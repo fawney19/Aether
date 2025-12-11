@@ -1,11 +1,12 @@
 # 基础镜像：包含所有依赖，只在依赖变化时需要重建
-# 用于 GitHub Actions CI 构建（不使用国内镜像源）
+# 构建命令: docker build -f Dockerfile.base -t aether-base:latest .
 FROM python:3.12-slim
 
 WORKDIR /app
 
 # 系统依赖
-RUN apt-get update && apt-get install -y \
+RUN sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/debian.sources && \
+    apt-get update && apt-get install -y \
     nginx \
     supervisor \
     libpq-dev \
@@ -16,6 +17,9 @@ RUN apt-get update && apt-get install -y \
     npm \
     && rm -rf /var/lib/apt/lists/*
 
+# pip 镜像源
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
 # Python 依赖（安装到系统，不用 -e 模式）
 COPY pyproject.toml README.md ./
 RUN mkdir -p src && touch src/__init__.py && \
@@ -24,7 +28,7 @@ RUN mkdir -p src && touch src/__init__.py && \
 # 前端依赖
 COPY frontend/package*.json /tmp/frontend/
 WORKDIR /tmp/frontend
-RUN npm ci
+RUN npm config set registry https://registry.npmmirror.com && npm ci
 
 # Nginx 配置模板
 RUN printf '%s\n' \

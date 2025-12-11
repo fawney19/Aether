@@ -14,8 +14,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  BASE_IMAGE_NAME: ${{ github.repository }}-base
-  APP_IMAGE_NAME: ${{ github.repository }}
+  BASE_IMAGE_NAME: fawney19/aether-base
+  APP_IMAGE_NAME: fawney19/aether
 
 jobs:
   check-base-changes:
@@ -76,7 +76,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile.base
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -125,7 +125,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile.app
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

@@ -81,7 +81,7 @@ save_migration_hash() { calc_migration_hash > "$MIGRATION_HASH_FILE"; }
 # 构建基础镜像
 build_base() {
     echo ">>> Building base image (dependencies)..."
-    docker build -f Dockerfile.base -t aether-base:latest .
+    docker build -f Dockerfile.base.local -t aether-base:latest .
     save_deps_hash
 }
 
