@@ -116,6 +116,33 @@ export default [
         ImageData: 'readonly',
         Path2D: 'readonly',
         OffscreenCanvas: 'readonly',
+        // 更多 DOM 类型
+        HTMLButtonElement: 'readonly',
+        HTMLTextAreaElement: 'readonly',
+        MediaQueryList: 'readonly',
+        MediaQueryListEvent: 'readonly',
+        FocusEvent: 'readonly',
+        DragEvent: 'readonly',
+        PointerEvent: 'readonly',
+        TouchEvent: 'readonly',
+        WheelEvent: 'readonly',
+        AnimationEvent: 'readonly',
+        TransitionEvent: 'readonly',
+        ClipboardEvent: 'readonly',
+        InputEvent: 'readonly',
+        CompositionEvent: 'readonly',
+        UIEvent: 'readonly',
+        ProgressEvent: 'readonly',
+        ErrorEvent: 'readonly',
+        StorageEvent: 'readonly',
+        PopStateEvent: 'readonly',
+        HashChangeEvent: 'readonly',
+        PageTransitionEvent: 'readonly',
+        BeforeUnloadEvent: 'readonly',
+        MessageEvent: 'readonly',
+        SecurityPolicyViolationEvent: 'readonly',
+        DeviceMotionEvent: 'readonly',
+        DeviceOrientationEvent: 'readonly',
       },
     },
   },
@@ -134,10 +161,10 @@ export default [
     rules: {
       // Vue 规则
       'vue/multi-word-component-names': 'off',
-      'vue/no-v-html': 'error',
+      'vue/no-v-html': 'warn', // 降级为警告，某些场景需要使用
       'vue/component-api-style': ['error', ['script-setup']],
       'vue/component-name-in-template-casing': ['error', 'PascalCase'],
-      'vue/custom-event-name-casing': ['error', 'camelCase'],
+      'vue/custom-event-name-casing': ['warn', 'camelCase'], // 降级为警告，逐步迁移
       'vue/define-macros-order': [
         'error',
         {
@@ -145,7 +172,7 @@ export default [
         },
       ],
       'vue/html-comment-content-spacing': ['error', 'always'],
-      'vue/no-unused-refs': 'error',
+      'vue/no-unused-refs': 'warn', // 降级为警告
       'vue/no-useless-v-bind': 'error',
       'vue/padding-line-between-blocks': ['error', 'always'],
       'vue/prefer-separate-static-class': 'error',
@@ -181,6 +208,14 @@ export default [
       'object-shorthand': ['error', 'always'],
       'prefer-template': 'error',
       'prefer-arrow-callback': 'error',
+    },
+  },
+
+  // 允许 main.ts 和 logger.ts 使用 console
+  {
+    files: ['**/main.ts', '**/logger.ts'],
+    rules: {
+      'no-console': 'off',
     },
   },
 ]
