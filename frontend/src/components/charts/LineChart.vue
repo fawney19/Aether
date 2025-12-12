@@ -21,7 +21,8 @@ import {
 } from 'chart.js'
 
 const props = withDefaults(defineProps<Props>(), {
-  height: 300
+  height: 300,
+  options: undefined
 })
 
 // 注册 Chart.js 组件

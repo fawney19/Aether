@@ -21,7 +21,8 @@ import {
 
 const props = withDefaults(defineProps<Props>(), {
   height: 300,
-  stacked: true
+  stacked: true,
+  options: undefined
 })
 
 ChartJS.register(

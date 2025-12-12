@@ -64,7 +64,8 @@ import {
 import 'chartjs-adapter-date-fns'
 
 const props = withDefaults(defineProps<Props>(), {
-  height: 300
+  height: 300,
+  options: undefined
 })
 
 ChartJS.register(
@@ -151,30 +152,8 @@ const crosshairStats = computed<CrosshairStats | null>(() => {
   }
 })
 
-const crosshairPlugin: Plugin<'scatter'> = {
-  id: 'crosshairLine',
-  afterDraw: (chartInstance) => {
-    if (crosshairY.value === null) return
-
-    const { ctx, chartArea, scales } = chartInstance
-    const yScale = scales.y
-    if (!yScale || !chartArea) return
-
-    const yPixel = yScale.getPixelForValue(crosshairY.value)
-
-    if (yPixel < chartArea.top || yPixel > chartArea.bottom) return
-
-    ctx.save()
-    ctx.beginPath()
-    ctx.moveTo(chartArea.left, yPixel)
-    ctx.lineTo(chartArea.right, yPixel)
-    ctx.strokeStyle = 'rgba(250, 204, 21, 0.8)'
-    ctx.lineWidth = 2
-    ctx.setLineDash([6, 4])
-    ctx.stroke()
-    ctx.restore()
-  }
-}
+// 旧版插件（保留作为参考但不再使用，使用下方的 crosshairPluginWithTransform 代替）
+// const crosshairPlugin: Plugin<'scatter'> = { ... }
 
 // 自定义非线性 Y 轴转换函数
 // 0-10 分钟占据 70% 的空间，10-120 分钟占据 30% 的空间
@@ -262,7 +241,6 @@ const defaultOptions: ChartOptions<'scatter'> = {
         // 自定义刻度值：在实际值 0, 2, 5, 10, 30, 60, 120 处显示
         callback(this: Scale, tickValue: string | number) {
           const displayVal = Number(tickValue)
-          const realVal = toRealValue(displayVal)
           // 只在特定的显示位置显示刻度
           const targetTicks = [0, 2, 5, 10, 30, 60, 120]
           for (const target of targetTicks) {
