@@ -48,6 +48,7 @@ interface Props {
 
 const props = withDefaults(defineProps<Props>(), {
   variant: 'spinner',
+  message: undefined,
   size: 'md',
   fullHeight: false,
 })

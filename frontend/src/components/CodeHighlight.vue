@@ -14,6 +14,7 @@ import bash from 'highlight.js/lib/languages/bash'
 import json from 'highlight.js/lib/languages/json'
 import ini from 'highlight.js/lib/languages/ini'
 import javascript from 'highlight.js/lib/languages/javascript'
+import { log } from '@/utils/logger'
 
 const props = defineProps<{
   code: string
@@ -105,7 +106,7 @@ const highlightedCode = computed(() => {
       result = hljs.highlight(code, { language }).value
     }
   } catch (e) {
-    console.error('Highlight error:', e)
+    log.error('Highlight error:', e)
     result = code
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')

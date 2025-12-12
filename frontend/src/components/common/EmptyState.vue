@@ -79,8 +79,6 @@ import {
   Inbox,
   AlertCircle,
   PackageOpen,
-  FolderOpen,
-  Database,
   Filter
 } from 'lucide-vue-next'
 import type { Component } from 'vue'
@@ -118,6 +116,11 @@ interface Emits {
 
 const props = withDefaults(defineProps<Props>(), {
   type: 'default',
+  icon: undefined,
+  title: undefined,
+  description: undefined,
+  actionText: undefined,
+  actionIcon: undefined,
   actionVariant: 'default',
   actionSize: 'default',
   size: 'md',
