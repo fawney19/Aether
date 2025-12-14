@@ -5,11 +5,9 @@ Gemini API 专属端点
 - /v1beta/models/{model}:generateContent
 - /v1beta/models/{model}:streamGenerateContent
 
-注意: Gemini API 的 model 在 URL 路径中，而不是请求体中
-
-路径配置来源: src.core.api_format_metadata.APIFormat.GEMINI
-- path_prefix: 本站路径前缀（如 /gemini），通过 router prefix 配置
-- default_path: 标准 API 路径模板
+注意:
+- Gemini API 的 model 在 URL 路径中，而不是请求体中
+- /v1beta/models (列表) 和 /v1beta/models/{model} (详情) 由 models.py 统一处理
 """
 
 from fastapi import APIRouter, Depends, Request
@@ -109,7 +107,7 @@ async def stream_generate_content(
     )
 
 
-# 兼容 v1 路径（部分 SDK 可能使用）
+# 兼容 v1 路径（部分 SDK 可能使用 generateContent）
 @router.post("/v1/models/{model}:generateContent")
 async def generate_content_v1(
     model: str,

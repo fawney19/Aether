@@ -59,7 +59,7 @@ _DEFINITIONS: Dict[APIFormat, ApiFormatDefinition] = {
         api_format=APIFormat.CLAUDE,
         aliases=("claude", "anthropic", "claude_compatible"),
         default_path="/v1/messages",
-        path_prefix="",  # 本站路径前缀，可配置如 "/claude"
+        path_prefix="",  # 通过请求头区分格式，不使用路径前缀
         auth_header="x-api-key",
         auth_type="header",
     ),
@@ -85,7 +85,7 @@ _DEFINITIONS: Dict[APIFormat, ApiFormatDefinition] = {
             "openai_compatible",
         ),
         default_path="/v1/chat/completions",
-        path_prefix="",  # 本站路径前缀，可配置如 "/openai"
+        path_prefix="",  # 默认格式
         auth_header="Authorization",
         auth_type="bearer",
     ),
@@ -93,7 +93,7 @@ _DEFINITIONS: Dict[APIFormat, ApiFormatDefinition] = {
         api_format=APIFormat.OPENAI_CLI,
         aliases=("openai_cli", "responses"),
         default_path="/responses",
-        path_prefix="",
+        path_prefix="",  # 与 OPENAI 共享入口
         auth_header="Authorization",
         auth_type="bearer",
     ),
@@ -101,7 +101,7 @@ _DEFINITIONS: Dict[APIFormat, ApiFormatDefinition] = {
         api_format=APIFormat.GEMINI,
         aliases=("gemini", "google", "vertex"),
         default_path="/v1beta/models/{model}:{action}",
-        path_prefix="",  # 本站路径前缀，可配置如 "/gemini"
+        path_prefix="",  # 通过请求头区分格式
         auth_header="x-goog-api-key",
         auth_type="header",
     ),

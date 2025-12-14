@@ -3,6 +3,8 @@ Claude API 端点
 
 - /v1/messages - Claude Messages API
 - /v1/messages/count_tokens - Token Count API
+
+注意: /v1/models 端点由 models.py 统一处理，根据请求头返回对应格式
 """
 
 from fastapi import APIRouter, Depends, Request
