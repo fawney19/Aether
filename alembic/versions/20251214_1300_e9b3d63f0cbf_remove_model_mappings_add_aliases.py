@@ -4,6 +4,7 @@
 1. 添加 provider_model_aliases 字段到 models 表
 2. 迁移 model_mappings 数据到 provider_model_aliases
 3. 删除 model_mappings 表
+4. 添加索引优化别名解析性能
 
 Revision ID: e9b3d63f0cbf
 Revises: 20251210_baseline
@@ -175,10 +176,55 @@ def upgrade() -> None:
     # 3. 删除 model_mappings 表
     op.drop_table('model_mappings')
 
+    # 4. 添加索引优化别名解析性能
+    # provider_model_name 索引（支持精确匹配）
+    op.create_index(
+        "idx_model_provider_model_name",
+        "models",
+        ["provider_model_name"],
+        unique=False,
+        postgresql_where=sa.text("is_active = true"),
+    )
+
+    # provider_model_aliases GIN 索引（支持 JSONB 查询，仅 PostgreSQL）
+    if bind.dialect.name == "postgresql":
+        # 将 json 列转为 jsonb（jsonb 性能更好且支持 GIN 索引）
+        op.execute(
+            """
+            ALTER TABLE models
+            ALTER COLUMN provider_model_aliases TYPE jsonb
+            USING provider_model_aliases::jsonb
+            """
+        )
+        # 创建 GIN 索引
+        op.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_model_provider_model_aliases_gin
+            ON models USING gin(provider_model_aliases jsonb_path_ops)
+            WHERE is_active = true
+            """
+        )
+
 
 def downgrade() -> None:
-    """恢复 model_mappings 表，移除 provider_model_aliases 字段"""
-    # 1. 恢复 model_mappings 表
+    """恢复 model_mappings 表，移除 provider_model_aliases 字段和索引"""
+    bind = op.get_bind()
+
+    # 1. 删除索引
+    op.drop_index("idx_model_provider_model_name", table_name="models")
+
+    if bind.dialect.name == "postgresql":
+        op.execute("DROP INDEX IF EXISTS idx_model_provider_model_aliases_gin")
+        # 将 jsonb 列还原为 json
+        op.execute(
+            """
+            ALTER TABLE models
+            ALTER COLUMN provider_model_aliases TYPE json
+            USING provider_model_aliases::json
+            """
+        )
+
+    # 2. 恢复 model_mappings 表
     op.create_table(
         'model_mappings',
         sa.Column('id', sa.String(36), primary_key=True),
@@ -201,5 +247,5 @@ def downgrade() -> None:
     op.create_index('ix_model_mappings_provider_id', 'model_mappings', ['provider_id'])
     op.create_index('ix_model_mappings_mapping_type', 'model_mappings', ['mapping_type'])
 
-    # 2. 移除 provider_model_aliases 字段
+    # 3. 移除 provider_model_aliases 字段
     op.drop_column('models', 'provider_model_aliases')
