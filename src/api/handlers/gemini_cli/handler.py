@@ -160,7 +160,7 @@ class GeminiCliMessageHandler(CliMessageHandlerBase):
             parts = content.get("parts", [])
             for part in parts:
                 if "text" in part:
-                    ctx.collected_text += part["text"]
+                    ctx.append_text(part["text"])
 
             # 检查结束原因
             finish_reason = candidate.get("finishReason")

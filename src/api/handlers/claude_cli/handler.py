@@ -111,7 +111,7 @@ class ClaudeCliMessageHandler(CliMessageHandlerBase):
             if delta.get("type") == "text_delta":
                 text = delta.get("text", "")
                 if text:
-                    ctx.collected_text += text
+                    ctx.append_text(text)
 
         # 处理消息增量（包含最终 usage）
         elif event_type == "message_delta":

@@ -94,9 +94,9 @@ class OpenAICliMessageHandler(CliMessageHandlerBase):
         if event_type in ["response.output_text.delta", "response.outtext.delta"]:
             delta = data.get("delta")
             if isinstance(delta, str):
-                ctx.collected_text += delta
+                ctx.append_text(delta)
             elif isinstance(delta, dict) and "text" in delta:
-                ctx.collected_text += delta["text"]
+                ctx.append_text(delta["text"])
 
         # 处理完成事件
         elif event_type == "response.completed":
@@ -124,7 +124,7 @@ class OpenAICliMessageHandler(CliMessageHandlerBase):
                             if content_item.get("type") == "output_text":
                                 text = content_item.get("text", "")
                                 if text:
-                                    ctx.collected_text += text
+                                    ctx.append_text(text)
 
         # 备用：从顶层 usage 提取
         usage_obj = data.get("usage")
