@@ -13,9 +13,9 @@ from src.config.constants import CacheTTL
 from src.core.cache_service import CacheService
 from src.core.logger import logger
 from src.core.metrics import (
-    model_alias_conflict_total,
-    model_alias_resolution_duration_seconds,
-    model_alias_resolution_total,
+    model_mapping_conflict_total,
+    model_mapping_resolution_duration_seconds,
+    model_mapping_resolution_total,
 )
 from src.models.database import GlobalModel, Model
 
@@ -184,7 +184,7 @@ class ModelCacheService:
             provider_id: Provider ID（用于清除 provider_global 缓存）
             global_model_id: GlobalModel ID（用于清除 provider_global 缓存）
             provider_model_name: provider_model_name（用于清除 resolve 缓存）
-            provider_model_aliases: 别名列表（用于清除 resolve 缓存）
+            provider_model_aliases: 映射名称列表（用于清除 resolve 缓存）
         """
         # 清除 model:id 缓存
         await CacheService.delete(f"model:id:{model_id}")
@@ -230,16 +230,16 @@ class ModelCacheService:
         db: Session, model_name: str
     ) -> Optional[GlobalModel]:
         """
-        通过名称或别名解析 GlobalModel（带缓存，支持别名匹配）
+        通过名称或映射解析 GlobalModel（带缓存，支持映射匹配）
 
         查找顺序：
         1. 检查缓存
-        2. 直接匹配 GlobalModel.name
-        3. 通过别名匹配（查询 Model 表的 provider_model_name 和 provider_model_aliases）
+        2. 通过映射匹配（查询 Model 表的 provider_model_name 和 provider_model_aliases）
+        3. 直接匹配 GlobalModel.name（兜底）
 
         Args:
             db: 数据库会话
-            model_name: 模型名称（可以是 GlobalModel.name 或别名）
+            model_name: 模型名称（可以是 GlobalModel.name 或映射名称）
 
         Returns:
             GlobalModel 对象或 None
@@ -262,7 +262,7 @@ class ModelCacheService:
                     # 缓存的负结果
                     cache_hit = True
                     resolution_method = "not_found"
-                    logger.debug(f"GlobalModel 缓存命中(别名解析-未找到): {normalized_name}")
+                    logger.debug(f"GlobalModel 缓存命中(映射解析-未找到): {normalized_name}")
                     return None
                 if isinstance(cached_data, dict) and "supported_capabilities" not in cached_data:
                     # 兼容旧缓存：字段不全时视为未命中，走 DB 刷新
@@ -270,15 +270,15 @@ class ModelCacheService:
                 else:
                     cache_hit = True
                     resolution_method = "direct_match"  # 缓存命中时无法区分原始解析方式
-                    logger.debug(f"GlobalModel 缓存命中(别名解析): {normalized_name}")
+                    logger.debug(f"GlobalModel 缓存命中(映射解析): {normalized_name}")
                     return ModelCacheService._dict_to_global_model(cached_data)
 
-            # 2. 优先通过 provider_model_name 和别名匹配（Provider 配置的别名优先级最高）
+            # 2. 优先通过 provider_model_name 和映射名称匹配（Provider 配置优先级最高）
             from sqlalchemy import or_
 
             from src.models.database import Provider
 
-            # 构建精确的别名匹配条件
+            # 构建精确的映射匹配条件
             # 注意：provider_model_aliases 是 JSONB 数组，需要使用 PostgreSQL 的 JSONB 操作符
             # 对于 SQLite，会在 Python 层面进行过滤
             try:
@@ -337,7 +337,7 @@ class ModelCacheService:
                                 # alias 优先级为 0（最高），覆盖任何已存在的匹配
                                 matched_models_dict[key] = (gm, "alias", 0)
                                 logger.debug(
-                                    f"模型名称 '{normalized_name}' 通过别名匹配到 "
+                                    f"模型名称 '{normalized_name}' 通过映射名称匹配到 "
                                     f"GlobalModel: {gm.name} (Model: {model.id[:8]}...)"
                                 )
                                 break
@@ -375,11 +375,11 @@ class ModelCacheService:
                     if len(unique_models) > 1:
                         model_names = [gm.name for gm in unique_models.values()]
                         logger.warning(
-                            f"模型冲突: 名称 '{normalized_name}' 匹配到多个不同的 GlobalModel: "
-                            f"{', '.join(model_names)}，使用第一个匹配结果（别名优先）"
+                            f"模型映射冲突: 名称 '{normalized_name}' 匹配到多个不同的 GlobalModel: "
+                            f"{', '.join(model_names)}，使用第一个匹配结果"
                         )
                         # 记录冲突指标
-                        model_alias_conflict_total.inc()
+                        model_mapping_conflict_total.inc()
 
                 # 返回第一个匹配的 GlobalModel
                 result_global_model: GlobalModel = matched_global_models[0][0]
@@ -388,11 +388,11 @@ class ModelCacheService:
                     cache_key, global_model_dict, ttl_seconds=ModelCacheService.CACHE_TTL
                 )
                 logger.debug(
-                    f"GlobalModel 已缓存(别名解析-{resolution_method}): {normalized_name} -> {result_global_model.name}"
+                    f"GlobalModel 已缓存(映射解析-{resolution_method}): {normalized_name} -> {result_global_model.name}"
                 )
                 return result_global_model
 
-            # 3. 如果通过 provider 别名没找到，最后尝试直接通过 GlobalModel.name 查找
+            # 3. 如果通过 provider 映射没找到，最后尝试直接通过 GlobalModel.name 查找
             global_model = (
                 db.query(GlobalModel)
                 .filter(GlobalModel.name == normalized_name, GlobalModel.is_active == True)
@@ -406,7 +406,7 @@ class ModelCacheService:
                 await CacheService.set(
                     cache_key, global_model_dict, ttl_seconds=ModelCacheService.CACHE_TTL
                 )
-                logger.debug(f"GlobalModel 已缓存(别名解析-直接匹配): {normalized_name}")
+                logger.debug(f"GlobalModel 已缓存(映射解析-直接匹配): {normalized_name}")
                 return global_model
 
             # 4. 完全未找到
@@ -415,16 +415,16 @@ class ModelCacheService:
             await CacheService.set(
                 cache_key, "NOT_FOUND", ttl_seconds=ModelCacheService.CACHE_TTL
             )
-            logger.debug(f"GlobalModel 未找到(别名解析): {normalized_name}")
+            logger.debug(f"GlobalModel 未找到(映射解析): {normalized_name}")
             return None
 
         finally:
             # 记录监控指标
             duration = time.time() - start_time
-            model_alias_resolution_total.labels(
+            model_mapping_resolution_total.labels(
                 method=resolution_method, cache_hit=str(cache_hit).lower()
             ).inc()
-            model_alias_resolution_duration_seconds.labels(method=resolution_method).observe(
+            model_mapping_resolution_duration_seconds.labels(method=resolution_method).observe(
                 duration
             )
 

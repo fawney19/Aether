@@ -45,23 +45,23 @@ health_open_circuits = Gauge(
     "Number of provider keys currently in circuit breaker open state",
 )
 
-# 模型别名解析相关
-model_alias_resolution_total = Counter(
-    "model_alias_resolution_total",
-    "Total number of model alias resolutions",
+# 模型映射解析相关
+model_mapping_resolution_total = Counter(
+    "model_mapping_resolution_total",
+    "Total number of model mapping resolutions",
     ["method", "cache_hit"],
     # method: direct_match, provider_model_name, alias, not_found
     # cache_hit: true, false
 )
 
-model_alias_resolution_duration_seconds = Histogram(
-    "model_alias_resolution_duration_seconds",
-    "Duration of model alias resolution in seconds",
+model_mapping_resolution_duration_seconds = Histogram(
+    "model_mapping_resolution_duration_seconds",
+    "Duration of model mapping resolution in seconds",
     ["method"],
     buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0],  # 1ms 到 1s
 )
 
-model_alias_conflict_total = Counter(
-    "model_alias_conflict_total",
-    "Total number of alias conflicts detected (same alias maps to multiple GlobalModels)",
+model_mapping_conflict_total = Counter(
+    "model_mapping_conflict_total",
+    "Total number of mapping conflicts detected (same name maps to multiple GlobalModels)",
 )
