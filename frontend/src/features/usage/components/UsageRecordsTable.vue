@@ -177,8 +177,9 @@
             费用
           </TableHead>
           <TableHead class="h-12 font-semibold w-[70px] text-right">
-            <div class="inline-block max-w-[2rem] leading-tight">
-              响应时间
+            <div class="flex flex-col items-end text-xs gap-0.5">
+              <span>首字</span>
+              <span class="text-muted-foreground font-normal">总耗时</span>
             </div>
           </TableHead>
         </TableRow>
@@ -356,15 +357,28 @@
             </div>
           </TableCell>
           <TableCell class="text-right py-4 w-[70px]">
-            <span
+            <div
               v-if="record.status === 'pending' || record.status === 'streaming'"
-              class="text-primary tabular-nums"
+              class="flex flex-col items-end text-xs gap-0.5"
             >
-              {{ getElapsedTime(record) }}
-            </span>
-            <span v-else-if="record.response_time_ms">
-              {{ (record.response_time_ms / 1000).toFixed(2) }}s
-            </span>
+              <span class="text-primary tabular-nums">
+                {{ getElapsedTime(record) }}
+              </span>
+            </div>
+            <div
+              v-else-if="record.response_time_ms != null"
+              class="flex flex-col items-end text-xs gap-0.5"
+            >
+              <span
+                v-if="record.first_byte_time_ms != null"
+                class="tabular-nums"
+              >{{ (record.first_byte_time_ms / 1000).toFixed(2) }}s</span>
+              <span
+                v-else
+                class="text-muted-foreground"
+              >-</span>
+              <span class="text-muted-foreground tabular-nums">{{ (record.response_time_ms / 1000).toFixed(2) }}s</span>
+            </div>
             <span
               v-else
               class="text-muted-foreground"

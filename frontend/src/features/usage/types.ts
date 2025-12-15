@@ -78,6 +78,7 @@ export interface UsageRecord {
   cost: number
   actual_cost?: number
   response_time_ms?: number
+  first_byte_time_ms?: number  // 首字时间 (TTFB)
   is_stream: boolean
   status_code?: number
   error_message?: string

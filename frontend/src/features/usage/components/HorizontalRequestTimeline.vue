@@ -479,10 +479,25 @@ const groupedTimeline = computed<NodeGroup[]>(() => {
   return groups
 })
 
-// 计算链路总耗时（从第一个节点开始到最后一个节点结束）
+// 计算链路总耗时（使用成功候选的 latency_ms 字段）
+// 优先使用 latency_ms，因为它与 Usage.response_time_ms 使用相同的时间基准
+// 避免 finished_at - started_at 带来的额外延迟（数据库操作时间）
 const totalTraceLatency = computed(() => {
   if (!timeline.value || timeline.value.length === 0) return 0
 
+  // 查找成功的候选，使用其 latency_ms
+  const successCandidate = timeline.value.find(c => c.status === 'success')
+  if (successCandidate?.latency_ms != null) {
+    return successCandidate.latency_ms
+  }
+
+  // 如果没有成功的候选，查找失败但有 latency_ms 的候选
+  const failedWithLatency = timeline.value.find(c => c.status === 'failed' && c.latency_ms != null)
+  if (failedWithLatency?.latency_ms != null) {
+    return failedWithLatency.latency_ms
+  }
+
+  // 回退：使用 finished_at - started_at 计算
   let earliestStart: number | null = null
   let latestEnd: number | null = null
 
