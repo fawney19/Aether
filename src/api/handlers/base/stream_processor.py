@@ -127,6 +127,13 @@ class StreamProcessor:
         if event_type in ("response.completed", "message_stop"):
             ctx.has_completion = True
 
+        # 检查 OpenAI 格式的 finish_reason
+        choices = data.get("choices", [])
+        if choices and isinstance(choices, list) and len(choices) > 0:
+            finish_reason = choices[0].get("finish_reason")
+            if finish_reason is not None:
+                ctx.has_completion = True
+
     async def prefetch_and_check_error(
         self,
         byte_iterator: Any,
