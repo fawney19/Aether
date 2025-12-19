@@ -1,5 +1,6 @@
 # 构建镜像：编译环境 + 预编译的依赖（国内镜像源版本）
 # 构建命令: docker build -f Dockerfile.base.local -t aether-base:latest .
+# 只在 pyproject.toml 或 frontend/package*.json 变化时需要重建
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -22,12 +23,11 @@ RUN mkdir -p src && touch src/__init__.py && \
     SETUPTOOLS_SCM_PRETEND_VERSION=0.1.0 pip install --no-cache-dir . && \
     pip cache purge
 
-# 前端构建（使用淘宝镜像源）
-COPY frontend/ ./frontend/
-RUN cd frontend && npm config set registry https://registry.npmmirror.com && \
-    npm ci && npm run build && rm -rf node_modules && npm cache clean --force
+# 前端依赖（只安装，不构建，使用淘宝镜像源）
+COPY frontend/package*.json ./frontend/
+RUN cd frontend && npm config set registry https://registry.npmmirror.com && npm ci
 
 # 产物位置：
 # - Python 包: /usr/local/lib/python3.12/site-packages
 # - Python 可执行文件: /usr/local/bin
-# - 前端构建产物: /app/frontend/dist
+# - 前端 node_modules: /app/frontend/node_modules

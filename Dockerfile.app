@@ -1,6 +1,13 @@
 # 运行镜像：从 base 提取产物到精简运行时
 # 构建命令: docker build -f Dockerfile.app -t aether-app:latest .
+# 代码变更只需重建此镜像，无需重建 base
 FROM aether-base:latest AS builder
+
+WORKDIR /app
+
+# 复制前端源码并构建
+COPY frontend/ ./frontend/
+RUN cd frontend && npm run build
 
 # ==================== 运行时镜像 ====================
 FROM python:3.12-slim
@@ -23,7 +30,7 @@ COPY --from=builder /usr/local/bin/gunicorn /usr/local/bin/
 COPY --from=builder /usr/local/bin/uvicorn /usr/local/bin/
 COPY --from=builder /usr/local/bin/alembic /usr/local/bin/
 
-# 从 base 镜像复制前端产物
+# 从 builder 阶段复制前端构建产物
 COPY --from=builder /app/frontend/dist /usr/share/nginx/html
 
 # 复制后端代码
