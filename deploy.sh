@@ -88,7 +88,7 @@ build_base() {
 # 构建应用镜像
 build_app() {
     echo ">>> Building app image (code only)..."
-    docker build -f Dockerfile.app -t aether-app:latest .
+    docker build -f Dockerfile.app.local -t aether-app:latest .
     save_code_hash
 }
 

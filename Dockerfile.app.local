@@ -1,6 +1,6 @@
-# 运行镜像：从 base 提取产物到精简运行时
-# 构建命令: docker build -f Dockerfile.app -t aether-app:latest .
-# 用于 GitHub Actions CI（官方源）
+# 运行镜像：从 base 提取产物到精简运行时（国内镜像源版本）
+# 构建命令: docker build -f Dockerfile.app.local -t aether-app:latest .
+# 用于本地/国内服务器部署
 FROM aether-base:latest AS builder
 
 WORKDIR /app
@@ -14,8 +14,9 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# 运行时依赖（无 gcc/nodejs/npm）
-RUN apt-get update && apt-get install -y \
+# 运行时依赖（使用清华镜像源）
+RUN sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/debian.sources && \
+    apt-get update && apt-get install -y \
     nginx \
     supervisor \
     libpq5 \

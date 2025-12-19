@@ -26,8 +26,3 @@ RUN mkdir -p src && touch src/__init__.py && \
 # 前端依赖（只安装，不构建，使用淘宝镜像源）
 COPY frontend/package*.json ./frontend/
 RUN cd frontend && npm config set registry https://registry.npmmirror.com && npm ci
-
-# 产物位置：
-# - Python 包: /usr/local/lib/python3.12/site-packages
-# - Python 可执行文件: /usr/local/bin
-# - 前端 node_modules: /app/frontend/node_modules

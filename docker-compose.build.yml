@@ -41,7 +41,7 @@ services:
   app:
     build:
       context: .
-      dockerfile: Dockerfile.app
+      dockerfile: Dockerfile.app.local
     image: aether-app:latest
     container_name: aether-app
     environment:
