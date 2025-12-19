@@ -55,6 +55,23 @@ async def _set_cached_models(api_formats: list[str], models: list["ModelInfo"]) 
         logger.warning(f"[ModelsService] 缓存写入失败: {e}")
 
 
+async def invalidate_models_list_cache() -> None:
+    """
+    清除所有 /v1/models 列表缓存
+
+    在模型创建、更新、删除时调用，确保模型列表实时更新
+    """
+    # 清除所有格式的缓存
+    all_formats = ["CLAUDE", "OPENAI", "GEMINI"]
+    for fmt in all_formats:
+        cache_key = f"{_CACHE_KEY_PREFIX}:{fmt}"
+        try:
+            await CacheService.delete(cache_key)
+            logger.debug(f"[ModelsService] 已清除缓存: {cache_key}")
+        except Exception as e:
+            logger.warning(f"[ModelsService] 清除缓存失败 {cache_key}: {e}")
+
+
 @dataclass
 class ModelInfo:
     """统一的模型信息结构"""

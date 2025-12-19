@@ -34,9 +34,7 @@ from src.api.handlers.base.base_handler import (
 from src.api.handlers.base.parsers import get_parser_for_format
 from src.api.handlers.base.request_builder import PassthroughRequestBuilder
 from src.api.handlers.base.stream_context import StreamContext
-from src.api.handlers.base.stream_processor import create_smoothed_stream
 from src.api.handlers.base.utils import build_sse_headers
-from src.services.system.config import SystemConfigService
 
 # 直接从具体模块导入，避免循环依赖
 from src.api.handlers.base.response_parser import (
@@ -354,17 +352,8 @@ class CliMessageHandlerBase(BaseMessageHandler):
             # 创建监控流
             monitored_stream = self._create_monitored_stream(ctx, stream_generator)
 
-            # 创建平滑输出流（如果启用）
-            smoothing_enabled = bool(
-                SystemConfigService.get_config(self.db, "stream_smoothing_enabled", False)
-            )
-            if smoothing_enabled:
-                final_stream = create_smoothed_stream(monitored_stream)
-            else:
-                final_stream = monitored_stream
-
             return StreamingResponse(
-                final_stream,
+                monitored_stream,
                 media_type="text/event-stream",
                 headers=build_sse_headers(),
                 background=background_tasks,

@@ -32,7 +32,7 @@ from src.api.handlers.base.parsers import get_parser_for_format
 from src.api.handlers.base.request_builder import PassthroughRequestBuilder
 from src.api.handlers.base.response_parser import ResponseParser
 from src.api.handlers.base.stream_context import StreamContext
-from src.api.handlers.base.stream_processor import StreamProcessor, StreamSmoothingConfig
+from src.api.handlers.base.stream_processor import StreamProcessor
 from src.api.handlers.base.stream_telemetry import StreamTelemetryRecorder
 from src.api.handlers.base.utils import build_sse_headers
 from src.config.settings import config
@@ -52,7 +52,6 @@ from src.models.database import (
     User,
 )
 from src.services.provider.transport import build_provider_url
-from src.services.system.config import SystemConfigService
 
 
 
@@ -298,18 +297,11 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
         def update_streaming_status() -> None:
             self._update_usage_to_streaming_with_ctx(ctx)
 
-        # 读取流式平滑输出开关
-        smoothing_enabled = bool(
-            SystemConfigService.get_config(self.db, "stream_smoothing_enabled", False)
-        )
-        smoothing_config = StreamSmoothingConfig(enabled=smoothing_enabled)
-
         # 创建流处理器
         stream_processor = StreamProcessor(
             request_id=self.request_id,
             default_parser=self.parser,
             on_streaming_start=update_streaming_status,
-            smoothing_config=smoothing_config,
         )
 
         # 定义请求函数
@@ -387,11 +379,8 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 http_request.is_disconnected,
             )
 
-            # 创建平滑输出流（如果启用）
-            smoothed_stream = stream_processor.create_smoothed_stream(monitored_stream)
-
             return StreamingResponse(
-                smoothed_stream,
+                monitored_stream,
                 media_type="text/event-stream",
                 headers=build_sse_headers(),
                 background=background_tasks,

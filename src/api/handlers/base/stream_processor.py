@@ -12,7 +12,6 @@
 import asyncio
 import codecs
 import json
-import math
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Callable, Optional
 
@@ -37,6 +36,8 @@ class StreamSmoothingConfig:
     """流式平滑输出配置"""
 
     enabled: bool = False
+    chunk_size: int = 20
+    delay_ms: int = 8
 
 
 class StreamProcessor:
@@ -46,13 +47,6 @@ class StreamProcessor:
     负责处理 SSE 流的解析、错误检测、响应生成和平滑输出。
     从 ChatHandlerBase 中提取，使其职责更加单一。
     """
-
-    # 平滑输出参数
-    CHUNK_SIZE = 20  # 每块字符数
-    MIN_DELAY_MS = 8  # 长文本延迟（毫秒）
-    MAX_DELAY_MS = 15  # 短文本延迟（毫秒）
-    SHORT_TEXT_THRESHOLD = 20  # 短文本阈值
-    LONG_TEXT_THRESHOLD = 100  # 长文本阈值
 
     def __init__(
         self,
@@ -548,10 +542,10 @@ class StreamProcessor:
 
                 # 只有内容长度大于 1 才需要平滑处理
                 if content and len(content) > 1 and extractor:
-                    # 计算动态延迟
-                    delay_seconds = self._calculate_delay(len(content))
+                    # 获取配置的延迟
+                    delay_seconds = self._calculate_delay()
 
-                    # 智能拆分
+                    # 拆分内容
                     content_chunks = self._split_content(content)
 
                     for i, sub_content in enumerate(content_chunks):
@@ -610,40 +604,24 @@ class StreamProcessor:
 
         return None, None
 
-    def _calculate_delay(self, text_length: int) -> float:
-        """
-        根据文本长度计算动态延迟（秒）
-
-        短文本使用较大延迟（打字感更强），长文本使用较小延迟（避免卡顿）。
-        中间长度使用对数插值平滑过渡。
-        """
-        if text_length <= self.SHORT_TEXT_THRESHOLD:
-            return self.MAX_DELAY_MS / 1000.0
-        if text_length >= self.LONG_TEXT_THRESHOLD:
-            return self.MIN_DELAY_MS / 1000.0
-
-        # 对数插值：平滑过渡
-        ratio = math.log(text_length / self.SHORT_TEXT_THRESHOLD) / math.log(
-            self.LONG_TEXT_THRESHOLD / self.SHORT_TEXT_THRESHOLD
-        )
-        delay_ms = self.MAX_DELAY_MS - ratio * (self.MAX_DELAY_MS - self.MIN_DELAY_MS)
-        return delay_ms / 1000.0
+    def _calculate_delay(self) -> float:
+        """获取配置的延迟（秒）"""
+        return self.smoothing_config.delay_ms / 1000.0
 
     def _split_content(self, content: str) -> list[str]:
         """
         按块拆分文本
-
-        统一使用 CHUNK_SIZE 拆分，通过动态延迟控制打字感。
         """
+        chunk_size = self.smoothing_config.chunk_size
         text_length = len(content)
 
-        if text_length <= self.CHUNK_SIZE:
+        if text_length <= chunk_size:
             return [content]
 
-        # 统一按块拆分
+        # 按块拆分
         chunks = []
-        for i in range(0, text_length, self.CHUNK_SIZE):
-            chunks.append(content[i : i + self.CHUNK_SIZE])
+        for i in range(0, text_length, chunk_size):
+            chunks.append(content[i : i + chunk_size])
         return chunks
 
     async def _cleanup(
@@ -664,6 +642,8 @@ class StreamProcessor:
 
 async def create_smoothed_stream(
     stream_generator: AsyncGenerator[bytes, None],
+    chunk_size: int = 20,
+    delay_ms: int = 8,
 ) -> AsyncGenerator[bytes, None]:
     """
     独立的平滑流生成函数
@@ -672,11 +652,13 @@ async def create_smoothed_stream(
 
     Args:
         stream_generator: 原始流生成器
+        chunk_size: 每块字符数
+        delay_ms: 每块之间的延迟毫秒数
 
     Yields:
         平滑处理后的响应数据块
     """
-    processor = _LightweightSmoother()
+    processor = _LightweightSmoother(chunk_size=chunk_size, delay_ms=delay_ms)
     async for chunk in processor.smooth(stream_generator):
         yield chunk
 
@@ -688,13 +670,9 @@ class _LightweightSmoother:
     只包含平滑输出所需的最小逻辑，不依赖 StreamProcessor 的其他功能。
     """
 
-    CHUNK_SIZE = 20
-    MIN_DELAY_MS = 8
-    MAX_DELAY_MS = 15
-    SHORT_TEXT_THRESHOLD = 20
-    LONG_TEXT_THRESHOLD = 100
-
-    def __init__(self) -> None:
+    def __init__(self, chunk_size: int = 20, delay_ms: int = 8) -> None:
+        self.chunk_size = chunk_size
+        self.delay_ms = delay_ms
         self._extractors: dict[str, ContentExtractor] = {}
 
     def _get_extractor(self, format_name: str) -> Optional[ContentExtractor]:
@@ -715,21 +693,14 @@ class _LightweightSmoother:
                     return content, extractor
         return None, None
 
-    def _calculate_delay(self, text_length: int) -> float:
-        if text_length <= self.SHORT_TEXT_THRESHOLD:
-            return self.MAX_DELAY_MS / 1000.0
-        if text_length >= self.LONG_TEXT_THRESHOLD:
-            return self.MIN_DELAY_MS / 1000.0
-        ratio = math.log(text_length / self.SHORT_TEXT_THRESHOLD) / math.log(
-            self.LONG_TEXT_THRESHOLD / self.SHORT_TEXT_THRESHOLD
-        )
-        return (self.MAX_DELAY_MS - ratio * (self.MAX_DELAY_MS - self.MIN_DELAY_MS)) / 1000.0
+    def _calculate_delay(self) -> float:
+        return self.delay_ms / 1000.0
 
     def _split_content(self, content: str) -> list[str]:
         text_length = len(content)
-        if text_length <= self.CHUNK_SIZE:
+        if text_length <= self.chunk_size:
             return [content]
-        return [content[i : i + self.CHUNK_SIZE] for i in range(0, text_length, self.CHUNK_SIZE)]
+        return [content[i : i + self.chunk_size] for i in range(0, text_length, self.chunk_size)]
 
     async def smooth(
         self, stream_generator: AsyncGenerator[bytes, None]
@@ -772,7 +743,7 @@ class _LightweightSmoother:
                 content, extractor = self._detect_format_and_extract(data)
 
                 if content and len(content) > 1 and extractor:
-                    delay_seconds = self._calculate_delay(len(content))
+                    delay_seconds = self._calculate_delay()
                     content_chunks = self._split_content(content)
 
                     for i, sub_content in enumerate(content_chunks):

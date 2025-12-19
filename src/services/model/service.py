@@ -13,6 +13,7 @@ from src.core.exceptions import InvalidRequestException, NotFoundException
 from src.core.logger import logger
 from src.models.api import ModelCreate, ModelResponse, ModelUpdate
 from src.models.database import Model, Provider
+from src.api.base.models_service import invalidate_models_list_cache
 from src.services.cache.invalidation import get_cache_invalidation_service
 from src.services.cache.model_cache import ModelCacheService
 
@@ -75,6 +76,10 @@ class ModelService:
                 )
 
             logger.info(f"创建模型成功: provider={provider.name}, model={model.provider_model_name}, global_model_id={model.global_model_id}")
+
+            # 清除 /v1/models 列表缓存
+            asyncio.create_task(invalidate_models_list_cache())
+
             return model
 
         except IntegrityError as e:
@@ -197,6 +202,9 @@ class ModelService:
                 cache_service = get_cache_invalidation_service()
                 cache_service.on_model_changed(model.provider_id, model.global_model_id)
 
+            # 清除 /v1/models 列表缓存
+            asyncio.create_task(invalidate_models_list_cache())
+
             logger.info(f"更新模型成功: id={model_id}, 最终 supports_vision: {model.supports_vision}, supports_function_calling: {model.supports_function_calling}, supports_extended_thinking: {model.supports_extended_thinking}")
             return model
         except IntegrityError as e:
@@ -261,6 +269,9 @@ class ModelService:
                 cache_service = get_cache_invalidation_service()
                 cache_service.on_model_changed(cache_info["provider_id"], cache_info["global_model_id"])
 
+            # 清除 /v1/models 列表缓存
+            asyncio.create_task(invalidate_models_list_cache())
+
             logger.info(f"删除模型成功: id={model_id}, provider_model_name={cache_info['provider_model_name']}, "
                 f"global_model_id={cache_info['global_model_id'][:8] if cache_info['global_model_id'] else 'None'}...")
         except Exception as e:
@@ -294,6 +305,9 @@ class ModelService:
         if model.provider_id and model.global_model_id:
             cache_service = get_cache_invalidation_service()
             cache_service.on_model_changed(model.provider_id, model.global_model_id)
+
+        # 清除 /v1/models 列表缓存
+        asyncio.create_task(invalidate_models_list_cache())
 
         status = "可用" if is_available else "不可用"
         logger.info(f"更新模型可用状态: id={model_id}, status={status}")
@@ -358,6 +372,9 @@ class ModelService:
                 for model in created_models:
                     db.refresh(model)
                 logger.info(f"批量创建 {len(created_models)} 个模型成功")
+
+                # 清除 /v1/models 列表缓存
+                asyncio.create_task(invalidate_models_list_cache())
             except IntegrityError as e:
                 db.rollback()
                 logger.error(f"批量创建模型失败: {str(e)}")

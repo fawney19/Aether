@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session, joinedload
 
 from src.api.base.admin_adapter import AdminApiAdapter
+from src.api.base.models_service import invalidate_models_list_cache
 from src.api.base.pipeline import ApiRequestPipeline
 from src.core.exceptions import InvalidRequestException, NotFoundException
 from src.core.logger import logger
@@ -418,5 +419,9 @@ class AdminBatchAssignModelsToProviderAdapter(AdminApiAdapter):
         logger.info(
             f"Batch assigned {len(success)} GlobalModels to provider {provider.name} by {context.user.username}"
         )
+
+        # 清除 /v1/models 列表缓存
+        if success:
+            await invalidate_models_list_cache()
 
         return BatchAssignModelsToProviderResponse(success=success, errors=errors)
