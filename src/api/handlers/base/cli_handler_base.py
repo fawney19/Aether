@@ -474,8 +474,8 @@ class CliMessageHandlerBase(BaseMessageHandler):
 
             stream_response.raise_for_status()
 
-            # 使用字节流迭代器（避免 aiter_lines 的性能问题）
-            byte_iterator = stream_response.aiter_raw()
+            # 使用字节流迭代器（避免 aiter_lines 的性能问题, aiter_bytes 会自动解压 gzip/deflate）
+            byte_iterator = stream_response.aiter_bytes()
 
             # 预读第一个数据块，检测嵌套错误（HTTP 200 但响应体包含错误）
             prefetched_chunks = await self._prefetch_and_check_embedded_error(
@@ -529,7 +529,7 @@ class CliMessageHandlerBase(BaseMessageHandler):
             # 检查是否需要格式转换
             needs_conversion = self._needs_format_conversion(ctx)
 
-            async for chunk in stream_response.aiter_raw():
+            async for chunk in stream_response.aiter_bytes():
                 # 在第一次输出数据前更新状态为 streaming
                 if not streaming_status_updated:
                     self._update_usage_to_streaming_with_ctx(ctx)
