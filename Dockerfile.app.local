@@ -36,6 +36,7 @@ COPY --from=builder /app/frontend/dist /usr/share/nginx/html
 
 # 复制后端代码
 COPY src/ ./src/
+COPY gunicorn.conf.py ./
 COPY alembic.ini ./
 COPY alembic/ ./alembic/
 
@@ -106,7 +107,7 @@ RUN printf '%s\n' \
 'stderr_logfile=/var/log/nginx/error.log' \
 '' \
 '[program:app]' \
-'command=gunicorn src.main:app -w %(ENV_GUNICORN_WORKERS)s -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:%(ENV_PORT)s --timeout 120 --access-logfile - --error-logfile - --log-level info' \
+'command=gunicorn src.main:app -c gunicorn.conf.py -w %(ENV_GUNICORN_WORKERS)s -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:%(ENV_PORT)s --timeout 120 --access-logfile - --error-logfile - --log-level info --preload' \
 'directory=/app' \
 'autostart=true' \
 'autorestart=true' \

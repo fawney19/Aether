@@ -103,6 +103,22 @@ def log_pool_status():
         logger.error(f"获取连接池状态失败: {e}")
 
 
+def dispose_engines():
+    """释放连接池，供 Gunicorn post_fork 钩子调用"""
+    global _engine, _async_engine, _SessionLocal, _AsyncSessionLocal
+    
+    if _engine:
+        logger.info("释放同步数据库连接池")
+        _engine.dispose()
+        _engine = None
+        _SessionLocal = None
+    
+    if _async_engine:
+        logger.info("释放异步数据库连接池")
+        _async_engine = None
+        _AsyncSessionLocal = None
+
+
 def _ensure_engine() -> Engine:
     """
     确保数据库引擎已创建（延迟加载）
