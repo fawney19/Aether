@@ -21,7 +21,7 @@ class ProviderEndpointCreate(BaseModel):
     base_url: str = Field(..., min_length=1, max_length=500, description="API 基础 URL")
 
     # 请求配置
-    headers: Optional[Dict[str, str]] = Field(default=None, description="自定义请求头")
+    headers: Optional[Dict[str, Any]] = Field(default=None, description="自定义请求头或headers规则")
     timeout: int = Field(default=300, ge=10, le=600, description="超时时间（秒）")
     max_retries: int = Field(default=3, ge=0, le=10, description="最大重试次数")
 
@@ -62,7 +62,7 @@ class ProviderEndpointUpdate(BaseModel):
     base_url: Optional[str] = Field(
         default=None, min_length=1, max_length=500, description="API 基础 URL"
     )
-    headers: Optional[Dict[str, str]] = Field(default=None, description="自定义请求头")
+    headers: Optional[Dict[str, Any]] = Field(default=None, description="自定义请求头或headers规则")
     timeout: Optional[int] = Field(default=None, ge=10, le=600, description="超时时间（秒）")
     max_retries: Optional[int] = Field(default=None, ge=0, le=10, description="最大重试次数")
     max_concurrent: Optional[int] = Field(default=None, ge=1, description="最大并发数")
@@ -96,7 +96,7 @@ class ProviderEndpointResponse(BaseModel):
     base_url: str
 
     # 请求配置
-    headers: Optional[Dict[str, str]] = None
+    headers: Optional[Dict[str, Any]] = None
     timeout: int
     max_retries: int
 

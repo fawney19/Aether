@@ -58,19 +58,35 @@ def _truncate_repr(value: Any, limit: int = 1200) -> str:
 
 def build_safe_headers(
     base_headers: Dict[str, str],
-    extra_headers: Optional[Dict[str, str]],
+    extra_headers: Optional[Dict[str, Any]],
     protected_keys: Iterable[str],
 ) -> Dict[str, str]:
     """
     合并 extra_headers，但防止覆盖 protected_keys（大小写不敏感）。
+
+    支持高级 headers 规则处理：
+    - 如果 header_rules 存在，会先应用规则处理 headers
+    - 规则包括：add（新增）、remove（删除）、replace_name（改名）、replace_value（改值）
+
+    Args:
+        base_headers: 基础 headers
+        extra_headers: 额外的 headers（可选）
+        protected_keys: 受保护的键列表（不会被覆盖）
+        header_rules: headers 处理规则（可选）
+
+    Returns:
+        处理后的 headers 字典
     """
     headers = dict(base_headers)
     if not extra_headers:
         return headers
 
-    protected = {k.lower() for k in protected_keys}
-    safe_headers = {k: v for k, v in extra_headers.items() if k.lower() not in protected}
-    headers.update(safe_headers)
+    # 合并 extra_headers（如果有）
+    if extra_headers:
+        from src.core.header_rules import apply_header_rules
+        headers = apply_header_rules(headers, extra_headers)
+
+    logger.debug(f"headers:{headers}")
     return headers
 
 
@@ -1243,7 +1259,7 @@ class EndpointCheckOrchestrator:
                     api_format=api_format,
                 )
 
-                logger.info(f"[{request.api_format}] Usage calculated successfully: {usage_data}")
+                logger.info(f"[{request.api_format}] Usage calculated successfully: {result.usage_data}")
             except Exception as e:
                 logger.error(f"[{request.api_format}] Failed to calculate usage: {e}")
                 import traceback

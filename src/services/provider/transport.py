@@ -28,6 +28,12 @@ def build_provider_headers(
 ) -> Dict[str, str]:
     """
     根据 endpoint/key 构建请求头，并透传客户端自定义头。
+
+    支持高级 headers 规则处理（从 endpoint.headers 读取）：
+    - add: 新增固定的参数和值
+    - remove: 删除指定的参数
+    - replace_name: 替换参数名
+    - replace_value: 替换参数值
     """
     headers: Dict[str, str] = {}
 
@@ -46,8 +52,20 @@ def build_provider_headers(
     else:
         headers[auth_header] = decrypted_key
 
+    # 处理 endpoint.headers（可能是规则或直接的 headers）
     if endpoint.headers:
-        headers.update(endpoint.headers)
+        from src.core.header_rules import apply_header_rules
+
+        # 检查是否是新格式的规则（包含规则键）
+        rule_keys = {"add", "remove", "replace_name", "replace_value"}
+        if isinstance(endpoint.headers, dict) and any(
+            key in endpoint.headers for key in rule_keys
+        ):
+            # 新格式：应用规则
+            headers = apply_header_rules(headers, endpoint.headers)
+        else:
+            # 旧格式：直接合并 headers
+            headers.update(endpoint.headers)
 
     excluded_headers = {
         "host",

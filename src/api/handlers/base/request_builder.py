@@ -137,6 +137,12 @@ class PassthroughRequestBuilder(RequestBuilder):
     ) -> Dict[str, str]:
         """
         透传请求头 - 清理敏感头部（黑名单），透传其他所有头部
+
+        支持高级 headers 规则处理（从 endpoint.headers 读取）：
+        - add: 新增固定的参数和值
+        - remove: 删除指定的参数
+        - replace_name: 替换参数名
+        - replace_value: 替换参数值
         """
         from src.core.api_format_metadata import get_auth_config, resolve_api_format
 
@@ -155,9 +161,21 @@ class PassthroughRequestBuilder(RequestBuilder):
         else:
             headers[auth_header] = decrypted_key
 
-        # 2. 添加 endpoint 配置的额外头部
-        if endpoint.headers:
-            headers.update(endpoint.headers)
+        # 2. 处理 endpoint.headers（可能是规则或直接的 headers）
+        endpoint_headers_config = getattr(endpoint, "headers", None)
+        if endpoint_headers_config:
+            from src.core.header_rules import apply_header_rules
+
+            # 检查是否是新格式的规则（包含规则键）
+            rule_keys = {"add", "remove", "replace_name", "replace_value"}
+            if isinstance(endpoint_headers_config, dict) and any(
+                key in endpoint_headers_config for key in rule_keys
+            ):
+                # 新格式：应用规则
+                headers = apply_header_rules(headers, endpoint_headers_config)
+            else:
+                # 旧格式：直接合并 headers
+                headers.update(endpoint_headers_config)
 
         # 3. 透传原始头部（排除敏感头部 - 黑名单模式）
         if original_headers:

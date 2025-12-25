@@ -205,6 +205,24 @@
           </div>
         </div>
       </div>
+
+      <!-- Headers 规则配置 -->
+      <div class="space-y-4">
+        <div class="flex items-center justify-between">
+          <div>
+            <h3 class="text-sm font-medium">
+              Headers 规则
+            </h3>
+            <p class="text-xs text-muted-foreground">
+              配置请求 Headers 的添加、删除、重命名和替换规则
+            </p>
+          </div>
+        </div>
+
+        <div class="rounded-lg border p-4">
+          <HeadersRulesEditor v-model="form.headers_rules" />
+        </div>
+      </div>
     </form>
 
     <template #footer>
@@ -253,6 +271,7 @@ import {
   Switch,
 } from '@/components/ui'
 import AlertDialog from '@/components/common/AlertDialog.vue'
+import HeadersRulesEditor from './HeadersRulesEditor.vue'
 import { Link, SquarePen } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
 import { useFormDialog } from '@/composables/useFormDialog'
@@ -265,6 +284,19 @@ import {
   type ProviderWithEndpointsSummary
 } from '@/api/endpoints'
 import { adminApi } from '@/api/admin'
+
+// Headers 规则类型定义
+type HeaderRules = {
+  add?: Record<string, string>
+  remove?: string[]
+  replace_name?: Record<string, string>
+  replace_value?: Record<string, {
+    search: string
+    replace: string
+    regex: boolean
+    case_sensitive?: boolean
+  }>
+}
 
 const props = defineProps<{
   modelValue: boolean
@@ -304,6 +336,8 @@ const form = ref({
   proxy_url: '',
   proxy_username: '',
   proxy_password: '',
+  // Headers 规则配置
+  headers_rules: null as HeaderRules | null,
 })
 
 // API 格式列表
@@ -385,6 +419,25 @@ onMounted(() => {
   loadApiFormats()
 })
 
+// 转换 endpoint.headers 到 headers_rules
+function convertHeadersToRules(headers: Record<string, string> | null): HeaderRules | null {
+  if (!headers) return null
+
+  // 检查是否已经是新格式（包含规则键）
+  const ruleKeys = ['add', 'remove', 'replace_name', 'replace_value']
+  const hasRuleKeys = Object.keys(headers).some(key => ruleKeys.includes(key))
+
+  if (hasRuleKeys) {
+    // 已经是新格式，直接返回
+    return headers as unknown as HeaderRules
+  }
+
+  // 旧格式：直接的 headers 字典，转换为 add 规则
+  return {
+    add: { ...headers }
+  }
+}
+
 // 重置表单
 function resetForm() {
   form.value = {
@@ -399,6 +452,7 @@ function resetForm() {
     proxy_url: '',
     proxy_username: '',
     proxy_password: '',
+    headers_rules: null,
   }
   proxyEnabled.value = false
 }
@@ -425,6 +479,8 @@ function loadEndpointData() {
     proxy_username: proxy?.username || '',
     // 如果密码是脱敏标记，显示为空（让用户知道有密码但看不到）
     proxy_password: proxy?.password === MASKED_PASSWORD ? '' : (proxy?.password || ''),
+    // 转换 headers 为规则格式
+    headers_rules: convertHeadersToRules(props.endpoint.headers as Record<string, string> | null),
   }
 
   // 根据 enabled 字段或 url 存在判断是否启用代理
@@ -482,18 +538,23 @@ const handleSubmit = async (skipCredentialCheck = false) => {
   try {
     const proxyConfig = buildProxyConfig()
 
+    // 准备提交数据
+    const submitData: any = {
+      base_url: form.value.base_url,
+      custom_path: form.value.custom_path || undefined,
+      timeout: form.value.timeout,
+      max_retries: form.value.max_retries,
+      max_concurrent: form.value.max_concurrent,
+      rate_limit: form.value.rate_limit,
+      is_active: form.value.is_active,
+      proxy: proxyConfig,
+      // 将 headers_rules 保存到 headers 字段
+      headers: form.value.headers_rules || undefined,
+    }
+
     if (isEditMode.value && props.endpoint) {
       // 更新端点
-      await updateEndpoint(props.endpoint.id, {
-        base_url: form.value.base_url,
-        custom_path: form.value.custom_path || undefined,
-        timeout: form.value.timeout,
-        max_retries: form.value.max_retries,
-        max_concurrent: form.value.max_concurrent,
-        rate_limit: form.value.rate_limit,
-        is_active: form.value.is_active,
-        proxy: proxyConfig,
-      })
+      await updateEndpoint(props.endpoint.id, submitData)
 
       success('端点已更新', '保存成功')
       emit('endpointUpdated')
@@ -502,14 +563,7 @@ const handleSubmit = async (skipCredentialCheck = false) => {
       await createEndpoint(props.provider.id, {
         provider_id: props.provider.id,
         api_format: form.value.api_format,
-        base_url: form.value.base_url,
-        custom_path: form.value.custom_path || undefined,
-        timeout: form.value.timeout,
-        max_retries: form.value.max_retries,
-        max_concurrent: form.value.max_concurrent,
-        rate_limit: form.value.rate_limit,
-        is_active: form.value.is_active,
-        proxy: proxyConfig,
+        ...submitData,
       })
 
       success('端点创建成功', '成功')
