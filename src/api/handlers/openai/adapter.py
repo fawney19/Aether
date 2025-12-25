@@ -4,13 +4,14 @@ OpenAI Chat Adapter - 基于 ChatAdapterBase 的 OpenAI Chat API 适配器
 处理 /v1/chat/completions 端点的 OpenAI Chat 格式请求。
 """
 
-from typing import Any, Dict, Optional, Tuple, Type
+from typing import Any, AsyncIterator, Dict, Optional, Tuple, Type, Union
 
 import httpx
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from src.api.handlers.base.chat_adapter_base import ChatAdapterBase, register_adapter
+from src.api.handlers.base.endpoint_checker import build_safe_headers, run_endpoint_check
 from src.api.handlers.base.chat_handler_base import ChatHandlerBase
 from src.core.logger import logger
 from src.models.openai import OpenAIRequest
@@ -153,6 +154,33 @@ class OpenAIChatAdapter(ChatAdapterBase):
             error_msg = f"Request error: {str(e)}"
             logger.warning(f"Failed to fetch models from {models_url}: {e}")
             return [], error_msg
+
+    @classmethod
+    def build_endpoint_url(cls, base_url: str) -> str:
+        """构建OpenAI API端点URL"""
+        base_url = base_url.rstrip("/")
+        if base_url.endswith("/v1"):
+            return f"{base_url}/chat/completions"
+        else:
+            return f"{base_url}/v1/chat/completions"
+
+    @classmethod
+    def build_base_headers(cls, api_key: str) -> Dict[str, str]:
+        """构建OpenAI API认证头"""
+        return {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+    @classmethod
+    def get_protected_header_keys(cls) -> tuple:
+        """返回OpenAI API的保护头部key"""
+        return ("authorization", "content-type")
+
+    @classmethod
+    def build_request_body(cls, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        """构建OpenAI API请求体"""
+        return request_data.copy()
 
 
 __all__ = ["OpenAIChatAdapter"]

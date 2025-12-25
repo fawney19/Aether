@@ -875,7 +875,8 @@ async function toggleUserStatus(user: any) {
   const action = user.is_active ? '禁用' : '启用'
   const confirmed = await confirmDanger(
     `确定要${action}用户 ${user.username} 吗？`,
-    `${action}用户`
+    `${action}用户`,
+    action
   )
 
   if (!confirmed) return
@@ -884,7 +885,7 @@ async function toggleUserStatus(user: any) {
     await usersStore.updateUser(user.id, { is_active: !user.is_active })
     success(`用户已${action}`)
   } catch (err: any) {
-    error(err.response?.data?.detail || '未知错误', `${action}用户失败`)
+    error(err.response?.data?.error?.message || err.response?.data?.detail || '未知错误', `${action}用户失败`)
   }
 }
 
@@ -955,7 +956,7 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string }) 
     closeUserFormDialog()
   } catch (err: any) {
     const title = data.id ? '更新用户失败' : '创建用户失败'
-    error(err.response?.data?.detail || '未知错误', title)
+    error(err.response?.data?.error?.message || err.response?.data?.detail || '未知错误', title)
   } finally {
     userFormDialogRef.value?.setSaving(false)
   }
@@ -989,7 +990,7 @@ async function createApiKey() {
     showNewApiKeyDialog.value = true
     await loadUserApiKeys(selectedUser.value.id)
   } catch (err: any) {
-    error(err.response?.data?.detail || '未知错误', '创建 API Key 失败')
+    error(err.response?.data?.error?.message || err.response?.data?.detail || '未知错误', '创建 API Key 失败')
   } finally {
     creatingApiKey.value = false
   }
@@ -1026,7 +1027,7 @@ async function deleteApiKey(apiKey: any) {
     await loadUserApiKeys(selectedUser.value.id)
     success('API Key已删除')
   } catch (err: any) {
-    error(err.response?.data?.detail || '未知错误', '删除 API Key 失败')
+    error(err.response?.data?.error?.message || err.response?.data?.detail || '未知错误', '删除 API Key 失败')
   }
 }
 
@@ -1038,7 +1039,7 @@ async function copyFullKey(apiKey: any) {
     success('完整密钥已复制到剪贴板')
   } catch (err: any) {
     log.error('复制密钥失败:', err)
-    error(err.response?.data?.detail || '未知错误', '复制密钥失败')
+    error(err.response?.data?.error?.message || err.response?.data?.detail || '未知错误', '复制密钥失败')
   }
 }
 
@@ -1054,7 +1055,7 @@ async function resetQuota(user: any) {
     await usersStore.resetUserQuota(user.id)
     success('配额已重置')
   } catch (err: any) {
-    error(err.response?.data?.detail || '未知错误', '重置配额失败')
+    error(err.response?.data?.error?.message || err.response?.data?.detail || '未知错误', '重置配额失败')
   }
 }
 
@@ -1070,7 +1071,7 @@ async function deleteUser(user: any) {
     await usersStore.deleteUser(user.id)
     success('用户已删除')
   } catch (err: any) {
-    error(err.response?.data?.detail || '未知错误', '删除用户失败')
+    error(err.response?.data?.error?.message || err.response?.data?.detail || '未知错误', '删除用户失败')
   }
 }
 </script>

@@ -4,7 +4,7 @@ OpenAI CLI Adapter - 基于通用 CLI Adapter 基类的简化实现
 继承 CliAdapterBase，只需配置 FORMAT_ID 和 HANDLER_CLASS。
 """
 
-from typing import Dict, Optional, Tuple, Type
+from typing import Any, AsyncIterator, Dict, Optional, Tuple, Type, Union
 
 import httpx
 from fastapi import Request
@@ -67,6 +67,38 @@ class OpenAICliAdapter(CliAdapterBase):
         for m in models:
             m["api_format"] = cls.FORMAT_ID
         return models, error
+
+    @classmethod
+    def build_endpoint_url(cls, base_url: str, request_data: Dict[str, Any], model_name: Optional[str] = None) -> str:
+        """构建OpenAI CLI API端点URL"""
+        base_url = base_url.rstrip("/")
+        if base_url.endswith("/v1"):
+            return f"{base_url}/chat/completions"
+        else:
+            return f"{base_url}/v1/chat/completions"
+
+    @classmethod
+    def build_base_headers(cls, api_key: str) -> Dict[str, str]:
+        """构建OpenAI CLI API认证头"""
+        return {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+    @classmethod
+    def get_protected_header_keys(cls) -> tuple:
+        """返回OpenAI CLI API的保护头部key"""
+        return ("authorization", "content-type")
+
+    @classmethod
+    def build_request_body(cls, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        """构建OpenAI CLI API请求体"""
+        return request_data.copy()
+
+    @classmethod
+    def get_cli_user_agent(cls) -> Optional[str]:
+        """获取OpenAI CLI User-Agent"""
+        return config.internal_user_agent_openai_cli
 
 
 __all__ = ["OpenAICliAdapter"]

@@ -4,7 +4,7 @@ Gemini CLI Adapter - 基于通用 CLI Adapter 基类的实现
 继承 CliAdapterBase，处理 Gemini CLI 格式的请求。
 """
 
-from typing import Any, Dict, Optional, Tuple, Type
+from typing import Any, AsyncIterator, Dict, Optional, Tuple, Type, Union
 
 import httpx
 from fastapi import Request
@@ -122,6 +122,52 @@ class GeminiCliAdapter(CliAdapterBase):
         for m in models:
             m["api_format"] = cls.FORMAT_ID
         return models, error
+
+    @classmethod
+    def build_endpoint_url(cls, base_url: str, request_data: Dict[str, Any], model_name: Optional[str] = None) -> str:
+        """构建Gemini CLI API端点URL"""
+        effective_model_name = model_name or request_data.get("model", "")
+        if not effective_model_name:
+            raise ValueError("Model name is required for Gemini API")
+
+        base_url = base_url.rstrip("/")
+        if base_url.endswith("/v1beta"):
+            prefix = base_url
+        else:
+            prefix = f"{base_url}/v1beta"
+        return f"{prefix}/models/{effective_model_name}:generateContent"
+
+    @classmethod
+    def build_base_headers(cls, api_key: str) -> Dict[str, str]:
+        """构建Gemini CLI API认证头"""
+        return {
+            "x-goog-api-key": api_key,
+            "Content-Type": "application/json",
+        }
+
+    @classmethod
+    def get_protected_header_keys(cls) -> tuple:
+        """返回Gemini CLI API的保护头部key"""
+        return ("x-goog-api-key", "content-type")
+
+    @classmethod
+    def build_request_body(cls, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        """构建Gemini CLI API请求体"""
+        return {
+            "contents": request_data.get("messages", []),
+            "generationConfig": {
+                "maxOutputTokens": request_data.get("max_tokens", 100),
+                "temperature": request_data.get("temperature", 0.7),
+            },
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"}
+            ],
+        }
+
+    @classmethod
+    def get_cli_user_agent(cls) -> Optional[str]:
+        """获取Gemini CLI User-Agent"""
+        return config.internal_user_agent_gemini_cli
 
 
 def build_gemini_cli_adapter(x_app_header: str = "") -> GeminiCliAdapter:

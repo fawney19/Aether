@@ -163,7 +163,9 @@ const contentZIndex = computed(() => (props.zIndex || 60) + 10)
 useEscapeKey(() => {
   if (isOpen.value) {
     handleClose()
+    return true  // 阻止其他监听器（如父级抽屉的 ESC 监听器）
   }
+  return false
 }, {
   disableOnInput: true,
   once: false

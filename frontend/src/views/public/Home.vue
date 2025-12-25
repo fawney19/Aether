@@ -102,9 +102,9 @@
     <!-- Main Content -->
     <main class="relative z-10">
       <!-- Fixed Logo Container -->
-      <div class="fixed inset-0 z-20 pointer-events-none flex items-center justify-center overflow-hidden">
+      <div class="mt-4 fixed inset-0 z-20 pointer-events-none flex items-center justify-center overflow-hidden">
         <div
-          class="transform-gpu logo-container"
+          class="mt-16 transform-gpu logo-container"
           :class="[currentSection === SECTIONS.HOME ? 'home-section' : '', `logo-transition-${scrollDirection}`]"
           :style="fixedLogoStyle"
         >
@@ -151,7 +151,7 @@
         class="min-h-screen snap-start flex items-center justify-center px-16 lg:px-20 py-20"
       >
         <div class="max-w-4xl mx-auto text-center">
-          <div class="h-80 w-full mb-16" />
+          <div class="h-80 w-full mb-16 mt-8" />
           <h1
             class="mb-6 text-5xl md:text-7xl font-bold text-[#191919] dark:text-white leading-tight transition-all duration-700"
             :style="getTitleStyle(SECTIONS.HOME)"
@@ -166,7 +166,7 @@
             整合 Claude Code、Codex CLI、Gemini CLI 等多个 AI 编程助手
           </p>
           <button
-            class="mt-16 transition-all duration-700 cursor-pointer hover:scale-110"
+            class="mt-8 transition-all duration-700 cursor-pointer hover:scale-110"
             :style="getScrollIndicatorStyle(SECTIONS.HOME)"
             @click="scrollToSection(SECTIONS.CLAUDE)"
           >

@@ -47,11 +47,11 @@ export function useConfirm() {
   /**
    * 便捷方法：危险操作确认（红色主题）
    */
-  const confirmDanger = (message: string, title?: string): Promise<boolean> => {
+  const confirmDanger = (message: string, title?: string, confirmText?: string): Promise<boolean> => {
     return confirm({
       message,
       title: title || '危险操作',
-      confirmText: '删除',
+      confirmText: confirmText || '删除',
       variant: 'danger'
     })
   }

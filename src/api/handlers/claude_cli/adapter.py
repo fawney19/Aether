@@ -4,7 +4,7 @@ Claude CLI Adapter - 基于通用 CLI Adapter 基类的简化实现
 继承 CliAdapterBase，只需配置 FORMAT_ID 和 HANDLER_CLASS。
 """
 
-from typing import Any, Dict, Optional, Tuple, Type
+from typing import Any, AsyncIterator, Dict, Optional, Tuple, Type, Union
 
 import httpx
 from fastapi import Request
@@ -125,6 +125,42 @@ class ClaudeCliAdapter(CliAdapterBase):
         for m in models:
             m["api_format"] = cls.FORMAT_ID
         return models, error
+
+    @classmethod
+    def build_endpoint_url(cls, base_url: str, request_data: Dict[str, Any], model_name: Optional[str] = None) -> str:
+        """构建Claude CLI API端点URL"""
+        base_url = base_url.rstrip("/")
+        if base_url.endswith("/v1"):
+            return f"{base_url}/messages"
+        else:
+            return f"{base_url}/v1/messages"
+
+    @classmethod
+    def build_base_headers(cls, api_key: str) -> Dict[str, str]:
+        """构建Claude CLI API认证头"""
+        return {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+    @classmethod
+    def get_protected_header_keys(cls) -> tuple:
+        """返回Claude CLI API的保护头部key"""
+        return ("authorization", "content-type")
+
+    @classmethod
+    def build_request_body(cls, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        """构建Claude CLI API请求体"""
+        return {
+            "model": request_data.get("model"),
+            "max_tokens": request_data.get("max_tokens", 100),
+            "messages": request_data.get("messages", []),
+        }
+
+    @classmethod
+    def get_cli_user_agent(cls) -> Optional[str]:
+        """获取Claude CLI User-Agent"""
+        return config.internal_user_agent_claude_cli
 
 
 __all__ = ["ClaudeCliAdapter"]

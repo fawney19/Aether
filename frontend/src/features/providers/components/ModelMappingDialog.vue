@@ -17,7 +17,7 @@
             v-model:open="modelSelectOpen"
             :model-value="formData.modelId"
             :disabled="!!editingGroup"
-            @update:model-value="formData.modelId = $event"
+            @update:model-value="handleModelChange"
           >
             <SelectTrigger class="h-9">
               <SelectValue placeholder="请选择模型" />
@@ -516,6 +516,15 @@ function initForm() {
   } else {
     upstreamModelsLoaded.value = false
     upstreamModels.value = []
+  }
+}
+
+// 处理模型选择变更
+function handleModelChange(value: string) {
+  formData.value.modelId = value
+  const selectedModel = props.models.find(m => m.id === value)
+  if (selectedModel) {
+    upstreamModelSearch.value = selectedModel.provider_model_name
   }
 }
 

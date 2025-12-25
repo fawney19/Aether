@@ -160,6 +160,17 @@
                   variant="ghost"
                   size="icon"
                   class="h-8 w-8"
+                  title="测试模型"
+                  :disabled="testingModelId === model.id"
+                  @click="testModelConnection(model)"
+                >
+                  <Loader2 v-if="testingModelId === model.id" class="w-3.5 h-3.5 animate-spin" />
+                  <Play v-else class="w-3.5 h-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="h-8 w-8"
                   title="编辑"
                   @click="editModel(model)"
                 >
@@ -209,12 +220,13 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { Box, Edit, Trash2, Layers, Eye, Wrench, Zap, Brain, Power, Copy, Image } from 'lucide-vue-next'
+import { Box, Edit, Trash2, Layers, Eye, Wrench, Zap, Brain, Power, Copy, Image, Loader2, Play } from 'lucide-vue-next'
 import Card from '@/components/ui/card.vue'
 import Button from '@/components/ui/button.vue'
 import { useToast } from '@/composables/useToast'
-import { getProviderModels, type Model } from '@/api/endpoints'
+import { getProviderModels, testModel, type Model } from '@/api/endpoints'
 import { updateModel } from '@/api/endpoints/models'
+import { parseTestModelError } from '@/utils/errorParser'
 
 const props = defineProps<{
   provider: any
@@ -232,6 +244,7 @@ const { error: showError, success: showSuccess } = useToast()
 const loading = ref(false)
 const models = ref<Model[]>([])
 const togglingModelId = ref<string | null>(null)
+const testingModelId = ref<string | null>(null)
 
 // 按名称排序的模型列表
 const sortedModels = computed(() => {
@@ -377,6 +390,39 @@ async function toggleModelActive(model: Model) {
     showError(err.response?.data?.detail || '操作失败', '错误')
   } finally {
     togglingModelId.value = null
+  }
+}
+
+// 测试模型连接性
+async function testModelConnection(model: Model) {
+  if (testingModelId.value) return
+
+  testingModelId.value = model.id
+  try {
+    const result = await testModel({
+      provider_id: props.provider.id,
+      model_name: model.provider_model_name,
+      message: "hello"
+    })
+
+    if (result.success) {
+      showSuccess(`模型 "${model.provider_model_name}" 测试成功`)
+
+      // 如果有响应内容，可以显示更多信息
+      if (result.data?.response?.choices?.[0]?.message?.content) {
+        const content = result.data.response.choices[0].message.content
+        showSuccess(`测试成功，响应: ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`)
+      } else if (result.data?.content_preview) {
+        showSuccess(`流式测试成功，预览: ${result.data.content_preview}`)
+      }
+    } else {
+      showError(`模型测试失败: ${parseTestModelError(result)}`)
+    }
+  } catch (err: any) {
+    const errorMsg = err.response?.data?.detail || err.message || '测试请求失败'
+    showError(`模型测试失败: ${errorMsg}`)
+  } finally {
+    testingModelId.value = null
   }
 }
 

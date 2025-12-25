@@ -531,6 +531,7 @@
               <!-- 模型名称映射 -->
               <ModelAliasesTab
                 v-if="provider"
+                ref="modelAliasesTabRef"
                 :key="`aliases-${provider.id}`"
                 :provider="provider"
                 @refresh="handleRelatedDataRefresh"
@@ -735,6 +736,9 @@ const deleteModelConfirmOpen = ref(false)
 const modelToDelete = ref<Model | null>(null)
 const batchAssignDialogOpen = ref(false)
 
+// ModelAliasesTab 组件引用
+const modelAliasesTabRef = ref<InstanceType<typeof ModelAliasesTab> | null>(null)
+
 // 拖动排序相关状态
 const dragState = ref({
   isDragging: false,
@@ -756,7 +760,9 @@ const hasBlockingDialogOpen = computed(() =>
   deleteKeyConfirmOpen.value ||
   modelFormDialogOpen.value ||
   deleteModelConfirmOpen.value ||
-  batchAssignDialogOpen.value
+  batchAssignDialogOpen.value ||
+  // 检测 ModelAliasesTab 子组件的 Dialog 是否打开
+  modelAliasesTabRef.value?.dialogOpen
 )
 
 // 监听 providerId 变化

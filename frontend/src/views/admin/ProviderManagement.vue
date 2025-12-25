@@ -723,9 +723,19 @@ async function handleDeleteProvider(provider: ProviderWithEndpointsSummary) {
 // 切换提供商状态
 async function toggleProviderStatus(provider: ProviderWithEndpointsSummary) {
   try {
-    await updateProvider(provider.id, { is_active: !provider.is_active })
-    provider.is_active = !provider.is_active
-    showSuccess(provider.is_active ? '提供商已启用' : '提供商已停用')
+    const newStatus = !provider.is_active
+    await updateProvider(provider.id, { is_active: newStatus })
+
+    // 更新抽屉内部的 provider 对象
+    provider.is_active = newStatus
+
+    // 同时更新主页面 providers 数组中的对象，实现无感更新
+    const targetProvider = providers.value.find(p => p.id === provider.id)
+    if (targetProvider) {
+      targetProvider.is_active = newStatus
+    }
+
+    showSuccess(newStatus ? '提供商已启用' : '提供商已停用')
   } catch (err: any) {
     showError(err.response?.data?.detail || '操作失败', '错误')
   }

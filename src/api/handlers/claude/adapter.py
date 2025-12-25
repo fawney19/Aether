@@ -209,6 +209,38 @@ class ClaudeChatAdapter(ChatAdapterBase):
             logger.warning(f"Failed to fetch Claude models from {models_url}: {e}")
             return [], error_msg
 
+    @classmethod
+    def build_endpoint_url(cls, base_url: str) -> str:
+        """构建Claude API端点URL"""
+        base_url = base_url.rstrip("/")
+        if base_url.endswith("/v1"):
+            return f"{base_url}/messages"
+        else:
+            return f"{base_url}/v1/messages"
+
+    @classmethod
+    def build_base_headers(cls, api_key: str) -> Dict[str, str]:
+        """构建Claude API认证头"""
+        return {
+            "x-api-key": api_key,
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+        }
+
+    @classmethod
+    def get_protected_header_keys(cls) -> tuple:
+        """返回Claude API的保护头部key"""
+        return ("x-api-key", "content-type", "anthropic-version")
+
+    @classmethod
+    def build_request_body(cls, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        """构建Claude API请求体"""
+        return {
+            "model": request_data.get("model"),
+            "max_tokens": request_data.get("max_tokens", 100),
+            "messages": request_data.get("messages", []),
+        }
+
 
 def build_claude_adapter(x_app_header: Optional[str]):
     """根据 x-app 头部构造 Chat 或 Claude Code 适配器。"""

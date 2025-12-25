@@ -198,3 +198,49 @@ export function parseApiErrorShort(err: unknown, defaultMessage: string = '操�
   const lines = fullError.split('\n')
   return lines[0] || defaultMessage
 }
+
+/**
+ * 解析模型测试响应的错误信息
+ * @param result 测试响应结果
+ * @returns 格式化的错误信息
+ */
+export function parseTestModelError(result: {
+  error?: string
+  data?: {
+    response?: {
+      status_code?: number
+      error?: string | { message?: string }
+    }
+  }
+}): string {
+  let errorMsg = result.error || '测试失败'
+
+  // 检查HTTP状态码错误
+  if (result.data?.response?.status_code) {
+    const status = result.data.response.status_code
+    if (status === 403) {
+      errorMsg = '认证失败: API密钥无效或客户端类型不被允许'
+    } else if (status === 401) {
+      errorMsg = '认证失败: API密钥无效或已过期'
+    } else if (status === 404) {
+      errorMsg = '模型不存在: 请检查模型名称是否正确'
+    } else if (status === 429) {
+      errorMsg = '请求频率过高: 请稍后重试'
+    } else if (status >= 500) {
+      errorMsg = `服务器错误: HTTP ${status}`
+    } else {
+      errorMsg = `请求失败: HTTP ${status}`
+    }
+  }
+
+  // 尝试从错误响应中提取更多信息
+  if (result.data?.response?.error) {
+    if (typeof result.data.response.error === 'string') {
+      errorMsg = result.data.response.error
+    } else if (result.data.response.error?.message) {
+      errorMsg = result.data.response.error.message
+    }
+  }
+
+  return errorMsg
+}

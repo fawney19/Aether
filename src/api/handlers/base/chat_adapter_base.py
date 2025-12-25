@@ -63,6 +63,34 @@ class ChatAdapterBase(ApiAdapter):
     name: str = "chat.base"
     mode = ApiMode.STANDARD
 
+    # 子类可以配置的特殊方法（用于check_endpoint）
+    @classmethod
+    def build_endpoint_url(cls, base_url: str) -> str:
+        """构建端点URL，子类可以覆盖以自定义URL构建逻辑"""
+        # 默认实现：在base_url后添加特定路径
+        return base_url
+
+    @classmethod
+    def build_base_headers(cls, api_key: str) -> Dict[str, str]:
+        """构建基础请求头，子类可以覆盖以自定义认证头"""
+        # 默认实现：Bearer token认证
+        return {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+    @classmethod
+    def get_protected_header_keys(cls) -> tuple:
+        """返回不应被extra_headers覆盖的头部key，子类可以覆盖"""
+        # 默认保护认证相关头部
+        return ("authorization", "content-type")
+
+    @classmethod
+    def build_request_body(cls, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        """构建请求体，子类可以覆盖以自定义请求格式转换"""
+        # 默认实现：直接使用请求数据
+        return request_data.copy()
+
     def __init__(self, allowed_api_formats: Optional[list[str]] = None):
         self.allowed_api_formats = allowed_api_formats or [self.FORMAT_ID]
 
@@ -654,6 +682,65 @@ class ChatAdapterBase(ApiAdapter):
         # 默认实现返回空列表，子类应覆盖
         return [], f"{cls.FORMAT_ID} adapter does not implement fetch_models"
 
+    @classmethod
+    async def check_endpoint(
+        cls,
+        client: httpx.AsyncClient,
+        base_url: str,
+        api_key: str,
+        request_data: Dict[str, Any],
+        extra_headers: Optional[Dict[str, str]] = None,
+        # 用量计算参数（现在强制记录）
+        db: Optional[Any] = None,
+        user: Optional[Any] = None,
+        provider_name: Optional[str] = None,
+        provider_id: Optional[str] = None,
+        api_key_id: Optional[str] = None,
+        model_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        测试模型连接性（非流式）
+
+        Args:
+            client: httpx 异步客户端
+            base_url: API 基础 URL
+            api_key: API 密钥（已解密）
+            request_data: 请求数据
+            extra_headers: 端点配置的额外请求头
+            db: 数据库会话
+            user: 用户对象
+            provider_name: 提供商名称
+            provider_id: 提供商ID
+            api_key_id: API Key ID
+            model_name: 模型名称
+
+        Returns:
+            测试响应数据
+        """
+        from src.api.handlers.base.endpoint_checker import build_safe_headers, run_endpoint_check
+
+        # 使用子类配置方法构建请求组件
+        url = cls.build_endpoint_url(base_url)
+        base_headers = cls.build_base_headers(api_key)
+        protected_keys = cls.get_protected_header_keys()
+        headers = build_safe_headers(base_headers, extra_headers, protected_keys)
+        body = cls.build_request_body(request_data)
+
+        # 使用通用的endpoint checker执行请求
+        return await run_endpoint_check(
+            client=client,
+            url=url,
+            headers=headers,
+            json_body=body,
+            api_format=cls.name,
+            # 用量计算参数（现在强制记录）
+            db=db,
+            user=user,
+            provider_name=provider_name,
+            provider_id=provider_id,
+            api_key_id=api_key_id,
+            model_name=model_name or request_data.get("model"),
+        )
 
 # =========================================================================
 # Adapter 注册表 - 用于根据 API format 获取 Adapter 实例
