@@ -234,8 +234,8 @@ class EndpointHealthService:
                 for api_format in format_key_mapping.keys()
             }
 
-        # 计算时间范围
-        interval_minutes = (lookback_hours * 60) // segments
+        # 计算时间范围（确保分段分钟数至少为1，避免除零）
+        interval_minutes = max(1, (lookback_hours * 60) // segments)
         start_time = now - timedelta(hours=lookback_hours)
 
         # 使用 RequestCandidate 表查询所有尝试记录
