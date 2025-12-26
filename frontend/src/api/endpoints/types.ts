@@ -527,6 +527,7 @@ export interface UpstreamModel {
   owned_by?: string
   display_name?: string
   api_format?: string
+  mapped?: boolean
 }
 
 /**

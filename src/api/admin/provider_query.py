@@ -16,7 +16,7 @@ from src.api.handlers.base.cli_adapter_base import get_cli_adapter_class
 from src.core.crypto import crypto_service
 from src.core.logger import logger
 from src.database.database import get_db
-from src.models.database import Provider, ProviderEndpoint, User
+from src.models.database import Model, Provider, ProviderEndpoint, User
 from src.utils.auth_utils import get_current_user
 
 router = APIRouter(prefix="/api/admin/provider-query", tags=["Provider Query"])
@@ -193,7 +193,16 @@ async def query_available_models(
             if error:
                 errors.append(error)
 
-    # 按 model id + api_format 去重（保留第一个）
+    # 查询该 Provider 下所有模型的映射关系，标记已映射的上游模型
+    mapped_model_names = {
+        mapping["name"]
+        for prov_model in db.query(Model).filter(Model.provider_id == request.provider_id).all()
+        if prov_model.provider_model_mappings
+        for mapping in prov_model.provider_model_mappings
+        if isinstance(mapping, dict) and mapping.get("name")
+    }
+
+    # 按 model id + api_format 去重（保留第一个），同时标记 mapped
     seen_keys: set[str] = set()
     unique_models: list = []
     for model in all_models:
@@ -202,6 +211,7 @@ async def query_available_models(
         unique_key = f"{model_id}:{api_format}"
         if model_id and unique_key not in seen_keys:
             seen_keys.add(unique_key)
+            model["mapped"] = model_id in mapped_model_names
             unique_models.append(model)
 
     error = "; ".join(errors) if errors else None

@@ -217,9 +217,18 @@
                         @click.stop
                       />
                       <div class="flex-1 min-w-0">
-                        <p class="font-medium text-sm truncate">
-                          {{ model.id }}
-                        </p>
+                        <div class="flex items-center gap-2">
+                          <p class="font-medium text-sm truncate">
+                            {{ model.id }}
+                          </p>
+                          <span
+                            v-if="model.mapped"
+                            class="shrink-0 px-1.5 py-0.5 text-xs rounded bg-primary/10 text-primary border border-primary/20"
+                            title="此模型已被映射"
+                          >
+                            已映射
+                          </span>
+                        </div>
                         <p class="text-xs text-muted-foreground truncate font-mono">
                           {{ model.owned_by || model.id }}
                         </p>
