@@ -379,14 +379,15 @@ async function testModelConnection(model: Model) {
     })
 
     if (result.success) {
-      showSuccess(`模型 "${model.provider_model_name}" 测试成功`)
-
       // 如果有响应内容，可以显示更多信息
       if (result.data?.response?.choices?.[0]?.message?.content) {
         const content = result.data.response.choices[0].message.content
-        showSuccess(`测试成功，响应: ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`)
+        const preview = `${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`
+        showSuccess(`模型 "${model.provider_model_name}" 测试成功，响应: ${preview}`)
       } else if (result.data?.content_preview) {
-        showSuccess(`流式测试成功，预览: ${result.data.content_preview}`)
+        showSuccess(`模型 "${model.provider_model_name}" 测试成功，预览: ${result.data.content_preview}`)
+      } else {
+        showSuccess(`模型 "${model.provider_model_name}" 测试成功`)
       }
     } else {
       showError(`模型测试失败: ${parseTestModelError(result)}`)
