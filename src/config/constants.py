@@ -52,19 +52,33 @@ class StreamDefaults:
     MAX_PREFETCH_BYTES = 64 * 1024  # 64KB
 
 
-class ConcurrencyDefaults:
-    """并发控制默认值
+class RPMDefaults:
+    """RPM（每分钟请求数）限制默认值
 
     算法说明：边界记忆 + 渐进探测
-    - 触发 429 时记录边界（last_concurrent_peak），新限制 = 边界 - 1
+    - 触发 429 时记录边界（last_rpm_peak），新限制 = 边界 - 1
     - 扩容时不超过边界，除非是探测性扩容（长时间无 429）
     - 这样可以快速收敛到真实限制附近，避免过度保守
+
+    初始值 50 RPM：
+    - 系统会根据实际使用自动调整
     """
 
-    # 自适应并发初始限制（宽松起步，遇到 429 再降低）
-    INITIAL_LIMIT = 50
+    # 自适应 RPM 初始限制
+    INITIAL_LIMIT = 50  # 每分钟 50 次请求
 
-    # 429错误后的冷却时间（分钟）- 在此期间不会增加并发限制
+    # === 内存模式 RPM 计数器配置 ===
+    # 内存模式下的最大条目限制（防止内存泄漏）
+    # 每个条目约占 100 字节，10000 条目 = ~1MB
+    # 计算依据：1000 Key × 5 API 格式 × 2 (buffer) = 10000
+    # 可通过环境变量 RPM_MAX_MEMORY_ENTRIES 覆盖
+    MAX_MEMORY_RPM_ENTRIES = 10000
+
+    # 内存使用告警阈值（达到此比例时记录警告日志）
+    # 可通过环境变量 RPM_MEMORY_WARNING_THRESHOLD 覆盖
+    MEMORY_WARNING_THRESHOLD = 0.6  # 60%
+
+    # 429错误后的冷却时间（分钟）- 在此期间不会增加 RPM 限制
     COOLDOWN_AFTER_429_MINUTES = 5
 
     # 探测间隔上限（分钟）- 用于长期探测策略
@@ -86,30 +100,30 @@ class ConcurrencyDefaults:
     # 最小采样数 - 窗口内至少需要这么多采样才能做出扩容决策
     MIN_SAMPLES_FOR_DECISION = 5
 
-    # 扩容步长 - 每次扩容增加的并发数
-    INCREASE_STEP = 2
+    # 扩容步长 - 每次扩容增加的 RPM
+    INCREASE_STEP = 5  # 每次增加 5 RPM
 
-    # 最大并发限制上限
-    MAX_CONCURRENT_LIMIT = 200
+    # 最大 RPM 限制上限（不设上限，让系统自适应学习）
+    MAX_RPM_LIMIT = 10000
 
-    # 最小并发限制下限
-    # 设置为 3 而不是 1，因为预留机制（10%预留给缓存用户）会导致
-    # 当 learned_max_concurrent=1 时新用户实际可用槽位为 0，永远无法命中
-    # 注意：当 limit < 10 时，预留机制实际不生效（预留槽位 = 0），这是可接受的
-    MIN_CONCURRENT_LIMIT = 3
+    # 最小 RPM 限制下限
+    MIN_RPM_LIMIT = 5
+
+    # 缓存用户预留比例（默认 10%，新用户可用 90%）
+    # 已被动态预留机制 (AdaptiveReservationDefaults) 替代，保留用于向后兼容
+    CACHE_RESERVATION_RATIO = 0.1
 
     # === 探测性扩容参数 ===
     # 探测性扩容间隔（分钟）- 长时间无 429 且有流量时尝试扩容
-    # 探测性扩容可以突破已知边界，尝试更高的并发
+    # 探测性扩容可以突破已知边界，尝试更高的 RPM
     PROBE_INCREASE_INTERVAL_MINUTES = 30
 
     # 探测性扩容最小请求数 - 在探测间隔内至少需要这么多请求
     PROBE_INCREASE_MIN_REQUESTS = 10
 
-    # === 缓存用户预留比例 ===
-    # 缓存用户槽位预留比例（新用户可用 1 - 此值）
-    # 0.1 表示缓存用户预留 10%，新用户可用 90%
-    CACHE_RESERVATION_RATIO = 0.1
+
+# 向后兼容别名
+ConcurrencyDefaults = RPMDefaults
 
 
 class CircuitBreakerDefaults:
@@ -193,10 +207,19 @@ class AdaptiveReservationDefaults:
 
 
 class TimeoutDefaults:
-    """超时配置默认值（秒）"""
+    """超时配置默认值（秒）
 
-    # HTTP 请求默认超时
-    HTTP_REQUEST = 300  # 5分钟
+    超时配置说明：
+    - 全局默认值和 Provider 默认值统一为 120 秒
+    - 120 秒是 LLM API 的合理默认值：
+      * 大多数请求在 30 秒内完成
+      * 复杂推理（如 Claude extended thinking）可能需要 60-90 秒
+      * 120 秒足够覆盖大部分场景，同时避免线程池被长时间占用
+    - 如需更长超时，可在 Provider 级别单独配置
+    """
+
+    # HTTP 请求默认超时（与 Provider 默认值保持一致）
+    HTTP_REQUEST = 120  # 2分钟
 
     # 数据库连接池获取超时
     DB_POOL = 30

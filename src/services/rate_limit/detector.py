@@ -3,7 +3,7 @@
 """
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict, Optional
 
 from src.core.logger import logger
 
@@ -62,7 +62,7 @@ class RateLimitDetector:
     def detect_from_headers(
         headers: Dict[str, str],
         provider_name: str = "unknown",
-        current_concurrent: Optional[int] = None,
+        current_usage: Optional[int] = None,
     ) -> RateLimitInfo:
         """
         从响应头中检测速率限制类型
@@ -70,7 +70,7 @@ class RateLimitDetector:
         Args:
             headers: 429响应的HTTP头
             provider_name: 提供商名称（用于选择解析策略）
-            current_concurrent: 当前并发数（用于判断是否为并发限制）
+            current_usage: 当前使用量（RPM 计数，用于启发式判断是否为并发限制）
 
         Returns:
             RateLimitInfo对象
@@ -80,16 +80,16 @@ class RateLimitDetector:
 
         # 根据提供商选择解析策略
         if "anthropic" in provider_name.lower() or "claude" in provider_name.lower():
-            return RateLimitDetector._parse_anthropic_headers(headers_lower, current_concurrent)
+            return RateLimitDetector._parse_anthropic_headers(headers_lower, current_usage)
         elif "openai" in provider_name.lower():
-            return RateLimitDetector._parse_openai_headers(headers_lower, current_concurrent)
+            return RateLimitDetector._parse_openai_headers(headers_lower, current_usage)
         else:
-            return RateLimitDetector._parse_generic_headers(headers_lower, current_concurrent)
+            return RateLimitDetector._parse_generic_headers(headers_lower, current_usage)
 
     @staticmethod
     def _parse_anthropic_headers(
         headers: Dict[str, str],
-        current_concurrent: Optional[int] = None,
+        current_usage: Optional[int] = None,
     ) -> RateLimitInfo:
         """
         解析 Anthropic Claude API 的速率限制头
@@ -127,29 +127,66 @@ class RateLimitDetector:
                 raw_headers=headers,
             )
 
-        # 2. 可能的并发限制判断（多条件综合）
-        # 条件：当前并发数存在，且 remaining > 0（说明不是 RPM 耗尽）
-        # 同时 retry_after 较短（并发限制通常 retry_after 较短，如 1-10 秒）
-        is_likely_concurrent = (
-            current_concurrent is not None
-            and current_concurrent >= 2  # 至少有 2 个并发
-            and (requests_remaining is None or requests_remaining > 0)  # RPM 未耗尽
-            and (retry_after is None or retry_after <= 30)  # 短暂等待
-        )
+        # 2. 并发限制判断（多条件策略）
+        # 注意：current_usage 是 RPM 计数（当前分钟请求数），不是真正的并发数
+        #
+        # 判断条件（满足任一即可）：
+        # A. 强判断：remaining > 0 且 retry_after <= 30（Provider 明确告知还有配额但需要等待）
+        # B. 弱判断：只有 retry_after <= 5 且缺少 remaining 头（短等待时间是并发限制的典型特征）
+        #
+        # 选择保守的 retry_after 阈值：
+        # - 强判断用 30 秒（有 remaining 头时）
+        # - 弱判断用 5 秒（无 remaining 头时，更保守）
+        is_likely_concurrent = False
+        concurrent_reason = ""
+
+        # 条件 A：remaining > 0 且 retry_after <= 30
+        if (
+            requests_remaining is not None
+            and requests_remaining > 0
+            and retry_after is not None
+            and retry_after <= 30
+        ):
+            is_likely_concurrent = True
+            concurrent_reason = f"remaining={requests_remaining} > 0, retry_after={retry_after}s <= 30s"
+
+        # 条件 B：无 remaining 头但 retry_after 很短（<= 5 秒）
+        elif (
+            requests_remaining is None
+            and retry_after is not None
+            and retry_after <= 5
+        ):
+            is_likely_concurrent = True
+            concurrent_reason = f"no remaining header, retry_after={retry_after}s <= 5s"
 
         if is_likely_concurrent:
-            logger.info(
-                f"检测到可能的并发限制: current_concurrent={current_concurrent}, "
-                f"remaining={requests_remaining}, retry_after={retry_after}"
-            )
+            logger.info(f"检测到并发限制: {concurrent_reason}")
             return RateLimitInfo(
                 limit_type=RateLimitType.CONCURRENT,
                 retry_after=retry_after,
-                current_usage=current_concurrent,
+                current_usage=current_usage,
                 raw_headers=headers,
             )
 
-        # 3. 未知类型
+        # 3. 默认视为 RPM 限制（更保守的处理）
+        # 无法明确区分时，视为 RPM 限制让系统降低 RPM
+        # 这比误判为并发限制（不降 RPM）更安全
+        if retry_after is not None or requests_limit is not None:
+            logger.info(
+                f"无法明确区分限制类型，保守视为 RPM 限制: "
+                f"remaining={requests_remaining}, retry_after={retry_after}"
+            )
+            return RateLimitInfo(
+                limit_type=RateLimitType.RPM,
+                retry_after=retry_after,
+                limit_value=requests_limit,
+                remaining=requests_remaining,
+                reset_at=requests_reset,
+                current_usage=current_usage,
+                raw_headers=headers,
+            )
+
+        # 4. 完全没有信息，标记为未知
         return RateLimitInfo(
             limit_type=RateLimitType.UNKNOWN,
             retry_after=retry_after,
@@ -159,7 +196,7 @@ class RateLimitDetector:
     @staticmethod
     def _parse_openai_headers(
         headers: Dict[str, str],
-        current_concurrent: Optional[int] = None,
+        current_usage: Optional[int] = None,
     ) -> RateLimitInfo:
         """
         解析 OpenAI API 的速率限制头
@@ -195,23 +232,55 @@ class RateLimitDetector:
                 raw_headers=headers,
             )
 
-        # 2. 可能的并发限制（多条件综合判断）
-        is_likely_concurrent = (
-            current_concurrent is not None
-            and current_concurrent >= 2
-            and (requests_remaining is None or requests_remaining > 0)
-            and (retry_after is None or retry_after <= 30)
-        )
+        # 2. 并发限制判断（多条件策略）
+        # 判断条件（满足任一即可）：
+        # A. 强判断：remaining > 0 且 retry_after <= 30
+        # B. 弱判断：只有 retry_after <= 5 且缺少 remaining 头
+        is_likely_concurrent = False
+        concurrent_reason = ""
+
+        if (
+            requests_remaining is not None
+            and requests_remaining > 0
+            and retry_after is not None
+            and retry_after <= 30
+        ):
+            is_likely_concurrent = True
+            concurrent_reason = f"remaining={requests_remaining} > 0, retry_after={retry_after}s <= 30s"
+        elif (
+            requests_remaining is None
+            and retry_after is not None
+            and retry_after <= 5
+        ):
+            is_likely_concurrent = True
+            concurrent_reason = f"no remaining header, retry_after={retry_after}s <= 5s"
 
         if is_likely_concurrent:
+            logger.info(f"检测到并发限制: {concurrent_reason}")
             return RateLimitInfo(
                 limit_type=RateLimitType.CONCURRENT,
                 retry_after=retry_after,
-                current_usage=current_concurrent,
+                current_usage=current_usage,
                 raw_headers=headers,
             )
 
-        # 3. 未知类型
+        # 3. 默认视为 RPM 限制（更保守的处理）
+        if retry_after is not None or requests_limit is not None:
+            logger.info(
+                f"无法明确区分限制类型，保守视为 RPM 限制: "
+                f"remaining={requests_remaining}, retry_after={retry_after}"
+            )
+            return RateLimitInfo(
+                limit_type=RateLimitType.RPM,
+                retry_after=retry_after,
+                limit_value=requests_limit,
+                remaining=requests_remaining,
+                reset_at=requests_reset,
+                current_usage=current_usage,
+                raw_headers=headers,
+            )
+
+        # 4. 完全没有信息，标记为未知
         return RateLimitInfo(
             limit_type=RateLimitType.UNKNOWN,
             retry_after=retry_after,
@@ -221,7 +290,7 @@ class RateLimitDetector:
     @staticmethod
     def _parse_generic_headers(
         headers: Dict[str, str],
-        current_concurrent: Optional[int] = None,
+        current_usage: Optional[int] = None,
     ) -> RateLimitInfo:
         """
         解析通用的速率限制头
@@ -247,23 +316,54 @@ class RateLimitDetector:
                 raw_headers=headers,
             )
 
-        # 2. 可能的并发限制
-        is_likely_concurrent = (
-            current_concurrent is not None
-            and current_concurrent >= 2
-            and (remaining is None or remaining > 0)
-            and (retry_after is None or retry_after <= 30)
-        )
+        # 2. 并发限制判断（多条件策略）
+        # 判断条件（满足任一即可）：
+        # A. 强判断：remaining > 0 且 retry_after <= 30
+        # B. 弱判断：只有 retry_after <= 5 且缺少 remaining 头
+        is_likely_concurrent = False
+        concurrent_reason = ""
+
+        if (
+            remaining is not None
+            and remaining > 0
+            and retry_after is not None
+            and retry_after <= 30
+        ):
+            is_likely_concurrent = True
+            concurrent_reason = f"remaining={remaining} > 0, retry_after={retry_after}s <= 30s"
+        elif (
+            remaining is None
+            and retry_after is not None
+            and retry_after <= 5
+        ):
+            is_likely_concurrent = True
+            concurrent_reason = f"no remaining header, retry_after={retry_after}s <= 5s"
 
         if is_likely_concurrent:
+            logger.info(f"检测到并发限制: {concurrent_reason}")
             return RateLimitInfo(
                 limit_type=RateLimitType.CONCURRENT,
                 retry_after=retry_after,
-                current_usage=current_concurrent,
+                current_usage=current_usage,
                 raw_headers=headers,
             )
 
-        # 3. 未知类型
+        # 3. 默认视为 RPM 限制（更保守的处理）
+        if retry_after is not None or limit_value is not None:
+            logger.info(
+                f"无法明确区分限制类型，保守视为 RPM 限制: "
+                f"remaining={remaining}, retry_after={retry_after}"
+            )
+            return RateLimitInfo(
+                limit_type=RateLimitType.RPM,
+                retry_after=retry_after,
+                limit_value=limit_value,
+                remaining=remaining,
+                current_usage=current_usage,
+                raw_headers=headers,
+            )
+
+        # 4. 完全没有信息，标记为未知
         return RateLimitInfo(
             limit_type=RateLimitType.UNKNOWN,
             retry_after=retry_after,
@@ -317,7 +417,7 @@ class RateLimitDetector:
 def detect_rate_limit_type(
     headers: Dict[str, str],
     provider_name: str = "unknown",
-    current_concurrent: Optional[int] = None,
+    current_usage: Optional[int] = None,
 ) -> RateLimitInfo:
     """
     检测速率限制类型（便捷函数）
@@ -325,9 +425,9 @@ def detect_rate_limit_type(
     Args:
         headers: 429响应头
         provider_name: 提供商名称
-        current_concurrent: 当前并发数
+        current_usage: 当前使用量（RPM 计数）
 
     Returns:
         RateLimitInfo对象
     """
-    return RateLimitDetector.detect_from_headers(headers, provider_name, current_concurrent)
+    return RateLimitDetector.detect_from_headers(headers, provider_name, current_usage)

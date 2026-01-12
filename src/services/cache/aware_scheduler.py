@@ -34,7 +34,7 @@ import hashlib
 import random
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 from sqlalchemy.orm import Session, selectinload
 
@@ -80,8 +80,6 @@ class ProviderCandidate:
 
 @dataclass
 class ConcurrencySnapshot:
-    endpoint_current: int
-    endpoint_limit: Optional[int]
     key_current: int
     key_limit: Optional[int]
     is_cached_user: bool = False
@@ -91,11 +89,9 @@ class ConcurrencySnapshot:
     reservation_confidence: float = 0.0
 
     def describe(self) -> str:
-        endpoint_limit_text = str(self.endpoint_limit) if self.endpoint_limit is not None else "inf"
         key_limit_text = str(self.key_limit) if self.key_limit is not None else "inf"
         reservation_text = f"{self.reservation_ratio:.0%}" if self.reservation_ratio > 0 else "N/A"
         return (
-            f"endpoint={self.endpoint_current}/{endpoint_limit_text}, "
             f"key={self.key_current}/{key_limit_text}, "
             f"cached={self.is_cached_user}, "
             f"reserve={reservation_text}({self.reservation_phase})"
@@ -246,9 +242,8 @@ class CacheAwareScheduler:
 
             if not candidates:
                 if provider_offset == 0:
-                    # 没有找到任何候选，提供友好的错误提示
-                    error_msg = f"模型 '{model_name}' 不可用"
-                    raise ProviderNotAvailableException(error_msg)
+                    # 没有找到任何候选，提供友好的错误提示（不暴露内部信息）
+                    raise ProviderNotAvailableException("请求的模型当前不可用")
                 break
 
             self._metrics["total_batches"] += 1
@@ -270,7 +265,6 @@ class CacheAwareScheduler:
 
                 is_cached_user = bool(candidate.is_cached)
                 can_use, snapshot = await self._check_concurrent_available(
-                    endpoint,
                     key,
                     is_cached_user=is_cached_user,
                 )
@@ -312,47 +306,51 @@ class CacheAwareScheduler:
 
             provider_offset += provider_batch_size
 
-        raise ProviderNotAvailableException(f"所有Provider的资源当前不可用 (model={model_name})")
+        raise ProviderNotAvailableException("服务暂时繁忙，请稍后重试")
 
-    def _get_effective_concurrent_limit(self, key: ProviderAPIKey) -> Optional[int]:
+    def _get_effective_rpm_limit(self, key: ProviderAPIKey) -> Optional[int]:
         """
-        获取有效的并发限制
+        获取有效的 RPM 限制
 
         新逻辑：
-        - max_concurrent=NULL: 启用自适应，使用 learned_max_concurrent（如无学习记录则为 None）
-        - max_concurrent=数字: 固定限制，直接使用该值
+        - rpm_limit=NULL: 启用自适应，使用 learned_rpm_limit（如无学习记录则使用默认初始值）
+        - rpm_limit=数字: 固定限制，直接使用该值
 
         Args:
             key: API Key对象
 
         Returns:
-            有效的并发限制（None 表示不限制）
+            有效的 RPM 限制（None 表示不限制）
         """
-        if key.max_concurrent is None:
+        if key.rpm_limit is None:
             # 自适应模式：使用学习到的值
-            learned = key.learned_max_concurrent
-            return int(learned) if learned is not None else None
+            learned = key.learned_rpm_limit
+            if learned is not None:
+                return int(learned)
+
+            # 未学习到值时，使用默认初始限制，避免无限制打爆上游
+            from src.config.constants import RPMDefaults
+
+            return int(RPMDefaults.INITIAL_LIMIT)
         else:
             # 固定限制模式
-            return int(key.max_concurrent)
+            return int(key.rpm_limit)
 
     async def _check_concurrent_available(
         self,
-        endpoint: ProviderEndpoint,
         key: ProviderAPIKey,
         is_cached_user: bool = False,
     ) -> Tuple[bool, ConcurrencySnapshot]:
         """
-        检查并发是否可用（使用动态预留机制）
+        检查 RPM 限制是否可用（使用动态预留机制）
 
         核心逻辑 - 动态缓存预留机制:
-        - 总槽位: 有效并发限制（固定值或学习到的值）
+        - 总槽位: 有效 RPM 限制（固定值或学习到的值）
         - 预留比例: 由 AdaptiveReservationManager 根据置信度和负载动态计算
         - 缓存用户可用: 全部槽位
         - 新用户可用: 总槽位 × (1 - 动态预留比例)
 
         Args:
-            endpoint: ProviderEndpoint对象
             key: ProviderAPIKey对象
             is_cached_user: 是否是缓存用户
 
@@ -360,7 +358,7 @@ class CacheAwareScheduler:
             (是否可用, 并发快照)
         """
         # 获取有效的并发限制
-        effective_key_limit = self._get_effective_concurrent_limit(key)
+        effective_key_limit = self._get_effective_rpm_limit(key)
 
         logger.debug(
             f"            -> 并发检查: _concurrency_manager={self._concurrency_manager is not None}, "
@@ -371,33 +369,23 @@ class CacheAwareScheduler:
             # 并发管理器不可用，直接返回True
             logger.debug(f"            -> 无并发管理器，直接通过")
             snapshot = ConcurrencySnapshot(
-                endpoint_current=0,
-                endpoint_limit=(
-                    int(endpoint.max_concurrent) if endpoint.max_concurrent is not None else None
-                ),
                 key_current=0,
                 key_limit=effective_key_limit,
                 is_cached_user=is_cached_user,
             )
             return True, snapshot
 
-        # 获取当前并发数
-        endpoint_count, key_count = await self._concurrency_manager.get_current_concurrency(
-            endpoint_id=str(endpoint.id),
+        # 获取当前 RPM 计数
+        key_count = await self._concurrency_manager.get_key_rpm_count(
             key_id=str(key.id),
         )
 
         can_use = True
 
-        # 检查Endpoint级别限制
-        if endpoint.max_concurrent is not None:
-            if endpoint_count >= endpoint.max_concurrent:
-                can_use = False
-
         # 计算动态预留比例
         reservation_result = self._reservation_manager.calculate_reservation(
             key=key,
-            current_concurrent=key_count,
+            current_usage=key_count,
             effective_limit=effective_key_limit,
         )
 
@@ -440,7 +428,8 @@ class CacheAwareScheduler:
                 # 使用 max 确保至少有 1 个槽位可用
                 import math
 
-                available_for_new = max(1, math.ceil(effective_key_limit * (1 - reservation_ratio)))
+                # 与 ConcurrencyManager 的 Lua 脚本保持一致：使用 floor 计算新用户可用槽位
+                available_for_new = max(1, math.floor(effective_key_limit * (1 - reservation_ratio)))
                 if key_count >= available_for_new:
                     logger.debug(
                         f"Key {key.id[:8]}... 新用户配额已满 "
@@ -460,8 +449,6 @@ class CacheAwareScheduler:
             key_limit_for_snapshot = None
 
         snapshot = ConcurrencySnapshot(
-            endpoint_current=endpoint_count,
-            endpoint_limit=endpoint.max_concurrent,
             key_current=key_count,
             key_limit=key_limit_for_snapshot,
             is_cached_user=is_cached_user,
@@ -475,7 +462,7 @@ class CacheAwareScheduler:
     def _get_effective_restrictions(
         self,
         user_api_key: Optional[ApiKey],
-    ) -> Dict[str, Optional[set]]:
+    ) -> Dict[str, Any]:
         """
         获取有效的访问限制（合并 ApiKey 和 User 的限制）
 
@@ -536,7 +523,10 @@ class CacheAwareScheduler:
         )
 
         # 合并 allowed_models
-        result["allowed_models"] = merge_restrictions(
+        # allowed_models 支持 list/dict 两种结构，不能转成 set 否则会导致权限校验失效
+        from src.core.model_permissions import merge_allowed_models
+
+        result["allowed_models"] = merge_allowed_models(
             user_api_key.allowed_models, user.allowed_models if user else None
         )
 
@@ -617,22 +607,25 @@ class CacheAwareScheduler:
                 )
                 return [], global_model_id
 
-        # 0.2 检查模型是否被允许
-        if allowed_models is not None:
-            if (
-                requested_model_name not in allowed_models
-                and resolved_model_name not in allowed_models
-            ):
-                resolved_note = (
-                    f" (解析为 {resolved_model_name})"
-                    if resolved_model_name != requested_model_name
-                    else ""
-                )
-                logger.debug(
-                    f"用户/API Key 不允许使用模型 {requested_model_name}{resolved_note}, "
-                    f"允许的模型: {allowed_models}"
-                )
-                return [], global_model_id
+        # 0.2 检查模型是否被允许（支持简单列表和按格式字典两种模式）
+        from src.core.model_permissions import check_model_allowed, get_allowed_models_preview
+
+        if not check_model_allowed(
+            model_name=requested_model_name,
+            allowed_models=allowed_models,
+            api_format=target_format.value,
+            resolved_model_name=resolved_model_name,
+        ):
+            resolved_note = (
+                f" (解析为 {resolved_model_name})"
+                if resolved_model_name != requested_model_name
+                else ""
+            )
+            logger.debug(
+                f"用户/API Key 不允许使用模型 {requested_model_name}{resolved_note}, "
+                f"允许的模型: {get_allowed_models_preview(allowed_models)}"
+            )
+            return [], global_model_id
 
         # 1. 查询 Providers
         providers = self._query_providers(
@@ -724,8 +717,11 @@ class CacheAwareScheduler:
         provider_query = (
             db.query(Provider)
             .options(
-                selectinload(Provider.endpoints).selectinload(ProviderEndpoint.api_keys),
-                # 同时加载 models 和 global_model 关系，以便 get_effective_* 方法能正确继承默认值
+                # 预加载 Provider 级别的 api_keys
+                selectinload(Provider.api_keys),
+                # 预加载 endpoints（用于按 api_format 选择请求配置）
+                selectinload(Provider.endpoints),
+                # 同时加载 models 和 global_model 关系
                 selectinload(Provider.models).selectinload(Model.global_model),
             )
             .filter(Provider.is_active == True)
@@ -852,6 +848,7 @@ class CacheAwareScheduler:
     def _check_key_availability(
         self,
         key: ProviderAPIKey,
+        api_format: Optional[str],
         model_name: str,
         capability_requirements: Optional[Dict[str, bool]] = None,
         resolved_model_name: Optional[str] = None,
@@ -871,20 +868,24 @@ class CacheAwareScheduler:
         Returns:
             (is_available, skip_reason)
         """
-        # 检查熔断器状态（使用详细状态方法获取更丰富的跳过原因）
-        is_available, circuit_reason = health_monitor.get_circuit_breaker_status(key)
+        # 检查熔断器状态（使用详细状态方法获取更丰富的跳过原因，按 API 格式）
+        is_available, circuit_reason = health_monitor.get_circuit_breaker_status(
+            key, api_format=api_format
+        )
         if not is_available:
             return False, circuit_reason or "熔断器已打开"
 
-        # 模型权限检查：使用 allowed_models 白名单
+        # 模型权限检查：使用 allowed_models 白名单（支持简单列表和按格式字典两种模式）
         # None = 允许所有模型，[] = 拒绝所有模型，["a","b"] = 只允许指定模型
-        if key.allowed_models is not None and (
-            model_name not in key.allowed_models
-            and (not resolved_model_name or resolved_model_name not in key.allowed_models)
+        from src.core.model_permissions import check_model_allowed, get_allowed_models_preview
+
+        if not check_model_allowed(
+            model_name=model_name,
+            allowed_models=key.allowed_models,
+            api_format=api_format,
+            resolved_model_name=resolved_model_name,
         ):
-            allowed_preview = ", ".join(key.allowed_models[:3]) if key.allowed_models else "(无)"
-            suffix = "..." if len(key.allowed_models) > 3 else ""
-            return False, f"模型权限不匹配(允许: {allowed_preview}{suffix})"
+            return False, f"模型权限不匹配(允许: {get_allowed_models_preview(key.allowed_models)})"
 
         # Key 级别的能力匹配检查
         # 注意：模型级别的能力检查已在 _check_model_support 中完成
@@ -914,6 +915,8 @@ class CacheAwareScheduler:
         """
         构建候选列表
 
+        Key 直属 Provider，通过 api_formats 筛选符合目标格式的 Key。
+
         Args:
             db: 数据库会话
             providers: Provider 列表
@@ -929,10 +932,10 @@ class CacheAwareScheduler:
             候选列表
         """
         candidates: List[ProviderCandidate] = []
+        target_format_str = target_format.value
 
         for provider in providers:
             # 检查模型支持（同时检查流式支持和模型能力需求）
-            # 模型能力检查在 Provider 级别进行，如果模型不支持所需能力，整个 Provider 被跳过
             supports_model, skip_reason, _model_caps = await self._check_model_support(
                 db, provider, model_name, is_stream, capability_requirements
             )
@@ -940,49 +943,63 @@ class CacheAwareScheduler:
                 logger.debug(f"Provider {provider.name} 不支持模型 {model_name}: {skip_reason}")
                 continue
 
+            # 查找目标格式对应的 Endpoint（获取请求配置）
+            target_endpoint = None
             for endpoint in provider.endpoints:
-                # endpoint.api_format 是字符串，target_format 是枚举
                 endpoint_format_str = (
                     endpoint.api_format
                     if isinstance(endpoint.api_format, str)
                     else endpoint.api_format.value
                 )
-                if not endpoint.is_active or endpoint_format_str != target_format.value:
-                    continue
+                if endpoint.is_active and endpoint_format_str == target_format_str:
+                    target_endpoint = endpoint
+                    break
 
-                # 获取活跃的 Key 并按 internal_priority + 负载均衡排序
-                active_keys = [key for key in endpoint.api_keys if key.is_active]
-                # 检查是否所有 Key 都是 TTL=0（轮换模式）
-                # 如果所有 Key 的 cache_ttl_minutes 都是 0 或 None，则使用随机排序
-                use_random = all(
-                    (key.cache_ttl_minutes or 0) == 0 for key in active_keys
-                ) if active_keys else False
-                if use_random and len(active_keys) > 1:
-                    logger.debug(
-                        f"  Endpoint {endpoint.id[:8]}... 启用 Key 轮换模式 (TTL=0, {len(active_keys)} keys)"
-                    )
-                keys = self._shuffle_keys_by_internal_priority(active_keys, affinity_key, use_random)
+            if not target_endpoint:
+                logger.debug(f"Provider {provider.name} 没有活跃的 {target_format_str} 端点")
+                continue
 
-                for key in keys:
-                    # Key 级别的能力检查（模型级别的能力检查已在上面完成）
-                    is_available, skip_reason = self._check_key_availability(
-                        key,
-                        model_name,
-                        capability_requirements,
-                        resolved_model_name=resolved_model_name,
-                    )
+            # Key 直属 Provider，通过 api_formats 筛选
+            active_keys = [
+                key for key in provider.api_keys
+                if key.is_active and target_format_str in (key.api_formats or [])
+            ]
 
-                    candidate = ProviderCandidate(
-                        provider=provider,
-                        endpoint=endpoint,
-                        key=key,
-                        is_skipped=not is_available,
-                        skip_reason=skip_reason,
-                    )
-                    candidates.append(candidate)
+            if not active_keys:
+                logger.debug(f"Provider {provider.name} 没有支持 {target_format_str} 的活跃 Key")
+                continue
 
-                    if max_candidates and len(candidates) >= max_candidates:
-                        return candidates
+            # 检查是否所有 Key 都是 TTL=0（轮换模式）
+            use_random = all(
+                (key.cache_ttl_minutes or 0) == 0 for key in active_keys
+            ) if active_keys else False
+            if use_random and len(active_keys) > 1:
+                logger.debug(
+                    f"  Provider {provider.name} 启用 Key 轮换模式 (TTL=0, {len(active_keys)} keys)"
+                )
+            keys = self._shuffle_keys_by_internal_priority(active_keys, affinity_key, use_random)
+
+            for key in keys:
+                # Key 级别的能力检查
+                is_available, skip_reason = self._check_key_availability(
+                    key,
+                    target_format_str,
+                    model_name,
+                    capability_requirements,
+                    resolved_model_name=resolved_model_name,
+                )
+
+                candidate = ProviderCandidate(
+                    provider=provider,
+                    endpoint=target_endpoint,
+                    key=key,
+                    is_skipped=not is_available,
+                    skip_reason=skip_reason,
+                )
+                candidates.append(candidate)
+
+                if max_candidates and len(candidates) >= max_candidates:
+                    return candidates
 
         return candidates
 
@@ -1187,7 +1204,6 @@ class CacheAwareScheduler:
 
         from collections import defaultdict
 
-        # 使用 tuple 作为统一的 key 类型，兼容两种模式
         priority_groups: Dict[tuple, List[ProviderCandidate]] = defaultdict(list)
 
         # 根据优先级模式选择分组方式

@@ -98,7 +98,7 @@ class AdaptiveReservationManager:
     def calculate_reservation(
         self,
         key: "ProviderAPIKey",
-        current_concurrent: int = 0,
+        current_usage: int = 0,
         effective_limit: Optional[int] = None,
     ) -> ReservationResult:
         """
@@ -106,8 +106,8 @@ class AdaptiveReservationManager:
 
         Args:
             key: ProviderAPIKey 对象
-            current_concurrent: 当前并发数
-            effective_limit: 有效并发限制（学习值或配置值）
+            current_usage: 当前使用量（RPM 计数）
+            effective_limit: 有效限制（学习值或配置值）
 
         Returns:
             ReservationResult 包含预留比例和详细信息
@@ -116,7 +116,7 @@ class AdaptiveReservationManager:
         total_requests = self._get_total_requests(key)
 
         # 计算负载率
-        load_ratio = self._calculate_load_ratio(current_concurrent, effective_limit)
+        load_ratio = self._calculate_load_ratio(current_usage, effective_limit)
 
         # 阶段1: 探测阶段
         if total_requests < self.config.probe_phase_requests:
@@ -165,12 +165,12 @@ class AdaptiveReservationManager:
         return request_count
 
     def _calculate_load_ratio(
-        self, current_concurrent: int, effective_limit: Optional[int]
+        self, current_usage: int, effective_limit: Optional[int]
     ) -> float:
         """计算当前负载率"""
         if not effective_limit or effective_limit <= 0:
             return 0.0
-        return min(current_concurrent / effective_limit, 1.0)
+        return min(current_usage / effective_limit, 1.0)
 
     def _calculate_confidence(self, key: "ProviderAPIKey") -> float:
         """

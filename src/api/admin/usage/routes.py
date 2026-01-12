@@ -247,7 +247,8 @@ async def get_usage_detail(
     - `request_headers`: 请求头
     - `request_body`: 请求体
     - `provider_request_headers`: 提供商请求头
-    - `response_headers`: 响应头
+    - `response_headers`: 提供商响应头
+    - `client_response_headers`: 返回给客户端的响应头
     - `response_body`: 响应体
     - `metadata`: 提供商响应元数据
     - `tiered_pricing`: 阶梯计费信息（如适用）
@@ -916,6 +917,7 @@ class AdminUsageDetailAdapter(AdminApiAdapter):
             "request_body": usage_record.get_request_body(),
             "provider_request_headers": usage_record.provider_request_headers,
             "response_headers": usage_record.response_headers,
+            "client_response_headers": usage_record.client_response_headers,
             "response_body": usage_record.get_response_body(),
             "metadata": usage_record.request_metadata,
             "tiered_pricing": tiered_pricing_info,

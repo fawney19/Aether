@@ -730,36 +730,6 @@ class AdminExportConfigAdapter(AdminApiAdapter):
             )
             endpoints_data = []
             for ep in endpoints:
-                # 导出 Endpoint Keys
-                keys = (
-                    db.query(ProviderAPIKey).filter(ProviderAPIKey.endpoint_id == ep.id).all()
-                )
-                keys_data = []
-                for key in keys:
-                    # 解密 API Key
-                    try:
-                        decrypted_key = crypto_service.decrypt(key.api_key)
-                    except Exception:
-                        decrypted_key = ""
-
-                    keys_data.append(
-                        {
-                            "api_key": decrypted_key,
-                            "name": key.name,
-                            "note": key.note,
-                            "rate_multiplier": key.rate_multiplier,
-                            "internal_priority": key.internal_priority,
-                            "global_priority": key.global_priority,
-                            "max_concurrent": key.max_concurrent,
-                            "rate_limit": key.rate_limit,
-                            "daily_limit": key.daily_limit,
-                            "monthly_limit": key.monthly_limit,
-                            "allowed_models": key.allowed_models,
-                            "capabilities": key.capabilities,
-                            "is_active": key.is_active,
-                        }
-                    )
-
                 endpoints_data.append(
                     {
                         "api_format": ep.api_format,
@@ -767,12 +737,44 @@ class AdminExportConfigAdapter(AdminApiAdapter):
                         "headers": ep.headers,
                         "timeout": ep.timeout,
                         "max_retries": ep.max_retries,
-                        "max_concurrent": ep.max_concurrent,
-                        "rate_limit": ep.rate_limit,
                         "is_active": ep.is_active,
                         "custom_path": ep.custom_path,
                         "config": ep.config,
-                        "keys": keys_data,
+                        "proxy": ep.proxy,
+                    }
+                )
+
+            # 导出 Provider Keys（按 provider_id 归属，包含 api_formats）
+            keys = (
+                db.query(ProviderAPIKey)
+                .filter(ProviderAPIKey.provider_id == provider.id)
+                .order_by(ProviderAPIKey.internal_priority.asc(), ProviderAPIKey.created_at.asc())
+                .all()
+            )
+            keys_data = []
+            for key in keys:
+                # 解密 API Key
+                try:
+                    decrypted_key = crypto_service.decrypt(key.api_key)
+                except Exception:
+                    decrypted_key = ""
+
+                keys_data.append(
+                    {
+                        "api_key": decrypted_key,
+                        "name": key.name,
+                        "note": key.note,
+                        "api_formats": key.api_formats or [],
+                        "rate_multiplier": key.rate_multiplier,
+                        "rate_multipliers": key.rate_multipliers,
+                        "internal_priority": key.internal_priority,
+                        "global_priority": key.global_priority,
+                        "rpm_limit": key.rpm_limit,
+                        "allowed_models": key.allowed_models,
+                        "capabilities": key.capabilities,
+                        "cache_ttl_minutes": key.cache_ttl_minutes,
+                        "max_probe_interval_minutes": key.max_probe_interval_minutes,
+                        "is_active": key.is_active,
                     }
                 )
 
@@ -804,24 +806,26 @@ class AdminExportConfigAdapter(AdminApiAdapter):
             providers_data.append(
                 {
                     "name": provider.name,
-                    "display_name": provider.display_name,
                     "description": provider.description,
                     "website": provider.website,
                     "billing_type": provider.billing_type.value if provider.billing_type else None,
                     "monthly_quota_usd": provider.monthly_quota_usd,
                     "quota_reset_day": provider.quota_reset_day,
-                    "rpm_limit": provider.rpm_limit,
                     "provider_priority": provider.provider_priority,
                     "is_active": provider.is_active,
                     "concurrent_limit": provider.concurrent_limit,
+                    "timeout": provider.timeout,
+                    "max_retries": provider.max_retries,
+                    "proxy": provider.proxy,
                     "config": provider.config,
                     "endpoints": endpoints_data,
+                    "api_keys": keys_data,
                     "models": models_data,
                 }
             )
 
         return {
-            "version": "1.0",
+            "version": "2.0",
             "exported_at": datetime.now(timezone.utc).isoformat(),
             "global_models": global_models_data,
             "providers": providers_data,
@@ -850,7 +854,7 @@ class AdminImportConfigAdapter(AdminApiAdapter):
 
         # 验证配置版本
         version = payload.get("version")
-        if version != "1.0":
+        if version != "2.0":
             raise InvalidRequestException(f"不支持的配置版本: {version}")
 
         # 获取导入选项
@@ -939,8 +943,8 @@ class AdminImportConfigAdapter(AdminApiAdapter):
                         )
                     elif merge_mode == "overwrite":
                         # 更新现有记录
-                        existing_provider.display_name = prov_data.get(
-                            "display_name", existing_provider.display_name
+                        existing_provider.name = prov_data.get(
+                            "name", existing_provider.name
                         )
                         existing_provider.description = prov_data.get("description")
                         existing_provider.website = prov_data.get("website")
@@ -954,7 +958,6 @@ class AdminImportConfigAdapter(AdminApiAdapter):
                         existing_provider.quota_reset_day = prov_data.get(
                             "quota_reset_day", 30
                         )
-                        existing_provider.rpm_limit = prov_data.get("rpm_limit")
                         existing_provider.provider_priority = prov_data.get(
                             "provider_priority", 100
                         )
@@ -962,6 +965,11 @@ class AdminImportConfigAdapter(AdminApiAdapter):
                         existing_provider.concurrent_limit = prov_data.get(
                             "concurrent_limit"
                         )
+                        existing_provider.timeout = prov_data.get("timeout", existing_provider.timeout)
+                        existing_provider.max_retries = prov_data.get(
+                            "max_retries", existing_provider.max_retries
+                        )
+                        existing_provider.proxy = prov_data.get("proxy", existing_provider.proxy)
                         existing_provider.config = prov_data.get("config")
                         existing_provider.updated_at = datetime.now(timezone.utc)
                         stats["providers"]["updated"] += 1
@@ -974,16 +982,17 @@ class AdminImportConfigAdapter(AdminApiAdapter):
                     new_provider = Provider(
                         id=str(uuid.uuid4()),
                         name=prov_data["name"],
-                        display_name=prov_data.get("display_name", prov_data["name"]),
                         description=prov_data.get("description"),
                         website=prov_data.get("website"),
                         billing_type=billing_type,
                         monthly_quota_usd=prov_data.get("monthly_quota_usd"),
                         quota_reset_day=prov_data.get("quota_reset_day", 30),
-                        rpm_limit=prov_data.get("rpm_limit"),
                         provider_priority=prov_data.get("provider_priority", 100),
                         is_active=prov_data.get("is_active", True),
                         concurrent_limit=prov_data.get("concurrent_limit"),
+                        timeout=prov_data.get("timeout"),
+                        max_retries=prov_data.get("max_retries"),
+                        proxy=prov_data.get("proxy"),
                         config=prov_data.get("config"),
                     )
                     db.add(new_provider)
@@ -1003,7 +1012,6 @@ class AdminImportConfigAdapter(AdminApiAdapter):
                     )
 
                     if existing_ep:
-                        endpoint_id = existing_ep.id
                         if merge_mode == "skip":
                             stats["endpoints"]["skipped"] += 1
                         elif merge_mode == "error":
@@ -1017,11 +1025,10 @@ class AdminImportConfigAdapter(AdminApiAdapter):
                             existing_ep.headers = ep_data.get("headers")
                             existing_ep.timeout = ep_data.get("timeout", 300)
                             existing_ep.max_retries = ep_data.get("max_retries", 2)
-                            existing_ep.max_concurrent = ep_data.get("max_concurrent")
-                            existing_ep.rate_limit = ep_data.get("rate_limit")
                             existing_ep.is_active = ep_data.get("is_active", True)
                             existing_ep.custom_path = ep_data.get("custom_path")
                             existing_ep.config = ep_data.get("config")
+                            existing_ep.proxy = ep_data.get("proxy")
                             existing_ep.updated_at = datetime.now(timezone.utc)
                             stats["endpoints"]["updated"] += 1
                     else:
@@ -1033,68 +1040,106 @@ class AdminImportConfigAdapter(AdminApiAdapter):
                             headers=ep_data.get("headers"),
                             timeout=ep_data.get("timeout", 300),
                             max_retries=ep_data.get("max_retries", 2),
-                            max_concurrent=ep_data.get("max_concurrent"),
-                            rate_limit=ep_data.get("rate_limit"),
                             is_active=ep_data.get("is_active", True),
                             custom_path=ep_data.get("custom_path"),
                             config=ep_data.get("config"),
+                            proxy=ep_data.get("proxy"),
                         )
                         db.add(new_ep)
                         db.flush()
-                        endpoint_id = new_ep.id
                         stats["endpoints"]["created"] += 1
 
-                    # 导入 Keys
-                    # 获取当前 endpoint 下所有已有的 keys，用于去重
-                    existing_keys = (
-                        db.query(ProviderAPIKey)
-                        .filter(ProviderAPIKey.endpoint_id == endpoint_id)
-                        .all()
-                    )
-                    # 解密已有 keys 用于比对
-                    existing_key_values = set()
-                    for ek in existing_keys:
-                        try:
-                            decrypted = crypto_service.decrypt(ek.api_key)
-                            existing_key_values.add(decrypted)
-                        except Exception:
-                            pass
+                # 导入 Provider Keys（按 provider_id 归属）
+                endpoint_format_rows = (
+                    db.query(ProviderEndpoint.api_format)
+                    .filter(ProviderEndpoint.provider_id == provider_id)
+                    .all()
+                )
+                endpoint_formats: set[str] = set()
+                for (api_format,) in endpoint_format_rows:
+                    fmt = api_format.value if hasattr(api_format, "value") else str(api_format)
+                    endpoint_formats.add(fmt.strip().upper())
+                existing_keys = (
+                    db.query(ProviderAPIKey)
+                    .filter(ProviderAPIKey.provider_id == provider_id)
+                    .all()
+                )
+                existing_key_values = set()
+                for ek in existing_keys:
+                    try:
+                        decrypted = crypto_service.decrypt(ek.api_key)
+                        existing_key_values.add(decrypted)
+                    except Exception:
+                        pass
 
-                    for key_data in ep_data.get("keys", []):
-                        if not key_data.get("api_key"):
-                            stats["errors"].append(
-                                f"跳过空 API Key (Endpoint: {ep_data['api_format']})"
-                            )
-                            continue
-
-                        # 检查是否已存在相同的 Key（通过明文比对）
-                        if key_data["api_key"] in existing_key_values:
-                            stats["keys"]["skipped"] += 1
-                            continue
-
-                        encrypted_key = crypto_service.encrypt(key_data["api_key"])
-
-                        new_key = ProviderAPIKey(
-                            id=str(uuid.uuid4()),
-                            endpoint_id=endpoint_id,
-                            api_key=encrypted_key,
-                            name=key_data.get("name"),
-                            note=key_data.get("note"),
-                            rate_multiplier=key_data.get("rate_multiplier", 1.0),
-                            internal_priority=key_data.get("internal_priority", 100),
-                            global_priority=key_data.get("global_priority"),
-                            max_concurrent=key_data.get("max_concurrent"),
-                            rate_limit=key_data.get("rate_limit"),
-                            daily_limit=key_data.get("daily_limit"),
-                            monthly_limit=key_data.get("monthly_limit"),
-                            allowed_models=key_data.get("allowed_models"),
-                            capabilities=key_data.get("capabilities"),
-                            is_active=key_data.get("is_active", True),
+                for key_data in prov_data.get("api_keys", []):
+                    if not key_data.get("api_key"):
+                        stats["errors"].append(
+                            f"跳过空 API Key (Provider: {prov_data['name']})"
                         )
-                        db.add(new_key)
-                        # 添加到已有集合，防止同一批导入中重复
-                        existing_key_values.add(key_data["api_key"])
-                        stats["keys"]["created"] += 1
+                        continue
+
+                    plaintext_key = key_data["api_key"]
+                    if plaintext_key in existing_key_values:
+                        stats["keys"]["skipped"] += 1
+                        continue
+
+                    raw_formats = key_data.get("api_formats") or []
+                    if not isinstance(raw_formats, list) or len(raw_formats) == 0:
+                        stats["errors"].append(
+                            f"跳过无 api_formats 的 Key (Provider: {prov_data['name']})"
+                        )
+                        continue
+
+                    normalized_formats: list[str] = []
+                    seen: set[str] = set()
+                    missing_formats: list[str] = []
+                    for fmt in raw_formats:
+                        if not isinstance(fmt, str):
+                            continue
+                        fmt_upper = fmt.strip().upper()
+                        if not fmt_upper or fmt_upper in seen:
+                            continue
+                        seen.add(fmt_upper)
+                        if endpoint_formats and fmt_upper not in endpoint_formats:
+                            missing_formats.append(fmt_upper)
+                            continue
+                        normalized_formats.append(fmt_upper)
+
+                    if missing_formats:
+                        stats["errors"].append(
+                            f"Key (Provider: {prov_data['name']}) 的 api_formats 未配置对应 Endpoint，已跳过: {missing_formats}"
+                        )
+
+                    if len(normalized_formats) == 0:
+                        stats["keys"]["skipped"] += 1
+                        continue
+
+                    encrypted_key = crypto_service.encrypt(plaintext_key)
+
+                    new_key = ProviderAPIKey(
+                        id=str(uuid.uuid4()),
+                        provider_id=provider_id,
+                        api_formats=normalized_formats,
+                        api_key=encrypted_key,
+                        name=key_data.get("name") or "Imported Key",
+                        note=key_data.get("note"),
+                        rate_multiplier=key_data.get("rate_multiplier", 1.0),
+                        rate_multipliers=key_data.get("rate_multipliers"),
+                        internal_priority=key_data.get("internal_priority", 50),
+                        global_priority=key_data.get("global_priority"),
+                        rpm_limit=key_data.get("rpm_limit"),
+                        allowed_models=key_data.get("allowed_models"),
+                        capabilities=key_data.get("capabilities"),
+                        cache_ttl_minutes=key_data.get("cache_ttl_minutes", 5),
+                        max_probe_interval_minutes=key_data.get("max_probe_interval_minutes", 32),
+                        is_active=key_data.get("is_active", True),
+                        health_by_format={},
+                        circuit_breaker_by_format={},
+                    )
+                    db.add(new_key)
+                    existing_key_values.add(plaintext_key)
+                    stats["keys"]["created"] += 1
 
                 # 导入 Models
                 for model_data in prov_data.get("models", []):

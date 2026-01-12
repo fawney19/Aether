@@ -65,3 +65,8 @@ export { default as RefreshButton } from './refresh-button.vue'
 
 // Tooltip 提示系列
 export { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './tooltip'
+
+// Collapsible 折叠系列
+export { default as Collapsible } from './collapsible.vue'
+export { default as CollapsibleTrigger } from './collapsible-trigger.vue'
+export { default as CollapsibleContent } from './collapsible-content.vue'

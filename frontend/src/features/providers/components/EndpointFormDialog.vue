@@ -1,277 +1,219 @@
 <template>
   <Dialog
     :model-value="internalOpen"
-    :title="isEditMode ? '编辑 API 端点' : '添加 API 端点'"
-    :description="isEditMode ? `修改 ${provider?.display_name} 的端点配置` : '为提供商添加新的 API 端点'"
-    :icon="isEditMode ? SquarePen : Link"
-    size="xl"
+    title="端点管理"
+    :description="`管理 ${provider?.name} 的 API 端点`"
+    :icon="Settings"
+    size="2xl"
     @update:model-value="handleDialogUpdate"
   >
-    <form
-      class="space-y-6"
-      @submit.prevent="handleSubmit()"
-    >
-      <!-- API 配置 -->
-      <div class="space-y-4">
-        <h3
-          v-if="isEditMode"
-          class="text-sm font-medium"
-        >
-          API 配置
-        </h3>
-
-        <!-- API URL 和自定义路径 -->
-        <div class="grid grid-cols-2 gap-4">
-          <div class="space-y-2">
-            <Label for="base_url">API URL *</Label>
-            <Input
-              id="base_url"
-              v-model="form.base_url"
-              placeholder="https://api.example.com"
-              required
-            />
-          </div>
-
-          <div class="space-y-2">
-            <Label for="custom_path">自定义请求路径（可选）</Label>
-            <Input
-              id="custom_path"
-              v-model="form.custom_path"
-              :placeholder="isEditMode ? defaultPathPlaceholder : '留空使用各格式的默认路径'"
-            />
-          </div>
-        </div>
-
-        <!-- API 格式 -->
+    <div class="space-y-4">
+      <!-- 已有端点列表 -->
+      <div
+        v-if="localEndpoints.length > 0"
+        class="space-y-2"
+      >
+        <Label class="text-muted-foreground">已配置的端点</Label>
         <div class="space-y-2">
-          <Label for="api_format">API 格式 *</Label>
-          <template v-if="isEditMode">
-            <Input
-              id="api_format"
-              v-model="form.api_format"
-              disabled
-              class="bg-muted"
-            />
-            <p class="text-xs text-muted-foreground">
-              API 格式创建后不可修改
-            </p>
-          </template>
-          <template v-else>
-            <div class="grid grid-cols-3 grid-flow-col grid-rows-2 gap-2">
-              <label
-                v-for="format in sortedApiFormats"
-                :key="format.value"
-                class="flex items-center gap-2 rounded-md border px-3 py-2 cursor-pointer transition-all text-sm"
-                :class="selectedFormats.includes(format.value)
-                  ? 'border-primary bg-primary/10 text-primary font-medium'
-                  : 'border-border hover:border-primary/50 hover:bg-accent'"
-              >
-                <input
-                  type="checkbox"
-                  :value="format.value"
-                  v-model="selectedFormats"
-                  class="sr-only"
-                />
-                <span
-                  class="flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors"
-                  :class="selectedFormats.includes(format.value)
-                    ? 'border-primary bg-primary text-primary-foreground'
-                    : 'border-muted-foreground/30'"
-                >
-                  <svg
-                    v-if="selectedFormats.includes(format.value)"
-                    class="h-3 w-3"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="3"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
+          <div
+            v-for="endpoint in localEndpoints"
+            :key="endpoint.id"
+            class="rounded-md border px-3 py-2"
+            :class="{ 'opacity-50': !endpoint.is_active }"
+          >
+            <!-- 编辑模式 -->
+            <template v-if="editingEndpointId === endpoint.id">
+              <div class="space-y-2">
+                <div class="flex items-center gap-2">
+                  <span class="text-sm font-medium w-24 shrink-0">{{ API_FORMAT_LABELS[endpoint.api_format] || endpoint.api_format }}</span>
+                  <div class="flex items-center gap-1 ml-auto">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      class="h-7 w-7"
+                      title="保存"
+                      :disabled="savingEndpointId === endpoint.id"
+                      @click="saveEndpointUrl(endpoint)"
+                    >
+                      <Check class="w-3.5 h-3.5" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      class="h-7 w-7"
+                      title="取消"
+                      @click="cancelEdit"
+                    >
+                      <X class="w-3.5 h-3.5" />
+                    </Button>
+                  </div>
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                  <div class="space-y-1">
+                    <Label class="text-xs text-muted-foreground">Base URL</Label>
+                    <Input
+                      v-model="editingUrl"
+                      class="h-8 text-sm"
+                      placeholder="https://api.example.com"
+                      @keyup.escape="cancelEdit"
+                    />
+                  </div>
+                  <div class="space-y-1">
+                    <Label class="text-xs text-muted-foreground">自定义路径 (可选)</Label>
+                    <Input
+                      v-model="editingPath"
+                      class="h-8 text-sm"
+                      :placeholder="editingDefaultPath || '留空使用默认路径'"
+                      @keyup.escape="cancelEdit"
+                    />
+                  </div>
+                </div>
+              </div>
+            </template>
+            <!-- 查看模式 -->
+            <template v-else>
+              <div class="flex items-center gap-3">
+                <div class="w-24 shrink-0">
+                  <span class="text-sm font-medium">{{ API_FORMAT_LABELS[endpoint.api_format] || endpoint.api_format }}</span>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <span class="text-sm text-muted-foreground truncate block">
+                    {{ endpoint.base_url }}{{ endpoint.custom_path ? endpoint.custom_path : '' }}
+                  </span>
+                </div>
+                <div class="flex items-center gap-1 shrink-0">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="h-7 w-7"
+                    title="编辑"
+                    @click="startEdit(endpoint)"
                   >
-                    <polyline points="20 6 9 17 4 12" />
-                  </svg>
-                </span>
-                <span>{{ format.label }}</span>
-              </label>
-            </div>
-          </template>
-        </div>
-      </div>
-
-      <!-- 请求配置 -->
-      <div class="space-y-4">
-        <h3 class="text-sm font-medium">
-          请求配置
-        </h3>
-
-        <div class="grid grid-cols-4 gap-4">
-          <div class="space-y-2">
-            <Label for="timeout">超时（秒）</Label>
-            <Input
-              id="timeout"
-              v-model.number="form.timeout"
-              type="number"
-              placeholder="300"
-            />
-          </div>
-
-          <div class="space-y-2">
-            <Label for="max_retries">最大重试</Label>
-            <Input
-              id="max_retries"
-              v-model.number="form.max_retries"
-              type="number"
-              placeholder="3"
-            />
-          </div>
-
-          <div class="space-y-2">
-            <Label for="max_concurrent">最大并发</Label>
-            <Input
-              id="max_concurrent"
-              :model-value="form.max_concurrent ?? ''"
-              type="number"
-              placeholder="无限制"
-              @update:model-value="(v) => form.max_concurrent = parseNumberInput(v)"
-            />
-          </div>
-
-          <div class="space-y-2">
-            <Label for="rate_limit">速率限制（/分钟）</Label>
-            <Input
-              id="rate_limit"
-              :model-value="form.rate_limit ?? ''"
-              type="number"
-              placeholder="无限制"
-              @update:model-value="(v) => form.rate_limit = parseNumberInput(v)"
-            />
+                    <Edit class="w-3.5 h-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="h-7 w-7"
+                    :title="endpoint.is_active ? '停用' : '启用'"
+                    :disabled="togglingEndpointId === endpoint.id"
+                    @click="handleToggleEndpoint(endpoint)"
+                  >
+                    <Power class="w-3.5 h-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="h-7 w-7 text-destructive hover:text-destructive"
+                    title="删除"
+                    :disabled="deletingEndpointId === endpoint.id"
+                    @click="handleDeleteEndpoint(endpoint)"
+                  >
+                    <Trash2 class="w-3.5 h-3.5" />
+                  </Button>
+                </div>
+              </div>
+            </template>
           </div>
         </div>
       </div>
 
-      <!-- 代理配置 -->
-      <div class="space-y-4">
-        <div class="flex items-center justify-between">
-          <h3 class="text-sm font-medium">
-            代理配置
-          </h3>
-          <div class="flex items-center gap-2">
-            <Switch v-model="proxyEnabled" />
-            <span class="text-sm text-muted-foreground">启用代理</span>
-          </div>
-        </div>
-
-        <div
-          v-if="proxyEnabled"
-          class="space-y-4 rounded-lg border p-4"
-        >
-          <div class="space-y-2">
-            <Label for="proxy_url">代理 URL *</Label>
-            <Input
-              id="proxy_url"
-              v-model="form.proxy_url"
-              placeholder="http://host:port 或 socks5://host:port"
-              required
-              :class="proxyUrlError ? 'border-red-500' : ''"
-            />
-            <p
-              v-if="proxyUrlError"
-              class="text-xs text-red-500"
+      <!-- 添加新端点 -->
+      <div
+        v-if="availableFormats.length > 0"
+        class="space-y-3 pt-3 border-t"
+      >
+        <Label class="text-muted-foreground">添加新端点</Label>
+        <div class="flex items-end gap-3">
+          <div class="w-32 shrink-0 space-y-1.5">
+            <Label class="text-xs">API 格式</Label>
+            <Select
+              v-model="newEndpoint.api_format"
+              v-model:open="formatSelectOpen"
             >
-              {{ proxyUrlError }}
-            </p>
-            <p
-              v-else
-              class="text-xs text-muted-foreground"
-            >
-              支持 HTTP、HTTPS、SOCKS5 代理
-            </p>
+              <SelectTrigger class="h-9">
+                <SelectValue placeholder="选择格式" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
+                  v-for="format in availableFormats"
+                  :key="format.value"
+                  :value="format.value"
+                >
+                  {{ format.label }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
-
-          <div class="grid grid-cols-2 gap-4">
-            <div class="space-y-2">
-              <Label for="proxy_user">用户名（可选）</Label>
-              <Input
-                :id="`proxy_user_${formId}`"
-                v-model="form.proxy_username"
-                :name="`proxy_user_${formId}`"
-                placeholder="代理认证用户名"
-                autocomplete="off"
-                data-form-type="other"
-                data-lpignore="true"
-                data-1p-ignore="true"
-              />
-            </div>
-
-            <div class="space-y-2">
-              <Label :for="`proxy_pass_${formId}`">密码（可选）</Label>
-              <Input
-                :id="`proxy_pass_${formId}`"
-                v-model="form.proxy_password"
-                :name="`proxy_pass_${formId}`"
-                type="text"
-                :placeholder="passwordPlaceholder"
-                autocomplete="off"
-                data-form-type="other"
-                data-lpignore="true"
-                data-1p-ignore="true"
-                :style="{ '-webkit-text-security': 'disc', 'text-security': 'disc' }"
-              />
-            </div>
+          <div class="flex-1 space-y-1.5">
+            <Label class="text-xs">Base URL</Label>
+            <Input
+              v-model="newEndpoint.base_url"
+              placeholder="https://api.example.com"
+              class="h-9"
+            />
           </div>
+          <div class="w-40 shrink-0 space-y-1.5">
+            <Label class="text-xs">自定义路径</Label>
+            <Input
+              v-model="newEndpoint.custom_path"
+              :placeholder="newEndpointDefaultPath || '可选'"
+              class="h-9"
+            />
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            class="h-9 shrink-0"
+            :disabled="!newEndpoint.api_format || !newEndpoint.base_url || addingEndpoint"
+            @click="handleAddEndpoint"
+          >
+            {{ addingEndpoint ? '添加中...' : '添加' }}
+          </Button>
         </div>
       </div>
-    </form>
+
+      <!-- 空状态 -->
+      <div
+        v-if="localEndpoints.length === 0 && availableFormats.length === 0"
+        class="text-center py-8 text-muted-foreground"
+      >
+        <p>所有 API 格式都已配置</p>
+      </div>
+    </div>
 
     <template #footer>
       <Button
-        type="button"
         variant="outline"
-        :disabled="loading"
-        @click="handleCancel"
+        @click="handleClose"
       >
-        取消
-      </Button>
-      <Button
-        :disabled="loading || !form.base_url || (!isEditMode && selectedFormats.length === 0)"
-        @click="handleSubmit()"
-      >
-        {{ loading ? (isEditMode ? '保存中...' : '创建中...') : (isEditMode ? '保存修改' : `创建 ${selectedFormats.length} 个端点`) }}
+        关闭
       </Button>
     </template>
   </Dialog>
-
-  <!-- 确认清空凭据对话框 -->
-  <AlertDialog
-    v-model="showClearCredentialsDialog"
-    title="清空代理凭据"
-    description="代理 URL 为空，但用户名和密码仍有值。是否清空这些凭据并继续保存？"
-    type="warning"
-    confirm-text="清空并保存"
-    cancel-text="返回编辑"
-    @confirm="confirmClearCredentials"
-    @cancel="showClearCredentialsDialog = false"
-  />
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import {
   Dialog,
   Button,
   Input,
   Label,
-  Switch,
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem,
 } from '@/components/ui'
-import AlertDialog from '@/components/common/AlertDialog.vue'
-import { Link, SquarePen } from 'lucide-vue-next'
+import { Settings, Edit, Trash2, Check, X, Power } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
-import { useFormDialog } from '@/composables/useFormDialog'
-import { parseNumberInput } from '@/utils/form'
 import { log } from '@/utils/logger'
 import {
   createEndpoint,
   updateEndpoint,
+  deleteEndpoint,
+  API_FORMAT_LABELS,
   type ProviderEndpoint,
   type ProviderWithEndpointsSummary
 } from '@/api/endpoints'
@@ -280,7 +222,7 @@ import { adminApi } from '@/api/admin'
 const props = defineProps<{
   modelValue: boolean
   provider: ProviderWithEndpointsSummary | null
-  endpoint?: ProviderEndpoint | null  // 编辑模式时传入
+  endpoints?: ProviderEndpoint[]
 }>()
 
 const emit = defineEmits<{
@@ -290,308 +232,184 @@ const emit = defineEmits<{
 }>()
 
 const { success, error: showError } = useToast()
-const loading = ref(false)
-const proxyEnabled = ref(false)
-const showClearCredentialsDialog = ref(false)  // 确认清空凭据对话框
 
-// 生成随机 ID 防止浏览器自动填充
-const formId = Math.random().toString(36).substring(2, 10)
+// 状态
+const addingEndpoint = ref(false)
+const editingEndpointId = ref<string | null>(null)
+const editingUrl = ref('')
+const editingPath = ref('')
+const savingEndpointId = ref<string | null>(null)
+const deletingEndpointId = ref<string | null>(null)
+const togglingEndpointId = ref<string | null>(null)
+const formatSelectOpen = ref(false)
 
 // 内部状态
 const internalOpen = computed(() => props.modelValue)
 
-// 表单数据
-const form = ref({
+// 新端点表单
+const newEndpoint = ref({
   api_format: '',
   base_url: '',
   custom_path: '',
-  timeout: 300,
-  max_retries: 2,
-  max_concurrent: undefined as number | undefined,
-  rate_limit: undefined as number | undefined,
-  is_active: true,
-  // 代理配置
-  proxy_url: '',
-  proxy_username: '',
-  proxy_password: '',
 })
-
-// 选中的 API 格式（多选）
-const selectedFormats = ref<string[]>([])
 
 // API 格式列表
-const apiFormats = ref<Array<{ value: string; label: string; default_path: string; aliases: string[] }>>([])
+const apiFormats = ref<Array<{ value: string; label: string; default_path: string }>>([])
 
-// 排序后的 API 格式：按列排列，每列是基础格式+CLI格式
-const sortedApiFormats = computed(() => {
-  const baseFormats = apiFormats.value.filter(f => !f.value.endsWith('_cli'))
-  const cliFormats = apiFormats.value.filter(f => f.value.endsWith('_cli'))
-  // 交错排列：base1, cli1, base2, cli2, base3, cli3
-  const result: typeof apiFormats.value = []
-  for (let i = 0; i < baseFormats.length; i++) {
-    result.push(baseFormats[i])
-    const cliFormat = cliFormats.find(f => f.value === baseFormats[i].value + '_cli')
-    if (cliFormat) {
-      result.push(cliFormat)
-    }
-  }
-  return result
+// 本地端点列表
+const localEndpoints = ref<ProviderEndpoint[]>([])
+
+// 可用的格式（未添加的）
+const availableFormats = computed(() => {
+  const existingFormats = localEndpoints.value.map(e => e.api_format)
+  return apiFormats.value.filter(f => !existingFormats.includes(f.value))
 })
 
-// 加载API格式列表
+// 获取指定 API 格式的默认路径
+function getDefaultPath(apiFormat: string): string {
+  const format = apiFormats.value.find(f => f.value === apiFormat)
+  return format?.default_path || ''
+}
+
+// 当前编辑端点的默认路径
+const editingDefaultPath = computed(() => {
+  const endpoint = localEndpoints.value.find(e => e.id === editingEndpointId.value)
+  return endpoint ? getDefaultPath(endpoint.api_format) : ''
+})
+
+// 新端点选择的格式的默认路径
+const newEndpointDefaultPath = computed(() => {
+  return getDefaultPath(newEndpoint.value.api_format)
+})
+
+// 加载 API 格式列表
 const loadApiFormats = async () => {
   try {
     const response = await adminApi.getApiFormats()
     apiFormats.value = response.formats
   } catch (error) {
     log.error('加载API格式失败:', error)
-    if (!isEditMode.value) {
-      showError('加载API格式失败', '错误')
-    }
   }
 }
 
-// 根据选择的 API 格式计算默认路径
-const defaultPath = computed(() => {
-  const format = apiFormats.value.find(f => f.value === form.value.api_format)
-  return format?.default_path || '/'
-})
-
-// 动态 placeholder
-const defaultPathPlaceholder = computed(() => {
-  return defaultPath.value
-})
-
-// 检查是否有已保存的密码（后端返回 *** 表示有密码）
-const hasExistingPassword = computed(() => {
-  if (!props.endpoint?.proxy) return false
-  const proxy = props.endpoint.proxy as { password?: string }
-  return proxy?.password === MASKED_PASSWORD
-})
-
-// 密码输入框的 placeholder
-const passwordPlaceholder = computed(() => {
-  if (hasExistingPassword.value) {
-    return '已保存密码，留空保持不变'
-  }
-  return '代理认证密码'
-})
-
-// 代理 URL 验证
-const proxyUrlError = computed(() => {
-  // 只有启用代理且填写了 URL 时才验证
-  if (!proxyEnabled.value || !form.value.proxy_url) {
-    return ''
-  }
-  const url = form.value.proxy_url.trim()
-
-  // 检查禁止的特殊字符
-  if (/[\n\r]/.test(url)) {
-    return '代理 URL 包含非法字符'
-  }
-
-  // 验证协议（不支持 SOCKS4）
-  if (!/^(http|https|socks5):\/\//i.test(url)) {
-    return '代理 URL 必须以 http://, https:// 或 socks5:// 开头'
-  }
-  try {
-    const parsed = new URL(url)
-    if (!parsed.host) {
-      return '代理 URL 必须包含有效的 host'
-    }
-    // 禁止 URL 中内嵌认证信息
-    if (parsed.username || parsed.password) {
-      return '请勿在 URL 中包含用户名和密码，请使用独立的认证字段'
-    }
-  } catch {
-    return '代理 URL 格式无效'
-  }
-  return ''
-})
-
-// 组件挂载时加载API格式
 onMounted(() => {
   loadApiFormats()
 })
 
-// 重置表单
-function resetForm() {
-  form.value = {
-    api_format: '',
-    base_url: '',
-    custom_path: '',
-    timeout: 300,
-    max_retries: 2,
-    max_concurrent: undefined,
-    rate_limit: undefined,
-    is_active: true,
-    proxy_url: '',
-    proxy_username: '',
-    proxy_password: '',
+// 监听 props 变化
+watch(() => props.modelValue, (open) => {
+  if (open) {
+    localEndpoints.value = [...(props.endpoints || [])]
+    // 重置编辑状态
+    editingEndpointId.value = null
+    editingUrl.value = ''
+    editingPath.value = ''
+  } else {
+    // 关闭对话框时完全清空新端点表单
+    newEndpoint.value = { api_format: '', base_url: '', custom_path: '' }
   }
-  selectedFormats.value = []
-  proxyEnabled.value = false
+}, { immediate: true })
+
+watch(() => props.endpoints, (endpoints) => {
+  if (props.modelValue) {
+    localEndpoints.value = [...(endpoints || [])]
+  }
+}, { deep: true })
+
+// 开始编辑
+function startEdit(endpoint: ProviderEndpoint) {
+  editingEndpointId.value = endpoint.id
+  editingUrl.value = endpoint.base_url
+  editingPath.value = endpoint.custom_path || ''
 }
 
-// 原始密码占位符（后端返回的脱敏标记）
-const MASKED_PASSWORD = '***'
-
-// 加载端点数据（编辑模式）
-function loadEndpointData() {
-  if (!props.endpoint) return
-
-  const proxy = props.endpoint.proxy as { url?: string; username?: string; password?: string; enabled?: boolean } | null
-
-  form.value = {
-    api_format: props.endpoint.api_format,
-    base_url: props.endpoint.base_url,
-    custom_path: props.endpoint.custom_path || '',
-    timeout: props.endpoint.timeout,
-    max_retries: props.endpoint.max_retries,
-    max_concurrent: props.endpoint.max_concurrent || undefined,
-    rate_limit: props.endpoint.rate_limit || undefined,
-    is_active: props.endpoint.is_active,
-    proxy_url: proxy?.url || '',
-    proxy_username: proxy?.username || '',
-    // 如果密码是脱敏标记，显示为空（让用户知道有密码但看不到）
-    proxy_password: proxy?.password === MASKED_PASSWORD ? '' : (proxy?.password || ''),
-  }
-
-  // 根据 enabled 字段或 url 存在判断是否启用代理
-  proxyEnabled.value = proxy?.enabled ?? !!proxy?.url
+// 取消编辑
+function cancelEdit() {
+  editingEndpointId.value = null
+  editingUrl.value = ''
+  editingPath.value = ''
 }
 
-// 使用 useFormDialog 统一处理对话框逻辑
-const { isEditMode, handleDialogUpdate, handleCancel } = useFormDialog({
-  isOpen: () => props.modelValue,
-  entity: () => props.endpoint,
-  isLoading: loading,
-  onClose: () => emit('update:modelValue', false),
-  loadData: loadEndpointData,
-  resetForm,
-})
+// 保存端点
+async function saveEndpointUrl(endpoint: ProviderEndpoint) {
+  if (!editingUrl.value) return
 
-// 构建代理配置
-// - 有 URL 时始终保存配置，通过 enabled 字段控制是否启用
-// - 无 URL 时返回 null
-function buildProxyConfig(): { url: string; username?: string; password?: string; enabled: boolean } | null {
-  if (!form.value.proxy_url) {
-    // 没填 URL，无代理配置
-    return null
-  }
-  return {
-    url: form.value.proxy_url,
-    username: form.value.proxy_username || undefined,
-    password: form.value.proxy_password || undefined,
-    enabled: proxyEnabled.value,  // 开关状态决定是否启用
-  }
-}
-
-// 提交表单
-const handleSubmit = async (skipCredentialCheck = false) => {
-  if (!props.provider && !props.endpoint) return
-
-  // 只在开关开启且填写了 URL 时验证
-  if (proxyEnabled.value && form.value.proxy_url && proxyUrlError.value) {
-    showError(proxyUrlError.value, '代理配置错误')
-    return
-  }
-
-  // 检查：开关开启但没有 URL，却有用户名或密码
-  const hasOrphanedCredentials = proxyEnabled.value
-    && !form.value.proxy_url
-    && (form.value.proxy_username || form.value.proxy_password)
-
-  if (hasOrphanedCredentials && !skipCredentialCheck) {
-    // 弹出确认对话框
-    showClearCredentialsDialog.value = true
-    return
-  }
-
-  loading.value = true
-  let successCount = 0
-  
+  savingEndpointId.value = endpoint.id
   try {
-    const proxyConfig = buildProxyConfig()
-
-    if (isEditMode.value && props.endpoint) {
-      // 更新端点
-      await updateEndpoint(props.endpoint.id, {
-        base_url: form.value.base_url,
-        custom_path: form.value.custom_path || undefined,
-        timeout: form.value.timeout,
-        max_retries: form.value.max_retries,
-        max_concurrent: form.value.max_concurrent,
-        rate_limit: form.value.rate_limit,
-        is_active: form.value.is_active,
-        proxy: proxyConfig,
-      })
-
-      success('端点已更新', '保存成功')
-      emit('endpointUpdated')
-      emit('update:modelValue', false)
-    } else if (props.provider) {
-      // 批量创建端点 - 使用并发请求提升性能
-      const results = await Promise.allSettled(
-        selectedFormats.value.map(apiFormat =>
-          createEndpoint(props.provider!.id, {
-            provider_id: props.provider!.id,
-            api_format: apiFormat,
-            base_url: form.value.base_url,
-            custom_path: form.value.custom_path || undefined,
-            timeout: form.value.timeout,
-            max_retries: form.value.max_retries,
-            max_concurrent: form.value.max_concurrent,
-            rate_limit: form.value.rate_limit,
-            is_active: form.value.is_active,
-            proxy: proxyConfig,
-          })
-        )
-      )
-
-      // 统计结果
-      const errors: string[] = []
-      results.forEach((result, index) => {
-        if (result.status === 'fulfilled') {
-          successCount++
-        } else {
-          const apiFormat = selectedFormats.value[index]
-          const formatLabel = apiFormats.value.find((f: any) => f.value === apiFormat)?.label || apiFormat
-          const errorMsg = result.reason?.response?.data?.detail || '创建失败'
-          errors.push(`${formatLabel}: ${errorMsg}`)
-        }
-      })
-
-      const failCount = errors.length
-
-      // 显示结果
-      if (successCount > 0 && failCount === 0) {
-        success(`成功创建 ${successCount} 个端点`, '创建成功')
-      } else if (successCount > 0 && failCount > 0) {
-        showError(`${failCount} 个端点创建失败:\n${errors.join('\n')}`, `${successCount} 个成功，${failCount} 个失败`)
-      } else {
-        showError(errors.join('\n') || '创建端点失败', '创建失败')
-      }
-
-      if (successCount > 0) {
-        emit('endpointCreated')
-        resetForm()
-        emit('update:modelValue', false)
-      }
-    }
+    await updateEndpoint(endpoint.id, {
+      base_url: editingUrl.value,
+      custom_path: editingPath.value || null,  // 空字符串时传 null 清空
+    })
+    success('端点已更新')
+    emit('endpointUpdated')
+    cancelEdit()
   } catch (error: any) {
-    const action = isEditMode.value ? '更新' : '创建'
-    showError(error.response?.data?.detail || `${action}端点失败`, '错误')
+    showError(error.response?.data?.detail || '更新失败', '错误')
   } finally {
-    loading.value = false
+    savingEndpointId.value = null
   }
 }
 
-// 确认清空凭据并继续保存
-const confirmClearCredentials = () => {
-  form.value.proxy_username = ''
-  form.value.proxy_password = ''
-  showClearCredentialsDialog.value = false
-  handleSubmit(true)  // 跳过凭据检查，直接提交
+// 添加端点
+async function handleAddEndpoint() {
+  if (!props.provider || !newEndpoint.value.api_format || !newEndpoint.value.base_url) return
+
+  addingEndpoint.value = true
+  try {
+    await createEndpoint(props.provider.id, {
+      provider_id: props.provider.id,
+      api_format: newEndpoint.value.api_format,
+      base_url: newEndpoint.value.base_url,
+      custom_path: newEndpoint.value.custom_path || undefined,
+      is_active: true,
+    })
+    success(`已添加 ${API_FORMAT_LABELS[newEndpoint.value.api_format] || newEndpoint.value.api_format} 端点`)
+    // 重置表单，保留 URL
+    const url = newEndpoint.value.base_url
+    newEndpoint.value = { api_format: '', base_url: url, custom_path: '' }
+    emit('endpointCreated')
+  } catch (error: any) {
+    showError(error.response?.data?.detail || '添加失败', '错误')
+  } finally {
+    addingEndpoint.value = false
+  }
+}
+
+// 切换端点启用状态
+async function handleToggleEndpoint(endpoint: ProviderEndpoint) {
+  togglingEndpointId.value = endpoint.id
+  try {
+    const newStatus = !endpoint.is_active
+    await updateEndpoint(endpoint.id, { is_active: newStatus })
+    success(newStatus ? '端点已启用' : '端点已停用')
+    emit('endpointUpdated')
+  } catch (error: any) {
+    showError(error.response?.data?.detail || '操作失败', '错误')
+  } finally {
+    togglingEndpointId.value = null
+  }
+}
+
+// 删除端点
+async function handleDeleteEndpoint(endpoint: ProviderEndpoint) {
+  deletingEndpointId.value = endpoint.id
+  try {
+    await deleteEndpoint(endpoint.id)
+    success(`已删除 ${API_FORMAT_LABELS[endpoint.api_format] || endpoint.api_format} 端点`)
+    emit('endpointUpdated')
+  } catch (error: any) {
+    showError(error.response?.data?.detail || '删除失败', '错误')
+  } finally {
+    deletingEndpointId.value = null
+  }
+}
+
+// 关闭对话框
+function handleDialogUpdate(value: boolean) {
+  emit('update:modelValue', value)
+}
+
+function handleClose() {
+  emit('update:modelValue', false)
 }
 </script>

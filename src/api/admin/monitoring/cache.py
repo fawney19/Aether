@@ -819,7 +819,7 @@ class AdminListAffinitiesAdapter(AdminApiAdapter):
                 "username": user.username if user else None,
                 "email": user.email if user else None,
                 "provider_id": provider_id,
-                "provider_name": provider.display_name if provider else None,
+                "provider_name": provider.name if provider else None,
                 "endpoint_id": endpoint_id,
                 "endpoint_api_format": (
                     endpoint.api_format if endpoint and endpoint.api_format else None
@@ -1369,9 +1369,7 @@ class AdminModelMappingCacheStatsAdapter(AdminApiAdapter):
                                     for model, provider in models:
                                         # 检查是否是主模型名称
                                         if model.provider_model_name == mapping_name:
-                                            provider_names.append(
-                                                provider.display_name or provider.name
-                                            )
+                                            provider_names.append(provider.name)
                                             continue
                                         # 检查是否在映射列表中
                                         if model.provider_model_mappings:
@@ -1381,9 +1379,7 @@ class AdminModelMappingCacheStatsAdapter(AdminApiAdapter):
                                                 if isinstance(a, dict)
                                             ]
                                             if mapping_name in mapping_list:
-                                                provider_names.append(
-                                                    provider.display_name or provider.name
-                                                )
+                                                provider_names.append(provider.name)
                                     provider_names = sorted(list(set(provider_names)))
 
                                 mappings.append({
@@ -1473,7 +1469,7 @@ class AdminModelMappingCacheStatsAdapter(AdminApiAdapter):
 
                                     provider_model_mappings.append({
                                         "provider_id": provider_id,
-                                        "provider_name": provider.display_name or provider.name,
+                                        "provider_name": provider.name,
                                         "global_model_id": global_model_id,
                                         "global_model_name": global_model.name,
                                         "global_model_display_name": global_model.display_name,

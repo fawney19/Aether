@@ -78,7 +78,7 @@ async def get_provider_stats(
     """
     获取提供商统计数据
 
-    获取指定提供商的计费信息、RPM 使用情况和使用统计数据。
+    获取指定提供商的计费信息和使用统计数据。
 
     **路径参数**:
     - `provider_id`: 提供商 ID
@@ -96,10 +96,6 @@ async def get_provider_stats(
       - `monthly_used_usd`: 月度已使用
       - `quota_remaining_usd`: 剩余配额
       - `quota_expires_at`: 配额过期时间
-    - `rpm_info`: RPM 信息
-      - `rpm_limit`: RPM 限制
-      - `rpm_used`: 已使用 RPM
-      - `rpm_reset_at`: RPM 重置时间
     - `usage_stats`: 使用统计
       - `total_requests`: 总请求数
       - `successful_requests`: 成功请求数
@@ -165,7 +161,6 @@ class AdminProviderBillingAdapter(AdminApiAdapter):
         provider.billing_type = config.billing_type
         provider.monthly_quota_usd = config.monthly_quota_usd
         provider.quota_reset_day = config.quota_reset_day
-        provider.rpm_limit = config.rpm_limit
         provider.provider_priority = config.provider_priority
 
         from dateutil import parser
@@ -262,13 +257,6 @@ class AdminProviderStatsAdapter(AdminApiAdapter):
                         provider.quota_expires_at.isoformat() if provider.quota_expires_at else None
                     ),
                 },
-                "rpm_info": {
-                    "rpm_limit": provider.rpm_limit,
-                    "rpm_used": provider.rpm_used,
-                    "rpm_reset_at": (
-                        provider.rpm_reset_at.isoformat() if provider.rpm_reset_at else None
-                    ),
-                },
                 "usage_stats": {
                     "total_requests": total_requests,
                     "successful_requests": total_success,
@@ -296,8 +284,6 @@ class AdminProviderResetQuotaAdapter(AdminApiAdapter):
 
         old_used = provider.monthly_used_usd
         provider.monthly_used_usd = 0.0
-        provider.rpm_used = 0
-        provider.rpm_reset_at = None
         db.commit()
 
         logger.info(f"Manually reset quota for provider {provider.name}")

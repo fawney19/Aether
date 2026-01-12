@@ -74,7 +74,6 @@ def build_safe_headers(
     return headers
 
 
-# 保持向后兼容的run_endpoint_check函数（使用新架构）
 async def run_endpoint_check(
     *,
     client: httpx.AsyncClient,  # 保持兼容性，但内部不使用
@@ -176,10 +175,16 @@ async def _calculate_and_record_usage(
         logger.warning(f"Provider API Key not found for usage calculation: {api_key_id}")
         return {"error": "Provider API Key not found"}
 
-    # 获取Provider Endpoint信息
+    # 获取Provider Endpoint信息（通过 api_format 查找）
     provider_endpoint = None
-    if provider_api_key.endpoint_id:
-        provider_endpoint = db.query(ProviderEndpoint).filter(ProviderEndpoint.id == provider_api_key.endpoint_id).first()
+    if api_format and provider_api_key.provider_id:
+        from src.models.database import Provider
+        provider = db.query(Provider).filter(Provider.id == provider_api_key.provider_id).first()
+        if provider:
+            for ep in provider.endpoints:
+                if ep.api_format == api_format and ep.is_active:
+                    provider_endpoint = ep
+                    break
 
     # 获取用户的API Key（用于记录关联，即使实际使用的是Provider API Key）
     user_api_key = None

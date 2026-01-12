@@ -36,6 +36,12 @@ class CacheService:
                 try:
                     return json.loads(value)
                 except (json.JSONDecodeError, TypeError):
+                    # 非 JSON 值：统一返回字符串，避免上层出现 bytes/str 混用
+                    if isinstance(value, (bytes, bytearray)):
+                        try:
+                            return value.decode("utf-8")
+                        except Exception:
+                            return value
                     return value
 
             return None
@@ -97,6 +103,48 @@ class CacheService:
         except Exception as e:
             logger.warning(f"缓存删除失败: {key} - {e}")
             return False
+
+    @staticmethod
+    async def delete_pattern(pattern: str, batch_size: int = 100) -> int:
+        """
+        删除匹配模式的所有缓存
+
+        使用 SCAN 遍历并分批删除，避免阻塞 Redis
+
+        Args:
+            pattern: 缓存键模式（支持 * 通配符）
+            batch_size: 每批删除的最大键数量
+
+        Returns:
+            删除的键数量
+        """
+        try:
+            redis = await get_redis_client(require_redis=False)
+            if not redis:
+                return 0
+
+            # 使用 SCAN 遍历匹配的键
+            deleted_count = 0
+            cursor = 0
+            while True:
+                cursor, keys = await redis.scan(cursor, match=pattern, count=batch_size)
+                if keys:
+                    # 分批删除，避免单次删除过多键导致 Redis 阻塞
+                    for i in range(0, len(keys), batch_size):
+                        batch = keys[i : i + batch_size]
+                        await redis.delete(*batch)
+                        deleted_count += len(batch)
+                if cursor == 0:
+                    break
+
+            if deleted_count > 0:
+                logger.debug(f"缓存模式删除成功: {pattern}, 删除 {deleted_count} 个键")
+
+            return deleted_count
+
+        except Exception as e:
+            logger.warning(f"缓存模式删除失败: {pattern} - {e}")
+            return 0
 
     @staticmethod
     async def exists(key: str) -> bool:

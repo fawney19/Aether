@@ -5,7 +5,7 @@ Endpoint 健康监控 API
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import func
@@ -128,29 +128,32 @@ async def get_api_format_health_monitor(
 async def get_key_health(
     key_id: str,
     request: Request,
+    api_format: Optional[str] = Query(None, description="API 格式（可选，如 CLAUDE、OPENAI）"),
     db: Session = Depends(get_db),
 ) -> HealthStatusResponse:
     """
     获取 Key 健康状态
 
     获取指定 API Key 的健康状态详情，包括健康分数、连续失败次数、
-    熔断器状态等信息。
+    熔断器状态等信息。支持按 API 格式查询。
 
     **路径参数**:
     - `key_id`: API Key ID
 
+    **查询参数**:
+    - `api_format`: 可选，指定 API 格式（如 CLAUDE、OPENAI）。
+      - 指定时返回该格式的健康度详情
+      - 不指定时返回所有格式的健康度摘要
+
     **返回字段**:
     - `key_id`: API Key ID
     - `key_health_score`: 健康分数（0.0-1.0）
-    - `key_consecutive_failures`: 连续失败次数
-    - `key_last_failure_at`: 最后失败时间
     - `key_is_active`: 是否活跃
     - `key_statistics`: 统计信息
-    - `circuit_breaker_open`: 熔断器是否打开
-    - `circuit_breaker_open_at`: 熔断器打开时间
-    - `next_probe_at`: 下次探测时间
+    - `health_by_format`: 按格式的健康度数据（无 api_format 参数时）
+    - `circuit_breaker_open`: 熔断器是否打开（有 api_format 参数时）
     """
-    adapter = AdminKeyHealthAdapter(key_id=key_id)
+    adapter = AdminKeyHealthAdapter(key_id=key_id, api_format=api_format)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
@@ -158,16 +161,22 @@ async def get_key_health(
 async def recover_key_health(
     key_id: str,
     request: Request,
+    api_format: Optional[str] = Query(None, description="API 格式（可选，不指定则恢复所有格式）"),
     db: Session = Depends(get_db),
 ) -> dict:
     """
     恢复 Key 健康状态
 
     手动恢复指定 Key 的健康状态，将健康分数重置为 1.0，关闭熔断器，
-    取消自动禁用，并重置所有失败计数。
+    取消自动禁用，并重置所有失败计数。支持按 API 格式恢复。
 
     **路径参数**:
     - `key_id`: API Key ID
+
+    **查询参数**:
+    - `api_format`: 可选，指定 API 格式（如 CLAUDE、OPENAI）
+      - 指定时仅恢复该格式的健康度
+      - 不指定时恢复所有格式
 
     **返回字段**:
     - `message`: 操作结果消息
@@ -176,7 +185,7 @@ async def recover_key_health(
       - `circuit_breaker_open`: 熔断器状态
       - `is_active`: 是否活跃
     """
-    adapter = AdminRecoverKeyHealthAdapter(key_id=key_id)
+    adapter = AdminRecoverKeyHealthAdapter(key_id=key_id, api_format=api_format)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
@@ -276,34 +285,9 @@ class AdminApiFormatHealthMonitorAdapter(AdminApiAdapter):
             )
             all_formats[api_format] = provider_count
 
-        # 1.1 获取所有活跃的 API 格式及其 API Key 数量
-        active_keys = (
-            db.query(
-                ProviderEndpoint.api_format,
-                func.count(ProviderAPIKey.id).label("key_count"),
-            )
-            .join(ProviderAPIKey, ProviderEndpoint.id == ProviderAPIKey.endpoint_id)
-            .join(Provider, ProviderEndpoint.provider_id == Provider.id)
-            .filter(
-                ProviderEndpoint.is_active.is_(True),
-                Provider.is_active.is_(True),
-                ProviderAPIKey.is_active.is_(True),
-            )
-            .group_by(ProviderEndpoint.api_format)
-            .all()
-        )
-
-        # 构建所有格式的 key_count 映射
-        key_counts: Dict[str, int] = {}
-        for api_format_enum, key_count in active_keys:
-            api_format = (
-                api_format_enum.value if hasattr(api_format_enum, "value") else str(api_format_enum)
-            )
-            key_counts[api_format] = key_count
-
-        # 1.2 建立每个 API 格式对应的 Endpoint ID 列表，供 Usage 时间线生成使用
+        # 1.1 建立每个 API 格式对应的 Endpoint ID 列表（用于时间线生成），并收集活跃的 provider+format 组合
         endpoint_rows = (
-            db.query(ProviderEndpoint.api_format, ProviderEndpoint.id)
+            db.query(ProviderEndpoint.api_format, ProviderEndpoint.id, ProviderEndpoint.provider_id)
             .join(Provider, ProviderEndpoint.provider_id == Provider.id)
             .filter(
                 ProviderEndpoint.is_active.is_(True),
@@ -312,11 +296,32 @@ class AdminApiFormatHealthMonitorAdapter(AdminApiAdapter):
             .all()
         )
         endpoint_map: Dict[str, List[str]] = defaultdict(list)
-        for api_format_enum, endpoint_id in endpoint_rows:
+        active_provider_formats: set[tuple[str, str]] = set()
+        for api_format_enum, endpoint_id, provider_id in endpoint_rows:
             api_format = (
                 api_format_enum.value if hasattr(api_format_enum, "value") else str(api_format_enum)
             )
             endpoint_map[api_format].append(endpoint_id)
+            active_provider_formats.add((str(provider_id), api_format))
+
+        # 1.2 统计每个 API 格式可用的活跃 Key 数量（Key 属于 Provider，通过 api_formats 关联格式）
+        key_counts: Dict[str, int] = {}
+        if active_provider_formats:
+            active_provider_keys = (
+                db.query(ProviderAPIKey.provider_id, ProviderAPIKey.api_formats)
+                .join(Provider, ProviderAPIKey.provider_id == Provider.id)
+                .filter(
+                    Provider.is_active.is_(True),
+                    ProviderAPIKey.is_active.is_(True),
+                )
+                .all()
+            )
+            for provider_id, api_formats in active_provider_keys:
+                pid = str(provider_id)
+                for fmt in (api_formats or []):
+                    if (pid, fmt) not in active_provider_formats:
+                        continue
+                    key_counts[fmt] = key_counts.get(fmt, 0) + 1
 
         # 2. 统计窗口内每个 API 格式的请求状态分布（真实统计）
         # 只统计最终状态：success, failed, skipped
@@ -457,28 +462,45 @@ class AdminApiFormatHealthMonitorAdapter(AdminApiAdapter):
 @dataclass
 class AdminKeyHealthAdapter(AdminApiAdapter):
     key_id: str
+    api_format: Optional[str] = None
 
     async def handle(self, context):  # type: ignore[override]
-        health_data = health_monitor.get_key_health(context.db, self.key_id)
+        health_data = health_monitor.get_key_health(context.db, self.key_id, self.api_format)
         if not health_data:
             raise NotFoundException(f"Key {self.key_id} 不存在")
 
-        return HealthStatusResponse(
-            key_id=health_data["key_id"],
-            key_health_score=health_data["health_score"],
-            key_consecutive_failures=health_data["consecutive_failures"],
-            key_last_failure_at=health_data["last_failure_at"],
-            key_is_active=health_data["is_active"],
-            key_statistics=health_data["statistics"],
-            circuit_breaker_open=health_data["circuit_breaker_open"],
-            circuit_breaker_open_at=health_data["circuit_breaker_open_at"],
-            next_probe_at=health_data["next_probe_at"],
-        )
+        # 构建响应
+        response_data = {
+            "key_id": health_data["key_id"],
+            "key_is_active": health_data["is_active"],
+            "key_statistics": health_data.get("statistics"),
+            "key_health_score": health_data.get("health_score", 1.0),
+        }
+
+        if self.api_format:
+            # 单格式查询
+            response_data["api_format"] = self.api_format
+            response_data["key_consecutive_failures"] = health_data.get("consecutive_failures")
+            response_data["key_last_failure_at"] = health_data.get("last_failure_at")
+            circuit = health_data.get("circuit_breaker", {})
+            response_data["circuit_breaker_open"] = circuit.get("open", False)
+            response_data["circuit_breaker_open_at"] = circuit.get("open_at")
+            response_data["next_probe_at"] = circuit.get("next_probe_at")
+            response_data["half_open_until"] = circuit.get("half_open_until")
+            response_data["half_open_successes"] = circuit.get("half_open_successes", 0)
+            response_data["half_open_failures"] = circuit.get("half_open_failures", 0)
+        else:
+            # 全格式查询
+            response_data["any_circuit_open"] = health_data.get("any_circuit_open", False)
+            response_data["health_by_format"] = health_data.get("health_by_format")
+
+        return HealthStatusResponse(**response_data)
 
 
 @dataclass
 class AdminRecoverKeyHealthAdapter(AdminApiAdapter):
     key_id: str
+    api_format: Optional[str] = None
 
     async def handle(self, context):  # type: ignore[override]
         db = context.db
@@ -486,28 +508,38 @@ class AdminRecoverKeyHealthAdapter(AdminApiAdapter):
         if not key:
             raise NotFoundException(f"Key {self.key_id} 不存在")
 
-        key.health_score = 1.0
-        key.consecutive_failures = 0
-        key.last_failure_at = None
-        key.circuit_breaker_open = False
-        key.circuit_breaker_open_at = None
-        key.next_probe_at = None
+        # 使用 health_monitor.reset_health 重置健康度
+        success = health_monitor.reset_health(db, key_id=self.key_id, api_format=self.api_format)
+        if not success:
+            raise Exception("重置健康度失败")
+
+        # 如果 Key 被禁用，重新启用
         if not key.is_active:
-            key.is_active = True
+            key.is_active = True  # type: ignore[assignment]
 
         db.commit()
 
-        admin_name = context.user.username if context.user else "admin"
-        logger.info(f"管理员恢复Key健康状态: {self.key_id} (health_score: 1.0, circuit_breaker: closed)")
-
-        return {
-            "message": "Key已完全恢复",
-            "details": {
-                "health_score": 1.0,
-                "circuit_breaker_open": False,
-                "is_active": True,
-            },
-        }
+        if self.api_format:
+            logger.info(f"管理员恢复Key健康状态: {self.key_id}/{self.api_format}")
+            return {
+                "message": f"Key 的 {self.api_format} 格式已恢复",
+                "details": {
+                    "api_format": self.api_format,
+                    "health_score": 1.0,
+                    "circuit_breaker_open": False,
+                    "is_active": True,
+                },
+            }
+        else:
+            logger.info(f"管理员恢复Key健康状态: {self.key_id} (所有格式)")
+            return {
+                "message": "Key 所有格式已恢复",
+                "details": {
+                    "health_score": 1.0,
+                    "circuit_breaker_open": False,
+                    "is_active": True,
+                },
+            }
 
 
 class AdminRecoverAllKeysHealthAdapter(AdminApiAdapter):
@@ -516,10 +548,17 @@ class AdminRecoverAllKeysHealthAdapter(AdminApiAdapter):
     async def handle(self, context):  # type: ignore[override]
         db = context.db
 
-        # 查找所有熔断的 Key
-        circuit_open_keys = (
-            db.query(ProviderAPIKey).filter(ProviderAPIKey.circuit_breaker_open == True).all()
-        )
+        # 查找所有有熔断格式的 Key（检查 circuit_breaker_by_format JSON 字段）
+        all_keys = db.query(ProviderAPIKey).all()
+
+        # 筛选出有任何格式熔断的 Key
+        circuit_open_keys = []
+        for key in all_keys:
+            circuit_by_format = key.circuit_breaker_by_format or {}
+            for fmt, circuit_data in circuit_by_format.items():
+                if circuit_data.get("open"):
+                    circuit_open_keys.append(key)
+                    break
 
         if not circuit_open_keys:
             return {
@@ -530,17 +569,15 @@ class AdminRecoverAllKeysHealthAdapter(AdminApiAdapter):
 
         recovered_keys = []
         for key in circuit_open_keys:
-            key.health_score = 1.0
-            key.consecutive_failures = 0
-            key.last_failure_at = None
-            key.circuit_breaker_open = False
-            key.circuit_breaker_open_at = None
-            key.next_probe_at = None
+            # 重置所有格式的健康度
+            key.health_by_format = {}  # type: ignore[assignment]
+            key.circuit_breaker_by_format = {}  # type: ignore[assignment]
             recovered_keys.append(
                 {
                     "key_id": key.id,
                     "key_name": key.name,
-                    "endpoint_id": key.endpoint_id,
+                    "provider_id": key.provider_id,
+                    "api_formats": key.api_formats,
                 }
             )
 
@@ -552,7 +589,6 @@ class AdminRecoverAllKeysHealthAdapter(AdminApiAdapter):
         HealthMonitor._open_circuit_keys = 0
         health_open_circuits.set(0)
 
-        admin_name = context.user.username if context.user else "admin"
         logger.info(f"管理员批量恢复 {len(recovered_keys)} 个 Key 的健康状态")
 
         return {

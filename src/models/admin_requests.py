@@ -52,15 +52,31 @@ class ProxyConfig(BaseModel):
 class CreateProviderRequest(BaseModel):
     """创建 Provider 请求"""
 
-    name: str = Field(
-        ...,
-        min_length=1,
-        max_length=100,
-        description="Provider 名称（英文字母、数字、下划线、连字符）",
-    )
-    display_name: str = Field(..., min_length=1, max_length=100, description="显示名称")
+    name: str = Field(..., min_length=1, max_length=100, description="提供商名称（唯一）")
     description: Optional[str] = Field(None, max_length=1000, description="描述")
     website: Optional[str] = Field(None, max_length=500, description="官网地址")
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        """验证名称格式，防止注入攻击"""
+        v = v.strip()
+
+        # 只允许安全的字符：字母、数字、下划线、连字符、空格、中文
+        if not re.match(r"^[\w\s\u4e00-\u9fff-]+$", v):
+            raise ValueError("名称只能包含字母、数字、下划线、连字符、空格和中文")
+
+        # 检查 SQL 注入关键字（不区分大小写）
+        sql_keywords = [
+            "SELECT", "INSERT", "UPDATE", "DELETE", "DROP", "CREATE",
+            "ALTER", "TRUNCATE", "UNION", "EXEC", "EXECUTE", "--", "/*", "*/"
+        ]
+        v_upper = v.upper()
+        for keyword in sql_keywords:
+            if keyword in v_upper:
+                raise ValueError(f"名称包含非法关键字: {keyword}")
+
+        return v
     billing_type: Optional[str] = Field(
         ProviderBillingType.PAY_AS_YOU_GO.value, description="计费类型"
     )
@@ -68,47 +84,16 @@ class CreateProviderRequest(BaseModel):
     quota_reset_day: Optional[int] = Field(30, ge=1, le=365, description="配额重置周期（天数）")
     quota_last_reset_at: Optional[datetime] = Field(None, description="当前周期开始时间")
     quota_expires_at: Optional[datetime] = Field(None, description="配额过期时间")
-    rpm_limit: Optional[int] = Field(None, ge=0, description="RPM 限制")
     provider_priority: Optional[int] = Field(100, ge=0, le=1000, description="提供商优先级（数字越小越优先）")
     is_active: Optional[bool] = Field(True, description="是否启用")
     concurrent_limit: Optional[int] = Field(None, ge=0, description="并发限制")
+    # 请求配置（从 Endpoint 迁移）
+    timeout: Optional[int] = Field(300, ge=1, le=600, description="请求超时（秒）")
+    max_retries: Optional[int] = Field(2, ge=0, le=10, description="最大重试次数")
+    proxy: Optional[ProxyConfig] = Field(None, description="代理配置")
     config: Optional[Dict[str, Any]] = Field(None, description="其他配置")
 
-    @field_validator("name")
-    @classmethod
-    def validate_name(cls, v: str) -> str:
-        """验证名称格式"""
-        if not re.match(r"^[a-zA-Z0-9_-]+$", v):
-            raise ValueError("名称只能包含英文字母、数字、下划线和连字符")
-
-        # SQL 注入防护：检查危险关键字
-        dangerous_keywords = [
-            "SELECT",
-            "INSERT",
-            "UPDATE",
-            "DELETE",
-            "DROP",
-            "CREATE",
-            "ALTER",
-            "EXEC",
-            "UNION",
-            "OR",
-            "AND",
-            "--",
-            ";",
-            "'",
-            '"',
-            "<",
-            ">",
-        ]
-        upper_name = v.upper()
-        for keyword in dangerous_keywords:
-            if keyword in upper_name:
-                raise ValueError(f"名称包含禁止的字符或关键字: {keyword}")
-
-        return v
-
-    @field_validator("display_name", "description")
+    @field_validator("name", "description")
     @classmethod
     def sanitize_text(cls, v: Optional[str]) -> Optional[str]:
         """清理文本输入，防止 XSS"""
@@ -162,7 +147,7 @@ class CreateProviderRequest(BaseModel):
 class UpdateProviderRequest(BaseModel):
     """更新 Provider 请求"""
 
-    display_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
     description: Optional[str] = Field(None, max_length=1000)
     website: Optional[str] = Field(None, max_length=500)
     billing_type: Optional[str] = None
@@ -170,14 +155,17 @@ class UpdateProviderRequest(BaseModel):
     quota_reset_day: Optional[int] = Field(None, ge=1, le=365)
     quota_last_reset_at: Optional[datetime] = None
     quota_expires_at: Optional[datetime] = None
-    rpm_limit: Optional[int] = Field(None, ge=0)
     provider_priority: Optional[int] = Field(None, ge=0, le=1000)
     is_active: Optional[bool] = None
     concurrent_limit: Optional[int] = Field(None, ge=0)
+    # 请求配置（从 Endpoint 迁移）
+    timeout: Optional[int] = Field(None, ge=1, le=600, description="请求超时（秒）")
+    max_retries: Optional[int] = Field(None, ge=0, le=10, description="最大重试次数")
+    proxy: Optional[ProxyConfig] = Field(None, description="代理配置")
     config: Optional[Dict[str, Any]] = None
 
     # 复用相同的验证器
-    _sanitize_text = field_validator("display_name", "description")(
+    _sanitize_text = field_validator("name", "description")(
         CreateProviderRequest.sanitize_text.__func__
     )
     _validate_website = field_validator("website")(CreateProviderRequest.validate_website.__func__)
@@ -196,7 +184,6 @@ class CreateEndpointRequest(BaseModel):
     custom_path: Optional[str] = Field(None, max_length=200, description="自定义路径")
     priority: Optional[int] = Field(100, ge=0, le=1000, description="优先级")
     is_active: Optional[bool] = Field(True, description="是否启用")
-    rpm_limit: Optional[int] = Field(None, ge=0, description="RPM 限制")
     concurrent_limit: Optional[int] = Field(None, ge=0, description="并发限制")
     config: Optional[Dict[str, Any]] = Field(None, description="其他配置")
     proxy: Optional[ProxyConfig] = Field(None, description="代理配置")
@@ -252,7 +239,6 @@ class UpdateEndpointRequest(BaseModel):
     custom_path: Optional[str] = Field(None, max_length=200)
     priority: Optional[int] = Field(None, ge=0, le=1000)
     is_active: Optional[bool] = None
-    rpm_limit: Optional[int] = Field(None, ge=0)
     concurrent_limit: Optional[int] = Field(None, ge=0)
     config: Optional[Dict[str, Any]] = None
     proxy: Optional[ProxyConfig] = Field(None, description="代理配置")
@@ -277,8 +263,7 @@ class CreateAPIKeyRequest(BaseModel):
     api_key: str = Field(..., min_length=1, max_length=500, description="API Key")
     priority: Optional[int] = Field(100, ge=0, le=1000, description="优先级")
     is_active: Optional[bool] = Field(True, description="是否启用")
-    max_rpm: Optional[int] = Field(None, ge=0, description="最大 RPM")
-    max_concurrent: Optional[int] = Field(None, ge=0, description="最大并发")
+    rpm_limit: Optional[int] = Field(None, ge=0, description="RPM 限制（NULL=自适应）")
     notes: Optional[str] = Field(None, max_length=500, description="备注")
 
     @field_validator("api_key")

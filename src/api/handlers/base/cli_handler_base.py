@@ -47,7 +47,7 @@ from src.api.handlers.base.utils import (
 )
 from src.config.constants import StreamDefaults
 from src.config.settings import config
-from src.core.error_utils import extract_error_message
+from src.core.error_utils import extract_client_error_message
 from src.core.exceptions import (
     EmbeddedErrorException,
     ProviderAuthException,
@@ -376,10 +376,18 @@ class CliMessageHandlerBase(BaseMessageHandler):
             # 创建监控流
             monitored_stream = self._create_monitored_stream(ctx, stream_generator)
 
+            # 透传提供商的响应头给客户端
+            # 同时添加必要的 SSE 头以确保流式传输正常工作
+            client_headers = dict(ctx.response_headers) if ctx.response_headers else {}
+            # 添加/覆盖 SSE 必需的头
+            client_headers.update(build_sse_headers())
+            client_headers["content-type"] = "text/event-stream"
+            ctx.client_response_headers = client_headers
+
             return StreamingResponse(
                 monitored_stream,
                 media_type="text/event-stream",
-                headers=build_sse_headers(),
+                headers=client_headers,
                 background=background_tasks,
             )
 
@@ -475,8 +483,8 @@ class CliMessageHandlerBase(BaseMessageHandler):
             pool=config.http_pool_timeout,
         )
 
-        # endpoint.timeout 作为整体请求超时（建立连接 + 获取首字节）
-        request_timeout = float(endpoint.timeout or 300)
+        # provider.timeout 作为整体请求超时（建立连接 + 获取首字节）
+        request_timeout = float(provider.timeout or 300)
 
         logger.debug(
             f"  └─ [{self.request_id}] 发送流式请求: "
@@ -486,11 +494,11 @@ class CliMessageHandlerBase(BaseMessageHandler):
             f"timeout={request_timeout}s"
         )
 
-        # 创建 HTTP 客户端（支持代理配置）
+        # 创建 HTTP 客户端（支持代理配置，从 Provider 读取）
         from src.clients.http_client import HTTPClientPool
 
         http_client = HTTPClientPool.create_client_with_proxy(
-            proxy_config=endpoint.proxy,
+            proxy_config=provider.proxy,
             timeout=timeout_config,
         )
 
@@ -524,7 +532,7 @@ class CliMessageHandlerBase(BaseMessageHandler):
 
         try:
             # 使用 asyncio.wait_for 包裹整个"建立连接 + 获取首字节"阶段
-            # endpoint.timeout 控制整体超时，避免上游长时间无响应
+            # provider.timeout 控制整体超时，避免上游长时间无响应
             await asyncio.wait_for(_connect_and_prefetch(), timeout=request_timeout)
 
         except asyncio.TimeoutError:
@@ -636,12 +644,16 @@ class CliMessageHandlerBase(BaseMessageHandler):
                     if ctx.chunk_count > self.EMPTY_CHUNK_THRESHOLD and ctx.data_count == 0:
                         elapsed = time.time() - last_data_time
                         if elapsed > self.DATA_TIMEOUT:
-                            logger.warning(f"提供商 '{ctx.provider_name}' 流超时且无数据")
+                            logger.warning(f"Provider '{ctx.provider_name}' 流超时且无数据")
+                            # 设置错误状态用于后续记录
+                            ctx.status_code = 504
+                            ctx.error_message = "流式响应超时，未收到有效数据"
+                            ctx.upstream_response = f"流超时: Provider={ctx.provider_name}, elapsed={elapsed:.1f}s, chunk_count={ctx.chunk_count}, data_count=0"
                             error_event = {
                                 "type": "error",
                                 "error": {
                                     "type": "empty_stream_timeout",
-                                    "message": f"提供商 '{ctx.provider_name}' 流超时且未返回有效数据",
+                                    "message": ctx.error_message,
                                 },
                             }
                             self._mark_first_output(ctx, output_state)
@@ -682,12 +694,16 @@ class CliMessageHandlerBase(BaseMessageHandler):
             if ctx.data_count == 0:
                 # 流已开始，无法抛出异常进行故障转移
                 # 发送错误事件并记录日志
-                logger.warning(f"提供商 '{ctx.provider_name}' 返回空流式响应")
+                logger.warning(f"Provider '{ctx.provider_name}' 返回空流式响应")
+                # 设置错误状态用于后续记录
+                ctx.status_code = 503
+                ctx.error_message = "上游服务返回了空的流式响应"
+                ctx.upstream_response = f"空流式响应: Provider={ctx.provider_name}, chunk_count={ctx.chunk_count}, data_count=0"
                 error_event = {
                     "type": "error",
                     "error": {
                         "type": "empty_response",
-                        "message": f"提供商 '{ctx.provider_name}' 返回了空的流式响应",
+                        "message": ctx.error_message,
                     },
                 }
                 yield f"event: error\ndata: {json.dumps(error_event)}\n\n".encode("utf-8")
@@ -699,12 +715,16 @@ class CliMessageHandlerBase(BaseMessageHandler):
         except httpx.StreamClosed:
             if ctx.data_count == 0:
                 # 流已开始，发送错误事件而不是抛出异常
-                logger.warning(f"提供商 '{ctx.provider_name}' 流连接关闭且无数据")
+                logger.warning(f"Provider '{ctx.provider_name}' 流连接关闭且无数据")
+                # 设置错误状态用于后续记录
+                ctx.status_code = 503
+                ctx.error_message = "上游服务连接关闭且未返回数据"
+                ctx.upstream_response = f"流连接关闭: Provider={ctx.provider_name}, chunk_count={ctx.chunk_count}, data_count=0"
                 error_event = {
                     "type": "error",
                     "error": {
                         "type": "stream_closed",
-                        "message": f"提供商 '{ctx.provider_name}' 连接关闭且未返回数据",
+                        "message": ctx.error_message,
                     },
                 }
                 yield f"event: error\ndata: {json.dumps(error_event)}\n\n".encode("utf-8")
@@ -824,8 +844,10 @@ class CliMessageHandlerBase(BaseMessageHandler):
                             f"base_url={endpoint.base_url}"
                         )
                         raise ProviderNotAvailableException(
-                            f"提供商 '{provider.name}' 返回了 HTML 页面而非 API 响应，"
-                            f"请检查 endpoint 的 base_url 配置是否正确"
+                            "上游服务返回了非预期的响应格式",
+                            provider_name=str(provider.name),
+                            upstream_status=200,
+                            upstream_response=normalized_line[:500] if normalized_line else "(empty)",
                         )
 
                     if not normalized_line or normalized_line.startswith(":"):
@@ -1024,12 +1046,16 @@ class CliMessageHandlerBase(BaseMessageHandler):
                     if ctx.chunk_count > self.EMPTY_CHUNK_THRESHOLD and ctx.data_count == 0:
                         elapsed = time.time() - last_data_time
                         if elapsed > self.DATA_TIMEOUT:
-                            logger.warning(f"提供商 '{ctx.provider_name}' 流超时且无数据")
+                            logger.warning(f"Provider '{ctx.provider_name}' 流超时且无数据")
+                            # 设置错误状态用于后续记录
+                            ctx.status_code = 504
+                            ctx.error_message = "流式响应超时，未收到有效数据"
+                            ctx.upstream_response = f"流超时: Provider={ctx.provider_name}, elapsed={elapsed:.1f}s, chunk_count={ctx.chunk_count}, data_count=0"
                             error_event = {
                                 "type": "error",
                                 "error": {
                                     "type": "empty_stream_timeout",
-                                    "message": f"提供商 '{ctx.provider_name}' 流超时且未返回有效数据",
+                                    "message": ctx.error_message,
                                 },
                             }
                             self._mark_first_output(ctx, output_state)
@@ -1071,14 +1097,18 @@ class CliMessageHandlerBase(BaseMessageHandler):
             if ctx.data_count == 0:
                 # 空流通常意味着配置错误（如 base_url 指向了网页而非 API）
                 logger.error(
-                    f"提供商 '{ctx.provider_name}' 返回空流式响应 (收到 {ctx.chunk_count} 个非数据行), "
+                    f"Provider '{ctx.provider_name}' 返回空流式响应 (收到 {ctx.chunk_count} 个非数据行), "
                     f"可能是 endpoint base_url 配置错误"
                 )
+                # 设置错误状态用于后续记录
+                ctx.status_code = 503
+                ctx.error_message = "上游服务返回了空的流式响应"
+                ctx.upstream_response = f"空流式响应: Provider={ctx.provider_name}, chunk_count={ctx.chunk_count}, data_count=0, 可能是 base_url 配置错误"
                 error_event = {
                     "type": "error",
                     "error": {
                         "type": "empty_response",
-                        "message": f"提供商 '{ctx.provider_name}' 返回了空的流式响应 (收到 {ctx.chunk_count} 行非 SSE 数据)，请检查 endpoint 的 base_url 配置是否指向了正确的 API 地址",
+                        "message": ctx.error_message,
                     },
                 }
                 yield f"event: error\ndata: {json.dumps(error_event)}\n\n".encode("utf-8")
@@ -1089,12 +1119,16 @@ class CliMessageHandlerBase(BaseMessageHandler):
             raise
         except httpx.StreamClosed:
             if ctx.data_count == 0:
-                logger.warning(f"提供商 '{ctx.provider_name}' 流连接关闭且无数据")
+                logger.warning(f"Provider '{ctx.provider_name}' 流连接关闭且无数据")
+                # 设置错误状态用于后续记录
+                ctx.status_code = 503
+                ctx.error_message = "上游服务连接关闭且未返回数据"
+                ctx.upstream_response = f"流连接关闭: Provider={ctx.provider_name}, chunk_count={ctx.chunk_count}, data_count=0"
                 error_event = {
                     "type": "error",
                     "error": {
                         "type": "stream_closed",
-                        "message": f"提供商 '{ctx.provider_name}' 连接关闭且未返回数据",
+                        "message": ctx.error_message,
                     },
                 }
                 yield f"event: error\ndata: {json.dumps(error_event)}\n\n".encode("utf-8")
@@ -1289,6 +1323,8 @@ class CliMessageHandlerBase(BaseMessageHandler):
                 if ctx.status_code and ctx.status_code >= 400:
                     # 记录失败的 Usage，但使用已收到的预估 token 信息（来自 message_start）
                     # 这样即使请求中断，也能记录预估成本
+                    # 失败时返回给客户端的是 JSON 错误响应，如果没有设置则使用默认值
+                    client_response_headers = ctx.client_response_headers or {"content-type": "application/json"}
                     await bg_telemetry.record_failure(
                         provider=ctx.provider_name or "unknown",
                         model=ctx.model,
@@ -1306,6 +1342,8 @@ class CliMessageHandlerBase(BaseMessageHandler):
                         cache_creation_tokens=ctx.cache_creation_tokens,
                         cache_read_tokens=ctx.cached_tokens,
                         response_body=response_body,
+                        response_headers=ctx.response_headers,
+                        client_response_headers=client_response_headers,
                         # 模型映射信息
                         target_model=ctx.mapped_model,
                     )
@@ -1319,6 +1357,14 @@ class CliMessageHandlerBase(BaseMessageHandler):
                     # 在记录统计前，允许子类从 parsed_chunks 中提取额外的元数据
                     self._finalize_stream_metadata(ctx)
 
+                    # 流式成功时，返回给客户端的是提供商响应头 + SSE 必需头
+                    client_response_headers = dict(ctx.response_headers) if ctx.response_headers else {}
+                    client_response_headers.update({
+                        "Cache-Control": "no-cache, no-transform",
+                        "X-Accel-Buffering": "no",
+                        "content-type": "text/event-stream",
+                    })
+
                     total_cost = await bg_telemetry.record_success(
                         provider=ctx.provider_name,
                         model=ctx.model,
@@ -1330,6 +1376,7 @@ class CliMessageHandlerBase(BaseMessageHandler):
                         request_headers=original_headers,
                         request_body=actual_request_body,
                         response_headers=ctx.response_headers,
+                        client_response_headers=client_response_headers,
                         response_body=response_body,
                         cache_creation_tokens=ctx.cache_creation_tokens,
                         cache_read_tokens=ctx.cached_tokens,
@@ -1367,13 +1414,15 @@ class CliMessageHandlerBase(BaseMessageHandler):
                     # 499 = 客户端断开连接，应标记为失败
                     # 503 = 服务不可用（如流中断），应标记为失败
                     if ctx.status_code and ctx.status_code >= 400:
+                        # 请求链路追踪使用 upstream_response（原始响应），回退到 error_message（友好消息）
+                        trace_error_message = ctx.upstream_response or ctx.error_message or f"HTTP {ctx.status_code}"
                         RequestCandidateService.mark_candidate_failed(
                             db=bg_db,
                             candidate_id=ctx.attempt_id,
                             error_type=(
                                 "client_disconnected" if ctx.status_code == 499 else "stream_error"
                             ),
-                            error_message=ctx.error_message or f"HTTP {ctx.status_code}",
+                            error_message=trace_error_message,
                             status_code=ctx.status_code,
                             latency_ms=response_time_ms,
                             extra_data={
@@ -1426,17 +1475,22 @@ class CliMessageHandlerBase(BaseMessageHandler):
         # 使用实际发送给 Provider 的请求体（如果有），否则用原始请求体
         actual_request_body = ctx.provider_request_body or original_request_body
 
+        # 失败时返回给客户端的是 JSON 错误响应
+        client_response_headers = {"content-type": "application/json"}
+
         await self.telemetry.record_failure(
             provider=ctx.provider_name or "unknown",
             model=ctx.model,
             response_time_ms=response_time_ms,
             status_code=status_code,
-            error_message=extract_error_message(error),
+            error_message=extract_client_error_message(error),
             request_headers=original_headers,
             request_body=actual_request_body,
             is_stream=True,
             api_format=ctx.api_format,
             provider_request_headers=ctx.provider_request_headers,
+            response_headers=ctx.response_headers,
+            client_response_headers=client_response_headers,
             # 模型映射信息
             target_model=ctx.mapped_model,
         )
@@ -1534,13 +1588,13 @@ class CliMessageHandlerBase(BaseMessageHandler):
                 f"原始模型={model}, 映射后={mapped_model or '无映射'}, URL模型={url_model}"
             )
 
-            # 获取复用的 HTTP 客户端（支持代理配置）
+            # 获取复用的 HTTP 客户端（支持代理配置，从 Provider 读取）
             # 注意：使用 get_proxy_client 复用连接池，不再每次创建新客户端
             from src.clients.http_client import HTTPClientPool
 
-            request_timeout = float(endpoint.timeout or 300)
+            request_timeout = float(provider.timeout or 300)
             http_client = await HTTPClientPool.get_proxy_client(
-                proxy_config=endpoint.proxy,
+                proxy_config=provider.proxy,
             )
 
             # 注意：不使用 async with，因为复用的客户端不应该被关闭
@@ -1556,10 +1610,10 @@ class CliMessageHandlerBase(BaseMessageHandler):
             response_headers = dict(resp.headers)
 
             if resp.status_code == 401:
-                raise ProviderAuthException(f"提供商认证失败: {provider.name}")
+                raise ProviderAuthException(str(provider.name))
             elif resp.status_code == 429:
                 raise ProviderRateLimitException(
-                    f"提供商速率限制: {provider.name}",
+                    "请求过于频繁，请稍后重试",
                     provider_name=str(provider.name),
                     response_headers=response_headers,
                     retry_after=int(resp.headers.get("retry-after", 0)) or None,
@@ -1567,7 +1621,7 @@ class CliMessageHandlerBase(BaseMessageHandler):
             elif resp.status_code >= 500:
                 error_text = resp.text
                 raise ProviderNotAvailableException(
-                    f"提供商服务不可用: {provider.name}, 状态: {resp.status_code}",
+                    f"上游服务暂时不可用 (HTTP {resp.status_code})",
                     provider_name=str(provider.name),
                     upstream_status=resp.status_code,
                     upstream_response=error_text,
@@ -1575,12 +1629,15 @@ class CliMessageHandlerBase(BaseMessageHandler):
             elif 300 <= resp.status_code < 400:
                 redirect_url = resp.headers.get("location", "unknown")
                 raise ProviderNotAvailableException(
-                    f"提供商配置错误: {provider.name}, 返回重定向 {resp.status_code} -> {redirect_url}"
+                    "上游服务返回重定向响应",
+                    provider_name=str(provider.name),
+                    upstream_status=resp.status_code,
+                    upstream_response=f"重定向 {resp.status_code} -> {redirect_url}",
                 )
             elif resp.status_code != 200:
                 error_text = resp.text
                 raise ProviderNotAvailableException(
-                    f"提供商返回错误: {provider.name}, 状态: {resp.status_code}",
+                    f"上游服务返回错误 (HTTP {resp.status_code})",
                     provider_name=str(provider.name),
                     upstream_status=resp.status_code,
                     upstream_response=error_text,
@@ -1590,16 +1647,34 @@ class CliMessageHandlerBase(BaseMessageHandler):
             try:
                 response_json = resp.json()
             except (UnicodeDecodeError, json.JSONDecodeError) as e:
-                # 记录原始响应信息用于调试
+                # 获取原始响应内容用于调试（存入 upstream_response）
                 content_type = resp.headers.get("content-type", "unknown")
                 content_encoding = resp.headers.get("content-encoding", "none")
+                raw_content = ""
+                try:
+                    raw_content = resp.text[:500] if resp.text else "(empty)"
+                except Exception:
+                    try:
+                        raw_content = repr(resp.content[:500]) if resp.content else "(empty)"
+                    except Exception:
+                        raw_content = "(unable to read)"
                 logger.error(
                     f"[{self.request_id}] 无法解析响应 JSON: {e}, "
                     f"Content-Type: {content_type}, Content-Encoding: {content_encoding}, "
-                    f"响应长度: {len(resp.content)} bytes"
+                    f"响应长度: {len(resp.content)} bytes, 原始内容: {raw_content}"
                 )
+                # 判断错误类型，生成友好的客户端错误消息（不暴露提供商信息）
+                if raw_content == "(empty)" or not raw_content.strip():
+                    client_message = "上游服务返回了空响应"
+                elif raw_content.strip().startswith(("<", "<!doctype", "<!DOCTYPE")):
+                    client_message = "上游服务返回了非预期的响应格式"
+                else:
+                    client_message = "上游服务返回了无效的响应"
                 raise ProviderNotAvailableException(
-                    f"提供商返回无效响应: {provider.name}, 无法解析 JSON: {str(e)[:100]}"
+                    client_message,
+                    provider_name=str(provider.name),
+                    upstream_status=resp.status_code,
+                    upstream_response=raw_content,
                 )
 
             # 提取 Provider 响应元数据（子类可覆盖）
@@ -1669,6 +1744,10 @@ class CliMessageHandlerBase(BaseMessageHandler):
             # 使用实际发送给 Provider 的请求体（如果有），否则用原始请求体
             actual_request_body = provider_request_body or original_request_body
 
+            # 非流式成功时，返回给客户端的是提供商响应头（透传）
+            client_response_headers = dict(response_headers) if response_headers else {}
+            client_response_headers["content-type"] = "application/json"
+
             total_cost = await self.telemetry.record_success(
                 provider=provider_name,
                 model=model,
@@ -1679,6 +1758,7 @@ class CliMessageHandlerBase(BaseMessageHandler):
                 request_headers=original_headers,
                 request_body=actual_request_body,
                 response_headers=response_headers,
+                client_response_headers=client_response_headers,
                 response_body=response_json,
                 cache_creation_tokens=cache_creation_tokens,
                 cache_read_tokens=cached_tokens,
@@ -1697,7 +1777,12 @@ class CliMessageHandlerBase(BaseMessageHandler):
 
             logger.info(f"{self.FORMAT_ID} 非流式响应处理完成")
 
-            return JSONResponse(status_code=status_code, content=response_json)
+            # 透传提供商的响应头
+            return JSONResponse(
+                status_code=status_code,
+                content=response_json,
+                headers=response_headers if response_headers else None,
+            )
 
         except Exception as e:
             response_time_ms = int((time.time() - sync_start_time) * 1000)
@@ -1713,17 +1798,27 @@ class CliMessageHandlerBase(BaseMessageHandler):
             # 使用实际发送给 Provider 的请求体（如果有），否则用原始请求体
             actual_request_body = provider_request_body or original_request_body
 
+            # 尝试从异常中提取响应头
+            error_response_headers: Dict[str, str] = {}
+            if isinstance(e, ProviderRateLimitException) and e.response_headers:
+                error_response_headers = e.response_headers
+            elif isinstance(e, httpx.HTTPStatusError) and hasattr(e, "response"):
+                error_response_headers = dict(e.response.headers)
+
             await self.telemetry.record_failure(
                 provider=provider_name or "unknown",
                 model=model,
                 response_time_ms=response_time_ms,
                 status_code=status_code,
-                error_message=extract_error_message(e),
+                error_message=extract_client_error_message(e),
                 request_headers=original_headers,
                 request_body=actual_request_body,
                 is_stream=False,
                 api_format=api_format,
                 provider_request_headers=provider_request_headers,
+                response_headers=error_response_headers,
+                # 非流式失败返回给客户端的是 JSON 错误响应
+                client_response_headers={"content-type": "application/json"},
                 # 模型映射信息
                 target_model=mapped_model_result,
             )

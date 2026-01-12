@@ -376,14 +376,13 @@ class ApiKeyResponse(BaseModel):
 class ProviderCreate(BaseModel):
     """创建提供商请求
 
-    新架构说明：
+    架构说明：
     - Provider 仅包含提供商的元数据和计费配置
     - API格式、URL、认证等配置应在 ProviderEndpoint 中设置
     - API密钥应在 ProviderAPIKey 中设置
     """
 
-    name: str = Field(..., min_length=1, max_length=100, description="提供商唯一标识")
-    display_name: str = Field(..., min_length=1, max_length=100, description="显示名称")
+    name: str = Field(..., min_length=1, max_length=100, description="提供商名称（唯一）")
     description: Optional[str] = Field(None, description="提供商描述")
     website: Optional[str] = Field(None, max_length=500, description="主站网站")
 
@@ -397,7 +396,7 @@ class ProviderCreate(BaseModel):
 class ProviderUpdate(BaseModel):
     """更新提供商请求"""
 
-    display_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
     description: Optional[str] = None
     website: Optional[str] = Field(None, max_length=500)
     api_format: Optional[str] = None
@@ -418,7 +417,6 @@ class ProviderResponse(BaseModel):
 
     id: str
     name: str
-    display_name: str
     description: Optional[str]
     website: Optional[str]
     api_format: str
@@ -609,7 +607,6 @@ class PublicProviderResponse(BaseModel):
 
     id: str
     name: str
-    display_name: str
     description: Optional[str]
     website: Optional[str]
     is_active: bool
@@ -627,7 +624,6 @@ class PublicModelResponse(BaseModel):
     id: str
     provider_id: str
     provider_name: str
-    provider_display_name: str
     name: str
     display_name: str
     description: Optional[str] = None

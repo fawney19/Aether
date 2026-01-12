@@ -134,10 +134,7 @@
               @click="handleRowClick($event, provider.id)"
             >
               <TableCell class="py-3.5">
-                <div class="flex flex-col gap-0.5">
-                  <span class="text-sm font-medium text-foreground">{{ provider.display_name }}</span>
-                  <span class="text-xs text-muted-foreground/70 font-mono">{{ provider.name }}</span>
-                </div>
+                <span class="text-sm font-medium text-foreground">{{ provider.name }}</span>
               </TableCell>
               <TableCell class="py-3.5">
                 <Badge
@@ -219,17 +216,10 @@
                     >${{ (provider.monthly_used_usd ?? 0).toFixed(2) }}</span> / <span class="font-medium">${{ (provider.monthly_quota_usd ?? 0).toFixed(2) }}</span>
                   </div>
                   <div
-                    v-if="rpmUsage(provider)"
-                    class="flex items-center gap-1"
-                  >
-                    <span class="text-muted-foreground/70">RPM:</span>
-                    <span class="font-medium text-foreground/80">{{ rpmUsage(provider) }}</span>
-                  </div>
-                  <div
-                    v-if="provider.billing_type !== 'monthly_quota' && !rpmUsage(provider)"
+                    v-else
                     class="text-muted-foreground/50"
                   >
-                    无限制
+                    按量付费
                   </div>
                 </div>
               </TableCell>
@@ -304,7 +294,7 @@
           <div class="flex items-start justify-between gap-3">
             <div class="flex-1 min-w-0">
               <div class="flex items-center gap-2">
-                <span class="font-medium text-foreground truncate">{{ provider.display_name }}</span>
+                <span class="font-medium text-foreground truncate">{{ provider.name }}</span>
                 <Badge
                   :variant="provider.is_active ? 'success' : 'secondary'"
                   class="text-xs shrink-0"
@@ -312,7 +302,6 @@
                   {{ provider.is_active ? '活跃' : '停用' }}
                 </Badge>
               </div>
-              <span class="text-xs text-muted-foreground/70 font-mono">{{ provider.name }}</span>
             </div>
             <div
               class="flex items-center gap-0.5 shrink-0"
@@ -383,19 +372,16 @@
             </span>
           </div>
 
-          <!-- 第四行：配额/限流 -->
+          <!-- 第四行：配额 -->
           <div
-            v-if="provider.billing_type === 'monthly_quota' || rpmUsage(provider)"
+            v-if="provider.billing_type === 'monthly_quota'"
             class="flex items-center gap-3 text-xs text-muted-foreground"
           >
-            <span v-if="provider.billing_type === 'monthly_quota'">
+            <span>
               配额: <span
                 class="font-semibold"
                 :class="getQuotaUsedColorClass(provider)"
               >${{ (provider.monthly_used_usd ?? 0).toFixed(2) }}</span> / ${{ (provider.monthly_quota_usd ?? 0).toFixed(2) }}
-            </span>
-            <span v-if="rpmUsage(provider)">
-              RPM: {{ rpmUsage(provider) }}
             </span>
           </div>
         </div>
@@ -509,7 +495,7 @@ const filteredProviders = computed(() => {
   if (searchQuery.value.trim()) {
     const keywords = searchQuery.value.toLowerCase().split(/\s+/).filter(k => k.length > 0)
     result = result.filter(p => {
-      const searchableText = `${p.display_name} ${p.name}`.toLowerCase()
+      const searchableText = `${p.name}`.toLowerCase()
       return keywords.every(keyword => searchableText.includes(keyword))
     })
   }
@@ -525,7 +511,7 @@ const filteredProviders = computed(() => {
       return a.provider_priority - b.provider_priority
     }
     // 3. 按名称排序
-    return a.display_name.localeCompare(b.display_name)
+    return a.name.localeCompare(b.name)
   })
 })
 
@@ -586,7 +572,10 @@ function sortEndpoints(endpoints: any[]) {
 
 // 判断端点是否可用（有 key）
 function isEndpointAvailable(endpoint: any, _provider: ProviderWithEndpointsSummary): boolean {
-  // 检查该端点是否有活跃的密钥
+  // 检查端点是否启用，以及是否有活跃的密钥
+  if (endpoint.is_active === false) {
+    return false
+  }
   return (endpoint.active_keys ?? 0) > 0
 }
 
@@ -637,21 +626,6 @@ function getQuotaUsedColorClass(provider: ProviderWithEndpointsSummary): string 
   if (ratio >= 0.9) return 'text-red-600 dark:text-red-400'
   if (ratio >= 0.7) return 'text-amber-600 dark:text-amber-400'
   return 'text-foreground'
-}
-
-function rpmUsage(provider: ProviderWithEndpointsSummary): string | null {
-  const rpmLimit = provider.rpm_limit
-  const rpmUsed = provider.rpm_used ?? 0
-
-  if (rpmLimit === null || rpmLimit === undefined) {
-    return rpmUsed > 0 ? `${rpmUsed}` : null
-  }
-
-  if (rpmLimit === 0) {
-    return '已完全禁止'
-  }
-
-  return `${rpmUsed} / ${rpmLimit}`
 }
 
 // 使用复用的行点击逻辑
@@ -706,7 +680,7 @@ function handleProviderAdded() {
 async function handleDeleteProvider(provider: ProviderWithEndpointsSummary) {
   const confirmed = await confirmDanger(
     '删除提供商',
-    `确定要删除提供商 "${provider.display_name}" 吗？\n\n这将同时删除其所有端点、密钥和配置。此操作不可恢复！`
+    `确定要删除提供商 "${provider.name}" 吗？\n\n这将同时删除其所有端点、密钥和配置。此操作不可恢复！`
   )
 
   if (!confirmed) return

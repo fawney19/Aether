@@ -13,9 +13,7 @@ class ProviderAPIKeyBase(BaseModel):
 
     name: Optional[str] = Field(None, description="密钥名称/备注")
     api_key: str = Field(..., description="API密钥")
-    rate_limit: Optional[int] = Field(None, description="速率限制（每分钟请求数）")
-    daily_limit: Optional[int] = Field(None, description="每日请求限制")
-    monthly_limit: Optional[int] = Field(None, description="每月请求限制")
+    rpm_limit: Optional[int] = Field(None, description="RPM限制（每分钟请求数），NULL=自适应模式")
     priority: int = Field(0, description="优先级（越高越优先使用）")
     is_active: bool = Field(True, description="是否启用")
     expires_at: Optional[datetime] = Field(None, description="过期时间")
@@ -32,9 +30,7 @@ class ProviderAPIKeyUpdate(BaseModel):
 
     name: Optional[str] = None
     api_key: Optional[str] = None
-    rate_limit: Optional[int] = None
-    daily_limit: Optional[int] = None
-    monthly_limit: Optional[int] = None
+    rpm_limit: Optional[int] = None
     priority: Optional[int] = None
     is_active: Optional[bool] = None
     expires_at: Optional[datetime] = None
@@ -67,5 +63,3 @@ class ProviderAPIKeyStats(BaseModel):
     last_used_at: Optional[datetime]
     is_active: bool
     is_expired: bool
-    remaining_daily: Optional[int] = Field(None, description="今日剩余请求数")
-    remaining_monthly: Optional[int] = Field(None, description="本月剩余请求数")

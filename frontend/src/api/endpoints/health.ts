@@ -32,16 +32,21 @@ export async function getKeyHealth(keyId: string): Promise<HealthStatus> {
 
 /**
  * 恢复Key健康状态（一键恢复：重置健康度 + 关闭熔断器 + 取消自动禁用）
+ * @param keyId Key ID
+ * @param apiFormat 可选，指定 API 格式（如 CLAUDE、OPENAI），不指定则恢复所有格式
  */
-export async function recoverKeyHealth(keyId: string): Promise<{
+export async function recoverKeyHealth(keyId: string, apiFormat?: string): Promise<{
   message: string
   details: {
+    api_format?: string
     health_score: number
     circuit_breaker_open: boolean
     is_active: boolean
   }
 }> {
-  const response = await client.patch(`/api/admin/endpoints/health/keys/${keyId}`)
+  const response = await client.patch(`/api/admin/endpoints/health/keys/${keyId}`, null, {
+    params: apiFormat ? { api_format: apiFormat } : undefined
+  })
   return response.data
 }
 

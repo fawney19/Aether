@@ -96,8 +96,6 @@ class QuotaScheduler:
                         logger.info(f"Resetting quota for provider {provider.name}")
 
                         provider.monthly_used_usd = 0.0
-                        provider.rpm_used = 0  # 同时重置RPM计数
-                        provider.rpm_reset_at = None
                         provider.quota_last_reset_at = now
                         reset_count += 1
 
@@ -126,8 +124,6 @@ class QuotaScheduler:
                 provider = db.query(Provider).filter(Provider.id == provider_id).first()
                 if provider and provider.billing_type == ProviderBillingType.MONTHLY_QUOTA:
                     provider.monthly_used_usd = 0.0
-                    provider.rpm_used = 0
-                    provider.rpm_reset_at = None
                     provider.quota_last_reset_at = now
                     db.commit()
                     logger.info(f"Force reset quota for provider {provider.name}")
@@ -140,8 +136,6 @@ class QuotaScheduler:
                 )
                 for provider in providers:
                     provider.monthly_used_usd = 0.0
-                    provider.rpm_used = 0
-                    provider.rpm_reset_at = None
                     provider.quota_last_reset_at = now
                 db.commit()
                 logger.info(f"Force reset quotas for {len(providers)} providers")

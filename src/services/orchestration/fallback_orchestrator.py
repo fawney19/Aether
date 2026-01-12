@@ -44,7 +44,7 @@ from src.services.cache.aware_scheduler import (
     get_cache_aware_scheduler,
 )
 from src.services.provider.format import normalize_api_format
-from src.services.rate_limit.adaptive_concurrency import get_adaptive_manager
+from src.services.rate_limit.adaptive_rpm import get_adaptive_rpm_manager
 from src.services.rate_limit.concurrency_manager import get_concurrency_manager
 from src.services.request.candidate import RequestCandidateService
 from src.services.request.executor import ExecutionError, RequestExecutor
@@ -87,7 +87,7 @@ class FallbackOrchestrator:
         self.redis = redis_client
         self.cache_scheduler: Optional[CacheAwareScheduler] = None
         self.concurrency_manager: Any = None
-        self.adaptive_manager = get_adaptive_manager()  # 自适应并发管理器
+        self.adaptive_manager = get_adaptive_rpm_manager()  # 自适应 RPM 管理器
         self.request_executor: Optional[RequestExecutor] = None
 
         # 拆分后的组件（延迟初始化）
@@ -558,7 +558,8 @@ class FallbackOrchestrator:
         """尝试单个候选（含重试逻辑），返回执行结果"""
         provider = candidate.provider
         endpoint = candidate.endpoint
-        max_retries_for_candidate = int(endpoint.max_retries) if candidate.is_cached else 1
+        # 从 Provider 读取 max_retries（已从 Endpoint 迁移）
+        max_retries_for_candidate = int(provider.max_retries or 2) if candidate.is_cached else 1
         last_error: Optional[Exception] = None
 
         for retry_index in range(max_retries_for_candidate):
@@ -710,7 +711,7 @@ class FallbackOrchestrator:
                 upstream_status = getattr(last_error, "upstream_status", None)
                 upstream_response = getattr(last_error, "upstream_response", None)
 
-            # 如果响应为空或无效，使用异常的字符串表示
+            # 如果响应为空或无效，使用异常的字符串表示作为 upstream_response
             if (
                 not upstream_response
                 or not upstream_response.strip()
@@ -718,8 +719,17 @@ class FallbackOrchestrator:
             ):
                 upstream_response = str(last_error)
 
+        # 构建友好的错误消息（用于返回给客户端，不暴露内部信息）
+        # 如果 last_error 有 message 属性，优先使用（已经是友好提示）
+        # 否则使用通用提示
+        friendly_message = "服务暂时不可用，请稍后重试"
+        if last_error:
+            last_error_message = getattr(last_error, "message", None)
+            if last_error_message and isinstance(last_error_message, str):
+                friendly_message = last_error_message
+
         raise ProviderNotAvailableException(
-            f"所有Provider均不可用，已尝试{max_attempts}个组合",
+            friendly_message,
             request_metadata=request_metadata,
             upstream_status=upstream_status,
             upstream_response=upstream_response,

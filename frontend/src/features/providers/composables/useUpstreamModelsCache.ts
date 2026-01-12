@@ -3,6 +3,7 @@
  */
 import { ref } from 'vue'
 import { adminApi } from '@/api/admin'
+import { parseUpstreamModelError } from '@/utils/errorParser'
 import type { UpstreamModel } from '@/api/endpoints/types'
 
 // 扩展类型，包含可能的额外字段
@@ -63,10 +64,14 @@ export function useUpstreamModelsCache() {
           })
           return { models: response.data.models }
         } else {
-          return { models: [], error: response.data?.error || '获取上游模型失败' }
+          // 使用友好的错误解析
+          const rawError = response.data?.error || '获取上游模型失败'
+          return { models: [], error: parseUpstreamModelError(rawError) }
         }
       } catch (err: any) {
-        return { models: [], error: err.response?.data?.detail || '获取上游模型失败' }
+        // 使用友好的错误解析
+        const rawError = err.response?.data?.detail || err.message || '获取上游模型失败'
+        return { models: [], error: parseUpstreamModelError(rawError) }
       } finally {
         loadingMap.value.set(providerId, false)
         pendingRequests.delete(providerId)

@@ -424,8 +424,7 @@ export const MOCK_ADMIN_API_KEYS: AdminApiKeysResponse = {
 export const MOCK_PROVIDERS: ProviderWithEndpointsSummary[] = [
   {
     id: 'provider-001',
-    name: 'duck_coding_free',
-    display_name: 'DuckCodingFree',
+    name: 'DuckCodingFree',
     description: '',
     website: 'https://duckcoding.com',
     provider_priority: 1,
@@ -451,8 +450,7 @@ export const MOCK_PROVIDERS: ProviderWithEndpointsSummary[] = [
   },
   {
     id: 'provider-002',
-    name: 'open_claude_code',
-    display_name: 'OpenClaudeCode',
+    name: 'OpenClaudeCode',
     description: '',
     website: 'https://www.openclaudecode.cn',
     provider_priority: 2,
@@ -477,8 +475,7 @@ export const MOCK_PROVIDERS: ProviderWithEndpointsSummary[] = [
   },
   {
     id: 'provider-003',
-    name: '88_code',
-    display_name: '88Code',
+    name: '88Code',
     description: '',
     website: 'https://www.88code.org/',
     provider_priority: 3,
@@ -503,8 +500,7 @@ export const MOCK_PROVIDERS: ProviderWithEndpointsSummary[] = [
   },
   {
     id: 'provider-004',
-    name: 'ikun_code',
-    display_name: 'IKunCode',
+    name: 'IKunCode',
     description: '',
     website: 'https://api.ikuncode.cc',
     provider_priority: 4,
@@ -531,8 +527,7 @@ export const MOCK_PROVIDERS: ProviderWithEndpointsSummary[] = [
   },
   {
     id: 'provider-005',
-    name: 'duck_coding',
-    display_name: 'DuckCoding',
+    name: 'DuckCoding',
     description: '',
     website: 'https://duckcoding.com',
     provider_priority: 5,
@@ -561,8 +556,7 @@ export const MOCK_PROVIDERS: ProviderWithEndpointsSummary[] = [
   },
   {
     id: 'provider-006',
-    name: 'privnode',
-    display_name: 'Privnode',
+    name: 'Privnode',
     description: '',
     website: 'https://privnode.com',
     provider_priority: 6,
@@ -584,8 +578,7 @@ export const MOCK_PROVIDERS: ProviderWithEndpointsSummary[] = [
   },
   {
     id: 'provider-007',
-    name: 'undying_api',
-    display_name: 'UndyingAPI',
+    name: 'UndyingAPI',
     description: '',
     website: 'https://vip.undyingapi.com',
     provider_priority: 7,

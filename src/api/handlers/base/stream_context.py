@@ -61,11 +61,13 @@ class StreamContext:
 
     # 响应状态
     status_code: int = 200
-    error_message: Optional[str] = None
+    error_message: Optional[str] = None  # 客户端友好的错误消息
+    upstream_response: Optional[str] = None  # 原始 Provider 响应（用于请求链路追踪）
     has_completion: bool = False
 
     # 请求/响应数据
-    response_headers: Dict[str, str] = field(default_factory=dict)
+    response_headers: Dict[str, str] = field(default_factory=dict)  # 提供商响应头
+    client_response_headers: Dict[str, str] = field(default_factory=dict)  # 返回给客户端的响应头
     provider_request_headers: Dict[str, str] = field(default_factory=dict)
     provider_request_body: Optional[Dict[str, Any]] = None
 
@@ -97,9 +99,11 @@ class StreamContext:
         self.cached_tokens = 0
         self.cache_creation_tokens = 0
         self.error_message = None
+        self.upstream_response = None
         self.status_code = 200
         self.first_byte_time_ms = None
         self.response_headers = {}
+        self.client_response_headers = {}
         self.provider_request_headers = {}
         self.provider_request_body = None
         self.response_id = None
@@ -174,10 +178,24 @@ class StreamContext:
         ):
             self.cache_creation_tokens = cache_creation_tokens
 
-    def mark_failed(self, status_code: int, error_message: str) -> None:
-        """标记请求失败"""
+    def mark_failed(
+        self,
+        status_code: int,
+        error_message: str,
+        upstream_response: Optional[str] = None,
+    ) -> None:
+        """
+        标记请求失败
+
+        Args:
+            status_code: HTTP 状态码
+            error_message: 客户端友好的错误消息
+            upstream_response: 原始 Provider 响应（用于请求链路追踪）
+        """
         self.status_code = status_code
         self.error_message = error_message
+        if upstream_response:
+            self.upstream_response = upstream_response
 
     def record_first_byte_time(self, start_time: float) -> None:
         """

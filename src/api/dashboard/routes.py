@@ -155,7 +155,7 @@ async def get_daily_stats(
 class DashboardAdapter(ApiAdapter):
     """需要登录的仪表盘适配器基类。"""
 
-    mode = ApiMode.ADMIN
+    mode = ApiMode.USER  # 普通用户也可访问仪表盘
 
     def authorize(self, context):  # type: ignore[override]
         if not context.user:

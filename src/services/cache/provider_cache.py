@@ -27,24 +27,29 @@ class ProviderCacheService:
 
     @staticmethod
     async def get_provider_api_key_rate_multiplier(
-        db: Session, provider_api_key_id: str
+        db: Session, provider_api_key_id: str, api_format: Optional[str] = None
     ) -> Optional[float]:
         """
         获取 ProviderAPIKey 的 rate_multiplier（带缓存）
 
+        优先返回指定 API 格式的倍率，如果没有则返回默认倍率。
+
         Args:
             db: 数据库会话
             provider_api_key_id: ProviderAPIKey ID
+            api_format: API 格式（可选），如 "CLAUDE"、"OPENAI"
 
         Returns:
             rate_multiplier 或 None（如果找不到）
         """
-        cache_key = f"provider_api_key:rate_multiplier:{provider_api_key_id}"
+        # 缓存键包含 api_format
+        format_suffix = api_format.upper() if api_format else "default"
+        cache_key = f"provider_api_key:rate_multiplier:{provider_api_key_id}:{format_suffix}"
 
         # 1. 尝试从缓存获取
         cached_data = await CacheService.get(cache_key)
         if cached_data is not None:
-            logger.debug(f"ProviderAPIKey rate_multiplier 缓存命中: {provider_api_key_id[:8]}...")
+            logger.debug(f"ProviderAPIKey rate_multiplier 缓存命中: {provider_api_key_id[:8]}... format={format_suffix}")
             # 缓存的 "NOT_FOUND" 表示数据库中不存在
             if cached_data == "NOT_FOUND":
                 return None
@@ -52,18 +57,24 @@ class ProviderCacheService:
 
         # 2. 缓存未命中，查询数据库
         provider_key = (
-            db.query(ProviderAPIKey.rate_multiplier)
+            db.query(ProviderAPIKey.rate_multiplier, ProviderAPIKey.rate_multipliers)
             .filter(ProviderAPIKey.id == provider_api_key_id)
             .first()
         )
 
-        # 3. 写入缓存
+        # 3. 计算倍率并写入缓存
         if provider_key:
+            # 优先使用 rate_multipliers[api_format]，回退到 rate_multiplier
             rate_multiplier = provider_key.rate_multiplier or 1.0
+            if api_format and provider_key.rate_multipliers:
+                format_upper = api_format.upper()
+                if format_upper in provider_key.rate_multipliers:
+                    rate_multiplier = provider_key.rate_multipliers[format_upper]
+
             await CacheService.set(
                 cache_key, rate_multiplier, ttl_seconds=ProviderCacheService.CACHE_TTL
             )
-            logger.debug(f"ProviderAPIKey rate_multiplier 已缓存: {provider_api_key_id[:8]}...")
+            logger.debug(f"ProviderAPIKey rate_multiplier 已缓存: {provider_api_key_id[:8]}... format={format_suffix} value={rate_multiplier}")
             return rate_multiplier
         else:
             # 缓存负结果
@@ -125,6 +136,7 @@ class ProviderCacheService:
         db: Session,
         provider_api_key_id: Optional[str],
         provider_id: Optional[str],
+        api_format: Optional[str] = None,
     ) -> Tuple[float, bool]:
         """
         获取费率倍数和是否免费套餐（带缓存）
@@ -135,6 +147,7 @@ class ProviderCacheService:
             db: 数据库会话
             provider_api_key_id: ProviderAPIKey ID（可选）
             provider_id: Provider ID（可选）
+            api_format: API 格式（可选），用于获取按格式配置的倍率
 
         Returns:
             (rate_multiplier, is_free_tier) 元组
@@ -142,10 +155,10 @@ class ProviderCacheService:
         actual_rate_multiplier = 1.0
         is_free_tier = False
 
-        # 获取费率倍数
+        # 获取费率倍数（支持按 API 格式查询）
         if provider_api_key_id:
             rate_multiplier = await ProviderCacheService.get_provider_api_key_rate_multiplier(
-                db, provider_api_key_id
+                db, provider_api_key_id, api_format
             )
             if rate_multiplier is not None:
                 actual_rate_multiplier = rate_multiplier
@@ -160,8 +173,9 @@ class ProviderCacheService:
 
     @staticmethod
     async def invalidate_provider_api_key_cache(provider_api_key_id: str) -> None:
-        """清除 ProviderAPIKey 缓存"""
-        await CacheService.delete(f"provider_api_key:rate_multiplier:{provider_api_key_id}")
+        """清除 ProviderAPIKey 缓存（包括所有 API 格式的缓存）"""
+        # 使用模式匹配删除所有格式的缓存
+        await CacheService.delete_pattern(f"provider_api_key:rate_multiplier:{provider_api_key_id}:*")
         logger.debug(f"ProviderAPIKey 缓存已清除: {provider_api_key_id[:8]}...")
 
     @staticmethod

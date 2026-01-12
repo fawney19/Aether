@@ -1,5 +1,5 @@
 import client from '../client'
-import type { ProviderWithEndpointsSummary } from './types'
+import type { ProviderWithEndpointsSummary, ProxyConfig } from './types'
 
 /**
  * 获取 Providers 摘要（包含 Endpoints 统计）
@@ -23,7 +23,7 @@ export async function getProvider(providerId: string): Promise<ProviderWithEndpo
 export async function updateProvider(
   providerId: string,
   data: Partial<{
-    display_name: string
+    name: string
     description: string
     website: string
     provider_priority: number
@@ -33,6 +33,10 @@ export async function updateProvider(
     quota_last_reset_at: string  // 周期开始时间
     quota_expires_at: string
     rpm_limit: number | null
+    // 请求配置（从 Endpoint 迁移）
+    timeout: number
+    max_retries: number
+    proxy: ProxyConfig | null
     cache_ttl_minutes: number  // 0表示不支持缓存，>0表示支持缓存并设置TTL(分钟)
     max_probe_interval_minutes: number
     is_active: boolean
@@ -83,7 +87,6 @@ export interface TestModelResponse {
   provider?: {
     id: string
     name: string
-    display_name: string
   }
   model?: string
 }
@@ -92,4 +95,3 @@ export async function testModel(data: TestModelRequest): Promise<TestModelRespon
   const response = await client.post('/api/admin/provider-query/test-model', data)
   return response.data
 }
-

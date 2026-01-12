@@ -1023,7 +1023,6 @@ class ListAvailableProvidersAdapter(AuthenticatedApiAdapter):
                 {
                     "id": provider.id,
                     "name": provider.name,
-                    "display_name": provider.display_name,
                     "description": provider.description,
                     "provider_priority": provider.provider_priority,
                     "endpoints": endpoints_data,

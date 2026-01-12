@@ -102,7 +102,6 @@ async def get_public_models(
     - id: 模型唯一标识符
     - provider_id: 所属提供商 ID
     - provider_name: 提供商名称
-    - provider_display_name: 提供商显示名称
     - name: 模型统一名称（优先使用 GlobalModel 名称）
     - display_name: 模型显示名称
     - description: 模型描述信息
@@ -300,10 +299,20 @@ class PublicProvidersAdapter(PublicApiAdapter):
         providers = query.offset(self.skip).limit(self.limit).all()
         result = []
         for provider in providers:
-            models_count = db.query(Model).filter(Model.provider_id == provider.id).count()
+            models_count = (
+                db.query(Model)
+                .filter(Model.provider_id == provider.id, Model.global_model_id.isnot(None))
+                .count()
+            )
             active_models_count = (
                 db.query(Model)
-                .filter(and_(Model.provider_id == provider.id, Model.is_active.is_(True)))
+                .filter(
+                    and_(
+                        Model.provider_id == provider.id,
+                        Model.is_active.is_(True),
+                        Model.global_model_id.isnot(None),
+                    )
+                )
                 .count()
             )
             endpoints_count = len(provider.endpoints) if provider.endpoints else 0
@@ -313,7 +322,6 @@ class PublicProvidersAdapter(PublicApiAdapter):
             provider_data = PublicProviderResponse(
                 id=provider.id,
                 name=provider.name,
-                display_name=provider.display_name,
                 description=provider.description,
                 is_active=provider.is_active,
                 provider_priority=provider.provider_priority,
@@ -342,7 +350,13 @@ class PublicModelsAdapter(PublicApiAdapter):
             db.query(Model, Provider)
             .options(joinedload(Model.global_model))
             .join(Provider)
-            .filter(and_(Model.is_active.is_(True), Provider.is_active.is_(True)))
+            .filter(
+                and_(
+                    Model.is_active.is_(True),
+                    Provider.is_active.is_(True),
+                    Model.global_model_id.isnot(None),
+                )
+            )
         )
         if self.provider_id is not None:
             query = query.filter(Model.provider_id == self.provider_id)
@@ -357,7 +371,6 @@ class PublicModelsAdapter(PublicApiAdapter):
                 id=model.id,
                 provider_id=model.provider_id,
                 provider_name=provider.name,
-                provider_display_name=provider.display_name,
                 name=unified_name,
                 display_name=display_name,
                 description=global_model.config.get("description") if global_model and global_model.config else None,
@@ -386,7 +399,13 @@ class PublicStatsAdapter(PublicApiAdapter):
         active_models = (
             db.query(Model)
             .join(Provider)
-            .filter(and_(Model.is_active.is_(True), Provider.is_active.is_(True)))
+            .filter(
+                and_(
+                    Model.is_active.is_(True),
+                    Provider.is_active.is_(True),
+                    Model.global_model_id.isnot(None),
+                )
+            )
             .count()
         )
         formats = (
@@ -418,7 +437,13 @@ class PublicSearchModelsAdapter(PublicApiAdapter):
             .options(joinedload(Model.global_model))
             .join(Provider)
             .outerjoin(GlobalModel, Model.global_model_id == GlobalModel.id)
-            .filter(and_(Model.is_active.is_(True), Provider.is_active.is_(True)))
+            .filter(
+                and_(
+                    Model.is_active.is_(True),
+                    Provider.is_active.is_(True),
+                    Model.global_model_id.isnot(None),
+                )
+            )
         )
         search_filter = (
             Model.provider_model_name.ilike(f"%{self.query}%")
@@ -439,7 +464,6 @@ class PublicSearchModelsAdapter(PublicApiAdapter):
                 id=model.id,
                 provider_id=model.provider_id,
                 provider_name=provider.name,
-                provider_display_name=provider.display_name,
                 name=unified_name,
                 display_name=display_name,
                 description=global_model.config.get("description") if global_model and global_model.config else None,

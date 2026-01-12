@@ -22,7 +22,7 @@
         />
       </Transition>
 
-      <div class="relative flex min-h-full items-end justify-center p-4 text-center sm:items-center sm:p-0 pointer-events-none">
+      <div class="relative flex min-h-full items-end justify-center px-3 py-4 text-center sm:items-center sm:p-0 pointer-events-none">
         <!-- 对话框内容 -->
         <Transition
           enter-active-class="duration-300 ease-out"
@@ -34,7 +34,7 @@
         >
           <div
             v-if="isOpen"
-            class="relative transform rounded-lg bg-background text-left shadow-2xl transition-all sm:my-8 sm:w-full border border-border pointer-events-auto"
+            class="relative transform rounded-lg bg-background text-left shadow-2xl transition-all w-full sm:my-8 sm:w-full border border-border pointer-events-auto"
             :style="{ zIndex: contentZIndex }"
             :class="maxWidthClass"
             @click.stop

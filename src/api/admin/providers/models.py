@@ -338,27 +338,29 @@ async def import_models_from_upstream(
     """
     从上游提供商导入模型
 
-    从上游提供商导入模型列表。如果全局模型不存在，将自动创建。
+    从上游提供商导入模型列表。导入的模型作为独立的 ProviderModel 存储，
+    不会自动创建 GlobalModel。后续需要手动关联 GlobalModel 才能参与路由。
 
     **流程说明**:
-    1. 根据 model_ids 检查全局模型是否存在（按 name 匹配）
-    2. 如不存在，自动创建新的 GlobalModel（使用默认免费配置）
-    3. 创建 Model 关联到当前 Provider
-    4. 如模型已关联，则记录到成功列表中
+    1. 检查模型是否已存在于当前 Provider（按 provider_model_name 匹配）
+    2. 创建新的 ProviderModel（global_model_id = NULL）
+    3. 支持设置价格覆盖（tiered_pricing, price_per_request）
 
     **路径参数**:
     - `provider_id`: 提供商 ID
 
     **请求体字段**:
     - `model_ids`: 模型 ID 数组（必填，每个 ID 长度 1-100 字符）
+    - `tiered_pricing`: 可选的阶梯计费配置（应用于所有导入的模型）
+    - `price_per_request`: 可选的按次计费价格（应用于所有导入的模型）
 
     **返回字段**:
     - `success`: 成功导入的模型数组，每项包含：
       - `model_id`: 模型 ID
-      - `global_model_id`: 全局模型 ID
-      - `global_model_name`: 全局模型名称
       - `provider_model_id`: 提供商模型 ID
-      - `created_global_model`: 是否新创建了全局模型
+      - `global_model_id`: 全局模型 ID（如果已关联）
+      - `global_model_name`: 全局模型名称（如果已关联）
+      - `created_global_model`: 是否新创建了全局模型（始终为 false）
     - `errors`: 失败的模型数组，每项包含：
       - `model_id`: 模型 ID
       - `error`: 错误信息
@@ -638,7 +640,7 @@ class AdminBatchAssignModelsToProviderAdapter(AdminApiAdapter):
 
 @dataclass
 class AdminImportFromUpstreamAdapter(AdminApiAdapter):
-    """从上游提供商导入模型"""
+    """从上游提供商导入模型（不创建 GlobalModel，作为独立 ProviderModel）"""
 
     provider_id: str
     payload: ImportFromUpstreamRequest
@@ -652,16 +654,13 @@ class AdminImportFromUpstreamAdapter(AdminApiAdapter):
         success: list[ImportFromUpstreamSuccessItem] = []
         errors: list[ImportFromUpstreamErrorItem] = []
 
-        # 默认阶梯计费配置（免费）
-        default_tiered_pricing = {
-            "tiers": [
-                {
-                    "up_to": None,
-                    "input_price_per_1m": 0.0,
-                    "output_price_per_1m": 0.0,
-                }
-            ]
-        }
+        # 获取价格覆盖配置
+        tiered_pricing = None
+        price_per_request = None
+        if hasattr(self.payload, 'tiered_pricing') and self.payload.tiered_pricing:
+            tiered_pricing = self.payload.tiered_pricing
+        if hasattr(self.payload, 'price_per_request') and self.payload.price_per_request is not None:
+            price_per_request = self.payload.price_per_request
 
         for model_id in self.payload.model_ids:
             # 输入验证：检查 model_id 长度
@@ -678,56 +677,37 @@ class AdminImportFromUpstreamAdapter(AdminApiAdapter):
                 # 使用 savepoint 确保单个模型导入的原子性
                 savepoint = db.begin_nested()
                 try:
-                    # 1. 检查是否已存在同名的 GlobalModel
-                    global_model = (
-                        db.query(GlobalModel).filter(GlobalModel.name == model_id).first()
-                    )
-                    created_global_model = False
-
-                    if not global_model:
-                        # 2. 创建新的 GlobalModel
-                        global_model = GlobalModel(
-                            name=model_id,
-                            display_name=model_id,
-                            default_tiered_pricing=default_tiered_pricing,
-                            is_active=True,
-                        )
-                        db.add(global_model)
-                        db.flush()
-                        created_global_model = True
-                        logger.info(
-                            f"Created new GlobalModel: {model_id} during upstream import"
-                        )
-
-                    # 3. 检查是否已存在关联
+                    # 1. 检查是否已存在同名的 ProviderModel
                     existing = (
                         db.query(Model)
                         .filter(
                             Model.provider_id == self.provider_id,
-                            Model.global_model_id == global_model.id,
+                            Model.provider_model_name == model_id,
                         )
                         .first()
                     )
                     if existing:
-                        # 已存在关联，提交 savepoint 并记录成功
+                        # 已存在，提交 savepoint 并记录成功
                         savepoint.commit()
                         success.append(
                             ImportFromUpstreamSuccessItem(
                                 model_id=model_id,
-                                global_model_id=global_model.id,
-                                global_model_name=global_model.name,
+                                global_model_id=existing.global_model_id or "",
+                                global_model_name=existing.global_model.name if existing.global_model else "",
                                 provider_model_id=existing.id,
-                                created_global_model=created_global_model,
+                                created_global_model=False,
                             )
                         )
                         continue
 
-                    # 4. 创建新的 Model 记录
+                    # 2. 创建新的 Model 记录（不关联 GlobalModel）
                     new_model = Model(
                         provider_id=self.provider_id,
-                        global_model_id=global_model.id,
-                        provider_model_name=global_model.name,
+                        global_model_id=None,  # 独立模型，不关联 GlobalModel
+                        provider_model_name=model_id,
                         is_active=True,
+                        tiered_pricing=tiered_pricing,
+                        price_per_request=price_per_request,
                     )
                     db.add(new_model)
                     db.flush()
@@ -737,11 +717,14 @@ class AdminImportFromUpstreamAdapter(AdminApiAdapter):
                     success.append(
                         ImportFromUpstreamSuccessItem(
                             model_id=model_id,
-                            global_model_id=global_model.id,
-                            global_model_name=global_model.name,
+                            global_model_id="",  # 未关联
+                            global_model_name="",  # 未关联
                             provider_model_id=new_model.id,
-                            created_global_model=created_global_model,
+                            created_global_model=False,
                         )
+                    )
+                    logger.info(
+                        f"Created independent ProviderModel: {model_id} for provider {provider.name}"
                     )
                 except Exception as e:
                     # 回滚到 savepoint
@@ -753,11 +736,9 @@ class AdminImportFromUpstreamAdapter(AdminApiAdapter):
 
         db.commit()
         logger.info(
-            f"Imported {len(success)} models from upstream to provider {provider.name} by {context.user.username}"
+            f"Imported {len(success)} independent models to provider {provider.name} by {context.user.username}"
         )
 
-        # 清除 /v1/models 列表缓存
-        if success:
-            await invalidate_models_list_cache()
+        # 不需要清除 /v1/models 缓存，因为独立模型不参与路由
 
         return ImportFromUpstreamResponse(success=success, errors=errors)

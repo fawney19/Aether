@@ -171,7 +171,8 @@ class CandidateResolver:
                 )
                 candidate_record_map[(candidate_index, 0)] = record_id
             else:
-                max_retries_for_candidate = endpoint.max_retries if candidate.is_cached else 1
+                # max_retries 已从 Endpoint 迁移到 Provider（Endpoint 仍可能保留旧字段用于兼容）
+                max_retries_for_candidate = int(provider.max_retries or 2) if candidate.is_cached else 1
 
                 for retry_index in range(max_retries_for_candidate):
                     record_id = str(uuid.uuid4())
@@ -236,7 +237,7 @@ class CandidateResolver:
         total = 0
         for candidate in all_candidates:
             if not candidate.is_skipped:
-                endpoint = candidate.endpoint
-                max_retries = int(endpoint.max_retries) if candidate.is_cached else 1
+                provider = candidate.provider
+                max_retries = int(provider.max_retries or 2) if candidate.is_cached else 1
                 total += max_retries
         return total

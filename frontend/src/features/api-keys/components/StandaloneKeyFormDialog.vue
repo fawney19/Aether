@@ -186,7 +186,7 @@
                     @click.stop
                     @change="toggleSelection('allowed_providers', provider.id)"
                   >
-                  <span class="text-sm">{{ provider.display_name || provider.name }}</span>
+                  <span class="text-sm">{{ provider.name }}</span>
                 </div>
                 <div
                   v-if="providers.length === 0"

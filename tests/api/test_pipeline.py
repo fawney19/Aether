@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi import HTTPException
 
 from src.api.base.pipeline import ApiRequestPipeline
+from src.core.enums import UserRole
 
 
 class TestPipelineQuotaCalculation:
@@ -343,6 +344,8 @@ class TestPipelineAdminAuth:
         mock_user = MagicMock()
         mock_user.id = "admin-123"
         mock_user.is_active = True
+        mock_user.role = UserRole.ADMIN
+        mock_user.email = "admin@example.com"
 
         mock_request = MagicMock()
         mock_request.headers = {"authorization": "Bearer valid-token"}
@@ -357,9 +360,10 @@ class TestPipelineAdminAuth:
             new_callable=AsyncMock,
             return_value={"user_id": "admin-123"},
         ):
-            result = await pipeline._authenticate_admin(mock_request, mock_db)
+            user, management_token = await pipeline._authenticate_admin(mock_request, mock_db)
 
-        assert result == mock_user
+        assert user == mock_user
+        assert management_token is None
         assert mock_request.state.user_id == "admin-123"
 
     @pytest.mark.asyncio
@@ -368,6 +372,8 @@ class TestPipelineAdminAuth:
         mock_user = MagicMock()
         mock_user.id = "admin-123"
         mock_user.is_active = True
+        mock_user.role = UserRole.ADMIN
+        mock_user.email = "admin@example.com"
 
         mock_request = MagicMock()
         mock_request.headers = {"authorization": "bearer valid-token"}
@@ -382,10 +388,11 @@ class TestPipelineAdminAuth:
             new_callable=AsyncMock,
             return_value={"user_id": "admin-123"},
         ) as mock_verify:
-            result = await pipeline._authenticate_admin(mock_request, mock_db)
+            user, management_token = await pipeline._authenticate_admin(mock_request, mock_db)
 
         mock_verify.assert_awaited_once_with("valid-token", token_type="access")
-        assert result == mock_user
+        assert user == mock_user
+        assert management_token is None
 
 
 class TestPipelineUserAuth:
@@ -401,6 +408,7 @@ class TestPipelineUserAuth:
         mock_user = MagicMock()
         mock_user.id = "user-123"
         mock_user.is_active = True
+        mock_user.email = "user@example.com"
 
         mock_request = MagicMock()
         mock_request.headers = {"authorization": "bearer valid-token"}
@@ -415,7 +423,8 @@ class TestPipelineUserAuth:
             new_callable=AsyncMock,
             return_value={"user_id": "user-123"},
         ) as mock_verify:
-            result = await pipeline._authenticate_user(mock_request, mock_db)
+            user, management_token = await pipeline._authenticate_user(mock_request, mock_db)
 
         mock_verify.assert_awaited_once_with("valid-token", token_type="access")
-        assert result == mock_user
+        assert user == mock_user
+        assert management_token is None

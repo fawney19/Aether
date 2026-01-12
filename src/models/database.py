@@ -338,7 +338,8 @@ class Usage(Base):
     request_headers = Column(JSON, nullable=True)  # 客户端请求头
     request_body = Column(JSON, nullable=True)  # 请求体（7天内未压缩）
     provider_request_headers = Column(JSON, nullable=True)  # 向提供商发送的请求头
-    response_headers = Column(JSON, nullable=True)  # 响应头
+    response_headers = Column(JSON, nullable=True)  # 提供商响应头
+    client_response_headers = Column(JSON, nullable=True)  # 返回给客户端的响应头
     response_body = Column(JSON, nullable=True)  # 响应体（7天内未压缩）
 
     # 压缩存储字段（7天后自动压缩到这里）
@@ -513,8 +514,7 @@ class Provider(Base):
     __tablename__ = "providers"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
-    name = Column(String(100), unique=True, nullable=False, index=True)  # 提供商唯一标识
-    display_name = Column(String(100), nullable=False)  # 显示名称
+    name = Column(String(100), unique=True, nullable=False, index=True)  # 提供商名称（唯一）
     description = Column(Text, nullable=True)  # 提供商描述
     website = Column(String(500), nullable=True)  # 主站网站
 
@@ -537,11 +537,6 @@ class Provider(Base):
     quota_last_reset_at = Column(DateTime(timezone=True), nullable=True)  # 上次额度重置时间
     quota_expires_at = Column(DateTime(timezone=True), nullable=True)  # 月卡过期时间
 
-    # RPM限制：NULL=无限制，0=禁止请求
-    rpm_limit = Column(Integer, nullable=True)  # 每分钟请求数限制（NULL=无限制，0=禁止请求）
-    rpm_used = Column(Integer, default=0)  # 当前分钟已用请求数
-    rpm_reset_at = Column(DateTime(timezone=True), nullable=True)  # RPM重置时间
-
     # 提供商优先级 (数字越小越优先，用于提供商优先模式下的 Provider 排序)
     # 0-10: 急需消耗(如即将过期的月卡)
     # 11-50: 优先消耗(月卡)
@@ -554,6 +549,15 @@ class Provider(Base):
 
     # 限制
     concurrent_limit = Column(Integer, nullable=True)  # 并发请求限制
+
+    # 请求配置（从 Endpoint 迁移，作为全局默认值）
+    # 超时 300 秒对于 LLM API 是合理的默认值：
+    # - 大多数请求在 30 秒内完成
+    # - 复杂推理（如 Claude thinking）可能需要 60-120 秒
+    # - 300 秒足够覆盖极端场景（如超长上下文、复杂工具调用）
+    timeout = Column(Integer, default=300, nullable=True)  # 请求超时（秒）
+    max_retries = Column(Integer, default=2, nullable=True)  # 最大重试次数
+    proxy = Column(JSONB, nullable=True)  # 代理配置: {url, username, password, enabled}
 
     # 配置
     config = Column(JSON, nullable=True)  # 额外配置（如Azure deployment name等）
@@ -573,6 +577,9 @@ class Provider(Base):
     models = relationship("Model", back_populates="provider", cascade="all, delete-orphan")
     endpoints = relationship(
         "ProviderEndpoint", back_populates="provider", cascade="all, delete-orphan"
+    )
+    api_keys = relationship(
+        "ProviderAPIKey", back_populates="provider", cascade="all, delete-orphan"
     )
     api_key_mappings = relationship(
         "ApiKeyProviderMapping", back_populates="provider", cascade="all, delete-orphan"
@@ -598,12 +605,6 @@ class ProviderEndpoint(Base):
     headers = Column(JSON, nullable=True)  # 额外请求头
     timeout = Column(Integer, default=300)  # 超时（秒）
     max_retries = Column(Integer, default=2)  # 最大重试次数
-
-    # 限制
-    max_concurrent = Column(
-        Integer, nullable=True, default=None
-    )  # 该端点的最大并发数（NULL=不限制）
-    rate_limit = Column(Integer, nullable=True)  # 每分钟请求限制
 
     # 状态
     is_active = Column(Boolean, default=True, nullable=False)
@@ -632,9 +633,6 @@ class ProviderEndpoint(Base):
 
     # 关系
     provider = relationship("Provider", back_populates="endpoints")
-    api_keys = relationship(
-        "ProviderAPIKey", back_populates="endpoint", cascade="all, delete-orphan"
-    )
 
     # 唯一约束和索引在表定义后
     __table_args__ = (
@@ -734,9 +732,11 @@ class GlobalModel(Base):
 class Model(Base):
     """Provider 模型配置表 - Provider 如何使用某个 GlobalModel
 
-    设计原则 (方案 A):
-    - 每个 Model 必须关联一个 GlobalModel (global_model_id 不可为空)
-    - Model 表示 Provider 对某个 GlobalModel 的具体实现
+    设计原则:
+    - Model 表示 Provider 对某个模型的具体实现
+    - global_model_id 可为空：
+      - 为空时：模型尚未关联到 GlobalModel，不参与路由
+      - 不为空时：模型已关联 GlobalModel，参与路由
     - provider_model_name 是 Provider 侧的实际模型名称 (可能与 GlobalModel.name 不同)
     - 价格和能力配置可为空，为空时使用 GlobalModel 的默认值
     """
@@ -745,7 +745,8 @@ class Model(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
     provider_id = Column(String(36), ForeignKey("providers.id"), nullable=False)
-    global_model_id = Column(String(36), ForeignKey("global_models.id"), nullable=False, index=True)
+    # 可为空：NULL 表示未关联，不参与路由；非 NULL 表示已关联，参与路由
+    global_model_id = Column(String(36), ForeignKey("global_models.id"), nullable=True, index=True)
 
     # Provider 映射配置
     provider_model_name = Column(String(200), nullable=False)  # Provider 侧的主模型名称
@@ -983,16 +984,19 @@ class Model(Base):
 
 
 class ProviderAPIKey(Base):
-    """Provider API密钥表 - 归属于特定 ProviderEndpoint"""
+    """Provider API密钥表 - 直接归属于 Provider，支持多种 API 格式"""
 
     __tablename__ = "provider_api_keys"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
 
-    # 外键关系
-    endpoint_id = Column(
-        String(36), ForeignKey("provider_endpoints.id", ondelete="CASCADE"), nullable=False
+    # 外键关系 - 直接关联 Provider
+    provider_id = Column(
+        String(36), ForeignKey("providers.id", ondelete="CASCADE"), nullable=False, index=True
     )
+
+    # API 格式支持列表（核心字段）
+    api_formats = Column(JSON, nullable=False, default=list)  # ["CLAUDE", "CLAUDE_CLI"]
 
     # API密钥信息
     api_key = Column(String(500), nullable=False)  # API密钥（加密存储）
@@ -1002,7 +1006,10 @@ class ProviderAPIKey(Base):
     # 成本计算
     rate_multiplier = Column(
         Float, default=1.0, nullable=False
-    )  # 成本倍率（真实成本 = 表面成本 × 倍率）
+    )  # 默认成本倍率（真实成本 = 表面成本 × 倍率）
+    rate_multipliers = Column(
+        JSON, nullable=True
+    )  # 按 API 格式的成本倍率 {"CLAUDE": 1.0, "OPENAI": 0.8}
 
     # 优先级配置 (数字越小越优先)
     internal_priority = Column(
@@ -1012,14 +1019,11 @@ class ProviderAPIKey(Base):
         Integer, nullable=True
     )  # 全局 Key 优先级（用于全局 Key 优先模式，跨 Provider 的 Key 排序，NULL=未配置使用默认排序）
 
-    # 并发限制配置
-    # max_concurrent 决定并发控制模式：
-    #   - NULL: 自适应模式，系统自动学习并调整（使用 learned_max_concurrent）
+    # RPM 限制配置（自适应学习）
+    # rpm_limit 决定 RPM 控制模式：
+    #   - NULL: 自适应模式，系统自动学习并调整（使用 learned_rpm_limit）
     #   - 数字: 固定限制模式，使用用户指定的值
-    max_concurrent = Column(Integer, nullable=True, default=None)
-    rate_limit = Column(Integer, nullable=True)  # 速率限制（每分钟请求数）
-    daily_limit = Column(Integer, nullable=True)  # 每日请求限制
-    monthly_limit = Column(Integer, nullable=True)  # 每月请求限制
+    rpm_limit = Column(Integer, nullable=True, default=None)
 
     # 模型权限控制
     allowed_models = Column(JSON, nullable=True)  # 允许使用的模型列表（null = 支持所有模型）
@@ -1028,16 +1032,16 @@ class ProviderAPIKey(Base):
     capabilities = Column(JSON, nullable=True)  # Key 拥有的能力
     # 示例: {"cache_1h": true, "context_1m": true}
 
-    # 自适应并发调整（仅当 max_concurrent = NULL 时生效）
-    learned_max_concurrent = Column(
+    # 自适应 RPM 调整（仅当 rpm_limit = NULL 时生效）
+    learned_rpm_limit = Column(
         Integer, nullable=True
-    )  # 学习到的并发限制（自适应模式下的有效值）
+    )  # 学习到的 RPM 限制（自适应模式下的有效值）
     concurrent_429_count = Column(Integer, default=0, nullable=False)  # 因并发导致的429次数
     rpm_429_count = Column(Integer, default=0, nullable=False)  # 因RPM导致的429次数
     last_429_at = Column(DateTime(timezone=True), nullable=True)  # 最后429时间
     last_429_type = Column(String(50), nullable=True)  # 最后429类型: concurrent/rpm/unknown
-    last_concurrent_peak = Column(Integer, nullable=True)  # 触发429时的并发数
-    adjustment_history = Column(JSON, nullable=True)  # 并发调整历史
+    last_rpm_peak = Column(Integer, nullable=True)  # 触发429时的RPM峰值
+    adjustment_history = Column(JSON, nullable=True)  # RPM调整历史
     # 基于滑动窗口的利用率追踪
     utilization_samples = Column(
         JSON, nullable=True
@@ -1046,12 +1050,9 @@ class ProviderAPIKey(Base):
         DateTime(timezone=True), nullable=True
     )  # 上次探测性扩容时间
 
-    # 健康度追踪（基于滑动窗口）
-    health_score = Column(Float, default=1.0)  # 0.0-1.0（保留用于展示，实际熔断基于滑动窗口）
-    consecutive_failures = Column(Integer, default=0)
-    last_failure_at = Column(DateTime(timezone=True), nullable=True)  # 最后失败时间
-    # 滑动窗口：记录最近 N 次请求的结果 [{"ts": timestamp, "ok": true/false}, ...]
-    request_results_window = Column(JSON, nullable=True)
+    # 健康度追踪（按 API 格式存储）
+    # 结构: {"CLAUDE": {"health_score": 1.0, "consecutive_failures": 0, "last_failure_at": null, "request_results_window": []}, ...}
+    health_by_format = Column(JSON, nullable=True, default=dict)
 
     # 缓存与熔断配置
     cache_ttl_minutes = Column(
@@ -1061,14 +1062,9 @@ class ProviderAPIKey(Base):
         Integer, default=32, nullable=False
     )  # 最大探测间隔(分钟)，默认32分钟（硬上限）
 
-    # 熔断器字段（滑动窗口 + 半开状态模式）
-    circuit_breaker_open = Column(Boolean, default=False, nullable=False)  # 熔断器是否打开
-    circuit_breaker_open_at = Column(DateTime(timezone=True), nullable=True)  # 熔断器打开时间
-    next_probe_at = Column(DateTime(timezone=True), nullable=True)  # 下次探测时间
-    # 半开状态：允许少量请求通过验证服务是否恢复
-    half_open_until = Column(DateTime(timezone=True), nullable=True)  # 半开状态结束时间
-    half_open_successes = Column(Integer, default=0)  # 半开状态下的成功次数
-    half_open_failures = Column(Integer, default=0)  # 半开状态下的失败次数
+    # 熔断器状态（按 API 格式存储）
+    # 结构: {"CLAUDE": {"open": false, "open_at": null, "next_probe_at": null, "half_open_until": null, "half_open_successes": 0, "half_open_failures": 0}, ...}
+    circuit_breaker_by_format = Column(JSON, nullable=True, default=dict)
 
     # 使用统计
     request_count = Column(Integer, default=0)  # 请求次数
@@ -1095,7 +1091,7 @@ class ProviderAPIKey(Base):
     )
 
     # 关系
-    endpoint = relationship("ProviderEndpoint", back_populates="api_keys")
+    provider = relationship("Provider", back_populates="api_keys")
 
 
 class UserPreference(Base):

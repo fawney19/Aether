@@ -67,8 +67,6 @@ async def list_provider_endpoints(
     - `custom_path`: 自定义路径
     - `timeout`: 超时时间（秒）
     - `max_retries`: 最大重试次数
-    - `max_concurrent`: 最大并发数
-    - `rate_limit`: 速率限制
     - `is_active`: 是否活跃
     - `total_keys`: Key 总数
     - `active_keys`: 活跃 Key 数量
@@ -107,8 +105,6 @@ async def create_provider_endpoint(
     - `headers`: 自定义请求头（可选）
     - `timeout`: 超时时间（秒，默认 300）
     - `max_retries`: 最大重试次数（默认 2）
-    - `max_concurrent`: 最大并发数（可选）
-    - `rate_limit`: 速率限制（可选）
     - `config`: 额外配置（可选）
     - `proxy`: 代理配置（可选）
 
@@ -145,8 +141,6 @@ async def get_endpoint(
     - `custom_path`: 自定义路径
     - `timeout`: 超时时间（秒）
     - `max_retries`: 最大重试次数
-    - `max_concurrent`: 最大并发数
-    - `rate_limit`: 速率限制
     - `is_active`: 是否活跃
     - `total_keys`: Key 总数
     - `active_keys`: 活跃 Key 数量
@@ -178,8 +172,6 @@ async def update_endpoint(
     - `headers`: 自定义请求头
     - `timeout`: 超时时间（秒）
     - `max_retries`: 最大重试次数
-    - `max_concurrent`: 最大并发数
-    - `rate_limit`: 速率限制
     - `is_active`: 是否活跃
     - `config`: 额外配置
     - `proxy`: 代理配置（设置为 null 可清除代理）
@@ -203,15 +195,15 @@ async def delete_endpoint(
     """
     删除 Endpoint
 
-    删除指定的 Endpoint，同时级联删除所有关联的 API Keys。
-    此操作不可逆，请谨慎使用。
+    删除指定的 Endpoint，会影响该 Provider 在该 API 格式下的路由能力。
+    Key 不会被删除，但包含该 API 格式的 Key 将无法被调度使用（直到重新创建该格式的 Endpoint）。
 
     **路径参数**:
     - `endpoint_id`: Endpoint ID
 
     **返回字段**:
     - `message`: 操作结果消息
-    - `deleted_keys_count`: 同时删除的 Key 数量
+    - `affected_keys_count`: 受影响的 Key 数量（包含该 API 格式）
     """
     adapter = AdminDeleteProviderEndpointAdapter(endpoint_id=endpoint_id)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
@@ -241,39 +233,33 @@ class AdminListProviderEndpointsAdapter(AdminApiAdapter):
             .all()
         )
 
-        endpoint_ids = [ep.id for ep in endpoints]
-        total_keys_map = {}
-        active_keys_map = {}
-        if endpoint_ids:
-            total_rows = (
-                db.query(ProviderAPIKey.endpoint_id, func.count(ProviderAPIKey.id).label("total"))
-                .filter(ProviderAPIKey.endpoint_id.in_(endpoint_ids))
-                .group_by(ProviderAPIKey.endpoint_id)
-                .all()
-            )
-            total_keys_map = {row.endpoint_id: row.total for row in total_rows}
-
-            active_rows = (
-                db.query(ProviderAPIKey.endpoint_id, func.count(ProviderAPIKey.id).label("active"))
-                .filter(
-                    and_(
-                        ProviderAPIKey.endpoint_id.in_(endpoint_ids),
-                        ProviderAPIKey.is_active.is_(True),
-                    )
-                )
-                .group_by(ProviderAPIKey.endpoint_id)
-                .all()
-            )
-            active_keys_map = {row.endpoint_id: row.active for row in active_rows}
+        # Key 是 Provider 级别资源：按 key.api_formats 归类到各 Endpoint.api_format 下
+        keys = (
+            db.query(ProviderAPIKey.api_formats, ProviderAPIKey.is_active)
+            .filter(ProviderAPIKey.provider_id == self.provider_id)
+            .all()
+        )
+        total_keys_map: dict[str, int] = {}
+        active_keys_map: dict[str, int] = {}
+        for api_formats, is_active in keys:
+            for fmt in (api_formats or []):
+                total_keys_map[fmt] = total_keys_map.get(fmt, 0) + 1
+                if is_active:
+                    active_keys_map[fmt] = active_keys_map.get(fmt, 0) + 1
 
         result: List[ProviderEndpointResponse] = []
         for endpoint in endpoints:
+            endpoint_format = (
+                endpoint.api_format
+                if isinstance(endpoint.api_format, str)
+                else endpoint.api_format.value
+            )
             endpoint_dict = {
                 **endpoint.__dict__,
                 "provider_name": provider.name,
                 "api_format": endpoint.api_format,
-                "total_keys": total_keys_map.get(endpoint.id, 0),
-                "active_keys": active_keys_map.get(endpoint.id, 0),
+                "total_keys": total_keys_map.get(endpoint_format, 0),
+                "active_keys": active_keys_map.get(endpoint_format, 0),
                 "proxy": mask_proxy_password(endpoint.proxy),
             }
             endpoint_dict.pop("_sa_instance_state", None)
@@ -321,8 +307,6 @@ class AdminCreateProviderEndpointAdapter(AdminApiAdapter):
             headers=self.endpoint_data.headers,
             timeout=self.endpoint_data.timeout,
             max_retries=self.endpoint_data.max_retries,
-            max_concurrent=self.endpoint_data.max_concurrent,
-            rate_limit=self.endpoint_data.rate_limit,
             is_active=True,
             config=self.endpoint_data.config,
             proxy=self.endpoint_data.proxy.model_dump() if self.endpoint_data.proxy else None,
@@ -367,19 +351,23 @@ class AdminGetProviderEndpointAdapter(AdminApiAdapter):
             raise NotFoundException(f"Endpoint {self.endpoint_id} 不存在")
 
         endpoint_obj, provider = endpoint
-        total_keys = (
-            db.query(ProviderAPIKey).filter(ProviderAPIKey.endpoint_id == self.endpoint_id).count()
+        endpoint_format = (
+            endpoint_obj.api_format
+            if isinstance(endpoint_obj.api_format, str)
+            else endpoint_obj.api_format.value
         )
-        active_keys = (
-            db.query(ProviderAPIKey)
-            .filter(
-                and_(
-                    ProviderAPIKey.endpoint_id == self.endpoint_id,
-                    ProviderAPIKey.is_active.is_(True),
-                )
-            )
-            .count()
+        keys = (
+            db.query(ProviderAPIKey.api_formats, ProviderAPIKey.is_active)
+            .filter(ProviderAPIKey.provider_id == endpoint_obj.provider_id)
+            .all()
         )
+        total_keys = 0
+        active_keys = 0
+        for api_formats, is_active in keys:
+            if endpoint_format in (api_formats or []):
+                total_keys += 1
+                if is_active:
+                    active_keys += 1
 
         endpoint_dict = {
             k: v
@@ -431,19 +419,21 @@ class AdminUpdateProviderEndpointAdapter(AdminApiAdapter):
         provider = db.query(Provider).filter(Provider.id == endpoint.provider_id).first()
         logger.info(f"[OK] 更新 Endpoint: ID={self.endpoint_id}, Updates={list(update_data.keys())}")
 
-        total_keys = (
-            db.query(ProviderAPIKey).filter(ProviderAPIKey.endpoint_id == self.endpoint_id).count()
+        endpoint_format = (
+            endpoint.api_format if isinstance(endpoint.api_format, str) else endpoint.api_format.value
         )
-        active_keys = (
-            db.query(ProviderAPIKey)
-            .filter(
-                and_(
-                    ProviderAPIKey.endpoint_id == self.endpoint_id,
-                    ProviderAPIKey.is_active.is_(True),
-                )
-            )
-            .count()
+        keys = (
+            db.query(ProviderAPIKey.api_formats, ProviderAPIKey.is_active)
+            .filter(ProviderAPIKey.provider_id == endpoint.provider_id)
+            .all()
         )
+        total_keys = 0
+        active_keys = 0
+        for api_formats, is_active in keys:
+            if endpoint_format in (api_formats or []):
+                total_keys += 1
+                if is_active:
+                    active_keys += 1
 
         endpoint_dict = {
             k: v
@@ -472,12 +462,26 @@ class AdminDeleteProviderEndpointAdapter(AdminApiAdapter):
         if not endpoint:
             raise NotFoundException(f"Endpoint {self.endpoint_id} 不存在")
 
-        keys_count = (
-            db.query(ProviderAPIKey).filter(ProviderAPIKey.endpoint_id == self.endpoint_id).count()
+        endpoint_format = (
+            endpoint.api_format if isinstance(endpoint.api_format, str) else endpoint.api_format.value
+        )
+        keys = (
+            db.query(ProviderAPIKey.api_formats)
+            .filter(ProviderAPIKey.provider_id == endpoint.provider_id)
+            .all()
+        )
+        affected_keys_count = sum(
+            1 for (api_formats,) in keys if endpoint_format in (api_formats or [])
         )
         db.delete(endpoint)
         db.commit()
 
-        logger.warning(f"[DELETE] 删除 Endpoint: ID={self.endpoint_id}, 同时删除了 {keys_count} 个 Keys")
+        logger.warning(
+            f"[DELETE] 删除 Endpoint: ID={self.endpoint_id}, Format={endpoint_format}, "
+            f"AffectedKeys={affected_keys_count}"
+        )
 
-        return {"message": f"Endpoint {self.endpoint_id} 已删除", "deleted_keys_count": keys_count}
+        return {
+            "message": f"Endpoint {self.endpoint_id} 已删除",
+            "affected_keys_count": affected_keys_count,
+        }

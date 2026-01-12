@@ -351,9 +351,9 @@ class ChatAdapterBase(ApiAdapter):
         # 确定错误消息
         if isinstance(e, ProviderAuthException):
             error_message = (
-                f"提供商认证失败: {str(e)}"
+                "上游服务认证失败"
                 if result.metadata.provider != "unknown"
-                else "服务端错误: 无可用提供商"
+                else "服务暂时不可用"
             )
             result.error_message = error_message
 

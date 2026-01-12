@@ -398,8 +398,8 @@ class UserService:
     def get_user_available_models(db: Session, user: User) -> List[Model]:
         """获取用户可用的模型
 
-        新架构：通过 GlobalModel + Model 关联查询用户可用模型
-        逻辑：用户可用提供商 → Provider 的 Model 实现 → 关联的 GlobalModel
+        通过 GlobalModel + Model 关联查询用户可用模型
+        逻辑：用户可用提供商 -> Provider 的 Model 实现 -> 关联的 GlobalModel
         """
         # 获取用户可用的提供商
         if user.role == UserRole.ADMIN:

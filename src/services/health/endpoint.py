@@ -70,20 +70,21 @@ class EndpointHealthService:
             db.query(ProviderEndpoint).join(Provider).filter(Provider.is_active.is_(True)).all()
         )
 
-        # 收集所有 endpoint_ids
-        all_endpoint_ids = [ep.id for ep in endpoints]
+        # 收集所有 provider_ids
+        all_provider_ids = list(set(ep.provider_id for ep in endpoints))
 
-        # 批量查询所有密钥
+        # 批量查询所有密钥（通过 provider_id 关联）
         all_keys = (
             db.query(ProviderAPIKey)
-            .filter(ProviderAPIKey.endpoint_id.in_(all_endpoint_ids))
+            .filter(ProviderAPIKey.provider_id.in_(all_provider_ids))
             .all()
-        ) if all_endpoint_ids else []
+        ) if all_provider_ids else []
 
-        # 按 endpoint_id 分组密钥
-        keys_by_endpoint: Dict[str, List[ProviderAPIKey]] = defaultdict(list)
+        # 按 api_format 分组密钥（通过 api_formats 字段）
+        keys_by_format: Dict[str, List[ProviderAPIKey]] = defaultdict(list)
         for key in all_keys:
-            keys_by_endpoint[key.endpoint_id].append(key)
+            for fmt in (key.api_formats or []):
+                keys_by_format[fmt].append(key)
 
         # 按 API 格式聚合
         format_stats = defaultdict(
@@ -106,18 +107,36 @@ class EndpointHealthService:
             format_stats[api_format]["endpoint_ids"].append(ep.id)
             format_stats[api_format]["provider_ids"].add(ep.provider_id)
 
-            # 从预加载的密钥中获取
-            keys = keys_by_endpoint.get(ep.id, [])
-            format_stats[api_format]["total_keys"] += len(keys)
+        # 统计每个格式的密钥（直接从 keys_by_format 获取）
+        for api_format, keys in keys_by_format.items():
+            if api_format not in format_stats:
+                # 如果有 Key 但没有对应的 Endpoint，跳过
+                continue
 
-            # 统计活跃密钥和健康度
-            if ep.is_active:
-                for key in keys:
-                    format_stats[api_format]["key_ids"].append(key.id)
-                    if key.is_active and not key.circuit_breaker_open:
-                        format_stats[api_format]["active_keys"] += 1
-                        health_score = key.health_score if key.health_score is not None else 1.0
-                        format_stats[api_format]["health_scores"].append(health_score)
+            # 去重（同一个 Key 可能支持多个格式）
+            seen_key_ids = set()
+            unique_keys = []
+            for key in keys:
+                if key.id not in seen_key_ids:
+                    seen_key_ids.add(key.id)
+                    unique_keys.append(key)
+
+            format_stats[api_format]["total_keys"] = len(unique_keys)
+
+            for key in unique_keys:
+                format_stats[api_format]["key_ids"].append(key.id)
+                # 检查该格式的熔断器状态
+                circuit_by_format = key.circuit_breaker_by_format or {}
+                format_circuit = circuit_by_format.get(api_format, {})
+                is_circuit_open = format_circuit.get("open", False)
+
+                if key.is_active and not is_circuit_open:
+                    format_stats[api_format]["active_keys"] += 1
+                    # 获取该格式的健康度
+                    health_by_format = key.health_by_format or {}
+                    format_health = health_by_format.get(api_format, {})
+                    health_score = float(format_health.get("health_score") or 1.0)
+                    format_stats[api_format]["health_scores"].append(health_score)
 
         # 批量生成所有格式的时间线数据
         all_key_ids = []
@@ -372,7 +391,7 @@ class EndpointHealthService:
         segments: int = 100,
     ) -> Dict[str, Any]:
         """
-        从真实使用记录生成时间线数据（兼容旧接口，使用批量查询优化）
+        从真实使用记录生成时间线数据（使用批量查询优化）
 
         Args:
             db: 数据库会话
@@ -391,13 +410,34 @@ class EndpointHealthService:
                 "time_range_end": None,
             }
 
-        # 先查询该 API 格式下的所有密钥
-        key_ids = [
-            k.id
-            for k in db.query(ProviderAPIKey.id)
-            .filter(ProviderAPIKey.endpoint_id.in_(endpoint_ids))
+        # 基于 endpoint_ids 反推 provider_ids 与 api_format，再选出支持该格式的 keys
+        endpoint_rows = (
+            db.query(ProviderEndpoint.provider_id, ProviderEndpoint.api_format)
+            .filter(ProviderEndpoint.id.in_(endpoint_ids))
             .all()
-        ]
+        )
+
+        if not endpoint_rows:
+            return {
+                "timeline": ["unknown"] * 100,
+                "time_range_start": None,
+                "time_range_end": None,
+            }
+
+        provider_ids = {str(pid) for pid, _fmt in endpoint_rows}
+        # 同一调用中 endpoint_ids 来自同一 api_format（上层已按格式分组）
+        api_format = (
+            endpoint_rows[0][1].value
+            if hasattr(endpoint_rows[0][1], "value")
+            else str(endpoint_rows[0][1])
+        )
+
+        keys = (
+            db.query(ProviderAPIKey.id, ProviderAPIKey.api_formats)
+            .filter(ProviderAPIKey.provider_id.in_(provider_ids))
+            .all()
+        )
+        key_ids = [str(key_id) for key_id, formats in keys if api_format in (formats or [])]
 
         if not key_ids:
             return {

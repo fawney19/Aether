@@ -26,7 +26,7 @@ from src.models.database import Provider, ProviderAPIKey, ProviderEndpoint
 from src.services.cache.aware_scheduler import CacheAwareScheduler
 from src.services.health.monitor import health_monitor
 from src.services.provider.format import normalize_api_format
-from src.services.rate_limit.adaptive_concurrency import get_adaptive_manager
+from src.services.rate_limit.adaptive_rpm import get_adaptive_rpm_manager
 from src.services.rate_limit.detector import RateLimitType, detect_rate_limit_type
 
 
@@ -112,7 +112,7 @@ class ErrorClassifier:
             cache_scheduler: 缓存调度器（可选）
         """
         self.db = db
-        self.adaptive_manager = adaptive_manager or get_adaptive_manager()
+        self.adaptive_manager = adaptive_manager or get_adaptive_rpm_manager()
         self.cache_scheduler = cache_scheduler
 
     # 表示客户端错误的 error type（不区分大小写）
@@ -361,7 +361,7 @@ class ErrorClassifier:
         self,
         key: ProviderAPIKey,
         provider_name: str,
-        current_concurrent: Optional[int],
+        current_rpm: Optional[int],
         exception: ProviderRateLimitException,
         request_id: Optional[str] = None,
     ) -> str:
@@ -371,7 +371,7 @@ class ErrorClassifier:
         Args:
             key: API Key 对象
             provider_name: 提供商名称
-            current_concurrent: 当前并发数
+            current_rpm: 当前分钟内的请求数
             exception: 速率限制异常
             request_id: 请求 ID（用于日志）
 
@@ -388,27 +388,27 @@ class ErrorClassifier:
             rate_limit_info = detect_rate_limit_type(
                 headers=response_headers,
                 provider_name=provider_name,
-                current_concurrent=current_concurrent,
+                current_usage=current_rpm,
             )
 
             logger.info(f"  [{request_id}] 429错误分析: "
                 f"类型={rate_limit_info.limit_type}, "
                 f"retry_after={rate_limit_info.retry_after}s, "
-                f"当前并发={current_concurrent}")
+                f"当前RPM={current_rpm}")
 
             # 调用自适应管理器处理
             new_limit = self.adaptive_manager.handle_429_error(
                 db=self.db,
                 key=key,
                 rate_limit_info=rate_limit_info,
-                current_concurrent=current_concurrent,
+                current_rpm=current_rpm,
             )
 
             if rate_limit_info.limit_type == RateLimitType.CONCURRENT:
-                logger.warning(f"  [{request_id}] 自适应调整: " f"Key {key.id[:8]}... 并发限制 -> {new_limit}")
+                logger.warning(f"  [{request_id}] 并发限制触发（不调整RPM）")
                 return "concurrent"
             elif rate_limit_info.limit_type == RateLimitType.RPM:
-                logger.info(f"  [{request_id}] [RPM] RPM限制，需要切换Provider")
+                logger.warning(f"  [{request_id}] 自适应调整: Key {key.id[:8]}... RPM限制 -> {new_limit}")
                 return "rpm"
             else:
                 return "unknown"
@@ -439,18 +439,18 @@ class ErrorClassifier:
         # 提取可读的错误消息
         extracted_message = self._extract_error_message(error_response_text)
 
-        # 构建详细错误信息
+        # 构建详细错误信息（仅用于日志，不暴露给客户端）
         if extracted_message:
-            detailed_message = f"提供商 '{provider_name}' 返回错误 {status}: {extracted_message}"
+            detailed_message = f"上游服务返回错误 {status}: {extracted_message}"
         else:
-            detailed_message = f"提供商 '{provider_name}' 返回错误: {status}"
+            detailed_message = f"上游服务返回错误: {status}"
 
         if status == 401:
             return ProviderAuthException(provider_name=provider_name)
 
         if status == 429:
             return ProviderRateLimitException(
-                message=error_response_text or f"提供商 '{provider_name}' 速率限制",
+                message="请求过于频繁，请稍后重试",
                 provider_name=provider_name,
                 response_headers=dict(error.response.headers) if error.response else None,
                 retry_after=(
@@ -583,6 +583,7 @@ class ErrorClassifier:
                 health_monitor.record_failure(
                     db=self.db,
                     key_id=str(key.id),
+                    api_format=api_format_str,
                     error_type="ProviderAuthException",
                 )
             return extra_data
@@ -592,7 +593,7 @@ class ErrorClassifier:
             await self.handle_rate_limit(
                 key=key,
                 provider_name=provider_name,
-                current_concurrent=captured_key_concurrent,
+                current_rpm=captured_key_concurrent,
                 exception=converted_error,
                 request_id=request_id,
             )
@@ -620,6 +621,7 @@ class ErrorClassifier:
             health_monitor.record_failure(
                 db=self.db,
                 key_id=str(key.id),
+                api_format=api_format_str,
                 error_type=type(converted_error).__name__,
             )
 
@@ -675,7 +677,7 @@ class ErrorClassifier:
             await self.handle_rate_limit(
                 key=key,
                 provider_name=provider_name,
-                current_concurrent=captured_key_concurrent,
+                current_rpm=captured_key_concurrent,
                 exception=error,
                 request_id=request_id,
             )
@@ -702,5 +704,6 @@ class ErrorClassifier:
             health_monitor.record_failure(
                 db=self.db,
                 key_id=str(key.id),
+                api_format=api_format_str,
                 error_type=type(error).__name__,
             )

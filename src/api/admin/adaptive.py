@@ -1,12 +1,12 @@
 """
-自适应并发管理 API 端点
+自适应 RPM 管理 API 端点
 
 设计原则：
-- 自适应模式由 max_concurrent 字段决定：
-  - max_concurrent = NULL：启用自适应模式，系统自动学习并调整并发限制
-  - max_concurrent = 数字：固定限制模式，使用用户指定的并发限制
-- learned_max_concurrent：自适应模式下学习到的并发限制值
-- adaptive_mode 是计算字段，基于 max_concurrent 是否为 NULL
+- 自适应模式由 rpm_limit 字段决定：
+  - rpm_limit = NULL：启用自适应模式，系统自动学习并调整 RPM 限制
+  - rpm_limit = 数字：固定限制模式，使用用户指定的 RPM 限制
+- learned_rpm_limit：自适应模式下学习到的 RPM 限制值
+- adaptive_mode 是计算字段，基于 rpm_limit 是否为 NULL
 """
 
 from dataclasses import dataclass
@@ -18,12 +18,13 @@ from sqlalchemy.orm import Session
 
 from src.api.base.admin_adapter import AdminApiAdapter
 from src.api.base.pipeline import ApiRequestPipeline
+from src.config.constants import RPMDefaults
 from src.core.exceptions import InvalidRequestException, translate_pydantic_error
 from src.database import get_db
 from src.models.database import ProviderAPIKey
-from src.services.rate_limit.adaptive_concurrency import get_adaptive_manager
+from src.services.rate_limit.adaptive_rpm import get_adaptive_rpm_manager
 
-router = APIRouter(prefix="/api/admin/adaptive", tags=["Adaptive Concurrency"])
+router = APIRouter(prefix="/api/admin/adaptive", tags=["Adaptive RPM"])
 pipeline = ApiRequestPipeline()
 
 
@@ -35,19 +36,19 @@ class EnableAdaptiveRequest(BaseModel):
 
     enabled: bool = Field(..., description="是否启用自适应模式（true=自适应，false=固定限制）")
     fixed_limit: Optional[int] = Field(
-        None, ge=1, le=100, description="固定并发限制（仅当 enabled=false 时生效）"
+        None, ge=1, le=100, description="固定 RPM 限制（仅当 enabled=false 时生效，1-100）"
     )
 
 
 class AdaptiveStatsResponse(BaseModel):
     """自适应统计响应"""
 
-    adaptive_mode: bool = Field(..., description="是否为自适应模式（max_concurrent=NULL）")
-    max_concurrent: Optional[int] = Field(None, description="用户配置的固定限制（NULL=自适应）")
+    adaptive_mode: bool = Field(..., description="是否为自适应模式（rpm_limit=NULL）")
+    rpm_limit: Optional[int] = Field(None, description="用户配置的固定限制（NULL=自适应）")
     effective_limit: Optional[int] = Field(
         None, description="当前有效限制（自适应使用学习值，固定使用配置值）"
     )
-    learned_limit: Optional[int] = Field(None, description="学习到的并发限制")
+    learned_limit: Optional[int] = Field(None, description="学习到的 RPM 限制")
     concurrent_429_count: int
     rpm_429_count: int
     last_429_at: Optional[str]
@@ -61,11 +62,12 @@ class KeyListItem(BaseModel):
 
     id: str
     name: Optional[str]
-    endpoint_id: str
-    is_adaptive: bool = Field(..., description="是否为自适应模式（max_concurrent=NULL）")
-    max_concurrent: Optional[int] = Field(None, description="固定并发限制（NULL=自适应）")
+    provider_id: str
+    api_formats: List[str] = Field(default_factory=list)
+    is_adaptive: bool = Field(..., description="是否为自适应模式（rpm_limit=NULL）")
+    rpm_limit: Optional[int] = Field(None, description="固定 RPM 限制（NULL=自适应）")
     effective_limit: Optional[int] = Field(None, description="当前有效限制")
-    learned_max_concurrent: Optional[int] = Field(None, description="学习到的并发限制")
+    learned_rpm_limit: Optional[int] = Field(None, description="学习到的 RPM 限制")
     concurrent_429_count: int
     rpm_429_count: int
 
@@ -80,22 +82,22 @@ class KeyListItem(BaseModel):
 )
 async def list_adaptive_keys(
     request: Request,
-    endpoint_id: Optional[str] = Query(None, description="按 Endpoint 过滤"),
+    provider_id: Optional[str] = Query(None, description="按 Provider 过滤"),
     db: Session = Depends(get_db),
 ):
     """
     获取所有启用自适应模式的Key列表
 
     可选参数：
-    - endpoint_id: 按 Endpoint 过滤
+    - provider_id: 按 Provider 过滤
     """
-    adapter = ListAdaptiveKeysAdapter(endpoint_id=endpoint_id)
+    adapter = ListAdaptiveKeysAdapter(provider_id=provider_id)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
 @router.patch(
     "/keys/{key_id}/mode",
-    summary="Toggle key's concurrency control mode",
+    summary="Toggle key's RPM control mode",
 )
 async def toggle_adaptive_mode(
     key_id: str,
@@ -103,10 +105,10 @@ async def toggle_adaptive_mode(
     db: Session = Depends(get_db),
 ):
     """
-    Toggle the concurrency control mode for a specific key
+    Toggle the RPM control mode for a specific key
 
     Parameters:
-    - enabled: true=adaptive mode (max_concurrent=NULL), false=fixed limit mode
+    - enabled: true=adaptive mode (rpm_limit=NULL), false=fixed limit mode
     - fixed_limit: fixed limit value (required when enabled=false)
     """
     adapter = ToggleAdaptiveModeAdapter(key_id=key_id)
@@ -124,7 +126,7 @@ async def get_adaptive_stats(
     db: Session = Depends(get_db),
 ):
     """
-    获取指定Key的自适应并发统计信息
+    获取指定Key的自适应 RPM 统计信息
 
     包括：
     - 当前配置
@@ -149,12 +151,12 @@ async def reset_adaptive_learning(
     Reset the adaptive learning state for a specific key
 
     Clears:
-    - Learned concurrency limit (learned_max_concurrent)
+    - Learned RPM limit (learned_rpm_limit)
     - 429 error counts
     - Adjustment history
 
     Does not change:
-    - max_concurrent config (determines adaptive mode)
+    - rpm_limit config (determines adaptive mode)
     """
     adapter = ResetAdaptiveLearningAdapter(key_id=key_id)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
@@ -162,40 +164,40 @@ async def reset_adaptive_learning(
 
 @router.patch(
     "/keys/{key_id}/limit",
-    summary="Set key to fixed concurrency limit mode",
+    summary="Set key to fixed RPM limit mode",
 )
-async def set_concurrent_limit(
+async def set_rpm_limit(
     key_id: str,
     request: Request,
-    limit: int = Query(..., ge=1, le=100, description="Concurrency limit value"),
+    limit: int = Query(..., ge=1, le=100, description="RPM limit value (1-100)"),
     db: Session = Depends(get_db),
 ):
     """
-    Set key to fixed concurrency limit mode
+    Set key to fixed RPM limit mode
 
     Note:
     - After setting this value, key switches to fixed limit mode and won't auto-adjust
     - To restore adaptive mode, use PATCH /keys/{key_id}/mode
     """
-    adapter = SetConcurrentLimitAdapter(key_id=key_id, limit=limit)
+    adapter = SetRPMLimitAdapter(key_id=key_id, limit=limit)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
 @router.get(
     "/summary",
-    summary="获取自适应并发的全局统计",
+    summary="获取自适应 RPM 的全局统计",
 )
 async def get_adaptive_summary(
     request: Request,
     db: Session = Depends(get_db),
 ):
     """
-    获取自适应并发的全局统计摘要
+    获取自适应 RPM 的全局统计摘要
 
     包括：
     - 启用自适应模式的Key数量
     - 总429错误数
-    - 并发限制调整次数
+    - RPM 限制调整次数
     """
     adapter = AdaptiveSummaryAdapter()
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
@@ -206,26 +208,29 @@ async def get_adaptive_summary(
 
 @dataclass
 class ListAdaptiveKeysAdapter(AdminApiAdapter):
-    endpoint_id: Optional[str] = None
+    provider_id: Optional[str] = None
 
     async def handle(self, context):  # type: ignore[override]
-        # 自适应模式：max_concurrent = NULL
-        query = context.db.query(ProviderAPIKey).filter(ProviderAPIKey.max_concurrent.is_(None))
-        if self.endpoint_id:
-            query = query.filter(ProviderAPIKey.endpoint_id == self.endpoint_id)
+        # 自适应模式：rpm_limit = NULL
+        query = context.db.query(ProviderAPIKey).filter(ProviderAPIKey.rpm_limit.is_(None))
+        if self.provider_id:
+            query = query.filter(ProviderAPIKey.provider_id == self.provider_id)
 
         keys = query.all()
         return [
             KeyListItem(
                 id=key.id,
                 name=key.name,
-                endpoint_id=key.endpoint_id,
-                is_adaptive=key.max_concurrent is None,
-                max_concurrent=key.max_concurrent,
+                provider_id=key.provider_id,
+                api_formats=key.api_formats or [],
+                is_adaptive=key.rpm_limit is None,
+                rpm_limit=key.rpm_limit,
                 effective_limit=(
-                    key.learned_max_concurrent if key.max_concurrent is None else key.max_concurrent
+                    (key.learned_rpm_limit if key.learned_rpm_limit is not None else RPMDefaults.INITIAL_LIMIT)
+                    if key.rpm_limit is None
+                    else key.rpm_limit
                 ),
-                learned_max_concurrent=key.learned_max_concurrent,
+                learned_rpm_limit=key.learned_rpm_limit,
                 concurrent_429_count=key.concurrent_429_count or 0,
                 rpm_429_count=key.rpm_429_count or 0,
             )
@@ -252,28 +257,32 @@ class ToggleAdaptiveModeAdapter(AdminApiAdapter):
             raise InvalidRequestException("请求数据验证失败")
 
         if body.enabled:
-            # 启用自适应模式：将 max_concurrent 设为 NULL
-            key.max_concurrent = None
-            message = "已切换为自适应模式，系统将自动学习并调整并发限制"
+            # 启用自适应模式：将 rpm_limit 设为 NULL
+            key.rpm_limit = None
+            message = "已切换为自适应模式，系统将自动学习并调整 RPM 限制"
         else:
             # 禁用自适应模式：设置固定限制
             if body.fixed_limit is None:
                 raise HTTPException(
                     status_code=400, detail="禁用自适应模式时必须提供 fixed_limit 参数"
                 )
-            key.max_concurrent = body.fixed_limit
-            message = f"已切换为固定限制模式，并发限制设为 {body.fixed_limit}"
+            key.rpm_limit = body.fixed_limit
+            message = f"已切换为固定限制模式，RPM 限制设为 {body.fixed_limit}"
 
         context.db.commit()
         context.db.refresh(key)
 
-        is_adaptive = key.max_concurrent is None
+        is_adaptive = key.rpm_limit is None
         return {
             "message": message,
             "key_id": key.id,
             "is_adaptive": is_adaptive,
-            "max_concurrent": key.max_concurrent,
-            "effective_limit": key.learned_max_concurrent if is_adaptive else key.max_concurrent,
+            "rpm_limit": key.rpm_limit,
+            "effective_limit": (
+                (key.learned_rpm_limit if key.learned_rpm_limit is not None else RPMDefaults.INITIAL_LIMIT)
+                if is_adaptive
+                else key.rpm_limit
+            ),
         }
 
 
@@ -286,13 +295,13 @@ class GetAdaptiveStatsAdapter(AdminApiAdapter):
         if not key:
             raise HTTPException(status_code=404, detail="Key not found")
 
-        adaptive_manager = get_adaptive_manager()
+        adaptive_manager = get_adaptive_rpm_manager()
         stats = adaptive_manager.get_adjustment_stats(key)
 
         # 转换字段名以匹配响应模型
         return AdaptiveStatsResponse(
             adaptive_mode=stats["adaptive_mode"],
-            max_concurrent=stats["max_concurrent"],
+            rpm_limit=stats["rpm_limit"],
             effective_limit=stats["effective_limit"],
             learned_limit=stats["learned_limit"],
             concurrent_429_count=stats["concurrent_429_count"],
@@ -313,13 +322,13 @@ class ResetAdaptiveLearningAdapter(AdminApiAdapter):
         if not key:
             raise HTTPException(status_code=404, detail="Key not found")
 
-        adaptive_manager = get_adaptive_manager()
+        adaptive_manager = get_adaptive_rpm_manager()
         adaptive_manager.reset_learning(context.db, key)
         return {"message": "学习状态已重置", "key_id": key.id}
 
 
 @dataclass
-class SetConcurrentLimitAdapter(AdminApiAdapter):
+class SetRPMLimitAdapter(AdminApiAdapter):
     key_id: str
     limit: int
 
@@ -328,25 +337,25 @@ class SetConcurrentLimitAdapter(AdminApiAdapter):
         if not key:
             raise HTTPException(status_code=404, detail="Key not found")
 
-        was_adaptive = key.max_concurrent is None
-        key.max_concurrent = self.limit
+        was_adaptive = key.rpm_limit is None
+        key.rpm_limit = self.limit
         context.db.commit()
         context.db.refresh(key)
 
         return {
-            "message": f"已设置为固定限制模式，并发限制为 {self.limit}",
+            "message": f"已设置为固定限制模式，RPM 限制为 {self.limit}",
             "key_id": key.id,
             "is_adaptive": False,
-            "max_concurrent": key.max_concurrent,
+            "rpm_limit": key.rpm_limit,
             "previous_mode": "adaptive" if was_adaptive else "fixed",
         }
 
 
 class AdaptiveSummaryAdapter(AdminApiAdapter):
     async def handle(self, context):  # type: ignore[override]
-        # 自适应模式：max_concurrent = NULL
+        # 自适应模式：rpm_limit = NULL
         adaptive_keys = (
-            context.db.query(ProviderAPIKey).filter(ProviderAPIKey.max_concurrent.is_(None)).all()
+            context.db.query(ProviderAPIKey).filter(ProviderAPIKey.rpm_limit.is_(None)).all()
         )
 
         total_keys = len(adaptive_keys)

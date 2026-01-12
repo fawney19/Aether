@@ -14,7 +14,7 @@ export async function toggleAdaptiveMode(
   message: string
   key_id: string
   is_adaptive: boolean
-  max_concurrent: number | null
+  rpm_limit: number | null
   effective_limit: number | null
 }> {
   const response = await client.patch(`/api/admin/adaptive/keys/${keyId}/mode`, data)
@@ -22,16 +22,16 @@ export async function toggleAdaptiveMode(
 }
 
 /**
- * 设置 Key 的固定并发限制
+ * 设置 Key 的固定 RPM 限制
  */
-export async function setConcurrentLimit(
+export async function setRpmLimit(
   keyId: string,
   limit: number
 ): Promise<{
   message: string
   key_id: string
   is_adaptive: boolean
-  max_concurrent: number
+  rpm_limit: number
   previous_mode: string
 }> {
   const response = await client.patch(`/api/admin/adaptive/keys/${keyId}/limit`, null, {

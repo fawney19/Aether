@@ -511,7 +511,7 @@
               端点: {{ importPreview.providers?.reduce((sum: number, p: any) => sum + (p.endpoints?.length || 0), 0) }} 个
             </li>
             <li>
-              API Keys: {{ importPreview.providers?.reduce((sum: number, p: any) => sum + p.endpoints?.reduce((s: number, e: any) => s + (e.keys?.length || 0), 0), 0) }} 个
+              API Keys: {{ importPreview.providers?.reduce((sum: number, p: any) => sum + (p.api_keys?.length || 0), 0) }} 个
             </li>
           </ul>
         </div>
@@ -1144,7 +1144,7 @@ function handleConfigFileSelect(event: Event) {
       const data = JSON.parse(content) as ConfigExportData
 
       // 验证版本
-      if (data.version !== '1.0') {
+      if (data.version !== '2.0') {
         error(`不支持的配置版本: ${data.version}`)
         return
       }

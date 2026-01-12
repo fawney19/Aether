@@ -67,7 +67,6 @@ export interface GlobalModelExport {
 
 export interface ProviderExport {
   name: string
-  display_name: string
   description?: string | null
   website?: string | null
   billing_type?: string | null
@@ -76,10 +75,13 @@ export interface ProviderExport {
   rpm_limit?: number | null
   provider_priority?: number
   is_active: boolean
-  rate_limit?: number | null
   concurrent_limit?: number | null
+  timeout?: number | null
+  max_retries?: number | null
+  proxy?: any
   config?: any
   endpoints: EndpointExport[]
+  api_keys: ProviderKeyExport[]
   models: ModelExport[]
 }
 
@@ -89,27 +91,26 @@ export interface EndpointExport {
   headers?: any
   timeout?: number
   max_retries?: number
-  max_concurrent?: number | null
-  rate_limit?: number | null
   is_active: boolean
   custom_path?: string | null
   config?: any
-  keys: KeyExport[]
+  proxy?: any
 }
 
-export interface KeyExport {
+export interface ProviderKeyExport {
   api_key: string
   name?: string | null
   note?: string | null
+  api_formats: string[]
   rate_multiplier?: number
+  rate_multipliers?: Record<string, number> | null
   internal_priority?: number
   global_priority?: number | null
-  max_concurrent?: number | null
-  rate_limit?: number | null
-  daily_limit?: number | null
-  monthly_limit?: number | null
-  allowed_models?: string[] | null
+  rpm_limit?: number | null
+  allowed_models?: any
   capabilities?: any
+  cache_ttl_minutes?: number
+  max_probe_interval_minutes?: number
   is_active: boolean
 }
 

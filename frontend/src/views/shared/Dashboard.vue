@@ -16,7 +16,8 @@
 
         <!-- 主要统计卡片 -->
         <div class="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
-          <template v-if="loading && stats.length === 0">
+          <!-- 加载中骨架屏 -->
+          <template v-if="loading">
             <Card
               v-for="i in 4"
               :key="'skeleton-' + i"
@@ -27,62 +28,98 @@
               <Skeleton class="h-4 w-16" />
             </Card>
           </template>
-          <Card
-            v-for="(stat, index) in stats"
-            v-else
-            :key="stat.name"
-            class="relative overflow-hidden p-3 sm:p-5"
-            :class="statCardBorders[index % statCardBorders.length]"
-          >
-            <div
-              class="pointer-events-none absolute -right-4 -top-6 h-28 w-28 rounded-full blur-3xl opacity-40"
-              :class="statCardGlows[index % statCardGlows.length]"
-            />
-            <!-- 图标固定在右上角 -->
-            <div
-              class="absolute top-3 right-3 sm:top-5 sm:right-5 rounded-xl sm:rounded-2xl border border-border bg-card/50 p-2 sm:p-3 shadow-inner backdrop-blur-sm"
-              :class="getStatIconColor(index)"
+          <!-- 有数据时显示统计卡片 -->
+          <template v-else-if="stats.length > 0">
+            <Card
+              v-for="(stat, index) in stats"
+              :key="stat.name"
+              class="relative overflow-hidden p-3 sm:p-5"
+              :class="statCardBorders[index % statCardBorders.length]"
             >
-              <component
-                :is="stat.icon"
-                class="h-4 w-4 sm:h-5 sm:w-5"
-              />
-            </div>
-            <!-- 内容区域 -->
-            <div>
-              <p class="text-[9px] sm:text-[11px] font-semibold uppercase tracking-[0.2em] sm:tracking-[0.4em] text-muted-foreground pr-10 sm:pr-14">
-                {{ stat.name }}
-              </p>
-              <p class="mt-2 sm:mt-4 text-xl sm:text-3xl font-semibold text-foreground">
-                {{ stat.value }}
-              </p>
-              <p
-                v-if="stat.subValue"
-                class="mt-0.5 sm:mt-1 text-[10px] sm:text-sm text-muted-foreground"
-              >
-                {{ stat.subValue }}
-              </p>
               <div
-                v-if="stat.change || stat.extraBadge"
-                class="mt-1.5 sm:mt-2 flex items-center gap-1 sm:gap-1.5 flex-wrap"
+                class="pointer-events-none absolute -right-4 -top-6 h-28 w-28 rounded-full blur-3xl opacity-40"
+                :class="statCardGlows[index % statCardGlows.length]"
+              />
+              <!-- 图标固定在右上角 -->
+              <div
+                class="absolute top-3 right-3 sm:top-5 sm:right-5 rounded-xl sm:rounded-2xl border border-border bg-card/50 p-2 sm:p-3 shadow-inner backdrop-blur-sm"
+                :class="getStatIconColor(index)"
               >
-                <Badge
-                  v-if="stat.change"
-                  variant="secondary"
-                  class="text-[9px] sm:text-xs"
-                >
-                  {{ stat.change }}
-                </Badge>
-                <Badge
-                  v-if="stat.extraBadge"
-                  variant="secondary"
-                  class="text-[9px] sm:text-xs"
-                >
-                  {{ stat.extraBadge }}
-                </Badge>
+                <component
+                  :is="stat.icon"
+                  class="h-4 w-4 sm:h-5 sm:w-5"
+                />
               </div>
-            </div>
-          </Card>
+              <!-- 内容区域 -->
+              <div>
+                <p class="text-[9px] sm:text-[11px] font-semibold uppercase tracking-[0.2em] sm:tracking-[0.4em] text-muted-foreground pr-10 sm:pr-14">
+                  {{ stat.name }}
+                </p>
+                <p class="mt-2 sm:mt-4 text-xl sm:text-3xl font-semibold text-foreground">
+                  {{ stat.value }}
+                </p>
+                <p
+                  v-if="stat.subValue"
+                  class="mt-0.5 sm:mt-1 text-[10px] sm:text-sm text-muted-foreground"
+                >
+                  {{ stat.subValue }}
+                </p>
+                <div
+                  v-if="stat.change || stat.extraBadge"
+                  class="mt-1.5 sm:mt-2 flex items-center gap-1 sm:gap-1.5 flex-wrap"
+                >
+                  <Badge
+                    v-if="stat.change"
+                    variant="secondary"
+                    class="text-[9px] sm:text-xs"
+                  >
+                    {{ stat.change }}
+                  </Badge>
+                  <Badge
+                    v-if="stat.extraBadge"
+                    variant="secondary"
+                    class="text-[9px] sm:text-xs"
+                  >
+                    {{ stat.extraBadge }}
+                  </Badge>
+                </div>
+              </div>
+            </Card>
+          </template>
+          <!-- 无数据时显示占位卡片 -->
+          <template v-else>
+            <Card
+              v-for="(placeholder, index) in emptyStatPlaceholders"
+              :key="'empty-' + index"
+              class="relative overflow-hidden p-3 sm:p-5"
+              :class="statCardBorders[index % statCardBorders.length]"
+            >
+              <div
+                class="pointer-events-none absolute -right-4 -top-6 h-28 w-28 rounded-full blur-3xl opacity-20"
+                :class="statCardGlows[index % statCardGlows.length]"
+              />
+              <div
+                class="absolute top-3 right-3 sm:top-5 sm:right-5 rounded-xl sm:rounded-2xl border border-border bg-card/50 p-2 sm:p-3 shadow-inner backdrop-blur-sm"
+                :class="getStatIconColor(index)"
+              >
+                <component
+                  :is="placeholder.icon"
+                  class="h-4 w-4 sm:h-5 sm:w-5"
+                />
+              </div>
+              <div>
+                <p class="text-[9px] sm:text-[11px] font-semibold uppercase tracking-[0.2em] sm:tracking-[0.4em] text-muted-foreground pr-10 sm:pr-14">
+                  {{ placeholder.name }}
+                </p>
+                <p class="mt-2 sm:mt-4 text-xl sm:text-3xl font-semibold text-muted-foreground/50">
+                  --
+                </p>
+                <p class="mt-0.5 sm:mt-1 text-[10px] sm:text-sm text-muted-foreground/50">
+                  暂无数据
+                </p>
+              </div>
+            </Card>
+          </template>
         </div>
 
         <!-- 管理员：系统健康摘要 -->
@@ -871,6 +908,24 @@ const detailDialogOpen = ref(false)
 const iconMap: Record<string, any> = {
   Users, Activity, TrendingUp, DollarSign, Key, Hash, Database
 }
+
+// 空状态占位卡片
+const emptyStatPlaceholders = computed(() => {
+  if (isAdmin.value) {
+    return [
+      { name: '今日请求', icon: Activity },
+      { name: '今日 Tokens', icon: Hash },
+      { name: '活跃用户', icon: Users },
+      { name: '今日费用', icon: DollarSign }
+    ]
+  }
+  return [
+    { name: '今日请求', icon: Activity },
+    { name: '今日 Tokens', icon: Hash },
+    { name: 'API Keys', icon: Key },
+    { name: '今日费用', icon: DollarSign }
+  ]
+})
 
 const totalStats = computed(() => {
   if (dailyStats.value.length === 0) {

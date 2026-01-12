@@ -369,7 +369,6 @@ def init_db():
     _ensure_engine()
 
     # 数据库表结构由 Alembic 迁移管理
-    # 首次部署或更新后请运行: ./migrate.sh
 
     db = _SessionLocal()
     try:

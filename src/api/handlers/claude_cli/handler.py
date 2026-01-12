@@ -2,7 +2,6 @@
 Claude CLI Message Handler - 基于通用 CLI Handler 基类的简化实现
 
 继承 CliMessageHandlerBase，只需覆盖格式特定的配置和事件处理逻辑。
-验证新架构的有效性：代码量从数百行减少到 ~80 行。
 """
 
 from typing import Any, Dict, Optional

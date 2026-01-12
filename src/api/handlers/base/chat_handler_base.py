@@ -37,7 +37,7 @@ from src.api.handlers.base.stream_processor import StreamProcessor
 from src.api.handlers.base.stream_telemetry import StreamTelemetryRecorder
 from src.api.handlers.base.utils import build_sse_headers
 from src.config.settings import config
-from src.core.error_utils import extract_error_message
+from src.core.error_utils import extract_client_error_message
 from src.core.exceptions import (
     EmbeddedErrorException,
     ProviderAuthException,
@@ -382,10 +382,17 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 http_request.is_disconnected,
             )
 
+            # 透传提供商的响应头给客户端
+            # 同时添加必要的 SSE 头以确保流式传输正常工作
+            client_headers = dict(ctx.response_headers) if ctx.response_headers else {}
+            # 添加/覆盖 SSE 必需的头
+            client_headers.update(build_sse_headers())
+            client_headers["content-type"] = "text/event-stream"
+
             return StreamingResponse(
                 monitored_stream,
                 media_type="text/event-stream",
-                headers=build_sse_headers(),
+                headers=client_headers,
                 background=background_tasks,
             )
 
@@ -463,7 +470,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
 
         # 配置 HTTP 超时
         # 注意：read timeout 用于检测连接断开，不是整体请求超时
-        # 整体请求超时由 asyncio.wait_for 控制，使用 endpoint.timeout
+        # 整体请求超时由 asyncio.wait_for 控制，使用 provider.timeout
         timeout_config = httpx.Timeout(
             connect=config.http_connect_timeout,
             read=config.http_read_timeout,  # 使用全局配置，用于检测连接断开
@@ -471,14 +478,14 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             pool=config.http_pool_timeout,
         )
 
-        # endpoint.timeout 作为整体请求超时（建立连接 + 获取首字节）
-        request_timeout = float(endpoint.timeout or 300)
+        # provider.timeout 作为整体请求超时（建立连接 + 获取首字节）
+        request_timeout = float(provider.timeout or 300)
 
-        # 创建 HTTP 客户端（支持代理配置）
+        # 创建 HTTP 客户端（支持代理配置，从 Provider 读取）
         from src.clients.http_client import HTTPClientPool
 
         http_client = HTTPClientPool.create_client_with_proxy(
-            proxy_config=endpoint.proxy,
+            proxy_config=provider.proxy,
             timeout=timeout_config,
         )
 
@@ -514,7 +521,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
 
         try:
             # 使用 asyncio.wait_for 包裹整个"建立连接 + 获取首字节"阶段
-            # endpoint.timeout 控制整体超时，避免上游长时间无响应
+            # provider.timeout 控制整体超时，避免上游长时间无响应
             await asyncio.wait_for(_connect_and_prefetch(), timeout=request_timeout)
 
         except asyncio.TimeoutError:
@@ -590,17 +597,22 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
 
         actual_request_body = ctx.provider_request_body or original_request_body
 
+        # 失败时返回给客户端的是 JSON 错误响应
+        client_response_headers = {"content-type": "application/json"}
+
         await self.telemetry.record_failure(
             provider=ctx.provider_name or "unknown",
             model=ctx.model,
             response_time_ms=response_time_ms,
             status_code=status_code,
-            error_message=extract_error_message(error),
+            error_message=extract_client_error_message(error),
             request_headers=original_headers,
             request_body=actual_request_body,
             is_stream=True,
             api_format=ctx.api_format,
             provider_request_headers=ctx.provider_request_headers,
+            response_headers=ctx.response_headers,
+            client_response_headers=client_response_headers,
             target_model=ctx.mapped_model,
         )
 
@@ -691,13 +703,13 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 f"  [{self.request_id}] 请求体stream字段: {provider_payload.get('stream', 'N/A')}"
             )
 
-            # 获取复用的 HTTP 客户端（支持代理配置）
+            # 获取复用的 HTTP 客户端（支持代理配置，从 Provider 读取）
             # 注意：使用 get_proxy_client 复用连接池，不再每次创建新客户端
             from src.clients.http_client import HTTPClientPool
 
-            request_timeout = float(endpoint.timeout or 300)
+            request_timeout = float(provider.timeout or 300)
             http_client = await HTTPClientPool.get_proxy_client(
-                proxy_config=endpoint.proxy,
+                proxy_config=provider.proxy,
             )
 
             # 注意：不使用 async with，因为复用的客户端不应该被关闭
@@ -713,10 +725,10 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             response_headers = dict(resp.headers)
 
             if resp.status_code == 401:
-                raise ProviderAuthException(f"提供商认证失败: {provider.name}")
+                raise ProviderAuthException(str(provider.name))
             elif resp.status_code == 429:
                 raise ProviderRateLimitException(
-                    f"提供商速率限制: {provider.name}",
+                    "请求过于频繁，请稍后重试",
                     provider_name=str(provider.name),
                     response_headers=response_headers,
                 )
@@ -731,7 +743,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 except Exception:
                     pass
                 raise ProviderNotAvailableException(
-                    f"提供商服务不可用: {provider.name}",
+                    f"上游服务暂时不可用 (HTTP {resp.status_code})",
                     provider_name=str(provider.name),
                     upstream_status=resp.status_code,
                     upstream_response=error_body,
@@ -747,13 +759,41 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 except Exception:
                     pass
                 raise ProviderNotAvailableException(
-                    f"提供商返回错误: {provider.name}, 状态: {resp.status_code}",
+                    f"上游服务返回错误 (HTTP {resp.status_code})",
                     provider_name=str(provider.name),
                     upstream_status=resp.status_code,
                     upstream_response=error_body,
                 )
 
-            response_json = resp.json()
+            # 安全解析 JSON 响应，处理可能的编码错误
+            try:
+                response_json = resp.json()
+            except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                # 获取原始响应内容用于调试（存入 upstream_response）
+                raw_content = ""
+                try:
+                    raw_content = resp.text[:500] if resp.text else "(empty)"
+                except Exception:
+                    try:
+                        raw_content = repr(resp.content[:500]) if resp.content else "(empty)"
+                    except Exception:
+                        raw_content = "(unable to read)"
+                logger.error(
+                    f"[{self.request_id}] 无法解析响应 JSON: {e}, 原始内容: {raw_content}"
+                )
+                # 判断错误类型，生成友好的客户端错误消息（不暴露提供商信息）
+                if raw_content == "(empty)" or not raw_content.strip():
+                    client_message = "上游服务返回了空响应"
+                elif raw_content.strip().startswith(("<", "<!doctype", "<!DOCTYPE")):
+                    client_message = "上游服务返回了非预期的响应格式"
+                else:
+                    client_message = "上游服务返回了无效的响应"
+                raise ProviderNotAvailableException(
+                    client_message,
+                    provider_name=str(provider.name),
+                    upstream_status=resp.status_code,
+                    upstream_response=raw_content,
+                )
             return response_json if isinstance(response_json, dict) else {}
 
         try:
@@ -798,6 +838,11 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
 
             actual_request_body = provider_request_body or original_request_body
 
+            # 非流式成功时，返回给客户端的是提供商响应头（透传）
+            # JSONResponse 会自动设置 content-type，但我们记录实际返回的完整头
+            client_response_headers = dict(response_headers) if response_headers else {}
+            client_response_headers["content-type"] = "application/json"
+
             total_cost = await self.telemetry.record_success(
                 provider=provider_name,
                 model=model,
@@ -808,6 +853,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 request_headers=original_headers,
                 request_body=actual_request_body,
                 response_headers=response_headers,
+                client_response_headers=client_response_headers,
                 response_body=response_json,
                 cache_creation_tokens=cache_creation_tokens,
                 cache_read_tokens=cached_tokens,
@@ -829,7 +875,12 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 f"in:{input_tokens or 0} out:{output_tokens or 0}"
             )
 
-            return JSONResponse(status_code=status_code, content=response_json)
+            # 透传提供商的响应头
+            return JSONResponse(
+                status_code=status_code,
+                content=response_json,
+                headers=response_headers if response_headers else None,
+            )
 
         except Exception as e:
             response_time_ms = self.elapsed_ms()
@@ -844,17 +895,27 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
 
             actual_request_body = provider_request_body or original_request_body
 
+            # 尝试从异常中提取响应头
+            error_response_headers: Dict[str, str] = {}
+            if isinstance(e, ProviderRateLimitException) and e.response_headers:
+                error_response_headers = e.response_headers
+            elif isinstance(e, httpx.HTTPStatusError) and hasattr(e, "response"):
+                error_response_headers = dict(e.response.headers)
+
             await self.telemetry.record_failure(
                 provider=provider_name or "unknown",
                 model=model,
                 response_time_ms=response_time_ms,
                 status_code=status_code,
-                error_message=extract_error_message(e),
+                error_message=extract_client_error_message(e),
                 request_headers=original_headers,
                 request_body=actual_request_body,
                 is_stream=False,
                 api_format=api_format,
                 provider_request_headers=provider_request_headers,
+                response_headers=error_response_headers,
+                # 非流式失败返回给客户端的是 JSON 错误响应
+                client_response_headers={"content-type": "application/json"},
                 # 模型映射信息
                 target_model=mapped_model_result,
             )

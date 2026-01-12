@@ -154,6 +154,14 @@ class StreamTelemetryRecorder:
         response_time_ms: int,
     ) -> None:
         """记录成功的请求"""
+        # 流式成功时，返回给客户端的是提供商响应头 + SSE 必需头
+        client_response_headers = dict(ctx.response_headers) if ctx.response_headers else {}
+        client_response_headers.update({
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "content-type": "text/event-stream",
+        })
+
         await telemetry.record_success(
             provider=ctx.provider_name or "unknown",
             model=ctx.model,
@@ -165,6 +173,7 @@ class StreamTelemetryRecorder:
             request_headers=original_headers,
             request_body=actual_request_body,
             response_headers=ctx.response_headers,
+            client_response_headers=client_response_headers,
             response_body=response_body,
             cache_creation_tokens=ctx.cache_creation_tokens,
             cache_read_tokens=ctx.cached_tokens,
@@ -190,6 +199,9 @@ class StreamTelemetryRecorder:
         response_time_ms: int,
     ) -> None:
         """记录失败的请求"""
+        # 失败时返回给客户端的是 JSON 错误响应，如果没有设置则使用默认值
+        client_response_headers = ctx.client_response_headers or {"content-type": "application/json"}
+
         await telemetry.record_failure(
             provider=ctx.provider_name or "unknown",
             model=ctx.model,
@@ -206,6 +218,8 @@ class StreamTelemetryRecorder:
             cache_creation_tokens=ctx.cache_creation_tokens,
             cache_read_tokens=ctx.cached_tokens,
             response_body=response_body,
+            response_headers=ctx.response_headers,
+            client_response_headers=client_response_headers,
             target_model=ctx.mapped_model,
         )
 
@@ -239,11 +253,13 @@ class StreamTelemetryRecorder:
             )
         else:
             error_type = "client_disconnected" if ctx.status_code == 499 else "stream_error"
+            # 请求链路追踪使用 upstream_response（原始响应），回退到 error_message（友好消息）
+            trace_error_message = ctx.upstream_response or ctx.error_message or f"HTTP {ctx.status_code}"
             RequestCandidateService.mark_candidate_failed(
                 db=db,
                 candidate_id=ctx.attempt_id,
                 error_type=error_type,
-                error_message=ctx.error_message or f"HTTP {ctx.status_code}",
+                error_message=trace_error_message,
                 status_code=ctx.status_code,
                 latency_ms=response_time_ms,
                 extra_data={

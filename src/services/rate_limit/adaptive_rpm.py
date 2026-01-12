@@ -1,16 +1,16 @@
 """
-自适应并发调整器 - 基于边界记忆的并发限制调整
+自适应 RPM 调整器 - 基于边界记忆的 RPM 限制调整
 
 核心算法：边界记忆 + 渐进探测
-- 触发 429 时记录边界（last_concurrent_peak），这就是真实上限
-- 缩容策略：新限制 = 边界 - 1，而非乘性减少
+- 触发 429 时记录边界（last_rpm_peak），这就是真实上限
+- 缩容策略：新限制 = 边界 - 步长，而非乘性减少
 - 扩容策略：不超过已知边界，除非是探测性扩容
 - 探测性扩容：长时间无 429 时尝试突破边界
 
 设计原则：
 1. 快速收敛：一次 429 就能找到接近真实的限制
 2. 避免过度保守：不会因为多次 429 而无限下降
-3. 安全探测：允许在稳定后尝试更高并发
+3. 安全探测：允许在稳定后尝试更高 RPM
 """
 
 from datetime import datetime, timezone
@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, cast
 
 from sqlalchemy.orm import Session
 
-from src.config.constants import ConcurrencyDefaults
+from src.config.constants import RPMDefaults
 from src.core.batch_committer import get_batch_committer
 from src.core.logger import logger
 from src.models.database import ProviderAPIKey
@@ -33,14 +33,14 @@ class AdaptiveStrategy:
     AGGRESSIVE = "aggressive"  # 激进策略（快速探测）
 
 
-class AdaptiveConcurrencyManager:
+class AdaptiveRPMManager:
     """
-    自适应并发管理器
+    自适应 RPM 管理器
 
     核心算法：边界记忆 + 渐进探测
-    - 触发 429 时记录边界（last_concurrent_peak = 触发时的并发数）
-    - 缩容：新限制 = 边界 - 1（快速收敛到真实限制附近）
-    - 扩容：不超过边界（即 last_concurrent_peak），允许回到边界值尝试
+    - 触发 429 时记录边界（last_rpm_peak = 触发时的 RPM）
+    - 缩容：新限制 = 边界 - 步长（快速收敛到真实限制附近）
+    - 扩容：不超过边界（即 last_rpm_peak），允许回到边界值尝试
     - 探测性扩容：长时间（30分钟）无 429 时，可以尝试 +1 突破边界
 
     扩容条件（满足任一即可）：
@@ -50,35 +50,35 @@ class AdaptiveConcurrencyManager:
     关键特性：
     1. 快速收敛：一次 429 就能学到接近真实的限制值
     2. 边界保护：普通扩容不会超过已知边界
-    3. 安全探测：长时间稳定后允许尝试更高并发
+    3. 安全探测：长时间稳定后允许尝试更高 RPM
     4. 区分并发限制和 RPM 限制
     """
 
     # 默认配置 - 使用统一常量
-    DEFAULT_INITIAL_LIMIT = ConcurrencyDefaults.INITIAL_LIMIT
-    MIN_CONCURRENT_LIMIT = ConcurrencyDefaults.MIN_CONCURRENT_LIMIT
-    MAX_CONCURRENT_LIMIT = ConcurrencyDefaults.MAX_CONCURRENT_LIMIT
+    DEFAULT_INITIAL_LIMIT = RPMDefaults.INITIAL_LIMIT
+    MIN_RPM_LIMIT = RPMDefaults.MIN_RPM_LIMIT
+    MAX_RPM_LIMIT = RPMDefaults.MAX_RPM_LIMIT
 
     # AIMD 参数
-    INCREASE_STEP = ConcurrencyDefaults.INCREASE_STEP
+    INCREASE_STEP = RPMDefaults.INCREASE_STEP
 
     # 滑动窗口参数
-    UTILIZATION_WINDOW_SIZE = ConcurrencyDefaults.UTILIZATION_WINDOW_SIZE
-    UTILIZATION_WINDOW_SECONDS = ConcurrencyDefaults.UTILIZATION_WINDOW_SECONDS
-    UTILIZATION_THRESHOLD = ConcurrencyDefaults.UTILIZATION_THRESHOLD
-    HIGH_UTILIZATION_RATIO = ConcurrencyDefaults.HIGH_UTILIZATION_RATIO
-    MIN_SAMPLES_FOR_DECISION = ConcurrencyDefaults.MIN_SAMPLES_FOR_DECISION
+    UTILIZATION_WINDOW_SIZE = RPMDefaults.UTILIZATION_WINDOW_SIZE
+    UTILIZATION_WINDOW_SECONDS = RPMDefaults.UTILIZATION_WINDOW_SECONDS
+    UTILIZATION_THRESHOLD = RPMDefaults.UTILIZATION_THRESHOLD
+    HIGH_UTILIZATION_RATIO = RPMDefaults.HIGH_UTILIZATION_RATIO
+    MIN_SAMPLES_FOR_DECISION = RPMDefaults.MIN_SAMPLES_FOR_DECISION
 
     # 探测性扩容参数
-    PROBE_INCREASE_INTERVAL_MINUTES = ConcurrencyDefaults.PROBE_INCREASE_INTERVAL_MINUTES
-    PROBE_INCREASE_MIN_REQUESTS = ConcurrencyDefaults.PROBE_INCREASE_MIN_REQUESTS
+    PROBE_INCREASE_INTERVAL_MINUTES = RPMDefaults.PROBE_INCREASE_INTERVAL_MINUTES
+    PROBE_INCREASE_MIN_REQUESTS = RPMDefaults.PROBE_INCREASE_MIN_REQUESTS
 
     # 记录历史数量
     MAX_HISTORY_RECORDS = 20
 
     def __init__(self, strategy: str = AdaptiveStrategy.AIMD):
         """
-        初始化自适应并发管理器
+        初始化自适应 RPM 管理器
 
         Args:
             strategy: 调整策略
@@ -90,54 +90,54 @@ class AdaptiveConcurrencyManager:
         db: Session,
         key: ProviderAPIKey,
         rate_limit_info: RateLimitInfo,
-        current_concurrent: Optional[int] = None,
+        current_rpm: Optional[int] = None,
     ) -> int:
         """
-        处理429错误，调整并发限制
+        处理429错误，调整 RPM 限制
 
         Args:
             db: 数据库会话
             key: API Key对象
             rate_limit_info: 速率限制信息
-            current_concurrent: 当前并发数
+            current_rpm: 当前分钟内的请求数
 
         Returns:
-            调整后的并发限制
+            调整后的 RPM 限制
         """
-        # max_concurrent=NULL 表示启用自适应，max_concurrent=数字 表示固定限制
-        is_adaptive = key.max_concurrent is None
+        # rpm_limit=NULL 表示启用自适应，rpm_limit=数字 表示固定限制
+        is_adaptive = key.rpm_limit is None
 
         if not is_adaptive:
             logger.debug(
-                f"Key {key.id} 设置了固定并发限制 ({key.max_concurrent})，跳过自适应调整"
+                f"Key {key.id} 设置了固定 RPM 限制 ({key.rpm_limit})，跳过自适应调整"
             )
-            return int(key.max_concurrent)  # type: ignore[arg-type]
+            return int(key.rpm_limit)  # type: ignore[arg-type]
 
         # 更新429统计
         key.last_429_at = datetime.now(timezone.utc)  # type: ignore[assignment]
         key.last_429_type = rate_limit_info.limit_type  # type: ignore[assignment]
-        # 仅在并发限制且拿到并发数时记录边界（RPM/UNKNOWN 不应覆盖并发边界记忆）
+        # 仅在 RPM 限制且拿到 RPM 数时记录边界
         if (
-            rate_limit_info.limit_type == RateLimitType.CONCURRENT
-            and current_concurrent is not None
-            and current_concurrent > 0
+            rate_limit_info.limit_type == RateLimitType.RPM
+            and current_rpm is not None
+            and current_rpm > 0
         ):
-            key.last_concurrent_peak = current_concurrent  # type: ignore[assignment]
+            key.last_rpm_peak = current_rpm  # type: ignore[assignment]
 
         # 遇到 429 错误，清空利用率采样窗口（重新开始收集）
         key.utilization_samples = []  # type: ignore[assignment]
 
-        if rate_limit_info.limit_type == RateLimitType.CONCURRENT:
-            # 并发限制：减少并发数
-            key.concurrent_429_count = int(key.concurrent_429_count or 0) + 1  # type: ignore[assignment]
+        if rate_limit_info.limit_type == RateLimitType.RPM:
+            # RPM 限制：减少 RPM 限制
+            key.rpm_429_count = int(key.rpm_429_count or 0) + 1  # type: ignore[assignment]
 
-            # 获取当前有效限制（自适应模式使用 learned_max_concurrent）
-            old_limit = int(key.learned_max_concurrent or self.DEFAULT_INITIAL_LIMIT)
-            new_limit = self._decrease_limit(old_limit, current_concurrent)
+            # 获取当前有效限制（自适应模式使用 learned_rpm_limit）
+            old_limit = int(key.learned_rpm_limit or self.DEFAULT_INITIAL_LIMIT)
+            new_limit = self._decrease_limit(old_limit, current_rpm)
 
             logger.warning(
-                f"[CONCURRENT] 并发限制触发: Key {key.id[:8]}... | "
-                f"当前并发: {current_concurrent} | "
+                f"[RPM] RPM 限制触发: Key {key.id[:8]}... | "
+                f"当前 RPM: {current_rpm} | "
                 f"调整: {old_limit} -> {new_limit}"
             )
 
@@ -146,79 +146,78 @@ class AdaptiveConcurrencyManager:
                 key,
                 old_limit=old_limit,
                 new_limit=new_limit,
-                reason="concurrent_429",
-                current_concurrent=current_concurrent,
+                reason="rpm_429",
+                current_rpm=current_rpm,
             )
 
-            # 更新学习到的并发限制
-            key.learned_max_concurrent = new_limit  # type: ignore[assignment]
+            # 更新学习到的 RPM 限制
+            key.learned_rpm_limit = new_limit  # type: ignore[assignment]
 
-        elif rate_limit_info.limit_type == RateLimitType.RPM:
-            # RPM限制：不调整并发，只记录
-            key.rpm_429_count = int(key.rpm_429_count or 0) + 1  # type: ignore[assignment]
+        elif rate_limit_info.limit_type == RateLimitType.CONCURRENT:
+            # 并发限制：不调整 RPM，只记录
+            key.concurrent_429_count = int(key.concurrent_429_count or 0) + 1  # type: ignore[assignment]
 
             logger.info(
-                f"[RPM] RPM限制触发: Key {key.id[:8]}... | "
-                f"retry_after: {rate_limit_info.retry_after}s | "
-                f"不调整并发限制"
+                f"[CONCURRENT] 并发限制触发: Key {key.id[:8]}... | "
+                f"不调整 RPM 限制（这是并发问题，非 RPM 问题）"
             )
 
         else:
             # 未知类型：保守处理，轻微减少
             logger.warning(
                 f"[UNKNOWN] 未知429类型: Key {key.id[:8]}... | "
-                f"当前并发: {current_concurrent} | "
-                f"保守减少并发"
+                f"当前 RPM: {current_rpm} | "
+                f"保守减少 RPM"
             )
 
-            old_limit = int(key.learned_max_concurrent or self.DEFAULT_INITIAL_LIMIT)
-            new_limit = max(int(old_limit * 0.9), self.MIN_CONCURRENT_LIMIT)  # 减少10%
+            old_limit = int(key.learned_rpm_limit or self.DEFAULT_INITIAL_LIMIT)
+            new_limit = max(int(old_limit * 0.9), self.MIN_RPM_LIMIT)  # 减少10%
 
             self._record_adjustment(
                 key,
                 old_limit=old_limit,
                 new_limit=new_limit,
                 reason="unknown_429",
-                current_concurrent=current_concurrent,
+                current_rpm=current_rpm,
             )
 
-            key.learned_max_concurrent = new_limit  # type: ignore[assignment]
+            key.learned_rpm_limit = new_limit  # type: ignore[assignment]
 
         db.flush()
         get_batch_committer().mark_dirty(db)
 
-        return int(key.learned_max_concurrent or self.DEFAULT_INITIAL_LIMIT)
+        return int(key.learned_rpm_limit or self.DEFAULT_INITIAL_LIMIT)
 
     def handle_success(
         self,
         db: Session,
         key: ProviderAPIKey,
-        current_concurrent: int,
+        current_rpm: int,
     ) -> Optional[int]:
         """
-        处理成功请求，基于滑动窗口利用率考虑增加并发限制
+        处理成功请求，基于滑动窗口利用率考虑增加 RPM 限制
 
         Args:
             db: 数据库会话
             key: API Key对象
-            current_concurrent: 当前并发数（必需，用于计算利用率）
+            current_rpm: 当前分钟内的请求数（必需，用于计算利用率）
 
         Returns:
-            调整后的并发限制（如果有调整），否则返回 None
+            调整后的 RPM 限制（如果有调整），否则返回 None
         """
-        # max_concurrent=NULL 表示启用自适应
-        is_adaptive = key.max_concurrent is None
+        # rpm_limit=NULL 表示启用自适应
+        is_adaptive = key.rpm_limit is None
 
         if not is_adaptive:
             return None
 
-        current_limit = int(key.learned_max_concurrent or self.DEFAULT_INITIAL_LIMIT)
+        current_limit = int(key.learned_rpm_limit or self.DEFAULT_INITIAL_LIMIT)
 
-        # 获取已知边界（上次触发 429 时的并发数）
-        known_boundary = key.last_concurrent_peak
+        # 获取已知边界（上次触发 429 时的 RPM）
+        known_boundary = key.last_rpm_peak
 
         # 计算当前利用率
-        utilization = float(current_concurrent / current_limit) if current_limit > 0 else 0.0
+        utilization = float(current_rpm / current_limit) if current_limit > 0 else 0.0
 
         now = datetime.now(timezone.utc)
         now_ts = now.timestamp()
@@ -229,7 +228,7 @@ class AdaptiveConcurrencyManager:
         # 检查是否满足扩容条件
         increase_reason = self._check_increase_conditions(key, samples, now, known_boundary)
 
-        if increase_reason and current_limit < self.MAX_CONCURRENT_LIMIT:
+        if increase_reason and current_limit < self.MAX_RPM_LIMIT:
             old_limit = current_limit
             is_probe = increase_reason == "probe_increase"
             new_limit = self._increase_limit(current_limit, known_boundary, is_probe)
@@ -262,12 +261,12 @@ class AdaptiveConcurrencyManager:
                 avg_utilization=round(avg_util, 2),
                 high_util_ratio=round(high_util_ratio, 2),
                 sample_count=len(samples),
-                current_concurrent=current_concurrent,
+                current_rpm=current_rpm,
                 known_boundary=known_boundary,
             )
 
             # 更新限制
-            key.learned_max_concurrent = new_limit  # type: ignore[assignment]
+            key.learned_rpm_limit = new_limit  # type: ignore[assignment]
 
             # 如果是探测性扩容，更新探测时间
             if is_probe:
@@ -334,7 +333,7 @@ class AdaptiveConcurrencyManager:
             key: API Key对象
             samples: 利用率采样列表
             now: 当前时间
-            known_boundary: 已知边界（触发 429 时的并发数）
+            known_boundary: 已知边界（触发 429 时的 RPM）
 
         Returns:
             扩容原因（如果满足条件），否则返回 None
@@ -343,7 +342,7 @@ class AdaptiveConcurrencyManager:
         if self._is_in_cooldown(key):
             return None
 
-        current_limit = int(key.learned_max_concurrent or self.DEFAULT_INITIAL_LIMIT)
+        current_limit = int(key.learned_rpm_limit or self.DEFAULT_INITIAL_LIMIT)
 
         # 条件1：滑动窗口扩容（不超过边界）
         if len(samples) >= self.MIN_SAMPLES_FOR_DECISION:
@@ -353,7 +352,7 @@ class AdaptiveConcurrencyManager:
             if high_util_ratio >= self.HIGH_UTILIZATION_RATIO:
                 # 检查是否还有扩容空间（边界保护）
                 if known_boundary:
-                    # 允许扩容到边界值（而非 boundary - 1），因为缩容时已经 -1 了
+                    # 允许扩容到边界值（而非 boundary - 1），因为缩容时已经 -步长 了
                     if current_limit < known_boundary:
                         return "high_utilization"
                     # 已达边界，不触发普通扩容
@@ -429,34 +428,37 @@ class AdaptiveConcurrencyManager:
 
         last_429_at = cast(datetime, key.last_429_at)
         time_since_429 = (datetime.now(timezone.utc) - last_429_at).total_seconds()
-        cooldown_seconds = ConcurrencyDefaults.COOLDOWN_AFTER_429_MINUTES * 60
+        cooldown_seconds = RPMDefaults.COOLDOWN_AFTER_429_MINUTES * 60
 
         return bool(time_since_429 < cooldown_seconds)
 
     def _decrease_limit(
         self,
         current_limit: int,
-        current_concurrent: Optional[int] = None,
+        current_rpm: Optional[int] = None,
     ) -> int:
         """
-        减少并发限制（基于边界记忆策略）
+        减少 RPM 限制（基于边界记忆策略）
 
         策略：
-        - 如果知道触发 429 时的并发数，新限制 = 并发数 - 1
-        - 这样可以快速收敛到真实限制附近，而不会过度保守
-        - 例如：真实限制 8，触发时并发 8 -> 新限制 7（而非 8*0.85=6）
+        - 如果知道触发 429 时的 RPM，新限制 = RPM * 0.90（保留 10% 安全边际）
+        - 10% 的安全边际更保守，考虑到：
+          1. RPM 报告可能存在延迟，实际触发时的 RPM 可能略高于报告值
+          2. 上游 API 的限制可能有波动
+          3. 避免频繁在边界附近触发 429
+        - 相比固定步长，百分比方式更适应不同量级的限制值
         """
-        if current_concurrent is not None and current_concurrent > 0:
-            # 边界记忆策略：新限制 = 触发边界 - 1
-            candidate = current_concurrent - 1
+        if current_rpm is not None and current_rpm > 0:
+            # 边界记忆策略：新限制 = 触发边界 * 0.90（10% 安全边际）
+            candidate = int(current_rpm * 0.90)
         else:
-            # 没有并发信息时，保守减少 1
-            candidate = current_limit - 1
+            # 没有 RPM 信息时，减少 10%
+            candidate = int(current_limit * 0.9)
 
-        # 保证不会“缩容变扩容”（例如 current_concurrent > current_limit 的异常场景）
+        # 保证不会"缩容变扩容"
         candidate = min(candidate, current_limit - 1)
 
-        new_limit = max(candidate, self.MIN_CONCURRENT_LIMIT)
+        new_limit = max(candidate, self.MIN_RPM_LIMIT)
 
         return new_limit
 
@@ -467,16 +469,15 @@ class AdaptiveConcurrencyManager:
         is_probe: bool = False,
     ) -> int:
         """
-        增加并发限制（考虑边界保护）
+        增加 RPM 限制（考虑边界保护）
 
         策略：
         - 普通扩容：每次 +INCREASE_STEP，但不超过 known_boundary
-          （因为缩容时已经 -1 了，这里允许回到边界值尝试）
         - 探测性扩容：每次只 +1，可以突破边界，但要谨慎
 
         Args:
             current_limit: 当前限制
-            known_boundary: 已知边界（last_concurrent_peak），即触发 429 时的并发数
+            known_boundary: 已知边界（last_rpm_peak），即触发 429 时的 RPM
             is_probe: 是否是探测性扩容（可以突破边界）
         """
         if is_probe:
@@ -486,13 +487,13 @@ class AdaptiveConcurrencyManager:
             # 普通模式：每次 +INCREASE_STEP
             new_limit = current_limit + self.INCREASE_STEP
 
-            # 边界保护：普通扩容不超过 known_boundary（允许回到边界值尝试）
+            # 边界保护：普通扩容不超过 known_boundary
             if known_boundary:
                 if new_limit > known_boundary:
                     new_limit = known_boundary
 
         # 全局上限保护
-        new_limit = min(new_limit, self.MAX_CONCURRENT_LIMIT)
+        new_limit = min(new_limit, self.MAX_RPM_LIMIT)
 
         # 确保有增长（否则返回原值表示不扩容）
         if new_limit <= current_limit:
@@ -509,7 +510,7 @@ class AdaptiveConcurrencyManager:
         **extra_data: Any,
     ) -> None:
         """
-        记录并发调整历史
+        记录 RPM 调整历史
 
         Args:
             key: API Key对象
@@ -548,10 +549,10 @@ class AdaptiveConcurrencyManager:
         history: List[Dict[str, Any]] = list(key.adjustment_history or [])
         samples: List[Dict[str, Any]] = list(key.utilization_samples or [])
 
-        # max_concurrent=NULL 表示自适应，否则为固定限制
-        is_adaptive = key.max_concurrent is None
-        current_limit = int(key.learned_max_concurrent or self.DEFAULT_INITIAL_LIMIT)
-        effective_limit = current_limit if is_adaptive else int(key.max_concurrent)  # type: ignore
+        # rpm_limit=NULL 表示自适应，否则为固定限制
+        is_adaptive = key.rpm_limit is None
+        current_limit = int(key.learned_rpm_limit or self.DEFAULT_INITIAL_LIMIT)
+        effective_limit = current_limit if is_adaptive else int(key.rpm_limit)  # type: ignore
 
         # 计算窗口统计
         avg_utilization: Optional[float] = None
@@ -570,15 +571,15 @@ class AdaptiveConcurrencyManager:
             last_probe_at_str = cast(datetime, key.last_probe_increase_at).isoformat()
 
         # 边界信息
-        known_boundary = key.last_concurrent_peak
+        known_boundary = key.last_rpm_peak
 
         return {
             "adaptive_mode": is_adaptive,
-            "max_concurrent": key.max_concurrent,  # NULL=自适应，数字=固定限制
+            "rpm_limit": key.rpm_limit,  # NULL=自适应，数字=固定限制
             "effective_limit": effective_limit,  # 当前有效限制
-            "learned_limit": key.learned_max_concurrent,  # 学习到的限制
+            "learned_limit": key.learned_rpm_limit,  # 学习到的限制
             # 边界记忆相关
-            "known_boundary": known_boundary,  # 触发 429 时的并发数（已知上限）
+            "known_boundary": known_boundary,  # 触发 429 时的 RPM（已知上限）
             "concurrent_429_count": int(key.concurrent_429_count or 0),
             "rpm_429_count": int(key.rpm_429_count or 0),
             "last_429_at": last_429_at_str,
@@ -607,12 +608,12 @@ class AdaptiveConcurrencyManager:
         """
         logger.info(f"[RESET] 重置学习状态: Key {key.id[:8]}...")
 
-        key.learned_max_concurrent = None  # type: ignore[assignment]
+        key.learned_rpm_limit = None  # type: ignore[assignment]
         key.concurrent_429_count = 0  # type: ignore[assignment]
         key.rpm_429_count = 0  # type: ignore[assignment]
         key.last_429_at = None  # type: ignore[assignment]
         key.last_429_type = None  # type: ignore[assignment]
-        key.last_concurrent_peak = None  # type: ignore[assignment]
+        key.last_rpm_peak = None  # type: ignore[assignment]
         key.adjustment_history = []  # type: ignore[assignment]
         key.utilization_samples = []  # type: ignore[assignment]
         key.last_probe_increase_at = None  # type: ignore[assignment]
@@ -622,12 +623,17 @@ class AdaptiveConcurrencyManager:
 
 
 # 全局单例
-_adaptive_manager: Optional[AdaptiveConcurrencyManager] = None
+_adaptive_rpm_manager: Optional[AdaptiveRPMManager] = None
 
 
-def get_adaptive_manager() -> AdaptiveConcurrencyManager:
-    """获取全局自适应管理器单例"""
-    global _adaptive_manager
-    if _adaptive_manager is None:
-        _adaptive_manager = AdaptiveConcurrencyManager()
-    return _adaptive_manager
+def get_adaptive_rpm_manager() -> AdaptiveRPMManager:
+    """获取全局自适应 RPM 管理器单例"""
+    global _adaptive_rpm_manager
+    if _adaptive_rpm_manager is None:
+        _adaptive_rpm_manager = AdaptiveRPMManager()
+    return _adaptive_rpm_manager
+
+
+# 向后兼容别名
+AdaptiveConcurrencyManager = AdaptiveRPMManager
+get_adaptive_manager = get_adaptive_rpm_manager

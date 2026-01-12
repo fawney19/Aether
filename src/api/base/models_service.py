@@ -202,20 +202,59 @@ def get_available_provider_ids(db: Session, api_formats: list[str]) -> set[str]:
     条件:
     - 端点 api_format 匹配
     - 端点是活跃的
-    - 端点下有活跃的 Key
+    - Provider 下有活跃的 Key 且支持该 api_format（Key 直属 Provider，通过 api_formats 过滤）
     """
-    rows = (
-        db.query(ProviderEndpoint.provider_id)
-        .join(ProviderAPIKey, ProviderAPIKey.endpoint_id == ProviderEndpoint.id)
+    target_formats = {f.upper() for f in api_formats}
+
+    # 1) 先找出有活跃端点的 Provider（记录每个 Provider 支持的格式集合）
+    endpoint_rows = (
+        db.query(ProviderEndpoint.provider_id, ProviderEndpoint.api_format)
         .filter(
-            ProviderEndpoint.api_format.in_(api_formats),
+            ProviderEndpoint.api_format.in_(list(target_formats)),
             ProviderEndpoint.is_active.is_(True),
-            ProviderAPIKey.is_active.is_(True),
         )
-        .distinct()
         .all()
     )
-    return {row[0] for row in rows}
+
+    if not endpoint_rows:
+        return set()
+
+    provider_to_formats: dict[str, set[str]] = {}
+    for provider_id, fmt in endpoint_rows:
+        if not provider_id or not fmt:
+            continue
+        provider_to_formats.setdefault(provider_id, set()).add(str(fmt).upper())
+
+    provider_ids_with_endpoints = set(provider_to_formats.keys())
+    if not provider_ids_with_endpoints:
+        return set()
+
+    # 2) 再检查这些 Provider 是否至少有一个活跃 Key 支持对应格式
+    key_rows = (
+        db.query(ProviderAPIKey.provider_id, ProviderAPIKey.api_formats)
+        .filter(
+            ProviderAPIKey.provider_id.in_(provider_ids_with_endpoints),
+            ProviderAPIKey.is_active.is_(True),
+        )
+        .all()
+    )
+
+    available_provider_ids: set[str] = set()
+    for provider_id, key_formats in key_rows:
+        if not provider_id:
+            continue
+        endpoint_formats = provider_to_formats.get(provider_id)
+        if not endpoint_formats:
+            continue
+
+        formats_list = key_formats if isinstance(key_formats, list) else []
+        key_formats_upper = {str(f).upper() for f in formats_list}
+
+        # 只有同时满足：请求格式 ∩ Provider 端点格式 ∩ Key 支持格式 非空，才算可用
+        if key_formats_upper & endpoint_formats & target_formats:
+            available_provider_ids.add(provider_id)
+
+    return available_provider_ids
 
 
 def _get_available_model_ids_for_format(db: Session, api_formats: list[str]) -> set[str]:
@@ -228,35 +267,63 @@ def _get_available_model_ids_for_format(db: Session, api_formats: list[str]) -> 
     3. **该端点的 Provider 关联了该模型**
     4. Key 的 allowed_models 允许该模型（null = 允许该 Provider 关联的所有模型）
     """
-    # 查询所有匹配格式的活跃端点及其活跃 Key，同时获取 endpoint_id
-    endpoint_keys = (
-        db.query(
-            ProviderEndpoint.id.label("endpoint_id"),
-            ProviderEndpoint.provider_id,
-            ProviderAPIKey.allowed_models,
-        )
-        .join(ProviderAPIKey, ProviderAPIKey.endpoint_id == ProviderEndpoint.id)
+    target_formats = {f.upper() for f in api_formats}
+
+    # 1) 找出有活跃端点的 Provider（记录每个 Provider 支持的格式集合）
+    endpoint_rows = (
+        db.query(ProviderEndpoint.provider_id, ProviderEndpoint.api_format)
         .filter(
-            ProviderEndpoint.api_format.in_(api_formats),
+            ProviderEndpoint.api_format.in_(list(target_formats)),
             ProviderEndpoint.is_active.is_(True),
+        )
+        .all()
+    )
+
+    if not endpoint_rows:
+        return set()
+
+    provider_to_formats: dict[str, set[str]] = {}
+    for provider_id, fmt in endpoint_rows:
+        if not provider_id or not fmt:
+            continue
+        provider_to_formats.setdefault(provider_id, set()).add(str(fmt).upper())
+
+    provider_ids_with_endpoints = set(provider_to_formats.keys())
+    if not provider_ids_with_endpoints:
+        return set()
+
+    # 2) 收集每个 Provider 下「支持对应格式」的活跃 Key 的 allowed_models
+    # Key 直属 Provider，通过 key.api_formats 与 Provider 端点格式交集筛选
+    key_rows = (
+        db.query(ProviderAPIKey.provider_id, ProviderAPIKey.allowed_models, ProviderAPIKey.api_formats)
+        .filter(
+            ProviderAPIKey.provider_id.in_(provider_ids_with_endpoints),
             ProviderAPIKey.is_active.is_(True),
         )
         .all()
     )
 
-    if not endpoint_keys:
+    # provider_id -> list[(allowed_models, usable_formats)]
+    provider_key_rules: dict[str, list[tuple[object, set[str]]]] = {}
+    for provider_id, allowed_models, key_formats in key_rows:
+        if not provider_id:
+            continue
+
+        endpoint_formats = provider_to_formats.get(provider_id)
+        if not endpoint_formats:
+            continue
+
+        formats_list = key_formats if isinstance(key_formats, list) else []
+        key_formats_upper = {str(f).upper() for f in formats_list}
+        usable_formats = key_formats_upper & endpoint_formats & target_formats
+        if not usable_formats:
+            continue
+
+        provider_key_rules.setdefault(provider_id, []).append((allowed_models, usable_formats))
+
+    provider_ids_with_format = set(provider_key_rules.keys())
+    if not provider_ids_with_format:
         return set()
-
-    # 收集每个 (provider_id, endpoint_id) 对应的 allowed_models
-    # 使用 provider_id 作为 key，因为模型是关联到 Provider 的
-    provider_allowed_models: dict[str, list[Optional[list[str]]]] = {}
-    provider_ids_with_format: set[str] = set()
-
-    for endpoint_id, provider_id, allowed_models in endpoint_keys:
-        provider_ids_with_format.add(provider_id)
-        if provider_id not in provider_allowed_models:
-            provider_allowed_models[provider_id] = []
-        provider_allowed_models[provider_id].append(allowed_models)
 
     # 只查询那些有匹配格式端点的 Provider 下的模型
     models = (
@@ -285,21 +352,29 @@ def _get_available_model_ids_for_format(db: Session, api_formats: list[str]) -> 
         if model_provider_id not in provider_ids_with_format:
             continue
 
-        # 检查该 provider 下是否有 Key 允许这个模型
-        allowed_lists = provider_allowed_models.get(model_provider_id, [])
-        for allowed_models in allowed_lists:
+        # 检查该 provider 下是否有 Key 允许这个模型（支持 list/dict 两种 allowed_models）
+        from src.core.model_permissions import check_model_allowed
+
+        rules = provider_key_rules.get(model_provider_id, [])
+        for allowed_models, usable_formats in rules:
+            # None = 不限制
             if allowed_models is None:
-                # null = 允许该 Provider 关联的所有模型（已通过上面的查询限制）
                 available_model_ids.add(model_id)
                 break
-            elif model_id in allowed_models:
-                # 明确在允许列表中
-                available_model_ids.add(model_id)
-                break
-            elif global_model and model.provider_model_name in allowed_models:
-                # 也检查 provider_model_name
-                available_model_ids.add(model_id)
-                break
+
+            # 对于支持多个格式的 Key：任意一个可用格式允许即可
+            for fmt in usable_formats:
+                if check_model_allowed(
+                    model_name=model_id,
+                    allowed_models=allowed_models,  # type: ignore[arg-type]
+                    api_format=fmt,
+                    resolved_model_name=(model.provider_model_name if global_model else None),
+                ):
+                    available_model_ids.add(model_id)
+                    break
+            else:
+                continue
+            break
 
     return available_model_ids
 

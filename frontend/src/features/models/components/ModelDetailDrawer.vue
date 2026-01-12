@@ -484,7 +484,7 @@
                               :class="provider.is_active ? 'bg-green-500' : 'bg-gray-300'"
                               :title="provider.is_active ? '活跃' : '停用'"
                             />
-                            <span class="font-medium truncate">{{ provider.display_name }}</span>
+                            <span class="font-medium truncate">{{ provider.name }}</span>
                           </div>
                         </TableCell>
                         <TableCell class="py-3">
@@ -595,7 +595,7 @@
                             class="w-2 h-2 rounded-full shrink-0"
                             :class="provider.is_active ? 'bg-green-500' : 'bg-gray-300'"
                           />
-                          <span class="font-medium truncate">{{ provider.display_name }}</span>
+                          <span class="font-medium truncate">{{ provider.name }}</span>
                         </div>
                         <div class="flex items-center gap-1 shrink-0">
                           <Button

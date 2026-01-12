@@ -34,16 +34,13 @@
       <table class="w-full text-sm table-fixed">
         <thead class="bg-muted/50 text-xs uppercase tracking-wide text-muted-foreground">
           <tr>
-            <th class="text-left px-4 py-3 font-semibold w-[40%]">
+            <th class="text-left px-4 py-3 font-semibold w-[45%]">
               模型
             </th>
-            <th class="text-left px-4 py-3 font-semibold w-[15%]">
-              能力
-            </th>
-            <th class="text-left px-4 py-3 font-semibold w-[25%]">
+            <th class="text-left px-4 py-3 font-semibold w-[30%]">
               价格 ($/M)
             </th>
-            <th class="text-center px-4 py-3 font-semibold w-[20%]">
+            <th class="text-center px-4 py-3 font-semibold w-[25%]">
               操作
             </th>
           </tr>
@@ -80,42 +77,6 @@
                 </div>
               </div>
             </td>
-            <td class="align-top px-4 py-3">
-              <div
-                v-if="hasAnyCapability(model)"
-                class="grid grid-cols-3 gap-1 w-fit"
-              >
-                <Zap
-                  v-if="model.effective_supports_streaming ?? model.supports_streaming"
-                  class="w-4 h-4 text-muted-foreground"
-                  title="流式输出"
-                />
-                <Image
-                  v-if="model.effective_supports_image_generation ?? model.supports_image_generation"
-                  class="w-4 h-4 text-muted-foreground"
-                  title="图像生成"
-                />
-                <Eye
-                  v-if="model.effective_supports_vision ?? model.supports_vision"
-                  class="w-4 h-4 text-muted-foreground"
-                  title="视觉理解"
-                />
-                <Wrench
-                  v-if="model.effective_supports_function_calling ?? model.supports_function_calling"
-                  class="w-4 h-4 text-muted-foreground"
-                  title="工具调用"
-                />
-                <Brain
-                  v-if="model.effective_supports_extended_thinking ?? model.supports_extended_thinking"
-                  class="w-4 h-4 text-muted-foreground"
-                  title="深度思考"
-                />
-              </div>
-              <span
-                v-else
-                class="text-xs text-muted-foreground"
-              >—</span>
-            </td>
             <td class="align-top px-4 py-3 text-xs whitespace-nowrap">
               <div
                 class="grid gap-1"
@@ -148,7 +109,7 @@
                     ${{ formatPrice(model.effective_price_per_request ?? model.price_per_request) }}/次
                   </span>
                 </template>
-                <!-- 无计费配置 -->
+                <!-- 无计��配置 -->
                 <template v-if="!hasTokenPricing(model) && !hasRequestPricing(model)">
                   <span class="text-muted-foreground">—</span>
                 </template>
@@ -156,6 +117,15 @@
             </td>
             <td class="align-top px-4 py-3">
               <div class="flex justify-center gap-1.5">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="h-8 w-8"
+                  title="添加映射"
+                  @click="addMapping(model)"
+                >
+                  <Link class="w-3.5 h-3.5" />
+                </Button>
                 <Button
                   variant="ghost"
                   size="icon"
@@ -209,7 +179,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { Box, Edit, Trash2, Layers, Eye, Wrench, Zap, Brain, Power, Copy, Image } from 'lucide-vue-next'
+import { Box, Edit, Trash2, Layers, Power, Copy, Link } from 'lucide-vue-next'
 import Card from '@/components/ui/card.vue'
 import Button from '@/components/ui/button.vue'
 import { useToast } from '@/composables/useToast'
@@ -225,6 +195,7 @@ const emit = defineEmits<{
   'editModel': [model: Model]
   'deleteModel': [model: Model]
   'batchAssign': []
+  'addMapping': [model: Model]
 }>()
 
 const { error: showError, success: showSuccess } = useToast()
@@ -274,17 +245,6 @@ function formatPrice(price: number | null | undefined): string {
   }
   // 其他情况保留4位小数
   return price.toFixed(4)
-}
-
-// 检查模型是否有任何能力
-function hasAnyCapability(model: Model): boolean {
-  return !!(
-    (model.effective_supports_vision ?? model.supports_vision) ||
-    (model.effective_supports_function_calling ?? model.supports_function_calling) ||
-    (model.effective_supports_streaming ?? model.supports_streaming) ||
-    (model.effective_supports_extended_thinking ?? model.supports_extended_thinking) ||
-    (model.effective_supports_image_generation ?? model.supports_image_generation)
-  )
 }
 
 // 检查是否有按 Token 计费
@@ -345,7 +305,7 @@ function getStatusTitle(model: Model): string {
   return '活跃但不可用'
 }
 
-// 编辑模型
+// ��辑模型
 function editModel(model: Model) {
   emit('editModel', model)
 }
@@ -353,6 +313,11 @@ function editModel(model: Model) {
 // 删除模型
 function deleteModel(model: Model) {
   emit('deleteModel', model)
+}
+
+// 添加映射
+function addMapping(model: Model) {
+  emit('addMapping', model)
 }
 
 // 打开批量关联对话框

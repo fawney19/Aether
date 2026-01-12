@@ -48,7 +48,6 @@ async def get_providers_summary(
     **返回字段**（数组，每项包含）:
     - `id`: 提供商 ID
     - `name`: 提供商名称
-    - `display_name`: 显示名称
     - `description`: 描述信息
     - `website`: 官网地址
     - `provider_priority`: 优先级
@@ -59,9 +58,9 @@ async def get_providers_summary(
     - `quota_reset_day`: 配额重置日期
     - `quota_last_reset_at`: 上次配额重置时间
     - `quota_expires_at`: 配额过期时间
-    - `rpm_limit`: RPM 限制
-    - `rpm_used`: 已使用 RPM
-    - `rpm_reset_at`: RPM 重置时间
+    - `timeout`: 默认请求超时（秒）
+    - `max_retries`: 默认最大重试次数
+    - `proxy`: 默认代理配置
     - `total_endpoints`: 端点总数
     - `active_endpoints`: 活跃端点数
     - `total_keys`: 密钥总数
@@ -96,7 +95,6 @@ async def get_provider_summary(
     **返回字段**:
     - `id`: 提供商 ID
     - `name`: 提供商名称
-    - `display_name`: 显示名称
     - `description`: 描述信息
     - `website`: 官网地址
     - `provider_priority`: 优先级
@@ -107,9 +105,9 @@ async def get_provider_summary(
     - `quota_reset_day`: 配额重置日期
     - `quota_last_reset_at`: 上次配额重置时间
     - `quota_expires_at`: 配额过期时间
-    - `rpm_limit`: RPM 限制
-    - `rpm_used`: 已使用 RPM
-    - `rpm_reset_at`: RPM 重置时间
+    - `timeout`: 默认请求超时（秒）
+    - `max_retries`: 默认最大重试次数
+    - `proxy`: 默认代理配置
     - `total_endpoints`: 端点总数
     - `active_endpoints`: 活跃端点数
     - `total_keys`: 密钥总数
@@ -185,13 +183,13 @@ async def update_provider_settings(
     """
     更新提供商基础配置
 
-    更新提供商的基础配置信息，如显示名称、描述、优先级等。只需传入需要更新的字段。
+    更新提供商的基础配置信息，如名称、描述、优先级等。只需传入需要更新的字段。
 
     **路径参数**:
     - `provider_id`: 提供商 ID
 
     **请求体字段**（所有字段可选）:
-    - `display_name`: 显示名称
+    - `name`: 提供商名称
     - `description`: 描述信息
     - `website`: 官网地址
     - `provider_priority`: 优先级
@@ -199,9 +197,10 @@ async def update_provider_settings(
     - `billing_type`: 计费类型
     - `monthly_quota_usd`: 月度配额（美元）
     - `quota_reset_day`: 配额重置日期
-    - `quota_last_reset_at`: 上次配额重置时间
     - `quota_expires_at`: 配额过期时间
-    - `rpm_limit`: RPM 限制
+    - `timeout`: 默认请求超时（秒）
+    - `max_retries`: 默认最大重试次数
+    - `proxy`: 默认代理配置
 
     **返回字段**: 返回更新后的提供商摘要信息（与 GET /summary 接口返回格式相同）
     """
@@ -215,18 +214,18 @@ def _build_provider_summary(db: Session, provider: Provider) -> ProviderWithEndp
 
     total_endpoints = len(endpoints)
     active_endpoints = sum(1 for e in endpoints if e.is_active)
-    endpoint_ids = [e.id for e in endpoints]
 
     # Key 统计（合并为单个查询）
-    total_keys = 0
-    active_keys = 0
-    if endpoint_ids:
-        key_stats = db.query(
+    key_stats = (
+        db.query(
             func.count(ProviderAPIKey.id).label("total"),
             func.sum(case((ProviderAPIKey.is_active == True, 1), else_=0)).label("active"),
-        ).filter(ProviderAPIKey.endpoint_id.in_(endpoint_ids)).first()
-        total_keys = key_stats.total or 0
-        active_keys = int(key_stats.active or 0)
+        )
+        .filter(ProviderAPIKey.provider_id == provider.id)
+        .first()
+    )
+    total_keys = key_stats.total or 0
+    active_keys = int(key_stats.active or 0)
 
     # Model 统计（合并为单个查询）
     model_stats = db.query(
@@ -238,25 +237,34 @@ def _build_provider_summary(db: Session, provider: Provider) -> ProviderWithEndp
 
     api_formats = [e.api_format for e in endpoints]
 
-    # 优化: 一次性加载所有 endpoint 的 keys，避免 N+1 查询
-    all_keys = []
-    if endpoint_ids:
-        all_keys = (
-            db.query(ProviderAPIKey).filter(ProviderAPIKey.endpoint_id.in_(endpoint_ids)).all()
-        )
+    # 优化: 一次性加载 Provider 的 keys，避免 N+1 查询
+    all_keys = db.query(ProviderAPIKey).filter(ProviderAPIKey.provider_id == provider.id).all()
 
-    # 按 endpoint_id 分组 keys
-    keys_by_endpoint: dict[str, list[ProviderAPIKey]] = {}
+    # 按 api_formats 分组 keys（通过 api_formats 关联）
+    format_to_endpoint_id: dict[str, str] = {e.api_format: e.id for e in endpoints}
+    keys_by_endpoint: dict[str, list[ProviderAPIKey]] = {e.id: [] for e in endpoints}
     for key in all_keys:
-        if key.endpoint_id not in keys_by_endpoint:
-            keys_by_endpoint[key.endpoint_id] = []
-        keys_by_endpoint[key.endpoint_id].append(key)
+        formats = key.api_formats or []
+        for fmt in formats:
+            endpoint_id = format_to_endpoint_id.get(fmt)
+            if endpoint_id:
+                keys_by_endpoint[endpoint_id].append(key)
 
     endpoint_health_map: dict[str, float] = {}
     for endpoint in endpoints:
         keys = keys_by_endpoint.get(endpoint.id, [])
         if keys:
-            health_scores = [k.health_score for k in keys if k.health_score is not None]
+            # 从 health_by_format 获取对应格式的健康度
+            api_fmt = endpoint.api_format
+            health_scores = []
+            for k in keys:
+                health_by_format = k.health_by_format or {}
+                if api_fmt in health_by_format:
+                    score = health_by_format[api_fmt].get("health_score")
+                    if score is not None:
+                        health_scores.append(float(score))
+                else:
+                    health_scores.append(1.0)  # 默认健康度
             avg_health = sum(health_scores) / len(health_scores) if health_scores else 1.0
             endpoint_health_map[endpoint.id] = avg_health
         else:
@@ -284,7 +292,6 @@ def _build_provider_summary(db: Session, provider: Provider) -> ProviderWithEndp
     return ProviderWithEndpointsSummary(
         id=provider.id,
         name=provider.name,
-        display_name=provider.display_name,
         description=provider.description,
         website=provider.website,
         provider_priority=provider.provider_priority,
@@ -295,9 +302,9 @@ def _build_provider_summary(db: Session, provider: Provider) -> ProviderWithEndp
         quota_reset_day=provider.quota_reset_day,
         quota_last_reset_at=provider.quota_last_reset_at,
         quota_expires_at=provider.quota_expires_at,
-        rpm_limit=provider.rpm_limit,
-        rpm_used=provider.rpm_used,
-        rpm_reset_at=provider.rpm_reset_at,
+        timeout=provider.timeout,
+        max_retries=provider.max_retries,
+        proxy=provider.proxy,
         total_endpoints=total_endpoints,
         active_endpoints=active_endpoints,
         total_keys=total_keys,
@@ -342,7 +349,7 @@ class AdminProviderHealthMonitorAdapter(AdminApiAdapter):
         if not endpoint_ids:
             response = ProviderEndpointHealthMonitorResponse(
                 provider_id=provider.id,
-                provider_name=provider.display_name or provider.name,
+                provider_name=provider.name,
                 generated_at=now,
                 endpoints=[],
             )
@@ -417,7 +424,7 @@ class AdminProviderHealthMonitorAdapter(AdminApiAdapter):
 
         response = ProviderEndpointHealthMonitorResponse(
             provider_id=provider.id,
-            provider_name=provider.display_name or provider.name,
+            provider_name=provider.name,
             generated_at=now,
             endpoints=endpoint_monitors,
         )

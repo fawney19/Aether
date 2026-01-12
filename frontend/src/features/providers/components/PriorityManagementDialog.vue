@@ -95,7 +95,7 @@
 
               <!-- 提供商信息 -->
               <div class="flex-1 min-w-0 flex items-center gap-2">
-                <span class="font-medium text-sm truncate">{{ provider.display_name }}</span>
+                <span class="font-medium text-sm truncate">{{ provider.name }}</span>
                 <Badge
                   v-if="!provider.is_active"
                   variant="secondary"
@@ -395,7 +395,7 @@ import { Dialog } from '@/components/ui'
 import Button from '@/components/ui/button.vue'
 import Badge from '@/components/ui/badge.vue'
 import { useToast } from '@/composables/useToast'
-import { updateProvider, updateEndpointKey } from '@/api/endpoints'
+import { updateProvider, updateProviderKey } from '@/api/endpoints'
 import type { ProviderWithEndpointsSummary } from '@/api/endpoints'
 import { adminApi } from '@/api/admin'
 
@@ -696,7 +696,7 @@ async function save() {
       const keys = keysByFormat.value[format]
       keys.forEach((key) => {
         // 使用用户设置的 priority 值，相同 priority 会做负载均衡
-        keyUpdates.push(updateEndpointKey(key.id, { global_priority: key.priority }))
+        keyUpdates.push(updateProviderKey(key.id, { global_priority: key.priority }))
       })
     }
 

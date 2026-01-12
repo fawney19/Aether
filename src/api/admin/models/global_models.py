@@ -452,7 +452,6 @@ class AdminGetGlobalModelProvidersAdapter(AdminApiAdapter):
                 ModelCatalogProviderDetail(
                     provider_id=provider.id,
                     provider_name=provider.name,
-                    provider_display_name=provider.display_name,
                     model_id=model.id,
                     target_model=model.provider_model_name,
                     input_price_per_1m=model.get_effective_input_price(),

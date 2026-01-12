@@ -289,14 +289,14 @@
                 />
               </div>
 
-              <!-- 错误信息卡片 -->
+              <!-- 响应客户端错误卡片 -->
               <Card
                 v-if="detail.error_message"
                 class="border-red-200 dark:border-red-800"
               >
                 <div class="p-4">
                   <h4 class="text-sm font-semibold text-red-600 dark:text-red-400 mb-2">
-                    错误信息
+                    响应客户端错误
                   </h4>
                   <div class="bg-red-50 dark:bg-red-900/20 rounded-lg p-3">
                     <p class="text-sm text-red-800 dark:text-red-300">
@@ -431,7 +431,7 @@
 
                     <TabsContent value="response-headers">
                       <JsonContent
-                        :data="detail.response_headers"
+                        :data="actualResponseHeaders"
                         :view-mode="viewMode"
                         :expand-depth="currentExpandDepth"
                         :is-dark="isDark"
@@ -614,6 +614,25 @@ const tabs = [
   { name: 'metadata', label: '元数据' },
 ]
 
+// 判断数据是否有实际内容（非空对象/数组）
+function hasContent(data: unknown): boolean {
+  if (data === null || data === undefined) return false
+  if (typeof data === 'object') {
+    return Object.keys(data as object).length > 0
+  }
+  return true
+}
+
+// 获取实际的响应头（优先 client_response_headers，回退到 response_headers）
+const actualResponseHeaders = computed(() => {
+  if (!detail.value) return null
+  // 优先返回客户端响应头，如果没有则回退到提供商响应头
+  if (hasContent(detail.value.client_response_headers)) {
+    return detail.value.client_response_headers
+  }
+  return detail.value.response_headers
+})
+
 // 根据实际数据决定显示哪些 Tab
 const visibleTabs = computed(() => {
   if (!detail.value) return []
@@ -621,15 +640,15 @@ const visibleTabs = computed(() => {
   return tabs.filter(tab => {
     switch (tab.name) {
       case 'request-headers':
-        return detail.value!.request_headers && Object.keys(detail.value!.request_headers).length > 0
+        return hasContent(detail.value!.request_headers)
       case 'request-body':
-        return detail.value!.request_body !== null && detail.value!.request_body !== undefined
+        return hasContent(detail.value!.request_body)
       case 'response-headers':
-        return detail.value!.response_headers && Object.keys(detail.value!.response_headers).length > 0
+        return hasContent(actualResponseHeaders.value)
       case 'response-body':
-        return detail.value!.response_body !== null && detail.value!.response_body !== undefined
+        return hasContent(detail.value!.response_body)
       case 'metadata':
-        return detail.value!.metadata && Object.keys(detail.value!.metadata).length > 0
+        return hasContent(detail.value!.metadata)
       default:
         return false
     }
@@ -775,7 +794,7 @@ function copyJsonToClipboard(tabName: string) {
       data = detail.value.request_body
       break
     case 'response-headers':
-      data = detail.value.response_headers
+      data = actualResponseHeaders.value
       break
     case 'response-body':
       data = detail.value.response_body

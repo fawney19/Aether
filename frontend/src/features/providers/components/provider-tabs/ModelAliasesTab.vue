@@ -168,6 +168,7 @@
     :provider-api-formats="providerApiFormats"
     :models="models"
     :editing-group="editingGroup"
+    :preselected-model-id="preselectedModelId"
     @saved="onDialogSaved"
   />
 
@@ -219,6 +220,7 @@ const deleteConfirmOpen = ref(false)
 const editingGroup = ref<AliasGroup | null>(null)
 const deletingGroup = ref<AliasGroup | null>(null)
 const testingMapping = ref<string | null>(null)
+const preselectedModelId = ref<string | null>(null)
 
 // 列表展开状态
 const expandedAliasGroups = ref<Set<string>>(new Set())
@@ -311,12 +313,21 @@ function toggleAliasGroupExpand(groupKey: string) {
 // 打开添加对话框
 function openAddDialog() {
   editingGroup.value = null
+  preselectedModelId.value = null
+  dialogOpen.value = true
+}
+
+// 打开添加对话框并预选模型（供外部调用）
+function openAddDialogForModel(modelId: string) {
+  editingGroup.value = null
+  preselectedModelId.value = modelId
   dialogOpen.value = true
 }
 
 // 编辑分组
 function editGroup(group: AliasGroup) {
   editingGroup.value = group
+  preselectedModelId.value = null
   dialogOpen.value = true
 }
 
@@ -416,8 +427,9 @@ onMounted(() => {
   }
 })
 
-// 暴露给父组件，用于检测是否有弹窗打开
+// 暴露给父组件
 defineExpose({
-  dialogOpen: computed(() => dialogOpen.value || deleteConfirmOpen.value)
+  dialogOpen: computed(() => dialogOpen.value || deleteConfirmOpen.value),
+  openAddDialogForModel
 })
 </script>

@@ -98,6 +98,7 @@ class MessageTelemetry:
         request_headers: Dict[str, Any],
         response_body: Any,
         response_headers: Dict[str, Any],
+        client_response_headers: Optional[Dict[str, Any]] = None,
         cache_creation_tokens: int = 0,
         cache_read_tokens: int = 0,
         is_stream: bool = False,
@@ -143,6 +144,7 @@ class MessageTelemetry:
             request_body=request_body,
             provider_request_headers=provider_request_headers or {},
             response_headers=response_headers,
+            client_response_headers=client_response_headers,
             response_body=response_body,
             request_id=self.request_id,
             # Provider 侧追踪信息（用于记录真实成本）
@@ -192,6 +194,8 @@ class MessageTelemetry:
         cache_creation_tokens: int = 0,
         cache_read_tokens: int = 0,
         response_body: Optional[Dict[str, Any]] = None,
+        response_headers: Optional[Dict[str, Any]] = None,
+        client_response_headers: Optional[Dict[str, Any]] = None,
         # 模型映射信息
         target_model: Optional[str] = None,
     ) -> None:
@@ -207,6 +211,8 @@ class MessageTelemetry:
             cache_creation_tokens: 缓存创建 tokens
             cache_read_tokens: 缓存读取 tokens
             response_body: 响应体（如果有部分响应）
+            response_headers: 响应头（Provider 返回的原始响应头）
+            client_response_headers: 返回给客户端的响应头
             target_model: 映射后的目标模型名（如果发生了映射）
         """
         provider_name = provider or "unknown"
@@ -232,7 +238,8 @@ class MessageTelemetry:
             request_headers=request_headers,
             request_body=request_body,
             provider_request_headers=provider_request_headers or {},
-            response_headers={},
+            response_headers=response_headers or {},
+            client_response_headers=client_response_headers,
             response_body=response_body or {"error": error_message},
             request_id=self.request_id,
             # 模型映射信息

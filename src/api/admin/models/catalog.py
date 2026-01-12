@@ -125,7 +125,6 @@ class AdminGetModelCatalogAdapter(AdminApiAdapter):
                     ModelCatalogProviderDetail(
                         provider_id=provider.id,
                         provider_name=provider.name,
-                        provider_display_name=provider.display_name,
                         model_id=model.id,
                         target_model=model.provider_model_name,
                         # 显示有效价格

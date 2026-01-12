@@ -26,8 +26,10 @@ def extract_cache_creation_tokens(usage: Dict[str, Any]) -> int:
     3. **旧格式（优先级第三）**：
        usage.cache_creation_input_tokens
 
-    优先使用嵌套格式，如果嵌套格式字段存在但值为 0，则智能 fallback 到旧格式。
-    扁平格式和嵌套格式互斥，按顺序检查。
+    说明：
+    - 只要检测到新格式字段（嵌套/扁平），即视为权威来源：哪怕值为 0 也不回退到旧字段。
+    - 仅当新格式字段完全不存在时，才回退到旧字段。
+    - 扁平格式和嵌套格式互斥，按顺序检查。
 
     Args:
         usage: API 响应中的 usage 字典
@@ -37,27 +39,20 @@ def extract_cache_creation_tokens(usage: Dict[str, Any]) -> int:
     """
     # 1. 检查嵌套格式（最新格式）
     cache_creation = usage.get("cache_creation")
-    if isinstance(cache_creation, dict):
+    has_nested_format = isinstance(cache_creation, dict) and (
+        "ephemeral_5m_input_tokens" in cache_creation
+        or "ephemeral_1h_input_tokens" in cache_creation
+    )
+
+    if has_nested_format:
         cache_5m = int(cache_creation.get("ephemeral_5m_input_tokens", 0))
         cache_1h = int(cache_creation.get("ephemeral_1h_input_tokens", 0))
         total = cache_5m + cache_1h
 
-        if total > 0:
-            logger.debug(
-                f"Using nested cache_creation: 5m={cache_5m}, 1h={cache_1h}, total={total}"
-            )
-            return total
-
-        # 嵌套格式存在但为 0，fallback 到旧格式
-        old_format = int(usage.get("cache_creation_input_tokens", 0))
-        if old_format > 0:
-            logger.debug(
-                f"Nested cache_creation is 0, using old format: {old_format}"
-            )
-            return old_format
-
-        # 都是 0，返回 0
-        return 0
+        logger.debug(
+            f"Using nested cache_creation: 5m={cache_5m}, 1h={cache_1h}, total={total}"
+        )
+        return total
 
     # 2. 检查扁平新格式
     has_flat_format = (
@@ -70,22 +65,10 @@ def extract_cache_creation_tokens(usage: Dict[str, Any]) -> int:
         cache_1h = int(usage.get("claude_cache_creation_1_h_tokens", 0))
         total = cache_5m + cache_1h
 
-        if total > 0:
-            logger.debug(
-                f"Using flat new format: 5m={cache_5m}, 1h={cache_1h}, total={total}"
-            )
-            return total
-
-        # 扁平格式存在但为 0，fallback 到旧格式
-        old_format = int(usage.get("cache_creation_input_tokens", 0))
-        if old_format > 0:
-            logger.debug(
-                f"Flat cache_creation is 0, using old format: {old_format}"
-            )
-            return old_format
-
-        # 都是 0，返回 0
-        return 0
+        logger.debug(
+            f"Using flat new format: 5m={cache_5m}, 1h={cache_1h}, total={total}"
+        )
+        return total
 
     # 3. 回退到旧格式
     old_format = int(usage.get("cache_creation_input_tokens", 0))
@@ -173,8 +156,10 @@ def check_prefetched_response_error(
                 f"base_url={base_url}"
             )
             raise ProviderNotAvailableException(
-                f"提供商 '{provider_name}' 返回了 HTML 页面而非 API 响应，"
-                f"请检查 endpoint 的 base_url 配置是否正确"
+                "上游服务返回了非预期的响应格式",
+                provider_name=provider_name,
+                upstream_status=200,
+                upstream_response=stripped.decode("utf-8", errors="replace")[:500],
             )
 
         # 纯 JSON（可能无换行/多行 JSON）

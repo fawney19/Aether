@@ -216,7 +216,7 @@ class ModelService:
     def delete_model(db: Session, model_id: str):  # UUID
         """删除模型
 
-        新架构删除逻辑：
+        删除逻辑：
         - Model 只是 Provider 对 GlobalModel 的实现，删除不影响 GlobalModel
         - 检查是否是该 GlobalModel 的最后一个实现（如果是，警告但允许删除）
         """
@@ -384,7 +384,7 @@ class ModelService:
 
     @staticmethod
     def convert_to_response(model: Model) -> ModelResponse:
-        """转换为响应模型（新架构：从 GlobalModel 获取显示信息和默认值）"""
+        """转换为响应模型（从 GlobalModel 获取显示信息和默认值）"""
         return ModelResponse(
             id=model.id,
             provider_id=model.provider_id,

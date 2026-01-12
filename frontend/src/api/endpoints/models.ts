@@ -147,14 +147,26 @@ export async function queryProviderUpstreamModels(
 
 /**
  * 从上游提供商导入模型
+ * @param providerId 提供商 ID
+ * @param modelIds 模型 ID 列表
+ * @param options 可选配置
+ * @param options.tiered_pricing 阶梯计费配置
+ * @param options.price_per_request 按次计费价格
  */
 export async function importModelsFromUpstream(
   providerId: string,
-  modelIds: string[]
+  modelIds: string[],
+  options?: {
+    tiered_pricing?: object
+    price_per_request?: number
+  }
 ): Promise<ImportFromUpstreamResponse> {
   const response = await client.post(
     `/api/admin/providers/${providerId}/import-from-upstream`,
-    { model_ids: modelIds }
+    {
+      model_ids: modelIds,
+      ...options
+    }
   )
   return response.data
 }

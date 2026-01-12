@@ -114,7 +114,6 @@ class ModelCatalogProviderDetail(BaseModel):
 
     provider_id: str
     provider_name: str
-    provider_display_name: Optional[str]
     model_id: Optional[str]
     target_model: str
     input_price_per_1m: Optional[float]
@@ -312,16 +311,26 @@ class ImportFromUpstreamRequest(BaseModel):
     """从上游提供商导入模型请求"""
 
     model_ids: List[str] = Field(..., min_length=1, description="上游模型 ID 列表")
+    # 价格覆盖配置（应用于所有导入的模型）
+    tiered_pricing: Optional[Dict] = Field(
+        None,
+        description="阶梯计费配置（可选），格式: {tiers: [{up_to, input_price_per_1m, output_price_per_1m, ...}]}"
+    )
+    price_per_request: Optional[float] = Field(
+        None,
+        ge=0,
+        description="按次计费价格（可选，单位：美元）"
+    )
 
 
 class ImportFromUpstreamSuccessItem(BaseModel):
     """导入成功的模型信息"""
 
     model_id: str = Field(..., description="上游模型 ID")
-    global_model_id: str = Field(..., description="GlobalModel ID")
-    global_model_name: str = Field(..., description="GlobalModel 名称")
     provider_model_id: str = Field(..., description="Provider Model ID")
-    created_global_model: bool = Field(..., description="是否新创建了 GlobalModel")
+    global_model_id: Optional[str] = Field("", description="GlobalModel ID（如果已关联）")
+    global_model_name: Optional[str] = Field("", description="GlobalModel 名称（如果已关联）")
+    created_global_model: bool = Field(False, description="是否新创建了 GlobalModel（始终为 false）")
 
 
 class ImportFromUpstreamErrorItem(BaseModel):

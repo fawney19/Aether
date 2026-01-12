@@ -418,16 +418,16 @@ const MOCK_ALIASES = [
 
 // Mock Endpoint Keys
 const MOCK_ENDPOINT_KEYS = [
-  { id: 'ekey-001', endpoint_id: 'ep-001', api_key_masked: 'sk-ant...abc1', name: 'Primary Key', rate_multiplier: 1.0, internal_priority: 1, health_score: 98, consecutive_failures: 0, request_count: 5000, success_count: 4950, error_count: 50, success_rate: 99, avg_response_time_ms: 1200, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: new Date().toISOString() },
-  { id: 'ekey-002', endpoint_id: 'ep-001', api_key_masked: 'sk-ant...def2', name: 'Backup Key', rate_multiplier: 1.0, internal_priority: 2, health_score: 95, consecutive_failures: 1, request_count: 2000, success_count: 1950, error_count: 50, success_rate: 97.5, avg_response_time_ms: 1350, is_active: true, created_at: '2024-02-01T00:00:00Z', updated_at: new Date().toISOString() },
-  { id: 'ekey-003', endpoint_id: 'ep-002', api_key_masked: 'sk-oai...ghi3', name: 'OpenAI Main', rate_multiplier: 1.0, internal_priority: 1, health_score: 97, consecutive_failures: 0, request_count: 3500, success_count: 3450, error_count: 50, success_rate: 98.6, avg_response_time_ms: 900, is_active: true, created_at: '2024-01-15T00:00:00Z', updated_at: new Date().toISOString() }
+  { id: 'ekey-001', provider_id: 'provider-001', api_formats: ['CLAUDE'], api_key_masked: 'sk-ant...abc1', name: 'Primary Key', rate_multiplier: 1.0, internal_priority: 1, health_score: 0.98, consecutive_failures: 0, request_count: 5000, success_count: 4950, error_count: 50, success_rate: 0.99, avg_response_time_ms: 1200, cache_ttl_minutes: 5, max_probe_interval_minutes: 32, is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: new Date().toISOString() },
+  { id: 'ekey-002', provider_id: 'provider-001', api_formats: ['CLAUDE'], api_key_masked: 'sk-ant...def2', name: 'Backup Key', rate_multiplier: 1.0, internal_priority: 2, health_score: 0.95, consecutive_failures: 1, request_count: 2000, success_count: 1950, error_count: 50, success_rate: 0.975, avg_response_time_ms: 1350, cache_ttl_minutes: 5, max_probe_interval_minutes: 32, is_active: true, created_at: '2024-02-01T00:00:00Z', updated_at: new Date().toISOString() },
+  { id: 'ekey-003', provider_id: 'provider-002', api_formats: ['OPENAI'], api_key_masked: 'sk-oai...ghi3', name: 'OpenAI Main', rate_multiplier: 1.0, internal_priority: 1, health_score: 0.97, consecutive_failures: 0, request_count: 3500, success_count: 3450, error_count: 50, success_rate: 0.986, avg_response_time_ms: 900, cache_ttl_minutes: 5, max_probe_interval_minutes: 32, is_active: true, created_at: '2024-01-15T00:00:00Z', updated_at: new Date().toISOString() }
 ]
 
 // Mock Endpoints
 const MOCK_ENDPOINTS = [
-  { id: 'ep-001', provider_id: 'provider-001', provider_name: 'anthropic', api_format: 'claude', base_url: 'https://api.anthropic.com', auth_type: 'bearer', timeout: 120, max_retries: 2, priority: 100, weight: 100, health_score: 98, consecutive_failures: 0, is_active: true, total_keys: 2, active_keys: 2, created_at: '2024-01-01T00:00:00Z', updated_at: new Date().toISOString() },
-  { id: 'ep-002', provider_id: 'provider-002', provider_name: 'openai', api_format: 'openai', base_url: 'https://api.openai.com', auth_type: 'bearer', timeout: 60, max_retries: 2, priority: 90, weight: 100, health_score: 97, consecutive_failures: 0, is_active: true, total_keys: 1, active_keys: 1, created_at: '2024-01-01T00:00:00Z', updated_at: new Date().toISOString() },
-  { id: 'ep-003', provider_id: 'provider-003', provider_name: 'google', api_format: 'gemini', base_url: 'https://generativelanguage.googleapis.com', auth_type: 'api_key', timeout: 60, max_retries: 2, priority: 80, weight: 100, health_score: 96, consecutive_failures: 0, is_active: true, total_keys: 1, active_keys: 1, created_at: '2024-01-15T00:00:00Z', updated_at: new Date().toISOString() }
+  { id: 'ep-001', provider_id: 'provider-001', provider_name: 'anthropic', api_format: 'CLAUDE', base_url: 'https://api.anthropic.com', timeout: 300, max_retries: 2, is_active: true, total_keys: 2, active_keys: 2, created_at: '2024-01-01T00:00:00Z', updated_at: new Date().toISOString() },
+  { id: 'ep-002', provider_id: 'provider-002', provider_name: 'openai', api_format: 'OPENAI', base_url: 'https://api.openai.com', timeout: 60, max_retries: 2, is_active: true, total_keys: 1, active_keys: 1, created_at: '2024-01-01T00:00:00Z', updated_at: new Date().toISOString() },
+  { id: 'ep-003', provider_id: 'provider-003', provider_name: 'google', api_format: 'GEMINI', base_url: 'https://generativelanguage.googleapis.com', timeout: 60, max_retries: 2, is_active: true, total_keys: 1, active_keys: 1, created_at: '2024-01-15T00:00:00Z', updated_at: new Date().toISOString() }
 ]
 
 // Mock 能力定义
@@ -581,7 +581,6 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     return createMockResponse(MOCK_PROVIDERS.map(p => ({
       id: p.id,
       name: p.name,
-      display_name: p.display_name,
       is_active: p.is_active
     })))
   },
@@ -1222,13 +1221,8 @@ function generateMockEndpointsForProvider(providerId: string) {
       base_url: format.includes('CLAUDE') ? 'https://api.anthropic.com' :
                 format.includes('OPENAI') ? 'https://api.openai.com' :
                 'https://generativelanguage.googleapis.com',
-      auth_type: format.includes('GEMINI') ? 'api_key' : 'bearer',
-      timeout: 120,
+      timeout: 300,
       max_retries: 2,
-      priority: 100 - index * 10,
-      weight: 100,
-      health_score: healthDetail?.health_score ?? 1.0,
-      consecutive_failures: healthDetail?.health_score && healthDetail.health_score < 0.7 ? 2 : 0,
       is_active: healthDetail?.is_active ?? true,
       total_keys: Math.ceil(Math.random() * 3) + 1,
       active_keys: Math.ceil(Math.random() * 2) + 1,
@@ -1238,11 +1232,16 @@ function generateMockEndpointsForProvider(providerId: string) {
   })
 }
 
-// 为 endpoint 生成 keys
-function generateMockKeysForEndpoint(endpointId: string, count: number = 2) {
+// 为 provider 生成 keys（Key 归属 Provider，通过 api_formats 关联）
+const PROVIDER_KEYS_CACHE: Record<string, any[]> = {}
+function generateMockKeysForProvider(providerId: string, count: number = 2) {
+  const provider = MOCK_PROVIDERS.find(p => p.id === providerId)
+  const formats = provider?.api_formats || []
+
   return Array.from({ length: count }, (_, i) => ({
-    id: `key-${endpointId}-${i + 1}`,
-    endpoint_id: endpointId,
+    id: `key-${providerId}-${i + 1}`,
+    provider_id: providerId,
+    api_formats: i === 0 ? formats : formats.slice(0, 1),
     api_key_masked: `sk-***...${Math.random().toString(36).substring(2, 6)}`,
     name: i === 0 ? 'Primary Key' : `Backup Key ${i}`,
     rate_multiplier: 1.0,
@@ -1254,6 +1253,8 @@ function generateMockKeysForEndpoint(endpointId: string, count: number = 2) {
     error_count: Math.floor(Math.random() * 100),
     success_rate: 0.95 + Math.random() * 0.04,  // 0.95-0.99
     avg_response_time_ms: 800 + Math.floor(Math.random() * 600),
+    cache_ttl_minutes: 5,
+    max_probe_interval_minutes: 32,
     is_active: true,
     created_at: '2024-01-01T00:00:00Z',
     updated_at: new Date().toISOString()
@@ -1463,29 +1464,63 @@ registerDynamicRoute('PUT', '/api/admin/endpoints/:endpointId', async (config, p
 registerDynamicRoute('DELETE', '/api/admin/endpoints/:endpointId', async (_config, _params) => {
   await delay()
   requireAdmin()
-  return createMockResponse({ message: '删除成功（演示模式）' })
+  return createMockResponse({ message: '删除成功（演示模式）', affected_keys_count: 0 })
 })
 
-// Endpoint Keys 列表
-registerDynamicRoute('GET', '/api/admin/endpoints/:endpointId/keys', async (_config, params) => {
+// Provider Keys 列表
+registerDynamicRoute('GET', '/api/admin/endpoints/providers/:providerId/keys', async (_config, params) => {
   await delay()
   requireAdmin()
-  const keys = generateMockKeysForEndpoint(params.endpointId, 2)
-  return createMockResponse(keys)
+  if (!PROVIDER_KEYS_CACHE[params.providerId]) {
+    PROVIDER_KEYS_CACHE[params.providerId] = generateMockKeysForProvider(params.providerId, 2)
+  }
+  return createMockResponse(PROVIDER_KEYS_CACHE[params.providerId])
 })
 
-// 创建 Key
-registerDynamicRoute('POST', '/api/admin/endpoints/:endpointId/keys', async (config, params) => {
+// 为 Provider 创建 Key
+registerDynamicRoute('POST', '/api/admin/endpoints/providers/:providerId/keys', async (config, params) => {
   await delay()
   requireAdmin()
   const body = JSON.parse(config.data || '{}')
-  return createMockResponse({
+  const apiKeyPlain = body.api_key || 'sk-demo'
+  const masked = apiKeyPlain.length >= 12
+    ? `${apiKeyPlain.slice(0, 8)}***${apiKeyPlain.slice(-4)}`
+    : 'sk-***...demo'
+
+  const newKey = {
     id: `key-demo-${Date.now()}`,
-    endpoint_id: params.endpointId,
-    api_key_masked: 'sk-***...demo',
-    ...body,
-    created_at: new Date().toISOString()
-  })
+    provider_id: params.providerId,
+    api_formats: body.api_formats || [],
+    api_key_masked: masked,
+    api_key_plain: null,
+    name: body.name || 'New Key',
+    note: body.note,
+    rate_multiplier: body.rate_multiplier ?? 1.0,
+    rate_multipliers: body.rate_multipliers ?? null,
+    internal_priority: body.internal_priority ?? 50,
+    global_priority: body.global_priority ?? null,
+    rpm_limit: body.rpm_limit ?? null,
+    allowed_models: body.allowed_models ?? null,
+    capabilities: body.capabilities ?? null,
+    cache_ttl_minutes: body.cache_ttl_minutes ?? 5,
+    max_probe_interval_minutes: body.max_probe_interval_minutes ?? 32,
+    health_score: 1.0,
+    consecutive_failures: 0,
+    request_count: 0,
+    success_count: 0,
+    error_count: 0,
+    success_rate: 0.0,
+    avg_response_time_ms: 0.0,
+    is_active: true,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }
+
+  if (!PROVIDER_KEYS_CACHE[params.providerId]) {
+    PROVIDER_KEYS_CACHE[params.providerId] = []
+  }
+  PROVIDER_KEYS_CACHE[params.providerId].push(newKey)
+  return createMockResponse(newKey)
 })
 
 // Key 更新
@@ -1502,6 +1537,50 @@ registerDynamicRoute('DELETE', '/api/admin/endpoints/keys/:keyId', async (_confi
   requireAdmin()
   return createMockResponse({ message: '删除成功（演示模式）' })
 })
+
+// Key Reveal
+registerDynamicRoute('GET', '/api/admin/endpoints/keys/:keyId/reveal', async (_config, _params) => {
+  await delay()
+  requireAdmin()
+  return createMockResponse({ api_key: 'sk-demo-reveal' })
+})
+
+// Keys grouped by format
+mockHandlers['GET /api/admin/endpoints/keys/grouped-by-format'] = async () => {
+  await delay()
+  requireAdmin()
+
+  // 确保每个 provider 都有 key 数据
+  for (const provider of MOCK_PROVIDERS) {
+    if (!PROVIDER_KEYS_CACHE[provider.id]) {
+      PROVIDER_KEYS_CACHE[provider.id] = generateMockKeysForProvider(provider.id, 2)
+    }
+  }
+
+  const grouped: Record<string, any[]> = {}
+  for (const provider of MOCK_PROVIDERS) {
+    const endpoints = generateMockEndpointsForProvider(provider.id)
+    const baseUrlByFormat = Object.fromEntries(endpoints.map(e => [e.api_format, e.base_url]))
+    const keys = PROVIDER_KEYS_CACHE[provider.id] || []
+    for (const key of keys) {
+      const formats: string[] = key.api_formats || []
+      for (const fmt of formats) {
+        if (!grouped[fmt]) grouped[fmt] = []
+        grouped[fmt].push({
+          ...key,
+          api_format: fmt,
+          provider_name: provider.name,
+          endpoint_base_url: baseUrlByFormat[fmt],
+          global_priority: key.global_priority ?? null,
+          circuit_breaker_open: false,
+          capabilities: [],
+        })
+      }
+    }
+  }
+
+  return createMockResponse(grouped)
+}
 
 // Provider Models 列表
 registerDynamicRoute('GET', '/api/admin/providers/:providerId/models', async (_config, params) => {

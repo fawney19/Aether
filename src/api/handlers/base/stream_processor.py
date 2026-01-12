@@ -251,8 +251,10 @@ class StreamProcessor:
                             f"base_url={endpoint.base_url}"
                         )
                         raise ProviderNotAvailableException(
-                            f"提供商 '{provider.name}' 返回了 HTML 页面而非 API 响应，"
-                            f"请检查 endpoint 的 base_url 配置是否正确"
+                            "上游服务返回了非预期的响应格式",
+                            provider_name=str(provider.name),
+                            upstream_status=200,
+                            upstream_response=line[:500] if line else "(empty)",
                         )
 
                     # 跳过空行和注释行

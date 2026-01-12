@@ -89,24 +89,29 @@ class RequestExecutor:
         try:
             # 计算动态预留比例
             reservation_manager = get_adaptive_reservation_manager()
-            # 获取当前并发数用于计算负载
+            # 获取当前 RPM 计数用于计算负载
+            # 注意：key 侧返回的是 RPM 计数（不会在请求结束时减少，靠 TTL 过期）
             try:
-                _, current_key_concurrent = await self.concurrency_manager.get_current_concurrency(
+                _, current_key_rpm = await self.concurrency_manager.get_current_concurrency(
                     endpoint_id=endpoint.id,
                     key_id=key.id,
                 )
             except Exception as e:
-                logger.debug(f"获取并发数失败（用于预留计算）: {e}")
-                current_key_concurrent = 0
+                logger.debug(f"获取 RPM 计数失败（用于预留计算）: {e}")
+                current_key_rpm = 0
 
-            # 获取有效的并发限制（自适应或固定）
-            effective_key_limit = (
-                key.learned_max_concurrent if key.max_concurrent is None else key.max_concurrent
-            )
+            # 获取有效的 RPM 限制（自适应或固定）
+            if key.rpm_limit is None:
+                # 自适应模式：优先使用学习值，否则使用默认初始限制，避免无限制打爆上游
+                from src.config.constants import RPMDefaults
+
+                effective_key_limit = int(key.learned_rpm_limit or RPMDefaults.INITIAL_LIMIT)
+            else:
+                effective_key_limit = int(key.rpm_limit)
 
             reservation_result = reservation_manager.calculate_reservation(
                 key=key,
-                current_concurrent=current_key_concurrent,
+                current_usage=current_key_rpm,
                 effective_limit=effective_key_limit,
             )
             dynamic_reservation_ratio = reservation_result.ratio
@@ -115,24 +120,22 @@ class RequestExecutor:
                 f"ratio={dynamic_reservation_ratio:.0%}, phase={reservation_result.phase}, "
                 f"confidence={reservation_result.confidence:.0%}")
 
-            async with self.concurrency_manager.concurrency_guard(
-                endpoint_id=endpoint.id,
-                endpoint_max_concurrent=endpoint.max_concurrent,
+            async with self.concurrency_manager.rpm_guard(
                 key_id=key.id,
-                key_max_concurrent=effective_key_limit,
+                key_rpm_limit=effective_key_limit,
                 is_cached_user=is_cached_user,
                 cache_reservation_ratio=dynamic_reservation_ratio,
             ):
+                # 获取当前 RPM 计数（guard 内再次获取以获得最新值）
                 try:
-                    _, key_concurrent = await self.concurrency_manager.get_current_concurrency(
-                        endpoint_id=endpoint.id,
+                    key_rpm_count = await self.concurrency_manager.get_key_rpm_count(
                         key_id=key.id,
                     )
                 except Exception as e:
-                    logger.debug(f"获取并发数失败（guard 内）: {e}")
-                    key_concurrent = None
+                    logger.debug(f"获取 RPM 计数失败（guard 内）: {e}")
+                    key_rpm_count = None
 
-                context.concurrent_requests = key_concurrent
+                context.concurrent_requests = key_rpm_count  # 用于记录，实际是 RPM 计数
                 context.start_time = time.time()
 
                 response = await request_func(provider, endpoint, key)
@@ -142,15 +145,18 @@ class RequestExecutor:
                 health_monitor.record_success(
                     db=self.db,
                     key_id=key.id,
+                    api_format=(
+                        api_format.value if isinstance(api_format, APIFormat) else api_format
+                    ),
                     response_time_ms=context.elapsed_ms,
                 )
 
-                # 自适应模式：max_concurrent = NULL
-                if key.max_concurrent is None and key_concurrent is not None:
+                # 自适应模式：rpm_limit = NULL
+                if key.rpm_limit is None and key_rpm_count is not None:
                     self.adaptive_manager.handle_success(
                         db=self.db,
                         key=key,
-                        current_concurrent=key_concurrent,
+                        current_rpm=key_rpm_count,
                     )
 
                 # 根据是否为流式请求，标记不同状态
@@ -162,7 +168,7 @@ class RequestExecutor:
                         db=self.db,
                         candidate_id=candidate_id,
                         status_code=200,
-                        concurrent_requests=key_concurrent,
+                        concurrent_requests=key_rpm_count,
                     )
                 else:
                     # 非流式请求：标记为 success 状态
@@ -171,7 +177,7 @@ class RequestExecutor:
                         candidate_id=candidate_id,
                         status_code=200,
                         latency_ms=context.elapsed_ms,
-                        concurrent_requests=key_concurrent,
+                        concurrent_requests=key_rpm_count,
                         extra_data={
                             "is_cached_user": is_cached_user,
                             "model_name": model_name,

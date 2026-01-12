@@ -205,7 +205,7 @@ class ProviderTimeoutException(ProviderException):
 
     def __init__(self, provider_name: str, timeout: int, request_metadata: Optional[Any] = None):
         super().__init__(
-            message=f"提供商 '{provider_name}' 请求超时（{timeout}秒）",
+            message=f"请求超时（{timeout}秒）",
             provider_name=provider_name,
             request_metadata=request_metadata,
             timeout=timeout,
@@ -217,7 +217,7 @@ class ProviderAuthException(ProviderException):
 
     def __init__(self, provider_name: str, request_metadata: Optional[Any] = None):
         super().__init__(
-            message=f"提供商 '{provider_name}' 认证失败，请检查API密钥",
+            message="上游服务认证失败",
             provider_name=provider_name,
             request_metadata=request_metadata,
         )
@@ -292,9 +292,8 @@ class ModelNotSupportedException(ProxyException):
     """模型不支持"""
 
     def __init__(self, model: str, provider_name: Optional[str] = None):
+        # 客户端消息不暴露提供商信息
         message = f"模型 '{model}' 不受支持"
-        if provider_name:
-            message = f"提供商 '{provider_name}' 不支持模型 '{model}'"
         super().__init__(
             status_code=status.HTTP_400_BAD_REQUEST,
             error_type="model_not_supported",
@@ -307,10 +306,8 @@ class StreamingNotSupportedException(ProxyException):
     """流式请求不支持"""
 
     def __init__(self, model: str, provider_name: Optional[str] = None):
-        if provider_name:
-            message = f"模型 '{model}' 在提供商 '{provider_name}' 上不支持流式请求"
-        else:
-            message = f"模型 '{model}' 不支持流式请求"
+        # 客户端消息不暴露提供商信息
+        message = f"模型 '{model}' 不支持流式请求"
         super().__init__(
             status_code=status.HTTP_400_BAD_REQUEST,
             error_type="streaming_not_supported",
@@ -389,7 +386,7 @@ class JSONParseException(ProviderException):
             details["response_content"] = response_content
 
         super().__init__(
-            message=f"提供商 '{provider_name}' 返回了无效的JSON响应",
+            message="上游服务返回了无效的响应",
             provider_name=provider_name,
             request_metadata=request_metadata,
             **details,
@@ -406,7 +403,7 @@ class EmptyStreamException(ProviderException):
         request_metadata: Optional[Any] = None,
     ):
         super().__init__(
-            message=f"提供商 '{provider_name}' 返回了空的流式响应（status=200 但无数据）",
+            message="上游服务返回了空的流式响应",
             provider_name=provider_name,
             request_metadata=request_metadata,
             chunk_count=chunk_count,
@@ -428,11 +425,10 @@ class EmbeddedErrorException(ProviderException):
         error_status: Optional[str] = None,
         request_metadata: Optional[Any] = None,
     ):
-        message = f"提供商 '{provider_name}' 返回了嵌套错误"
+        # 客户端消息不暴露提供商信息
+        message = "上游服务返回了错误"
         if error_code:
             message += f" (code={error_code})"
-        if error_message:
-            message += f": {error_message}"
 
         super().__init__(
             message=message,
@@ -549,12 +545,14 @@ class ErrorResponse:
         if isinstance(e, ProxyException):
             details = e.details.copy() if e.details else {}
             status_code = e.status_code
-            message = e.message
-            # 如果是 ProviderNotAvailableException 且有上游错误，直接透传上游信息
-            if isinstance(e, ProviderNotAvailableException) and e.upstream_response:
+            message = e.message  # 使用友好的错误消息
+            # 如果是 ProviderNotAvailableException 且有上游错误信息
+            if isinstance(e, ProviderNotAvailableException):
                 if e.upstream_status:
                     status_code = e.upstream_status
-                message = e.upstream_response
+                # upstream_response 存入 details 供请求链路追踪使用，不作为客户端消息
+                if e.upstream_response:
+                    details["upstream_response"] = e.upstream_response
             return ErrorResponse.create(
                 error_type=e.error_type,
                 message=message,

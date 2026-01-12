@@ -93,6 +93,10 @@ class UsageRecorder:
         if metadata.original_model and metadata.original_model != metadata.model:
             target_model = metadata.model
 
+        # 非流式成功时，返回给客户端的是提供商响应头（透传）+ content-type
+        client_response_headers = dict(metadata.provider_response_headers) if metadata.provider_response_headers else {}
+        client_response_headers["content-type"] = "application/json"
+
         await UsageService.record_usage(
             db=self.db,
             user=self.user,
@@ -115,6 +119,7 @@ class UsageRecorder:
             request_body=request_body or result.request_body,
             provider_request_headers=metadata.provider_request_headers,
             response_headers=metadata.provider_response_headers,
+            client_response_headers=client_response_headers,
             response_body=result.response_data if isinstance(result.response_data, dict) else {},
             request_id=self.request_id,
             provider_id=metadata.provider_id,
@@ -181,6 +186,8 @@ class UsageRecorder:
             request_body=request_body or result.request_body,
             provider_request_headers=metadata.provider_request_headers,
             response_headers={},
+            # 失败请求返回给客户端的是 JSON 错误响应
+            client_response_headers={"content-type": "application/json"},
             response_body={"error": result.error_message} if result.error_message else {},
             request_id=self.request_id,
             provider_id=metadata.provider_id,

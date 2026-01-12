@@ -530,9 +530,6 @@
                     />
                     <div class="flex-1 min-w-0">
                       <p class="font-medium text-sm truncate">
-                        {{ provider.display_name || provider.name }}
-                      </p>
-                      <p class="text-xs text-muted-foreground truncate">
                         {{ provider.name }}
                       </p>
                     </div>
@@ -645,10 +642,7 @@
                     />
                     <div class="flex-1 min-w-0">
                       <p class="font-medium text-sm truncate">
-                        {{ provider.display_name }}
-                      </p>
-                      <p class="text-xs text-muted-foreground truncate">
-                        {{ provider.identifier }}
+                        {{ provider.name }}
                       </p>
                     </div>
                     <Badge
@@ -679,7 +673,7 @@
     <ProviderModelFormDialog
       :open="editProviderDialogOpen"
       :provider-id="editingProvider?.id || ''"
-      :provider-name="editingProvider?.display_name || ''"
+      :provider-name="editingProvider?.name || ''"
       :editing-model="editingProviderModel"
       @update:open="handleEditProviderDialogUpdate"
       @saved="handleEditProviderSaved"
@@ -939,7 +933,7 @@ async function batchAddSelectedProviders() {
       const errorMessages = result.errors
         .map(e => {
           const provider = providerOptions.value.find(p => p.id === e.provider_id)
-          const providerName = provider?.display_name || provider?.name || e.provider_id
+          const providerName = provider?.name || e.provider_id
           return `${providerName}: ${e.error}`
         })
         .join('\n')
@@ -977,7 +971,7 @@ async function batchRemoveSelectedProviders() {
         await deleteModel(providerId, provider.model_id)
         successCount++
       } catch (err: any) {
-        errors.push(`${provider.display_name}: ${parseApiError(err, '删除失败')}`)
+        errors.push(`${provider.name}: ${parseApiError(err, '删除失败')}`)
       }
     }
 
@@ -1088,8 +1082,7 @@ async function loadModelProviders(_globalModelId: string) {
     selectedModelProviders.value = response.providers.map(p => ({
       id: p.provider_id,
       model_id: p.model_id,
-      display_name: p.provider_display_name || p.provider_name,
-      identifier: p.provider_name,
+      name: p.provider_name,
       provider_type: 'API',
       target_model: p.target_model,
       is_active: p.is_active,
@@ -1219,7 +1212,7 @@ async function confirmDeleteProviderImplementation(provider: any) {
   }
 
   const confirmed = await confirmDanger(
-    `确定要删除 ${provider.display_name} 的模型关联吗？\n\n模型: ${provider.target_model}\n\n此操作不可恢复！`,
+    `确定要删除 ${provider.name} 的模型关联吗？\n\n模型: ${provider.target_model}\n\n此操作不可恢复！`,
     '删除关联提供商'
   )
   if (!confirmed) return
@@ -1227,7 +1220,7 @@ async function confirmDeleteProviderImplementation(provider: any) {
   try {
     const { deleteModel } = await import('@/api/endpoints')
     await deleteModel(provider.id, provider.model_id)
-    success(`已删除 ${provider.display_name} 的模型实现`)
+    success(`已删除 ${provider.name} 的模型实现`)
     // 重新加载 Provider 列表
     if (selectedModel.value) {
       await loadModelProviders(selectedModel.value.id)

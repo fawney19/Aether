@@ -40,6 +40,7 @@ class UsageRecordParams:
     request_body: Optional[Any]
     provider_request_headers: Optional[Dict[str, Any]]
     response_headers: Optional[Dict[str, Any]]
+    client_response_headers: Optional[Dict[str, Any]]
     response_body: Optional[Any]
     request_id: str
     provider_id: Optional[str]
@@ -223,6 +224,7 @@ class UsageService:
         request_body: Optional[Any],
         provider_request_headers: Optional[Dict[str, Any]],
         response_headers: Optional[Dict[str, Any]],
+        client_response_headers: Optional[Dict[str, Any]],
         response_body: Optional[Any],
         request_id: str,
         provider_id: Optional[str],
@@ -288,6 +290,13 @@ class UsageService:
                 db, response_headers
             )
 
+        # 处理返回给客户端的响应头
+        processed_client_response_headers = None
+        if should_log_headers and client_response_headers:
+            processed_client_response_headers = SystemConfigService.mask_sensitive_headers(
+                db, client_response_headers
+            )
+
         # 计算真实成本（表面成本 * 倍率），免费套餐实际费用为 0
         if is_free_tier:
             actual_input_cost = 0.0
@@ -351,6 +360,7 @@ class UsageService:
             "request_body": processed_request_body,
             "provider_request_headers": processed_provider_request_headers,
             "response_headers": processed_response_headers,
+            "client_response_headers": processed_client_response_headers,
             "response_body": processed_response_body,
         }
 
@@ -360,12 +370,13 @@ class UsageService:
         db: Session,
         provider_api_key_id: Optional[str],
         provider_id: Optional[str],
+        api_format: Optional[str] = None,
     ) -> Tuple[float, bool]:
         """获取费率倍数和是否免费套餐（使用缓存）"""
         from src.services.cache.provider_cache import ProviderCacheService
 
         return await ProviderCacheService.get_rate_multiplier_and_free_tier(
-            db, provider_api_key_id, provider_id
+            db, provider_api_key_id, provider_id, api_format
         )
 
     @classmethod
@@ -484,6 +495,7 @@ class UsageService:
             existing_usage.provider_request_headers = usage_params["provider_request_headers"]
         existing_usage.response_body = usage_params["response_body"]
         existing_usage.response_headers = usage_params["response_headers"]
+        existing_usage.client_response_headers = usage_params["client_response_headers"]
 
         # 更新 token 和费用信息
         existing_usage.input_tokens = usage_params["input_tokens"]
@@ -656,9 +668,9 @@ class UsageService:
         Returns:
             (usage_params 字典, total_cost 总成本)
         """
-        # 获取费率倍数和是否免费套餐
+        # 获取费率倍数和是否免费套餐（传递 api_format 支持按格式配置的倍率）
         actual_rate_multiplier, is_free_tier = await cls._get_rate_multiplier_and_free_tier(
-            params.db, params.provider_api_key_id, params.provider_id
+            params.db, params.provider_api_key_id, params.provider_id, params.api_format
         )
 
         # 计算成本
@@ -704,6 +716,7 @@ class UsageService:
             request_body=params.request_body,
             provider_request_headers=params.provider_request_headers,
             response_headers=params.response_headers,
+            client_response_headers=params.client_response_headers,
             response_body=params.response_body,
             request_id=params.request_id,
             provider_id=params.provider_id,
@@ -753,6 +766,7 @@ class UsageService:
         request_body: Optional[Any] = None,
         provider_request_headers: Optional[Dict[str, Any]] = None,
         response_headers: Optional[Dict[str, Any]] = None,
+        client_response_headers: Optional[Dict[str, Any]] = None,
         response_body: Optional[Any] = None,
         request_id: Optional[str] = None,
         provider_id: Optional[str] = None,
@@ -785,7 +799,8 @@ class UsageService:
             status_code=status_code, error_message=error_message, metadata=metadata,
             request_headers=request_headers, request_body=request_body,
             provider_request_headers=provider_request_headers,
-            response_headers=response_headers, response_body=response_body,
+            response_headers=response_headers, client_response_headers=client_response_headers,
+            response_body=response_body,
             request_id=request_id, provider_id=provider_id,
             provider_endpoint_id=provider_endpoint_id,
             provider_api_key_id=provider_api_key_id, status=status,
@@ -844,6 +859,7 @@ class UsageService:
         request_body: Optional[Any] = None,
         provider_request_headers: Optional[Dict[str, Any]] = None,
         response_headers: Optional[Dict[str, Any]] = None,
+        client_response_headers: Optional[Dict[str, Any]] = None,
         response_body: Optional[Any] = None,
         request_id: Optional[str] = None,
         provider_id: Optional[str] = None,
@@ -878,7 +894,8 @@ class UsageService:
             status_code=status_code, error_message=error_message, metadata=metadata,
             request_headers=request_headers, request_body=request_body,
             provider_request_headers=provider_request_headers,
-            response_headers=response_headers, response_body=response_body,
+            response_headers=response_headers, client_response_headers=client_response_headers,
+            response_body=response_body,
             request_id=request_id, provider_id=provider_id,
             provider_endpoint_id=provider_endpoint_id,
             provider_api_key_id=provider_api_key_id, status=status,

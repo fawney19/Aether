@@ -25,12 +25,12 @@
 
           <template v-else-if="provider">
             <!-- 头部:名称 + 快捷操作 -->
-            <div class="sticky top-0 z-10 bg-background border-b p-4 sm:p-6">
+            <div class="sticky top-0 z-10 bg-background border-b px-4 sm:px-6 pt-4 sm:pt-6 pb-3 sm:pb-3">
               <div class="flex items-start justify-between gap-3 sm:gap-4">
                 <div class="space-y-1 flex-1 min-w-0">
                   <div class="flex items-center gap-2">
                     <h2 class="text-lg sm:text-xl font-bold truncate">
-                      {{ provider.display_name }}
+                      {{ provider.name }}
                     </h2>
                     <Badge
                       :variant="provider.is_active ? 'default' : 'secondary'"
@@ -39,20 +39,19 @@
                       {{ provider.is_active ? '活跃' : '已停用' }}
                     </Badge>
                   </div>
-                  <div class="flex items-center gap-2 flex-wrap">
-                    <span class="text-sm text-muted-foreground font-mono">{{ provider.name }}</span>
-                    <template v-if="provider.website">
-                      <span class="text-muted-foreground">·</span>
-                      <a
-                        :href="provider.website"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        class="text-xs text-primary hover:underline truncate"
-                        title="访问官网"
-                      >
-                        {{ provider.website }}
-                      </a>
-                    </template>
+                  <!-- 网站链接 -->
+                  <div
+                    v-if="provider.website"
+                    class="flex items-center gap-2"
+                  >
+                    <span class="text-muted-foreground">·</span>
+                    <a
+                      :href="provider.website"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="text-xs text-primary hover:underline truncate"
+                      title="访问官网"
+                    >{{ provider.website }}</a>
                   </div>
                 </div>
                 <div class="flex items-center gap-1 shrink-0">
@@ -81,6 +80,22 @@
                     <X class="w-4 h-4" />
                   </Button>
                 </div>
+              </div>
+              <!-- 端点 API 格式 -->
+              <div class="flex items-center gap-1.5 flex-wrap mt-3">
+                <template v-for="endpoint in endpoints" :key="endpoint.id">
+                  <span
+                    class="text-xs px-2 py-0.5 rounded-md border border-border bg-background hover:bg-accent hover:border-accent-foreground/20 cursor-pointer transition-colors font-medium"
+                    :class="{ 'opacity-40': !endpoint.is_active }"
+                    :title="`编辑 ${API_FORMAT_LABELS[endpoint.api_format]} 端点`"
+                    @click="handleEditEndpoint(endpoint)"
+                  >{{ API_FORMAT_LABELS[endpoint.api_format] || endpoint.api_format }}</span>
+                </template>
+                <span
+                  class="text-xs px-2 py-0.5 rounded-md border border-dashed border-border hover:bg-accent hover:border-accent-foreground/20 cursor-pointer transition-colors text-muted-foreground"
+                  title="编辑端点"
+                  @click="showAddEndpointDialog"
+                >编辑</span>
               </div>
             </div>
 
@@ -127,410 +142,198 @@
                 </div>
               </Card>
 
-              <!-- 端点与密钥管理 -->
+              <!-- 密钥管理 -->
               <Card class="overflow-hidden">
                 <div class="p-4 border-b border-border/60">
                   <div class="flex items-center justify-between">
-                    <h3 class="text-sm font-semibold flex items-center gap-2">
-                      <span>端点与密钥管理</span>
+                    <h3 class="text-sm font-semibold">
+                      密钥管理
                     </h3>
                     <Button
+                      v-if="endpoints.length > 0"
                       variant="outline"
                       size="sm"
                       class="h-8"
-                      @click="showAddEndpointDialog"
+                      @click="handleAddKeyToFirstEndpoint"
                     >
                       <Plus class="w-3.5 h-3.5 mr-1.5" />
-                      添加端点
+                      添加密钥
                     </Button>
                   </div>
                 </div>
 
-                <!-- 端点列表 -->
+                <!-- 密钥列表 -->
                 <div
-                  v-if="endpoints.length > 0"
+                  v-if="allKeys.length > 0"
                   class="divide-y divide-border/40"
                 >
                   <div
-                    v-for="endpoint in endpoints"
-                    :key="endpoint.id"
-                    class="group"
+                    v-for="({ key, endpoint }, index) in allKeys"
+                    :key="key.id"
+                    class="px-4 py-2.5 hover:bg-muted/30 transition-colors group/item"
+                    :class="{
+                      'opacity-50': keyDragState.isDragging && keyDragState.draggedIndex === index,
+                      'bg-primary/5 border-l-2 border-l-primary': keyDragState.targetIndex === index && keyDragState.isDragging
+                    }"
+                    draggable="true"
+                    @dragstart="handleKeyDragStart($event, index)"
+                    @dragend="handleKeyDragEnd"
+                    @dragover="handleKeyDragOver($event, index)"
+                    @dragleave="handleKeyDragLeave"
+                    @drop="handleKeyDrop($event, index)"
                   >
-                    <!-- 端点头部 - 可点击展开/收起 -->
-                    <div
-                      class="p-4 hover:bg-muted/30 transition-colors cursor-pointer"
-                      @click="toggleEndpoint(endpoint.id)"
-                    >
-                      <div class="flex items-center justify-between">
-                        <div class="flex items-center gap-3 flex-1 min-w-0">
-                          <ChevronRight
-                            class="w-4 h-4 text-muted-foreground transition-transform shrink-0"
-                            :class="{ 'rotate-90': expandedEndpoints.has(endpoint.id) }"
-                          />
-                          <div class="flex-1 min-w-0">
-                            <div class="flex items-center gap-2">
-                              <span class="text-sm font-medium">{{ endpoint.api_format }}</span>
-                              <Badge
-                                v-if="!endpoint.is_active"
-                                variant="secondary"
-                                class="text-[10px] px-1.5 py-0"
-                              >
-                                已停用
-                              </Badge>
-                              <span class="text-xs text-muted-foreground flex items-center gap-1">
-                                <Key class="w-3 h-3" />
-                                {{ endpoint.keys?.filter((k: EndpointAPIKey) => k.is_active).length || 0 }}
-                              </span>
-                              <span
-                                v-if="endpoint.max_retries"
-                                class="text-xs text-muted-foreground"
-                              >
-                                {{ endpoint.max_retries }}次重试
-                              </span>
-                              <span
-                                v-if="endpoint.timeout"
-                                class="text-xs text-muted-foreground"
-                              >
-                                {{ endpoint.timeout }}s
-                              </span>
-                            </div>
-                            <div class="flex items-center gap-1.5 mt-0.5">
-                              <span class="text-xs text-muted-foreground font-mono truncate">
-                                {{ endpoint.base_url }}
-                              </span>
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                class="h-5 w-5 shrink-0"
-                                title="复制 Base URL"
-                                @click.stop="copyToClipboard(endpoint.base_url)"
-                              >
-                                <Copy class="w-3 h-3" />
-                              </Button>
-                            </div>
+                    <!-- 第一行：名称 + 状态 + 操作按钮 -->
+                    <div class="flex items-center justify-between gap-2">
+                      <div class="flex items-center gap-2 flex-1 min-w-0">
+                        <!-- 拖拽手柄 -->
+                        <div class="cursor-grab active:cursor-grabbing text-muted-foreground/30 group-hover/item:text-muted-foreground transition-colors shrink-0">
+                          <GripVertical class="w-4 h-4" />
+                        </div>
+                        <div class="flex flex-col min-w-0">
+                          <span class="text-sm font-medium truncate">{{ key.name || '未命名密钥' }}</span>
+                          <div class="flex items-center gap-1">
+                            <span class="text-[11px] font-mono text-muted-foreground">
+                              {{ key.api_key_masked }}
+                            </span>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              class="h-4 w-4 shrink-0"
+                              title="复制密钥"
+                              @click.stop="copyFullKey(key)"
+                            >
+                              <Copy class="w-2.5 h-2.5" />
+                            </Button>
                           </div>
                         </div>
-                        <div
-                          class="flex items-center gap-1"
-                          @click.stop
+                        <Badge
+                          v-if="!key.is_active"
+                          variant="secondary"
+                          class="text-[10px] px-1.5 py-0 shrink-0"
                         >
-                          <Button
-                            v-if="hasUnhealthyKeys(endpoint)"
-                            variant="ghost"
-                            size="icon"
-                            class="h-8 w-8 text-green-600"
-                            title="恢复所有密钥健康状态"
-                            :disabled="recoveringEndpointId === endpoint.id"
-                            @click="handleRecoverAllKeys(endpoint)"
-                          >
-                            <Loader2
-                              v-if="recoveringEndpointId === endpoint.id"
-                              class="w-3.5 h-3.5 animate-spin"
+                          禁用
+                        </Badge>
+                        <Badge
+                          v-if="key.circuit_breaker_open"
+                          variant="destructive"
+                          class="text-[10px] px-1.5 py-0 shrink-0"
+                        >
+                          熔断
+                        </Badge>
+                      </div>
+                      <!-- 并发 + 健康度 + 操作按钮 -->
+                      <div class="flex items-center gap-1 shrink-0">
+                        <!-- RPM 限制信息（放在最前面） -->
+                        <span
+                          v-if="key.rpm_limit || key.is_adaptive"
+                          class="text-[10px] text-muted-foreground mr-1"
+                        >
+                          {{ key.is_adaptive ? '自适应' : key.rpm_limit }} RPM
+                        </span>
+                        <!-- 健康度 -->
+                        <div
+                          v-if="key.health_score !== undefined"
+                          class="flex items-center gap-1 mr-1"
+                        >
+                          <div class="w-10 h-1.5 bg-muted/80 rounded-full overflow-hidden">
+                            <div
+                              class="h-full transition-all duration-300"
+                              :class="getHealthScoreBarColor(key.health_score || 0)"
+                              :style="{ width: `${(key.health_score || 0) * 100}%` }"
                             />
-                            <RefreshCw
-                              v-else
-                              class="w-3.5 h-3.5"
-                            />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            class="h-8 w-8"
-                            title="添加密钥"
-                            @click="handleAddKey(endpoint)"
+                          </div>
+                          <span
+                            class="text-[10px] font-medium tabular-nums"
+                            :class="getHealthScoreColor(key.health_score || 0)"
                           >
-                            <Plus class="w-4 h-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            class="h-8 w-8"
-                            title="编辑端点"
-                            @click="handleEditEndpoint(endpoint)"
-                          >
-                            <Edit class="w-3.5 h-3.5" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            class="h-8 w-8"
-                            :disabled="togglingEndpointId === endpoint.id"
-                            :title="endpoint.is_active ? '点击停用' : '点击启用'"
-                            @click="toggleEndpointActive(endpoint)"
-                          >
-                            <Power class="w-3.5 h-3.5" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            class="h-8 w-8"
-                            title="删除端点"
-                            @click="handleDeleteEndpoint(endpoint)"
-                          >
-                            <Trash2 class="w-3.5 h-3.5" />
-                          </Button>
+                            {{ ((key.health_score || 0) * 100).toFixed(0) }}%
+                          </span>
                         </div>
+                        <Button
+                          v-if="key.circuit_breaker_open || (key.health_score !== undefined && key.health_score < 0.5)"
+                          variant="ghost"
+                          size="icon"
+                          class="h-7 w-7 text-green-600"
+                          title="刷新健康状态"
+                          @click="handleRecoverKey(key)"
+                        >
+                          <RefreshCw class="w-3.5 h-3.5" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          class="h-7 w-7"
+                          title="模型权限"
+                          @click="handleKeyPermissions(key)"
+                        >
+                          <Shield class="w-3.5 h-3.5" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          class="h-7 w-7"
+                          title="编辑密钥"
+                          @click="handleEditKey(endpoint, key)"
+                        >
+                          <Edit class="w-3.5 h-3.5" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          class="h-7 w-7"
+                          :disabled="togglingKeyId === key.id"
+                          :title="key.is_active ? '点击停用' : '点击启用'"
+                          @click="toggleKeyActive(key)"
+                        >
+                          <Power class="w-3.5 h-3.5" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          class="h-7 w-7"
+                          title="删除密钥"
+                          @click="handleDeleteKey(key)"
+                        >
+                          <Trash2 class="w-3.5 h-3.5" />
+                        </Button>
                       </div>
                     </div>
-
-                    <!-- 端点详情 - 可展开区域 -->
-                    <div
-                      v-if="expandedEndpoints.has(endpoint.id)"
-                      class="px-4 pb-4 bg-muted/20 border-t border-border/40"
-                    >
-                      <div class="space-y-3 pt-3">
-                        <!-- 端点配置信息 -->
-                        <div
-                          v-if="endpoint.custom_path || endpoint.rpm_limit"
-                          class="flex flex-wrap gap-x-4 gap-y-1 text-xs"
-                        >
-                          <div v-if="endpoint.custom_path">
-                            <span class="text-muted-foreground">自定义路径:</span>
-                            <span class="ml-1 font-mono">{{ endpoint.custom_path }}</span>
-                          </div>
-                          <div v-if="endpoint.rpm_limit">
-                            <span class="text-muted-foreground">RPM:</span>
-                            <span class="ml-1 font-medium">{{ endpoint.rpm_limit }}</span>
-                          </div>
-                        </div>
-
-                        <!-- 密钥列表 -->
-                        <div class="space-y-2">
-                          <div
-                            v-if="endpoint.keys && endpoint.keys.length > 0"
-                            class="space-y-2"
-                          >
-                            <div
-                              v-for="key in endpoint.keys"
-                              :key="key.id"
-                              draggable="true"
-                              class="p-3 bg-background rounded-md border transition-all duration-150 group/key"
-                              :class="{
-                                'border-border/40 hover:border-border/80': dragState.targetKeyId !== key.id,
-                                'border-primary border-2 bg-primary/5': dragState.targetKeyId === key.id,
-                                'opacity-50': dragState.draggedKeyId === key.id,
-                                'cursor-grabbing': dragState.isDragging
-                              }"
-                              @dragstart="handleDragStart($event, key, endpoint)"
-                              @dragend="handleDragEnd"
-                              @dragover="handleDragOver($event, key)"
-                              @dragleave="handleDragLeave"
-                              @drop="handleDrop($event, key, endpoint)"
-                            >
-                              <!-- 密钥主要信息行 -->
-                              <div class="flex items-center justify-between mb-2">
-                                <div class="flex items-center gap-2 flex-1 min-w-0">
-                                  <!-- 拖动手柄 -->
-                                  <div
-                                    class="cursor-grab active:cursor-grabbing text-muted-foreground/50 hover:text-muted-foreground"
-                                    title="拖动排序"
-                                  >
-                                    <GripVertical class="w-4 h-4" />
-                                  </div>
-                                  <div class="min-w-0">
-                                    <div class="flex items-center gap-1.5">
-                                      <span class="text-xs font-medium truncate">{{ key.name || '未命名密钥' }}</span>
-                                      <Badge
-                                        :variant="key.is_active ? 'default' : 'secondary'"
-                                        class="text-[10px] px-1.5 py-0 shrink-0"
-                                      >
-                                        {{ key.is_active ? '活跃' : '禁用' }}
-                                      </Badge>
-                                    </div>
-                                    <div class="flex items-center gap-1">
-                                      <span class="text-[10px] font-mono text-muted-foreground truncate max-w-[180px]">
-                                        {{ revealedKeys.has(key.id) ? revealedKeys.get(key.id) : key.api_key_masked }}
-                                      </span>
-                                      <Button
-                                        variant="ghost"
-                                        size="icon"
-                                        class="h-5 w-5 shrink-0"
-                                        :title="revealedKeys.has(key.id) ? '隐藏密钥' : '显示密钥'"
-                                        :disabled="revealingKeyId === key.id"
-                                        @click.stop="toggleKeyReveal(key)"
-                                      >
-                                        <Loader2
-                                          v-if="revealingKeyId === key.id"
-                                          class="w-3 h-3 animate-spin"
-                                        />
-                                        <EyeOff
-                                          v-else-if="revealedKeys.has(key.id)"
-                                          class="w-3 h-3"
-                                        />
-                                        <Eye
-                                          v-else
-                                          class="w-3 h-3"
-                                        />
-                                      </Button>
-                                      <Button
-                                        variant="ghost"
-                                        size="icon"
-                                        class="h-5 w-5 shrink-0"
-                                        title="复制密钥"
-                                        @click.stop="copyFullKey(key)"
-                                      >
-                                        <Copy class="w-3 h-3" />
-                                      </Button>
-                                    </div>
-                                  </div>
-                                  <div class="flex items-center gap-1.5 ml-auto shrink-0">
-                                    <div
-                                      v-if="key.health_score !== undefined"
-                                      class="flex items-center gap-1"
-                                    >
-                                      <div class="w-12 h-1 bg-muted/80 rounded-full overflow-hidden">
-                                        <div
-                                          class="h-full transition-all duration-300"
-                                          :class="getHealthScoreBarColor(key.health_score || 0)"
-                                          :style="{ width: `${(key.health_score || 0) * 100}%` }"
-                                        />
-                                      </div>
-                                      <span
-                                        class="text-[10px] font-bold tabular-nums w-[30px] text-right"
-                                        :class="getHealthScoreColor(key.health_score || 0)"
-                                      >
-                                        {{ ((key.health_score || 0) * 100).toFixed(0) }}%
-                                      </span>
-                                    </div>
-                                    <Badge
-                                      v-if="key.circuit_breaker_open"
-                                      variant="destructive"
-                                      class="text-[10px] px-1.5 py-0"
-                                    >
-                                      熔断
-                                    </Badge>
-                                  </div>
-                                </div>
-                                <div class="flex items-center gap-1 ml-2">
-                                  <Button
-                                    v-if="key.circuit_breaker_open || (key.health_score !== undefined && key.health_score < 0.5)"
-                                    variant="ghost"
-                                    size="icon"
-                                    class="h-7 w-7 text-green-600"
-                                    title="刷新健康状态"
-                                    @click="handleRecoverKey(key)"
-                                  >
-                                    <RefreshCw class="w-3 h-3" />
-                                  </Button>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    class="h-7 w-7"
-                                    title="配置允许的模型"
-                                    @click="handleConfigKeyModels(key)"
-                                  >
-                                    <Layers class="w-3 h-3" />
-                                  </Button>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    class="h-7 w-7"
-                                    title="编辑密钥"
-                                    @click="handleEditKey(endpoint, key)"
-                                  >
-                                    <Edit class="w-3 h-3" />
-                                  </Button>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    class="h-7 w-7"
-                                    :disabled="togglingKeyId === key.id"
-                                    :title="key.is_active ? '点击停用' : '点击启用'"
-                                    @click="toggleKeyActive(key)"
-                                  >
-                                    <Power class="w-3 h-3" />
-                                  </Button>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    class="h-7 w-7"
-                                    title="删除密钥"
-                                    @click="handleDeleteKey(key)"
-                                  >
-                                    <Trash2 class="w-3 h-3" />
-                                  </Button>
-                                </div>
-                              </div>
-
-                              <!-- 密钥详细信息 -->
-                              <div class="flex items-center text-[11px]">
-                                <!-- 左侧固定信息 -->
-                                <div class="flex items-center gap-2">
-                                  <!-- 可点击编辑的优先级 -->
-                                  <span
-                                    v-if="editingPriorityKey !== key.id"
-                                    class="text-muted-foreground cursor-pointer hover:text-foreground hover:bg-muted/50 px-1 rounded transition-colors"
-                                    title="点击编辑优先级，数字越小优先级越高"
-                                    @click="startEditPriority(key)"
-                                  >
-                                    P {{ key.internal_priority }}
-                                  </span>
-                                  <!-- 编辑模式 -->
-                                  <span
-                                    v-else
-                                    class="flex items-center gap-1"
-                                  >
-                                    <span class="text-muted-foreground">P</span>
-                                    <input
-                                      ref="priorityInput"
-                                      v-model.number="editingPriorityValue"
-                                      type="number"
-                                      class="w-12 h-5 px-1 text-[11px] border rounded bg-background focus:outline-none focus:ring-1 focus:ring-primary"
-                                      min="0"
-                                      @keyup.enter="savePriority(key, endpoint)"
-                                      @keyup.escape="cancelEditPriority"
-                                      @blur="savePriority(key, endpoint)"
-                                    >
-                                  </span>
-                                  <span
-                                    class="text-muted-foreground"
-                                    title="成本倍率，实际成本 = 模型价格 × 倍率"
-                                  >
-                                    {{ key.rate_multiplier }}x
-                                  </span>
-                                  <span
-                                    v-if="key.success_rate !== undefined"
-                                    class="text-muted-foreground"
-                                    title="成功率 = 成功次数 / 总请求数"
-                                  >
-                                    {{ (key.success_rate * 100).toFixed(1) }}% ({{ key.success_count }}/{{ key.request_count }})
-                                  </span>
-                                </div>
-                                <!-- 右侧动态信息 -->
-                                <div class="flex items-center gap-2 ml-auto">
-                                  <span
-                                    v-if="key.next_probe_at"
-                                    class="text-amber-600 dark:text-amber-400"
-                                    title="熔断器探测恢复时间"
-                                  >
-                                    {{ formatProbeTime(key.next_probe_at) }}探测
-                                  </span>
-                                  <span
-                                    v-if="key.rate_limit"
-                                    class="text-muted-foreground"
-                                    title="每分钟请求数限制"
-                                  >
-                                    {{ key.rate_limit }}rpm
-                                  </span>
-                                  <span
-                                    v-if="key.max_concurrent || key.is_adaptive"
-                                    class="text-muted-foreground"
-                                    :title="key.is_adaptive ? `自适应并发限制（学习值: ${key.learned_max_concurrent ?? '未学习'}）` : `固定并发限制: ${key.max_concurrent}`"
-                                  >
-                                    {{ key.is_adaptive ? '自适应' : '固定' }}并发: {{ key.is_adaptive ? (key.learned_max_concurrent ?? '学习中') : key.max_concurrent }}
-                                  </span>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                          <div
-                            v-else
-                            class="text-xs text-muted-foreground text-center py-4"
-                          >
-                            暂无密钥
-                          </div>
-                        </div>
-                      </div>
+                    <!-- 第二行：优先级 + API 格式（展开显示） + 统计信息 -->
+                    <div class="flex items-center gap-1.5 mt-1 text-[11px] text-muted-foreground">
+                      <!-- 优先级放最前面，支持点击编辑 -->
+                      <span
+                        v-if="editingPriorityKey !== key.id"
+                        title="点击编辑优先级"
+                        class="font-medium text-foreground/80 cursor-pointer hover:text-primary hover:underline"
+                        @click="startEditPriority(key)"
+                      >P{{ key.internal_priority }}</span>
+                      <input
+                        v-else
+                        ref="priorityInputRef"
+                        v-model="editingPriorityValue"
+                        type="text"
+                        inputmode="numeric"
+                        pattern="[0-9]*"
+                        class="w-8 h-5 px-1 text-[11px] text-center border rounded bg-background focus:outline-none focus:ring-1 focus:ring-primary font-medium text-foreground/80"
+                        @keydown="(e) => handlePriorityKeydown(e, key)"
+                        @blur="handlePriorityBlur(key)"
+                      >
+                      <span class="text-muted-foreground/40">|</span>
+                      <!-- API 格式：展开显示每个格式和倍率 -->
+                      <template
+                        v-for="(format, idx) in getKeyApiFormats(key, endpoint)"
+                        :key="format"
+                      >
+                        <span v-if="idx > 0" class="text-muted-foreground/40">/</span>
+                        <span>{{ API_FORMAT_SHORT[format] || format }} {{ getKeyRateMultiplier(key, format) }}x</span>
+                      </template>
+                      <span v-if="key.rate_limit">| {{ key.rate_limit }}rpm</span>
+                      <span
+                        v-if="key.next_probe_at"
+                        class="text-amber-600 dark:text-amber-400"
+                      >
+                        | {{ formatProbeTime(key.next_probe_at) }}探测
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -540,12 +343,12 @@
                   v-else
                   class="p-8 text-center text-muted-foreground"
                 >
-                  <Server class="w-12 h-12 mx-auto mb-3 opacity-50" />
+                  <Key class="w-12 h-12 mx-auto mb-3 opacity-50" />
                   <p class="text-sm">
-                    暂无端点配置
+                    暂无密钥配置
                   </p>
                   <p class="text-xs mt-1">
-                    点击上方"添加端点"按钮创建第一个端点
+                    {{ endpoints.length > 0 ? '点击上方"添加密钥"按钮创建第一个密钥' : '请先添加端点，然后再添加密钥' }}
                   </p>
                 </div>
               </Card>
@@ -558,6 +361,7 @@
                 @edit-model="handleEditModel"
                 @delete-model="handleDeleteModel"
                 @batch-assign="handleBatchAssign"
+                @add-mapping="handleAddMapping"
               />
 
               <!-- 模型名称映射 -->
@@ -575,12 +379,12 @@
     </Transition>
   </Teleport>
 
-  <!-- 端点表单对话框（添加/编辑） -->
+  <!-- 端点表单对话框（管理/编辑） -->
   <EndpointFormDialog
     v-if="provider && open"
     v-model="endpointDialogOpen"
     :provider="provider"
-    :endpoint="endpointToEdit"
+    :endpoints="endpoints"
     @endpoint-created="handleEndpointChanged"
     @endpoint-updated="handleEndpointChanged"
   />
@@ -606,17 +410,18 @@
     :endpoint="currentEndpoint"
     :editing-key="editingKey"
     :provider-id="provider ? provider.id : null"
+    :available-api-formats="provider?.api_formats || []"
     @close="keyFormDialogOpen = false"
     @saved="handleKeyChanged"
   />
 
-  <!-- 密钥允许模型配置对话框 -->
-  <KeyAllowedModelsDialog
+  <!-- 模型权限对话框 -->
+  <KeyAllowedModelsEditDialog
     v-if="open"
-    :open="keyAllowedModelsDialogOpen"
+    :open="keyPermissionsDialogOpen"
     :api-key="editingKey"
-    :provider-id="provider ? provider.id : null"
-    @close="keyAllowedModelsDialogOpen = false"
+    :provider-id="providerId || ''"
+    @close="keyPermissionsDialogOpen = false"
     @saved="handleKeyChanged"
   />
 
@@ -639,7 +444,7 @@
     v-if="open && provider"
     :open="modelFormDialogOpen"
     :provider-id="provider.id"
-    :provider-name="provider.display_name"
+    :provider-name="provider.name"
     :editing-model="editingModel"
     @update:open="modelFormDialogOpen = $event"
     @saved="handleModelSaved"
@@ -650,7 +455,7 @@
     v-if="open"
     :model-value="deleteModelConfirmOpen"
     title="移除模型支持"
-    :description="`确定要移除提供商 ${provider?.display_name} 对模型 ${modelToDelete?.global_model_display_name || modelToDelete?.provider_model_name} 的支持吗？这不会删除全局模型，只是该提供商将不再支持此模型。`"
+    :description="`确定要移除提供商 ${provider?.name} 对模型 ${modelToDelete?.global_model_display_name || modelToDelete?.provider_model_name} 的支持吗？这不会删除全局模型，只是该提供商将不再支持此模型。`"
     confirm-text="移除"
     cancel-text="取消"
     type="danger"
@@ -664,7 +469,7 @@
     v-if="open && provider"
     :open="batchAssignDialogOpen"
     :provider-id="provider.id"
-    :provider-name="provider.display_name"
+    :provider-name="provider.name"
     :provider-identifier="provider.name"
     @update:open="batchAssignDialogOpen = $event"
     @changed="handleBatchAssignChanged"
@@ -672,7 +477,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, computed } from 'vue'
+import { ref, watch, computed, nextTick } from 'vue'
 import {
   Server,
   Plus,
@@ -684,11 +489,12 @@ import {
   X,
   Loader2,
   Power,
-  Layers,
   GripVertical,
   Copy,
   Eye,
-  EyeOff
+  EyeOff,
+  ExternalLink,
+  Shield
 } from 'lucide-vue-next'
 import { useEscapeKey } from '@/composables/useEscapeKey'
 import Button from '@/components/ui/button.vue'
@@ -699,7 +505,7 @@ import { useClipboard } from '@/composables/useClipboard'
 import { getProvider, getProviderEndpoints } from '@/api/endpoints'
 import {
   KeyFormDialog,
-  KeyAllowedModelsDialog,
+  KeyAllowedModelsEditDialog,
   ModelsTab,
   ModelAliasesTab,
   BatchAssignModelsDialog
@@ -711,14 +517,17 @@ import {
   deleteEndpoint as deleteEndpointAPI,
   deleteEndpointKey,
   recoverKeyHealth,
-  getEndpointKeys,
+  getProviderKeys,
   updateEndpoint,
-  updateEndpointKey,
-  batchUpdateKeyPriority,
+  updateProviderKey,
   revealEndpointKey,
   type ProviderEndpoint,
   type EndpointAPIKey,
-  type Model
+  type Model,
+  API_FORMAT_LABELS,
+  API_FORMAT_ORDER,
+  API_FORMAT_SHORT,
+  sortApiFormats,
 } from '@/api/endpoints'
 import { deleteModel as deleteModelAPI } from '@/api/endpoints/models'
 
@@ -747,17 +556,17 @@ const { copyToClipboard } = useClipboard()
 const loading = ref(false)
 const provider = ref<any>(null)
 const endpoints = ref<ProviderEndpointWithKeys[]>([])
+const providerKeys = ref<EndpointAPIKey[]>([])  // Provider 级别的 keys
 const expandedEndpoints = ref<Set<string>>(new Set())
 
 // 端点相关状态
 const endpointDialogOpen = ref(false)
-const endpointToEdit = ref<ProviderEndpoint | null>(null)
 const deleteEndpointConfirmOpen = ref(false)
 const endpointToDelete = ref<ProviderEndpoint | null>(null)
 
 // 密钥相关状态
 const keyFormDialogOpen = ref(false)
-const keyAllowedModelsDialogOpen = ref(false)
+const keyPermissionsDialogOpen = ref(false)
 const currentEndpoint = ref<ProviderEndpoint | null>(null)
 const editingKey = ref<EndpointAPIKey | null>(null)
 const deleteKeyConfirmOpen = ref(false)
@@ -780,7 +589,7 @@ const batchAssignDialogOpen = ref(false)
 // ModelAliasesTab 组件引用
 const modelAliasesTabRef = ref<InstanceType<typeof ModelAliasesTab> | null>(null)
 
-// 拖动排序相关状态
+// 拖动排序相关状态（旧的端点级别拖拽，保留以兼容）
 const dragState = ref({
   isDragging: false,
   draggedKeyId: null as string | null,
@@ -788,16 +597,25 @@ const dragState = ref({
   dragEndpointId: null as string | null
 })
 
+// 密钥列表拖拽排序状态
+const keyDragState = ref({
+  isDragging: false,
+  draggedIndex: null as number | null,
+  targetIndex: null as number | null
+})
+
 // 点击编辑优先级相关状态
 const editingPriorityKey = ref<string | null>(null)
 const editingPriorityValue = ref<number>(0)
+const priorityInputRef = ref<HTMLInputElement[] | null>(null)
+const prioritySaving = ref(false)
 
 // 任意模态窗口打开时,阻止抽屉被误关闭
 const hasBlockingDialogOpen = computed(() =>
   endpointDialogOpen.value ||
   deleteEndpointConfirmOpen.value ||
   keyFormDialogOpen.value ||
-  keyAllowedModelsDialogOpen.value ||
+  keyPermissionsDialogOpen.value ||
   deleteKeyConfirmOpen.value ||
   modelFormDialogOpen.value ||
   deleteModelConfirmOpen.value ||
@@ -805,6 +623,36 @@ const hasBlockingDialogOpen = computed(() =>
   // 检测 ModelAliasesTab 子组件的 Dialog 是否打开
   modelAliasesTabRef.value?.dialogOpen
 )
+
+// 所有密钥的扁平列表（带端点信息）
+// key 通过 api_formats 字段确定支持的格式，endpoint 可能为 undefined
+const allKeys = computed(() => {
+  const result: { key: EndpointAPIKey; endpoint?: ProviderEndpointWithKeys }[] = []
+  const seenKeyIds = new Set<string>()
+
+  // 1. 先添加 Provider 级别的 keys
+  for (const key of providerKeys.value) {
+    if (!seenKeyIds.has(key.id)) {
+      seenKeyIds.add(key.id)
+      // key 没有关联特定 endpoint
+      result.push({ key, endpoint: undefined })
+    }
+  }
+
+  // 2. 再遍历所有端点的 keys（历史数据）
+  for (const endpoint of endpoints.value) {
+    if (endpoint.keys) {
+      for (const key of endpoint.keys) {
+        if (!seenKeyIds.has(key.id)) {
+          seenKeyIds.add(key.id)
+          result.push({ key, endpoint })
+        }
+      }
+    }
+  }
+
+  return result
+})
 
 // 监听 providerId 变化
 watch(() => props.providerId, (newId) => {
@@ -823,18 +671,18 @@ watch(() => props.open, (newOpen) => {
     // 重置所有状态
     provider.value = null
     endpoints.value = []
+    providerKeys.value = []  // 清空 Provider 级别的 keys
     expandedEndpoints.value.clear()
 
     // 重置所有对话框状态
     endpointDialogOpen.value = false
     deleteEndpointConfirmOpen.value = false
     keyFormDialogOpen.value = false
-    keyAllowedModelsDialogOpen.value = false
+    keyPermissionsDialogOpen.value = false
     deleteKeyConfirmOpen.value = false
     batchAssignDialogOpen.value = false
 
     // 重置临时数据
-    endpointToEdit.value = null
     endpointToDelete.value = null
     currentEndpoint.value = null
     editingKey.value = null
@@ -873,15 +721,14 @@ async function handleRelatedDataRefresh() {
   emit('refresh')
 }
 
-// 显示添加端点对话框
+// 显示端点管理对话框
 function showAddEndpointDialog() {
-  endpointToEdit.value = null  // 添加模式
   endpointDialogOpen.value = true
 }
 
 // ===== 端点事件处理 =====
-function handleEditEndpoint(endpoint: ProviderEndpoint) {
-  endpointToEdit.value = endpoint  // 编辑模式
+function handleEditEndpoint(_endpoint: ProviderEndpoint) {
+  // 点击任何端点都打开管理对话框
   endpointDialogOpen.value = true
 }
 
@@ -907,9 +754,8 @@ async function confirmDeleteEndpoint() {
 }
 
 async function handleEndpointChanged() {
-  await loadEndpoints()
+  await Promise.all([loadProvider(), loadEndpoints()])
   emit('refresh')
-  endpointToEdit.value = null
 }
 
 // ===== 密钥事件处理 =====
@@ -919,15 +765,22 @@ function handleAddKey(endpoint: ProviderEndpoint) {
   keyFormDialogOpen.value = true
 }
 
-function handleEditKey(endpoint: ProviderEndpoint, key: EndpointAPIKey) {
-  currentEndpoint.value = endpoint
+// 添加密钥（如果有多个端点则添加到第一个）
+function handleAddKeyToFirstEndpoint() {
+  if (endpoints.value.length > 0) {
+    handleAddKey(endpoints.value[0])
+  }
+}
+
+function handleEditKey(endpoint: ProviderEndpoint | undefined, key: EndpointAPIKey) {
+  currentEndpoint.value = endpoint || null
   editingKey.value = key
   keyFormDialogOpen.value = true
 }
 
-function handleConfigKeyModels(key: EndpointAPIKey) {
+function handleKeyPermissions(key: EndpointAPIKey) {
   editingKey.value = key
-  keyAllowedModelsDialogOpen.value = true
+  keyPermissionsDialogOpen.value = true
 }
 
 // 切换密钥显示/隐藏
@@ -1080,7 +933,7 @@ async function toggleKeyActive(key: EndpointAPIKey) {
   togglingKeyId.value = key.id
   try {
     const newStatus = !key.is_active
-    await updateEndpointKey(key.id, { is_active: newStatus })
+    await updateProviderKey(key.id, { is_active: newStatus })
     key.is_active = newStatus
     showSuccess(newStatus ? '密钥已启用' : '密钥已停用')
     emit('refresh')
@@ -1101,6 +954,11 @@ function handleEditModel(model: Model) {
 // 处理打开批量关联对话框
 function handleBatchAssign() {
   batchAssignDialogOpen.value = true
+}
+
+// 处理添加映射（从 ModelsTab 触发）
+function handleAddMapping(model: Model) {
+  modelAliasesTabRef.value?.openAddDialogForModel(model.id)
 }
 
 // 处理批量关联完成
@@ -1240,9 +1098,11 @@ async function handleDrop(event: DragEvent, targetKey: EndpointAPIKey, endpoint:
 
   handleDragEnd()
 
-  // 调用 API 批量更新
+  // 调用 API 批量更新（使用循环调用 updateProviderKey 替代已废弃的 batchUpdateKeyPriority）
   try {
-    await batchUpdateKeyPriority(endpoint.id, priorities)
+    await Promise.all(
+      priorities.map(p => updateProviderKey(p.key_id, { internal_priority: p.internal_priority }))
+    )
     showSuccess('优先级已更新')
     // 重新加载以获取更新后的数据
     await loadEndpoints()
@@ -1258,15 +1118,43 @@ async function handleDrop(event: DragEvent, targetKey: EndpointAPIKey, endpoint:
 function startEditPriority(key: EndpointAPIKey) {
   editingPriorityKey.value = key.id
   editingPriorityValue.value = key.internal_priority ?? 0
+  prioritySaving.value = false
+  nextTick(() => {
+    // v-for 中的 ref 是数组，取第一个元素
+    const input = Array.isArray(priorityInputRef.value) ? priorityInputRef.value[0] : priorityInputRef.value
+    input?.focus()
+    input?.select()
+  })
 }
 
 function cancelEditPriority() {
   editingPriorityKey.value = null
+  prioritySaving.value = false
 }
 
-async function savePriority(key: EndpointAPIKey, endpoint: ProviderEndpointWithKeys) {
+function handlePriorityKeydown(e: KeyboardEvent, key: EndpointAPIKey) {
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    e.stopPropagation()
+    if (!prioritySaving.value) {
+      prioritySaving.value = true
+      savePriority(key)
+    }
+  } else if (e.key === 'Escape') {
+    e.preventDefault()
+    cancelEditPriority()
+  }
+}
+
+function handlePriorityBlur(key: EndpointAPIKey) {
+  // 如果已经在保存中（Enter触发），不重复保存
+  if (prioritySaving.value) return
+  savePriority(key)
+}
+
+async function savePriority(key: EndpointAPIKey) {
   const keyId = editingPriorityKey.value
-  const newPriority = editingPriorityValue.value
+  const newPriority = parseInt(String(editingPriorityValue.value), 10) || 0
 
   if (!keyId || newPriority < 0) {
     cancelEditPriority()
@@ -1282,20 +1170,104 @@ async function savePriority(key: EndpointAPIKey, endpoint: ProviderEndpointWithK
   cancelEditPriority()
 
   try {
-    await updateEndpointKey(keyId, { internal_priority: newPriority })
+    await updateProviderKey(keyId, { internal_priority: newPriority })
     showSuccess('优先级已更新')
-    // 更新本地数据
-    if (endpoint.keys) {
-      const keyToUpdate = endpoint.keys.find(k => k.id === keyId)
-      if (keyToUpdate) {
-        keyToUpdate.internal_priority = newPriority
-      }
-      // 重新排序
-      endpoint.keys.sort((a, b) => (a.internal_priority ?? 0) - (b.internal_priority ?? 0))
+    // 更新本地数据 - 更新 providerKeys 中的数据
+    const keyToUpdate = providerKeys.value.find(k => k.id === keyId)
+    if (keyToUpdate) {
+      keyToUpdate.internal_priority = newPriority
     }
+    // 重新排序
+    providerKeys.value.sort((a, b) => (a.internal_priority ?? 0) - (b.internal_priority ?? 0))
     emit('refresh')
   } catch (err: any) {
     showError(err.response?.data?.detail || '更新优先级失败', '错误')
+  }
+}
+
+// ===== 密钥列表拖拽排序 =====
+function handleKeyDragStart(event: DragEvent, index: number) {
+  keyDragState.value.isDragging = true
+  keyDragState.value.draggedIndex = index
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', String(index))
+  }
+}
+
+function handleKeyDragEnd() {
+  keyDragState.value.isDragging = false
+  keyDragState.value.draggedIndex = null
+  keyDragState.value.targetIndex = null
+}
+
+function handleKeyDragOver(event: DragEvent, index: number) {
+  event.preventDefault()
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move'
+  }
+  if (keyDragState.value.draggedIndex !== index) {
+    keyDragState.value.targetIndex = index
+  }
+}
+
+function handleKeyDragLeave() {
+  keyDragState.value.targetIndex = null
+}
+
+async function handleKeyDrop(event: DragEvent, targetIndex: number) {
+  event.preventDefault()
+
+  const draggedIndex = keyDragState.value.draggedIndex
+  if (draggedIndex === null || draggedIndex === targetIndex) {
+    handleKeyDragEnd()
+    return
+  }
+
+  const keys = allKeys.value.map(item => item.key)
+  if (draggedIndex < 0 || draggedIndex >= keys.length || targetIndex < 0 || targetIndex >= keys.length) {
+    handleKeyDragEnd()
+    return
+  }
+
+  const draggedKey = keys[draggedIndex]
+  const targetKey = keys[targetIndex]
+  const draggedPriority = draggedKey.internal_priority ?? 0
+  const targetPriority = targetKey.internal_priority ?? 0
+
+  // 如果是同组内拖拽（同优先级），忽略操作
+  if (draggedPriority === targetPriority) {
+    handleKeyDragEnd()
+    return
+  }
+
+  // 检查目标 key 是否属于一个"组"（除了被拖拽的 key，还有其他 key 与目标同优先级）
+  // 组的定义：2 个及以上同优先级的 key
+  const keysAtTargetPriority = keys.filter(k =>
+    k.id !== draggedKey.id && (k.internal_priority ?? 0) === targetPriority
+  )
+  // 如果有 2 个及以上 key 在目标优先级（不含被拖拽的），说明目标在组内
+  const targetIsInGroup = keysAtTargetPriority.length >= 2
+
+  handleKeyDragEnd()
+
+  try {
+    if (targetIsInGroup) {
+      // 目标在组内，被拖拽的 key 加入该组
+      await updateProviderKey(draggedKey.id, { internal_priority: targetPriority })
+    } else {
+      // 目标是单独的（或只有目标自己），交换优先级
+      await Promise.all([
+        updateProviderKey(draggedKey.id, { internal_priority: targetPriority }),
+        updateProviderKey(targetKey.id, { internal_priority: draggedPriority })
+      ])
+    }
+    showSuccess('优先级已更新')
+    await loadEndpoints()
+    emit('refresh')
+  } catch (err: any) {
+    showError(err.response?.data?.detail || '更新优先级失败', '错误')
+    await loadEndpoints()
   }
 }
 
@@ -1316,6 +1288,28 @@ function formatProbeTime(probeTime: string): string {
   if (diffHours > 0) return `${diffHours}小时后`
   if (diffMinutes > 0) return `${diffMinutes}分钟后`
   return '即将探测'
+}
+
+// 获取密钥的 API 格式列表（按指定顺序排序）
+function getKeyApiFormats(key: EndpointAPIKey, endpoint?: ProviderEndpointWithKeys): string[] {
+  let formats: string[] = []
+  if (key.api_formats && key.api_formats.length > 0) {
+    formats = [...key.api_formats]
+  } else if (endpoint) {
+    formats = [endpoint.api_format]
+  }
+  // 使用统一的排序函数
+  return sortApiFormats(formats)
+}
+
+// 获取密钥在指定 API 格式下的成本倍率
+function getKeyRateMultiplier(key: EndpointAPIKey, format: string): number {
+  // 优先使用 rate_multipliers 中指定格式的倍率
+  if (key.rate_multipliers && key.rate_multipliers[format] !== undefined) {
+    return key.rate_multipliers[format]
+  }
+  // 回退到默认倍率
+  return key.rate_multiplier || 1.0
 }
 
 // 健康度颜色
@@ -1354,22 +1348,22 @@ async function loadEndpoints() {
   if (!props.providerId) return
 
   try {
-    const endpointsList = await getProviderEndpoints(props.providerId)
+    // 并行加载端点列表和 Provider 级别的 keys
+    const [endpointsList, providerKeysResult] = await Promise.all([
+      getProviderEndpoints(props.providerId),
+      getProviderKeys(props.providerId).catch(() => []),
+    ])
 
-    // 为每个端点加载其密钥
-    const endpointsWithKeys = await Promise.all(
-      endpointsList.map(async (endpoint) => {
-        try {
-          const keys = await getEndpointKeys(endpoint.id)
-          return { ...endpoint, keys }
-        } catch {
-          // 如果获取密钥失败，返回空数组
-          return { ...endpoint, keys: [] }
-        }
-      })
-    )
-
-    endpoints.value = endpointsWithKeys
+    providerKeys.value = providerKeysResult
+    // 按 API 格式排序
+    endpoints.value = endpointsList.sort((a, b) => {
+      const aIdx = API_FORMAT_ORDER.indexOf(a.api_format)
+      const bIdx = API_FORMAT_ORDER.indexOf(b.api_format)
+      if (aIdx === -1 && bIdx === -1) return 0
+      if (aIdx === -1) return 1
+      if (bIdx === -1) return -1
+      return aIdx - bIdx
+    })
   } catch (err: any) {
     showError(err.response?.data?.detail || '加载端点失败', '错误')
   }

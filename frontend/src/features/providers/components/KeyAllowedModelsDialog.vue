@@ -1,165 +1,179 @@
 <template>
   <Dialog
     :model-value="isOpen"
-    title="配置允许的模型"
-    description="选择该 API Key 允许访问的模型，留空则允许访问所有模型"
-    :icon="Settings2"
+    title="获取上游模型"
+    :description="`使用密钥 ${props.apiKey?.name || props.apiKey?.api_key_masked || ''} 从上游获取模型列表。导入的模型需要关联全局模型后才能参与路由。`"
+    :icon="Layers"
     size="2xl"
     @update:model-value="handleDialogUpdate"
   >
     <div class="space-y-4 py-2">
-      <!-- 已选模型展示 -->
-      <div
-        v-if="selectedModels.length > 0"
-        class="space-y-2"
-      >
-        <div class="flex items-center justify-between px-1">
-          <div class="text-xs font-medium text-muted-foreground">
-            已选模型 ({{ selectedModels.length }})
-          </div>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            class="h-6 text-xs hover:text-destructive"
-            @click="clearModels"
-          >
-            清空
-          </Button>
+      <!-- 操作区域 -->
+      <div class="flex items-center justify-between">
+        <div class="text-sm text-muted-foreground">
+          <span v-if="!hasQueried">点击获取按钮查询上游可用模型</span>
+          <span v-else-if="upstreamModels.length > 0">
+            共 {{ upstreamModels.length }} 个模型，已选 {{ selectedModels.length }} 个
+          </span>
+          <span v-else>未找到可用模型</span>
         </div>
-        <div class="flex flex-wrap gap-1.5 p-2 bg-muted/20 rounded-lg border border-border/40 min-h-[40px]">
-          <Badge
-            v-for="modelName in selectedModels"
-            :key="modelName"
-            variant="secondary"
-            class="text-[11px] px-2 py-0.5 bg-background border-border/60 shadow-sm text-foreground dark:text-white"
-          >
-            {{ getModelLabel(modelName) }}
-            <button
-              class="ml-0.5 hover:text-destructive focus:outline-none text-foreground dark:text-white"
-              @click.stop="toggleModel(modelName, false)"
-            >
-              &times;
-            </button>
-          </Badge>
-        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          :disabled="loading"
+          @click="fetchUpstreamModels"
+        >
+          <RefreshCw
+            class="w-3.5 h-3.5 mr-1.5"
+            :class="{ 'animate-spin': loading }"
+          />
+          {{ hasQueried ? '刷新' : '获取模型' }}
+        </Button>
       </div>
 
-      <!-- 模型列表区域 -->
-      <div class="space-y-2">
+      <!-- 加载状态 -->
+      <div
+        v-if="loading"
+        class="flex flex-col items-center justify-center py-12 space-y-3"
+      >
+        <div class="animate-spin rounded-full h-8 w-8 border-2 border-primary/20 border-t-primary" />
+        <span class="text-xs text-muted-foreground">正在从上游获取模型列表...</span>
+      </div>
+
+      <!-- 错误状态 -->
+      <div
+        v-else-if="errorMessage"
+        class="flex flex-col items-center justify-center py-12 text-destructive border border-dashed border-destructive/30 rounded-lg bg-destructive/5"
+      >
+        <AlertCircle class="w-10 h-10 mb-2 opacity-50" />
+        <span class="text-sm text-center px-4">{{ errorMessage }}</span>
+        <Button
+          variant="outline"
+          size="sm"
+          class="mt-3"
+          @click="fetchUpstreamModels"
+        >
+          重试
+        </Button>
+      </div>
+
+      <!-- 未查询状态 -->
+      <div
+        v-else-if="!hasQueried"
+        class="flex flex-col items-center justify-center py-12 text-muted-foreground border border-dashed rounded-lg bg-muted/10"
+      >
+        <Layers class="w-10 h-10 mb-2 opacity-20" />
+        <span class="text-sm">点击上方按钮获取模型列表</span>
+      </div>
+
+      <!-- 无模型 -->
+      <div
+        v-else-if="upstreamModels.length === 0"
+        class="flex flex-col items-center justify-center py-12 text-muted-foreground border border-dashed rounded-lg bg-muted/10"
+      >
+        <Box class="w-10 h-10 mb-2 opacity-20" />
+        <span class="text-sm">上游 API 未返回可用模型</span>
+      </div>
+
+      <!-- 模型列表 -->
+      <div v-else class="space-y-2">
+        <!-- 全选/取消 -->
         <div class="flex items-center justify-between px-1">
-          <div class="text-xs font-medium text-muted-foreground">
-            可选模型列表
+          <div class="flex items-center gap-2">
+            <Checkbox
+              :checked="isAllSelected"
+              :indeterminate="isPartiallySelected"
+              @update:checked="toggleSelectAll"
+            />
+            <span class="text-xs text-muted-foreground">
+              {{ isAllSelected ? '取消全选' : '全选' }}
+            </span>
           </div>
-          <div
-            v-if="!loadingModels && availableModels.length > 0"
-            class="text-[10px] text-muted-foreground/60"
-          >
-            共 {{ availableModels.length }} 个模型
+          <div class="text-xs text-muted-foreground">
+            {{ newModelsCount }} 个新模型（不在本地）
           </div>
         </div>
 
-        <!-- 加载状态 -->
-        <div
-          v-if="loadingModels"
-          class="flex flex-col items-center justify-center py-12 space-y-3"
-        >
-          <div class="animate-spin rounded-full h-8 w-8 border-2 border-primary/20 border-t-primary" />
-          <span class="text-xs text-muted-foreground">正在加载模型列表...</span>
-        </div>
-
-        <!-- 无模型 -->
-        <div
-          v-else-if="availableModels.length === 0"
-          class="flex flex-col items-center justify-center py-12 text-muted-foreground border border-dashed rounded-lg bg-muted/10"
-        >
-          <Box class="w-10 h-10 mb-2 opacity-20" />
-          <span class="text-sm">暂无可选模型</span>
-        </div>
-
-        <!-- 模型列表 -->
-        <div
-          v-else
-          class="max-h-[320px] overflow-y-auto pr-1 space-y-1.5 custom-scrollbar"
-        >
+        <div class="max-h-[320px] overflow-y-auto pr-1 space-y-1 custom-scrollbar">
           <div
-            v-for="model in availableModels"
-            :key="model.global_model_name"
+            v-for="model in upstreamModels"
+            :key="`${model.id}:${model.api_format || ''}`"
             class="group flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-all duration-200 cursor-pointer select-none"
             :class="[
-              selectedModels.includes(model.global_model_name)
+              selectedModels.includes(model.id)
                 ? 'border-primary/40 bg-primary/5 shadow-sm'
                 : 'border-border/40 bg-background hover:border-primary/20 hover:bg-muted/30'
             ]"
-            @click="toggleModel(model.global_model_name, !selectedModels.includes(model.global_model_name))"
+            @click="toggleModel(model.id)"
           >
-            <!-- Checkbox -->
             <Checkbox
-              :checked="selectedModels.includes(model.global_model_name)"
+              :checked="selectedModels.includes(model.id)"
               class="data-[state=checked]:bg-primary data-[state=checked]:border-primary"
               @click.stop
-              @update:checked="checked => toggleModel(model.global_model_name, checked)"
+              @update:checked="checked => toggleModel(model.id, checked)"
             />
-
-            <!-- Info -->
             <div class="flex-1 min-w-0">
-              <div class="flex items-center justify-between gap-2">
-                <span class="text-sm font-medium truncate text-foreground/90">{{ model.display_name }}</span>
-                <span
-                  v-if="hasPricing(model)"
-                  class="text-[10px] font-mono text-muted-foreground/80 bg-muted/30 px-1.5 py-0.5 rounded border border-border/30 shrink-0"
-                >
-                  {{ formatPricingShort(model) }}
+              <div class="flex items-center gap-2">
+                <span class="text-sm font-medium truncate text-foreground/90">
+                  {{ model.display_name || model.id }}
                 </span>
+                <Badge
+                  v-if="model.api_format"
+                  variant="outline"
+                  class="text-[10px] px-1.5 py-0 shrink-0"
+                >
+                  {{ API_FORMAT_LABELS[model.api_format] || model.api_format }}
+                </Badge>
+                <Badge
+                  v-if="isModelExisting(model.id)"
+                  variant="secondary"
+                  class="text-[10px] px-1.5 py-0 shrink-0"
+                >
+                  已存在
+                </Badge>
               </div>
               <div class="text-[11px] text-muted-foreground/60 font-mono truncate mt-0.5">
-                {{ model.global_model_name }}
+                {{ model.id }}
               </div>
             </div>
-
-            <!-- 测试按钮 -->
-            <Button
-              variant="ghost"
-              size="icon"
-              class="h-7 w-7 shrink-0"
-              title="测试模型连接"
-              :disabled="testingModelName === model.global_model_name"
-              @click.stop="testModelConnection(model)"
+            <div
+              v-if="model.owned_by"
+              class="text-[10px] text-muted-foreground/50 shrink-0"
             >
-              <Loader2
-                v-if="testingModelName === model.global_model_name"
-                class="w-3.5 h-3.5 animate-spin"
-              />
-              <Play
-                v-else
-                class="w-3.5 h-3.5"
-              />
-            </Button>
+              {{ model.owned_by }}
+            </div>
           </div>
         </div>
       </div>
     </div>
 
     <template #footer>
-      <div class="flex items-center justify-end gap-2 w-full pt-2">
-        <Button
-          variant="outline"
-          class="h-9"
-          @click="handleCancel"
-        >
-          取消
-        </Button>
-        <Button
-          :disabled="saving"
-          class="h-9 min-w-[80px]"
-          @click="handleSave"
-        >
-          <Loader2
-            v-if="saving"
-            class="w-3.5 h-3.5 mr-1.5 animate-spin"
-          />
-          {{ saving ? '保存中' : '保存配置' }}
-        </Button>
+      <div class="flex items-center justify-between w-full pt-2">
+        <div class="text-xs text-muted-foreground">
+          <span v-if="selectedModels.length > 0 && newSelectedCount > 0">
+            将导入 {{ newSelectedCount }} 个新模型
+          </span>
+        </div>
+        <div class="flex items-center gap-2">
+          <Button
+            variant="outline"
+            class="h-9"
+            @click="handleCancel"
+          >
+            取消
+          </Button>
+          <Button
+            :disabled="importing || selectedModels.length === 0 || newSelectedCount === 0"
+            class="h-9 min-w-[100px]"
+            @click="handleImport"
+          >
+            <Loader2
+              v-if="importing"
+              class="w-3.5 h-3.5 mr-1.5 animate-spin"
+            />
+            {{ importing ? '导入中' : `导入 ${newSelectedCount} 个模型` }}
+          </Button>
+        </div>
       </div>
     </template>
   </Dialog>
@@ -167,19 +181,20 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { Box, Loader2, Settings2, Play } from 'lucide-vue-next'
+import { Box, Layers, Loader2, RefreshCw, AlertCircle } from 'lucide-vue-next'
 import { Dialog } from '@/components/ui'
 import Button from '@/components/ui/button.vue'
 import Badge from '@/components/ui/badge.vue'
 import Checkbox from '@/components/ui/checkbox.vue'
 import { useToast } from '@/composables/useToast'
-import { parseApiError, parseTestModelError } from '@/utils/errorParser'
+import { parseUpstreamModelError } from '@/utils/errorParser'
+import { adminApi } from '@/api/admin'
 import {
-  updateEndpointKey,
-  getProviderAvailableSourceModels,
-  testModel,
+  importModelsFromUpstream,
+  getProviderModels,
   type EndpointAPIKey,
-  type ProviderAvailableSourceModel
+  type UpstreamModel,
+  API_FORMAT_LABELS,
 } from '@/api/endpoints'
 
 const props = defineProps<{
@@ -196,130 +211,121 @@ const emit = defineEmits<{
 const { success, error: showError } = useToast()
 
 const isOpen = computed(() => props.open)
-const saving = ref(false)
-const loadingModels = ref(false)
-const availableModels = ref<ProviderAvailableSourceModel[]>([])
+const loading = ref(false)
+const importing = ref(false)
+const hasQueried = ref(false)
+const errorMessage = ref('')
+const upstreamModels = ref<UpstreamModel[]>([])
 const selectedModels = ref<string[]>([])
-const initialModels = ref<string[]>([])
-const testingModelName = ref<string | null>(null)
+const existingModelIds = ref<Set<string>>(new Set())
+
+// 计算属性
+const isAllSelected = computed(() =>
+  upstreamModels.value.length > 0 &&
+  selectedModels.value.length === upstreamModels.value.length
+)
+
+const isPartiallySelected = computed(() =>
+  selectedModels.value.length > 0 &&
+  selectedModels.value.length < upstreamModels.value.length
+)
+
+const newModelsCount = computed(() =>
+  upstreamModels.value.filter(m => !existingModelIds.value.has(m.id)).length
+)
+
+const newSelectedCount = computed(() =>
+  selectedModels.value.filter(id => !existingModelIds.value.has(id)).length
+)
+
+// 检查模型是否已存在
+function isModelExisting(modelId: string): boolean {
+  return existingModelIds.value.has(modelId)
+}
 
 // 监听对话框打开
 watch(() => props.open, (open) => {
   if (open) {
-    loadData()
+    resetState()
+    loadExistingModels()
   }
 })
 
-async function loadData() {
-  // 初始化已选模型
-  if (props.apiKey?.allowed_models) {
-    selectedModels.value = [...props.apiKey.allowed_models]
-    initialModels.value = [...props.apiKey.allowed_models]
-  } else {
-    selectedModels.value = []
-    initialModels.value = []
-  }
-
-  // 加载可选模型
-  if (props.providerId) {
-    await loadAvailableModels()
-  }
-}
-
-async function loadAvailableModels() {
-  if (!props.providerId) return
-  try {
-    loadingModels.value = true
-    const response = await getProviderAvailableSourceModels(props.providerId)
-    availableModels.value = response.models
-  } catch (err: any) {
-    const errorMessage = parseApiError(err, '加载模型列表失败')
-    showError(errorMessage, '错误')
-  } finally {
-    loadingModels.value = false
-  }
-}
-
-const modelLabelMap = computed(() => {
-  const map = new Map<string, string>()
-  availableModels.value.forEach(model => {
-    map.set(model.global_model_name, model.display_name || model.global_model_name)
-  })
-  return map
-})
-
-function getModelLabel(modelName: string): string {
-  return modelLabelMap.value.get(modelName) ?? modelName
-}
-
-function hasPricing(model: ProviderAvailableSourceModel): boolean {
-  const input = model.price.input_price_per_1m ?? 0
-  const output = model.price.output_price_per_1m ?? 0
-  return input > 0 || output > 0
-}
-
-function formatPricingShort(model: ProviderAvailableSourceModel): string {
-  const input = model.price.input_price_per_1m ?? 0
-  const output = model.price.output_price_per_1m ?? 0
-  if (input > 0 || output > 0) {
-    return `$${formatPrice(input)}/$${formatPrice(output)}`
-  }
-  return ''
-}
-
-function formatPrice(value?: number | null): string {
-  if (value === undefined || value === null || value === 0) return '0'
-  if (value >= 1) {
-    return value.toFixed(2)
-  }
-  return value.toFixed(2)
-}
-
-function toggleModel(modelName: string, checked: boolean) {
-  if (checked) {
-    if (!selectedModels.value.includes(modelName)) {
-      selectedModels.value = [...selectedModels.value, modelName]
-    }
-  } else {
-    selectedModels.value = selectedModels.value.filter(name => name !== modelName)
-  }
-}
-
-function clearModels() {
+function resetState() {
+  hasQueried.value = false
+  errorMessage.value = ''
+  upstreamModels.value = []
   selectedModels.value = []
 }
 
-// 测试模型连接
-async function testModelConnection(model: ProviderAvailableSourceModel) {
-  if (!props.providerId || !props.apiKey || testingModelName.value) return
-
-  testingModelName.value = model.global_model_name
+// 加载已存在的模型列表
+async function loadExistingModels() {
+  if (!props.providerId) return
   try {
-    const result = await testModel({
-      provider_id: props.providerId,
-      model_name: model.provider_model_name,
-      api_key_id: props.apiKey.id,
-      message: "hello"
-    })
-
-    if (result.success) {
-      success(`模型 "${model.display_name}" 测试成功`)
-    } else {
-      showError(`模型测试失败: ${parseTestModelError(result)}`)
-    }
-  } catch (err: any) {
-    const errorMsg = err.response?.data?.detail || err.message || '测试请求失败'
-    showError(`模型测试失败: ${errorMsg}`)
-  } finally {
-    testingModelName.value = null
+    const models = await getProviderModels(props.providerId)
+    existingModelIds.value = new Set(
+      models.map((m: { provider_model_name: string }) => m.provider_model_name)
+    )
+  } catch {
+    existingModelIds.value = new Set()
   }
 }
 
-function areArraysEqual(a: string[], b: string[]): boolean {
-  if (a.length !== b.length) return false
-  const sortedA = [...a].sort()
-  const sortedB = [...b].sort()
-  return sortedA.every((value, index) => value === sortedB[index])
+// 获取上游模型
+async function fetchUpstreamModels() {
+  if (!props.providerId || !props.apiKey) return
+
+  loading.value = true
+  errorMessage.value = ''
+
+  try {
+    const response = await adminApi.queryProviderModels(props.providerId, props.apiKey.id)
+
+    if (response.success && response.data?.models) {
+      upstreamModels.value = response.data.models
+      // 默认选中所有新模型
+      selectedModels.value = response.data.models
+        .filter((m: UpstreamModel) => !existingModelIds.value.has(m.id))
+        .map((m: UpstreamModel) => m.id)
+      hasQueried.value = true
+      // 如果有部分失败，显示警告提示
+      if (response.data.error) {
+        // 使用友好的错误解析
+        showError(`部分格式获取失败: ${parseUpstreamModelError(response.data.error)}`, '警告')
+      }
+    } else {
+      // 使用友好的错误解析
+      const rawError = response.data?.error || '获取上游模型失败'
+      errorMessage.value = parseUpstreamModelError(rawError)
+    }
+  } catch (err: any) {
+    // 使用友好的错误解析
+    const rawError = err.response?.data?.detail || err.message || '获取上游模型失败'
+    errorMessage.value = parseUpstreamModelError(rawError)
+  } finally {
+    loading.value = false
+  }
+}
+
+// 切换模型选择
+function toggleModel(modelId: string, checked?: boolean) {
+  const shouldSelect = checked !== undefined ? checked : !selectedModels.value.includes(modelId)
+  if (shouldSelect) {
+    if (!selectedModels.value.includes(modelId)) {
+      selectedModels.value = [...selectedModels.value, modelId]
+    }
+  } else {
+    selectedModels.value = selectedModels.value.filter(id => id !== modelId)
+  }
+}
+
+// 全选/取消全选
+function toggleSelectAll(checked: boolean) {
+  if (checked) {
+    selectedModels.value = upstreamModels.value.map(m => m.id)
+  } else {
+    selectedModels.value = []
+  }
 }
 
 function handleDialogUpdate(value: boolean) {
@@ -332,30 +338,44 @@ function handleCancel() {
   emit('close')
 }
 
-async function handleSave() {
-  if (!props.apiKey) return
+// 导入选中的模型
+async function handleImport() {
+  if (!props.providerId || selectedModels.value.length === 0) return
 
-  // 检查是否有变化
-  const hasChanged = !areArraysEqual(selectedModels.value, initialModels.value)
-  if (!hasChanged) {
-    emit('close')
+  // 过滤出新模型（不在已存在列表中的）
+  const modelsToImport = selectedModels.value.filter(id => !existingModelIds.value.has(id))
+  if (modelsToImport.length === 0) {
+    showError('所选模型都已存在', '提示')
     return
   }
 
-  saving.value = true
+  importing.value = true
   try {
-    await updateEndpointKey(props.apiKey.id, {
-      // 空数组时发送 null，表示允许所有模型
-      allowed_models: selectedModels.value.length > 0 ? [...selectedModels.value] : null
-    })
-    success('允许的模型已更新', '成功')
-    emit('saved')
-    emit('close')
+    const response = await importModelsFromUpstream(props.providerId, modelsToImport)
+
+    const successCount = response.success?.length || 0
+    const errorCount = response.errors?.length || 0
+
+    if (successCount > 0 && errorCount === 0) {
+      success(`成功导入 ${successCount} 个模型`, '导入成功')
+      emit('saved')
+      emit('close')
+    } else if (successCount > 0 && errorCount > 0) {
+      success(`成功导入 ${successCount} 个模型，${errorCount} 个失败`, '部分成功')
+      emit('saved')
+      // 刷新列表以更新已存在状态
+      await loadExistingModels()
+      // 更新选中列表，移除已成功导入的
+      const successIds = new Set(response.success?.map((s: { model_id: string }) => s.model_id) || [])
+      selectedModels.value = selectedModels.value.filter(id => !successIds.has(id))
+    } else {
+      const errorMsg = response.errors?.[0]?.error || '导入失败'
+      showError(errorMsg, '导入失败')
+    }
   } catch (err: any) {
-    const errorMessage = parseApiError(err, '保存失败')
-    showError(errorMessage, '错误')
+    showError(err.response?.data?.detail || '导入失败', '错误')
   } finally {
-    saving.value = false
+    importing.value = false
   }
 }
 </script>

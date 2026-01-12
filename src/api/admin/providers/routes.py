@@ -41,8 +41,7 @@ async def list_providers(
 
     **返回字段**:
     - `id`: 提供商 ID
-    - `name`: 提供商名称（唯一标识）
-    - `display_name`: 显示名称
+    - `name`: 提供商名称（唯一）
     - `api_format`: API 格式（如 claude、openai、gemini 等）
     - `base_url`: API 基础 URL
     - `api_key`: API 密钥（脱敏显示）
@@ -63,8 +62,7 @@ async def create_provider(request: Request, db: Session = Depends(get_db)):
     创建一个新的 AI 模型提供商配置。
 
     **请求体字段**:
-    - `name`: 提供商名称（必填，唯一，用于系统标识）
-    - `display_name`: 显示名称（必填）
+    - `name`: 提供商名称（必填，唯一）
     - `description`: 描述信息（可选）
     - `website`: 官网地址（可选）
     - `billing_type`: 计费类型（可选，pay_as_you_go/subscription/prepaid，默认 pay_as_you_go）
@@ -72,16 +70,17 @@ async def create_provider(request: Request, db: Session = Depends(get_db)):
     - `quota_reset_day`: 配额重置日期（1-31）（可选）
     - `quota_last_reset_at`: 上次配额重置时间（可选）
     - `quota_expires_at`: 配额过期时间（可选）
-    - `rpm_limit`: 每分钟请求数限制（可选）
     - `provider_priority`: 提供商优先级（数字越小优先级越高，默认 100）
     - `is_active`: 是否启用（默认 true）
     - `concurrent_limit`: 并发限制（可选）
+    - `timeout`: 请求超时（秒，可选）
+    - `max_retries`: 最大重试次数（可选）
+    - `proxy`: 代理配置（可选）
     - `config`: 额外配置信息（JSON，可选）
 
     **返回字段**:
     - `id`: 新创建的提供商 ID
     - `name`: 提供商名称
-    - `display_name`: 显示名称
     - `message`: 成功提示信息
     """
     adapter = AdminCreateProviderAdapter()
@@ -100,7 +99,6 @@ async def update_provider(provider_id: str, request: Request, db: Session = Depe
 
     **请求体字段**（所有字段可选）:
     - `name`: 提供商名称
-    - `display_name`: 显示名称
     - `description`: 描述信息
     - `website`: 官网地址
     - `billing_type`: 计费类型（pay_as_you_go/subscription/prepaid）
@@ -108,10 +106,12 @@ async def update_provider(provider_id: str, request: Request, db: Session = Depe
     - `quota_reset_day`: 配额重置日期（1-31）
     - `quota_last_reset_at`: 上次配额重置时间
     - `quota_expires_at`: 配额过期时间
-    - `rpm_limit`: 每分钟请求数限制
     - `provider_priority`: 提供商优先级
     - `is_active`: 是否启用
     - `concurrent_limit`: 并发限制
+    - `timeout`: 请求超时（秒）
+    - `max_retries`: 最大重试次数
+    - `proxy`: 代理配置
     - `config`: 额外配置信息（JSON）
 
     **返回字段**:
@@ -165,7 +165,6 @@ class AdminListProvidersAdapter(AdminApiAdapter):
                 {
                     "id": provider.id,
                     "name": provider.name,
-                    "display_name": provider.display_name,
                     "api_format": api_format.value if api_format else None,
                     "base_url": base_url,
                     "api_key": "***" if api_key else None,
@@ -217,7 +216,6 @@ class AdminCreateProviderAdapter(AdminApiAdapter):
             # 创建 Provider 对象
             provider = Provider(
                 name=validated_data.name,
-                display_name=validated_data.display_name,
                 description=validated_data.description,
                 website=validated_data.website,
                 billing_type=billing_type,
@@ -225,10 +223,12 @@ class AdminCreateProviderAdapter(AdminApiAdapter):
                 quota_reset_day=validated_data.quota_reset_day,
                 quota_last_reset_at=validated_data.quota_last_reset_at,
                 quota_expires_at=validated_data.quota_expires_at,
-                rpm_limit=validated_data.rpm_limit,
                 provider_priority=validated_data.provider_priority,
                 is_active=validated_data.is_active,
                 concurrent_limit=validated_data.concurrent_limit,
+                timeout=validated_data.timeout,
+                max_retries=validated_data.max_retries,
+                proxy=validated_data.proxy.model_dump() if validated_data.proxy else None,
                 config=validated_data.config,
             )
 
@@ -248,7 +248,6 @@ class AdminCreateProviderAdapter(AdminApiAdapter):
             return {
                 "id": provider.id,
                 "name": provider.name,
-                "display_name": provider.display_name,
                 "message": "提供商创建成功",
             }
         except InvalidRequestException:
@@ -291,6 +290,9 @@ class AdminUpdateProviderAdapter(AdminApiAdapter):
                 if field == "billing_type" and value is not None:
                     # billing_type 需要转换为枚举
                     setattr(provider, field, ProviderBillingType(value))
+                elif field == "proxy" and value is not None:
+                    # proxy 需要转换为 dict（如果是 Pydantic 模型）
+                    setattr(provider, field, value if isinstance(value, dict) else value.model_dump())
                 else:
                     setattr(provider, field, value)
 

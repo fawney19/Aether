@@ -13,10 +13,11 @@ from sqlalchemy.orm import Session, joinedload
 
 from src.api.handlers.base.chat_adapter_base import get_adapter_class
 from src.api.handlers.base.cli_adapter_base import get_cli_adapter_class
+from src.config.constants import TimeoutDefaults
 from src.core.crypto import crypto_service
 from src.core.logger import logger
 from src.database.database import get_db
-from src.models.database import Provider, ProviderEndpoint, User
+from src.models.database import Provider, ProviderAPIKey, ProviderEndpoint, User
 from src.utils.auth_utils import get_current_user
 
 router = APIRouter(prefix="/api/admin/provider-query", tags=["Provider Query"])
@@ -81,10 +82,13 @@ async def query_available_models(
     Returns:
         所有端点的模型列表（合并）
     """
-    # 获取提供商及其端点
+    # 获取提供商及其端点和 API Keys
     provider = (
         db.query(Provider)
-        .options(joinedload(Provider.endpoints).joinedload(ProviderEndpoint.api_keys))
+        .options(
+            joinedload(Provider.endpoints),
+            joinedload(Provider.api_keys),
+        )
         .filter(Provider.id == request.provider_id)
         .first()
     )
@@ -95,49 +99,70 @@ async def query_available_models(
     # 收集所有活跃端点的配置
     endpoint_configs: list[dict] = []
 
+    # 构建 api_format -> endpoint 映射
+    format_to_endpoint: dict[str, ProviderEndpoint] = {}
+    for endpoint in provider.endpoints:
+        if endpoint.is_active:
+            format_to_endpoint[endpoint.api_format] = endpoint
+
     if request.api_key_id:
-        # 指定了特定的 API Key，只使用该 Key 对应的端点
-        for endpoint in provider.endpoints:
-            for api_key in endpoint.api_keys:
-                if api_key.id == request.api_key_id:
-                    try:
-                        api_key_value = crypto_service.decrypt(api_key.api_key)
-                    except Exception as e:
-                        logger.error(f"Failed to decrypt API key: {e}")
-                        raise HTTPException(status_code=500, detail="Failed to decrypt API key")
-                    endpoint_configs.append({
-                        "api_key": api_key_value,
-                        "base_url": endpoint.base_url,
-                        "api_format": endpoint.api_format,
-                        "extra_headers": endpoint.headers,
-                    })
-                    break
-            if endpoint_configs:
-                break
+        # 指定了特定的 API Key（从 provider.api_keys 查找）
+        api_key = next(
+            (key for key in provider.api_keys if key.id == request.api_key_id),
+            None
+        )
+
+        if not api_key:
+            raise HTTPException(status_code=404, detail="API Key not found")
+
+        try:
+            api_key_value = crypto_service.decrypt(api_key.api_key)
+        except Exception as e:
+            logger.error(f"Failed to decrypt API key: {e}")
+            raise HTTPException(status_code=500, detail="Failed to decrypt API key")
+
+        # 根据 Key 的 api_formats 找对应的 Endpoint
+        key_formats = api_key.api_formats or []
+        for fmt in key_formats:
+            endpoint = format_to_endpoint.get(fmt)
+            if endpoint:
+                endpoint_configs.append({
+                    "api_key": api_key_value,
+                    "base_url": endpoint.base_url,
+                    "api_format": fmt,
+                    "extra_headers": endpoint.headers,
+                })
 
         if not endpoint_configs:
-            raise HTTPException(status_code=404, detail="API Key not found")
+            raise HTTPException(
+                status_code=400,
+                detail="No matching endpoint found for this API Key's formats"
+            )
     else:
-        # 遍历所有活跃端点，每个端点取第一个可用的 Key
+        # 遍历所有活跃端点，为每个端点找一个支持该格式的 Key
         for endpoint in provider.endpoints:
-            if not endpoint.is_active or not endpoint.api_keys:
+            if not endpoint.is_active:
                 continue
 
-            # 找第一个可用的 Key
-            for api_key in endpoint.api_keys:
-                if api_key.is_active:
-                    try:
-                        api_key_value = crypto_service.decrypt(api_key.api_key)
-                    except Exception as e:
-                        logger.error(f"Failed to decrypt API key: {e}")
-                        continue  # 尝试下一个 Key
-                    endpoint_configs.append({
-                        "api_key": api_key_value,
-                        "base_url": endpoint.base_url,
-                        "api_format": endpoint.api_format,
-                        "extra_headers": endpoint.headers,
-                    })
-                    break  # 只取第一个可用的 Key
+            # 找第一个支持该格式的可用 Key
+            for api_key in provider.api_keys:
+                if not api_key.is_active:
+                    continue
+                key_formats = api_key.api_formats or []
+                if endpoint.api_format not in key_formats:
+                    continue
+                try:
+                    api_key_value = crypto_service.decrypt(api_key.api_key)
+                except Exception as e:
+                    logger.error(f"Failed to decrypt API key: {e}")
+                    continue
+                endpoint_configs.append({
+                    "api_key": api_key_value,
+                    "base_url": endpoint.base_url,
+                    "api_format": endpoint.api_format,
+                    "extra_headers": endpoint.headers,
+                })
+                break  # 只取第一个可用的 Key
 
         if not endpoint_configs:
             raise HTTPException(status_code=400, detail="No active API Key found for this provider")
@@ -214,7 +239,6 @@ async def query_available_models(
         "provider": {
             "id": provider.id,
             "name": provider.name,
-            "display_name": provider.display_name,
         },
     }
 
@@ -229,17 +253,14 @@ async def test_model(
     测试模型连接性
 
     向指定提供商的指定模型发送测试请求，验证模型是否可用
-
-    Args:
-        request: 测试请求
-
-    Returns:
-        测试结果
     """
-    # 获取提供商及其端点
+    # 获取提供商及其端点和 Keys
     provider = (
         db.query(Provider)
-        .options(joinedload(Provider.endpoints).joinedload(ProviderEndpoint.api_keys))
+        .options(
+            joinedload(Provider.endpoints),
+            joinedload(Provider.api_keys),
+        )
         .filter(Provider.id == request.provider_id)
         .first()
     )
@@ -247,28 +268,38 @@ async def test_model(
     if not provider:
         raise HTTPException(status_code=404, detail="Provider not found")
 
-    # 找到合适的端点和API Key
-    endpoint_config = None
+    # 构建 api_format -> endpoint 映射
+    format_to_endpoint: dict[str, ProviderEndpoint] = {}
+    for ep in provider.endpoints:
+        if ep.is_active:
+            format_to_endpoint[ep.api_format] = ep
+
+    # 找到合适的端点和 API Key
     endpoint = None
     api_key = None
 
     if request.api_key_id:
-        # 使用指定的API Key
-        for ep in provider.endpoints:
-            for key in ep.api_keys:
-                if key.id == request.api_key_id and key.is_active and ep.is_active:
-                    endpoint = ep
-                    api_key = key
+        # 使用指定的 API Key
+        api_key = next(
+            (key for key in provider.api_keys if key.id == request.api_key_id and key.is_active),
+            None
+        )
+        if api_key:
+            # 找到该 Key 支持的第一个活跃 Endpoint
+            for fmt in (api_key.api_formats or []):
+                if fmt in format_to_endpoint:
+                    endpoint = format_to_endpoint[fmt]
                     break
-            if endpoint:
-                break
     else:
         # 使用第一个可用的端点和密钥
         for ep in provider.endpoints:
-            if not ep.is_active or not ep.api_keys:
+            if not ep.is_active:
                 continue
-            for key in ep.api_keys:
-                if key.is_active:
+            # 找支持该格式的第一个可用 Key
+            for key in provider.api_keys:
+                if not key.is_active:
+                    continue
+                if ep.api_format in (key.api_formats or []):
                     endpoint = ep
                     api_key = key
                     break
@@ -284,14 +315,14 @@ async def test_model(
         logger.error(f"[test-model] Failed to decrypt API key: {e}")
         raise HTTPException(status_code=500, detail="Failed to decrypt API key")
 
-    # 构建请求配置
+    # 构建请求配置（timeout 从 Provider 读取）
     endpoint_config = {
         "api_key": api_key_value,
         "api_key_id": api_key.id,  # 添加API Key ID用于用量记录
         "base_url": endpoint.base_url,
         "api_format": endpoint.api_format,
         "extra_headers": endpoint.headers,
-        "timeout": endpoint.timeout or 30.0,
+        "timeout": provider.timeout or TimeoutDefaults.HTTP_REQUEST,
     }
 
     try:
@@ -304,7 +335,6 @@ async def test_model(
                 "provider": {
                     "id": provider.id,
                     "name": provider.name,
-                    "display_name": provider.display_name,
                 },
                 "model": request.model_name,
             }
@@ -325,7 +355,6 @@ async def test_model(
                     "provider": {
                         "id": provider.id,
                         "name": provider.name,
-                        "display_name": provider.display_name,
                     },
                     "model": request.model_name,
                 }
@@ -415,7 +444,6 @@ async def test_model(
                 "provider": {
                     "id": provider.id,
                     "name": provider.name,
-                    "display_name": provider.display_name,
                 },
                 "model": request.model_name,
                 "endpoint": {
@@ -433,7 +461,6 @@ async def test_model(
             "provider": {
                 "id": provider.id,
                 "name": provider.name,
-                "display_name": provider.display_name,
             },
             "model": request.model_name,
             "endpoint": {

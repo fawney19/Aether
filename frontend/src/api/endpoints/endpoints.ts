@@ -27,15 +27,9 @@ export async function createEndpoint(
     api_format: string
     base_url: string
     custom_path?: string
-    auth_type?: string
-    auth_header?: string
     headers?: Record<string, string>
     timeout?: number
     max_retries?: number
-    priority?: number
-    weight?: number
-    max_concurrent?: number
-    rate_limit?: number
     is_active?: boolean
     config?: Record<string, any>
     proxy?: ProxyConfig | null
@@ -52,16 +46,10 @@ export async function updateEndpoint(
   endpointId: string,
   data: Partial<{
     base_url: string
-    custom_path: string
-    auth_type: string
-    auth_header: string
+    custom_path: string | null
     headers: Record<string, string>
     timeout: number
     max_retries: number
-    priority: number
-    weight: number
-    max_concurrent: number
-    rate_limit: number
     is_active: boolean
     config: Record<string, any>
     proxy: ProxyConfig | null
@@ -74,7 +62,7 @@ export async function updateEndpoint(
 /**
  * 删除 Endpoint
  */
-export async function deleteEndpoint(endpointId: string): Promise<{ message: string; deleted_keys_count: number }> {
+export async function deleteEndpoint(endpointId: string): Promise<{ message: string; affected_keys_count: number }> {
   const response = await client.delete(`/api/admin/endpoints/${endpointId}`)
   return response.data
 }

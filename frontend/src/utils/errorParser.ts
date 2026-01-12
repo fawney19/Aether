@@ -20,7 +20,7 @@ interface ValidationError {
 const fieldNameMap: Record<string, string> = {
   'api_key': 'API 密钥',
   'priority': '优先级',
-  'max_concurrent': '最大并发',
+  'rpm_limit': 'RPM 限制',
   'rate_limit': '速率限制',
   'daily_limit': '每日限制',
   'monthly_limit': '每月限制',
@@ -44,7 +44,6 @@ const fieldNameMap: Record<string, string> = {
   'monthly_quota_usd': '月度配额',
   'quota_reset_day': '配额重置日',
   'quota_expires_at': '配额过期时间',
-  'rpm_limit': 'RPM 限制',
   'cache_ttl_minutes': '缓存 TTL',
   'max_probe_interval_minutes': '最大探测间隔',
 }
@@ -151,11 +150,18 @@ export function parseApiError(err: unknown, defaultMessage: string = '操作失�
     return '无法连接到服务器，请检查网络连接'
   }
 
-  const detail = err.response?.data?.detail
+  const data = err.response?.data
+
+  // 1. 处理 {error: {type, message}} 格式（ProxyException 返回格式）
+  if (data?.error?.message) {
+    return data.error.message
+  }
+
+  const detail = data?.detail
 
   // 如果没有 detail 字段
   if (!detail) {
-    return err.response?.data?.message || err.message || defaultMessage
+    return data?.message || err.message || defaultMessage
   }
 
   // 1. 处理 Pydantic 验证错误（数组格式）
@@ -243,4 +249,116 @@ export function parseTestModelError(result: {
   }
 
   return errorMsg
+}
+
+/**
+ * 解析上游模型查询错误信息
+ * 将后端返回的原始错误信息（如 "HTTP 401: {json...}"）转换为友好的错误提示
+ * @param error 错误字符串，格式可能是 "HTTP {status}: {json_body}" 或其他
+ * @returns 友好的错误信息
+ */
+export function parseUpstreamModelError(error: string): string {
+  if (!error) return '获取上游模型失败'
+
+  // 匹配 "HTTP {status}: {body}" 格式
+  const httpMatch = error.match(/^HTTP\s+(\d+):\s*(.*)$/s)
+  if (httpMatch) {
+    const status = parseInt(httpMatch[1], 10)
+    const body = httpMatch[2]
+
+    // 根据状态码生成友好消息
+    let friendlyMsg = ''
+    if (status === 401) {
+      friendlyMsg = '密钥无效或已过期'
+    } else if (status === 403) {
+      friendlyMsg = '密钥权限不足'
+    } else if (status === 404) {
+      friendlyMsg = '模型列表接口不存在'
+    } else if (status === 429) {
+      friendlyMsg = '请求频率过高，请稍后重试'
+    } else if (status >= 500) {
+      friendlyMsg = '上游服务暂时不可用'
+    }
+
+    // 尝试从 JSON body 中提取更详细的错误信息
+    if (body) {
+      try {
+        const parsed = JSON.parse(body)
+        // 常见的错误格式: {error: {message: "..."}} 或 {error: "..."} 或 {message: "..."}
+        let detailMsg = ''
+        if (parsed.error?.message) {
+          detailMsg = parsed.error.message
+        } else if (typeof parsed.error === 'string') {
+          detailMsg = parsed.error
+        } else if (parsed.message) {
+          detailMsg = parsed.message
+        } else if (parsed.detail) {
+          detailMsg = typeof parsed.detail === 'string' ? parsed.detail : JSON.stringify(parsed.detail)
+        }
+
+        // 如果提取到了详细消息，用它来丰富友好消息
+        if (detailMsg) {
+          // 检查是否是 token/认证相关的错误
+          const lowerMsg = detailMsg.toLowerCase()
+          if (lowerMsg.includes('invalid token') || lowerMsg.includes('invalid api key')) {
+            return '密钥无效，请检查密钥是否正确'
+          }
+          if (lowerMsg.includes('expired')) {
+            return '密钥已过期，请更新密钥'
+          }
+          if (lowerMsg.includes('quota') || lowerMsg.includes('exceeded')) {
+            return '配额已用尽或超出限制'
+          }
+          if (lowerMsg.includes('rate limit')) {
+            return '请求频率过高，请稍后重试'
+          }
+          // 没有匹配特定关键词，但有详细信息，使用它作为补充
+          if (friendlyMsg) {
+            const truncated = detailMsg.length > 80 ? detailMsg.substring(0, 80) + '...' : detailMsg
+            return `${friendlyMsg}: ${truncated}`
+          }
+          // 没有友好消息，直接使用详细信息
+          const truncated = detailMsg.length > 100 ? detailMsg.substring(0, 100) + '...' : detailMsg
+          return truncated
+        }
+      } catch {
+        // JSON 解析失败，忽略
+      }
+    }
+
+    // 返回友好消息，附加状态码
+    if (friendlyMsg) {
+      return friendlyMsg
+    }
+    return `请求失败 (HTTP ${status})`
+  }
+
+  // 检查是否是请求错误
+  if (error.startsWith('Request error:')) {
+    const detail = error.replace('Request error:', '').trim()
+    if (detail.toLowerCase().includes('timeout')) {
+      return '请求超时，上游服务响应过慢'
+    }
+    if (detail.toLowerCase().includes('connection')) {
+      return '无法连接到上游服务'
+    }
+    return '网络请求失败'
+  }
+
+  // 检查是否是未知 API 格式
+  if (error.startsWith('Unknown API format:')) {
+    return '不支持的 API 格式'
+  }
+
+  // 如果包含分号，可能是多个错误合并的，取第一个
+  if (error.includes('; ')) {
+    const firstError = error.split('; ')[0]
+    return parseUpstreamModelError(firstError)
+  }
+
+  // 默认返回原始错误（截断过长的部分）
+  if (error.length > 100) {
+    return error.substring(0, 100) + '...'
+  }
+  return error
 }

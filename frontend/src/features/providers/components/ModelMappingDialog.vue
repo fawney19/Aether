@@ -377,6 +377,7 @@ const props = defineProps<{
   providerApiFormats: string[]
   models: Model[]
   editingGroup?: AliasGroup | null
+  preselectedModelId?: string | null
 }>()
 
 const emit = defineEmits<{
@@ -500,7 +501,7 @@ function initForm() {
     }
   } else {
     formData.value = {
-      modelId: '',
+      modelId: props.preselectedModelId || '',
       apiFormats: [],
       aliases: []
     }

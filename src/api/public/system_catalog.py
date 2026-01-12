@@ -43,7 +43,6 @@ def _serialize_provider(
     provider_data: Dict[str, Any] = {
         "id": provider.id,
         "name": provider.name,
-        "display_name": provider.display_name,
         "is_active": provider.is_active,
         "provider_priority": provider.provider_priority,
     }
