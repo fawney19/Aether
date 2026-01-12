@@ -107,8 +107,12 @@
                       />
                     </div>
                     <div class="flex-1 min-w-0">
-                      <p class="text-sm font-medium truncate">{{ model.display_name }}</p>
-                      <p class="text-xs text-muted-foreground truncate font-mono">{{ model.name }}</p>
+                      <p class="text-sm font-medium truncate">
+                        {{ model.display_name }}
+                      </p>
+                      <p class="text-xs text-muted-foreground truncate font-mono">
+                        {{ model.name }}
+                      </p>
                     </div>
                   </div>
                 </div>
@@ -159,8 +163,12 @@
                       />
                     </div>
                     <div class="flex-1 min-w-0">
-                      <p class="text-sm font-medium truncate">{{ model.id }}</p>
-                      <p class="text-xs text-muted-foreground truncate font-mono">{{ model.owned_by || model.id }}</p>
+                      <p class="text-sm font-medium truncate">
+                        {{ model.id }}
+                      </p>
+                      <p class="text-xs text-muted-foreground truncate font-mono">
+                        {{ model.owned_by || model.id }}
+                      </p>
                     </div>
                   </div>
                 </div>
@@ -172,7 +180,9 @@
                 class="flex flex-col items-center justify-center py-12 text-muted-foreground"
               >
                 <Layers class="w-10 h-10 mb-2 opacity-30" />
-                <p class="text-sm">{{ searchQuery ? '无匹配结果' : '暂无可用模型' }}</p>
+                <p class="text-sm">
+                  {{ searchQuery ? '无匹配结果' : '暂无可用模型' }}
+                </p>
                 <p
                   v-if="!upstreamModelsLoaded"
                   class="text-xs mt-1"

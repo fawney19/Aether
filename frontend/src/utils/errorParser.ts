@@ -314,11 +314,11 @@ export function parseUpstreamModelError(error: string): string {
           }
           // 没有匹配特定关键词，但有详细信息，使用它作为补充
           if (friendlyMsg) {
-            const truncated = detailMsg.length > 80 ? detailMsg.substring(0, 80) + '...' : detailMsg
+            const truncated = detailMsg.length > 80 ? `${detailMsg.substring(0, 80)  }...` : detailMsg
             return `${friendlyMsg}: ${truncated}`
           }
           // 没有友好消息，直接使用详细信息
-          const truncated = detailMsg.length > 100 ? detailMsg.substring(0, 100) + '...' : detailMsg
+          const truncated = detailMsg.length > 100 ? `${detailMsg.substring(0, 100)  }...` : detailMsg
           return truncated
         }
       } catch {
@@ -358,7 +358,7 @@ export function parseUpstreamModelError(error: string): string {
 
   // 默认返回原始错误（截断过长的部分）
   if (error.length > 100) {
-    return error.substring(0, 100) + '...'
+    return `${error.substring(0, 100)  }...`
   }
   return error
 }

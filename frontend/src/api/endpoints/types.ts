@@ -622,3 +622,83 @@ export interface ImportFromUpstreamResponse {
   success: ImportFromUpstreamSuccessItem[]
   errors: ImportFromUpstreamErrorItem[]
 }
+
+// ========== 路由预览相关类型 ==========
+
+/**
+ * Key 路由信息
+ */
+export interface RoutingKeyInfo {
+  id: string
+  name: string
+  masked_key: string
+  internal_priority: number
+  global_priority?: number | null
+  rpm_limit?: number | null
+  is_adaptive: boolean
+  effective_rpm?: number | null
+  cache_ttl_minutes: number
+  health_score: number
+  is_active: boolean
+  api_formats: string[]
+  circuit_breaker_open: boolean
+  circuit_breaker_formats: string[]
+}
+
+/**
+ * Endpoint 路由信息
+ */
+export interface RoutingEndpointInfo {
+  id: string
+  api_format: string
+  base_url: string
+  custom_path?: string | null
+  is_active: boolean
+  keys: RoutingKeyInfo[]
+  total_keys: number
+  active_keys: number
+}
+
+/**
+ * 模型名称映射信息
+ */
+export interface RoutingModelMapping {
+  name: string
+  priority: number
+  api_formats?: string[] | null
+}
+
+/**
+ * Provider 路由信息
+ */
+export interface RoutingProviderInfo {
+  id: string
+  name: string
+  model_id: string
+  provider_priority: number
+  billing_type?: string | null
+  monthly_quota_usd?: number | null
+  monthly_used_usd?: number | null
+  is_active: boolean
+  provider_model_name: string
+  model_mappings: RoutingModelMapping[]
+  model_is_active: boolean
+  endpoints: RoutingEndpointInfo[]
+  total_endpoints: number
+  active_endpoints: number
+}
+
+/**
+ * 模型请求链路预览响应
+ */
+export interface ModelRoutingPreviewResponse {
+  global_model_id: string
+  global_model_name: string
+  display_name: string
+  is_active: boolean
+  providers: RoutingProviderInfo[]
+  total_providers: number
+  active_providers: number
+  scheduling_mode: string
+  priority_mode: string
+}

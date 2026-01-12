@@ -6,6 +6,16 @@ import type {
   GlobalModelWithStats,
   GlobalModelListResponse,
   ModelCatalogProviderDetail,
+  ModelRoutingPreviewResponse,
+} from './types'
+
+// 重新导出路由相关类型供外部使用
+export type {
+  RoutingKeyInfo,
+  RoutingEndpointInfo,
+  RoutingModelMapping,
+  RoutingProviderInfo,
+  ModelRoutingPreviewResponse,
 } from './types'
 
 /**
@@ -94,6 +104,18 @@ export async function getGlobalModelProviders(globalModelId: string): Promise<{
 }> {
   const response = await client.get(
     `/api/admin/models/global/${globalModelId}/providers`
+  )
+  return response.data
+}
+
+/**
+ * 获取 GlobalModel 的请求链路预览
+ */
+export async function getGlobalModelRoutingPreview(
+  globalModelId: string
+): Promise<ModelRoutingPreviewResponse> {
+  const response = await client.get(
+    `/api/admin/models/global/${globalModelId}/routing`
   )
   return response.data
 }

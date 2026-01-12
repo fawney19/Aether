@@ -95,14 +95,14 @@
                 type="button"
                 class="flex-1 px-2 sm:px-4 py-2 text-xs sm:text-sm font-medium rounded-md transition-all duration-200"
                 :class="[
-                  detailTab === 'providers'
+                  detailTab === 'routing'
                     ? 'bg-primary text-primary-foreground shadow-sm'
                     : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
                 ]"
-                @click="detailTab = 'providers'"
+                @click="detailTab = 'routing'"
               >
-                <span class="hidden sm:inline">关联提供商</span>
-                <span class="sm:hidden">提供商</span>
+                <span class="hidden sm:inline">链路控制</span>
+                <span class="sm:hidden">链路</span>
               </button>
             </div>
 
@@ -407,269 +407,17 @@
               </div>
             </div>
 
-            <!-- Tab 2: 关联提供商 -->
-            <div v-show="detailTab === 'providers'">
-              <Card class="overflow-hidden">
-                <!-- 标题栏 -->
-                <div class="px-4 py-3 border-b border-border/60">
-                  <div class="flex items-center justify-between gap-4">
-                    <div>
-                      <h4 class="text-sm font-semibold">
-                        关联提供商列表
-                      </h4>
-                    </div>
-                    <div class="flex items-center gap-2">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        class="h-8 w-8"
-                        title="添加关联"
-                        @click="$emit('addProvider')"
-                      >
-                        <Plus class="w-3.5 h-3.5" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        class="h-8 w-8"
-                        title="刷新"
-                        @click="$emit('refreshProviders')"
-                      >
-                        <RefreshCw
-                          class="w-3.5 h-3.5"
-                          :class="loadingProviders ? 'animate-spin' : ''"
-                        />
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- 表格内容 -->
-                <div
-                  v-if="loadingProviders"
-                  class="flex items-center justify-center py-12"
-                >
-                  <Loader2 class="w-6 h-6 animate-spin text-primary" />
-                </div>
-
-                <template v-else-if="providers.length > 0">
-                  <!-- 桌面端表格 -->
-                  <Table class="hidden sm:table">
-                    <TableHeader>
-                      <TableRow class="border-b border-border/60 hover:bg-transparent">
-                        <TableHead class="h-10 font-semibold">
-                          Provider
-                        </TableHead>
-                        <TableHead class="w-[100px] h-10 font-semibold">
-                          能力
-                        </TableHead>
-                        <TableHead class="w-[200px] h-10 font-semibold">
-                          价格 ($/M)
-                        </TableHead>
-                        <TableHead class="w-[100px] h-10 font-semibold text-center">
-                          操作
-                        </TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      <TableRow
-                        v-for="provider in providers"
-                        :key="provider.id"
-                        class="border-b border-border/40 hover:bg-muted/30 transition-colors"
-                      >
-                        <TableCell class="py-3">
-                          <div class="flex items-center gap-2">
-                            <span
-                              class="w-2 h-2 rounded-full shrink-0"
-                              :class="provider.is_active ? 'bg-green-500' : 'bg-gray-300'"
-                              :title="provider.is_active ? '活跃' : '停用'"
-                            />
-                            <span class="font-medium truncate">{{ provider.name }}</span>
-                          </div>
-                        </TableCell>
-                        <TableCell class="py-3">
-                          <div class="flex gap-0.5">
-                            <Zap
-                              v-if="provider.supports_streaming"
-                              class="w-3.5 h-3.5 text-muted-foreground"
-                              title="流式输出"
-                            />
-                            <Eye
-                              v-if="provider.supports_vision"
-                              class="w-3.5 h-3.5 text-muted-foreground"
-                              title="视觉理解"
-                            />
-                            <Wrench
-                              v-if="provider.supports_function_calling"
-                              class="w-3.5 h-3.5 text-muted-foreground"
-                              title="工具调用"
-                            />
-                          </div>
-                        </TableCell>
-                        <TableCell class="py-3">
-                          <div class="text-xs font-mono space-y-0.5">
-                            <!-- Token 计费：输入/输出 -->
-                            <div v-if="(provider.input_price_per_1m || 0) > 0 || (provider.output_price_per_1m || 0) > 0">
-                              <span class="text-muted-foreground">输入/输出:</span>
-                              <span class="ml-1">${{ (provider.input_price_per_1m || 0).toFixed(1) }}/${{ (provider.output_price_per_1m || 0).toFixed(1) }}</span>
-                              <!-- 阶梯标记 -->
-                              <span
-                                v-if="(provider.tier_count || 1) > 1"
-                                class="ml-1 text-muted-foreground"
-                                title="阶梯计费"
-                              >[阶梯]</span>
-                            </div>
-                            <!-- 缓存价格 -->
-                            <div
-                              v-if="(provider.cache_creation_price_per_1m || 0) > 0 || (provider.cache_read_price_per_1m || 0) > 0"
-                              class="text-muted-foreground"
-                            >
-                              <span>缓存:</span>
-                              <span class="ml-1">${{ (provider.cache_creation_price_per_1m || 0).toFixed(2) }}/${{ (provider.cache_read_price_per_1m || 0).toFixed(2) }}</span>
-                            </div>
-                            <!-- 1h 缓存价格 -->
-                            <div
-                              v-if="(provider.cache_1h_creation_price_per_1m || 0) > 0"
-                              class="text-muted-foreground"
-                            >
-                              <span>1h 缓存:</span>
-                              <span class="ml-1">${{ (provider.cache_1h_creation_price_per_1m || 0).toFixed(2) }}</span>
-                            </div>
-                            <!-- 按次计费 -->
-                            <div v-if="(provider.price_per_request || 0) > 0">
-                              <span class="text-muted-foreground">按次:</span>
-                              <span class="ml-1">${{ (provider.price_per_request || 0).toFixed(3) }}/次</span>
-                            </div>
-                            <!-- 无定价 -->
-                            <span
-                              v-if="!(provider.input_price_per_1m || 0) && !(provider.output_price_per_1m || 0) && !(provider.price_per_request || 0)"
-                              class="text-muted-foreground"
-                            >-</span>
-                          </div>
-                        </TableCell>
-                        <TableCell class="py-3 text-center">
-                          <div class="flex items-center justify-center gap-1">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              class="h-7 w-7"
-                              title="编辑此关联"
-                              @click="$emit('editProvider', provider)"
-                            >
-                              <Edit class="w-3.5 h-3.5" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              class="h-7 w-7"
-                              :title="provider.is_active ? '停用此关联' : '启用此关联'"
-                              @click="$emit('toggleProviderStatus', provider)"
-                            >
-                              <Power class="w-3.5 h-3.5" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              class="h-7 w-7"
-                              title="删除此关联"
-                              @click="$emit('deleteProvider', provider)"
-                            >
-                              <Trash2 class="w-3.5 h-3.5" />
-                            </Button>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    </TableBody>
-                  </Table>
-
-                  <!-- 移动端卡片列表 -->
-                  <div class="sm:hidden divide-y divide-border/40">
-                    <div
-                      v-for="provider in providers"
-                      :key="provider.id"
-                      class="p-4 space-y-3"
-                    >
-                      <div class="flex items-start justify-between gap-3">
-                        <div class="flex items-center gap-2 min-w-0">
-                          <span
-                            class="w-2 h-2 rounded-full shrink-0"
-                            :class="provider.is_active ? 'bg-green-500' : 'bg-gray-300'"
-                          />
-                          <span class="font-medium truncate">{{ provider.name }}</span>
-                        </div>
-                        <div class="flex items-center gap-1 shrink-0">
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            class="h-7 w-7"
-                            @click="$emit('editProvider', provider)"
-                          >
-                            <Edit class="w-3.5 h-3.5" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            class="h-7 w-7"
-                            @click="$emit('toggleProviderStatus', provider)"
-                          >
-                            <Power class="w-3.5 h-3.5" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            class="h-7 w-7"
-                            @click="$emit('deleteProvider', provider)"
-                          >
-                            <Trash2 class="w-3.5 h-3.5" />
-                          </Button>
-                        </div>
-                      </div>
-                      <div class="flex items-center gap-3 text-xs">
-                        <div class="flex gap-1">
-                          <Zap
-                            v-if="provider.supports_streaming"
-                            class="w-3.5 h-3.5 text-muted-foreground"
-                          />
-                          <Eye
-                            v-if="provider.supports_vision"
-                            class="w-3.5 h-3.5 text-muted-foreground"
-                          />
-                          <Wrench
-                            v-if="provider.supports_function_calling"
-                            class="w-3.5 h-3.5 text-muted-foreground"
-                          />
-                        </div>
-                        <div
-                          v-if="(provider.input_price_per_1m || 0) > 0 || (provider.output_price_per_1m || 0) > 0"
-                          class="text-muted-foreground font-mono"
-                        >
-                          ${{ (provider.input_price_per_1m || 0).toFixed(1) }}/${{ (provider.output_price_per_1m || 0).toFixed(1) }}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </template>
-
-                <div
-                  v-else
-                  class="text-center py-12"
-                >
-                  <!-- 空状态 -->
-                  <Building2 class="w-12 h-12 mx-auto text-muted-foreground/30 mb-3" />
-                  <p class="text-sm text-muted-foreground">
-                    暂无关联提供商
-                  </p>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    class="mt-4"
-                    @click="$emit('addProvider')"
-                  >
-                    <Plus class="w-4 h-4 mr-1" />
-                    添加第一个关联
-                  </Button>
-                </div>
-              </Card>
+            <!-- Tab 2: 链路控制 -->
+            <div v-show="detailTab === 'routing'">
+              <RoutingTab
+                v-if="model"
+                ref="routingTabRef"
+                :global-model-id="model.id"
+                @add-provider="$emit('addProvider')"
+                @edit-provider="handleEditProviderFromRouting"
+                @toggle-provider-status="handleToggleProviderFromRouting"
+                @delete-provider="handleDeleteProviderFromRouting"
+              />
             </div>
           </div>
         </Card>
@@ -688,12 +436,8 @@ import {
   Zap,
   Image,
   Building2,
-  Plus,
   Edit,
-  Trash2,
   Power,
-  Loader2,
-  RefreshCw,
   Copy,
   Layers,
   BarChart3
@@ -711,14 +455,15 @@ import TableBody from '@/components/ui/table-body.vue'
 import TableRow from '@/components/ui/table-row.vue'
 import TableHead from '@/components/ui/table-head.vue'
 import TableCell from '@/components/ui/table-cell.vue'
+import RoutingTab from './RoutingTab.vue'
 
 // 使用外部类型定义
 import type { GlobalModelResponse } from '@/api/global-models'
 import type { TieredPricingConfig, PricingTier } from '@/api/endpoints/types'
 import type { CapabilityDefinition } from '@/api/endpoints'
+import type { RoutingProviderInfo } from '@/api/global-models'
 
 const props = withDefaults(defineProps<Props>(), {
-  loadingProviders: false,
   hasBlockingDialogOpen: false,
 })
 const emit = defineEmits<{
@@ -729,7 +474,6 @@ const emit = defineEmits<{
   'editProvider': [provider: any]
   'deleteProvider': [provider: any]
   'toggleProviderStatus': [provider: any]
-  'refreshProviders': []
 }>()
 const { success: showSuccess, error: showError } = useToast()
 const { copyToClipboard } = useClipboard()
@@ -737,11 +481,47 @@ const { copyToClipboard } = useClipboard()
 interface Props {
   model: GlobalModelResponse | null
   open: boolean
-  providers: any[]
-  loadingProviders?: boolean
   hasBlockingDialogOpen?: boolean
   capabilities?: CapabilityDefinition[]
 }
+
+// RoutingTab 引用
+const routingTabRef = ref<InstanceType<typeof RoutingTab> | null>(null)
+
+// 将 RoutingProviderInfo 转换为父组件期望的格式
+function convertRoutingProviderToLegacyFormat(provider: RoutingProviderInfo) {
+  return {
+    id: provider.id,
+    model_id: provider.model_id,
+    name: provider.name,
+    is_active: provider.model_is_active
+  }
+}
+
+// 处理从 RoutingTab 来的编辑事件
+function handleEditProviderFromRouting(provider: RoutingProviderInfo) {
+  emit('editProvider', convertRoutingProviderToLegacyFormat(provider))
+}
+
+// 处理从 RoutingTab 来的状态切换事件
+function handleToggleProviderFromRouting(provider: RoutingProviderInfo) {
+  emit('toggleProviderStatus', convertRoutingProviderToLegacyFormat(provider))
+}
+
+// 处理从 RoutingTab 来的删除事件
+function handleDeleteProviderFromRouting(provider: RoutingProviderInfo) {
+  emit('deleteProvider', convertRoutingProviderToLegacyFormat(provider))
+}
+
+// 刷新路由数据
+function refreshRoutingData() {
+  routingTabRef.value?.loadRoutingData?.()
+}
+
+// 暴露刷新方法给父组件
+defineExpose({
+  refreshRoutingData
+})
 
 // 根据能力名称获取显示名称
 function getCapabilityDisplayName(capName: string): string {

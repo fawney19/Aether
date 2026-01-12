@@ -68,9 +68,15 @@
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="monthly_quota">月卡额度</SelectItem>
-                <SelectItem value="pay_as_you_go">按量付费</SelectItem>
-                <SelectItem value="free_tier">免费套餐</SelectItem>
+                <SelectItem value="monthly_quota">
+                  月卡额度
+                </SelectItem>
+                <SelectItem value="pay_as_you_go">
+                  按量付费
+                </SelectItem>
+                <SelectItem value="free_tier">
+                  免费套餐
+                </SelectItem>
               </SelectContent>
             </Select>
           </div>

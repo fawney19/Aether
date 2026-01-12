@@ -5,7 +5,10 @@ const props = defineProps<CollapsibleTriggerProps>()
 </script>
 
 <template>
-  <CollapsibleTrigger v-bind="props" as-child>
+  <CollapsibleTrigger
+    v-bind="props"
+    as-child
+  >
     <slot />
   </CollapsibleTrigger>
 </template>

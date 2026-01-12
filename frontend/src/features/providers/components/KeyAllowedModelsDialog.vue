@@ -76,7 +76,10 @@
       </div>
 
       <!-- 模型列表 -->
-      <div v-else class="space-y-2">
+      <div
+        v-else
+        class="space-y-2"
+      >
         <!-- 全选/取消 -->
         <div class="flex items-center justify-between px-1">
           <div class="flex items-center gap-2">

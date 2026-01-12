@@ -418,6 +418,7 @@
 
     <!-- 模型详情抽屉 -->
     <ModelDetailDrawer
+      ref="modelDetailDrawerRef"
       :model="selectedModel"
       :open="!!selectedModel"
       :providers="selectedModelProviders"
@@ -437,235 +438,125 @@
     <!-- 批量添加关联提供商对话框 -->
     <Dialog
       :model-value="batchAddProvidersDialogOpen"
-      title="批量添加关联提供商"
-      description="为模型批量添加 Provider 实现, 提供商将自动继承模型的价格和能力, 可在添加后单独修改"
+      :title="selectedModel ? `批量管理提供商 - ${selectedModel.display_name}` : '批量管理提供商'"
+      description="选中的提供商将被关联到模型，取消选中将移除关联"
       :icon="Server"
-      size="4xl"
+      size="2xl"
       @update:model-value="handleBatchAddProvidersDialogUpdate"
     >
       <template #default>
-        <div
-          v-if="selectedModel"
-          class="space-y-4"
-        >
-          <!-- 模型信息头部 -->
-          <div class="rounded-lg border bg-muted/30 p-4">
-            <div class="flex items-start justify-between">
-              <div>
-                <p class="font-semibold text-lg">
-                  {{ selectedModel.display_name }}
-                </p>
-                <p class="text-sm text-muted-foreground font-mono">
-                  {{ selectedModel.name }}
-                </p>
-              </div>
-              <Badge
-                variant="outline"
-                class="text-xs"
-              >
-                当前 {{ selectedModelProviders.length }} 个 Provider
-              </Badge>
+        <div class="space-y-4">
+          <!-- 搜索栏 -->
+          <div class="flex items-center gap-2">
+            <div class="flex-1 relative">
+              <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+              <Input
+                v-model="batchProviderSearchQuery"
+                placeholder="搜索提供商..."
+                class="pl-8 h-9"
+              />
             </div>
           </div>
 
-          <!-- 左右对比布局 -->
-          <div class="flex gap-2 items-stretch">
-            <!-- 左侧：可添加的提供商 -->
-            <div class="flex-1 space-y-2">
-              <div class="flex items-center justify-between">
-                <div class="flex items-center gap-2">
-                  <p class="text-sm font-medium">
-                    可添加
-                  </p>
-                  <Button
-                    v-if="availableProvidersForBatchAdd.length > 0"
-                    variant="ghost"
-                    size="sm"
-                    class="h-6 px-2 text-xs"
-                    @click="toggleSelectAllLeft"
-                  >
-                    {{ isAllLeftSelected ? '取消全选' : '全选' }}
-                  </Button>
-                </div>
-                <Badge
-                  variant="secondary"
-                  class="text-xs"
-                >
-                  {{ availableProvidersForBatchAdd.length }} 个
-                </Badge>
+          <!-- 单列提供商列表 -->
+          <div class="border rounded-lg overflow-hidden">
+            <div class="max-h-96 overflow-y-auto">
+              <div
+                v-if="loadingProviderOptions"
+                class="flex items-center justify-center py-12"
+              >
+                <Loader2 class="w-6 h-6 animate-spin text-primary" />
               </div>
-              <div class="border rounded-lg h-80 overflow-y-auto">
-                <div
-                  v-if="loadingProviderOptions"
-                  class="flex items-center justify-center h-full"
-                >
-                  <Loader2 class="w-6 h-6 animate-spin text-primary" />
+
+              <template v-else>
+                <!-- 提供商组 -->
+                <div v-if="filteredBatchProviders.length > 0">
+                  <div
+                    class="flex items-center justify-between px-3 py-2 bg-muted sticky top-0 z-10"
+                  >
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs font-medium">提供商</span>
+                      <span class="text-xs text-muted-foreground">({{ filteredBatchProviders.length }})</span>
+                    </div>
+                    <button
+                      type="button"
+                      class="text-xs text-primary hover:underline shrink-0"
+                      @click="toggleAllBatchProviders"
+                    >
+                      {{ isAllBatchProvidersSelected ? '取消全选' : '全选' }}
+                    </button>
+                  </div>
+                  <div class="space-y-1 p-2">
+                    <div
+                      v-for="provider in filteredBatchProviders"
+                      :key="provider.id"
+                      class="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-muted cursor-pointer"
+                      @click="toggleBatchProviderSelection(provider.id)"
+                    >
+                      <div
+                        class="w-4 h-4 border rounded flex items-center justify-center shrink-0"
+                        :class="isBatchProviderSelected(provider.id) ? 'bg-primary border-primary' : ''"
+                      >
+                        <Check
+                          v-if="isBatchProviderSelected(provider.id)"
+                          class="w-3 h-3 text-primary-foreground"
+                        />
+                      </div>
+                      <div class="flex-1 min-w-0">
+                        <p class="text-sm font-medium truncate">
+                          {{ provider.name }}
+                        </p>
+                      </div>
+                      <Badge
+                        :variant="provider.is_active ? 'outline' : 'secondary'"
+                        :class="provider.is_active ? 'text-green-600 border-green-500/60' : ''"
+                        class="text-xs shrink-0"
+                      >
+                        {{ provider.is_active ? '活跃' : '停用' }}
+                      </Badge>
+                    </div>
+                  </div>
                 </div>
+
+                <!-- 空状态 -->
                 <div
-                  v-else-if="availableProvidersForBatchAdd.length === 0"
-                  class="flex flex-col items-center justify-center h-full text-muted-foreground"
+                  v-if="filteredBatchProviders.length === 0"
+                  class="flex flex-col items-center justify-center py-12 text-muted-foreground"
                 >
                   <Building2 class="w-10 h-10 mb-2 opacity-30" />
                   <p class="text-sm">
-                    所有 Provider 均已关联
+                    {{ batchProviderSearchQuery ? '无匹配结果' : '暂无可用提供商' }}
                   </p>
                 </div>
-                <div
-                  v-else
-                  class="p-2 space-y-1"
-                >
-                  <div
-                    v-for="provider in availableProvidersForBatchAdd"
-                    :key="provider.id"
-                    class="flex items-center gap-2 p-2 rounded-lg border transition-colors"
-                    :class="selectedLeftProviderIds.includes(provider.id)
-                      ? 'border-primary bg-primary/10'
-                      : 'hover:bg-muted/50 cursor-pointer'"
-                    @click="toggleLeftSelection(provider.id)"
-                  >
-                    <Checkbox
-                      :checked="selectedLeftProviderIds.includes(provider.id)"
-                      @update:checked="toggleLeftSelection(provider.id)"
-                      @click.stop
-                    />
-                    <div class="flex-1 min-w-0">
-                      <p class="font-medium text-sm truncate">
-                        {{ provider.name }}
-                      </p>
-                    </div>
-                    <Badge
-                      :variant="provider.is_active ? 'outline' : 'secondary'"
-                      :class="provider.is_active ? 'text-green-600 border-green-500/60' : ''"
-                      class="text-xs shrink-0"
-                    >
-                      {{ provider.is_active ? '活跃' : '停用' }}
-                    </Badge>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <!-- 中间：操作按钮 -->
-            <div class="flex flex-col items-center justify-center w-12 shrink-0 gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                class="w-9 h-8"
-                :class="selectedLeftProviderIds.length > 0 && !submittingBatchAddProviders ? 'border-primary' : ''"
-                :disabled="selectedLeftProviderIds.length === 0 || submittingBatchAddProviders"
-                title="添加选中"
-                @click="batchAddSelectedProviders"
-              >
-                <Loader2
-                  v-if="submittingBatchAddProviders"
-                  class="w-4 h-4 animate-spin"
-                />
-                <ChevronRight
-                  v-else
-                  class="w-6 h-6 stroke-[3]"
-                  :class="selectedLeftProviderIds.length > 0 && !submittingBatchAddProviders ? 'text-primary' : ''"
-                />
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                class="w-9 h-8"
-                :class="selectedRightProviderIds.length > 0 && !submittingBatchRemoveProviders ? 'border-primary' : ''"
-                :disabled="selectedRightProviderIds.length === 0 || submittingBatchRemoveProviders"
-                title="移除选中"
-                @click="batchRemoveSelectedProviders"
-              >
-                <Loader2
-                  v-if="submittingBatchRemoveProviders"
-                  class="w-4 h-4 animate-spin"
-                />
-                <ChevronLeft
-                  v-else
-                  class="w-6 h-6 stroke-[3]"
-                  :class="selectedRightProviderIds.length > 0 && !submittingBatchRemoveProviders ? 'text-primary' : ''"
-                />
-              </Button>
-            </div>
-
-            <!-- 右侧：已添加的提供商 -->
-            <div class="flex-1 space-y-2">
-              <div class="flex items-center justify-between">
-                <div class="flex items-center gap-2">
-                  <p class="text-sm font-medium">
-                    已添加
-                  </p>
-                  <Button
-                    v-if="selectedModelProviders.length > 0"
-                    variant="ghost"
-                    size="sm"
-                    class="h-6 px-2 text-xs"
-                    @click="toggleSelectAllRight"
-                  >
-                    {{ isAllRightSelected ? '取消全选' : '全选' }}
-                  </Button>
-                </div>
-                <Badge
-                  variant="secondary"
-                  class="text-xs"
-                >
-                  {{ selectedModelProviders.length }} 个
-                </Badge>
-              </div>
-              <div class="border rounded-lg h-80 overflow-y-auto">
-                <div
-                  v-if="selectedModelProviders.length === 0"
-                  class="flex flex-col items-center justify-center h-full text-muted-foreground"
-                >
-                  <Building2 class="w-10 h-10 mb-2 opacity-30" />
-                  <p class="text-sm">
-                    暂无关联提供商
-                  </p>
-                </div>
-                <div
-                  v-else
-                  class="p-2 space-y-1"
-                >
-                  <!-- 已存在的（可选中删除） -->
-                  <div
-                    v-for="provider in selectedModelProviders"
-                    :key="'existing-' + provider.id"
-                    class="flex items-center gap-2 p-2 rounded-lg border transition-colors cursor-pointer"
-                    :class="selectedRightProviderIds.includes(provider.id)
-                      ? 'border-primary bg-primary/10'
-                      : 'hover:bg-muted/50'"
-                    @click="toggleRightSelection(provider.id)"
-                  >
-                    <Checkbox
-                      :checked="selectedRightProviderIds.includes(provider.id)"
-                      @update:checked="toggleRightSelection(provider.id)"
-                      @click.stop
-                    />
-                    <div class="flex-1 min-w-0">
-                      <p class="font-medium text-sm truncate">
-                        {{ provider.name }}
-                      </p>
-                    </div>
-                    <Badge
-                      :variant="provider.is_active ? 'outline' : 'secondary'"
-                      :class="provider.is_active ? 'text-green-600 border-green-500/60' : ''"
-                      class="text-xs shrink-0"
-                    >
-                      {{ provider.is_active ? '活跃' : '停用' }}
-                    </Badge>
-                  </div>
-                </div>
-              </div>
+              </template>
             </div>
           </div>
         </div>
       </template>
       <template #footer>
-        <Button
-          variant="outline"
-          @click="closeBatchAddProvidersDialog"
-        >
-          关闭
-        </Button>
+        <div class="flex items-center justify-between w-full">
+          <p class="text-xs text-muted-foreground">
+            {{ hasBatchProviderChanges ? `${batchProviderPendingChangesCount} 项更改待保存` : '' }}
+          </p>
+          <div class="flex items-center gap-2">
+            <Button
+              :disabled="!hasBatchProviderChanges || submittingBatchProviders"
+              @click="saveBatchProviderChanges"
+            >
+              <Loader2
+                v-if="submittingBatchProviders"
+                class="w-4 h-4 mr-1 animate-spin"
+              />
+              {{ submittingBatchProviders ? '保存中...' : '保存' }}
+            </Button>
+            <Button
+              variant="outline"
+              @click="closeBatchAddProvidersDialog"
+            >
+              关闭
+            </Button>
+          </div>
+        </div>
       </template>
     </Dialog>
 
@@ -698,8 +589,7 @@ import {
   Power,
   Copy,
   Server,
-  ChevronRight,
-  ChevronLeft,
+  Check,
 } from 'lucide-vue-next'
 import ModelDetailDrawer from '@/features/models/components/ModelDetailDrawer.vue'
 import GlobalModelFormDialog from '@/features/models/components/GlobalModelFormDialog.vue'
@@ -722,7 +612,6 @@ import {
   TableCell,
   Badge,
   Dialog,
-  Checkbox,
   Pagination,
   RefreshButton,
 } from '@/components/ui'
@@ -743,10 +632,10 @@ const { copyToClipboard } = useClipboard()
 
 // 状态
 const loading = ref(false)
-const submitting = ref(false)
 const detailTab = ref('basic')
 const searchQuery = ref('')
 const selectedModel = ref<GlobalModelResponse | null>(null)
+const modelDetailDrawerRef = ref<InstanceType<typeof ModelDetailDrawer> | null>(null)
 const createModelDialogOpen = ref(false)
 const editingModel = ref<GlobalModelResponse | null>(null)
 
@@ -765,11 +654,14 @@ const loadingModelProviders = ref(false)
 
 // 批量添加关联提供商
 const batchAddProvidersDialogOpen = ref(false)
-const selectedProviderIds = ref<string[]>([])
-const submittingBatchAddProviders = ref(false)
-const submittingBatchRemoveProviders = ref(false)
+const submittingBatchProviders = ref(false)
 const providerOptions = ref<any[]>([])
 const loadingProviderOptions = ref(false)
+
+// 单列勾选模式所需状态
+const batchProviderSearchQuery = ref('')
+const selectedBatchProviderIds = ref<Set<string>>(new Set())
+const initialBatchProviderIds = ref<Set<string>>(new Set())
 
 // 编辑提供商模型
 const editProviderDialogOpen = ref(false)
@@ -844,154 +736,152 @@ const capabilityFilters = ref({
   extendedThinking: false,
 })
 
-// 左侧选中的 Provider（用于添加）
-const selectedLeftProviderIds = ref<string[]>([])
-// 右侧选中的 Provider（用于移除，只能选新增的）
-const selectedRightProviderIds = ref<string[]>([])
-
-// 可用于批量添加的 Provider (排除已有实现的和已选中的)
-const availableProvidersForBatchAdd = computed(() => {
-  if (!selectedModel.value) return []
-
-  const existingProviderIds = new Set(
-    selectedModelProviders.value.map(p => p.id)
-  )
-  const selectedIds = new Set(selectedProviderIds.value)
-
-  return providerOptions.value.filter(
-    provider => !existingProviderIds.has(provider.id) && !selectedIds.has(provider.id)
-  )
-})
-
-// 是否全选了左侧
-const isAllLeftSelected = computed(() => {
-  return availableProvidersForBatchAdd.value.length > 0 &&
-    selectedLeftProviderIds.value.length === availableProvidersForBatchAdd.value.length
-})
-
-// 是否全选了右侧
-const isAllRightSelected = computed(() => {
-  return selectedModelProviders.value.length > 0 &&
-    selectedRightProviderIds.value.length === selectedModelProviders.value.length
-})
-
-// 切换左侧选择
-function toggleLeftSelection(providerId: string) {
-  const index = selectedLeftProviderIds.value.indexOf(providerId)
-  if (index === -1) {
-    selectedLeftProviderIds.value.push(providerId)
-  } else {
-    selectedLeftProviderIds.value.splice(index, 1)
-  }
-}
-
-// 切换右侧选择（只能选新增的）
-function toggleRightSelection(providerId: string) {
-  const index = selectedRightProviderIds.value.indexOf(providerId)
-  if (index === -1) {
-    selectedRightProviderIds.value.push(providerId)
-  } else {
-    selectedRightProviderIds.value.splice(index, 1)
-  }
-}
-
-// 全选/取消全选左侧
-function toggleSelectAllLeft() {
-  if (isAllLeftSelected.value) {
-    selectedLeftProviderIds.value = []
-  } else {
-    selectedLeftProviderIds.value = availableProvidersForBatchAdd.value.map(p => p.id)
-  }
-}
-
-// 全选/取消全选右侧
-function toggleSelectAllRight() {
-  if (isAllRightSelected.value) {
-    selectedRightProviderIds.value = []
-  } else {
-    selectedRightProviderIds.value = selectedModelProviders.value.map(p => p.id)
-  }
-}
-
-// 批量添加选中的 Provider（直接调用 API）
-async function batchAddSelectedProviders() {
-  if (!selectedModel.value || selectedLeftProviderIds.value.length === 0) return
-
-  try {
-    submittingBatchAddProviders.value = true
-
-    const result = await batchAssignToProviders(selectedModel.value.id, {
-      provider_ids: selectedLeftProviderIds.value,
-      create_models: true
-    })
-
-    if (result.success.length > 0) {
-      success(`成功添加 ${result.success.length} 个 Provider`)
+// 过滤后的提供商列表
+const filteredBatchProviders = computed(() => {
+  const query = batchProviderSearchQuery.value.toLowerCase().trim()
+  return providerOptions.value.filter(p => {
+    if (query && !p.name.toLowerCase().includes(query)) {
+      return false
     }
+    return true
+  })
+})
 
-    if (result.errors.length > 0) {
-      const errorMessages = result.errors
-        .map(e => {
-          const provider = providerOptions.value.find(p => p.id === e.provider_id)
-          const providerName = provider?.name || e.provider_id
-          return `${providerName}: ${e.error}`
-        })
-        .join('\n')
-      showError(errorMessages, '部分 Provider 添加失败')
-    }
-
-    // 清空左侧选择，刷新右侧列表和外层表格
-    selectedLeftProviderIds.value = []
-    await loadModelProviders(selectedModel.value.id)
-    // 刷新外层模型列表以更新 provider_count
-    await loadGlobalModels()
-  } catch (err: any) {
-    showError(parseApiError(err, '批量添加失败'), '错误')
-  } finally {
-    submittingBatchAddProviders.value = false
-  }
+// 检查提供商是否已选中
+function isBatchProviderSelected(providerId: string): boolean {
+  return selectedBatchProviderIds.value.has(providerId)
 }
 
-// 批量移除选中的 Provider（直接调用 API）
-async function batchRemoveSelectedProviders() {
-  if (!selectedModel.value || selectedRightProviderIds.value.length === 0) return
+// 是否全选
+const isAllBatchProvidersSelected = computed(() => {
+  if (filteredBatchProviders.value.length === 0) return false
+  return filteredBatchProviders.value.every(p => isBatchProviderSelected(p.id))
+})
 
+// 计算待添加的提供商
+const batchProvidersToAdd = computed(() => {
+  const toAdd: string[] = []
+  for (const id of selectedBatchProviderIds.value) {
+    if (!initialBatchProviderIds.value.has(id)) {
+      toAdd.push(id)
+    }
+  }
+  return toAdd
+})
+
+// 计算待移除的提供商
+const batchProvidersToRemove = computed(() => {
+  const toRemove: string[] = []
+  for (const id of initialBatchProviderIds.value) {
+    if (!selectedBatchProviderIds.value.has(id)) {
+      toRemove.push(id)
+    }
+  }
+  return toRemove
+})
+
+// 是否有变更
+const hasBatchProviderChanges = computed(() => {
+  return batchProvidersToAdd.value.length > 0 || batchProvidersToRemove.value.length > 0
+})
+
+// 待变更数量
+const batchProviderPendingChangesCount = computed(() => {
+  return batchProvidersToAdd.value.length + batchProvidersToRemove.value.length
+})
+
+// 切换提供商选择
+function toggleBatchProviderSelection(providerId: string) {
+  if (selectedBatchProviderIds.value.has(providerId)) {
+    selectedBatchProviderIds.value.delete(providerId)
+  } else {
+    selectedBatchProviderIds.value.add(providerId)
+  }
+  selectedBatchProviderIds.value = new Set(selectedBatchProviderIds.value)
+}
+
+// 全选/取消全选
+function toggleAllBatchProviders() {
+  const allIds = filteredBatchProviders.value.map(p => p.id)
+  if (isAllBatchProvidersSelected.value) {
+    for (const id of allIds) {
+      selectedBatchProviderIds.value.delete(id)
+    }
+  } else {
+    for (const id of allIds) {
+      selectedBatchProviderIds.value.add(id)
+    }
+  }
+  selectedBatchProviderIds.value = new Set(selectedBatchProviderIds.value)
+}
+
+// 同步初始选择状态
+function syncBatchProviderSelection() {
+  const existingIds = new Set(selectedModelProviders.value.map((p: any) => p.id))
+  selectedBatchProviderIds.value = new Set(existingIds)
+  initialBatchProviderIds.value = new Set(existingIds)
+}
+
+// 保存变更
+async function saveBatchProviderChanges() {
+  if (!hasBatchProviderChanges.value || submittingBatchProviders.value || !selectedModel.value) return
+
+  submittingBatchProviders.value = true
   try {
-    submittingBatchRemoveProviders.value = true
-    const { deleteModel } = await import('@/api/endpoints')
+    let totalSuccess = 0
+    const allErrors: string[] = []
 
-    let successCount = 0
-    const errors: string[] = []
+    // 并行移除提供商
+    if (batchProvidersToRemove.value.length > 0) {
+      const { deleteModel } = await import('@/api/endpoints')
+      const removePromises = batchProvidersToRemove.value.map(async (providerId) => {
+        const existingProvider = selectedModelProviders.value.find((p: any) => p.id === providerId)
+        if (existingProvider && existingProvider.model_id) {
+          return deleteModel(providerId, existingProvider.model_id)
+        }
+        return null
+      })
 
-    for (const providerId of selectedRightProviderIds.value) {
-      const provider = selectedModelProviders.value.find(p => p.id === providerId)
-      if (!provider?.model_id) continue
-
-      try {
-        await deleteModel(providerId, provider.model_id)
-        successCount++
-      } catch (err: any) {
-        errors.push(`${provider.name}: ${parseApiError(err, '删除失败')}`)
+      const results = await Promise.allSettled(removePromises)
+      for (const result of results) {
+        if (result.status === 'fulfilled' && result.value !== null) {
+          totalSuccess++
+        } else if (result.status === 'rejected') {
+          allErrors.push(parseApiError(result.reason, '移除失败'))
+        }
       }
     }
 
-    if (successCount > 0) {
-      success(`成功移除 ${successCount} 个 Provider`)
+    // 添加提供商
+    if (batchProvidersToAdd.value.length > 0) {
+      const result = await batchAssignToProviders(selectedModel.value.id, {
+        provider_ids: batchProvidersToAdd.value,
+        create_models: true
+      })
+      totalSuccess += result.success.length
+      if (result.errors.length > 0) {
+        allErrors.push(...result.errors.map(e => e.error))
+      }
     }
 
-    if (errors.length > 0) {
-      showError(errors.join('\n'), '部分 Provider 移除失败')
+    if (totalSuccess > 0) {
+      success(`成功处理 ${totalSuccess} 个提供商`)
     }
 
-    // 清空右侧选择，刷新列表和外层表格
-    selectedRightProviderIds.value = []
+    if (allErrors.length > 0) {
+      showError(`部分操作失败: ${allErrors.slice(0, 3).join(', ')}${allErrors.length > 3 ? '...' : ''}`, '警告')
+    }
+
+    // 刷新数据并关闭对话框
     await loadModelProviders(selectedModel.value.id)
-    // 刷新外层模型列表以更新 provider_count
     await loadGlobalModels()
+    // 刷新路由数据
+    modelDetailDrawerRef.value?.refreshRoutingData?.()
+    closeBatchAddProvidersDialog()
   } catch (err: any) {
-    showError(parseApiError(err, '批量移除失败'), '错误')
+    showError(parseApiError(err, '保存失败'), '错误')
   } finally {
-    submittingBatchRemoveProviders.value = false
+    submittingBatchProviders.value = false
   }
 }
 
@@ -1135,15 +1025,18 @@ async function ensureProviderOptions() {
 // 打开添加关联提供商对话框
 function openAddProviderDialog() {
   if (!selectedModel.value) return
-  selectedProviderIds.value = []
+  batchProviderSearchQuery.value = ''
   batchAddProvidersDialogOpen.value = true
-  ensureProviderOptions()
+  ensureProviderOptions().then(() => {
+    // 同步选择状态
+    syncBatchProviderSelection()
+  })
 }
 
 // 处理批量添加 Provider 对话框关闭事件
 function handleBatchAddProvidersDialogUpdate(value: boolean) {
   // 只有在不处于提交状态时才允许关闭
-  if (!value && submittingBatchAddProviders.value) {
+  if (!value && submittingBatchProviders.value) {
     return
   }
   batchAddProvidersDialogOpen.value = value
@@ -1152,10 +1045,10 @@ function handleBatchAddProvidersDialogUpdate(value: boolean) {
 // 关闭批量添加对话框
 function closeBatchAddProvidersDialog() {
   batchAddProvidersDialogOpen.value = false
-  selectedProviderIds.value = []
-  selectedLeftProviderIds.value = []
-  selectedRightProviderIds.value = []
-  submittingBatchAddProviders.value = false
+  batchProviderSearchQuery.value = ''
+  selectedBatchProviderIds.value = new Set()
+  initialBatchProviderIds.value = new Set()
+  submittingBatchProviders.value = false
 }
 
 // 抽屉控制函数
@@ -1199,6 +1092,8 @@ async function toggleProviderStatus(provider: any) {
     await updateModel(provider.id, provider.model_id, { is_active: newStatus })
     provider.is_active = newStatus
     success(newStatus ? '已启用此关联提供商' : '已停用此关联提供商')
+    // 刷新路由数据
+    modelDetailDrawerRef.value?.refreshRoutingData?.()
   } catch (err: any) {
     showError(parseApiError(err, '更新状态失败'))
   }
@@ -1212,7 +1107,7 @@ async function confirmDeleteProviderImplementation(provider: any) {
   }
 
   const confirmed = await confirmDanger(
-    `确定要删除 ${provider.name} 的模型关联吗？\n\n模型: ${provider.target_model}\n\n此操作不可恢复！`,
+    `确定要删除 ${provider.name} 的模型关联吗？\n\n此操作不可恢复！`,
     '删除关联提供商'
   )
   if (!confirmed) return
@@ -1221,10 +1116,12 @@ async function confirmDeleteProviderImplementation(provider: any) {
     const { deleteModel } = await import('@/api/endpoints')
     await deleteModel(provider.id, provider.model_id)
     success(`已删除 ${provider.name} 的模型实现`)
-    // 重新加载 Provider 列表
+    // 同步更新 selectedModelProviders 确保状态一致
     if (selectedModel.value) {
       await loadModelProviders(selectedModel.value.id)
     }
+    // 刷新路由数据
+    modelDetailDrawerRef.value?.refreshRoutingData?.()
   } catch (err: any) {
     showError(parseApiError(err, '删除模型失败'))
   }

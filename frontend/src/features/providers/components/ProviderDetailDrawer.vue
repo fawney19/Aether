@@ -83,7 +83,10 @@
               </div>
               <!-- 端点 API 格式 -->
               <div class="flex items-center gap-1.5 flex-wrap mt-3">
-                <template v-for="endpoint in endpoints" :key="endpoint.id">
+                <template
+                  v-for="endpoint in endpoints"
+                  :key="endpoint.id"
+                >
                   <span
                     class="text-xs px-2 py-0.5 rounded-md border border-border bg-background hover:bg-accent hover:border-accent-foreground/20 cursor-pointer transition-colors font-medium"
                     :class="{ 'opacity-40': !endpoint.is_active }"
@@ -324,7 +327,10 @@
                         v-for="(format, idx) in getKeyApiFormats(key, endpoint)"
                         :key="format"
                       >
-                        <span v-if="idx > 0" class="text-muted-foreground/40">/</span>
+                        <span
+                          v-if="idx > 0"
+                          class="text-muted-foreground/40"
+                        >/</span>
                         <span>{{ API_FORMAT_SHORT[format] || format }} {{ getKeyRateMultiplier(key, format) }}x</span>
                       </template>
                       <span v-if="key.rate_limit">| {{ key.rate_limit }}rpm</span>
