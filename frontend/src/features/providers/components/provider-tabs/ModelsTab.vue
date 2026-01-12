@@ -190,7 +190,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { Box, Edit, Trash2, Layers, Power, Copy, Link, Eye, Wrench, Zap, Brain, Image, Loader2, Play } from 'lucide-vue-next'
+import { Box, Edit, Trash2, Layers, Power, Copy, Link, Loader2, Play } from 'lucide-vue-next'
 import Card from '@/components/ui/card.vue'
 import Button from '@/components/ui/button.vue'
 import { useToast } from '@/composables/useToast'
