@@ -638,11 +638,13 @@ export interface RoutingKeyInfo {
   is_adaptive: boolean
   effective_rpm?: number | null
   cache_ttl_minutes: number
-  health_score: number
+  health_score: number  // 0-1 小数格式
   is_active: boolean
   api_formats: string[]
+  allowed_models?: string[] | null  // 允许的模型列表，null 表示不限制
   circuit_breaker_open: boolean
   circuit_breaker_formats: string[]
+  next_probe_at?: string | null  // 下次探测时间（ISO格式）
 }
 
 /**

@@ -1,10 +1,11 @@
 """管理员 Provider 管理路由。"""
 
+import asyncio
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from src.api.base.admin_adapter import AdminApiAdapter
@@ -12,13 +13,79 @@ from src.api.base.pipeline import ApiRequestPipeline
 from src.core.enums import ProviderBillingType
 from src.core.exceptions import InvalidRequestException, NotFoundException
 from src.core.logger import logger
+from src.core.model_permissions import match_model_with_pattern, parse_allowed_models_to_list
 from src.database import get_db
 from src.models.admin_requests import CreateProviderRequest, UpdateProviderRequest
-from src.models.database import Provider
+from src.models.database import GlobalModel, Provider, ProviderAPIKey
 from src.services.cache.provider_cache import ProviderCacheService
 
 router = APIRouter(tags=["Provider CRUD"])
 pipeline = ApiRequestPipeline()
+
+
+# 别名映射预览配置（管理后台功能，限制宽松）
+ALIAS_PREVIEW_MAX_KEYS = 200
+ALIAS_PREVIEW_MAX_MODELS = 500
+ALIAS_PREVIEW_TIMEOUT_SECONDS = 10.0
+
+
+# ========== Response Models ==========
+
+
+class AliasMatchedModel(BaseModel):
+    """匹配到的模型名称"""
+
+    allowed_model: str = Field(..., description="Key 白名单中匹配到的模型名")
+    alias_pattern: str = Field(..., description="匹配的别名规则")
+
+
+class AliasMatchingGlobalModel(BaseModel):
+    """有别名匹配的 GlobalModel"""
+
+    global_model_id: str
+    global_model_name: str
+    display_name: str
+    is_active: bool
+    matched_models: List[AliasMatchedModel] = Field(
+        default_factory=list, description="匹配到的模型列表"
+    )
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AliasMatchingKey(BaseModel):
+    """有别名匹配的 Key"""
+
+    key_id: str
+    key_name: str
+    masked_key: str
+    is_active: bool
+    allowed_models: List[str] = Field(default_factory=list, description="Key 的模型白名单")
+    matching_global_models: List[AliasMatchingGlobalModel] = Field(
+        default_factory=list, description="匹配到的 GlobalModel 列表"
+    )
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProviderAliasMappingPreviewResponse(BaseModel):
+    """Provider 别名映射预览响应"""
+
+    provider_id: str
+    provider_name: str
+    keys: List[AliasMatchingKey] = Field(
+        default_factory=list, description="有白名单配置且匹配到别名的 Key 列表"
+    )
+    total_keys: int = Field(0, description="有匹配结果的 Key 数量")
+    total_matches: int = Field(
+        0, description="匹配到的 GlobalModel 数量（同一 GlobalModel 被多个 Key 匹配会重复计数）"
+    )
+    # 截断提示字段
+    truncated: bool = Field(False, description="是否因限制而截断结果")
+    truncated_keys: int = Field(0, description="被截断的 Key 数量")
+    truncated_models: int = Field(0, description="被截断的 GlobalModel 数量")
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 @router.get("/")
@@ -292,7 +359,9 @@ class AdminUpdateProviderAdapter(AdminApiAdapter):
                     setattr(provider, field, ProviderBillingType(value))
                 elif field == "proxy" and value is not None:
                     # proxy 需要转换为 dict（如果是 Pydantic 模型）
-                    setattr(provider, field, value if isinstance(value, dict) else value.model_dump())
+                    setattr(
+                        provider, field, value if isinstance(value, dict) else value.model_dump()
+                    )
                 else:
                     setattr(provider, field, value)
 
@@ -345,3 +414,232 @@ class AdminDeleteProviderAdapter(AdminApiAdapter):
         db.delete(provider)
         db.commit()
         return {"message": "提供商已删除"}
+
+
+@router.get(
+    "/{provider_id}/alias-mapping-preview",
+    response_model=ProviderAliasMappingPreviewResponse,
+)
+async def get_provider_alias_mapping_preview(
+    request: Request,
+    provider_id: str,
+    db: Session = Depends(get_db),
+) -> ProviderAliasMappingPreviewResponse:
+    """
+    获取 Provider 别名映射预览
+
+    查看该 Provider 的 Key 白名单能够被哪些 GlobalModel 的别名规则匹配。
+
+    **路径参数**:
+    - `provider_id`: Provider ID
+
+    **返回字段**:
+    - `provider_id`: Provider ID
+    - `provider_name`: Provider 名称
+    - `keys`: 有白名单配置的 Key 列表，每个包含：
+      - `key_id`: Key ID
+      - `key_name`: Key 名称
+      - `masked_key`: 脱敏的 Key
+      - `allowed_models`: Key 的白名单模型列表
+      - `matching_global_models`: 匹配到的 GlobalModel 列表
+    - `total_keys`: 有白名单配置的 Key 总数
+    - `total_matches`: 匹配到的 GlobalModel 总数
+    """
+    adapter = AdminGetProviderAliasMappingPreviewAdapter(provider_id=provider_id)
+
+    # 添加超时保护，防止复杂匹配导致的 DoS
+    try:
+        return await asyncio.wait_for(
+            pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode),
+            timeout=ALIAS_PREVIEW_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"别名映射预览超时: provider_id={provider_id}")
+        raise InvalidRequestException("别名映射预览超时，请简化配置或稍后重试")
+
+
+class AdminGetProviderAliasMappingPreviewAdapter(AdminApiAdapter):
+    """获取 Provider 别名映射预览"""
+
+    def __init__(self, provider_id: str):
+        self.provider_id = provider_id
+
+    async def handle(self, context) -> ProviderAliasMappingPreviewResponse:  # type: ignore[override]
+        db = context.db
+
+        # 获取 Provider
+        provider = db.query(Provider).filter(Provider.id == self.provider_id).first()
+        if not provider:
+            raise NotFoundException("提供商不存在", "provider")
+
+        # 统计截断情况
+        truncated_keys = 0
+        truncated_models = 0
+
+        # 获取该 Provider 有白名单配置的 Key 总数（用于截断统计）
+        from sqlalchemy import func
+
+        total_keys_with_allowed_models = (
+            db.query(func.count(ProviderAPIKey.id))
+            .filter(
+                ProviderAPIKey.provider_id == self.provider_id,
+                ProviderAPIKey.allowed_models.isnot(None),
+            )
+            .scalar()
+            or 0
+        )
+
+        # 获取该 Provider 有白名单配置的 Key（只查询需要的字段）
+        keys = (
+            db.query(
+                ProviderAPIKey.id,
+                ProviderAPIKey.name,
+                ProviderAPIKey.api_key,
+                ProviderAPIKey.is_active,
+                ProviderAPIKey.allowed_models,
+            )
+            .filter(
+                ProviderAPIKey.provider_id == self.provider_id,
+                ProviderAPIKey.allowed_models.isnot(None),
+            )
+            .limit(ALIAS_PREVIEW_MAX_KEYS)
+            .all()
+        )
+
+        # 计算被截断的 Key 数量
+        if total_keys_with_allowed_models > ALIAS_PREVIEW_MAX_KEYS:
+            truncated_keys = total_keys_with_allowed_models - ALIAS_PREVIEW_MAX_KEYS
+
+        # 获取有 model_aliases 配置的 GlobalModel 总数（用于截断统计）
+        total_models_with_aliases = (
+            db.query(func.count(GlobalModel.id))
+            .filter(
+                GlobalModel.config.isnot(None),
+                GlobalModel.config["model_aliases"].isnot(None),
+                func.jsonb_array_length(GlobalModel.config["model_aliases"]) > 0,
+            )
+            .scalar()
+            or 0
+        )
+
+        # 只查询有 model_aliases 配置的 GlobalModel（使用 SQLAlchemy JSONB 操作符）
+        global_models = (
+            db.query(
+                GlobalModel.id,
+                GlobalModel.name,
+                GlobalModel.display_name,
+                GlobalModel.is_active,
+                GlobalModel.config,
+            )
+            .filter(
+                GlobalModel.config.isnot(None),
+                GlobalModel.config["model_aliases"].isnot(None),
+                func.jsonb_array_length(GlobalModel.config["model_aliases"]) > 0,
+            )
+            .limit(ALIAS_PREVIEW_MAX_MODELS)
+            .all()
+        )
+
+        # 计算被截断的 GlobalModel 数量
+        if total_models_with_aliases > ALIAS_PREVIEW_MAX_MODELS:
+            truncated_models = total_models_with_aliases - ALIAS_PREVIEW_MAX_MODELS
+
+        # 构建有别名配置的 GlobalModel 映射
+        models_with_aliases: Dict[str, tuple] = {}  # id -> (model_info, aliases)
+        for gm in global_models:
+            config = gm.config or {}
+            aliases = config.get("model_aliases", [])
+            if aliases:
+                models_with_aliases[gm.id] = (gm, aliases)
+
+        # 如果没有任何带别名的 GlobalModel，直接返回空结果
+        if not models_with_aliases:
+            return ProviderAliasMappingPreviewResponse(
+                provider_id=provider.id,
+                provider_name=provider.name,
+                keys=[],
+                total_keys=0,
+                total_matches=0,
+                truncated=False,
+                truncated_keys=0,
+                truncated_models=0,
+            )
+
+        key_infos: List[AliasMatchingKey] = []
+        total_matches = 0
+
+        # 创建 CryptoService 实例
+        from src.core.crypto import CryptoService
+
+        crypto = CryptoService()
+
+        for key in keys:
+            allowed_models_list = parse_allowed_models_to_list(key.allowed_models)
+            if not allowed_models_list:
+                continue
+
+            # 生成脱敏 Key
+            masked_key = "***"
+            if key.api_key:
+                try:
+                    decrypted_key = crypto.decrypt(key.api_key, silent=True)
+                    if len(decrypted_key) > 8:
+                        masked_key = f"{decrypted_key[:4]}***{decrypted_key[-4:]}"
+                    else:
+                        masked_key = f"{decrypted_key[:2]}***"
+                except Exception:
+                    pass
+
+            # 查找匹配的 GlobalModel
+            matching_global_models: List[AliasMatchingGlobalModel] = []
+
+            for gm_id, (gm, aliases) in models_with_aliases.items():
+                matched_models: List[AliasMatchedModel] = []
+
+                for allowed_model in allowed_models_list:
+                    for alias_pattern in aliases:
+                        if match_model_with_pattern(alias_pattern, allowed_model):
+                            matched_models.append(
+                                AliasMatchedModel(
+                                    allowed_model=allowed_model,
+                                    alias_pattern=alias_pattern,
+                                )
+                            )
+                            break  # 一个 allowed_model 只需匹配一个别名
+
+                if matched_models:
+                    matching_global_models.append(
+                        AliasMatchingGlobalModel(
+                            global_model_id=gm.id,
+                            global_model_name=gm.name,
+                            display_name=gm.display_name,
+                            is_active=bool(gm.is_active),
+                            matched_models=matched_models,
+                        )
+                    )
+                    total_matches += 1
+
+            if matching_global_models:
+                key_infos.append(
+                    AliasMatchingKey(
+                        key_id=key.id or "",
+                        key_name=key.name or "",
+                        masked_key=masked_key,
+                        is_active=bool(key.is_active),
+                        allowed_models=allowed_models_list,
+                        matching_global_models=matching_global_models,
+                    )
+                )
+
+        is_truncated = truncated_keys > 0 or truncated_models > 0
+
+        return ProviderAliasMappingPreviewResponse(
+            provider_id=provider.id,
+            provider_name=provider.name,
+            keys=key_infos,
+            total_keys=len(key_infos),
+            total_matches=total_matches,
+            truncated=is_truncated,
+            truncated_keys=truncated_keys,
+            truncated_models=truncated_models,
+        )

@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from src.api.base.admin_adapter import AdminApiAdapter
 from src.api.base.pipeline import ApiRequestPipeline
+from src.core.model_permissions import parse_allowed_models_to_list
 from src.database import get_db
 from src.models.database import (
     GlobalModel,
@@ -46,12 +47,15 @@ class RoutingKeyInfo(BaseModel):
     is_adaptive: bool = Field(False, description="是否为自适应 RPM 模式")
     effective_rpm: Optional[int] = Field(None, description="有效 RPM 限制")
     cache_ttl_minutes: int = Field(0, description="缓存 TTL（分钟）")
-    health_score: float = Field(100.0, description="健康度分数")
+    health_score: float = Field(1.0, description="健康度分数（0-1 小数格式）")
     is_active: bool
     api_formats: List[str] = Field(default_factory=list, description="支持的 API 格式")
+    # 模型白名单
+    allowed_models: Optional[List[str]] = Field(None, description="允许的模型列表，null 表示不限制")
     # 熔断状态
     circuit_breaker_open: bool = Field(False, description="熔断器是否打开")
     circuit_breaker_formats: List[str] = Field(default_factory=list, description="熔断的 API 格式列表")
+    next_probe_at: Optional[str] = Field(None, description="下次探测时间（ISO格式）")
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -269,11 +273,11 @@ class AdminGetModelRoutingPreviewAdapter(AdminApiAdapter):
                     if is_adaptive and key.learned_rpm_limit:
                         effective_rpm = key.learned_rpm_limit
 
-                    # 从 health_by_format 获取健康度
-                    health_score = 100.0
+                    # 从 health_by_format 获取健康度（0-1 小数格式）
+                    health_score = 1.0
                     if key.health_by_format and ep.api_format:
                         format_health = key.health_by_format.get(ep.api_format, {})
-                        health_score = format_health.get("health_score", 100.0)
+                        health_score = format_health.get("health_score", 1.0)
 
                     # 生成脱敏 SK（先解密再脱敏）
                     masked_key = ""
@@ -293,11 +297,32 @@ class AdminGetModelRoutingPreviewAdapter(AdminApiAdapter):
                     # 检查熔断状态
                     circuit_breaker_open = False
                     circuit_breaker_formats: List[str] = []
+                    next_probe_at: Optional[str] = None
                     if key.circuit_breaker_by_format:
                         for fmt, cb_state in key.circuit_breaker_by_format.items():
                             if isinstance(cb_state, dict) and cb_state.get("open"):
                                 circuit_breaker_open = True
                                 circuit_breaker_formats.append(fmt)
+                                # 取最早的探测时间
+                                fmt_next_probe = cb_state.get("next_probe_at")
+                                if fmt_next_probe:
+                                    if next_probe_at is None or fmt_next_probe < next_probe_at:
+                                        next_probe_at = fmt_next_probe
+
+                    # 解析 allowed_models
+                    # 语义说明：
+                    # - None: 不限制（允许所有模型）
+                    # - {}: 空字典 = 不限制（normalize_allowed_models 返回 None）
+                    # - []: 空列表 = 拒绝所有模型
+                    # - {"CLAUDE": []}: 指定格式空列表 = 该格式拒绝所有
+                    raw_allowed_models = key.allowed_models
+                    if raw_allowed_models is None:
+                        allowed_models_list = None
+                    elif isinstance(raw_allowed_models, dict) and not raw_allowed_models:
+                        # 空 dict {} 在语义上等价于不限制
+                        allowed_models_list = None
+                    else:
+                        allowed_models_list = parse_allowed_models_to_list(raw_allowed_models)
 
                     key_infos.append(
                         RoutingKeyInfo(
@@ -313,8 +338,10 @@ class AdminGetModelRoutingPreviewAdapter(AdminApiAdapter):
                             health_score=health_score,
                             is_active=bool(key.is_active),
                             api_formats=key.api_formats or [],
+                            allowed_models=allowed_models_list,
                             circuit_breaker_open=circuit_breaker_open,
                             circuit_breaker_formats=circuit_breaker_formats,
+                            next_probe_at=next_probe_at,
                         )
                     )
 

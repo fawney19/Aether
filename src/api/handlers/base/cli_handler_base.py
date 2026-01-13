@@ -64,6 +64,7 @@ from src.models.database import (
     ProviderEndpoint,
     User,
 )
+from src.services.cache.aware_scheduler import ProviderCandidate
 from src.services.provider.transport import build_provider_url
 from src.utils.sse_parser import SSEEventParser
 from src.utils.timeout import read_first_chunk_with_ttfb_timeout
@@ -317,6 +318,7 @@ class CliMessageHandlerBase(BaseMessageHandler):
             provider: Provider,
             endpoint: ProviderEndpoint,
             key: ProviderAPIKey,
+            candidate: ProviderCandidate,
         ) -> AsyncGenerator[bytes, None]:
             return await self._execute_stream_request(
                 ctx,
@@ -326,6 +328,7 @@ class CliMessageHandlerBase(BaseMessageHandler):
                 original_request_body,
                 original_headers,
                 query_params,
+                candidate,
             )
 
         try:
@@ -405,6 +408,7 @@ class CliMessageHandlerBase(BaseMessageHandler):
         original_request_body: Dict[str, Any],
         original_headers: Dict[str, str],
         query_params: Optional[Dict[str, str]] = None,
+        candidate: Optional[ProviderCandidate] = None,
     ) -> AsyncGenerator[bytes, None]:
         """执行流式请求并返回流生成器"""
         # 重置上下文状态（重试时清除之前的数据，避免累积）
@@ -432,11 +436,13 @@ class CliMessageHandlerBase(BaseMessageHandler):
         ctx.provider_api_format = str(endpoint.api_format) if endpoint.api_format else ""
         ctx.client_api_format = ctx.api_format  # 已在 process_stream 中设置
 
-        # 获取模型映射（映射名称 → 实际模型名）
-        mapped_model = await self._get_mapped_model(
-            source_model=ctx.model,
-            provider_id=str(provider.id),
-        )
+        # 获取模型映射（优先使用别名匹配到的模型，其次是 Provider 级别的映射）
+        mapped_model = candidate.alias_matched_model if candidate else None
+        if not mapped_model:
+            mapped_model = await self._get_mapped_model(
+                source_model=ctx.model,
+                provider_id=str(provider.id),
+            )
 
         # 应用模型映射到请求体（子类可覆盖此方法处理不同格式）
         if mapped_model:
@@ -1247,14 +1253,29 @@ class CliMessageHandlerBase(BaseMessageHandler):
         stream_generator: AsyncGenerator[bytes, None],
     ) -> AsyncGenerator[bytes, None]:
         """创建带监控的流生成器"""
+        import time as time_module
+
+        last_chunk_time = time_module.time()
+        chunk_count = 0
         try:
             async for chunk in stream_generator:
+                last_chunk_time = time_module.time()
+                chunk_count += 1
                 yield chunk
         except asyncio.CancelledError:
+            # 计算距离上次收到 chunk 的时间
+            time_since_last_chunk = time_module.time() - last_chunk_time
             # 如果响应已完成，不标记为失败
             if not ctx.has_completion:
                 ctx.status_code = 499
                 ctx.error_message = "Client disconnected"
+                logger.warning(
+                    f"ID:{ctx.request_id} | Stream cancelled: "
+                    f"chunks={chunk_count}, "
+                    f"has_completion={ctx.has_completion}, "
+                    f"time_since_last_chunk={time_since_last_chunk:.2f}s, "
+                    f"output_tokens={ctx.output_tokens}"
+                )
             raise
         except httpx.TimeoutException as e:
             ctx.status_code = 504
@@ -1536,16 +1557,19 @@ class CliMessageHandlerBase(BaseMessageHandler):
             provider: Provider,
             endpoint: ProviderEndpoint,
             key: ProviderAPIKey,
+            candidate: ProviderCandidate,
         ) -> Dict[str, Any]:
             nonlocal provider_name, response_json, status_code, response_headers, provider_api_format, provider_request_headers, provider_request_body, mapped_model_result, response_metadata_result
             provider_name = str(provider.name)
             provider_api_format = str(endpoint.api_format) if endpoint.api_format else ""
 
-            # 获取模型映射（映射名称 → 实际模型名）
-            mapped_model = await self._get_mapped_model(
-                source_model=model,
-                provider_id=str(provider.id),
-            )
+            # 获取模型映射（优先使用别名匹配到的模型，其次是 Provider 级别的映射）
+            mapped_model = candidate.alias_matched_model if candidate else None
+            if not mapped_model:
+                mapped_model = await self._get_mapped_model(
+                    source_model=model,
+                    provider_id=str(provider.id),
+                )
 
             # 应用模型映射到请求体（子类可覆盖此方法处理不同格式）
             if mapped_model:

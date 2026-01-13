@@ -321,6 +321,14 @@ class AdminCreateGlobalModelAdapter(AdminApiAdapter):
     payload: GlobalModelCreate
 
     async def handle(self, context):  # type: ignore[override]
+        from src.core.exceptions import InvalidRequestException
+        from src.core.model_permissions import validate_and_extract_model_aliases
+
+        # 验证 model_aliases（如果有）
+        is_valid, error, _ = validate_and_extract_model_aliases(self.payload.config)
+        if not is_valid:
+            raise InvalidRequestException(f"别名规则验证失败: {error}", "model_aliases")
+
         # 将 TieredPricingConfig 转换为 dict
         tiered_pricing_dict = self.payload.default_tiered_pricing.model_dump()
 
@@ -352,6 +360,40 @@ class AdminUpdateGlobalModelAdapter(AdminApiAdapter):
     payload: GlobalModelUpdate
 
     async def handle(self, context):  # type: ignore[override]
+        from src.core.exceptions import InvalidRequestException
+        from src.core.model_permissions import validate_and_extract_model_aliases
+
+        # 验证 model_aliases（如果有）
+        is_valid, error, _ = validate_and_extract_model_aliases(self.payload.config)
+        if not is_valid:
+            raise InvalidRequestException(f"别名规则验证失败: {error}", "model_aliases")
+
+        # 使用行级锁获取旧的 GlobalModel 信息，防止并发更新导致的竞态条件
+        # 设置 2 秒锁超时，允许短暂等待而非立即失败，提升并发操作的成功率
+        from sqlalchemy import text
+        from sqlalchemy.exc import OperationalError
+
+        from src.models.database import GlobalModel
+
+        try:
+            # 设置会话级别的锁超时（仅影响当前事务）
+            context.db.execute(text("SET LOCAL lock_timeout = '2s'"))
+            old_global_model = (
+                context.db.query(GlobalModel)
+                .filter(GlobalModel.id == self.global_model_id)
+                .with_for_update()
+                .first()
+            )
+        except OperationalError as e:
+            # 锁超时或锁冲突时返回友好的错误提示
+            error_msg = str(e).lower()
+            if "lock" in error_msg or "timeout" in error_msg:
+                raise InvalidRequestException("该模型正在被其他操作更新，请稍后重试")
+            raise
+        old_model_name = old_global_model.name if old_global_model else None
+        new_model_name = self.payload.name if self.payload.name else old_model_name
+
+        # 执行更新（此时仍持有行锁）
         global_model = GlobalModelService.update_global_model(
             db=context.db,
             global_model_id=self.global_model_id,
@@ -360,11 +402,18 @@ class AdminUpdateGlobalModelAdapter(AdminApiAdapter):
 
         logger.info(f"GlobalModel 已更新: id={global_model.id} name={global_model.name}")
 
-        # 失效相关缓存
+        # 更新成功后才失效缓存（避免回滚时缓存已被清除的竞态问题）
+        # 注意：此时事务已提交（由 pipeline 管理），数据已持久化
         from src.services.cache.invalidation import get_cache_invalidation_service
 
         cache_service = get_cache_invalidation_service()
-        cache_service.on_global_model_changed(global_model.name)
+        # 同步清理新旧两个名称的缓存（防止名称变更时的竞态）
+        if old_model_name:
+            cache_service.on_global_model_changed(old_model_name, self.global_model_id)
+        if new_model_name and new_model_name != old_model_name:
+            cache_service.on_global_model_changed(new_model_name, self.global_model_id)
+        # 异步失效更多缓存
+        await cache_service.on_global_model_changed_async(global_model.name, global_model.id)
 
         return GlobalModelResponse.model_validate(global_model)
 
@@ -376,24 +425,44 @@ class AdminDeleteGlobalModelAdapter(AdminApiAdapter):
     global_model_id: str
 
     async def handle(self, context):  # type: ignore[override]
-        # 先获取 GlobalModel 信息（用于失效缓存）
+        # 使用行级锁获取 GlobalModel 信息，防止并发操作导致的竞态条件
+        # 设置 2 秒锁超时，允许短暂等待而非立即失败
+        from sqlalchemy import text
+        from sqlalchemy.exc import OperationalError
+
+        from src.core.exceptions import InvalidRequestException
         from src.models.database import GlobalModel
 
-        global_model = (
-            context.db.query(GlobalModel).filter(GlobalModel.id == self.global_model_id).first()
-        )
+        try:
+            # 设置会话级别的锁超时（仅影响当前事务）
+            context.db.execute(text("SET LOCAL lock_timeout = '2s'"))
+            global_model = (
+                context.db.query(GlobalModel)
+                .filter(GlobalModel.id == self.global_model_id)
+                .with_for_update()
+                .first()
+            )
+        except OperationalError as e:
+            # 锁超时或锁冲突时返回友好的错误提示
+            error_msg = str(e).lower()
+            if "lock" in error_msg or "timeout" in error_msg:
+                raise InvalidRequestException("该模型正在被其他操作处理，请稍后重试")
+            raise
         model_name = global_model.name if global_model else None
+        model_id = global_model.id if global_model else self.global_model_id
 
+        # 执行删除（此时仍持有行锁）
         GlobalModelService.delete_global_model(context.db, self.global_model_id)
 
         logger.info(f"GlobalModel 已删除: id={self.global_model_id}")
 
-        # 失效相关缓存
-        if model_name:
-            from src.services.cache.invalidation import get_cache_invalidation_service
+        # 删除成功后才失效缓存（避免回滚时缓存已被清除的竞态问题）
+        from src.services.cache.invalidation import get_cache_invalidation_service
 
-            cache_service = get_cache_invalidation_service()
-            cache_service.on_global_model_changed(model_name)
+        cache_service = get_cache_invalidation_service()
+        if model_name:
+            cache_service.on_global_model_changed(model_name, model_id)
+            await cache_service.on_global_model_changed_async(model_name, model_id)
 
         return None
 
@@ -413,7 +482,9 @@ class AdminBatchAssignToProvidersAdapter(AdminApiAdapter):
             create_models=self.payload.create_models,
         )
 
-        logger.info(f"批量为 Provider 添加 GlobalModel: global_model_id={self.global_model_id} success={len(result['success'])} errors={len(result['errors'])}")
+        logger.info(
+            f"批量为 Provider 添加 GlobalModel: global_model_id={self.global_model_id} success={len(result['success'])} errors={len(result['errors'])}"
+        )
 
         return BatchAssignToProvidersResponse(**result)
 

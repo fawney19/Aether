@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import random
+import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
@@ -76,6 +77,7 @@ class ProviderCandidate:
     is_cached: bool = False
     is_skipped: bool = False  # 是否被跳过
     skip_reason: Optional[str] = None  # 跳过原因
+    alias_matched_model: Optional[str] = None  # 通过别名匹配到的模型名（用于实际请求）
 
 
 @dataclass
@@ -590,6 +592,9 @@ class CacheAwareScheduler:
         requested_model_name = model_name
         resolved_model_name = str(global_model.name)
 
+        # 提取模型别名（用于 Provider Key 的 allowed_models 匹配）
+        model_aliases: List[str] = (global_model.config or {}).get("model_aliases", [])
+
         # 获取合并后的访问限制（ApiKey + User）
         restrictions = self._get_effective_restrictions(user_api_key)
         allowed_api_formats = restrictions["allowed_api_formats"]
@@ -657,6 +662,7 @@ class CacheAwareScheduler:
             target_format=target_format,
             model_name=requested_model_name,
             resolved_model_name=resolved_model_name,
+            model_aliases=model_aliases,
             affinity_key=affinity_key,
             max_candidates=max_candidates,
             is_stream=is_stream,
@@ -852,7 +858,8 @@ class CacheAwareScheduler:
         model_name: str,
         capability_requirements: Optional[Dict[str, bool]] = None,
         resolved_model_name: Optional[str] = None,
-    ) -> Tuple[bool, Optional[str]]:
+        model_aliases: Optional[List[str]] = None,
+    ) -> Tuple[bool, Optional[str], Optional[str]]:
         """
         检查 API Key 的可用性
 
@@ -864,28 +871,53 @@ class CacheAwareScheduler:
             model_name: 模型名称
             capability_requirements: 能力需求（可选）
             resolved_model_name: 解析后的 GlobalModel.name（可选）
+            model_aliases: GlobalModel 的别名列表（用于通配符匹配）
 
         Returns:
-            (is_available, skip_reason)
+            (is_available, skip_reason, alias_matched_model)
+            - is_available: Key 是否可用
+            - skip_reason: 不可用时的原因
+            - alias_matched_model: 通过别名匹配到的模型名（用于实际请求）
         """
         # 检查熔断器状态（使用详细状态方法获取更丰富的跳过原因，按 API 格式）
         is_available, circuit_reason = health_monitor.get_circuit_breaker_status(
             key, api_format=api_format
         )
         if not is_available:
-            return False, circuit_reason or "熔断器已打开"
+            return False, circuit_reason or "熔断器已打开", None
 
         # 模型权限检查：使用 allowed_models 白名单（支持简单列表和按格式字典两种模式）
         # None = 允许所有模型，[] = 拒绝所有模型，["a","b"] = 只允许指定模型
-        from src.core.model_permissions import check_model_allowed, get_allowed_models_preview
+        # 支持通配符别名匹配（通过 model_aliases）
+        from src.core.model_permissions import (
+            check_model_allowed_with_aliases,
+            get_allowed_models_preview,
+        )
 
-        if not check_model_allowed(
-            model_name=model_name,
-            allowed_models=key.allowed_models,
-            api_format=api_format,
-            resolved_model_name=resolved_model_name,
-        ):
-            return False, f"模型权限不匹配(允许: {get_allowed_models_preview(key.allowed_models)})"
+        try:
+            is_allowed, alias_matched_model = check_model_allowed_with_aliases(
+                model_name=model_name,
+                allowed_models=key.allowed_models,
+                api_format=api_format,
+                resolved_model_name=resolved_model_name,
+                model_aliases=model_aliases,
+            )
+        except TimeoutError:
+            # 正则匹配超时（可能是 ReDoS 攻击或复杂模式）
+            logger.warning(f"别名匹配超时: key_id={key.id}, model={model_name}")
+            return False, "别名匹配超时，请简化配置", None
+        except re.error as e:
+            # 正则语法错误（配置问题）
+            logger.warning(f"别名规则无效: key_id={key.id}, model={model_name}, error={e}")
+            return False, f"别名规则无效: {str(e)}", None
+        except Exception as e:
+            # 其他未知异常
+            logger.error(f"别名匹配异常: key_id={key.id}, model={model_name}, error={e}", exc_info=True)
+            # 异常时保守处理：不允许使用该 Key
+            return False, "别名匹配失败", None
+
+        if not is_allowed:
+            return False, f"模型权限不匹配(允许: {get_allowed_models_preview(key.allowed_models)})", None
 
         # Key 级别的能力匹配检查
         # 注意：模型级别的能力检查已在 _check_model_support 中完成
@@ -896,9 +928,9 @@ class CacheAwareScheduler:
         key_caps: Dict[str, bool] = dict(key.capabilities or {})
         is_match, skip_reason = check_capability_match(key_caps, capability_requirements)
         if not is_match:
-            return False, skip_reason
+            return False, skip_reason, None
 
-        return True, None
+        return True, None, alias_matched_model
 
     async def _build_candidates(
         self,
@@ -908,6 +940,7 @@ class CacheAwareScheduler:
         model_name: str,
         affinity_key: Optional[str],
         resolved_model_name: Optional[str] = None,
+        model_aliases: Optional[List[str]] = None,
         max_candidates: Optional[int] = None,
         is_stream: bool = False,
         capability_requirements: Optional[Dict[str, bool]] = None,
@@ -924,6 +957,7 @@ class CacheAwareScheduler:
             model_name: 模型名称（用户请求的名称，可能是映射名）
             affinity_key: 亲和性标识符（通常为API Key ID）
             resolved_model_name: 解析后的 GlobalModel.name（用于 Key.allowed_models 校验）
+            model_aliases: GlobalModel 的别名列表（用于 Key.allowed_models 通配符匹配）
             max_candidates: 最大候选数
             is_stream: 是否是流式请求，如果为 True 则过滤不支持流式的 Provider
             capability_requirements: 能力需求（可选）
@@ -981,12 +1015,13 @@ class CacheAwareScheduler:
 
             for key in keys:
                 # Key 级别的能力检查
-                is_available, skip_reason = self._check_key_availability(
+                is_available, skip_reason, alias_matched_model = self._check_key_availability(
                     key,
                     target_format_str,
                     model_name,
                     capability_requirements,
                     resolved_model_name=resolved_model_name,
+                    model_aliases=model_aliases,
                 )
 
                 candidate = ProviderCandidate(
@@ -995,6 +1030,7 @@ class CacheAwareScheduler:
                     key=key,
                     is_skipped=not is_available,
                     skip_reason=skip_reason,
+                    alias_matched_model=alias_matched_model,
                 )
                 candidates.append(candidate)
 

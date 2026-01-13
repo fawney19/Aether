@@ -53,6 +53,7 @@ from src.models.database import (
     ProviderEndpoint,
     User,
 )
+from src.services.cache.aware_scheduler import ProviderCandidate
 from src.services.provider.transport import build_provider_url
 
 
@@ -312,6 +313,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             provider: Provider,
             endpoint: ProviderEndpoint,
             key: ProviderAPIKey,
+            candidate: ProviderCandidate,
         ) -> AsyncGenerator[bytes, None]:
             return await self._execute_stream_request(
                 ctx,
@@ -322,6 +324,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 original_request_body,
                 original_headers,
                 query_params,
+                candidate,
             )
 
         try:
@@ -411,6 +414,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
         original_request_body: Dict[str, Any],
         original_headers: Dict[str, str],
         query_params: Optional[Dict[str, str]] = None,
+        candidate: Optional[ProviderCandidate] = None,
     ) -> AsyncGenerator[bytes, None]:
         """执行流式请求并返回流生成器"""
         # 重置上下文状态（重试时清除之前的数据）
@@ -425,11 +429,13 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             provider_api_format=str(endpoint.api_format) if endpoint.api_format else None,
         )
 
-        # 获取模型映射
-        mapped_model = await self._get_mapped_model(
-            source_model=ctx.model,
-            provider_id=str(provider.id),
-        )
+        # 获取模型映射（优先使用别名匹配到的模型，其次是 Provider 级别的映射）
+        mapped_model = candidate.alias_matched_model if candidate else None
+        if not mapped_model:
+            mapped_model = await self._get_mapped_model(
+                source_model=ctx.model,
+                provider_id=str(provider.id),
+            )
 
         # 应用模型映射到请求体
         if mapped_model:
@@ -650,17 +656,20 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             provider: Provider,
             endpoint: ProviderEndpoint,
             key: ProviderAPIKey,
+            candidate: ProviderCandidate,
         ) -> Dict[str, Any]:
             nonlocal provider_name, response_json, status_code, response_headers
             nonlocal provider_request_headers, provider_request_body, mapped_model_result
 
             provider_name = str(provider.name)
 
-            # 获取模型映射
-            mapped_model = await self._get_mapped_model(
-                source_model=model,
-                provider_id=str(provider.id),
-            )
+            # 获取模型映射（优先使用别名匹配到的模型，其次是 Provider 级别的映射）
+            mapped_model = candidate.alias_matched_model if candidate else None
+            if not mapped_model:
+                mapped_model = await self._get_mapped_model(
+                    source_model=model,
+                    provider_id=str(provider.id),
+                )
 
             # 应用模型映射
             if mapped_model:

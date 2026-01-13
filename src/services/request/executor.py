@@ -138,7 +138,7 @@ class RequestExecutor:
                 context.concurrent_requests = key_rpm_count  # 用于记录，实际是 RPM 计数
                 context.start_time = time.time()
 
-                response = await request_func(provider, endpoint, key)
+                response = await request_func(provider, endpoint, key, candidate)
 
                 context.elapsed_ms = int((time.time() - context.start_time) * 1000)
 

@@ -104,6 +104,19 @@
                 <span class="hidden sm:inline">链路控制</span>
                 <span class="sm:hidden">链路</span>
               </button>
+              <button
+                type="button"
+                class="flex-1 px-2 sm:px-4 py-2 text-xs sm:text-sm font-medium rounded-md transition-all duration-200"
+                :class="[
+                  detailTab === 'aliases'
+                    ? 'bg-primary text-primary-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
+                ]"
+                @click="detailTab = 'aliases'"
+              >
+                <span class="hidden sm:inline">模型映射</span>
+                <span class="sm:hidden">映射</span>
+              </button>
             </div>
 
             <!-- Tab 内容 -->
@@ -419,6 +432,17 @@
                 @delete-provider="handleDeleteProviderFromRouting"
               />
             </div>
+
+            <!-- Tab 3: 模型映射 -->
+            <div v-show="detailTab === 'aliases'">
+              <ModelAliasesTab
+                v-if="model"
+                :global-model-id="model.id"
+                :model-name="model.name"
+                :aliases="model.config?.model_aliases || []"
+                @update="handleAliasesUpdate"
+              />
+            </div>
           </div>
         </Card>
       </div>
@@ -456,6 +480,7 @@ import TableRow from '@/components/ui/table-row.vue'
 import TableHead from '@/components/ui/table-head.vue'
 import TableCell from '@/components/ui/table-cell.vue'
 import RoutingTab from './RoutingTab.vue'
+import ModelAliasesTab from './ModelAliasesTab.vue'
 
 // 使用外部类型定义
 import type { GlobalModelResponse } from '@/api/global-models'
@@ -516,6 +541,13 @@ function handleDeleteProviderFromRouting(provider: RoutingProviderInfo) {
 // 刷新路由数据
 function refreshRoutingData() {
   routingTabRef.value?.loadRoutingData?.()
+}
+
+// 处理模型别名更新
+function handleAliasesUpdate(_aliases: string[]) {
+  // 别名已在 ModelAliasesTab 内部保存到服务器
+  // 刷新路由数据以反映可能的候选变化
+  refreshRoutingData()
 }
 
 // 暴露刷新方法给父组件

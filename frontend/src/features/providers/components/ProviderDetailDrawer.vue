@@ -176,7 +176,8 @@
                     class="px-4 py-2.5 hover:bg-muted/30 transition-colors group/item"
                     :class="{
                       'opacity-50': keyDragState.isDragging && keyDragState.draggedIndex === index,
-                      'bg-primary/5 border-l-2 border-l-primary': keyDragState.targetIndex === index && keyDragState.isDragging
+                      'bg-primary/5 border-l-2 border-l-primary': keyDragState.targetIndex === index && keyDragState.isDragging,
+                      'opacity-40 bg-muted/20': !key.is_active
                     }"
                     draggable="true"
                     @dragstart="handleKeyDragStart($event, index)"
@@ -209,13 +210,10 @@
                             </Button>
                           </div>
                         </div>
-                        <Badge
-                          v-if="!key.is_active"
-                          variant="secondary"
-                          class="text-[10px] px-1.5 py-0 shrink-0"
-                        >
-                          禁用
-                        </Badge>
+                      </div>
+                      <!-- 并发 + 健康度 + 操作按钮 -->
+                      <div class="flex items-center gap-1 shrink-0">
+                        <!-- 熔断徽章 -->
                         <Badge
                           v-if="key.circuit_breaker_open"
                           variant="destructive"
@@ -223,16 +221,6 @@
                         >
                           熔断
                         </Badge>
-                      </div>
-                      <!-- 并发 + 健康度 + 操作按钮 -->
-                      <div class="flex items-center gap-1 shrink-0">
-                        <!-- RPM 限制信息（放在最前面） -->
-                        <span
-                          v-if="key.rpm_limit || key.is_adaptive"
-                          class="text-[10px] text-muted-foreground mr-1"
-                        >
-                          {{ key.is_adaptive ? '自适应' : key.rpm_limit }} RPM
-                        </span>
                         <!-- 健康度 -->
                         <div
                           v-if="key.health_score !== undefined"
@@ -321,8 +309,13 @@
                         @keydown="(e) => handlePriorityKeydown(e, key)"
                         @blur="handlePriorityBlur(key)"
                       >
+                      <!-- RPM 限制信息（第二位） -->
+                      <template v-if="key.rpm_limit || key.is_adaptive">
+                        <span class="text-muted-foreground/40">|</span>
+                        <span>{{ key.is_adaptive ? '自适应' : key.rpm_limit }} RPM</span>
+                      </template>
                       <span class="text-muted-foreground/40">|</span>
-                      <!-- API 格式：展开显示每个格式和倍率 -->
+                      <!-- API 格式：展开显示每个格式、倍率、熔断状态 -->
                       <template
                         v-for="(format, idx) in getKeyApiFormats(key, endpoint)"
                         :key="format"
@@ -331,15 +324,32 @@
                           v-if="idx > 0"
                           class="text-muted-foreground/40"
                         >/</span>
-                        <span>{{ API_FORMAT_SHORT[format] || format }} {{ getKeyRateMultiplier(key, format) }}x</span>
+                        <span :class="{ 'text-destructive': isFormatCircuitOpen(key, format) }">
+                          {{ API_FORMAT_SHORT[format] || format }}
+                        </span>
+                        <span
+                          v-if="editingMultiplierKey !== key.id || editingMultiplierFormat !== format"
+                          title="点击编辑倍率"
+                          class="cursor-pointer hover:text-primary hover:underline"
+                          :class="{ 'text-destructive': isFormatCircuitOpen(key, format) }"
+                          @click="startEditMultiplier(key, format)"
+                        >{{ getKeyRateMultiplier(key, format) }}x</span>
+                        <input
+                          v-else
+                          ref="multiplierInputRef"
+                          v-model="editingMultiplierValue"
+                          type="text"
+                          inputmode="decimal"
+                          pattern="[0-9]*\.?[0-9]*"
+                          class="w-10 h-5 px-1 text-[11px] text-center border rounded bg-background focus:outline-none focus:ring-1 focus:ring-primary font-medium text-foreground/80"
+                          @keydown="(e) => handleMultiplierKeydown(e, key, format)"
+                          @blur="handleMultiplierBlur(key, format)"
+                        >
+                        <span
+                          v-if="getFormatProbeCountdown(key, format)"
+                          :class="{ 'text-destructive': isFormatCircuitOpen(key, format) }"
+                        >{{ getFormatProbeCountdown(key, format) }}</span>
                       </template>
-                      <span v-if="key.rate_limit">| {{ key.rate_limit }}rpm</span>
-                      <span
-                        v-if="key.next_probe_at"
-                        class="text-amber-600 dark:text-amber-400"
-                      >
-                        | {{ formatProbeTime(key.next_probe_at) }}探测
-                      </span>
                     </div>
                   </div>
                 </div>
@@ -367,17 +377,106 @@
                 @edit-model="handleEditModel"
                 @delete-model="handleDeleteModel"
                 @batch-assign="handleBatchAssign"
-                @add-mapping="handleAddMapping"
               />
 
-              <!-- 模型名称映射 -->
-              <ModelAliasesTab
-                v-if="provider"
-                ref="modelAliasesTabRef"
-                :key="`aliases-${provider.id}`"
-                :provider="provider"
-                @refresh="handleRelatedDataRefresh"
-              />
+              <!-- 别名映射预览 -->
+              <Card
+                v-if="aliasMappingLoading || (aliasMappingPreview && aliasMappingPreview.total_matches > 0)"
+                class="overflow-hidden"
+              >
+                <div class="px-4 py-3 border-b border-border/60">
+                  <h3 class="text-sm font-semibold">
+                    别名映射预览
+                  </h3>
+                </div>
+
+                <!-- 加载状态 -->
+                <div v-if="aliasMappingLoading" class="flex items-center justify-center py-8">
+                  <RefreshCw class="w-5 h-5 animate-spin text-muted-foreground" />
+                </div>
+
+                <!-- GlobalModel 列表 -->
+                <div v-else class="divide-y divide-border/40">
+                  <div
+                    v-for="(gmInfo, gmIndex) in computedAliasMappingByModel"
+                    :key="gmInfo.global_model_id"
+                  >
+                    <!-- GlobalModel 行 -->
+                    <div
+                      class="px-4 py-3 flex items-center gap-3 cursor-pointer hover:bg-muted/30 transition-colors"
+                      @click="toggleAliasExpand(gmIndex)"
+                    >
+                      <ChevronRight
+                        class="w-4 h-4 text-muted-foreground transition-transform flex-shrink-0"
+                        :class="{ 'rotate-90': aliasExpandedIndex === gmIndex }"
+                      />
+                      <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2">
+                          <span class="text-sm font-medium truncate">{{ gmInfo.display_name }}</span>
+                          <Badge
+                            v-if="!gmInfo.is_active"
+                            variant="outline"
+                            class="text-[10px] px-1.5 py-0 text-muted-foreground flex-shrink-0"
+                          >
+                            停用
+                          </Badge>
+                        </div>
+                        <div class="flex items-center gap-2 text-xs text-muted-foreground">
+                          <span class="font-mono">{{ gmInfo.global_model_name }}</span>
+                          <span class="text-muted-foreground/50">|</span>
+                          <span class="font-mono text-primary/80">{{ gmInfo.alias_patterns.join(' / ') }}</span>
+                        </div>
+                      </div>
+                      <Badge
+                        variant="secondary"
+                        class="text-xs flex-shrink-0"
+                      >
+                        {{ gmInfo.matched_keys.length }} Key · {{ gmInfo.total_models }} 模型
+                      </Badge>
+                    </div>
+
+                    <!-- 展开内容：匹配的 Key 列表 -->
+                    <div
+                      v-if="aliasExpandedIndex === gmIndex"
+                      class="border-t bg-muted/10 px-4 py-3"
+                    >
+                      <div class="space-y-2">
+                        <div
+                          v-for="keyItem in gmInfo.matched_keys"
+                          :key="keyItem.key_id"
+                          class="bg-background rounded-md border p-3"
+                        >
+                          <div class="flex items-center gap-2 text-sm mb-2">
+                            <Key class="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
+                            <span class="font-medium truncate">{{ keyItem.key_name || '未命名密钥' }}</span>
+                            <span class="text-xs text-muted-foreground font-mono ml-auto flex-shrink-0">
+                              {{ keyItem.masked_key }}
+                            </span>
+                            <Badge
+                              v-if="!keyItem.is_active"
+                              variant="secondary"
+                              class="text-[10px] px-1.5 py-0 flex-shrink-0"
+                            >
+                              禁用
+                            </Badge>
+                          </div>
+                          <div class="flex flex-wrap gap-1.5">
+                            <Badge
+                              v-for="match in keyItem.matches"
+                              :key="match.allowed_model"
+                              variant="secondary"
+                              class="text-xs font-mono"
+                              :title="`匹配规则: ${match.alias_pattern}`"
+                            >
+                              {{ match.allowed_model }}
+                            </Badge>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </Card>
             </div>
           </template>
         </Card>
@@ -485,7 +584,6 @@
 <script setup lang="ts">
 import { ref, watch, computed, nextTick } from 'vue'
 import {
-  Server,
   Plus,
   Key,
   ChevronRight,
@@ -493,13 +591,9 @@ import {
   Trash2,
   RefreshCw,
   X,
-  Loader2,
   Power,
   GripVertical,
   Copy,
-  Eye,
-  EyeOff,
-  ExternalLink,
   Shield
 } from 'lucide-vue-next'
 import { useEscapeKey } from '@/composables/useEscapeKey'
@@ -508,12 +602,12 @@ import Badge from '@/components/ui/badge.vue'
 import Card from '@/components/ui/card.vue'
 import { useToast } from '@/composables/useToast'
 import { useClipboard } from '@/composables/useClipboard'
-import { getProvider, getProviderEndpoints } from '@/api/endpoints'
+import { useCountdownTimer, formatCountdown } from '@/composables/useCountdownTimer'
+import { getProvider, getProviderEndpoints, getProviderAliasMappingPreview, type ProviderAliasMappingPreviewResponse } from '@/api/endpoints'
 import {
   KeyFormDialog,
   KeyAllowedModelsEditDialog,
   ModelsTab,
-  ModelAliasesTab,
   BatchAssignModelsDialog
 } from '@/features/providers/components'
 import EndpointFormDialog from '@/features/providers/components/EndpointFormDialog.vue'
@@ -558,6 +652,7 @@ const emit = defineEmits<{
 
 const { error: showError, success: showSuccess } = useToast()
 const { copyToClipboard } = useClipboard()
+const { tick: countdownTick, start: startCountdownTimer, stop: stopCountdownTimer } = useCountdownTimer()
 
 const loading = ref(false)
 const provider = ref<any>(null)
@@ -592,8 +687,83 @@ const deleteModelConfirmOpen = ref(false)
 const modelToDelete = ref<Model | null>(null)
 const batchAssignDialogOpen = ref(false)
 
-// ModelAliasesTab 组件引用
-const modelAliasesTabRef = ref<InstanceType<typeof ModelAliasesTab> | null>(null)
+// 别名映射预览状态
+const aliasMappingPreview = ref<ProviderAliasMappingPreviewResponse | null>(null)
+const aliasMappingLoading = ref(false)
+const aliasExpandedIndex = ref<number | null>(null)
+
+// 切换别名展开
+function toggleAliasExpand(index: number) {
+  aliasExpandedIndex.value = aliasExpandedIndex.value === index ? null : index
+}
+
+// 按 GlobalModel 分组的别名映射数据
+interface MatchedKeyItem {
+  key_id: string
+  key_name: string
+  masked_key: string
+  is_active: boolean
+  matches: { allowed_model: string; alias_pattern: string }[]
+}
+
+interface GlobalModelAliasInfo {
+  global_model_id: string
+  global_model_name: string
+  display_name: string
+  is_active: boolean
+  alias_patterns: string[]
+  matched_keys: MatchedKeyItem[]
+  total_models: number
+}
+
+const computedAliasMappingByModel = computed<GlobalModelAliasInfo[]>(() => {
+  if (!aliasMappingPreview.value) return []
+
+  // 按 GlobalModel 分组
+  const modelMap = new Map<string, GlobalModelAliasInfo>()
+
+  for (const keyInfo of aliasMappingPreview.value.keys) {
+    for (const gm of keyInfo.matching_global_models) {
+      if (!modelMap.has(gm.global_model_id)) {
+        // 收集所有匹配用到的别名规则（去重）
+        const patterns = new Set<string>()
+        for (const match of gm.matched_models) {
+          patterns.add(match.alias_pattern)
+        }
+
+        modelMap.set(gm.global_model_id, {
+          global_model_id: gm.global_model_id,
+          global_model_name: gm.global_model_name,
+          display_name: gm.display_name,
+          is_active: gm.is_active,
+          alias_patterns: Array.from(patterns),
+          matched_keys: [],
+          total_models: 0,
+        })
+      }
+
+      const modelInfo = modelMap.get(gm.global_model_id)!
+
+      // 更新别名规则集合（可能来自不同 Key 的匹配）
+      for (const match of gm.matched_models) {
+        if (!modelInfo.alias_patterns.includes(match.alias_pattern)) {
+          modelInfo.alias_patterns.push(match.alias_pattern)
+        }
+      }
+
+      modelInfo.matched_keys.push({
+        key_id: keyInfo.key_id,
+        key_name: keyInfo.key_name,
+        masked_key: keyInfo.masked_key,
+        is_active: keyInfo.is_active,
+        matches: gm.matched_models,
+      })
+      modelInfo.total_models += gm.matched_models.length
+    }
+  }
+
+  return Array.from(modelMap.values())
+})
 
 // 拖动排序相关状态（旧的端点级别拖拽，保留以兼容）
 const dragState = ref({
@@ -616,6 +786,13 @@ const editingPriorityValue = ref<number>(0)
 const priorityInputRef = ref<HTMLInputElement[] | null>(null)
 const prioritySaving = ref(false)
 
+// 点击编辑倍率相关状态
+const editingMultiplierKey = ref<string | null>(null)
+const editingMultiplierFormat = ref<string | null>(null)
+const editingMultiplierValue = ref<number>(1.0)
+const multiplierInputRef = ref<HTMLInputElement[] | null>(null)
+const multiplierSaving = ref(false)
+
 // 任意模态窗口打开时,阻止抽屉被误关闭
 const hasBlockingDialogOpen = computed(() =>
   endpointDialogOpen.value ||
@@ -625,9 +802,7 @@ const hasBlockingDialogOpen = computed(() =>
   deleteKeyConfirmOpen.value ||
   modelFormDialogOpen.value ||
   deleteModelConfirmOpen.value ||
-  batchAssignDialogOpen.value ||
-  // 检测 ModelAliasesTab 子组件的 Dialog 是否打开
-  modelAliasesTabRef.value?.dialogOpen
+  batchAssignDialogOpen.value
 )
 
 // 所有密钥的扁平列表（带端点信息）
@@ -665,6 +840,7 @@ watch(() => props.providerId, (newId) => {
   if (newId && props.open) {
     loadProvider()
     loadEndpoints()
+    loadAliasMappingPreview()
   }
 }, { immediate: true })
 
@@ -673,7 +849,12 @@ watch(() => props.open, (newOpen) => {
   if (newOpen && props.providerId) {
     loadProvider()
     loadEndpoints()
+    loadAliasMappingPreview()
+    // 启动倒计时定时器
+    startCountdownTimer()
   } else if (!newOpen) {
+    // 停止倒计时定时器
+    stopCountdownTimer()
     // 重置所有状态
     provider.value = null
     endpoints.value = []
@@ -696,6 +877,10 @@ watch(() => props.open, (newOpen) => {
 
     // 清除已显示的密钥（安全考虑）
     revealedKeys.value.clear()
+
+    // 重置别名映射预览
+    aliasMappingPreview.value = null
+    aliasExpandedIndex.value = null
   }
 })
 
@@ -720,11 +905,6 @@ function toggleEndpoint(endpointId: string) {
   } else {
     expandedEndpoints.value.add(endpointId)
   }
-}
-
-async function handleRelatedDataRefresh() {
-  await loadProvider()
-  emit('refresh')
 }
 
 // 显示端点管理对话框
@@ -962,11 +1142,6 @@ function handleBatchAssign() {
   batchAssignDialogOpen.value = true
 }
 
-// 处理添加映射（从 ModelsTab 触发）
-function handleAddMapping(model: Model) {
-  modelAliasesTabRef.value?.openAddDialogForModel(model.id)
-}
-
 // 处理批量关联完成
 async function handleBatchAssignChanged() {
   await loadProvider()
@@ -1191,6 +1366,96 @@ async function savePriority(key: EndpointAPIKey) {
   }
 }
 
+// ===== 点击编辑倍率 =====
+function startEditMultiplier(key: EndpointAPIKey, format: string) {
+  editingMultiplierKey.value = key.id
+  editingMultiplierFormat.value = format
+  editingMultiplierValue.value = getKeyRateMultiplier(key, format)
+  multiplierSaving.value = false
+  nextTick(() => {
+    const input = Array.isArray(multiplierInputRef.value) ? multiplierInputRef.value[0] : multiplierInputRef.value
+    input?.focus()
+    input?.select()
+  })
+}
+
+function cancelEditMultiplier() {
+  editingMultiplierKey.value = null
+  editingMultiplierFormat.value = null
+  multiplierSaving.value = false
+}
+
+function handleMultiplierKeydown(e: KeyboardEvent, key: EndpointAPIKey, format: string) {
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    e.stopPropagation()
+    if (!multiplierSaving.value) {
+      multiplierSaving.value = true
+      saveMultiplier(key, format)
+    }
+  } else if (e.key === 'Escape') {
+    e.preventDefault()
+    cancelEditMultiplier()
+  }
+}
+
+function handleMultiplierBlur(key: EndpointAPIKey, format: string) {
+  if (multiplierSaving.value) return
+  saveMultiplier(key, format)
+}
+
+async function saveMultiplier(key: EndpointAPIKey, format: string) {
+  // 防止重复调用
+  if (multiplierSaving.value) return
+  multiplierSaving.value = true
+
+  const keyId = editingMultiplierKey.value
+  const newMultiplier = parseFloat(String(editingMultiplierValue.value))
+
+  // 验证输入有效性
+  if (!keyId || isNaN(newMultiplier)) {
+    showError('请输入有效的倍率值')
+    cancelEditMultiplier()
+    return
+  }
+
+  // 验证合理范围
+  if (newMultiplier <= 0 || newMultiplier > 100) {
+    showError('倍率必须在 0.01 到 100 之间')
+    cancelEditMultiplier()
+    return
+  }
+
+  // 如果倍率没有变化,直接取消编辑（使用精度容差比较浮点数）
+  const currentMultiplier = getKeyRateMultiplier(key, format)
+  if (Math.abs(currentMultiplier - newMultiplier) < 0.0001) {
+    cancelEditMultiplier()
+    return
+  }
+
+  cancelEditMultiplier()
+
+  try {
+    // 构建 rate_multipliers 对象
+    const rateMultipliers = { ...(key.rate_multipliers || {}) }
+    rateMultipliers[format] = newMultiplier
+
+    await updateProviderKey(keyId, { rate_multipliers: rateMultipliers })
+    showSuccess('倍率已更新')
+
+    // 更新本地数据
+    const keyToUpdate = providerKeys.value.find(k => k.id === keyId)
+    if (keyToUpdate) {
+      keyToUpdate.rate_multipliers = rateMultipliers
+    }
+    emit('refresh')
+  } catch (err: any) {
+    showError(err.response?.data?.detail || '更新倍率失败', '错误')
+  } finally {
+    multiplierSaving.value = false
+  }
+}
+
 // ===== 密钥列表拖拽排序 =====
 function handleKeyDragStart(event: DragEvent, index: number) {
   keyDragState.value.isDragging = true
@@ -1331,6 +1596,44 @@ function getHealthScoreBarColor(score: number): string {
   return 'bg-red-500 dark:bg-red-400'
 }
 
+// 检查指定格式是否熔断
+function isFormatCircuitOpen(key: EndpointAPIKey, format: string): boolean {
+  if (!key.circuit_breaker_by_format) return false
+  const formatData = key.circuit_breaker_by_format[format]
+  return formatData?.open === true
+}
+
+// 获取指定格式的探测倒计时（如果熔断，返回带空格前缀的倒计时文本）
+function getFormatProbeCountdown(key: EndpointAPIKey, format: string): string {
+  // 触发响应式更新
+  void countdownTick.value
+
+  if (!key.circuit_breaker_by_format) return ''
+  const formatData = key.circuit_breaker_by_format[format]
+  if (!formatData?.open) return ''
+
+  // 半开状态
+  if (formatData.half_open_until) {
+    const halfOpenUntil = new Date(formatData.half_open_until)
+    const now = new Date()
+    if (halfOpenUntil > now) {
+      return ' 探测中'
+    }
+  }
+  // 等待探测
+  if (formatData.next_probe_at) {
+    const nextProbe = new Date(formatData.next_probe_at)
+    const now = new Date()
+    const diffMs = nextProbe.getTime() - now.getTime()
+    if (diffMs > 0) {
+      return ' ' + formatCountdown(diffMs)
+    } else {
+      return ' 探测中'
+    }
+  }
+  return ''
+}
+
 // 加载 Provider 信息
 async function loadProvider() {
   if (!props.providerId) return
@@ -1372,6 +1675,25 @@ async function loadEndpoints() {
     })
   } catch (err: any) {
     showError(err.response?.data?.detail || '加载端点失败', '错误')
+  }
+}
+
+// 加载别名映射预览
+async function loadAliasMappingPreview() {
+  if (!props.providerId) return
+
+  aliasMappingLoading.value = true
+  try {
+    aliasMappingPreview.value = await getProviderAliasMappingPreview(props.providerId)
+  } catch (err: any) {
+    // 404 静默处理（Provider 不存在或无别名配置）
+    if (err.response?.status !== 404) {
+      console.warn('加载别名映射预览失败:', err)
+      showError('加载别名映射预览失败')
+    }
+    aliasMappingPreview.value = null
+  } finally {
+    aliasMappingLoading.value = false
   }
 }
 
