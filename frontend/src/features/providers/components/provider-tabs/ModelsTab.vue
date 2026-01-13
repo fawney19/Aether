@@ -190,7 +190,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { Box, Edit, Trash2, Layers, Power, Copy, Link, Eye, Wrench, Zap, Brain, Image, Loader2, Play } from 'lucide-vue-next'
+import { Box, Edit, Trash2, Layers, Power, Copy, Link, Loader2, Play } from 'lucide-vue-next'
 import Card from '@/components/ui/card.vue'
 import Button from '@/components/ui/button.vue'
 import { useToast } from '@/composables/useToast'
@@ -258,17 +258,6 @@ function formatPrice(price: number | null | undefined): string {
   }
   // 其他情况保留4位小数
   return price.toFixed(4)
-}
-
-// 检查模型是否有任何能力
-function hasAnyCapability(model: Model): boolean {
-  return !!(
-    (model.effective_supports_vision ?? model.supports_vision) ||
-    (model.effective_supports_function_calling ?? model.supports_function_calling) ||
-    (model.effective_supports_streaming ?? model.supports_streaming) ||
-    (model.effective_supports_extended_thinking ?? model.supports_extended_thinking) ||
-    (model.effective_supports_image_generation ?? model.supports_image_generation)
-  )
 }
 
 // 检查是否有按 Token 计费
@@ -379,14 +368,15 @@ async function testModelConnection(model: Model) {
     })
 
     if (result.success) {
-      showSuccess(`模型 "${model.provider_model_name}" 测试成功`)
-
       // 如果有响应内容，可以显示更多信息
       if (result.data?.response?.choices?.[0]?.message?.content) {
         const content = result.data.response.choices[0].message.content
-        showSuccess(`测试成功，响应: ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`)
+        const preview = `${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`
+        showSuccess(`模型 "${model.provider_model_name}" 测试成功，响应: ${preview}`)
       } else if (result.data?.content_preview) {
-        showSuccess(`流式测试成功，预览: ${result.data.content_preview}`)
+        showSuccess(`模型 "${model.provider_model_name}" 测试成功，预览: ${result.data.content_preview}`)
+      } else {
+        showSuccess(`模型 "${model.provider_model_name}" 测试成功`)
       }
     } else {
       showError(`模型测试失败: ${parseTestModelError(result)}`)
