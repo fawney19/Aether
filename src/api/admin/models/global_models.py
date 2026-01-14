@@ -349,6 +349,32 @@ class AdminCreateGlobalModelAdapter(AdminApiAdapter):
 
         logger.info(f"GlobalModel 已创建: id={global_model.id} name={global_model.name}")
 
+        # 如果新创建的 GlobalModel 包含别名规则，触发自动同步
+        if self.payload.config and "model_aliases" in self.payload.config:
+            model_aliases = self.payload.config.get("model_aliases", [])
+            if isinstance(model_aliases, list) and model_aliases:
+                logger.info(
+                    f"检测到新 GlobalModel '{global_model.name}' 包含别名规则 {model_aliases}，触发自动同步..."
+                )
+                try:
+                    from src.services.model.auto_sync_service import ModelAutoSyncService
+
+                    sync_result = ModelAutoSyncService.sync_models_for_global_model(
+                        db=context.db, global_model_id=global_model.id
+                    )
+                    logger.info(
+                        f"自动同步完成: GlobalModel '{global_model.name}' - "
+                        f"扫描 {sync_result['providers_scanned']} 个 Provider, "
+                        f"新增 {sync_result['models_created']} 个模型"
+                    )
+                    if sync_result["errors"]:
+                        logger.warning(
+                            f"自动同步存在错误: {len(sync_result['errors'])} 个错误"
+                        )
+                except Exception as e:
+                    # 同步失败不影响创建操作，仅记录日志
+                    logger.error(f"新建 GlobalModel 后自动同步失败: {str(e)}", exc_info=True)
+
         return GlobalModelResponse.model_validate(global_model)
 
 
@@ -390,6 +416,22 @@ class AdminUpdateGlobalModelAdapter(AdminApiAdapter):
             if "lock" in error_msg or "timeout" in error_msg:
                 raise InvalidRequestException("该模型正在被其他操作更新，请稍后重试")
             raise
+
+        # 检查别名规则是否发生变更
+        old_aliases = None
+        new_aliases = None
+        aliases_changed = False
+
+        if old_global_model:
+            old_config = old_global_model.config or {}
+            old_aliases = old_config.get("model_aliases", [])
+
+        if self.payload.config is not None:
+            new_config = self.payload.config or {}
+            new_aliases = new_config.get("model_aliases", [])
+            # 只要 config 被更新，就比较别名规则
+            aliases_changed = old_aliases != new_aliases
+
         old_model_name = old_global_model.name if old_global_model else None
 
         # 执行更新（此时仍持有行锁）
@@ -400,6 +442,31 @@ class AdminUpdateGlobalModelAdapter(AdminApiAdapter):
         )
 
         logger.info(f"GlobalModel 已更新: id={global_model.id} name={global_model.name}")
+
+        # 如果别名规则发生变更，触发自动同步
+        if aliases_changed:
+            logger.info(
+                f"检测到别名规则变更: GlobalModel '{global_model.name}' "
+                f"(旧: {old_aliases}, 新: {new_aliases})，触发自动同步..."
+            )
+            try:
+                from src.services.model.auto_sync_service import ModelAutoSyncService
+
+                sync_result = ModelAutoSyncService.sync_models_for_global_model(
+                    db=context.db, global_model_id=self.global_model_id
+                )
+                logger.info(
+                    f"自动同步完成: GlobalModel '{global_model.name}' - "
+                    f"扫描 {sync_result['providers_scanned']} 个 Provider, "
+                    f"新增 {sync_result['models_created']} 个模型"
+                )
+                if sync_result["errors"]:
+                    logger.warning(
+                        f"自动同步存在错误: {len(sync_result['errors'])} 个错误"
+                    )
+            except Exception as e:
+                # 同步失败不影响更新操作，仅记录日志
+                logger.error(f"别名规则变更后自动同步失败: {str(e)}", exc_info=True)
 
         # 更新成功后才失效缓存（避免回滚时缓存已被清除的竞态问题）
         # 注意：此时事务已提交（由 pipeline 管理），数据已持久化

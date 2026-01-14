@@ -100,6 +100,14 @@ class CleanupScheduler:
             name="审计日志清理",
         )
 
+        # 模型自动同步任务 - 每12小时执行一次
+        scheduler.add_interval_job(
+            self._scheduled_model_sync,
+            hours=12,
+            job_id="model_auto_sync",
+            name="模型自动同步",
+        )
+
         # 启动时执行一次初始化任务
         asyncio.create_task(self._run_startup_tasks())
 
@@ -157,6 +165,10 @@ class CleanupScheduler:
     async def _scheduled_audit_cleanup(self):
         """审计日志清理任务（定时调用）"""
         await self._perform_audit_cleanup()
+
+    async def _scheduled_model_sync(self):
+        """模型自动同步任务（定时调用）"""
+        await self._perform_model_sync()
 
     # ========== 实际任务实现 ==========
 
@@ -800,6 +812,41 @@ class CleanupScheduler:
                 break
 
         return total_deleted
+
+    async def _perform_model_sync(self):
+        """执行模型自动同步任务"""
+        db = create_session()
+        try:
+            # 检查是否启用自动同步
+            if not SystemConfigService.get_config(db, "enable_model_auto_sync", True):
+                logger.info("模型自动同步已禁用，跳过同步任务")
+                return
+
+            logger.info("开始执行模型自动同步...")
+
+            from src.services.model.auto_sync_service import ModelAutoSyncService
+
+            result = ModelAutoSyncService.sync_all_provider_models(db)
+
+            if result["models_created"] > 0:
+                logger.info(
+                    f"模型自动同步完成: 扫描 {result['providers_scanned']} 个 Provider, "
+                    f"新增 {result['models_created']} 个模型"
+                )
+            else:
+                logger.info("模型自动同步完成: 没有新增模型")
+
+            if result["errors"]:
+                logger.warning(f"同步过程中出现 {len(result['errors'])} 个错误")
+
+        except Exception as e:
+            logger.exception(f"模型自动同步任务执行失败: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            db.close()
 
 
 # 全局单例
