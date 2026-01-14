@@ -32,6 +32,9 @@ COPY --from=builder /usr/local/bin/alembic /usr/local/bin/
 
 # 从 builder 阶段复制前端构建产物
 COPY --from=builder /app/frontend/dist /usr/share/nginx/html
+# 设置前端文件权限，确保 nginx 可以访问
+RUN chmod -R 755 /usr/share/nginx/html
+
 
 # 复制后端代码
 COPY src/ ./src/
