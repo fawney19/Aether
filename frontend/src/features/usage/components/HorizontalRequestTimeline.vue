@@ -756,7 +756,7 @@ const getStatusColorClass = (status: string) => {
 .minimal-track {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: space-between;
   gap: 64px;
   padding: 2rem;
   overflow-x: auto;
