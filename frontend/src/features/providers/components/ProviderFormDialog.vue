@@ -210,14 +210,14 @@
         </h3>
         <div class="flex items-center justify-between p-3 border rounded-lg">
           <div class="space-y-0.5">
-            <Label class="text-sm font-medium">隐藏客户端 IP</Label>
+            <Label class="text-sm font-medium">隐藏代理痕迹</Label>
             <p class="text-xs text-muted-foreground">
-              开启后不会将客户端 IP 相关信息（如 X-Forwarded-For）透传给上游供应商
+              开启后不会将 X-Forwarded-* / Forwarded / Via / X-Envoy-* 等头部透传给上游供应商
             </p>
           </div>
           <Switch
-            :model-value="form.strip_ip_headers"
-            @update:model-value="(v) => form.strip_ip_headers = v"
+            :model-value="form.strip_proxy_headers"
+            @update:model-value="(v) => form.strip_proxy_headers = v"
           />
         </div>
       </div>
@@ -306,7 +306,7 @@ const form = ref({
   proxy_username: '',
   proxy_password: '',
   // 高级配置
-  strip_ip_headers: false,
+  strip_proxy_headers: false,
 })
 
 // 重置表单
@@ -333,7 +333,7 @@ function resetForm() {
     proxy_username: '',
     proxy_password: '',
     // 高级配置
-    strip_ip_headers: false,
+    strip_proxy_headers: false,
   }
 }
 
@@ -366,7 +366,7 @@ function loadProviderData() {
     proxy_username: proxy?.username || '',
     proxy_password: proxy?.password || '',
     // 高级配置
-    strip_ip_headers: props.provider.config?.strip_ip_headers ?? false,
+    strip_proxy_headers: props.provider.config?.strip_proxy_headers ?? false,
   }
 }
 
@@ -404,9 +404,13 @@ const handleSubmit = async () => {
       enabled: true,
     } : null
 
-    // 构建 config 对象
-    const config = {
-      strip_ip_headers: form.value.strip_ip_headers,
+    // 构建 config 对象（合并已有配置，避免覆盖其他 config 字段）
+    const existingConfig = (isEditMode.value && props.provider?.config)
+      ? props.provider.config
+      : {}
+    const config: Record<string, unknown> = {
+      ...existingConfig,
+      strip_proxy_headers: form.value.strip_proxy_headers,
     }
 
     const payload = {

@@ -39,25 +39,25 @@ SENSITIVE_HEADERS: FrozenSet[str] = frozenset(
     }
 )
 
-# IP 相关头部 - 用于控制是否透传客户端 IP 信息给上游
-# 当 Provider 配置 strip_ip_headers=True 时，这些头部会被过滤
-IP_RELATED_HEADERS: FrozenSet[str] = frozenset(
+# 代理痕迹/客户端来源相关头部
+#
+# 目标：尽量不让上游感知请求在到达上游前被代理/转发过（例如 X-Forwarded-*、Via、Envoy/CDN 相关头等）。
+# 当 Provider 配置 strip_proxy_headers=True 时，这些头部会被过滤。
+PROXY_TRACE_HEADERS: FrozenSet[str] = frozenset(
     {
-        "x-forwarded-for",
         "x-real-ip",
-        "x-forwarded-host",
-        "x-forwarded-proto",
-        "x-forwarded-port",
-        "x-forwarded-scheme",
         "forwarded",
+        "via",
         "cf-connecting-ip",  # Cloudflare
         "true-client-ip",  # Cloudflare/Akamai
+        "client-ip",
         "x-client-ip",
         "x-cluster-client-ip",
         "x-original-forwarded-for",
         "x-originating-ip",
         "proxy-client-ip",
         "wl-proxy-client-ip",  # WebLogic
+        # 一些网关/环境变量风格的注入字段（非标准 HTTP Header，但在透传模式下也可能出现）
         "http_x_forwarded_for",
         "http_x_forwarded",
         "http_x_cluster_client_ip",
@@ -68,6 +68,16 @@ IP_RELATED_HEADERS: FrozenSet[str] = frozenset(
         "remote_addr",
     }
 )
+
+# 前缀匹配：全量过滤常见转发/代理链路头，避免漏掉变体（如 x-forwarded-prefix / x-envoy-external-address）
+PROXY_TRACE_PREFIXES: Tuple[str, ...] = (
+    "x-forwarded-",
+    "x-envoy-",
+)
+
+
+def _should_strip_proxy_trace_header(lower_name: str) -> bool:
+    return lower_name in PROXY_TRACE_HEADERS or lower_name.startswith(PROXY_TRACE_PREFIXES)
 
 
 # ==============================================================================
@@ -168,19 +178,20 @@ class PassthroughRequestBuilder(RequestBuilder):
         """
         透传请求头 - 清理敏感头部（黑名单），透传其他所有头部
 
-        如果 Provider 配置了 strip_ip_headers=True，则同时过滤 IP 相关头部，
-        避免将客户端 IP 信息透传给上游供应商。
+        如果 Provider 配置了 strip_proxy_headers=True，则过滤代理痕迹相关头部，
+        避免将转发/代理链路信息透传给上游供应商。
         """
         from src.core.api_format_metadata import get_auth_config, resolve_api_format
 
         headers: Dict[str, str] = {}
 
-        # 检查 Provider 是否配置了过滤 IP 头部
-        strip_ip_headers = False
+        # 检查 Provider 是否配置了过滤代理痕迹头部
+        strip_proxy_headers = False
         provider = getattr(endpoint, "provider", None)
         if provider:
-            provider_config = getattr(provider, "config", None) or {}
-            strip_ip_headers = provider_config.get("strip_ip_headers", False)
+            provider_config = getattr(provider, "config", None)
+            if isinstance(provider_config, dict):
+                strip_proxy_headers = bool(provider_config.get("strip_proxy_headers", False))
 
         # 1. 根据 API 格式自动设置认证头
         decrypted_key = crypto_service.decrypt(key.api_key)
@@ -208,8 +219,8 @@ class PassthroughRequestBuilder(RequestBuilder):
                 if lower_name in SENSITIVE_HEADERS:
                     continue
 
-                # 如果启用了 IP 头部过滤，跳过 IP 相关头部
-                if strip_ip_headers and lower_name in IP_RELATED_HEADERS:
+                # 如果启用了代理痕迹过滤，跳过相关头部
+                if strip_proxy_headers and _should_strip_proxy_trace_header(lower_name):
                     continue
 
                 headers[name] = value

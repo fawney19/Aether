@@ -300,7 +300,7 @@ export interface ProviderWithEndpointsSummary {
 
 // Provider 配置
 export interface ProviderConfig {
-  strip_ip_headers?: boolean  // 是否过滤 IP 相关头部，不透传给上游
+  strip_proxy_headers?: boolean  // 是否过滤代理痕迹相关头部，不透传给上游
   [key: string]: unknown      // 其他配置
 }
 
