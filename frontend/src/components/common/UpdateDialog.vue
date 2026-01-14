@@ -17,7 +17,7 @@
       </h2>
 
       <!-- Version Info -->
-      <div class="flex items-center gap-3 mb-4">
+      <div class="flex items-center gap-3 mb-2">
         <span class="px-3 py-1.5 rounded-lg bg-muted text-sm font-mono text-muted-foreground">
           v{{ currentVersion }}
         </span>
@@ -39,8 +39,33 @@
         </span>
       </div>
 
-      <!-- Description -->
-      <p class="text-sm text-muted-foreground max-w-xs">
+      <!-- Published At -->
+      <p
+        v-if="publishedAt"
+        class="text-xs text-muted-foreground mb-4"
+      >
+        发布于 {{ formattedPublishedAt }}
+      </p>
+
+      <!-- Release Notes -->
+      <div
+        v-if="releaseNotes"
+        class="w-full mt-2 mb-4"
+      >
+        <div class="text-left text-xs font-medium text-muted-foreground mb-2">
+          更新内容
+        </div>
+        <div
+          class="w-full max-h-48 overflow-y-auto rounded-lg bg-muted/50 p-3 text-left text-sm text-foreground/80 prose prose-sm dark:prose-invert prose-p:my-1 prose-ul:my-1 prose-li:my-0"
+          v-html="renderedReleaseNotes"
+        />
+      </div>
+
+      <!-- Description (fallback when no release notes) -->
+      <p
+        v-else
+        class="text-sm text-muted-foreground max-w-xs mb-4"
+      >
         新版本已发布，建议更新以获得最新功能和安全修复
       </p>
     </div>
@@ -66,16 +91,20 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 import { Dialog } from '@/components/ui'
 import Button from '@/components/ui/button.vue'
 import HeaderLogo from '@/components/HeaderLogo.vue'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 
 const props = defineProps<{
   modelValue: boolean
   currentVersion: string
   latestVersion: string
   releaseUrl: string | null
+  releaseNotes: string | null
+  publishedAt: string | null
 }>()
 
 const emit = defineEmits<{
@@ -90,6 +119,37 @@ watch(() => props.modelValue, (val) => {
 
 watch(isOpen, (val) => {
   emit('update:modelValue', val)
+})
+
+// 格式化发布时间
+const formattedPublishedAt = computed(() => {
+  if (!props.publishedAt) return ''
+  try {
+    const date = new Date(props.publishedAt)
+    return date.toLocaleDateString('zh-CN', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    })
+  } catch {
+    return props.publishedAt
+  }
+})
+
+// 渲染 Markdown 格式的 Release Notes（使用 DOMPurify 防止 XSS）
+const renderedReleaseNotes = computed(() => {
+  if (!props.releaseNotes) return ''
+  try {
+    const html = marked.parse(props.releaseNotes, { async: false }) as string
+    return DOMPurify.sanitize(html)
+  } catch {
+    // 如果 markdown 解析失败，返回原始文本（转义 HTML）
+    return props.releaseNotes
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\n/g, '<br>')
+  }
 })
 
 function handleLater() {

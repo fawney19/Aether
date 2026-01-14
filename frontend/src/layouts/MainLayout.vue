@@ -303,6 +303,8 @@
       :current-version="updateInfo.current_version"
       :latest-version="updateInfo.latest_version || ''"
       :release-url="updateInfo.release_url"
+      :release-notes="updateInfo.release_notes"
+      :published-at="updateInfo.published_at"
     />
   </AppShell>
 </template>

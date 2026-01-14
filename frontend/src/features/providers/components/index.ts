@@ -8,7 +8,5 @@ export { default as ProviderModelFormDialog } from './ProviderModelFormDialog.vu
 export { default as ProviderDetailDrawer } from './ProviderDetailDrawer.vue'
 export { default as EndpointHealthTimeline } from './EndpointHealthTimeline.vue'
 export { default as BatchAssignModelsDialog } from './BatchAssignModelsDialog.vue'
-export { default as ModelAliasDialog } from './ModelAliasDialog.vue'
 
 export { default as ModelsTab } from './provider-tabs/ModelsTab.vue'
-export { default as ModelAliasesTab } from './provider-tabs/ModelAliasesTab.vue'

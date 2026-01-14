@@ -21,4 +21,5 @@ export {
   deleteGlobalModel,
   batchAssignToProviders,
   getGlobalModelProviders,
+  getGlobalModelRoutingPreview,
 } from './endpoints/global-models'

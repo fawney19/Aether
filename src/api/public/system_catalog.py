@@ -268,7 +268,7 @@ async def test_connection(
     orchestrator = FallbackOrchestrator(db, redis_client)
 
     # 定义请求函数
-    async def test_request_func(_prov, endpoint, key):
+    async def test_request_func(_prov, endpoint, key, _candidate):
         request_builder = PassthroughRequestBuilder()
         provider_payload, provider_headers = request_builder.build(
             payload, {}, endpoint, key, is_stream=False

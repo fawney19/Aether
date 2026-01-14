@@ -131,7 +131,10 @@
                       class="w-4 h-4 border rounded flex items-center justify-center shrink-0"
                       :class="selectedModels.includes(model) ? 'bg-primary border-primary' : ''"
                     >
-                      <Check v-if="selectedModels.includes(model)" class="w-3 h-3 text-primary-foreground" />
+                      <Check
+                        v-if="selectedModels.includes(model)"
+                        class="w-3 h-3 text-primary-foreground"
+                      />
                     </div>
                     <span class="text-sm font-mono truncate">{{ model }}</span>
                   </div>
@@ -174,18 +177,28 @@
                       class="w-4 h-4 border rounded flex items-center justify-center shrink-0"
                       :class="selectedModels.includes(model.name) ? 'bg-primary border-primary' : ''"
                     >
-                      <Check v-if="selectedModels.includes(model.name)" class="w-3 h-3 text-primary-foreground" />
+                      <Check
+                        v-if="selectedModels.includes(model.name)"
+                        class="w-3 h-3 text-primary-foreground"
+                      />
                     </div>
                     <div class="flex-1 min-w-0">
-                      <p class="text-sm font-medium truncate">{{ model.display_name }}</p>
-                      <p class="text-xs text-muted-foreground truncate font-mono">{{ model.name }}</p>
+                      <p class="text-sm font-medium truncate">
+                        {{ model.display_name }}
+                      </p>
+                      <p class="text-xs text-muted-foreground truncate font-mono">
+                        {{ model.name }}
+                      </p>
                     </div>
                   </div>
                 </div>
               </div>
 
               <!-- 上游模型组 -->
-              <div v-for="group in filteredUpstreamGroups" :key="group.api_format">
+              <div
+                v-for="group in filteredUpstreamGroups"
+                :key="group.api_format"
+              >
                 <div
                   class="flex items-center justify-between px-3 py-2 bg-muted sticky top-0 z-10 cursor-pointer hover:bg-muted/80 transition-colors"
                   @click="toggleGroupCollapse(group.api_format)"
@@ -222,7 +235,10 @@
                       class="w-4 h-4 border rounded flex items-center justify-center shrink-0"
                       :class="selectedModels.includes(model.id) ? 'bg-primary border-primary' : ''"
                     >
-                      <Check v-if="selectedModels.includes(model.id)" class="w-3 h-3 text-primary-foreground" />
+                      <Check
+                        v-if="selectedModels.includes(model.id)"
+                        class="w-3 h-3 text-primary-foreground"
+                      />
                     </div>
                     <span class="text-sm font-mono truncate">{{ model.id }}</span>
                   </div>
@@ -235,8 +251,15 @@
                 class="flex flex-col items-center justify-center py-12 text-muted-foreground"
               >
                 <Shield class="w-10 h-10 mb-2 opacity-30" />
-                <p class="text-sm">{{ searchQuery ? '无匹配结果' : '暂无可选模型' }}</p>
-                <p v-if="!upstreamModelsLoaded" class="text-xs mt-1">点击闪电按钮从上游获取模型</p>
+                <p class="text-sm">
+                  {{ searchQuery ? '无匹配结果' : '暂无可选模型' }}
+                </p>
+                <p
+                  v-if="!upstreamModelsLoaded"
+                  class="text-xs mt-1"
+                >
+                  点击闪电按钮从上游获取模型
+                </p>
               </div>
             </template>
           </div>
@@ -250,10 +273,18 @@
           {{ hasChanges ? '有未保存的更改' : '' }}
         </p>
         <div class="flex items-center gap-2">
-          <Button :disabled="saving || !hasChanges" @click="handleSave">
+          <Button
+            :disabled="saving || !hasChanges"
+            @click="handleSave"
+          >
             {{ saving ? '保存中...' : '保存' }}
           </Button>
-          <Button variant="outline" @click="handleCancel">取消</Button>
+          <Button
+            variant="outline"
+            @click="handleCancel"
+          >
+            取消
+          </Button>
         </div>
       </div>
     </template>

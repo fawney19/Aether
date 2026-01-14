@@ -172,6 +172,7 @@ class RedisClientManager:
                     max_connections=redis_max_conn,
                     decode_responses=True,
                     socket_connect_timeout=5.0,
+                    health_check_interval=30,  # 每 30 秒检查连接健康状态
                 )
                 safe_url = f"sentinel://{sentinel_service}"
             else:
@@ -182,6 +183,7 @@ class RedisClientManager:
                     socket_timeout=5.0,
                     socket_connect_timeout=5.0,
                     max_connections=redis_max_conn,
+                    health_check_interval=30,  # 每 30 秒检查连接健康状态
                 )
                 safe_url = redis_url.split("@")[-1] if "@" in redis_url else redis_url
 

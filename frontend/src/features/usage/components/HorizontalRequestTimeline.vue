@@ -749,9 +749,33 @@ const getStatusColorClass = (status: string) => {
 .minimal-track {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 0;
-  padding: 2rem 0 2rem;
+  justify-content: flex-start;
+  gap: 64px;
+  padding: 2rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+
+  /* 优化滚动体验 */
+  scrollbar-width: thin; /* Firefox */
+  scrollbar-color: hsl(var(--border)) transparent;
+}
+
+/* Webkit 滚动条样式 */
+.minimal-track::-webkit-scrollbar {
+  height: 6px;
+}
+
+.minimal-track::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.minimal-track::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 3px;
+}
+
+.minimal-track::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.5);
 }
 
 .minimal-node-group {
@@ -931,10 +955,13 @@ const getStatusColorClass = (status: string) => {
 .node-dot.status-available { color: #d1d5db; }
 
 .node-line {
+  position: absolute;
+  right: -64px;
+  top: 50%;
+  transform: translateY(-50%);
   width: 64px;
   height: 2px;
   background: hsl(var(--border));
-  margin: 0 -1px;
   z-index: 1;
 }
 

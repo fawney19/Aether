@@ -641,7 +641,7 @@ class ChatAdapterBase(ApiAdapter):
             url=url,
             headers=headers,
             json_body=body,
-            api_format=cls.name,
+            api_format=cls.FORMAT_ID,
             # 用量计算参数（现在强制记录）
             db=db,
             user=user,

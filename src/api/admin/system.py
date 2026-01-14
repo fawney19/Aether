@@ -96,13 +96,15 @@ async def check_update():
     """
     检查系统更新
 
-    从 GitHub Tags 获取最新版本并与当前版本对比。
+    从 GitHub Releases 获取最新版本并与当前版本对比。
 
     **返回字段**:
     - `current_version`: 当前版本号
     - `latest_version`: 最新版本号
     - `has_update`: 是否有更新可用
     - `release_url`: 最新版本的 GitHub 页面链接
+    - `release_notes`: 更新日志 (Markdown 格式)
+    - `published_at`: 发布时间 (ISO 8601 格式)
     """
     import httpx
 
@@ -110,14 +112,25 @@ async def check_update():
 
     current_version = _get_current_version()
     github_repo = "Aethersailor/Aether"
-    github_tags_url = f"https://api.github.com/repos/{github_repo}/tags"
+    github_releases_url = f"https://api.github.com/repos/{github_repo}/releases"
+
+    def _make_empty_response(error: str | None = None):
+        return {
+            "current_version": current_version,
+            "latest_version": None,
+            "has_update": False,
+            "release_url": None,
+            "release_notes": None,
+            "published_at": None,
+            "error": error,
+        }
 
     try:
         async with HTTPClientPool.get_temp_client(
             timeout=httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
         ) as client:
             response = await client.get(
-                github_tags_url,
+                github_releases_url,
                 headers={
                     "Accept": "application/vnd.github.v3+json",
                     "User-Agent": f"Aether/{current_version}",
@@ -126,43 +139,29 @@ async def check_update():
             )
 
             if response.status_code != 200:
-                return {
-                    "current_version": current_version,
-                    "latest_version": None,
-                    "has_update": False,
-                    "release_url": None,
-                    "error": f"GitHub API 返回错误: {response.status_code}",
-                }
+                return _make_empty_response(f"GitHub API 返回错误: {response.status_code}")
 
-            tags = response.json()
-            if not tags:
-                return {
-                    "current_version": current_version,
-                    "latest_version": None,
-                    "has_update": False,
-                    "release_url": None,
-                    "error": None,
-                }
+            releases = response.json()
+            if not releases:
+                return _make_empty_response()
 
-            # 找到最新的版本 tag（按版本号排序，而非时间）
-            version_tags = []
-            for tag in tags:
-                tag_name = tag.get("name", "")
-                if tag_name.startswith("v") or tag_name[0].isdigit():
-                    version_tags.append((tag_name, _parse_version(tag_name)))
+            # 找到最新的正式 release（排除 prerelease 和 draft，按版本号排序）
+            valid_releases = []
+            for release in releases:
+                if release.get("prerelease") or release.get("draft"):
+                    continue
+                tag_name = release.get("tag_name", "")
+                if tag_name.startswith("v") or (tag_name and tag_name[0].isdigit()):
+                    valid_releases.append((release, _parse_version(tag_name)))
 
-            if not version_tags:
-                return {
-                    "current_version": current_version,
-                    "latest_version": None,
-                    "has_update": False,
-                    "release_url": None,
-                    "error": None,
-                }
+            if not valid_releases:
+                return _make_empty_response()
 
             # 按版本号排序，取最大的
-            version_tags.sort(key=lambda x: x[1], reverse=True)
-            latest_tag = version_tags[0][0]
+            valid_releases.sort(key=lambda x: x[1], reverse=True)
+            latest_release = valid_releases[0][0]
+
+            latest_tag = latest_release.get("tag_name", "")
             latest_version = latest_tag.lstrip("v")
 
             current_tuple = _parse_version(current_version)
@@ -173,26 +172,17 @@ async def check_update():
                 "current_version": current_version,
                 "latest_version": latest_version,
                 "has_update": has_update,
-                "release_url": f"https://github.com/{github_repo}/releases/tag/{latest_tag}",
+                "release_url": latest_release.get("html_url")
+                or f"https://github.com/{github_repo}/releases/tag/{latest_tag}",
+                "release_notes": latest_release.get("body"),
+                "published_at": latest_release.get("published_at"),
                 "error": None,
             }
 
     except httpx.TimeoutException:
-        return {
-            "current_version": current_version,
-            "latest_version": None,
-            "has_update": False,
-            "release_url": None,
-            "error": "检查更新超时",
-        }
+        return _make_empty_response("检查更新超时")
     except Exception as e:
-        return {
-            "current_version": current_version,
-            "latest_version": None,
-            "has_update": False,
-            "release_url": None,
-            "error": f"检查更新失败: {str(e)}",
-        }
+        return _make_empty_response(f"检查更新失败: {str(e)}")
 
 
 pipeline = ApiRequestPipeline()

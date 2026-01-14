@@ -84,7 +84,7 @@
               >
                 <!-- 按 Token 计费 -->
                 <template v-if="hasTokenPricing(model)">
-                  <span class="text-muted-foreground text-right">输入/输出:</span>
+                  <span class="text-muted-foreground text-right">入/出:</span>
                   <span class="font-mono font-semibold">
                     ${{ formatPrice(model.effective_input_price) }}/${{ formatPrice(model.effective_output_price) }}
                   </span>
@@ -109,23 +109,42 @@
                     ${{ formatPrice(model.effective_price_per_request ?? model.price_per_request) }}/次
                   </span>
                 </template>
-                <!-- 无计��配置 -->
+                <!-- 无计费配置 -->
                 <template v-if="!hasTokenPricing(model) && !hasRequestPricing(model)">
                   <span class="text-muted-foreground">—</span>
                 </template>
               </div>
             </td>
             <td class="align-top px-4 py-3">
-              <div class="flex justify-center gap-1.5">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="h-8 w-8"
-                  title="添加映射"
-                  @click="addMapping(model)"
-                >
-                  <Link class="w-3.5 h-3.5" />
-                </Button>
+              <div class="flex justify-center gap-1">
+                <!-- 测试按钮（支持多格式选择） -->
+                <div class="relative">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="h-8 w-8"
+                    title="测试模型"
+                    :disabled="testingModelId === model.id"
+                    @click="handleTestClick(model)"
+                  >
+                    <Loader2 v-if="testingModelId === model.id" class="w-3.5 h-3.5 animate-spin" />
+                    <Play v-else class="w-3.5 h-3.5" />
+                  </Button>
+                  <!-- 格式选择下拉菜单 -->
+                  <div
+                    v-if="formatMenuModelId === model.id && availableApiFormats.length > 1"
+                    class="absolute top-full left-0 mt-1 z-10 bg-popover border rounded-md shadow-md py-1 min-w-[120px]"
+                  >
+                    <button
+                      v-for="fmt in availableApiFormats"
+                      :key="fmt"
+                      class="w-full px-3 py-1.5 text-left text-sm hover:bg-muted transition-colors"
+                      @click="testModelConnection(model, fmt)"
+                    >
+                      {{ fmt }}
+                    </button>
+                  </div>
+                </div>
                 <Button
                   variant="ghost"
                   size="icon"
@@ -178,24 +197,32 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
-import { Box, Edit, Trash2, Layers, Power, Copy, Link } from 'lucide-vue-next'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { Box, Edit, Trash2, Layers, Power, Copy, Loader2, Play } from 'lucide-vue-next'
 import Card from '@/components/ui/card.vue'
 import Button from '@/components/ui/button.vue'
 import { useToast } from '@/composables/useToast'
 import { useClipboard } from '@/composables/useClipboard'
-import { getProviderModels, type Model } from '@/api/endpoints'
+import { getProviderModels, type Model, testModel } from '@/api/endpoints'
 import { updateModel } from '@/api/endpoints/models'
+import { parseTestModelError } from '@/utils/errorParser'
+
+interface Endpoint {
+  id: string
+  api_format: string
+  is_active: boolean
+  active_keys?: number
+}
 
 const props = defineProps<{
   provider: any
+  endpoints?: Endpoint[]
 }>()
 
 const emit = defineEmits<{
   'editModel': [model: Model]
   'deleteModel': [model: Model]
   'batchAssign': []
-  'addMapping': [model: Model]
 }>()
 
 const { error: showError, success: showSuccess } = useToast()
@@ -205,6 +232,16 @@ const { copyToClipboard } = useClipboard()
 const loading = ref(false)
 const models = ref<Model[]>([])
 const togglingModelId = ref<string | null>(null)
+const testingModelId = ref<string | null>(null)
+const formatMenuModelId = ref<string | null>(null)
+
+// 获取可用的 API 格式（有活跃端点且有活跃 Key）
+const availableApiFormats = computed(() => {
+  if (!props.endpoints) return []
+  return props.endpoints
+    .filter(ep => ep.is_active && (ep.active_keys ?? 0) > 0)
+    .map(ep => ep.api_format)
+})
 
 // 按名称排序的模型列表
 const sortedModels = computed(() => {
@@ -305,7 +342,7 @@ function getStatusTitle(model: Model): string {
   return '活跃但不可用'
 }
 
-// ��辑模型
+// 编辑模型
 function editModel(model: Model) {
   emit('editModel', model)
 }
@@ -313,11 +350,6 @@ function editModel(model: Model) {
 // 删除模型
 function deleteModel(model: Model) {
   emit('deleteModel', model)
-}
-
-// 添加映射
-function addMapping(model: Model) {
-  emit('addMapping', model)
 }
 
 // 打开批量关联对话框
@@ -342,7 +374,69 @@ async function toggleModelActive(model: Model) {
   }
 }
 
+// 测试模型连接性
+async function testModelConnection(model: Model, apiFormat?: string) {
+  if (testingModelId.value) return
+
+  testingModelId.value = model.id
+  formatMenuModelId.value = null
+  try {
+    const result = await testModel({
+      provider_id: props.provider.id,
+      model_name: model.provider_model_name,
+      message: "hello",
+      api_format: apiFormat
+    })
+
+    if (result.success) {
+      // 根据响应内容显示不同的成功消息
+      if (result.data?.response?.choices?.[0]?.message?.content) {
+        const content = result.data.response.choices[0].message.content
+        showSuccess(`测试成功，响应: ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`)
+      } else if (result.data?.content_preview) {
+        showSuccess(`流式测试成功，预览: ${result.data.content_preview}`)
+      } else {
+        showSuccess(`模型 "${model.provider_model_name}" 测试成功`)
+      }
+    } else {
+      showError(`模型测试失败: ${parseTestModelError(result)}`)
+    }
+  } catch (err: any) {
+    const errorMsg = err.response?.data?.detail || err.message || '测试请求失败'
+    showError(`模型测试失败: ${errorMsg}`)
+  } finally {
+    testingModelId.value = null
+  }
+}
+
+// 处理测试按钮点击
+function handleTestClick(model: Model) {
+  const formats = availableApiFormats.value
+  if (formats.length === 0) {
+    // 没有可用格式信息，使用默认行为
+    testModelConnection(model)
+  } else if (formats.length === 1) {
+    // 只有一种格式，直接测试
+    testModelConnection(model, formats[0])
+  } else {
+    // 多种格式，显示选择菜单
+    formatMenuModelId.value = formatMenuModelId.value === model.id ? null : model.id
+  }
+}
+
+// 点击外部关闭格式选择菜单
+function handleClickOutside(event: MouseEvent) {
+  if (formatMenuModelId.value && !(event.target as Element).closest('.relative')) {
+    formatMenuModelId.value = null
+  }
+}
+
 onMounted(() => {
   loadModels()
+  document.addEventListener('click', handleClickOutside)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', handleClickOutside)
 })
 </script>
