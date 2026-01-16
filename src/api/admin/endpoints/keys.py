@@ -353,8 +353,18 @@ class AdminDeleteEndpointKeyAdapter(AdminApiAdapter):
             logger.error(f"删除 Key 失败: ID={self.key_id}, Error={exc}")
             raise
 
-        # 清除 /v1/models 列表缓存
-        await invalidate_models_list_cache()
+        # 触发缓存失效和自动解除关联检查
+        if provider_id:
+            from src.services.model.global_model import on_key_allowed_models_changed
+
+            await on_key_allowed_models_changed(
+                db=db,
+                provider_id=provider_id,
+                allowed_models=[],
+            )
+        else:
+            # 无 provider_id 时仅清除缓存
+            await invalidate_models_list_cache()
 
         logger.warning(f"[DELETE] 删除 Key: ID={self.key_id}, Provider={provider_id}")
         return {"message": f"Key {self.key_id} 已删除"}

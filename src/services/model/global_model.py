@@ -26,6 +26,7 @@ async def on_key_allowed_models_changed(
     包括：
     1. 触发缓存失效（包括 /v1/models 列表缓存）
     2. 检查并自动关联匹配的 GlobalModel
+    3. 检查并自动解除不再匹配的 GlobalModel 关联
 
     Args:
         db: 数据库 Session
@@ -45,6 +46,12 @@ async def on_key_allowed_models_changed(
             provider_id=provider_id,
             allowed_models=allowed_models,
         )
+
+    # 3. 检查并自动解除不再匹配的 GlobalModel 关联
+    GlobalModelService.auto_disassociate_provider_by_key_whitelist(
+        db=db,
+        provider_id=provider_id,
+    )
 
 
 class GlobalModelService:
@@ -450,6 +457,128 @@ class GlobalModelService:
                 )
 
         if results["success"]:
+            db.commit()
+
+        return results
+
+    @staticmethod
+    def auto_disassociate_provider_by_key_whitelist(
+        db: Session,
+        provider_id: str,
+    ) -> Dict:
+        """
+        根据 Key 白名单自动解除 Provider 与不再匹配的 GlobalModel 的关联
+
+        当 Key 的 allowed_models 更新后调用此方法，检查所有已关联的 GlobalModel，
+        如果其映射规则不再匹配任何 Key 白名单中的模型，则自动删除关联。
+
+        注意：只删除通过映射规则自动关联的 Model（即 GlobalModel 有 model_mappings 配置的）
+
+        Args:
+            db: 数据库 Session
+            provider_id: Provider ID
+
+        Returns:
+            Dict: 包含 deleted 和 errors 列表
+        """
+        from src.core.model_permissions import match_model_with_pattern
+        from src.models.database import Provider, ProviderAPIKey
+
+        results: Dict[str, List[Dict]] = {
+            "deleted": [],
+            "errors": [],
+        }
+
+        # 获取 Provider
+        provider = db.query(Provider).filter(Provider.id == provider_id).first()
+        if not provider:
+            logger.warning(f"Provider {provider_id} not found for auto-disassociation")
+            return results
+
+        # 1. 获取 Provider 下所有活跃 Key 的 allowed_models 并集
+        keys = (
+            db.query(ProviderAPIKey)
+            .filter(
+                ProviderAPIKey.provider_id == provider_id,
+                ProviderAPIKey.is_active == True,
+            )
+            .all()
+        )
+
+        # 收集所有 Key 的 allowed_models 并集
+        # 注意：allowed_models 为 null 或空列表都表示不支持任何模型
+        all_allowed_models: Set[str] = set()
+
+        for key in keys:
+            if key.allowed_models:
+                all_allowed_models.update(key.allowed_models)
+
+        # 2. 获取 Provider 当前关联的所有 Model（带 GlobalModel 信息）
+        models = (
+            db.query(Model)
+            .options(joinedload(Model.global_model))
+            .filter(Model.provider_id == provider_id)
+            .all()
+        )
+
+        # 3. 检查每个 Model 是否还能匹配
+        for model in models:
+            # 跳过没有关联 GlobalModel 的
+            if not model.global_model_id or not model.global_model:
+                continue
+
+            global_model = model.global_model
+
+            # 提取映射规则
+            model_mappings: List[str] = []
+            if global_model.config and isinstance(global_model.config, dict):
+                mappings = global_model.config.get("model_mappings")
+                if isinstance(mappings, list):
+                    model_mappings = [m for m in mappings if isinstance(m, str)]
+
+            # 如果 GlobalModel 没有 model_mappings，跳过（说明不是通过映射自动关联的）
+            if not model_mappings:
+                continue
+
+            # 检查是否有映射规则匹配到任一 allowed_models
+            matched = False
+            for mapping_pattern in model_mappings:
+                for allowed_model in all_allowed_models:
+                    if match_model_with_pattern(mapping_pattern, allowed_model):
+                        matched = True
+                        break
+                if matched:
+                    break
+
+            # 如果不再匹配，删除该 Model
+            if not matched:
+                try:
+                    db.delete(model)
+                    results["deleted"].append(
+                        {
+                            "model_id": model.id,
+                            "global_model_id": global_model.id,
+                            "global_model_name": global_model.name,
+                        }
+                    )
+                    logger.info(
+                        f"Auto-disassociated Provider {provider.name} from GlobalModel {global_model.name} "
+                        f"(no matching allowed_models)"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to auto-disassociate Provider {provider.name} from GlobalModel {global_model.name}: {e}"
+                    )
+                    results["errors"].append(
+                        {
+                            "model_id": model.id,
+                            "global_model_id": global_model.id,
+                            "global_model_name": global_model.name,
+                            "error": str(e),
+                        }
+                    )
+
+        if results["deleted"]:
             db.commit()
 
         return results
