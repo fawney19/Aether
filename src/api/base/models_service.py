@@ -13,6 +13,7 @@
 from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
 from src.config.constants import CacheTTL
@@ -327,10 +328,13 @@ def _get_available_model_ids_for_format(db: Session, api_formats: list[str]) -> 
         db.query(Model)
         .options(joinedload(Model.global_model))
         .join(Provider)
+        .outerjoin(GlobalModel, Model.global_model_id == GlobalModel.id)
         .filter(
             Model.provider_id.in_(provider_ids_with_format),
             Model.is_active.is_(True),
             Provider.is_active.is_(True),
+            # GlobalModel 为空（未关联）或 GlobalModel 活跃
+            or_(Model.global_model_id.is_(None), GlobalModel.is_active.is_(True)),
         )
         .all()
     )
@@ -350,7 +354,14 @@ def _get_available_model_ids_for_format(db: Session, api_formats: list[str]) -> 
             continue
 
         # 检查该 provider 下是否有 Key 允许这个模型
-        from src.core.model_permissions import check_model_allowed
+        from src.core.model_permissions import check_model_allowed_with_mappings
+
+        # 获取 GlobalModel 的 model_mappings（用于正则匹配）
+        model_mappings: list[str] | None = None
+        if global_model and global_model.config:
+            mappings = global_model.config.get("model_mappings")
+            if isinstance(mappings, list):
+                model_mappings = [m for m in mappings if isinstance(m, str)]
 
         rules = provider_key_rules.get(model_provider_id, [])
         for allowed_models, usable_formats in rules:
@@ -359,12 +370,14 @@ def _get_available_model_ids_for_format(db: Session, api_formats: list[str]) -> 
                 available_model_ids.add(model_id)
                 break
 
-            # 检查是否允许该模型
-            if check_model_allowed(
+            # 检查是否允许该模型（支持正则匹配）
+            is_allowed, _ = check_model_allowed_with_mappings(
                 model_name=model_id,
                 allowed_models=allowed_models,  # type: ignore[arg-type]
                 resolved_model_name=(model.provider_model_name if global_model else None),
-            ):
+                model_mappings=model_mappings,
+            )
+            if is_allowed:
                 available_model_ids.add(model_id)
                 break
 
@@ -462,10 +475,13 @@ async def list_available_models(
         db.query(Model)
         .options(joinedload(Model.global_model), joinedload(Model.provider))
         .join(Provider)
+        .outerjoin(GlobalModel, Model.global_model_id == GlobalModel.id)
         .filter(
             Model.is_active.is_(True),
             Provider.is_active.is_(True),
             Model.provider_id.in_(available_provider_ids),
+            # GlobalModel 为空（未关联）或 GlobalModel 活跃
+            or_(Model.global_model_id.is_(None), GlobalModel.is_active.is_(True)),
         )
         .order_by(Model.created_at.desc())
     )
@@ -548,6 +564,7 @@ def find_model_by_id(
         .join(GlobalModel, Model.global_model_id == GlobalModel.id)
         .filter(
             GlobalModel.name == model_id,
+            GlobalModel.is_active.is_(True),
             Model.is_active.is_(True),
             Provider.is_active.is_(True),
         )
