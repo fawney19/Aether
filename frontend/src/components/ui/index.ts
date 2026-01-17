@@ -59,6 +59,7 @@ export { default as AvatarImage } from './avatar-image.vue'
 
 // 分页组件
 export { default as Pagination } from './pagination.vue'
+export { getPageSizeCache } from './pagination-utils'
 
 // 操作按钮
 export { default as RefreshButton } from './refresh-button.vue'

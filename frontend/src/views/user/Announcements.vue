@@ -310,6 +310,7 @@
         :current="currentPage"
         :total="total"
         :page-size="pageSize"
+        cache-key="announcements-page-size"
         @update:current="loadAnnouncements($event)"
         @update:page-size="pageSize = $event; loadAnnouncements(1)"
       />
@@ -567,7 +568,8 @@ import {
   TableRow,
   TableHead,
   TableCell,
-  Switch
+  Switch,
+  getPageSizeCache
 } from '@/components/ui'
 import Select from '@/components/ui/select.vue'
 import SelectTrigger from '@/components/ui/select-trigger.vue'
@@ -590,7 +592,7 @@ const loading = ref(false)
 const total = ref(0)
 const unreadCount = ref(0)
 const currentPage = ref(1)
-const pageSize = ref(20)
+const pageSize = ref(getPageSizeCache('announcements-page-size', 20))
 
 // 对话框状态
 const dialogOpen = ref(false)

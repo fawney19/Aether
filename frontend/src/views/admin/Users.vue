@@ -498,6 +498,7 @@
         :current="currentPage"
         :total="filteredUsers.length"
         :page-size="pageSize"
+        cache-key="users-page-size"
         @update:current="currentPage = $event"
         @update:page-size="pageSize = $event"
       />
@@ -750,7 +751,8 @@ import {
   Avatar,
   AvatarFallback,
   Pagination,
-  RefreshButton
+  RefreshButton,
+  getPageSizeCache
 } from '@/components/ui'
 
 import {
@@ -804,7 +806,7 @@ const filterRoleOpenMobile = ref(false)
 const filterStatusOpenMobile = ref(false)
 
 const currentPage = ref(1)
-const pageSize = ref(20)
+const pageSize = ref(getPageSizeCache('users-page-size', 20))
 
 const filteredUsers = computed(() => {
   let filtered = [...usersStore.users]

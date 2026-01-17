@@ -402,6 +402,7 @@
           :current="catalogCurrentPage"
           :total="filteredGlobalModels.length"
           :page-size="catalogPageSize"
+          cache-key="model-management-page-size"
           @update:current="catalogCurrentPage = $event"
           @update:page-size="catalogPageSize = $event"
         />
@@ -614,6 +615,7 @@ import {
   Dialog,
   Pagination,
   RefreshButton,
+  getPageSizeCache,
 } from '@/components/ui'
 import {
   listGlobalModels,
@@ -647,7 +649,7 @@ const capabilities = ref<CapabilityDefinition[]>([])
 
 // 模型目录分页
 const catalogCurrentPage = ref(1)
-const catalogPageSize = ref(20)
+const catalogPageSize = ref(getPageSizeCache('model-management-page-size', 20))
 
 // 选中模型的详细数据
 const selectedModelProviders = ref<any[]>([])

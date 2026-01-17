@@ -312,6 +312,7 @@
         :current="currentPage"
         :total="filteredModels.length"
         :page-size="pageSize"
+        cache-key="model-catalog-page-size"
         @update:current="currentPage = $event"
         @update:page-size="pageSize = $event"
       />
@@ -355,6 +356,7 @@ import {
   Input,
   Pagination,
   RefreshButton,
+  getPageSizeCache,
 } from '@/components/ui'
 import {
   getPublicGlobalModels,
@@ -393,7 +395,7 @@ function openModelDetail(model: PublicGlobalModel, event: MouseEvent) {
 
 // 分页
 const currentPage = ref(1)
-const pageSize = ref(20)
+const pageSize = ref(getPageSizeCache('model-catalog-page-size', 20))
 
 // 能力筛选
 const capabilityFilters = ref({

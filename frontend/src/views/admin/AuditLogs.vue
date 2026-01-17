@@ -302,6 +302,7 @@
           :total="totalRecords"
           :page-size="pageSize"
           :page-size-options="[10, 20, 50, 100]"
+          cache-key="audit-logs-page-size"
           @update:current="handlePageChange"
           @update:page-size="pageSize = $event; currentPage = 1; loadLogs()"
         />
@@ -427,7 +428,8 @@ import {
   TableCell,
   Input,
   Pagination,
-  RefreshButton
+  RefreshButton,
+  getPageSizeCache
 } from '@/components/ui'
 import { auditApi } from '@/api/audit'
 import {
@@ -481,7 +483,7 @@ const filters = ref({
 const filtersDaysString = ref('7')
 
 const currentPage = ref(1)
-const pageSize = ref(20)
+const pageSize = ref(getPageSizeCache('audit-logs-page-size', 20))
 const totalRecords = ref(0)
 
 let loadTimeout: number

@@ -393,6 +393,7 @@
         :current="currentPage"
         :total="filteredProviders.length"
         :page-size="pageSize"
+        cache-key="provider-management-page-size"
         @update:current="currentPage = $event"
         @update:page-size="pageSize = $event"
       />
@@ -445,6 +446,7 @@ import TableRow from '@/components/ui/table-row.vue'
 import TableHead from '@/components/ui/table-head.vue'
 import TableCell from '@/components/ui/table-cell.vue'
 import Pagination from '@/components/ui/pagination.vue'
+import { getPageSizeCache } from '@/components/ui/pagination-utils'
 import RefreshButton from '@/components/ui/refresh-button.vue'
 import { ProviderFormDialog, PriorityManagementDialog } from '@/features/providers/components'
 import ProviderDetailDrawer from '@/features/providers/components/ProviderDetailDrawer.vue'
@@ -478,7 +480,7 @@ const searchQuery = ref('')
 
 // 分页
 const currentPage = ref(1)
-const pageSize = ref(20)
+const pageSize = ref(getPageSizeCache('provider-management-page-size', 20))
 
 // 优先级模式配置
 const priorityModeConfig = computed(() => {

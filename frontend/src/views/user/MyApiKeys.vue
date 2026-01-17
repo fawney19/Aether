@@ -339,6 +339,7 @@
         :current="currentPage"
         :total="apiKeys.length"
         :page-size="pageSize"
+        cache-key="my-api-keys-page-size"
         @update:current="currentPage = $event"
         @update:page-size="pageSize = $event"
       />
@@ -483,7 +484,7 @@ import Button from '@/components/ui/button.vue'
 import Input from '@/components/ui/input.vue'
 import Label from '@/components/ui/label.vue'
 import Badge from '@/components/ui/badge.vue'
-import { Dialog, Pagination } from '@/components/ui'
+import { Dialog, Pagination, getPageSizeCache } from '@/components/ui'
 import { LoadingState, AlertDialog, EmptyState } from '@/components/common'
 import {
   Table,
@@ -508,7 +509,7 @@ const deleting = ref(false)
 
 // 分页相关
 const currentPage = ref(1)
-const pageSize = ref(10)
+const pageSize = ref(getPageSizeCache('my-api-keys-page-size', 10))
 
 const paginatedApiKeys = computed(() => {
   const start = (currentPage.value - 1) * pageSize.value

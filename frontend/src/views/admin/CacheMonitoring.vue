@@ -11,6 +11,7 @@ import TableHeader from '@/components/ui/table-header.vue'
 import TableRow from '@/components/ui/table-row.vue'
 import Input from '@/components/ui/input.vue'
 import Pagination from '@/components/ui/pagination.vue'
+import { getPageSizeCache } from '@/components/ui/pagination-utils'
 import RefreshButton from '@/components/ui/refresh-button.vue'
 import Select from '@/components/ui/select.vue'
 import SelectTrigger from '@/components/ui/select-trigger.vue'
@@ -44,7 +45,7 @@ const tableKeyword = ref('')
 const matchedUserId = ref<string | null>(null)
 const clearingRowAffinityKey = ref<string | null>(null)
 const currentPage = ref(1)
-const pageSize = ref(20)
+const pageSize = ref(getPageSizeCache('cache-monitoring-page-size', 20))
 const currentTime = ref(Math.floor(Date.now() / 1000))
 const analysisHoursSelectOpen = ref(false)
 
@@ -702,6 +703,7 @@ onBeforeUnmount(() => {
         :current="currentPage"
         :total="affinityList.length"
         :page-size="pageSize"
+        cache-key="cache-monitoring-page-size"
         @update:current="currentPage = $event; handlePageChange()"
         @update:page-size="pageSize = $event"
       />

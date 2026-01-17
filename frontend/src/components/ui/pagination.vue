@@ -100,6 +100,8 @@ interface Props {
   pageSize?: number
   pageSizeOptions?: number[]
   showPageSizeSelector?: boolean
+  /** 缓存键名，设置后会将 pageSize 缓存到 localStorage */
+  cacheKey?: string
 }
 
 interface Emits {
@@ -170,9 +172,14 @@ function handlePageChange(page: number) {
 function handlePageSizeChange(value: string) {
   const newSize = parseInt(value)
   if (newSize !== props.pageSize) {
+    // 缓存到 localStorage
+    if (props.cacheKey) {
+      localStorage.setItem(props.cacheKey, value)
+    }
     emit('update:pageSize', newSize)
     // 切换每页数量时，重置到第一页
     emit('update:current', 1)
   }
 }
+
 </script>

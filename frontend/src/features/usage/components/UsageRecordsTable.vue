@@ -495,6 +495,7 @@
         :total="totalRecords"
         :page-size="pageSize"
         :page-size-options="pageSizeOptions"
+        cache-key="usage-records-page-size"
         @update:current="$emit('update:currentPage', $event)"
         @update:page-size="$emit('update:pageSize', $event)"
       />

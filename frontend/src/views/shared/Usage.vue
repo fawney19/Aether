@@ -100,6 +100,7 @@ import { useAuthStore } from '@/stores/auth'
 import { usageApi } from '@/api/usage'
 import { usersApi } from '@/api/users'
 import { meApi } from '@/api/me'
+import { getPageSizeCache } from '@/components/ui'
 import {
   UsageModelTable,
   UsageProviderTable,
@@ -131,7 +132,7 @@ const selectedPeriod = ref<PeriodValue>('today')
 
 // 分页状态
 const currentPage = ref(1)
-const pageSize = ref(20)
+const pageSize = ref(getPageSizeCache('usage-records-page-size', 20))
 const pageSizeOptions = [10, 20, 50, 100]
 
 // 筛选状态
