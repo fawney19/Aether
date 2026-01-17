@@ -23,7 +23,7 @@
               <Input
                 id="audit-logs-search"
                 v-model="searchQuery"
-                placeholder="搜索用户ID..."
+                placeholder="搜索用户名..."
                 class="w-32 sm:w-64 h-8 text-sm pl-8"
                 @input="handleSearchChange"
               />
@@ -472,7 +472,7 @@ const eventTypeSelectOpen = ref(false)
 const daysSelectOpen = ref(false)
 
 const filters = ref({
-  userId: '',
+  username: '',
   eventType: '__all__',
   days: 7,
   limit: 50
@@ -502,7 +502,7 @@ async function loadLogs() {
     const offset = (currentPage.value - 1) * pageSize.value
 
     const filterParams = {
-      user_id: filters.value.userId || undefined,
+      username: filters.value.username || undefined,
       event_type: (filters.value.eventType !== '__all__' ? filters.value.eventType : undefined),
       days: filters.value.days,
       limit: pageSize.value,
@@ -527,14 +527,14 @@ function refreshLogs() {
 
 // 搜索变化处理
 function handleSearchChange() {
-  filters.value.userId = searchQuery.value
+  filters.value.username = searchQuery.value
   debouncedLoadLogs()
 }
 
 // 重置筛选条件
 function handleResetFilters() {
   searchQuery.value = ''
-  filters.value.userId = ''
+  filters.value.username = ''
   filters.value.eventType = '__all__'
   filters.value.days = 7
   filtersDaysString.value = '7'
@@ -573,7 +573,7 @@ async function exportLogs() {
 
     while (hasMore) {
       const data = await auditApi.getAuditLogs({
-        user_id: filters.value.userId || undefined,
+        username: filters.value.username || undefined,
         event_type: filters.value.eventType !== '__all__' ? filters.value.eventType : undefined,
         days: filters.value.days,
         limit: batchSize,

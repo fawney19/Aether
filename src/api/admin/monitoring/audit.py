@@ -32,7 +32,7 @@ pipeline = ApiRequestPipeline()
 @router.get("/audit-logs")
 async def get_audit_logs(
     request: Request,
-    user_id: Optional[str] = Query(None, description="用户ID筛选 (支持UUID)"),
+    username: Optional[str] = Query(None, description="用户名筛选 (模糊匹配)"),
     event_type: Optional[str] = Query(None, description="事件类型筛选"),
     days: int = Query(7, description="查询天数"),
     limit: int = Query(100, description="返回数量限制"),
@@ -42,10 +42,10 @@ async def get_audit_logs(
     """
     获取审计日志
 
-    获取系统审计日志列表，支持按用户、事件类型、时间范围筛选。需要管理员权限。
+    获取系统审计日志列表，支持按用户名、事件类型、时间范围筛选。需要管理员权限。
 
     **查询参数**:
-    - `user_id`: 可选，用户 ID 筛选（UUID 格式）
+    - `username`: 可选，用户名筛选（模糊匹配）
     - `event_type`: 可选，事件类型筛选
     - `days`: 查询最近多少天的日志，默认 7 天
     - `limit`: 返回数量限制，默认 100
@@ -68,7 +68,7 @@ async def get_audit_logs(
     - `filters`: 筛选条件
     """
     adapter = AdminGetAuditLogsAdapter(
-        user_id=user_id,
+        username=username,
         event_type=event_type,
         days=days,
         limit=limit,
@@ -211,7 +211,7 @@ async def get_circuit_history(
 
 @dataclass
 class AdminGetAuditLogsAdapter(AdminApiAdapter):
-    user_id: Optional[str]
+    username: Optional[str]
     event_type: Optional[str]
     days: int
     limit: int
@@ -229,8 +229,8 @@ class AdminGetAuditLogsAdapter(AdminApiAdapter):
             .outerjoin(DBUser, AuditLog.user_id == DBUser.id)
             .filter(AuditLog.created_at >= cutoff_time)
         )
-        if self.user_id:
-            base_query = base_query.filter(AuditLog.user_id == self.user_id)
+        if self.username:
+            base_query = base_query.filter(DBUser.username.ilike(f"%{self.username}%"))
         if self.event_type:
             base_query = base_query.filter(AuditLog.event_type == self.event_type)
 
@@ -264,14 +264,14 @@ class AdminGetAuditLogsAdapter(AdminApiAdapter):
             items,
             meta,
             filters={
-                "user_id": self.user_id,
+                "username": self.username,
                 "event_type": self.event_type,
                 "days": self.days,
             },
         )
         context.add_audit_metadata(
             action="monitor_audit_logs",
-            filter_user_id=self.user_id,
+            filter_username=self.username,
             filter_event_type=self.event_type,
             days=self.days,
             limit=self.limit,

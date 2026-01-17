@@ -26,7 +26,7 @@ export interface AuditLogsResponse {
 }
 
 export interface AuditFilters {
-  user_id?: string
+  username?: string
   event_type?: string
   days?: number
   limit?: number
