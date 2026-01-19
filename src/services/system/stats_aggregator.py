@@ -301,9 +301,10 @@ class StatsAggregatorService:
         day_start, day_end = _get_business_day_range(date)
 
         # 按供应商分组统计
+        provider_name_expr = func.coalesce(Usage.provider_name, "Unknown")
         provider_stats = (
             db.query(
-                Usage.provider_name,
+                provider_name_expr.label("provider_name"),
                 func.count(Usage.id).label("total_requests"),
                 func.sum(Usage.input_tokens).label("input_tokens"),
                 func.sum(Usage.output_tokens).label("output_tokens"),
@@ -312,15 +313,12 @@ class StatsAggregatorService:
                 func.sum(Usage.total_cost_usd).label("total_cost"),
             )
             .filter(and_(Usage.created_at >= day_start, Usage.created_at < day_end))
-            .group_by(Usage.provider_name)
+            .group_by(provider_name_expr)
             .all()
         )
 
         results = []
         for stat in provider_stats:
-            if not stat.provider_name:
-                continue
-
             existing = (
                 db.query(StatsDailyProvider)
                 .filter(and_(StatsDailyProvider.date == day_start, StatsDailyProvider.provider_name == stat.provider_name))
