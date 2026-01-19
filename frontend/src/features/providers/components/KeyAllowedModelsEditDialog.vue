@@ -254,7 +254,7 @@
                 >
                   <div
                     v-for="model in filteredUpstreamModels"
-                    :key="model"
+                    :key="model.id"
                     class="flex items-center gap-2 px-2 py-1.5 rounded"
                     :class="isAutoFetchMode ? 'opacity-80' : 'hover:bg-muted cursor-pointer'"
                     @click="handleUpstreamModelClick(model)"
@@ -262,25 +262,35 @@
                     <div
                       class="w-4 h-4 border rounded flex items-center justify-center shrink-0"
                       :class="[
-                        selectedModels.includes(model) ? 'bg-primary border-primary' : '',
+                        selectedModels.includes(model.id) ? 'bg-primary border-primary' : '',
                         isAutoFetchMode ? 'opacity-50' : ''
                       ]"
                     >
                       <Check
-                        v-if="selectedModels.includes(model)"
+                        v-if="selectedModels.includes(model.id)"
                         class="w-3 h-3 text-primary-foreground"
                       />
                     </div>
-                    <span class="text-sm font-mono truncate flex-1">{{ model }}</span>
+                    <span class="text-sm font-mono truncate flex-1">{{ model.id }}</span>
+                    <!-- API 格式标签 -->
+                    <div class="flex items-center gap-1 shrink-0">
+                      <span
+                        v-for="fmt in model.api_formats"
+                        :key="fmt"
+                        class="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground"
+                      >
+                        {{ API_FORMAT_SHORT[fmt] || fmt }}
+                      </span>
+                    </div>
                     <button
-                      v-if="selectedModels.includes(model)"
+                      v-if="selectedModels.includes(model.id)"
                       type="button"
                       class="p-1 rounded hover:bg-muted-foreground/10 transition-colors shrink-0 text-muted-foreground"
-                      :title="isLocked(model) ? '已锁定 - 点击解锁' : '点击锁定（刷新时不会被删除）'"
-                      @click="toggleLock(model, $event)"
+                      :title="isLocked(model.id) ? '已锁定 - 点击解锁' : '点击锁定（刷新时不会被删除）'"
+                      @click="toggleLock(model.id, $event)"
                     >
                       <Lock
-                        v-if="isLocked(model)"
+                        v-if="isLocked(model.id)"
                         class="w-3.5 h-3.5"
                       />
                       <LockOpen
@@ -356,7 +366,7 @@ import {
 } from '@/api/endpoints'
 import { getGlobalModels, type GlobalModelResponse } from '@/api/global-models'
 import { useUpstreamModelsCache } from '../composables/useUpstreamModelsCache'
-import type { UpstreamModel } from '@/api/endpoints/types'
+import { API_FORMAT_SHORT, type UpstreamModel } from '@/api/endpoints/types'
 
 interface AvailableModel {
   name: string
@@ -452,37 +462,49 @@ function isGlobalModel(modelId: string): boolean {
   return globalModelNamesSet.value.has(modelId)
 }
 
-// Key 支持的 API 格式
-const keyApiFormats = computed(() => props.apiKey?.api_formats ?? [])
+// 上游模型信息（包含 api_format）
+interface UpstreamModelInfo {
+  id: string
+  api_formats: string[]  // 该模型支持的所有 API 格式
+}
 
-// 上游模型名称列表（去重后）
-const upstreamModelNames = computed(() => {
-  const names = new Set<string>()
+// 上游模型列表（按 id 聚合，包含所有 api_format）
+const upstreamModelList = computed(() => {
+  const modelMap = new Map<string, Set<string>>()
   upstreamModels.value.forEach(m => {
-    // 只包含 Key 支持的 API 格式的模型
-    if (!m.api_format || keyApiFormats.value.includes(m.api_format)) {
-      names.add(m.id)
+    if (!modelMap.has(m.id)) {
+      modelMap.set(m.id, new Set())
+    }
+    if (m.api_format) {
+      modelMap.get(m.id)!.add(m.api_format)
     }
   })
-  return Array.from(names).sort()
+  const result: UpstreamModelInfo[] = []
+  modelMap.forEach((formats, id) => {
+    result.push({ id, api_formats: Array.from(formats).sort() })
+  })
+  return result.sort((a, b) => a.id.localeCompare(b.id))
 })
+
+// 上游模型名称列表（用于计数和全选判断）
+const upstreamModelNames = computed(() => upstreamModelList.value.map(m => m.id))
 
 // 过滤后的上游模型
 const filteredUpstreamModels = computed(() => {
-  if (!searchQuery.value.trim()) return upstreamModelNames.value
+  if (!searchQuery.value.trim()) return upstreamModelList.value
   const query = searchQuery.value.toLowerCase()
-  return upstreamModelNames.value.filter(m => m.toLowerCase().includes(query))
+  return upstreamModelList.value.filter(m => m.id.toLowerCase().includes(query))
 })
 
 // 上游模型是否全选
 const isAllUpstreamModelsSelected = computed(() => {
   if (filteredUpstreamModels.value.length === 0) return false
-  return filteredUpstreamModels.value.every(m => selectedModels.value.includes(m))
+  return filteredUpstreamModels.value.every(m => selectedModels.value.includes(m.id))
 })
 
 // 全选/取消全选上游模型
 function toggleAllUpstreamModels() {
-  const allIds = filteredUpstreamModels.value
+  const allIds = filteredUpstreamModels.value.map(m => m.id)
   if (isAllUpstreamModelsSelected.value) {
     selectedModels.value = selectedModels.value.filter(id => !allIds.includes(id))
   } else {
@@ -495,9 +517,9 @@ function toggleAllUpstreamModels() {
 }
 
 // 处理上游模型点击（自动同步模式下禁用）
-function handleUpstreamModelClick(model: string) {
+function handleUpstreamModelClick(model: UpstreamModelInfo) {
   if (!isAutoFetchMode.value) {
-    toggleModel(model)
+    toggleModel(model.id)
   }
 }
 
