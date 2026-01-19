@@ -206,6 +206,13 @@ export interface ModelSummary {
   tokens_per_request: number
 }
 
+export interface ProviderSummary {
+  provider: string
+  requests: number
+  tokens: number
+  cost: number
+}
+
 export interface DailyStat {
   date: string // ISO date string
   requests: number
@@ -220,6 +227,7 @@ export interface DailyStat {
 export interface DailyStatsResponse {
   daily_stats: DailyStat[]
   model_summary: ModelSummary[]
+  provider_summary: ProviderSummary[]
   period: {
     start_date: string
     end_date: string

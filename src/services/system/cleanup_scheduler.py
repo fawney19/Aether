@@ -288,6 +288,10 @@ class CleanupScheduler:
                                     StatsAggregatorService.aggregate_daily_model_stats(
                                         db, current_date_local
                                     )
+                                # 供应商统计在任一缺失时都回填
+                                StatsAggregatorService.aggregate_daily_provider_stats(
+                                    db, current_date_local
+                                )
                                 # 用户统计在任一缺失时都回填
                                 for (user_id,) in users:
                                     try:
@@ -329,6 +333,7 @@ class CleanupScheduler:
 
                 StatsAggregatorService.aggregate_daily_stats(db, yesterday_local)
                 StatsAggregatorService.aggregate_daily_model_stats(db, yesterday_local)
+                StatsAggregatorService.aggregate_daily_provider_stats(db, yesterday_local)
 
                 users = db.query(DBUser.id).filter(DBUser.is_active.is_(True)).all()
                 for (user_id,) in users:

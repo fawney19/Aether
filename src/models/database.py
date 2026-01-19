@@ -1706,6 +1706,50 @@ class StatsDailyModel(Base):
     )
 
 
+class StatsDailyProvider(Base):
+    """每日供应商统计快照 - 用于快速查询每日供应商维度数据"""
+
+    __tablename__ = "stats_daily_provider"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+
+    # 统计日期 (UTC)
+    date = Column(DateTime(timezone=True), nullable=False, index=True)
+
+    # 供应商名称
+    provider_name = Column(String(100), nullable=False)
+
+    # 请求统计
+    total_requests = Column(Integer, default=0, nullable=False)
+
+    # Token 统计
+    input_tokens = Column(BigInteger, default=0, nullable=False)
+    output_tokens = Column(BigInteger, default=0, nullable=False)
+    cache_creation_tokens = Column(BigInteger, default=0, nullable=False)
+    cache_read_tokens = Column(BigInteger, default=0, nullable=False)
+
+    # 成本统计 (USD)
+    total_cost = Column(Float, default=0.0, nullable=False)
+
+    # 时间戳
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    # 唯一约束：每个供应商每天只有一条记录
+    __table_args__ = (
+        UniqueConstraint("date", "provider_name", name="uq_stats_daily_provider"),
+        Index("idx_stats_daily_provider_date", "date"),
+        Index("idx_stats_daily_provider_date_provider", "date", "provider_name"),
+    )
+
+
 class StatsSummary(Base):
     """全局统计汇总 - 单行记录，存储截止到昨天的累计数据"""
 

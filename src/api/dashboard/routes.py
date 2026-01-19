@@ -14,7 +14,7 @@ from src.api.base.pipeline import ApiRequestPipeline
 from src.config.constants import CacheTTL
 from src.core.enums import UserRole
 from src.database import get_db
-from src.models.database import ApiKey, Provider, RequestCandidate, StatsDaily, StatsDailyModel, Usage
+from src.models.database import ApiKey, Provider, RequestCandidate, StatsDaily, StatsDailyModel, StatsDailyProvider, Usage
 from src.models.database import User as DBUser
 from src.services.system.stats_aggregator import StatsAggregatorService
 from src.utils.cache_decorator import cache_result
@@ -1147,9 +1147,97 @@ class DashboardDailyStatsAdapter(DashboardAdapter):
             for item in formatted:
                 item["model_breakdown"] = breakdown.get(item["date"], [])
 
+        # ==================== 供应商统计 ====================
+        if is_admin:
+            # 管理员：使用预聚合数据 + 今日实时数据
+
+            # 历史数据从 stats_daily_provider 获取
+            historical_provider_stats = (
+                db.query(StatsDailyProvider)
+                .filter(and_(StatsDailyProvider.date >= start_date, StatsDailyProvider.date < today))
+                .all()
+            )
+
+            # 按供应商汇总历史数据
+            provider_agg: dict[str, dict[str, int | float]] = {}
+            for stat in historical_provider_stats:
+                provider = stat.provider_name or "Unknown"
+                if provider not in provider_agg:
+                    provider_agg[provider] = {"requests": 0, "tokens": 0, "cost": 0.0}
+                provider_agg[provider]["requests"] += stat.total_requests
+                tokens = (stat.input_tokens + stat.output_tokens +
+                          stat.cache_creation_tokens + stat.cache_read_tokens)
+                provider_agg[provider]["tokens"] += tokens
+                provider_agg[provider]["cost"] += stat.total_cost
+
+            # 今日实时供应商统计
+            today_provider_stats = (
+                db.query(
+                    Usage.provider_name,
+                    func.count(Usage.id).label("requests"),
+                    func.sum(Usage.total_tokens).label("tokens"),
+                    func.sum(Usage.total_cost_usd).label("cost"),
+                )
+                .filter(Usage.created_at >= today)
+                .group_by(Usage.provider_name)
+                .all()
+            )
+
+            for stat in today_provider_stats:
+                provider = stat.provider_name or "Unknown"
+                if provider not in provider_agg:
+                    provider_agg[provider] = {"requests": 0, "tokens": 0, "cost": 0.0}
+                provider_agg[provider]["requests"] += stat.requests or 0
+                provider_agg[provider]["tokens"] += int(stat.tokens or 0)
+                provider_agg[provider]["cost"] += float(stat.cost or 0)
+
+            # 构建 provider_summary
+            provider_summary = [
+                {
+                    "provider": provider,
+                    "requests": agg["requests"],
+                    "tokens": agg["tokens"],
+                    "cost": agg["cost"],
+                }
+                for provider, agg in provider_agg.items()
+            ]
+            provider_summary.sort(key=lambda x: x["cost"], reverse=True)
+
+        else:
+            # 普通用户：实时查询
+            provider_stats = (
+                db.query(
+                    Usage.provider_name,
+                    func.count(Usage.id).label("requests"),
+                    func.sum(Usage.total_tokens).label("tokens"),
+                    func.sum(Usage.total_cost_usd).label("cost"),
+                )
+                .filter(
+                    and_(
+                        Usage.user_id == user.id,
+                        Usage.created_at >= start_date,
+                        Usage.created_at <= end_date
+                    )
+                )
+                .group_by(Usage.provider_name)
+                .order_by(func.sum(Usage.total_cost_usd).desc())
+                .all()
+            )
+
+            provider_summary = [
+                {
+                    "provider": stat.provider_name or "Unknown",
+                    "requests": stat.requests or 0,
+                    "tokens": int(stat.tokens or 0),
+                    "cost": float(stat.cost or 0),
+                }
+                for stat in provider_stats
+            ]
+
         return {
             "daily_stats": formatted,
             "model_summary": model_summary,
+            "provider_summary": provider_summary,
             "period": {
                 "start_date": start_date.date().isoformat(),
                 "end_date": end_date.date().isoformat(),
