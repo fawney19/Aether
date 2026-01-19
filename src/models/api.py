@@ -237,7 +237,7 @@ class CreateUserRequest(BaseModel):
 
     username: str = Field(..., min_length=2, max_length=50, description="用户名")
     password: str = Field(..., min_length=6, max_length=128, description="密码")
-    email: str = Field(..., min_length=3, max_length=255, description="邮箱地址")
+    email: Optional[str] = Field(None, max_length=255, description="邮箱地址（可选）")
     role: Optional[UserRole] = Field(UserRole.USER, description="用户角色")
     quota_usd: Optional[float] = Field(default=None, description="USD配额，null表示使用系统默认配额")
     unlimited: bool = Field(default=False, description="是否无限配额")
@@ -254,13 +254,15 @@ class CreateUserRequest(BaseModel):
             raise ValueError("配额必须在 0-10000 范围内")
         return v
 
-    @classmethod
     @field_validator("email")
+    @classmethod
     def validate_email(cls, v):
-        """验证邮箱格式"""
+        """验证邮箱格式（如果提供）"""
+        if v is None:
+            return None
         v = v.strip()
         if not v:
-            raise ValueError("邮箱不能为空")
+            return None
         email_pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
         if not re.match(email_pattern, v):
             raise ValueError("邮箱格式无效")
