@@ -601,7 +601,11 @@ async function loadOAuthBindings() {
 function handleBind(providerType: string) {
   // 保存返回路径（OAuth callback 会读取）
   sessionStorage.setItem('redirectPath', route.fullPath)
-  window.location.href = getApiUrl(`/api/user/oauth/${providerType}/bind`)
+  // 浏览器跳转无法携带 Authorization header，需要通过 query 参数传递 token
+  const token = localStorage.getItem('access_token')
+  const bindUrl = getApiUrl(`/api/user/oauth/${providerType}/bind`)
+  const separator = bindUrl.includes('?') ? '&' : '?'
+  window.location.href = token ? `${bindUrl}${separator}access_token=${encodeURIComponent(token)}` : bindUrl
 }
 
 async function handleUnbind(providerType: string) {

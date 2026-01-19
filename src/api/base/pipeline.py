@@ -255,15 +255,28 @@ class ApiRequestPipeline:
     async def _authenticate_user(
         self, request: Request, db: Session
     ) -> Tuple[User, Optional["ManagementToken"]]:
-        """用户认证，支持 JWT 和 Management Token 两种方式"""
+        """用户认证，支持 JWT 和 Management Token 两种方式
+
+        认证来源优先级：
+        1. Authorization header (Bearer token)
+        2. URL query parameter (access_token) - 用于浏览器直接跳转场景如 OAuth 绑定
+        """
         from src.models.database import ManagementToken
         from src.utils.request_utils import get_client_ip
 
-        authorization = request.headers.get("authorization")
-        if not authorization or not authorization.lower().startswith("bearer "):
-            raise HTTPException(status_code=401, detail="缺少用户凭证")
+        token: Optional[str] = None
 
-        token = authorization[7:].strip()
+        # 优先从 Authorization header 获取
+        authorization = request.headers.get("authorization")
+        if authorization and authorization.lower().startswith("bearer "):
+            token = authorization[7:].strip()
+
+        # 如果 header 中没有，尝试从 query 参数获取（用于浏览器跳转场景）
+        if not token:
+            token = request.query_params.get("access_token")
+
+        if not token:
+            raise HTTPException(status_code=401, detail="缺少用户凭证")
 
         # 检查是否为 Management Token（ae_ 前缀）
         if token.startswith(ManagementToken.TOKEN_PREFIX):
