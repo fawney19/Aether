@@ -122,6 +122,26 @@
                   停用
                 </Badge>
               </div>
+              <!-- API 格式标签 -->
+              <div
+                v-if="provider.api_formats?.length"
+                class="flex items-center gap-1 shrink-0"
+              >
+                <span
+                  v-for="fmt in provider.api_formats"
+                  :key="fmt"
+                  class="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground"
+                >
+                  {{ API_FORMAT_SHORT[fmt] || fmt }}
+                </span>
+              </div>
+              <!-- 余额显示-->
+              <span
+                v-if="formatBalanceDisplay(provider.id)"
+                class="text-xs shrink-0"
+              >
+                <span class="font-semibold text-foreground/90">{{ formatBalanceDisplay(provider.id) }}</span>
+              </span>
             </div>
           </div>
         </div>
@@ -416,6 +436,8 @@ import { useToast } from '@/composables/useToast'
 import { updateProvider, updateProviderKey } from '@/api/endpoints'
 import type { ProviderWithEndpointsSummary } from '@/api/endpoints'
 import { adminApi } from '@/api/admin'
+import { batchQueryBalance, type ActionResultResponse, type BalanceInfo } from '@/api/providerOps'
+import { API_FORMAT_SHORT } from '@/api/endpoints/types'
 
 interface KeyWithMeta {
   id: string
@@ -482,6 +504,60 @@ const editingProviderPriority = ref<string | null>(null)  // providerId
 // 调度模式状态
 const schedulingMode = ref<'fixed_order' | 'load_balance' | 'cache_affinity'>('cache_affinity')
 
+// 余额数据缓存 {providerId: ActionResultResponse}
+const balanceCache = ref<Record<string, ActionResultResponse>>({})
+
+// 类型守卫函数
+function isBalanceInfo(data: unknown): data is BalanceInfo {
+  return data !== null && typeof data === 'object' && 'total_available' in data
+}
+
+// 获取 provider 的余额显示
+function getProviderBalance(providerId: string): { available: number | null; currency: string } | null {
+  const result = balanceCache.value[providerId]
+  if (!result || result.status !== 'success' || !result.data) {
+    return null
+  }
+  if (!isBalanceInfo(result.data)) {
+    return null
+  }
+  return {
+    available: result.data.total_available,
+    currency: result.data.currency || 'USD'
+  }
+}
+
+// 格式化余额显示
+function formatBalanceDisplay(providerId: string): string {
+  const balance = getProviderBalance(providerId)
+  if (!balance || balance.available == null) {
+    return ''
+  }
+  const symbol = balance.currency === 'USD' ? '$' : balance.currency
+  return `${symbol}${balance.available.toFixed(2)}`
+}
+
+// 异步加载余额数据（使用批量接口）
+async function loadBalances() {
+  try {
+    const opsProviderIds = sortedProviders.value
+      .filter(p => p.ops_configured)
+      .map(p => p.id)
+    if (opsProviderIds.length === 0) return
+
+    const results = await batchQueryBalance(opsProviderIds)
+
+    // 将成功的结果存入缓存
+    for (const [providerId, result] of Object.entries(results)) {
+      if (result.status === 'success') {
+        balanceCache.value[providerId] = result
+      }
+    }
+  } catch (e) {
+    console.warn('[loadBalances] 加载余额数据失败:', e)
+  }
+}
+
 // 可用的 API 格式
 const availableFormats = computed(() => {
   return Object.keys(keysByFormat.value).sort()
@@ -499,6 +575,8 @@ watch(internalOpen, async (open) => {
   if (open) {
     await loadCurrentPriorityMode()
     await loadKeysByFormat()
+    // 异步加载余额数据
+    loadBalances()
   }
 })
 
