@@ -208,7 +208,7 @@ class CleanupScheduler:
                         return
 
                     # 非首次运行，检查最近是否有缺失的日期需要回填
-                    from src.models.database import StatsDailyModel
+                    from src.models.database import StatsDailyModel, StatsDailyProvider
 
                     yesterday_business_date = today_local.date() - timedelta(days=1)
                     max_backfill_days: int = SystemConfigService.get_config(
@@ -223,6 +223,7 @@ class CleanupScheduler:
                     # 获取 StatsDaily 和 StatsDailyModel 中已有数据的日期集合
                     existing_daily_dates = set()
                     existing_model_dates = set()
+                    existing_provider_dates = set()
 
                     daily_stats = (
                         db.query(StatsDaily.date)
@@ -245,6 +246,17 @@ class CleanupScheduler:
                             stat_date = stat_date.replace(tzinfo=timezone.utc)
                         existing_model_dates.add(stat_date.astimezone(app_tz).date())
 
+                    provider_stats = (
+                        db.query(StatsDailyProvider.date)
+                        .filter(StatsDailyProvider.date >= check_start_date.isoformat())
+                        .distinct()
+                        .all()
+                    )
+                    for (stat_date,) in provider_stats:
+                        if stat_date.tzinfo is None:
+                            stat_date = stat_date.replace(tzinfo=timezone.utc)
+                        existing_provider_dates.add(stat_date.astimezone(app_tz).date())
+
                     # 找出需要回填的日期
                     all_dates = set()
                     current = check_start_date
@@ -256,15 +268,18 @@ class CleanupScheduler:
                     missing_daily_dates = all_dates - existing_daily_dates
                     # 需要回填 StatsDailyModel 的日期
                     missing_model_dates = all_dates - existing_model_dates
+                    # 需要回填 StatsDailyProvider 的日期
+                    missing_provider_dates = all_dates - existing_provider_dates
                     # 合并所有需要处理的日期
-                    dates_to_process = missing_daily_dates | missing_model_dates
+                    dates_to_process = missing_daily_dates | missing_model_dates | missing_provider_dates
 
                     if dates_to_process:
                         sorted_dates = sorted(dates_to_process)
                         logger.info(
                             f"检测到 {len(dates_to_process)} 天的统计数据需要回填 "
                             f"(StatsDaily 缺失 {len(missing_daily_dates)} 天, "
-                            f"StatsDailyModel 缺失 {len(missing_model_dates)} 天)"
+                            f"StatsDailyModel 缺失 {len(missing_model_dates)} 天, "
+                            f"StatsDailyProvider 缺失 {len(missing_provider_dates)} 天)"
                         )
 
                         users = (
@@ -288,10 +303,10 @@ class CleanupScheduler:
                                     StatsAggregatorService.aggregate_daily_model_stats(
                                         db, current_date_local
                                     )
-                                # 供应商统计在任一缺失时都回填
-                                StatsAggregatorService.aggregate_daily_provider_stats(
-                                    db, current_date_local
-                                )
+                                if current_date in missing_provider_dates:
+                                    StatsAggregatorService.aggregate_daily_provider_stats(
+                                        db, current_date_local
+                                    )
                                 # 用户统计在任一缺失时都回填
                                 for (user_id,) in users:
                                     try:
