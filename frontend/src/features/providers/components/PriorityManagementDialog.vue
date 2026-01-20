@@ -122,26 +122,30 @@
                   停用
                 </Badge>
               </div>
-              <!-- API 格式标签 -->
-              <div
-                v-if="provider.api_formats?.length"
-                class="flex items-center gap-1 shrink-0"
-              >
-                <span
-                  v-for="fmt in provider.api_formats"
-                  :key="fmt"
-                  class="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground"
-                >
-                  {{ API_FORMAT_SHORT[fmt] || fmt }}
-                </span>
+              <div class="flex items-center gap-3 shrink-0 ml-2">
+                <!-- API 格式标签 (自适应宽度) -->
+                <div class="flex items-center justify-end gap-1">
+                  <template v-if="provider.api_formats?.length">
+                    <span
+                      v-for="fmt in provider.api_formats"
+                      :key="fmt"
+                      class="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground whitespace-nowrap"
+                    >
+                      {{ API_FORMAT_SHORT[fmt] || fmt }}
+                    </span>
+                  </template>
+                </div>
+                
+                <!-- 余额显示 (表格对齐) -->
+                <div class="min-w-[4rem] text-right">
+                  <span
+                    v-if="formatBalanceDisplay(provider.id)"
+                    class="text-xs font-semibold text-foreground/90 tabular-nums"
+                  >
+                    {{ formatBalanceDisplay(provider.id) }}
+                  </span>
+                </div>
               </div>
-              <!-- 余额显示-->
-              <span
-                v-if="formatBalanceDisplay(provider.id)"
-                class="text-xs shrink-0"
-              >
-                <span class="font-semibold text-foreground/90">{{ formatBalanceDisplay(provider.id) }}</span>
-              </span>
             </div>
           </div>
         </div>
