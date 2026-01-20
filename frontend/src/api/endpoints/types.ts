@@ -221,6 +221,7 @@ export interface EndpointHealthDetail {
   api_format: string
   health_score: number
   is_active: boolean
+  total_keys?: number
   active_keys?: number
 }
 

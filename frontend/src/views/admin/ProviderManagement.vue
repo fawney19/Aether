@@ -101,19 +101,19 @@
               <TableHead class="w-[18%] min-w-[140px] h-11 font-medium text-foreground/80">
                 提供商信息
               </TableHead>
-              <TableHead class="w-[16%] min-w-[180px] h-11 font-medium text-foreground/80">
+              <TableHead class="w-[20%] min-w-[180px] h-11 font-medium text-foreground/80">
                 余额监控
               </TableHead>
               <TableHead class="w-[12%] min-w-[100px] h-11 font-medium text-foreground/80 text-center">
                 资源统计
               </TableHead>
-              <TableHead class="w-[30%] min-w-[200px] h-11 font-medium text-foreground/80">
+              <TableHead class="w-[24%] min-w-[260px] h-11 font-medium text-foreground/80">
                 端点健康
               </TableHead>
               <TableHead class="w-[8%] min-w-[60px] h-11 font-medium text-foreground/80 text-center">
                 状态
               </TableHead>
-              <TableHead class="w-[16%] min-w-[120px] h-11 font-medium text-foreground/80 text-center">
+              <TableHead class="w-[18%] min-w-[120px] h-11 font-medium text-foreground/80 text-center">
                 操作
               </TableHead>
             </TableRow>
@@ -265,21 +265,33 @@
               <TableCell class="py-3.5 align-middle">
                 <div
                   v-if="provider.endpoint_health_details && provider.endpoint_health_details.length > 0"
-                  class="flex flex-wrap gap-1.5 max-w-[280px]"
+                  class="grid grid-cols-3 gap-x-3 gap-y-2 max-w-[240px]"
                 >
-                  <span
+                  <div
                     v-for="endpoint in sortEndpoints(provider.endpoint_health_details)"
                     :key="endpoint.api_format"
-                    class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10px] font-medium tracking-wide uppercase leading-none"
-                    :class="getEndpointTagClass(endpoint, provider)"
+                    class="flex flex-col gap-1.5"
                     :title="getEndpointTooltip(endpoint, provider)"
                   >
-                    <span
-                      class="w-1.5 h-1.5 rounded-full"
-                      :class="getEndpointDotColor(endpoint, provider)"
-                    />
-                    {{ endpoint.api_format }}
-                  </span>
+                    <!-- 上排：缩写 + 百分比 -->
+                    <div class="flex items-center justify-between text-[10px] leading-none">
+                      <span class="font-medium text-muted-foreground/80">
+                        {{ API_FORMAT_SHORT[endpoint.api_format] || endpoint.api_format.substring(0,2) }}
+                      </span>
+                      <span class="font-medium text-muted-foreground/80">
+                        {{ isEndpointAvailable(endpoint, provider) ? `${(endpoint.health_score * 100).toFixed(0)}%` : '-' }}
+                      </span>
+                    </div>
+
+                    <!-- 下排：进度条 -->
+                    <div class="h-1.5 w-full bg-muted/40 rounded-full overflow-hidden">
+                      <div
+                        class="h-full rounded-full transition-all duration-300"
+                        :class="getEndpointDotColor(endpoint, provider)"
+                        :style="{ width: isEndpointAvailable(endpoint, provider) ? `${Math.max(endpoint.health_score * 100, 5)}%` : '100%' }"
+                      />
+                    </div>
+                  </div>
                 </div>
                 <span
                   v-else
@@ -489,20 +501,33 @@
           <!-- 第三行：端点健康 -->
           <div
             v-if="provider.endpoint_health_details && provider.endpoint_health_details.length > 0"
-            class="flex flex-wrap gap-1.5"
+            class="grid grid-cols-3 gap-x-3 gap-y-2 max-w-[240px]"
           >
-            <span
+            <div
               v-for="endpoint in sortEndpoints(provider.endpoint_health_details)"
               :key="endpoint.api_format"
-              class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10px] font-medium tracking-wide uppercase leading-none"
-              :class="getEndpointTagClass(endpoint, provider)"
+              class="flex flex-col gap-1.5"
+              :title="getEndpointTooltip(endpoint, provider)"
             >
-              <span
-                class="w-1.5 h-1.5 rounded-full"
-                :class="getEndpointDotColor(endpoint, provider)"
-              />
-              {{ endpoint.api_format }}
-            </span>
+              <!-- 上排：缩写 + 百分比 -->
+              <div class="flex items-center justify-between text-[10px] leading-none">
+                <span class="font-medium text-muted-foreground/80">
+                  {{ API_FORMAT_SHORT[endpoint.api_format] || endpoint.api_format.substring(0,2) }}
+                </span>
+                <span class="font-medium text-muted-foreground/80">
+                  {{ isEndpointAvailable(endpoint, provider) ? `${(endpoint.health_score * 100).toFixed(0)}%` : '-' }}
+                </span>
+              </div>
+
+              <!-- 下排：进度条 -->
+              <div class="h-1.5 w-full bg-muted/40 rounded-full overflow-hidden">
+                <div
+                  class="h-full rounded-full transition-all duration-300"
+                  :class="getEndpointDotColor(endpoint, provider)"
+                  :style="{ width: isEndpointAvailable(endpoint, provider) ? `${Math.max(endpoint.health_score * 100, 5)}%` : '100%' }"
+                />
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -584,7 +609,8 @@ import {
   getProvidersSummary,
   deleteProvider,
   updateProvider,
-  type ProviderWithEndpointsSummary
+  type ProviderWithEndpointsSummary,
+  API_FORMAT_SHORT
 } from '@/api/endpoints'
 import { adminApi } from '@/api/admin'
 import { batchQueryBalance, type ActionResultResponse } from '@/api/providerOps'
@@ -902,10 +928,10 @@ function getEndpointTagClass(endpoint: any, provider: ProviderWithEndpointsSumma
   return 'border-border/40 bg-muted/20 text-foreground/70'
 }
 
-// 端点圆点颜色
+// 进度条颜色
 function getEndpointDotColor(endpoint: any, provider: ProviderWithEndpointsSummary): string {
   if (!isEndpointAvailable(endpoint, provider)) {
-    return 'bg-red-400'
+    return 'bg-red-400/50'
   }
   const score = endpoint.health_score
   if (score === undefined || score === null) {
@@ -922,8 +948,15 @@ function getEndpointDotColor(endpoint: any, provider: ProviderWithEndpointsSumma
 
 // 端点提示文本
 function getEndpointTooltip(endpoint: any, provider: ProviderWithEndpointsSummary): string {
-  if (provider.active_keys === 0) {
-    return `${endpoint.api_format}: 无可用密钥`
+  if (endpoint.is_active === false) {
+    return `${endpoint.api_format}: 端点已禁用`
+  }
+  if (endpoint.active_keys === 0) {
+    // 区分：有密钥但全部禁用 vs 未配置任何密钥
+    if ((endpoint.total_keys ?? 0) > 0) {
+      return `${endpoint.api_format}: 无可用密钥`
+    }
+    return `${endpoint.api_format}: 未配置密钥`
   }
   const score = endpoint.health_score
   if (score === undefined || score === null) {
