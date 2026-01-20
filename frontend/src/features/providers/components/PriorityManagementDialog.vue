@@ -4,7 +4,7 @@
     title="优先级管理"
     description="调整提供商和 API Key 的优先级顺序，保存后自动切换对应的调度策略"
     :icon="ListOrdered"
-    size="3xl"
+    size="2xl"
     @update:model-value="handleDialogUpdate"
   >
     <div class="space-y-4">
@@ -39,7 +39,7 @@
       </div>
 
       <!-- 内容区域 -->
-      <div class="min-h-[420px]">
+      <div class="min-h-[70vh]">
         <!-- 提供商优先级 -->
         <div
           v-show="activeMainTab === 'provider'"
@@ -63,12 +63,12 @@
           <!-- 提供商列表 -->
           <div
             v-else
-            class="space-y-2 max-h-[380px] overflow-y-auto pr-1"
+            class="space-y-1 max-h-[65vh] overflow-y-auto pr-1"
           >
             <div
               v-for="(provider, index) in sortedProviders"
               :key="provider.id"
-              class="group flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-all duration-200"
+              class="group flex items-center gap-3 px-3 py-1.5 rounded-lg border transition-all duration-200"
               :class="[
                 draggedProvider === index
                   ? 'border-primary/50 bg-primary/5 shadow-md scale-[1.01]'
@@ -209,7 +209,7 @@
               >
                 <div
                   v-if="keysByFormat[format]?.length > 0"
-                  class="space-y-2 max-h-[380px] overflow-y-auto pr-1"
+                  class="space-y-2 max-h-[65vh] overflow-y-auto pr-1"
                 >
                   <div
                     v-for="(key, index) in keysByFormat[format]"
