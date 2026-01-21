@@ -271,7 +271,7 @@
                     v-for="endpoint in sortEndpoints(provider.endpoint_health_details)"
                     :key="endpoint.api_format"
                     class="flex flex-col gap-1.5"
-                    :title="getEndpointTooltip(endpoint, provider)"
+                    :title="getEndpointTooltip(endpoint)"
                   >
                     <!-- 上排：缩写 + 百分比 -->
                     <div class="flex items-center justify-between text-[10px] leading-none">
@@ -279,16 +279,16 @@
                         {{ API_FORMAT_SHORT[endpoint.api_format] || endpoint.api_format.substring(0,2) }}
                       </span>
                       <span class="font-medium text-muted-foreground/80">
-                        {{ isEndpointAvailable(endpoint, provider) ? `${(endpoint.health_score * 100).toFixed(0)}%` : '-' }}
+                        {{ isEndpointAvailable(endpoint) ? `${(endpoint.health_score * 100).toFixed(0)}%` : '-' }}
                       </span>
                     </div>
 
                     <!-- 下排：进度条 -->
-                    <div class="h-1.5 w-full bg-muted/40 rounded-full overflow-hidden">
+                    <div class="h-1.5 w-full bg-border dark:bg-border/80 rounded-full overflow-hidden">
                       <div
                         class="h-full rounded-full transition-all duration-300"
-                        :class="getEndpointDotColor(endpoint, provider)"
-                        :style="{ width: isEndpointAvailable(endpoint, provider) ? `${Math.max(endpoint.health_score * 100, 5)}%` : '100%' }"
+                        :class="getEndpointDotColor(endpoint)"
+                        :style="{ width: isEndpointAvailable(endpoint) ? `${Math.max(endpoint.health_score * 100, 5)}%` : '100%' }"
                       />
                     </div>
                   </div>
@@ -507,7 +507,7 @@
               v-for="endpoint in sortEndpoints(provider.endpoint_health_details)"
               :key="endpoint.api_format"
               class="flex flex-col gap-1.5"
-              :title="getEndpointTooltip(endpoint, provider)"
+              :title="getEndpointTooltip(endpoint)"
             >
               <!-- 上排：缩写 + 百分比 -->
               <div class="flex items-center justify-between text-[10px] leading-none">
@@ -515,16 +515,16 @@
                   {{ API_FORMAT_SHORT[endpoint.api_format] || endpoint.api_format.substring(0,2) }}
                 </span>
                 <span class="font-medium text-muted-foreground/80">
-                  {{ isEndpointAvailable(endpoint, provider) ? `${(endpoint.health_score * 100).toFixed(0)}%` : '-' }}
+                  {{ isEndpointAvailable(endpoint) ? `${(endpoint.health_score * 100).toFixed(0)}%` : '-' }}
                 </span>
               </div>
 
               <!-- 下排：进度条 -->
-              <div class="h-1.5 w-full bg-muted/40 rounded-full overflow-hidden">
+              <div class="h-1.5 w-full bg-border dark:bg-border/80 rounded-full overflow-hidden">
                 <div
                   class="h-full rounded-full transition-all duration-300"
-                  :class="getEndpointDotColor(endpoint, provider)"
-                  :style="{ width: isEndpointAvailable(endpoint, provider) ? `${Math.max(endpoint.health_score * 100, 5)}%` : '100%' }"
+                  :class="getEndpointDotColor(endpoint)"
+                  :style="{ width: isEndpointAvailable(endpoint) ? `${Math.max(endpoint.health_score * 100, 5)}%` : '100%' }"
                 />
               </div>
             </div>
@@ -911,58 +911,63 @@ function sortEndpoints(endpoints: any[]) {
   })
 }
 
-// 判断端点是否可用（有 key）
-function isEndpointAvailable(endpoint: any, _provider: ProviderWithEndpointsSummary): boolean {
-  // 检查端点是否启用，以及是否有活跃的密钥
+// 端点状态枚举
+type EndpointStatus = 'disabled' | 'no_keys' | 'keys_disabled' | 'available'
+
+// 获取端点状态
+function getEndpointStatus(endpoint: any): EndpointStatus {
   if (endpoint.is_active === false) {
-    return false
+    return 'disabled'
   }
-  return (endpoint.active_keys ?? 0) > 0
+  if ((endpoint.active_keys ?? 0) === 0) {
+    return (endpoint.total_keys ?? 0) > 0 ? 'keys_disabled' : 'no_keys'
+  }
+  return 'available'
 }
 
-// 端点标签样式
-function getEndpointTagClass(endpoint: any, provider: ProviderWithEndpointsSummary): string {
-  if (!isEndpointAvailable(endpoint, provider)) {
-    return 'border-red-300/50 bg-red-50/50 text-red-600/80 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-400/80'
-  }
-  return 'border-border/40 bg-muted/20 text-foreground/70'
+// 判断端点是否可用
+function isEndpointAvailable(endpoint: any): boolean {
+  return getEndpointStatus(endpoint) === 'available'
 }
 
-// 进度条颜色
-function getEndpointDotColor(endpoint: any, provider: ProviderWithEndpointsSummary): string {
-  if (!isEndpointAvailable(endpoint, provider)) {
-    return 'bg-red-400/50'
-  }
-  const score = endpoint.health_score
+// 根据健康分数获取颜色
+function getHealthScoreColor(score: number | undefined | null): string {
   if (score === undefined || score === null) {
     return 'bg-muted-foreground/40'
   }
-  if (score >= 0.8) {
-    return 'bg-green-500'
-  }
-  if (score >= 0.5) {
-    return 'bg-amber-500'
-  }
+  if (score >= 0.8) return 'bg-green-500'
+  if (score >= 0.5) return 'bg-amber-500'
   return 'bg-red-500'
 }
 
+// 端点不可用时进度条颜色
+function getEndpointDotColor(endpoint: any): string {
+  if (!isEndpointAvailable(endpoint)) {
+    return 'bg-muted-foreground/40'
+  }
+  return getHealthScoreColor(endpoint.health_score)
+}
+
 // 端点提示文本
-function getEndpointTooltip(endpoint: any, provider: ProviderWithEndpointsSummary): string {
-  if (endpoint.is_active === false) {
-    return `${endpoint.api_format}: 端点已禁用`
-  }
-  if (endpoint.active_keys === 0) {
-    // 区分：有密钥但全部禁用 vs 未配置任何密钥
-    if ((endpoint.total_keys ?? 0) > 0) {
-      return `${endpoint.api_format}: 无可用密钥`
+function getEndpointTooltip(endpoint: any): string {
+  const format = endpoint.api_format
+  const status = getEndpointStatus(endpoint)
+
+  switch (status) {
+    case 'disabled':
+      return `${format}: 端点已禁用`
+    case 'no_keys':
+      return `${format}: 未配置密钥`
+    case 'keys_disabled':
+      return `${format}: 无可用密钥`
+    case 'available': {
+      const score = endpoint.health_score
+      if (score === undefined || score === null) {
+        return `${format}: 暂无健康数据`
+      }
+      return `${format}: 健康度 ${(score * 100).toFixed(0)}%`
     }
-    return `${endpoint.api_format}: 未配置密钥`
   }
-  const score = endpoint.health_score
-  if (score === undefined || score === null) {
-    return `${endpoint.api_format}: 暂无健康数据`
-  }
-  return `${endpoint.api_format}: 健康度 ${(score * 100).toFixed(0)}%`
 }
 
 // 配额已用颜色（根据使用比例）
