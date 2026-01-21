@@ -61,7 +61,8 @@ class ThinkingRectifier:
                 rectified_body["messages"] = rectified_messages
                 modified = True
 
-        # 2. 条件删除顶层 thinking 参数
+        # 2. 条件删除顶层 thinking 参数（使用整流后的 messages 判断）
+        # 与 cc-switch 行为一致：在整流 messages 之后获取快照进行判断
         if ThinkingRectifier._should_remove_top_level_thinking(rectified_body, rectified_body.get("messages", [])):
             if "thinking" in rectified_body:
                 del rectified_body["thinking"]
@@ -141,14 +142,12 @@ class ThinkingRectifier:
         """
         判断是否应该删除顶层 thinking 参数
 
-        条件（全部满足才删除）：
-        1. thinking 参数存在且已启用
-        2. 存在任一 assistant 消息满足：首块非 thinking/redacted_thinking 且含 tool_use
+        与 cc-switch 行为一致：只检查最后一条 assistant 消息
 
         设计思路：
-        - Claude API 要求：启用 thinking 时，所有含 tool_use 的 assistant 消息必须以 thinking 块开头
-        - 整流后所有 thinking 块被移除，如果原来有 tool_use，必然违反上述要求
-        - 因此只要检测到任一 assistant 有 tool_use，就需要禁用 thinking 参数
+        - 传入的 messages 是整流后的状态，thinking 块已被移除
+        - Claude API 只校验最后一条 assistant 消息的结构
+        - 如果最后一条有 tool_use 但首块不是 thinking，需要禁用 thinking 参数
 
         Args:
             body: 请求体
@@ -162,43 +161,48 @@ class ThinkingRectifier:
         if not isinstance(thinking_param, dict) or thinking_param.get("type") != "enabled":
             return False
 
-        # 条件 2: 扫描所有 assistant 消息
-        # 整流后 thinking 块已被移除，只需检查是否有 tool_use
-        for message in messages:
-            # 类型保护：跳过非 dict 消息
-            if not isinstance(message, dict):
-                continue
+        # 类型保护：确保 messages 是 list
+        if not isinstance(messages, list) or not messages:
+            return False
 
-            if message.get("role") != "assistant":
-                continue
+        # 条件 2: 找到最后一条 assistant 消息
+        last_assistant = None
+        for message in reversed(messages):
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                last_assistant = message
+                break
 
-            content = message.get("content")
-            if not isinstance(content, list):
-                continue
+        if not last_assistant:
+            return False
 
-            # 检查首块是否为 thinking/redacted_thinking
-            first_block_is_thinking = False
-            if len(content) > 0:
-                first_block = content[0]
-                if isinstance(first_block, dict):
-                    first_type = first_block.get("type")
-                    if first_type in ("thinking", "redacted_thinking"):
-                        first_block_is_thinking = True
+        content = last_assistant.get("content")
+        if not isinstance(content, list) or not content:
+            return False
 
-            # 检查是否有 tool_use
-            has_tool_use = any(
-                isinstance(block, dict) and block.get("type") == "tool_use"
-                for block in content
+        # 检查首块是否为 thinking/redacted_thinking
+        first_block = content[0]
+        first_is_thinking = (
+            isinstance(first_block, dict) and
+            first_block.get("type") in ("thinking", "redacted_thinking")
+        )
+
+        # 如果首块是 thinking，不需要禁用（结构正确）
+        if first_is_thinking:
+            return False
+
+        # 检查是否有 tool_use
+        has_tool_use = any(
+            isinstance(block, dict) and block.get("type") == "tool_use"
+            for block in content
+        )
+
+        # 最后一条 assistant 有 tool_use 但首块不是 thinking → 需要禁用 thinking
+        if has_tool_use:
+            logger.info(
+                "ThinkingRectifier: 最后一条 assistant 消息有 tool_use 但无 thinking 前缀，"
+                "需要禁用 thinking 参数"
             )
+            return True
 
-            # 如果该 assistant 消息有 tool_use 但首块不是 thinking，需要禁用 thinking
-            if has_tool_use and not first_block_is_thinking:
-                logger.info(
-                    "ThinkingRectifier: 检测到 assistant 消息有 tool_use 但无 thinking 前缀，"
-                    "需要禁用 thinking 参数"
-                )
-                return True
-
-        # 没有发现需要禁用的情况
-        logger.debug("ThinkingRectifier: 所有 assistant 消息结构正常，保留 thinking 参数")
+        logger.debug("ThinkingRectifier: 最后一条 assistant 消息结构正常，保留 thinking 参数")
         return False

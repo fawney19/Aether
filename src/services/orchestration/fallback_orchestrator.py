@@ -719,6 +719,7 @@ class FallbackOrchestrator:
                     # 检查是否刚完成整流，需要额外重试一次
                     if request_body_ref and request_body_ref.get("_rectified_this_turn", False):
                         # 清除标记，允许额外重试一次
+                        # 注：必须用 +2 而非 +1，因为 retry_index 会在后面 +1，需要确保整流后的请求能发出
                         request_body_ref["_rectified_this_turn"] = False
                         max_retries_for_candidate = max(max_retries_for_candidate, retry_index + 2)
                         logger.debug(f"  [{request_id}] 整流后扩展重试次数至 {max_retries_for_candidate}")
