@@ -462,6 +462,28 @@
         </div>
       </CardSection>
 
+      <!-- 多供应商兼容 -->
+      <CardSection
+        title="多供应商兼容"
+        description="处理多供应商场景下的 Thinking 块签名兼容性问题"
+      >
+        <!-- 功能说明 -->
+        <div class="p-4 bg-muted/50 rounded-lg">
+          <div class="text-sm text-muted-foreground space-y-3">
+            <p>当使用多个供应商时，Thinking 块的签名可能导致跨供应商请求失败。</p>
+
+            <div class="p-3 bg-green-500/10 border border-green-500/20 rounded">
+              <p class="font-medium text-green-700 dark:text-green-400">✓ 自动整流（默认启用，无需配置）</p>
+              <p class="mt-1 text-xs">当遇到签名或结构错误时，系统会<strong>自动整流</strong>请求（移除 Thinking 块）并重试一次。</p>
+            </div>
+
+            <p class="text-xs text-muted-foreground/80">
+              整流过程中移除的 Thinking 块不会影响模型的上下文理解，因为 Thinking 内容是模型的内部推理过程。
+            </p>
+          </div>
+        </div>
+      </CardSection>
+
       <!-- 系统版本信息 -->
       <CardSection
         title="系统信息"

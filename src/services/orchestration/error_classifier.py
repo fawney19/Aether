@@ -152,6 +152,31 @@ class ErrorClassifier:
         "not available for this model",  # 此模型不可用
     )
 
+    # Thinking 块相关错误模式 - 这类错误需要清洗 thinking 块或调整请求
+    # 重命名为 THINKING_ERROR_PATTERNS，覆盖签名错误和结构错误
+    THINKING_ERROR_PATTERNS: Tuple[str, ...] = (
+        # 签名错误
+        "invalid `signature` in `thinking` block",
+        "invalid signature in thinking block",
+        "thinking.signature: field required",
+        "thinking.signature",  # 简短匹配，能匹配 messages.X.content.X.thinking.signature
+        "signature verification failed",
+        # 结构错误（cc-switch 新增场景）
+        # 使用更精确的模式避免误判，同时覆盖有/无反引号的变体
+        "must start with a thinking block",
+        "expected thinking or redacted_thinking",
+        "expected `thinking`",
+        "expected thinking, found tool_use",      # 无反引号变体
+        "expected thinking, found `tool_use`",    # 带反引号变体
+        "expected thinking, found text",          # 无反引号变体
+        "expected thinking, found `text`",        # 带反引号变体
+        "expected redacted_thinking, found",      # redacted_thinking 变体
+        "expected `redacted_thinking`, found",    # 带反引号变体
+    )
+
+    # 保留旧名称别名以保持向后兼容
+    SIGNATURE_ERROR_PATTERNS = THINKING_ERROR_PATTERNS
+
     def _parse_error_response(self, error_text: Optional[str]) -> Dict[str, Any]:
         """
         解析错误响应为结构化数据
@@ -295,6 +320,28 @@ class ErrorClassifier:
 
         search_text = error_text.lower()
         return any(pattern.lower() in search_text for pattern in self.COMPATIBILITY_ERROR_PATTERNS)
+
+    def _is_thinking_error(self, error_text: Optional[str]) -> bool:
+        """
+        检测错误响应是否为 Thinking 块相关错误（签名错误或结构错误）
+
+        这类错误通常发生在：
+        1. 多供应商场景下，当一个供应商生成的 thinking 块被发送到另一个供应商时，签名验证会失败
+        2. 请求体中有 tool_use 但没有以 thinking 块开头时，Claude 会报结构错误
+
+        Args:
+            error_text: 错误响应文本
+
+        Returns:
+            是否为 Thinking 相关错误
+        """
+        if not error_text:
+            return False
+        search_text = error_text.lower()
+        return any(p.lower() in search_text for p in self.THINKING_ERROR_PATTERNS)
+
+    # 保留旧方法名别名以保持向后兼容
+    _is_signature_error = _is_thinking_error
 
     def _extract_error_message(self, error_text: Optional[str]) -> Optional[str]:
         """
@@ -458,6 +505,16 @@ class ErrorClassifier:
                     if error.response and error.response.headers.get("retry-after")
                     else None
                 ),
+            )
+
+        # 400 错误：检查是否为 Thinking 块签名错误
+        if status == 400 and self._is_signature_error(error_response_text):
+            from src.core.exceptions import ThinkingSignatureException
+            logger.info(f"检测到 Thinking 块签名错误: {extracted_message}")
+            return ThinkingSignatureException(
+                message=extracted_message or "Thinking block signature validation failed",
+                provider_name=provider_name,
+                upstream_error=error_response_text,
             )
 
         # 400 错误：先检查是否为 Provider 兼容性错误（应触发故障转移）

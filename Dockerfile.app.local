@@ -141,7 +141,7 @@ RUN mkdir -p /var/log/supervisor /app/logs /app/data
 
 # 入口脚本（启动前执行迁移）
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
 # 环境变量
 ENV PYTHONUNBUFFERED=1 \

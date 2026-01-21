@@ -530,6 +530,25 @@ class UpstreamClientException(ProxyException):
         )
 
 
+class ThinkingSignatureException(UpstreamClientException):
+    """Thinking 块签名验证失败异常"""
+    def __init__(
+        self,
+        message: str,
+        provider_name: Optional[str] = None,
+        upstream_error: Optional[str] = None,
+        request_metadata: Any = None,
+    ):
+        super().__init__(
+            message=message,
+            provider_name=provider_name,
+            status_code=400,
+            error_type="thinking_signature_error",
+            upstream_error=upstream_error,
+            request_metadata=request_metadata,
+        )
+
+
 class ErrorResponse:
     """统一的错误响应格式化器"""
 

@@ -56,6 +56,7 @@ from src.core.exceptions import (
     ProviderNotAvailableException,
     ProviderRateLimitException,
     ProviderTimeoutException,
+    ThinkingSignatureException,
 )
 from src.core.logger import logger
 from src.database import get_db
@@ -303,8 +304,11 @@ class CliMessageHandlerBase(BaseMessageHandler):
         """
         logger.debug(f"开始流式响应处理 ({self.FORMAT_ID})")
 
+        # 使用可变容器，允许 orchestrator 在签名错误时修改请求体
+        request_body_ref: Dict[str, Any] = {"body": original_request_body}
+
         # 使用子类实现的方法提取 model（不同 API 格式的 model 位置不同）
-        model = self.extract_model_from_request(original_request_body, path_params)
+        model = self.extract_model_from_request(request_body_ref["body"], path_params)
 
         # 创建流上下文
         ctx = StreamContext(
@@ -327,7 +331,7 @@ class CliMessageHandlerBase(BaseMessageHandler):
                 provider,
                 endpoint,
                 key,
-                original_request_body,
+                request_body_ref["body"],  # 使用容器中的请求体
                 original_headers,
                 query_params,
                 candidate,
@@ -356,6 +360,7 @@ class CliMessageHandlerBase(BaseMessageHandler):
                 request_id=self.request_id,
                 is_stream=True,
                 capability_requirements=capability_requirements or None,
+                request_body_ref=request_body_ref,  # 传递容器引用
             )
 
             # 更新上下文（确保 provider 信息已设置，用于 streaming 状态更新）
@@ -395,6 +400,12 @@ class CliMessageHandlerBase(BaseMessageHandler):
                 headers=client_headers,
                 background=background_tasks,
             )
+
+        except ThinkingSignatureException as e:
+            # 签名错误：orchestrator 层已处理清洗重试，这里只记录失败
+            self._log_request_error("流式请求失败（签名错误）", e)
+            await self._record_stream_failure(ctx, e, original_headers, original_request_body)
+            raise
 
         except Exception as e:
             self._log_request_error("流式请求失败", e)
@@ -1574,6 +1585,9 @@ class CliMessageHandlerBase(BaseMessageHandler):
         mapped_model_result = None  # 映射后的目标模型名（用于 Usage 记录）
         response_metadata_result: Dict[str, Any] = {}  # Provider 响应元数据
 
+        # 使用可变容器，允许 orchestrator 在签名错误时修改请求体
+        request_body_ref: Dict[str, Any] = {"body": original_request_body}
+
         async def sync_request_func(
             provider: Provider,
             endpoint: ProviderEndpoint,
@@ -1595,9 +1609,9 @@ class CliMessageHandlerBase(BaseMessageHandler):
             # 应用模型映射到请求体（子类可覆盖此方法处理不同格式）
             if mapped_model:
                 mapped_model_result = mapped_model  # 保存映射后的模型名，用于 Usage 记录
-                request_body = self.apply_mapped_model(original_request_body, mapped_model)
+                request_body = self.apply_mapped_model(request_body_ref["body"], mapped_model)
             else:
-                request_body = original_request_body
+                request_body = request_body_ref["body"]
 
             # 准备发送给 Provider 的请求体（子类可覆盖以移除不需要的字段）
             request_body = self.prepare_provider_request_body(request_body)
@@ -1749,6 +1763,7 @@ class CliMessageHandlerBase(BaseMessageHandler):
                 request_func=sync_request_func,
                 request_id=self.request_id,
                 capability_requirements=capability_requirements or None,
+                request_body_ref=request_body_ref,  # 传递容器引用
             )
 
             provider_name = actual_provider_name

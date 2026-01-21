@@ -22,7 +22,7 @@ Chat Handler Base - Chat API 格式的通用基类
 import asyncio
 import json
 from abc import ABC, abstractmethod
-from typing import Any, AsyncGenerator, Callable, Dict, Optional
+from typing import Any, AsyncGenerator, Callable, Dict, Optional, Tuple
 
 import httpx
 from fastapi import BackgroundTasks, Request
@@ -45,6 +45,7 @@ from src.core.exceptions import (
     ProviderNotAvailableException,
     ProviderRateLimitException,
     ProviderTimeoutException,
+    ThinkingSignatureException,
 )
 from src.core.logger import logger
 from src.models.database import (
@@ -287,13 +288,18 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
         original_request_body: Dict[str, Any],
         query_params: Optional[Dict[str, str]] = None,
     ) -> StreamingResponse:
-        """处理流式响应"""
+        """
+        处理流式响应
+        """
         logger.debug(f"开始流式响应处理 ({self.FORMAT_ID})")
 
         # 转换请求格式
         converted_request = await self._convert_request(request)
         model = getattr(converted_request, "model", original_request_body.get("model", "unknown"))
         api_format = self.allowed_api_formats[0]
+
+        # 使用可变容器，允许 orchestrator 在签名错误时修改请求体
+        request_body_ref: Dict[str, Any] = {"body": original_request_body}
 
         # 创建类型安全的流式上下文
         ctx = StreamContext(model=model, api_format=api_format)
@@ -322,7 +328,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 provider,
                 endpoint,
                 key,
-                original_request_body,
+                request_body_ref["body"],  # 使用容器中的请求体
                 original_headers,
                 query_params,
                 candidate,
@@ -351,6 +357,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 request_id=self.request_id,
                 is_stream=True,
                 capability_requirements=capability_requirements or None,
+                request_body_ref=request_body_ref,  # 传递容器引用
             )
 
             # 更新上下文
@@ -399,6 +406,12 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 headers=client_headers,
                 background=background_tasks,
             )
+
+        except ThinkingSignatureException as e:
+            # 签名错误：orchestrator 层已处理清洗重试，这里只记录失败
+            self._log_request_error("流式请求失败（签名错误）", e)
+            await self._record_stream_failure(ctx, e, original_headers, original_request_body)
+            raise
 
         except Exception as e:
             self._log_request_error("流式请求失败", e)
@@ -633,13 +646,18 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
         original_request_body: Dict[str, Any],
         query_params: Optional[Dict[str, str]] = None,
     ) -> JSONResponse:
-        """处理非流式响应"""
+        """
+        处理非流式响应
+        """
         logger.debug(f"开始非流式响应处理 ({self.FORMAT_ID})")
 
         # 转换请求格式
         converted_request = await self._convert_request(request)
         model = getattr(converted_request, "model", original_request_body.get("model", "unknown"))
         api_format = self.allowed_api_formats[0]
+
+        # 使用可变容器，允许 orchestrator 在签名错误时修改请求体
+        request_body_ref: Dict[str, Any] = {"body": original_request_body}
 
         # 用于跟踪的变量
         provider_name: Optional[str] = None
@@ -675,9 +693,9 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             # 应用模型映射
             if mapped_model:
                 mapped_model_result = mapped_model  # 保存映射后的模型名，用于 Usage 记录
-                request_body = self.apply_mapped_model(original_request_body, mapped_model)
+                request_body = self.apply_mapped_model(request_body_ref["body"], mapped_model)
             else:
-                request_body = dict(original_request_body)
+                request_body = dict(request_body_ref["body"])
 
             # 准备发送给 Provider 的请求体（子类可覆盖以移除不需要的字段）
             request_body = self.prepare_provider_request_body(request_body)
@@ -848,6 +866,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 request_func=sync_request_func,
                 request_id=self.request_id,
                 capability_requirements=capability_requirements or None,
+                request_body_ref=request_body_ref,  # 传递容器引用
             )
 
             provider_name = actual_provider_name
@@ -912,6 +931,22 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 content=response_json,
                 headers=client_response_headers,
             )
+
+        except ThinkingSignatureException as e:
+            # 签名错误：orchestrator 层已处理清洗重试，这里只记录失败
+            response_time_ms = self.elapsed_ms()
+            actual_request_body = provider_request_body or original_request_body
+            await self.telemetry.record_failure(
+                provider=provider_name or "unknown",
+                model=model,
+                response_time_ms=response_time_ms,
+                status_code=503,
+                request_headers=original_headers,
+                request_body=actual_request_body,
+                error_message=str(e),
+                is_stream=False,
+            )
+            raise
 
         except Exception as e:
             response_time_ms = self.elapsed_ms()
