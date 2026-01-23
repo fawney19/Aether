@@ -361,13 +361,39 @@
             </div>
           </TableCell>
           <TableCell class="py-4 w-[80px]">
-            <span
+            <div
               v-if="record.api_format"
-              class="inline-flex items-center px-2 py-0.5 rounded-full border border-border/60 text-[10px] font-medium whitespace-nowrap text-muted-foreground"
-              :title="record.api_format"
+              class="flex items-center gap-1"
             >
-              {{ formatApiFormat(record.api_format) }}
-            </span>
+              <span
+                class="inline-flex items-center px-2 py-0.5 rounded-full border border-border/60 text-[10px] font-medium whitespace-nowrap text-muted-foreground"
+                :title="getApiFormatDisplay(record).tooltip"
+              >
+                {{ getApiFormatDisplay(record).text }}
+              </span>
+              <!-- 格式转换标识 -->
+              <span
+                v-if="record.endpoint_api_format && record.api_format.toUpperCase() !== record.endpoint_api_format.toUpperCase()"
+                class="inline-flex items-center justify-center w-4 h-4 text-xs text-violet-600 dark:text-violet-400"
+                :title="`由 ${formatApiFormat(record.endpoint_api_format)} 转换`"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  class="w-3.5 h-3.5"
+                >
+                  <path d="M17 3v10" />
+                  <path d="m21 7-4-4-4 4" />
+                  <path d="M7 21V11" />
+                  <path d="m3 17 4 4 4-4" />
+                </svg>
+              </span>
+            </div>
             <span
               v-else
               class="text-muted-foreground text-xs"
@@ -683,6 +709,29 @@ function formatApiFormat(format: string): string {
     'GEMINI_CLI': 'Gemini CLI',
   }
   return formatMap[format.toUpperCase()] || format
+}
+
+// 获取 API 格式显示信息（包含转换提示）
+function getApiFormatDisplay(record: UsageRecord): { text: string; tooltip: string } {
+  const apiFormat = record.api_format
+  const endpointFormat = record.endpoint_api_format
+
+  if (!apiFormat) {
+    return { text: '-', tooltip: '' }
+  }
+
+  const displayFormat = formatApiFormat(apiFormat)
+
+  // 判断是否发生了格式转换
+  if (endpointFormat && apiFormat.toUpperCase() !== endpointFormat.toUpperCase()) {
+    const endpointDisplayFormat = formatApiFormat(endpointFormat)
+    return {
+      text: displayFormat,
+      tooltip: `用户请求格式: ${displayFormat}\n端点原生格式: ${endpointDisplayFormat}\n系统进行了 ${displayFormat} → ${endpointDisplayFormat} 格式转换`
+    }
+  }
+
+  return { text: displayFormat, tooltip: apiFormat }
 }
 
 // 获取实际使用的模型（优先 target_model，其次 model_version）

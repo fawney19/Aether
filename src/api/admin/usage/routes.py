@@ -844,6 +844,7 @@ class AdminUsageRecordsAdapter(AdminApiAdapter):
                     "has_rectified": rectified_map.get(usage.request_id, False),
                     "api_format": usage.api_format
                     or (endpoint.api_format if endpoint and endpoint.api_format else None),
+                    "endpoint_api_format": endpoint.api_format if endpoint else None,
                     "api_key_name": provider_api_key.name if provider_api_key else None,
                     "request_metadata": usage.request_metadata,  # Provider 响应元数据
                 }
