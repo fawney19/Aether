@@ -21,6 +21,15 @@ from src.models.admin_requests import ProxyConfig
 HeaderRule = dict[str, Any]
 
 
+# ========== Body Rule 类型定义 ==========
+# 请求体规则支持三种操作：
+# - set: 设置/覆盖字段 {"action": "set", "path": "metadata", "value": {"custom": "val"}}
+# - drop: 删除字段 {"action": "drop", "path": "unwanted_field"}
+# - rename: 重命名字段 {"action": "rename", "from": "old_key", "to": "new_key"}
+# 实际验证在 request_builder.py 的 apply_body_rules 中处理
+BodyRule = dict[str, Any]
+
+
 # ========== ProviderEndpoint CRUD ==========
 
 
@@ -41,6 +50,12 @@ class ProviderEndpointCreate(BaseModel):
     header_rules: list[HeaderRule] | None = Field(
         default=None,
         description="请求头规则列表，支持 set/drop/rename 操作",
+    )
+
+    # 请求体配置
+    body_rules: list[BodyRule] | None = Field(
+        default=None,
+        description="请求体规则列表，支持 set/drop/rename 操作",
     )
 
     max_retries: int = Field(default=2, ge=0, le=10, description="最大重试次数")
@@ -93,6 +108,12 @@ class ProviderEndpointUpdate(BaseModel):
         description="请求头规则列表，支持 set/drop/rename 操作",
     )
 
+    # 请求体配置
+    body_rules: list[BodyRule] | None = Field(
+        default=None,
+        description="请求体规则列表，支持 set/drop/rename 操作",
+    )
+
     max_retries: int | None = Field(default=None, ge=0, le=10, description="最大重试次数")
     is_active: bool | None = Field(default=None, description="是否启用")
     config: dict[str, Any] | None = Field(default=None, description="额外配置")
@@ -131,6 +152,11 @@ class ProviderEndpointResponse(BaseModel):
 
     # 请求头配置
     header_rules: list[HeaderRule] | None = Field(default=None, description="请求头规则列表")
+
+    # 请求体配置
+    body_rules: list[BodyRule] | None = Field(
+        default=None, description="请求体规则列表"
+    )
 
     max_retries: int
 

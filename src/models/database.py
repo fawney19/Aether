@@ -739,6 +739,7 @@ class ProviderEndpoint(Base):
 
     # 请求配置
     header_rules = Column(JSON, nullable=True)  # 请求头规则 [{action, key, value, from, to}]
+    body_rules = Column(JSON, nullable=True)  # 请求体规则 [{action, path, value, from, to}]
     max_retries = Column(Integer, default=2)  # 最大重试次数
 
     # 状态

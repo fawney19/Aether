@@ -56,6 +56,14 @@ class ProviderAuthInfo:
 # 兼容别名：历史代码使用 SENSITIVE_HEADERS 命名
 SENSITIVE_HEADERS: frozenset[str] = UPSTREAM_DROP_HEADERS
 
+# 请求体中受保护的字段（不能被 body_rules 修改）
+PROTECTED_BODY_FIELDS: frozenset[str] = frozenset(
+    {
+        "model",  # 模型名由系统管理
+        "stream",  # 流式标志由系统管理
+    }
+)
+
 
 # ==============================================================================
 # 测试请求常量与辅助函数
@@ -127,6 +135,65 @@ def build_test_request_body(
 
 
 # ==============================================================================
+# 请求体规则应用
+# ==============================================================================
+
+
+def apply_body_rules(
+    body: dict[str, Any],
+    rules: list[dict[str, Any]],
+    protected_keys: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    """
+    应用请求体规则
+
+    支持的规则类型：
+    - set: 设置/覆盖字段 {"action": "set", "path": "metadata", "value": {"custom": "val"}}
+    - drop: 删除字段 {"action": "drop", "path": "unwanted_field"}
+    - rename: 重命名字段 {"action": "rename", "from": "old_key", "to": "new_key"}
+
+    Args:
+        body: 原始请求体
+        rules: 规则列表
+        protected_keys: 受保护的字段（不能被 set/drop/rename 修改）
+
+    Returns:
+        应用规则后的请求体
+    """
+    if not rules:
+        return body
+
+    # 复制一份，避免修改原始数据
+    result = dict(body)
+    protected = protected_keys or PROTECTED_BODY_FIELDS
+
+    for rule in rules:
+        action = rule.get("action")
+
+        if action == "set":
+            path = rule.get("path", "")
+            value = rule.get("value")
+            if path and path not in protected:
+                result[path] = value
+
+        elif action == "drop":
+            path = rule.get("path", "")
+            if path and path not in protected:
+                result.pop(path, None)
+
+        elif action == "rename":
+            from_key = rule.get("from", "")
+            to_key = rule.get("to", "")
+            if from_key and to_key:
+                # 两个 key 都不能是受保护的
+                if from_key not in protected and to_key not in protected:
+                    if from_key in result:
+                        result[to_key] = result.pop(from_key)
+
+    return result
+
+
+# ==============================================================================
 # 请求构建器
 # ==============================================================================
 
@@ -191,6 +258,12 @@ class RequestBuilder(ABC):
             mapped_model=mapped_model,
             is_stream=is_stream,
         )
+
+        # 应用请求体规则（如果 endpoint 配置了 body_rules）
+        body_rules = getattr(endpoint, "body_rules", None)
+        if body_rules:
+            payload = apply_body_rules(payload, body_rules)
+
         headers = self.build_headers(
             original_headers,
             endpoint,

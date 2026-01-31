@@ -1,5 +1,5 @@
 import client from '../client'
-import type { ProviderEndpoint, ProxyConfig, HeaderRule, FormatAcceptanceConfig } from './types'
+import type { ProviderEndpoint, ProxyConfig, HeaderRule, BodyRule, FormatAcceptanceConfig } from './types'
 
 /**
  * 获取指定 Provider 的所有 Endpoints
@@ -28,6 +28,7 @@ export async function createEndpoint(
     base_url: string
     custom_path?: string
     header_rules?: HeaderRule[]
+    body_rules?: BodyRule[]
     max_retries?: number
     is_active?: boolean
     config?: Record<string, any>
@@ -48,6 +49,7 @@ export async function updateEndpoint(
     base_url: string
     custom_path: string | null
     header_rules: HeaderRule[] | null
+    body_rules: BodyRule[] | null
     max_retries: number
     is_active: boolean
     config: Record<string, any>

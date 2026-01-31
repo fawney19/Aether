@@ -115,6 +115,31 @@ export interface HeaderRuleRename {
 export type HeaderRule = HeaderRuleSet | HeaderRuleDrop | HeaderRuleRename
 
 /**
+ * 请求体规则类型
+ * - set: 设置/覆盖字段
+ * - drop: 删除字段
+ * - rename: 重命名字段（保留原值）
+ */
+export interface BodyRuleSet {
+  action: 'set'
+  path: string
+  value: any
+}
+
+export interface BodyRuleDrop {
+  action: 'drop'
+  path: string
+}
+
+export interface BodyRuleRename {
+  action: 'rename'
+  from: string
+  to: string
+}
+
+export type BodyRule = BodyRuleSet | BodyRuleDrop | BodyRuleRename
+
+/**
  * 格式接受策略配置
  * 用于控制端点是否接受来自不同 API 格式的请求，并自动进行格式转换
  */
@@ -133,6 +158,8 @@ export interface ProviderEndpoint {
   custom_path?: string  // 自定义请求路径（可选，为空则使用 API 格式默认路径）
   // 请求头配置
   header_rules?: HeaderRule[]  // 请求头规则列表，支持 set/drop/rename 操作
+  // 请求体配置
+  body_rules?: BodyRule[]  // 请求体规则列表，支持 set/drop/rename 操作
   max_retries: number
   is_active: boolean
   config?: Record<string, any>

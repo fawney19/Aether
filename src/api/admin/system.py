@@ -837,6 +837,7 @@ class AdminExportConfigAdapter(AdminApiAdapter):
                         "api_format": ep.api_format,
                         "base_url": ep.base_url,
                         "header_rules": ep.header_rules,
+                        "body_rules": ep.body_rules,
                         "max_retries": ep.max_retries,
                         "is_active": ep.is_active,
                         "custom_path": ep.custom_path,
@@ -1232,6 +1233,7 @@ class AdminImportConfigAdapter(AdminApiAdapter):
                         elif merge_mode == "overwrite":
                             existing_ep.base_url = ep_data.get("base_url", existing_ep.base_url)
                             existing_ep.header_rules = ep_data.get("header_rules")
+                            existing_ep.body_rules = ep_data.get("body_rules")
                             existing_ep.max_retries = ep_data.get("max_retries", 2)
                             existing_ep.is_active = ep_data.get("is_active", True)
                             existing_ep.custom_path = ep_data.get("custom_path")
@@ -1255,6 +1257,7 @@ class AdminImportConfigAdapter(AdminApiAdapter):
                             endpoint_kind=endpoint_kind,
                             base_url=ep_data["base_url"],
                             header_rules=ep_data.get("header_rules"),
+                            body_rules=ep_data.get("body_rules"),
                             max_retries=ep_data.get("max_retries", 2),
                             is_active=ep_data.get("is_active", True),
                             custom_path=ep_data.get("custom_path"),
