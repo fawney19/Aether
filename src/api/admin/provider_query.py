@@ -474,6 +474,16 @@ async def test_model(
             "temperature": 0.7,
         }
 
+        # 获取端点规则（不在此处应用，传递给 check_endpoint 在格式转换后应用）
+        body_rules = getattr(endpoint, "body_rules", None)
+        header_rules = getattr(endpoint, "header_rules", None)
+        extra_headers = endpoint_config.get("extra_headers") or {}
+
+        if body_rules:
+            logger.debug(f"[test-model] 将传递 body_rules 给 check_endpoint: {body_rules}")
+        if header_rules:
+            logger.debug(f"[test-model] 将传递 header_rules 给 check_endpoint: {header_rules}")
+
         # 发送测试请求
         async with httpx.AsyncClient(
             timeout=endpoint_config["timeout"], verify=get_ssl_context()
@@ -486,7 +496,10 @@ async def test_model(
                 endpoint_config["base_url"],
                 endpoint_config["api_key"],
                 check_request,
-                endpoint_config.get("extra_headers"),
+                extra_headers if extra_headers else None,
+                # 端点规则（在 check_endpoint 内部格式转换后应用）
+                body_rules=body_rules,
+                header_rules=header_rules,
                 # 用量计算参数（现在强制记录）
                 db=db,
                 user=current_user,

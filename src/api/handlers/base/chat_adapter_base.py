@@ -630,6 +630,9 @@ class ChatAdapterBase(ApiAdapter):
         api_key: str,
         request_data: dict[str, Any],
         extra_headers: dict[str, str] | None = None,
+        # 端点规则参数
+        body_rules: list[dict[str, Any]] | None = None,
+        header_rules: list[dict[str, Any]] | None = None,
         # 用量计算参数（现在强制记录）
         db: Any | None = None,
         user: Any | None = None,
@@ -647,6 +650,8 @@ class ChatAdapterBase(ApiAdapter):
             api_key: API 密钥（已解密）
             request_data: 请求数据
             extra_headers: 端点配置的额外请求头
+            body_rules: 请求体规则（在格式转换后应用）
+            header_rules: 请求头规则（在请求头构建后应用）
             db: 数据库会话
             user: 用户对象
             provider_name: 提供商名称
@@ -658,11 +663,29 @@ class ChatAdapterBase(ApiAdapter):
             测试响应数据
         """
         from src.api.handlers.base.endpoint_checker import run_endpoint_check
+        from src.api.handlers.base.request_builder import apply_body_rules
+        from src.core.api_format.headers import HeaderBuilder
 
         # 使用子类配置方法构建请求组件
         url = cls.build_endpoint_url(base_url)
         headers = cls.build_headers_with_extra(api_key, extra_headers)
         body = cls.build_request_body(request_data)
+
+        # 应用请求体规则（在格式转换后应用，确保规则效果不被覆盖）
+        if body_rules:
+            body = apply_body_rules(body, body_rules)
+
+        # 应用请求头规则（在请求头构建后应用）
+        if header_rules:
+            # 获取认证头名称，防止被规则覆盖
+            from src.core.api_format import get_auth_config
+            auth_header, _ = get_auth_config(cls._get_api_format())
+            protected_keys = {auth_header.lower(), "content-type"}
+
+            header_builder = HeaderBuilder()
+            header_builder.add_many(headers)
+            header_builder.apply_rules(header_rules, protected_keys)
+            headers = header_builder.build()
 
         # 使用通用的endpoint checker执行请求
         return await run_endpoint_check(

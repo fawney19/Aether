@@ -252,6 +252,9 @@ class GeminiChatAdapter(ChatAdapterBase):
         api_key: str,
         request_data: dict[str, Any],
         extra_headers: dict[str, str] | None = None,
+        # 端点规则参数
+        body_rules: list[dict[str, Any]] | None = None,
+        header_rules: list[dict[str, Any]] | None = None,
         # 用量计算参数
         db: Any | None = None,
         user: Any | None = None,
@@ -261,6 +264,10 @@ class GeminiChatAdapter(ChatAdapterBase):
         model_name: str | None = None,
     ) -> dict[str, Any]:
         """测试 Gemini API 模型连接性（非流式）"""
+        from src.api.handlers.base.endpoint_checker import run_endpoint_check
+        from src.api.handlers.base.request_builder import apply_body_rules
+        from src.core.api_format.headers import HeaderBuilder
+
         # Gemini需要从request_data或model_name参数获取model名称
         effective_model_name = model_name or request_data.get("model", "")
         if not effective_model_name:
@@ -277,8 +284,21 @@ class GeminiChatAdapter(ChatAdapterBase):
         headers = cls.build_headers_with_extra(api_key, extra_headers)
         body = cls.build_request_body(request_data)
 
-        # 使用基类的通用endpoint checker
-        from src.api.handlers.base.endpoint_checker import run_endpoint_check
+        # 应用请求体规则（在格式转换后应用，确保规则效果不被覆盖）
+        if body_rules:
+            body = apply_body_rules(body, body_rules)
+
+        # 应用请求头规则（在请求头构建后应用）
+        if header_rules:
+            # 获取认证头名称，防止被规则覆盖
+            from src.core.api_format import get_auth_config
+            auth_header, _ = get_auth_config(cls._get_api_format())
+            protected_keys = {auth_header.lower(), "content-type"}
+
+            header_builder = HeaderBuilder()
+            header_builder.add_many(headers)
+            header_builder.apply_rules(header_rules, protected_keys)
+            headers = header_builder.build()
 
         return await run_endpoint_check(
             client=client,
