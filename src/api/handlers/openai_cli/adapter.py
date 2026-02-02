@@ -67,12 +67,17 @@ class OpenAICliAdapter(CliAdapterBase):
     def build_endpoint_url(
         cls, base_url: str, request_data: dict[str, Any], model_name: str | None = None
     ) -> str:
-        """构建OpenAI CLI API端点URL"""
+        """构建OpenAI CLI API端点URL
+
+        OPENAI_CLI 格式使用 /responses 端点（Responses API），
+        与 OPENAI 格式的 /v1/chat/completions 端点（Chat Completions API）不同。
+        """
         base_url = base_url.rstrip("/")
+        # OPENAI_CLI 使用 /responses 端点
         if base_url.endswith("/v1"):
-            return f"{base_url}/chat/completions"
+            return f"{base_url}/responses"
         else:
-            return f"{base_url}/v1/chat/completions"
+            return f"{base_url}/v1/responses"
 
     # build_request_body 使用基类实现
     # OPENAI -> OPENAI_CLI 无转换器，会直接透传原始请求
