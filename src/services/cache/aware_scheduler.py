@@ -1170,16 +1170,23 @@ class CacheAwareScheduler:
                     str(getattr(endpoint, "endpoint_kind", "")).strip().lower(),
                 )
 
-                # 计算格式转换的有效开关状态（三层优先级）
-                # 全局 ON → 强制允许（跳过端点检查）
-                # 全局 OFF → 提供商 ON → 强制允许（跳过端点检查）
-                # 全局 OFF → 提供商 OFF → 看端点配置
-                provider_allows_conversion = getattr(provider, "enable_format_conversion", True)
-                effective_conversion_enabled = (
-                    global_conversion_enabled or provider_allows_conversion
-                )
-                # 如果全局或提供商开关为 ON，跳过端点配置检查
-                skip_endpoint_check = global_conversion_enabled or provider_allows_conversion
+                # 计算格式转换的有效开关状态（三态继承：端点 > 提供商 > 全局）
+                # provider.enable_format_conversion:
+                #   - True: 明确启用
+                #   - False: 明确禁用
+                #   - None: 继承全局设置
+                provider_conversion_setting = getattr(provider, "enable_format_conversion", None)
+                if provider_conversion_setting is not None:
+                    # 提供商有明确设置，使用提供商设置
+                    provider_allows_conversion = bool(provider_conversion_setting)
+                else:
+                    # 提供商未设置（None），继承全局设置
+                    provider_allows_conversion = global_conversion_enabled
+
+                # 有效值：如果全局或提供商（经过继承计算后）为 True，则启用
+                effective_conversion_enabled = provider_allows_conversion
+                # 如果提供商级别已明确允许，跳过端点配置检查
+                skip_endpoint_check = provider_allows_conversion
 
                 is_compatible, needs_conversion, _compat_reason = is_format_compatible(
                     client_format_str,

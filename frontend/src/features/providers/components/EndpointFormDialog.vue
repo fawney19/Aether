@@ -41,12 +41,20 @@
                   variant="ghost"
                   size="icon"
                   class="h-7 w-7 mr-1"
-                  :class="endpoint.format_acceptance_config?.enabled ? 'text-primary' : ''"
-                  :title="endpoint.format_acceptance_config?.enabled ? '已启用格式转换（点击关闭）' : '启用格式转换'"
+                  :class="getEndpointFormatConversionClass(endpoint)"
+                  :title="getEndpointFormatConversionTitle(endpoint)"
                   :disabled="togglingFormatEndpointId === endpoint.id"
                   @click="handleToggleFormatConversion(endpoint)"
                 >
-                  <Shuffle class="w-3.5 h-3.5" />
+                  <!-- 继承状态用 Link2 图标，其他状态用 Shuffle -->
+                  <Link2
+                    v-if="isEndpointInherited(endpoint)"
+                    class="w-3.5 h-3.5"
+                  />
+                  <Shuffle
+                    v-else
+                    class="w-3.5 h-3.5"
+                  />
                 </Button>
                 <!-- 启用/停用 -->
                 <Button
@@ -397,7 +405,7 @@ import {
   CollapsibleTrigger,
   CollapsibleContent,
 } from '@/components/ui'
-import { Settings, Trash2, Check, X, Power, ChevronRight, Plus, ArrowRight, Shuffle, RotateCcw } from 'lucide-vue-next'
+import { Settings, Trash2, Check, X, Power, ChevronRight, Plus, ArrowRight, Shuffle, RotateCcw, Link2 } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
 import { log } from '@/utils/logger'
 import AlertDialog from '@/components/common/AlertDialog.vue'
@@ -861,22 +869,98 @@ async function saveEndpoint(endpoint: ProviderEndpoint) {
   }
 }
 
-// 切换格式转换（直接保存）
+// 切换格式转换（三态循环：null → true → false → null，直接保存）
+// 保留 format_acceptance_config 中的其他字段（如 accept_formats、reject_formats）
 async function handleToggleFormatConversion(endpoint: ProviderEndpoint) {
-  const currentEnabled = endpoint.format_acceptance_config?.enabled || false
-  const newEnabled = !currentEnabled
+  const currentConfig = endpoint.format_acceptance_config
+  const currentEnabled = currentConfig?.enabled
+  let newConfig: Record<string, any> | null
+  let message: string
+
+  if (currentEnabled === null || currentEnabled === undefined) {
+    // null → true：保留原有配置，只更新 enabled
+    newConfig = { ...currentConfig, enabled: true }
+    message = '已启用格式转换'
+  } else if (currentEnabled === true) {
+    // true → false：保留原有配置，只更新 enabled
+    newConfig = { ...currentConfig, enabled: false }
+    message = '已禁用格式转换'
+  } else {
+    // false → null（继承父级）：清除 enabled 字段，保留其他配置
+    if (currentConfig) {
+      const { enabled: _, ...restConfig } = currentConfig
+      // 如果除 enabled 外还有其他配置，保留它们
+      newConfig = Object.keys(restConfig).length > 0 ? restConfig : null
+    } else {
+      newConfig = null
+    }
+    message = '已切换为继承父级设置'
+  }
 
   togglingFormatEndpointId.value = endpoint.id
   try {
     await updateEndpoint(endpoint.id, {
-      format_acceptance_config: newEnabled ? { enabled: true } : null,
+      format_acceptance_config: newConfig,
     })
-    success(newEnabled ? '已启用格式转换' : '已关闭格式转换')
+    success(message)
     emit('endpointUpdated')
   } catch (error: any) {
     showError(error.response?.data?.detail || '操作失败', '错误')
   } finally {
     togglingFormatEndpointId.value = null
+  }
+}
+
+// 判断端点是否处于继承状态
+function isEndpointInherited(endpoint: ProviderEndpoint): boolean {
+  const enabled = endpoint.format_acceptance_config?.enabled
+  return enabled === null || enabled === undefined
+}
+
+// 获取端点格式转换按钮的样式类
+function getEndpointFormatConversionClass(endpoint: ProviderEndpoint): string {
+  const enabled = endpoint.format_acceptance_config?.enabled
+  if (enabled === true) {
+    // 明确启用 - 橘黄色
+    return 'text-orange-500'
+  } else if (enabled === false) {
+    // 明确禁用 - 默认色
+    return ''
+  } else {
+    // 继承 - 蓝色
+    return 'text-blue-500'
+  }
+}
+
+// 获取端点格式转换按钮的 title
+function getEndpointFormatConversionTitle(endpoint: ProviderEndpoint): string {
+  const enabled = endpoint.format_acceptance_config?.enabled
+  if (enabled === true) {
+    return '已启用格式转换（点击切换为禁用）'
+  } else if (enabled === false) {
+    return '已禁用格式转换（点击切换为继承父级）'
+  } else {
+    // 继承状态 - 判断继承来源
+    const inheritedFrom = endpoint.format_conversion_inherited_from
+    const effective = endpoint.format_conversion_effective
+    const effectiveLabel = effective ? '启用' : '禁用'
+
+    if (inheritedFrom === 'provider') {
+      // 端点继承提供商，检查提供商是否也是继承状态
+      const providerValue = props.provider?.enable_format_conversion
+      if (providerValue === null || providerValue === undefined) {
+        // 提供商也是继承全局
+        return `继承提供商设置（当前提供商：继承全局 → ${effectiveLabel}）（点击切换为启用）`
+      } else {
+        // 提供商有明确值
+        return `继承提供商设置（当前提供商：${effectiveLabel}）（点击切换为启用）`
+      }
+    } else if (inheritedFrom === 'global') {
+      return `继承全局设置（当前全局：${effectiveLabel}）（点击切换为启用）`
+    } else {
+      // 兜底
+      return `继承父级设置（当前：${effectiveLabel}）（点击切换为启用）`
+    }
   }
 }
 

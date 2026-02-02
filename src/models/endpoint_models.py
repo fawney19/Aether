@@ -143,10 +143,19 @@ class ProviderEndpointResponse(BaseModel):
     # 代理配置（响应中密码已脱敏）
     proxy: dict[str, Any] | None = Field(default=None, description="代理配置（密码已脱敏）")
 
-    # 格式转换配置
+    # 格式转换配置（三态）
     format_acceptance_config: dict[str, Any] | None = Field(
         default=None,
         description="格式接受策略配置（跨格式转换开关/白黑名单等）",
+    )
+    # 格式转换有效值和继承信息
+    format_conversion_effective: bool = Field(
+        default=False,
+        description="格式转换的有效值（计算继承后的实际生效值）",
+    )
+    format_conversion_inherited_from: str | None = Field(
+        default=None,
+        description="格式转换继承来源：'provider' / 'global'，None 表示使用自身设置",
     )
 
     # 统计（从 Keys 聚合）
@@ -637,7 +646,7 @@ class ProviderUpdateRequest(BaseModel):
     )
     enable_format_conversion: bool | None = Field(
         None,
-        description="是否允许格式转换（提供商级别开关）",
+        description="是否允许格式转换（提供商级别开关，None=继承全局）",
     )
     is_active: bool | None = None
     billing_type: str | None = Field(
@@ -671,9 +680,19 @@ class ProviderWithEndpointsSummary(BaseModel):
         default=False,
         description="格式转换时是否保持优先级（True=保持原优先级，False=需要转换时降级）",
     )
-    enable_format_conversion: bool = Field(
-        default=True,
-        description="是否允许格式转换（提供商级别开关）",
+    # 三态格式转换配置
+    enable_format_conversion: bool | None = Field(
+        default=None,
+        description="是否允许格式转换（True=启用，False=禁用，None=继承全局）",
+    )
+    # 格式转换有效值和继承信息
+    format_conversion_effective: bool = Field(
+        default=False,
+        description="格式转换的有效值（计算继承后的实际生效值）",
+    )
+    format_conversion_inherited_from: str | None = Field(
+        default=None,
+        description="格式转换继承来源：'global' 表示继承全局，None 表示使用自身设置",
     )
     is_active: bool
 

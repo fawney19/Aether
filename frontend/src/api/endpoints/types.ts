@@ -119,9 +119,9 @@ export type HeaderRule = HeaderRuleSet | HeaderRuleDrop | HeaderRuleRename
  * 用于控制端点是否接受来自不同 API 格式的请求，并自动进行格式转换
  */
 export interface FormatAcceptanceConfig {
-  enabled: boolean                // 是否启用格式转换
-  accept_formats?: string[]       // 白名单：接受哪些格式的请求
-  reject_formats?: string[]       // 黑名单：拒绝哪些格式（优先级高于白名单）
+  enabled?: boolean | null      // 是否启用格式转换（null=继承父级）
+  accept_formats?: string[]     // 白名单：接受哪些格式的请求
+  reject_formats?: string[]     // 黑名单：拒绝哪些格式（优先级高于白名单）
 }
 
 export interface ProviderEndpoint {
@@ -137,8 +137,11 @@ export interface ProviderEndpoint {
   is_active: boolean
   config?: Record<string, any>
   proxy?: ProxyConfig | null
-  // 格式转换配置
+  // 格式转换配置（三态）
   format_acceptance_config?: FormatAcceptanceConfig | null
+  // 格式转换有效值和继承信息
+  format_conversion_effective: boolean    // 计算继承后的实际生效值
+  format_conversion_inherited_from?: 'provider' | 'global' | null  // 继承来源
   total_keys: number
   active_keys: number
   created_at: string
@@ -340,7 +343,11 @@ export interface ProviderWithEndpointsSummary {
   website?: string
   provider_priority: number
   keep_priority_on_conversion: boolean  // 格式转换时是否保持优先级
-  enable_format_conversion: boolean  // 是否允许格式转换（提供商级别开关）
+  // 三态格式转换配置
+  enable_format_conversion?: boolean | null  // 是否允许格式转换（null=继承全局）
+  // 格式转换有效值和继承信息
+  format_conversion_effective: boolean    // 计算继承后的实际生效值
+  format_conversion_inherited_from?: 'global' | null  // 继承来源（'global' 或 null=自身设置）
   billing_type?: 'monthly_quota' | 'pay_as_you_go' | 'free_tier'
   monthly_quota_usd?: number
   monthly_used_usd?: number

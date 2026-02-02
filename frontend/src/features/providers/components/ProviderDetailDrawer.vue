@@ -58,11 +58,19 @@
                   <Button
                     variant="ghost"
                     size="icon"
-                    :title="provider.enable_format_conversion ? '已启用格式转换（点击关闭）' : '启用格式转换'"
-                    :class="provider.enable_format_conversion ? 'text-primary' : ''"
+                    :title="getProviderFormatConversionTitle()"
+                    :class="getProviderFormatConversionClass()"
                     @click="toggleFormatConversion"
                   >
-                    <Shuffle class="w-4 h-4" />
+                    <!-- 继承状态用 Link2 图标，其他状态用 Shuffle -->
+                    <Link2
+                      v-if="provider.enable_format_conversion === null || provider.enable_format_conversion === undefined"
+                      class="w-4 h-4"
+                    />
+                    <Shuffle
+                      v-else
+                      class="w-4 h-4"
+                    />
                   </Button>
                   <Button
                     variant="ghost"
@@ -512,7 +520,8 @@ import {
   GripVertical,
   Copy,
   Shield,
-  Shuffle
+  Shuffle,
+  Link2
 } from 'lucide-vue-next'
 import { useEscapeKey } from '@/composables/useEscapeKey'
 import Button from '@/components/ui/button.vue'
@@ -712,14 +721,63 @@ function handleClose() {
   }
 }
 
-// 切换格式转换开关
+// 获取提供商格式转换按钮的 title
+function getProviderFormatConversionTitle(): string {
+  const current = provider.value?.enable_format_conversion
+  if (current === true) {
+    return '已启用格式转换（点击切换为禁用）'
+  } else if (current === false) {
+    return '已禁用格式转换（点击切换为继承全局）'
+  } else {
+    // null/undefined = 继承全局
+    const effective = provider.value?.format_conversion_effective
+    return `继承全局设置（当前全局：${effective ? '启用' : '禁用'}）（点击切换为启用）`
+  }
+}
+
+// 获取提供商格式转换按钮的样式类
+function getProviderFormatConversionClass(): string {
+  const current = provider.value?.enable_format_conversion
+  if (current === true) {
+    // 明确启用 - 橘黄色
+    return 'text-orange-500'
+  } else if (current === false) {
+    // 明确禁用 - 默认色
+    return ''
+  } else {
+    // 继承 - 蓝色
+    return 'text-blue-500'
+  }
+}
+
+// 切换格式转换开关（三态循环：null → true → false → null）
 async function toggleFormatConversion() {
   if (!provider.value) return
-  const newValue = !provider.value.enable_format_conversion
+
+  const current = provider.value.enable_format_conversion
+  let newValue: boolean | null
+  let message: string
+
+  if (current === null || current === undefined) {
+    // null → true
+    newValue = true
+    message = '已启用格式转换'
+  } else if (current === true) {
+    // true → false
+    newValue = false
+    message = '已禁用格式转换'
+  } else {
+    // false → null
+    newValue = null
+    message = '已切换为继承全局设置'
+  }
+
   try {
-    await updateProvider(provider.value.id, { enable_format_conversion: newValue })
+    const result = await updateProvider(provider.value.id, { enable_format_conversion: newValue })
     provider.value.enable_format_conversion = newValue
-    showSuccess(newValue ? '已启用格式转换' : '已禁用格式转换')
+    provider.value.format_conversion_effective = result.format_conversion_effective
+    provider.value.format_conversion_inherited_from = result.format_conversion_inherited_from
+    showSuccess(message)
     emit('refresh')
   } catch {
     showError('切换格式转换失败')

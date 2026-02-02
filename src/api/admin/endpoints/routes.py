@@ -28,6 +28,7 @@ from src.models.endpoint_models import (
     ProviderEndpointResponse,
     ProviderEndpointUpdate,
 )
+from src.services.system.config import SystemConfigService
 
 router = APIRouter(tags=["Endpoint Management"])
 pipeline = ApiRequestPipeline()
@@ -41,6 +42,32 @@ def mask_proxy_password(proxy_config: dict | None) -> dict | None:
     if masked.get("password"):
         masked["password"] = "***"
     return masked
+
+
+def _compute_endpoint_format_conversion(
+    endpoint: ProviderEndpoint, provider: Provider, db: Session
+) -> tuple[bool, str | None]:
+    """计算端点格式转换的有效值和继承来源
+
+    继承链：端点 > 提供商 > 全局
+    Returns:
+        (effective_value, inherited_from)
+        inherited_from: None=自身设置, 'provider'=继承提供商, 'global'=继承全局
+    """
+    # 端点自身配置
+    endpoint_config = endpoint.format_acceptance_config
+    if endpoint_config is not None and endpoint_config.get("enabled") is not None:
+        enabled = endpoint_config.get("enabled")
+        if enabled is True or enabled is False:
+            return bool(enabled), None
+
+    # 继承提供商设置
+    if provider.enable_format_conversion is not None:
+        return bool(provider.enable_format_conversion), "provider"
+
+    # 继承全局设置
+    global_value = SystemConfigService.get_config(db, "enable_format_conversion", False)
+    return bool(global_value), "global"
 
 
 @router.get("/providers/{provider_id}/endpoints", response_model=list[ProviderEndpointResponse])
@@ -256,6 +283,10 @@ class AdminListProviderEndpointsAdapter(AdminApiAdapter):
                 if isinstance(endpoint.api_format, str)
                 else endpoint.api_format.value
             )
+            # 计算格式转换的有效值和继承来源
+            effective, inherited_from = _compute_endpoint_format_conversion(
+                endpoint, provider, db
+            )
             endpoint_dict = {
                 **endpoint.__dict__,
                 "provider_name": provider.name,
@@ -263,6 +294,8 @@ class AdminListProviderEndpointsAdapter(AdminApiAdapter):
                 "total_keys": total_keys_map.get(endpoint_format, 0),
                 "active_keys": active_keys_map.get(endpoint_format, 0),
                 "proxy": mask_proxy_password(endpoint.proxy),
+                "format_conversion_effective": effective,
+                "format_conversion_inherited_from": inherited_from,
             }
             endpoint_dict.pop("_sa_instance_state", None)
             result.append(ProviderEndpointResponse(**endpoint_dict))
@@ -340,6 +373,9 @@ class AdminCreateProviderEndpointAdapter(AdminApiAdapter):
             for k, v in new_endpoint.__dict__.items()
             if k not in {"api_format", "_sa_instance_state", "proxy"}
         }
+        effective, inherited_from = _compute_endpoint_format_conversion(
+            new_endpoint, provider, db
+        )
         return ProviderEndpointResponse(
             **endpoint_dict,
             provider_name=provider.name,
@@ -347,6 +383,8 @@ class AdminCreateProviderEndpointAdapter(AdminApiAdapter):
             proxy=mask_proxy_password(new_endpoint.proxy),
             total_keys=0,
             active_keys=0,
+            format_conversion_effective=effective,
+            format_conversion_inherited_from=inherited_from,
         )
 
 
@@ -389,6 +427,9 @@ class AdminGetProviderEndpointAdapter(AdminApiAdapter):
             for k, v in endpoint_obj.__dict__.items()
             if k not in {"api_format", "_sa_instance_state", "proxy"}
         }
+        effective, inherited_from = _compute_endpoint_format_conversion(
+            endpoint_obj, provider, db
+        )
         return ProviderEndpointResponse(
             **endpoint_dict,
             provider_name=provider.name,
@@ -396,6 +437,8 @@ class AdminGetProviderEndpointAdapter(AdminApiAdapter):
             proxy=mask_proxy_password(endpoint_obj.proxy),
             total_keys=total_keys,
             active_keys=active_keys,
+            format_conversion_effective=effective,
+            format_conversion_inherited_from=inherited_from,
         )
 
 
@@ -468,6 +511,9 @@ class AdminUpdateProviderEndpointAdapter(AdminApiAdapter):
             for k, v in endpoint.__dict__.items()
             if k not in {"api_format", "_sa_instance_state", "proxy"}
         }
+        effective, inherited_from = _compute_endpoint_format_conversion(
+            endpoint, provider, db
+        ) if provider else (False, None)
         return ProviderEndpointResponse(
             **endpoint_dict,
             provider_name=provider.name if provider else "Unknown",
@@ -475,6 +521,8 @@ class AdminUpdateProviderEndpointAdapter(AdminApiAdapter):
             proxy=mask_proxy_password(endpoint.proxy),
             total_keys=total_keys,
             active_keys=active_keys,
+            format_conversion_effective=effective,
+            format_conversion_inherited_from=inherited_from,
         )
 
 

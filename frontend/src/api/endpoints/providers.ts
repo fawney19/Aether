@@ -27,6 +27,8 @@ export async function updateProvider(
     description: string
     website: string
     provider_priority: number
+    keep_priority_on_conversion: boolean
+    enable_format_conversion: boolean | null  // 三态：true=启用，false=禁用，null=继承全局
     billing_type: 'monthly_quota' | 'pay_as_you_go' | 'free_tier'
     monthly_quota_usd: number
     quota_reset_day: number

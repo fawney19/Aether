@@ -31,6 +31,7 @@ from src.models.endpoint_models import (
     ProviderUpdateRequest,
     ProviderWithEndpointsSummary,
 )
+from src.services.system.config import SystemConfigService
 
 router = APIRouter(tags=["Provider Summary"])
 pipeline = ApiRequestPipeline()
@@ -302,6 +303,17 @@ def _build_provider_summary(db: Session, provider: Provider) -> ProviderWithEndp
         provider_ops_config.get("architecture_id") if provider_ops_config else None
     )
 
+    # 计算格式转换的有效值和继承来源
+    if provider.enable_format_conversion is not None:
+        # 提供商自身有明确设置
+        format_conversion_effective = provider.enable_format_conversion
+        format_conversion_inherited_from = None
+    else:
+        # 继承全局设置
+        global_value = SystemConfigService.get_config(db, "enable_format_conversion", False)
+        format_conversion_effective = bool(global_value)
+        format_conversion_inherited_from = "global"
+
     return ProviderWithEndpointsSummary(
         id=provider.id,
         name=provider.name,
@@ -310,6 +322,8 @@ def _build_provider_summary(db: Session, provider: Provider) -> ProviderWithEndp
         provider_priority=provider.provider_priority,
         keep_priority_on_conversion=provider.keep_priority_on_conversion,
         enable_format_conversion=provider.enable_format_conversion,
+        format_conversion_effective=format_conversion_effective,
+        format_conversion_inherited_from=format_conversion_inherited_from,
         is_active=provider.is_active,
         billing_type=provider.billing_type.value if provider.billing_type else None,
         monthly_quota_usd=provider.monthly_quota_usd,

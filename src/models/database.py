@@ -669,13 +669,12 @@ class Provider(Base):
     # 注意：如果全局配置 KEEP_PRIORITY_ON_CONVERSION=true，此字段被忽略（所有提供商都保持优先级）
     keep_priority_on_conversion = Column(Boolean, default=False, nullable=False)
 
-    # 是否允许格式转换（默认 True）
-    # - True: 该提供商可以作为格式转换的目标（如 OpenAI 客户端请求可以路由到此 Gemini 提供商）
-    # - False: 该提供商不接受需要格式转换的请求
-    # 优先级逻辑：
-    # - 全局开关 ON → 强制允许所有提供商的格式转换（忽略此字段）
-    # - 全局开关 OFF → 由此字段决定是否允许该提供商的格式转换
-    enable_format_conversion = Column(Boolean, default=False, nullable=False)
+    # 是否允许格式转换（三态逻辑）
+    # - True: 明确启用格式转换
+    # - False: 明确禁用格式转换
+    # - None/NULL: 继承全局设置（SystemConfig.enable_format_conversion）
+    # 继承链：端点 > 提供商 > 全局
+    enable_format_conversion = Column(Boolean, default=None, nullable=True)
 
     # 状态
     is_active = Column(Boolean, default=True, nullable=False)

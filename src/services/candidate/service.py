@@ -235,13 +235,23 @@ class CandidateService:
                             )
                         continue
 
-                    # 2. Check global + provider switches
-                    # 全局 ON → 允许；全局 OFF → 看提供商
+                    # 2. Check global + provider switches (三态继承：提供商 > 全局)
+                    # provider.enable_format_conversion:
+                    #   - True: 明确启用
+                    #   - False: 明确禁用
+                    #   - None: 继承全局设置
                     from src.services.system.config import SystemConfigService
 
                     global_enabled = SystemConfigService.is_format_conversion_enabled(self.db)
-                    provider_enabled = getattr(cand.provider, "enable_format_conversion", True)
-                    effective_enabled = global_enabled or provider_enabled
+                    provider_conversion_setting = getattr(
+                        cand.provider, "enable_format_conversion", None
+                    )
+                    if provider_conversion_setting is not None:
+                        # 提供商有明确设置，使用提供商设置
+                        effective_enabled = bool(provider_conversion_setting)
+                    else:
+                        # 提供商未设置（None），继承全局设置
+                        effective_enabled = global_enabled
 
                     if not effective_enabled:
                         skip_reason = "format_conversion_disabled"
@@ -250,7 +260,8 @@ class CandidateService:
                                 "skipped": True,
                                 "skip_reason": skip_reason,
                                 "global_conversion_enabled": global_enabled,
-                                "provider_conversion_enabled": provider_enabled,
+                                "provider_conversion_setting": provider_conversion_setting,
+                                "effective_enabled": effective_enabled,
                             }
                         )
                         if record_id:
