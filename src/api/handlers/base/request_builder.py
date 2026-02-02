@@ -123,15 +123,20 @@ def build_test_request_body(
     # 获取测试请求数据（OpenAI 格式）
     source_data = get_test_request_data(request_data)
 
-    # CLI 格式使用基础格式进行转换（claude:cli -> claude:chat）
-    target_format = get_base_format(format_id) or format_id
+    # 确定目标格式
+    # 注意：OPENAI_CLI 使用不同的数据格式（input 而非 messages），需要完整转换
+    # 其他 CLI 格式（如 CLAUDE_CLI、GEMINI_CLI）与基础格式数据结构相同，可使用基础格式
+    normalized_format = str(format_id).strip()
+    format_lower = normalized_format.lower().replace("_", ":")
+    if format_lower == "openai:cli":
+        # OPENAI_CLI 需要完整转换：messages -> input
+        target_format = "openai:cli"
+    else:
+        # 其他 CLI 格式使用基础格式进行转换（claude:cli -> claude:chat）
+        target_format = get_base_format(format_lower) or format_lower
 
-    # 使用注册表进行格式转换 (openai:chat -> 目标基础格式)
-    return format_conversion_registry.convert_request(
-        source_data,
-        make_signature_key("openai", "chat"),
-        target_format,
-    )
+    # 使用注册表进行格式转换 (openai:chat -> 目标格式)
+    return format_conversion_registry.convert_request(source_data, "openai:chat", target_format)
 
 
 # ==============================================================================
