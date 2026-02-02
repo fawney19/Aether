@@ -291,8 +291,8 @@ class GeminiChatAdapter(ChatAdapterBase):
         # 应用请求头规则（在请求头构建后应用）
         if header_rules:
             # 获取认证头名称，防止被规则覆盖
-            from src.core.api_format import get_auth_config
-            auth_header, _ = get_auth_config(cls._get_api_format())
+            from src.core.api_format import get_auth_config_for_endpoint
+            auth_header, _ = get_auth_config_for_endpoint(cls.FORMAT_ID)
             protected_keys = {auth_header.lower(), "content-type"}
 
             header_builder = HeaderBuilder()
