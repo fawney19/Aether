@@ -217,7 +217,7 @@ const MOCK_ENDPOINT_STATUS = {
     },
     {
       api_format: 'openai:cli',
-      api_path: '/responses',
+      api_path: '/v1/responses',
       total_attempts: 2340,
       success_count: 2200,
       failed_count: 100,

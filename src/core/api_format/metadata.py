@@ -116,7 +116,7 @@ _ENDPOINT_DEFINITIONS: dict[tuple[ApiFamily, EndpointKind], EndpointDefinition] 
         api_family=ApiFamily.OPENAI,
         endpoint_kind=EndpointKind.CLI,
         aliases=("openai_cli", "responses"),
-        default_path="/responses",
+        default_path="/v1/responses",
         auth_method=AuthMethod.BEARER,
         auth_header="Authorization",
         auth_type="bearer",
