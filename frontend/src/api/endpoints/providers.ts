@@ -25,7 +25,7 @@ export async function updateProvider(
   data: Partial<{
     name: string
     provider_type: 'custom' | 'claude_code' | 'codex' | 'gemini_cli' | 'antigravity'
-    description: string
+    description: string | null
     website: string
     provider_priority: number
     billing_type: 'monthly_quota' | 'pay_as_you_go' | 'free_tier'

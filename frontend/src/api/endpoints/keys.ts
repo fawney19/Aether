@@ -144,3 +144,31 @@ export async function updateProviderKey(
   const response = await client.put(`/api/admin/endpoints/keys/${keyId}`, data)
   return response.data
 }
+
+/**
+ * 刷新 Provider 的所有 Key 限额信息（Codex）
+ */
+export interface RefreshQuotaResult {
+  success: number
+  failed: number
+  total: number
+  results: Array<{
+    key_id: string
+    key_name: string
+    status: 'success' | 'no_metadata' | 'error'
+    metadata?: {
+      plan_type?: string
+      primary_used_percent?: number
+      primary_reset_seconds?: number
+      secondary_used_percent?: number
+      secondary_reset_seconds?: number
+    }
+    message?: string
+    status_code?: number
+  }>
+}
+
+export async function refreshProviderQuota(providerId: string): Promise<RefreshQuotaResult> {
+  const response = await client.post(`/api/admin/endpoints/providers/${providerId}/refresh-quota`)
+  return response.data
+}

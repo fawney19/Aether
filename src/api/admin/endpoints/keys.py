@@ -865,3 +865,190 @@ class AdminCreateProviderKeyAdapter(AdminApiAdapter):
             await invalidate_models_list_cache()
 
         return _build_key_response(new_key, api_key_plain=self.key_data.api_key)
+
+
+# ========== Codex Quota Refresh API ==========
+
+
+@router.post("/providers/{provider_id}/refresh-quota")
+async def refresh_provider_quota(
+    provider_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """
+    刷新 Provider 所有 Keys 的限额信息（Codex）
+
+    向每个 Key 发送一个测试请求，从响应头中获取最新的限额信息。
+    仅适用于 Codex 类型的 Provider。
+
+    **路径参数**:
+    - `provider_id`: Provider ID
+
+    **返回字段**:
+    - `success`: 成功刷新的 Key 数量
+    - `failed`: 失败的 Key 数量
+    - `results`: 每个 Key 的刷新结果
+    """
+    adapter = AdminRefreshProviderQuotaAdapter(provider_id=provider_id)
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@dataclass
+class AdminRefreshProviderQuotaAdapter(AdminApiAdapter):
+    """刷新 Provider 所有 Keys 的限额信息"""
+
+    provider_id: str
+
+    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
+        import asyncio
+
+        import httpx
+
+        from src.api.handlers.base.request_builder import get_provider_auth
+        from src.services.provider.metadata_collectors import MetadataCollectorRegistry, ensure_collectors_registered
+        from src.services.provider.transport import build_provider_url
+        from src.utils.ssl_utils import get_ssl_context
+
+        # 确保 Codex 采集器已注册
+        ensure_collectors_registered()
+
+        db = context.db
+        provider = db.query(Provider).filter(Provider.id == self.provider_id).first()
+        if not provider:
+            raise NotFoundException(f"Provider {self.provider_id} 不存在")
+
+        # 检查是否是 Codex 类型
+        if provider.provider_type != "codex":
+            raise InvalidRequestException("仅支持 Codex 类型的 Provider 刷新限额")
+
+        # 获取所有活跃的 Keys
+        keys = (
+            db.query(ProviderAPIKey)
+            .filter(
+                ProviderAPIKey.provider_id == self.provider_id,
+                ProviderAPIKey.is_active.is_(True),
+            )
+            .all()
+        )
+
+        if not keys:
+            return {"success": 0, "failed": 0, "total": 0, "results": [], "message": "没有活跃的 Key"}
+
+        # 获取 openai:cli 端点
+        endpoint = None
+        for ep in provider.endpoints:
+            if ep.api_format == "openai:cli" and ep.is_active:
+                endpoint = ep
+                break
+
+        if not endpoint:
+            raise InvalidRequestException("找不到有效的 openai:cli 端点")
+
+        results: list[dict] = []
+        success_count = 0
+        failed_count = 0
+
+        # 单个 Key 刷新函数
+        async def refresh_single_key(key: ProviderAPIKey) -> dict:
+            try:
+                # 获取认证信息
+                auth_info = await get_provider_auth(endpoint, key)
+
+                # 构建请求 URL
+                url = build_provider_url(endpoint, key=key)
+
+                # 构建请求头
+                headers = {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                }
+                if auth_info:
+                    headers[auth_info.auth_header] = auth_info.auth_value
+                else:
+                    # 标准 API Key
+                    decrypted_key = crypto_service.decrypt(key.api_key)
+                    headers["Authorization"] = f"Bearer {decrypted_key}"
+
+                # 发送最小的测试请求，使用 Codex Responses API 格式
+                test_body = {
+                    "model": "gpt-5.1-codex-mini",
+                    "input": [
+                        {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "hi"}],
+                        }
+                    ],
+                    "instructions": "",
+                    "stream": True,
+                    "store": False,
+                }
+
+                async with httpx.AsyncClient(
+                    timeout=30.0, verify=get_ssl_context()
+                ) as client:
+                    response = await client.post(url, json=test_body, headers=headers)
+
+                # 解析响应头中的限额信息
+                response_headers = dict(response.headers)
+                metadata = MetadataCollectorRegistry.collect("codex", response_headers)
+
+                if metadata:
+                    # 更新数据库中的元数据
+                    key.upstream_metadata = metadata
+                    db.add(key)
+                    return {
+                        "key_id": key.id,
+                        "key_name": key.name,
+                        "status": "success",
+                        "metadata": metadata,
+                    }
+                else:
+                    # 响应成功但没有限额头
+                    return {
+                        "key_id": key.id,
+                        "key_name": key.name,
+                        "status": "no_metadata",
+                        "message": "响应中未包含限额信息",
+                        "status_code": response.status_code,
+                    }
+
+            except Exception as e:
+                logger.error(f"刷新 Key {key.id} 限额失败: {e}")
+                return {
+                    "key_id": key.id,
+                    "key_name": key.name,
+                    "status": "error",
+                    "message": str(e),
+                }
+
+        # 分批执行，每批最多 5 个并发
+        BATCH_SIZE = 5
+        for i in range(0, len(keys), BATCH_SIZE):
+            batch = keys[i : i + BATCH_SIZE]
+            batch_tasks = [refresh_single_key(key) for key in batch]
+            batch_results = await asyncio.gather(*batch_tasks)
+            results.extend(batch_results)
+
+            # 统计本批次结果
+            for r in batch_results:
+                if r["status"] == "success":
+                    success_count += 1
+                else:
+                    failed_count += 1
+
+        # 提交数据库更改
+        db.commit()
+
+        logger.info(
+            f"[QUOTA_REFRESH] Provider {self.provider_id}: "
+            f"成功 {success_count}/{len(keys)}, 失败 {failed_count}"
+        )
+
+        return {
+            "success": success_count,
+            "failed": failed_count,
+            "total": len(keys),
+            "results": results,
+        }

@@ -84,6 +84,11 @@ def _ensure_collectors_registered() -> None:
     MetadataCollectorRegistry.register(CodexMetadataCollector())
 
 
+def ensure_collectors_registered() -> None:
+    """Ensure metadata collectors are registered (idempotent)."""
+    _ensure_collectors_registered()
+
+
 def collect_and_save_upstream_metadata(
     db: Session,
     *,
@@ -147,4 +152,5 @@ __all__ = [
     "MetadataCollector",
     "MetadataCollectorRegistry",
     "collect_and_save_upstream_metadata",
+    "ensure_collectors_registered",
 ]

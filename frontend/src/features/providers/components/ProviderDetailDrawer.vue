@@ -188,16 +188,34 @@
                     <h3 class="text-sm font-semibold">
                       {{ provider.provider_type === 'custom' ? '密钥管理' : '账号管理' }}
                     </h3>
-                    <Button
-                      v-if="endpoints.length > 0"
-                      variant="outline"
-                      size="sm"
-                      class="h-8"
-                      @click="handleAddKeyToFirstEndpoint"
-                    >
-                      <Plus class="w-3.5 h-3.5 mr-1.5" />
-                      {{ provider.provider_type === 'custom' ? '添加密钥' : '添加账号' }}
-                    </Button>
+                    <div class="flex items-center gap-2">
+                      <!-- Codex 刷新限额按钮 -->
+                      <Button
+                        v-if="provider.provider_type === 'codex' && allKeys.length > 0"
+                        variant="outline"
+                        size="sm"
+                        class="h-8"
+                        :disabled="refreshingQuota"
+                        title="刷新所有账号的限额信息"
+                        @click="handleRefreshQuota"
+                      >
+                        <RefreshCw
+                          class="w-3.5 h-3.5 mr-1.5"
+                          :class="{ 'animate-spin': refreshingQuota }"
+                        />
+                        刷新限额
+                      </Button>
+                      <Button
+                        v-if="endpoints.length > 0"
+                        variant="outline"
+                        size="sm"
+                        class="h-8"
+                        @click="handleAddKeyToFirstEndpoint"
+                      >
+                        <Plus class="w-3.5 h-3.5 mr-1.5" />
+                        {{ provider.provider_type === 'custom' ? '添加密钥' : '添加账号' }}
+                      </Button>
+                    </div>
                   </div>
                 </div>
 
@@ -667,6 +685,7 @@ import {
   updateProviderKey,
   revealEndpointKey,
   refreshProviderOAuth,
+  refreshProviderQuota,
   type ProviderEndpoint,
   type EndpointAPIKey,
   type Model,
@@ -745,6 +764,9 @@ const prioritySaving = ref(false)
 
 // OAuth 刷新状态
 const refreshingOAuthKeyId = ref<string | null>(null)
+
+// Codex 限额刷新状态
+const refreshingQuota = ref(false)
 
 // 描述编辑状态
 const editingDescription = ref(false)
@@ -1038,6 +1060,28 @@ async function handleRefreshOAuth(key: EndpointAPIKey) {
     showError(err.response?.data?.detail || 'Token 刷新失败', '错误')
   } finally {
     refreshingOAuthKeyId.value = null
+  }
+}
+
+// 刷新 Codex 所有账号限额
+async function handleRefreshQuota() {
+  if (refreshingQuota.value || !props.providerId) return
+  refreshingQuota.value = true
+  try {
+    const result = await refreshProviderQuota(props.providerId)
+    if (result.success > 0) {
+      showSuccess(`成功刷新 ${result.success}/${result.total} 个账号的限额`)
+      // 重新加载数据以更新 UI
+      await loadEndpoints()
+    } else if (result.failed > 0) {
+      showError(`刷新失败: ${result.results.map(r => r.message).filter(Boolean).join(', ')}`, '错误')
+    } else {
+      showError('没有获取到限额信息', '警告')
+    }
+  } catch (err: any) {
+    showError(err.response?.data?.detail || '刷新限额失败', '错误')
+  } finally {
+    refreshingQuota.value = false
   }
 }
 
