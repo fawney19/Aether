@@ -7,6 +7,9 @@ to avoid upstream blocks (Cloudflare, etc.).
 Request/response shape quirks should live in the conversion layer as a same-format
 variant (`target_variant="codex"` in the `openai:cli` normalizer). This envelope
 only adds headers and keeps the rest as a no-op wrapper.
+
+We use contextvars to pass request-scoped values (account_id) from wrap_request()
+to extra_headers().
 """
 
 from __future__ import annotations
@@ -15,6 +18,11 @@ import uuid
 from typing import Any
 
 from src.config.settings import config
+from src.services.provider.adapters.codex.context import (
+    CodexRequestContext,
+    get_codex_request_context,
+    set_codex_request_context,
+)
 from src.services.provider.request_context import get_selected_base_url
 
 
@@ -38,18 +46,31 @@ class CodexOAuthEnvelope:
         if ua:
             headers["User-Agent"] = ua
 
+        # Add chatgpt-account-id from context (set by wrap_request)
+        ctx = get_codex_request_context()
+        if ctx and ctx.account_id:
+            headers["chatgpt-account-id"] = ctx.account_id
+
         return headers
 
     def wrap_request(
         self,
         request_body: dict[str, Any],
         *,
-        model: str,
+        model: str,  # noqa: ARG002
         url_model: str | None,
         decrypted_auth_config: dict[str, Any] | None,
     ) -> tuple[dict[str, Any], str | None]:
+        # Extract account_id from auth_config and set context for extra_headers()
+        account_id = (decrypted_auth_config or {}).get("account_id")
+        user_id = (decrypted_auth_config or {}).get("user_id")
+        set_codex_request_context(
+            CodexRequestContext(
+                account_id=str(account_id) if account_id else None,
+                user_id=str(user_id) if user_id else None,
+            )
+        )
         # No wire envelope for Codex; keep request body as-is.
-        _ = model, decrypted_auth_config
         return request_body, url_model
 
     def unwrap_response(self, data: Any) -> Any:
