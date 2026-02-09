@@ -115,11 +115,14 @@ async def fetch_kiro_usage_limits(
     if response.status_code != 200:
         response_text = (response.text or "").strip()
 
-        # 检测账户封禁（403/423 + 特定错误信息）
+        # 检测账户封禁（403/423 均视为封禁）
+        # 对于 Kiro，403 表示账户权限被拒绝（无论是封禁、权限不足还是其他原因），
+        # 都应该标记为异常状态，以便管理员及时处理
         is_banned = False
         ban_reason = None
         if response.status_code in (403, 423):
-            # 检测封禁相关错误（正则模式，通过 re.search 匹配）
+            is_banned = True
+            # 检测封禁相关错误（用于提供更详细的原因说明）
             banned_keywords = [
                 "AccountSuspendedException",
                 "account.*suspend",
@@ -129,19 +132,22 @@ async def fetch_kiro_usage_limits(
             ]
             for keyword in banned_keywords:
                 if re.search(keyword, response_text, re.IGNORECASE):
-                    is_banned = True
                     ban_reason = (
                         response_text[:200] if response_text else f"HTTP {response.status_code}"
                     )
                     break
-            if not is_banned and response.status_code == 423:
-                # 423 Locked 通常表示账户被锁定/封禁
-                is_banned = True
-                ban_reason = response_text[:200] if response_text else "HTTP 423 Locked"
+            # 如果没有匹配到特定关键词，使用通用原因
+            if not ban_reason:
+                if response.status_code == 423:
+                    ban_reason = response_text[:200] if response_text else "HTTP 423 Locked"
+                else:
+                    ban_reason = (
+                        response_text[:200] if response_text else "HTTP 403 权限被拒绝"
+                    )
 
         error_msg = {
             401: "认证失败，Token 无效或已过期",
-            403: "账户已封禁" if is_banned else "权限不足，无法获取使用额度",
+            403: "账户异常，权限被拒绝",
             423: "账户已封禁",
             429: "请求过于频繁，已被限流",
         }.get(response.status_code, "获取使用额度失败")

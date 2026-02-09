@@ -50,6 +50,9 @@ def build_antigravity_url(
     if is_stream:
         effective_query_params.setdefault("alt", "sse")
 
+    # 移除 v1internal 不支持的查询参数
+    effective_query_params.pop("beta", None)
+
     url = f"{str(base_url).rstrip('/')}{path}"
     if effective_query_params:
         query_string = urlencode(effective_query_params, doseq=True)
