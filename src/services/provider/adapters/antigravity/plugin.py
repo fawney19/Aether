@@ -208,7 +208,10 @@ async def fetch_models_antigravity(
     调用 v1internal:fetchAvailableModels 获取可用模型列表，
     解析配额信息，过滤黑名单模型。
     """
-    from src.services.provider.adapters.antigravity.client import fetch_available_models
+    from src.services.provider.adapters.antigravity.client import (
+        AntigravityAccountForbiddenException,
+        fetch_available_models,
+    )
 
     auth_config = ctx.auth_config or {}
     project_id = auth_config.get("project_id")
@@ -222,6 +225,9 @@ async def fetch_models_antigravity(
             proxy_config=ctx.proxy_config,
             timeout_seconds=timeout_seconds,
         )
+    except AntigravityAccountForbiddenException:
+        # 重新抛出，由上层（keys.py）处理自动停用逻辑
+        raise
     except Exception as e:
         return [], [f"antigravity: fetchAvailableModels error: {e}"], False, None
 

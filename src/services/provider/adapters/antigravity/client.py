@@ -124,6 +124,56 @@ def _should_fallback_status(status_code: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 账户封禁异常（对齐 AM: is_forbidden 标志）
+# ---------------------------------------------------------------------------
+
+
+class AntigravityAccountForbiddenException(Exception):
+    """Antigravity 账户被封禁/禁止访问异常。
+
+    当 API 返回 403 Forbidden 时抛出，表示账户权限被撤销。
+    """
+
+    def __init__(
+        self,
+        message: str = "账户访问被禁止",
+        status_code: int = 403,
+        reason: str | None = None,
+    ):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.reason = reason
+
+
+def _extract_forbidden_reason(response_text: str) -> str | None:
+    """从 403 响应体中提取封禁原因。
+
+    尝试解析 JSON 响应中的 error.message 字段。
+    """
+    if not response_text:
+        return None
+    try:
+        data = json.loads(response_text)
+        if isinstance(data, dict):
+            error = data.get("error")
+            if isinstance(error, dict):
+                message = error.get("message")
+                if isinstance(message, str) and message.strip():
+                    return message.strip()
+            # 直接在顶层查找 message
+            message = data.get("message")
+            if isinstance(message, str) and message.strip():
+                return message.strip()
+    except Exception:
+        pass
+    # 如果无法解析，返回原始文本的前 100 个字符
+    if len(response_text) > 100:
+        return response_text[:100] + "..."
+    return response_text if response_text.strip() else None
+
+
+# ---------------------------------------------------------------------------
 # 从 loadCodeAssist 响应中提取信息
 # ---------------------------------------------------------------------------
 
@@ -441,12 +491,25 @@ async def fetch_available_models(
                 )
                 continue
 
+            # 403 Forbidden：账户权限被禁止（对齐 AM is_forbidden 标志）
+            if resp.status_code == 403:
+                reason = _extract_forbidden_reason(resp.text)
+                logger.warning(
+                    "[antigravity] fetchAvailableModels 403 Forbidden: {}",
+                    reason or "unknown",
+                )
+                raise AntigravityAccountForbiddenException(
+                    message="账户访问被禁止",
+                    status_code=403,
+                    reason=reason,
+                )
+
             # 不可 fallback 的 4xx：直接抛出
             raise RuntimeError(
                 f"fetchAvailableModels failed: status={resp.status_code} base_url={base_url} "
                 f"body={resp.text[:200] if resp.text else ''}"
             )
-        except RuntimeError:
+        except (RuntimeError, AntigravityAccountForbiddenException):
             raise
         except Exception as e:
             url_availability.mark_unavailable(base_url)
@@ -513,6 +576,7 @@ def generate_fallback_project_id() -> str:
 
 
 __all__ = [
+    "AntigravityAccountForbiddenException",
     "extract_project_id",
     "extract_tier_id",
     "fetch_available_models",

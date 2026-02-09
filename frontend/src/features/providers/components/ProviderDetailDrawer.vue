@@ -577,109 +577,163 @@
                     </div>
                     <!-- Antigravity 上游额度摘要（按家族分组展示关键配额） -->
                     <div
-                      v-if="provider.provider_type === 'antigravity' && key.upstream_metadata && hasAntigravityQuotaData(key.upstream_metadata)"
-                      class="mt-2 p-2 bg-muted/30 rounded-md"
+                      v-if="provider.provider_type === 'antigravity' && key.upstream_metadata && (hasAntigravityQuotaData(key.upstream_metadata) || isAntigravityForbidden(key.upstream_metadata))"
+                      class="mt-2 p-2 rounded-md"
+                      :class="isAntigravityForbidden(key.upstream_metadata) ? 'bg-destructive/10 border border-destructive/30' : 'bg-muted/30'"
                     >
-                      <div class="flex items-center justify-between mb-1">
-                        <span class="text-[10px] text-muted-foreground">模型配额</span>
-                        <div class="flex items-center gap-1">
-                          <RefreshCw
-                            v-if="refreshingQuota"
-                            class="w-3 h-3 text-muted-foreground/70 animate-spin"
-                          />
-                          <span
-                            v-if="key.upstream_metadata.antigravity?.updated_at"
-                            class="text-[9px] text-muted-foreground/70"
-                          >
-                            {{ formatAntigravityUpdatedAt(key.upstream_metadata.antigravity.updated_at) }}
-                          </span>
-                        </div>
-                      </div>
-                      <div class="grid grid-cols-2 gap-3">
-                        <div
-                          v-for="group in getAntigravityQuotaSummary(key.upstream_metadata)"
-                          :key="group.key"
-                        >
-                          <div class="flex items-center justify-between text-[10px] mb-0.5">
-                            <span class="text-muted-foreground truncate mr-2 min-w-0 flex-1">
-                              {{ group.label }}
-                            </span>
-                            <span :class="getQuotaRemainingClass(group.usedPercent)">
-                              {{ group.remainingPercent.toFixed(1) }}%
-                            </span>
-                          </div>
-                          <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
-                            <div
-                              class="absolute left-0 top-0 h-full transition-all duration-300"
-                              :class="getQuotaRemainingBarColor(group.usedPercent)"
-                              :style="{ width: `${Math.max(group.remainingPercent, 0)}%` }"
-                            />
-                          </div>
+                      <!-- 封禁状态显示 -->
+                      <div
+                        v-if="isAntigravityForbidden(key.upstream_metadata)"
+                        class="flex items-center gap-2 text-destructive"
+                      >
+                        <ShieldX class="w-4 h-4 shrink-0" />
+                        <div class="flex-1 min-w-0">
+                          <div class="text-[11px] font-medium">账户访问被禁止</div>
                           <div
-                            v-if="group.resetSeconds !== null || group.usedPercent > 0"
-                            class="text-[9px] text-muted-foreground/70 mt-0.5"
+                            v-if="key.upstream_metadata.antigravity?.forbidden_reason"
+                            class="text-[10px] text-destructive/80 truncate"
+                            :title="key.upstream_metadata.antigravity?.forbidden_reason"
                           >
-                            <template v-if="group.resetSeconds !== null && group.resetSeconds > 0">
-                              {{ formatResetTime(group.resetSeconds) }}后重置
-                            </template>
-                            <template v-else-if="group.resetSeconds !== null && group.resetSeconds <= 0">
-                              已重置
-                            </template>
-                            <template v-else>
-                              重置时间未知
-                            </template>
+                            {{ key.upstream_metadata.antigravity?.forbidden_reason }}
                           </div>
                         </div>
+                        <span
+                          v-if="key.upstream_metadata.antigravity?.forbidden_at"
+                          class="text-[9px] text-destructive/60 shrink-0"
+                        >
+                          {{ formatAntigravityForbiddenAt(key.upstream_metadata.antigravity?.forbidden_at) }}
+                        </span>
                       </div>
+                      <!-- 正常配额显示 -->
+                      <template v-else>
+                        <div class="flex items-center justify-between mb-1">
+                          <span class="text-[10px] text-muted-foreground">模型配额</span>
+                          <div class="flex items-center gap-1">
+                            <RefreshCw
+                              v-if="refreshingQuota"
+                              class="w-3 h-3 text-muted-foreground/70 animate-spin"
+                            />
+                            <span
+                              v-if="key.upstream_metadata.antigravity?.updated_at"
+                              class="text-[9px] text-muted-foreground/70"
+                            >
+                              {{ formatAntigravityUpdatedAt(key.upstream_metadata.antigravity.updated_at) }}
+                            </span>
+                          </div>
+                        </div>
+                        <div class="grid grid-cols-2 gap-3">
+                          <div
+                            v-for="group in getAntigravityQuotaSummary(key.upstream_metadata)"
+                            :key="group.key"
+                          >
+                            <div class="flex items-center justify-between text-[10px] mb-0.5">
+                              <span class="text-muted-foreground truncate mr-2 min-w-0 flex-1">
+                                {{ group.label }}
+                              </span>
+                              <span :class="getQuotaRemainingClass(group.usedPercent)">
+                                {{ group.remainingPercent.toFixed(1) }}%
+                              </span>
+                            </div>
+                            <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
+                              <div
+                                class="absolute left-0 top-0 h-full transition-all duration-300"
+                                :class="getQuotaRemainingBarColor(group.usedPercent)"
+                                :style="{ width: `${Math.max(group.remainingPercent, 0)}%` }"
+                              />
+                            </div>
+                            <div
+                              v-if="group.resetSeconds !== null || group.usedPercent > 0"
+                              class="text-[9px] text-muted-foreground/70 mt-0.5"
+                            >
+                              <template v-if="group.resetSeconds !== null && group.resetSeconds > 0">
+                                {{ formatResetTime(group.resetSeconds) }}后重置
+                              </template>
+                              <template v-else-if="group.resetSeconds !== null && group.resetSeconds <= 0">
+                                已重置
+                              </template>
+                              <template v-else>
+                                重置时间未知
+                              </template>
+                            </div>
+                          </div>
+                        </div>
+                      </template>
                     </div>
                     <!-- Kiro 上游额度信息（仅当有元数据时显示） -->
                     <div
-                      v-if="provider.provider_type === 'kiro' && key.upstream_metadata && hasKiroQuotaData(key.upstream_metadata)"
-                      class="mt-2 p-2 bg-muted/30 rounded-md"
+                      v-if="provider.provider_type === 'kiro' && key.upstream_metadata && (hasKiroQuotaData(key.upstream_metadata) || isKiroBanned(key.upstream_metadata))"
+                      class="mt-2 p-2 rounded-md"
+                      :class="isKiroBanned(key.upstream_metadata) ? 'bg-destructive/10 border border-destructive/30' : 'bg-muted/30'"
                     >
-                      <div class="flex items-center justify-between mb-1">
-                        <span class="text-[10px] text-muted-foreground">账号配额</span>
-                        <div class="flex items-center gap-1">
-                          <RefreshCw
-                            v-if="refreshingQuota"
-                            class="w-3 h-3 text-muted-foreground/70 animate-spin"
-                          />
-                          <span
-                            v-if="key.upstream_metadata.kiro?.updated_at"
-                            class="text-[9px] text-muted-foreground/70"
+                      <!-- 封禁状态显示 -->
+                      <div
+                        v-if="isKiroBanned(key.upstream_metadata)"
+                        class="flex items-center gap-2 text-destructive"
+                      >
+                        <ShieldX class="w-4 h-4 shrink-0" />
+                        <div class="flex-1 min-w-0">
+                          <div class="text-[11px] font-medium">账户已封禁</div>
+                          <div
+                            v-if="key.upstream_metadata.kiro?.ban_reason"
+                            class="text-[10px] text-destructive/80 truncate"
+                            :title="key.upstream_metadata.kiro?.ban_reason"
                           >
-                            {{ formatKiroUpdatedAt(key.upstream_metadata.kiro?.updated_at) }}
-                          </span>
-                        </div>
-                      </div>
-                      <!-- Kiro 额度显示：使用进度 -->
-                      <div>
-                        <!-- 使用额度进度条 -->
-                        <div>
-                          <div class="flex items-center justify-between text-[10px] mb-0.5">
-                            <span class="text-muted-foreground">使用额度</span>
-                            <span :class="getQuotaRemainingClass(key.upstream_metadata.kiro?.usage_percentage || 0)">
-                              {{ (100 - (key.upstream_metadata.kiro?.usage_percentage || 0)).toFixed(1) }}%
-                            </span>
+                            {{ key.upstream_metadata.kiro?.ban_reason }}
                           </div>
-                          <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
-                            <div
-                              class="absolute left-0 top-0 h-full transition-all duration-300"
-                              :class="getQuotaRemainingBarColor(key.upstream_metadata.kiro?.usage_percentage || 0)"
-                              :style="{ width: `${Math.max(100 - (key.upstream_metadata.kiro?.usage_percentage || 0), 0)}%` }"
+                        </div>
+                        <span
+                          v-if="key.upstream_metadata.kiro?.banned_at"
+                          class="text-[9px] text-destructive/60 shrink-0"
+                        >
+                          {{ formatKiroBannedAt(key.upstream_metadata.kiro?.banned_at) }}
+                        </span>
+                      </div>
+                      <!-- 正常配额显示 -->
+                      <template v-else>
+                        <div class="flex items-center justify-between mb-1">
+                          <span class="text-[10px] text-muted-foreground">账号配额</span>
+                          <div class="flex items-center gap-1">
+                            <RefreshCw
+                              v-if="refreshingQuota"
+                              class="w-3 h-3 text-muted-foreground/70 animate-spin"
                             />
-                          </div>
-                          <div class="flex items-center justify-between text-[9px] text-muted-foreground/70 mt-0.5">
-                            <span>
-                              {{ formatKiroUsage(key.upstream_metadata.kiro?.current_usage) }} /
-                              {{ formatKiroUsage(key.upstream_metadata.kiro?.usage_limit) }}
-                            </span>
-                            <span v-if="key.upstream_metadata.kiro?.next_reset_at">
-                              {{ formatKiroResetTime(key.upstream_metadata.kiro?.next_reset_at) }}重置
+                            <span
+                              v-if="key.upstream_metadata.kiro?.updated_at"
+                              class="text-[9px] text-muted-foreground/70"
+                            >
+                              {{ formatKiroUpdatedAt(key.upstream_metadata.kiro?.updated_at) }}
                             </span>
                           </div>
                         </div>
-                      </div>
+                        <!-- Kiro 额度显示：使用进度 -->
+                        <div>
+                          <!-- 使用额度进度条 -->
+                          <div>
+                            <div class="flex items-center justify-between text-[10px] mb-0.5">
+                              <span class="text-muted-foreground">使用额度</span>
+                              <span :class="getQuotaRemainingClass(key.upstream_metadata.kiro?.usage_percentage || 0)">
+                                {{ (100 - (key.upstream_metadata.kiro?.usage_percentage || 0)).toFixed(1) }}%
+                              </span>
+                            </div>
+                            <div class="relative w-full h-1.5 bg-border rounded-full overflow-hidden">
+                              <div
+                                class="absolute left-0 top-0 h-full transition-all duration-300"
+                                :class="getQuotaRemainingBarColor(key.upstream_metadata.kiro?.usage_percentage || 0)"
+                                :style="{ width: `${Math.max(100 - (key.upstream_metadata.kiro?.usage_percentage || 0), 0)}%` }"
+                              />
+                            </div>
+                            <div class="flex items-center justify-between text-[9px] text-muted-foreground/70 mt-0.5">
+                              <span>
+                                {{ formatKiroUsage(key.upstream_metadata.kiro?.current_usage) }} /
+                                {{ formatKiroUsage(key.upstream_metadata.kiro?.usage_limit) }}
+                              </span>
+                              <span v-if="key.upstream_metadata.kiro?.next_reset_at">
+                                {{ formatKiroResetTime(key.upstream_metadata.kiro?.next_reset_at) }}重置
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      </template>
                     </div>
                     <!-- 第二行：优先级 + API 格式（展开显示） + 统计信息 -->
                     <div class="flex items-center gap-1.5 mt-1 text-[11px] text-muted-foreground">
@@ -1486,6 +1540,42 @@ function hasCodexQuotaData(meta: UpstreamMetadata | null | undefined): boolean {
 function hasKiroQuotaData(meta: UpstreamMetadata | null | undefined): boolean {
   if (!meta?.kiro) return false
   return meta.kiro.usage_percentage !== undefined || meta.kiro.usage_limit !== undefined
+}
+
+// 检查 Kiro 账户是否被封禁
+function isKiroBanned(meta: UpstreamMetadata | null | undefined): boolean {
+  if (!meta?.kiro) return false
+  return meta.kiro.is_banned === true
+}
+
+// 格式化 Kiro 封禁时间（后端返回秒级时间戳）
+function formatKiroBannedAt(timestamp: number | undefined): string {
+  if (!timestamp) return ''
+  const date = new Date(timestamp * 1000)
+  return date.toLocaleDateString('zh-CN', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+// 检查 Antigravity 账户是否被禁止访问
+function isAntigravityForbidden(meta: UpstreamMetadata | null | undefined): boolean {
+  if (!meta?.antigravity) return false
+  return meta.antigravity.is_forbidden === true
+}
+
+// 格式化 Antigravity 禁止时间（后端返回秒级时间戳）
+function formatAntigravityForbiddenAt(timestamp: number | undefined): string {
+  if (!timestamp) return ''
+  const date = new Date(timestamp * 1000)
+  return date.toLocaleDateString('zh-CN', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 // 格式化 Kiro 更新时间

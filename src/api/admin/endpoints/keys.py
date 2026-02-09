@@ -1419,6 +1419,9 @@ class AdminRefreshProviderQuotaAdapter(AdminApiAdapter):
                         UpstreamModelsFetchContext,
                         fetch_models_for_key,
                     )
+                    from src.services.provider.adapters.antigravity.client import (
+                        AntigravityAccountForbiddenException,
+                    )
 
                     fetch_ctx = UpstreamModelsFetchContext(
                         provider_type="antigravity",
@@ -1428,11 +1431,49 @@ class AdminRefreshProviderQuotaAdapter(AdminApiAdapter):
                         proxy_config=getattr(provider, "proxy", None),
                         auth_config=auth_info.decrypted_auth_config,
                     )
-                    _models, errors, ok, upstream_meta = await fetch_models_for_key(
-                        fetch_ctx, timeout_seconds=10.0
-                    )
+
+                    try:
+                        _models, errors, ok, upstream_meta = await fetch_models_for_key(
+                            fetch_ctx, timeout_seconds=10.0
+                        )
+                    except AntigravityAccountForbiddenException as e:
+                        # 账户访问被禁止，自动停用并标记
+                        key.is_active = False
+                        key.oauth_invalid_at = datetime.now(timezone.utc)
+                        key.oauth_invalid_reason = f"账户访问被禁止: {e.reason or e.message}"
+                        # 更新 upstream_metadata 标记封禁状态
+                        forbidden_metadata = {
+                            "antigravity": {
+                                "is_forbidden": True,
+                                "forbidden_reason": e.reason or e.message,
+                                "forbidden_at": int(time.time()),
+                                "updated_at": int(time.time()),
+                            }
+                        }
+                        key.upstream_metadata = merge_upstream_metadata(
+                            key.upstream_metadata, forbidden_metadata
+                        )
+                        db.commit()
+                        logger.warning(
+                            "[ANTIGRAVITY_QUOTA] Key {} 账户访问被禁止，已自动停用: {}",
+                            key.id,
+                            e.reason or e.message,
+                        )
+                        return {
+                            "key_id": key.id,
+                            "key_name": key.name,
+                            "status": "forbidden",
+                            "message": f"账户访问被禁止: {e.reason or e.message}",
+                            "is_forbidden": True,
+                            "auto_disabled": True,
+                        }
 
                     if ok and upstream_meta:
+                        # 刷新成功时清除之前的封禁标记（如果账户已恢复）
+                        if "antigravity" in upstream_meta:
+                            upstream_meta["antigravity"]["is_forbidden"] = False
+                            upstream_meta["antigravity"]["forbidden_reason"] = None
+                            upstream_meta["antigravity"]["forbidden_at"] = None
                         metadata_updates[key.id] = upstream_meta
                         return {
                             "key_id": key.id,
@@ -1480,9 +1521,8 @@ class AdminRefreshProviderQuotaAdapter(AdminApiAdapter):
 
                 elif provider_type == ProviderType.KIRO:
                     from src.services.provider.adapters.kiro.usage import (
+                        KiroAccountBannedException,
                         fetch_kiro_usage_limits as _fetch_kiro_usage_limits,
-                    )
-                    from src.services.provider.adapters.kiro.usage import (
                         parse_kiro_usage_response as _parse_kiro_usage_response,
                     )
 
@@ -1516,6 +1556,37 @@ class AdminRefreshProviderQuotaAdapter(AdminApiAdapter):
                             auth_config=auth_config_data,
                             proxy_config=proxy_config,
                         )
+                    except KiroAccountBannedException as e:
+                        # 账户被封禁，自动停用并标记
+                        key.is_active = False
+                        key.oauth_invalid_at = datetime.now(timezone.utc)
+                        key.oauth_invalid_reason = f"账户已封禁: {e.reason or e.message}"
+                        # 更新 upstream_metadata 标记封禁状态
+                        ban_metadata = {
+                            "kiro": {
+                                "is_banned": True,
+                                "ban_reason": e.reason or e.message,
+                                "banned_at": int(time.time()),
+                                "updated_at": int(time.time()),
+                            }
+                        }
+                        key.upstream_metadata = merge_upstream_metadata(
+                            key.upstream_metadata, ban_metadata
+                        )
+                        db.commit()
+                        logger.warning(
+                            "[KIRO_QUOTA] Key {} 账户已封禁，已自动停用: {}",
+                            key.id,
+                            e.reason or e.message,
+                        )
+                        return {
+                            "key_id": key.id,
+                            "key_name": key.name,
+                            "status": "banned",
+                            "message": f"账户已封禁: {e.reason or e.message}",
+                            "is_banned": True,
+                            "auto_disabled": True,
+                        }
                     except RuntimeError as e:
                         error_msg = str(e)
                         # 检查是否需要标记账号异常
@@ -1538,6 +1609,10 @@ class AdminRefreshProviderQuotaAdapter(AdminApiAdapter):
                     metadata = _parse_kiro_usage_response(usage_data)
 
                     if metadata:
+                        # 刷新成功时清除之前的封禁标记（如果账户已恢复）
+                        metadata["is_banned"] = False
+                        metadata["ban_reason"] = None
+                        metadata["banned_at"] = None
                         # 收集元数据，稍后统一更新数据库（存储到 kiro 子对象）
                         metadata_updates[key.id] = {"kiro": metadata}
 

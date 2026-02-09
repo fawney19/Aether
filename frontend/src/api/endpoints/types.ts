@@ -355,6 +355,9 @@ export interface AntigravityModelQuota {
 export interface AntigravityUpstreamMetadata {
   updated_at?: number  // Unix 时间戳（秒）
   quota_by_model?: Record<string, AntigravityModelQuota>
+  is_forbidden?: boolean  // 账户是否被禁止访问
+  forbidden_reason?: string  // 禁止访问原因
+  forbidden_at?: number  // 禁止时间（Unix 时间戳，秒）
 }
 
 // Kiro 上游配额信息
@@ -367,6 +370,9 @@ export interface KiroUpstreamMetadata {
   next_reset_at?: number  // 下次重置时间（Unix 时间戳，毫秒）
   email?: string  // 用户邮箱
   updated_at?: number  // Unix 时间戳（秒）
+  is_banned?: boolean  // 账户是否被封禁
+  ban_reason?: string  // 封禁原因
+  banned_at?: number  // 封禁时间（Unix 时间戳，秒）
 }
 
 export interface UpstreamMetadata {
