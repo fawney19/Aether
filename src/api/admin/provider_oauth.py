@@ -321,10 +321,11 @@ def _check_duplicate_oauth_account(
     """
     检查是否存在重复的 OAuth 账号
 
-    通过以下字段判断重复（按优先级）：
+    通过以下字段判断重复：
     - account_id: Codex 等使用的账号 ID
-    - email: OAuth 账号邮箱
-    - profile_arn: Kiro 使用的 profile ARN
+    - email + auth_method: Kiro 使用 email + auth_method 组合判断
+      （同一邮箱可能通过 Social 和 IdC 两种方式登录，视为不同账号）
+    - email: 其他 OAuth Provider 使用邮箱判断
 
     Args:
         db: 数据库 session
@@ -337,10 +338,11 @@ def _check_duplicate_oauth_account(
     """
     new_email = auth_config.get("email")
     new_account_id = auth_config.get("account_id")
-    new_profile_arn = auth_config.get("profile_arn")
+    new_auth_method = auth_config.get("auth_method")  # Kiro: social / idc
+    new_provider_type = auth_config.get("provider_type")
 
     # 如果没有可用于识别的字段，跳过检查
-    if not new_email and not new_account_id and not new_profile_arn:
+    if not new_email and not new_account_id:
         return
 
     # 查询该 Provider 下所有 OAuth 类型的 Keys
@@ -362,22 +364,37 @@ def _check_duplicate_oauth_account(
             )
             existing_email = decrypted_config.get("email")
             existing_account_id = decrypted_config.get("account_id")
-            existing_profile_arn = decrypted_config.get("profile_arn")
+            existing_auth_method = decrypted_config.get("auth_method")
+            existing_provider_type = decrypted_config.get("provider_type")
 
-            # 独立检查每个标识字段，避免 elif 链遗漏跨字段匹配
+            # account_id 相同即重复（Codex 等）
             if new_account_id and existing_account_id and new_account_id == existing_account_id:
                 raise InvalidRequestException(
                     f"该 OAuth 账号已存在于当前 Provider 中（名称: {existing_key.name}）"
                 )
-            if new_profile_arn and existing_profile_arn and new_profile_arn == existing_profile_arn:
-                raise InvalidRequestException(
-                    f"该 Kiro 账号已存在于当前 Provider 中（名称: {existing_key.name}）"
-                )
+
+            # email 判断
             if new_email and existing_email and new_email == existing_email:
-                raise InvalidRequestException(
-                    f"该 OAuth 账号 ({new_email}) 已存在于当前 Provider 中"
-                    f"（名称: {existing_key.name}）"
-                )
+                is_kiro = new_provider_type == "kiro" or existing_provider_type == "kiro"
+                if is_kiro:
+                    # Kiro: 只有 email + auth_method 都相同才视为重复
+                    # 同一邮箱可能通过 Social 和 IdC 两种方式登录，视为不同账号
+                    if new_auth_method and existing_auth_method:
+                        if new_auth_method.lower() == existing_auth_method.lower():
+                            auth_method_display = (
+                                "Social" if new_auth_method.lower() == "social" else "IdC"
+                            )
+                            raise InvalidRequestException(
+                                f"该 Kiro 账号 ({new_email}, {auth_method_display}) "
+                                f"已存在于当前 Provider 中（名称: {existing_key.name}）"
+                            )
+                    # auth_method 不同，不视为重复
+                else:
+                    # 非 Kiro Provider: 仅 email 相同即视为重复
+                    raise InvalidRequestException(
+                        f"该 OAuth 账号 ({new_email}) 已存在于当前 Provider 中"
+                        f"（名称: {existing_key.name}）"
+                    )
         except InvalidRequestException:
             raise
         except Exception:
