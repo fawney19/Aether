@@ -228,7 +228,18 @@ def _inject_system_instruction(inner_request: dict[str, Any]) -> None:
     - 如果已有 systemInstruction：在前面插入（避免重复）
     - 如果没有：创建新的
     - 补全 role: user（Gemini API 要求）
+
+    注意：Gemini API 使用 protobuf oneof，`system_instruction`（snake_case）和
+    `systemInstruction`（camelCase）是同一个字段，只能设置其中一个。
+    需要先统一到 camelCase 再处理。
     """
+    # 统一 snake_case 到 camelCase（避免 oneof 冲突）
+    if "system_instruction" in inner_request:
+        snake_value = inner_request.pop("system_instruction")
+        # 仅当 camelCase 不存在时才迁移
+        if "systemInstruction" not in inner_request:
+            inner_request["systemInstruction"] = snake_value
+
     system_instruction = inner_request.get("systemInstruction")
 
     if isinstance(system_instruction, dict):
