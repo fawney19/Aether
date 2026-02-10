@@ -265,10 +265,10 @@ class GeminiChatAdapter(ChatAdapterBase):
         provider_id: str | None = None,
         api_key_id: str | None = None,
         model_name: str | None = None,
-        # Provider 上下文（Gemini Chat 适配器忽略，仅保持签名兼容）
-        auth_type: str | None = None,  # noqa: ARG003
-        provider_type: str | None = None,  # noqa: ARG003
-        decrypted_auth_config: dict[str, Any] | None = None,  # noqa: ARG003
+        # Provider 上下文
+        auth_type: str | None = None,
+        provider_type: str | None = None,
+        decrypted_auth_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """测试 Gemini API 模型连接性（非流式）"""
         from src.api.handlers.base.endpoint_checker import run_endpoint_check
@@ -283,17 +283,59 @@ class GeminiChatAdapter(ChatAdapterBase):
                 "status_code": 400,
             }
 
-        # 使用基类配置方法，但重写URL构建逻辑
-        base_url_resolved = cls.build_endpoint_url(base_url)
-        url = f"{base_url_resolved}/models/{effective_model_name}:generateContent"
+        is_antigravity = provider_type and provider_type.lower() == "antigravity"
+        is_oauth = auth_type == "oauth"
+
+        # Antigravity provider 使用 v1internal 路径，而非标准 Gemini API 路径
+        if is_antigravity:
+            from src.services.provider.adapters.antigravity.constants import (
+                V1INTERNAL_PATH_TEMPLATE,
+                get_http_user_agent as _get_antigravity_ua,
+            )
+            from src.services.provider.adapters.antigravity.url_availability import url_availability
+
+            ordered_urls = url_availability.get_ordered_urls(prefer_daily=True)
+            ag_base = ordered_urls[0] if ordered_urls else base_url
+            path = V1INTERNAL_PATH_TEMPLATE.format(action="generateContent")
+            url = f"{str(ag_base).rstrip('/')}{path}"
+        else:
+            # 使用基类配置方法，但重写URL构建逻辑
+            base_url_resolved = cls.build_endpoint_url(base_url)
+            url = f"{base_url_resolved}/models/{effective_model_name}:generateContent"
 
         # 构建请求组件
-        headers = cls.build_headers_with_extra(api_key, extra_headers)
+        # Antigravity 需要特定的 User-Agent
+        merged_extra = dict(extra_headers) if extra_headers else {}
+        if is_antigravity:
+            merged_extra["User-Agent"] = _get_antigravity_ua()
+        headers = cls.build_headers_with_extra(api_key, merged_extra if merged_extra else None)
+
+        # OAuth 统一处理：替换端点默认认证头（x-goog-api-key）为 Authorization: Bearer
+        if is_oauth:
+            from src.core.api_format import get_auth_config_for_endpoint
+
+            default_auth_header, _ = get_auth_config_for_endpoint(cls.FORMAT_ID)
+            if default_auth_header.lower() != "authorization":
+                headers.pop(default_auth_header, None)
+            headers["Authorization"] = f"Bearer {api_key}"
+
         body = cls.build_request_body(request_data)
 
         # 应用请求体规则（在格式转换后应用，确保规则效果不被覆盖）
         if body_rules:
             body = apply_body_rules(body, body_rules)
+
+        # Antigravity 需要将请求体包装为 v1internal 信封格式
+        if is_antigravity:
+            from src.services.provider.adapters.antigravity.envelope import wrap_v1internal_request
+
+            project_id = (decrypted_auth_config or {}).get("project_id", "")
+            body = wrap_v1internal_request(
+                body,
+                project_id=project_id,
+                model=effective_model_name,
+                request_type="endpoint_test",
+            )
 
         # 应用请求头规则（在请求头构建后应用）
         if header_rules:
