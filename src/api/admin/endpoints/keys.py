@@ -199,11 +199,12 @@ async def clear_oauth_invalid(
     old_reason = key.oauth_invalid_reason
     key.oauth_invalid_at = None
     key.oauth_invalid_reason = None
+    key.is_active = True
     db.commit()
 
-    logger.info("[OK] 手动清除 Key {}... 的 OAuth 失效标记 (原因: {})", key_id[:8], old_reason)
+    logger.info("[OK] 手动清除 Key {}... 的 OAuth 失效标记并自动启用 (原因: {})", key_id[:8], old_reason)
 
-    return {"message": "已清除 OAuth 失效标记"}
+    return {"message": "已清除 OAuth 失效标记，Key 已自动启用"}
 
 
 # ========== Provider Keys API ==========
@@ -1575,8 +1576,9 @@ class AdminRefreshProviderQuotaAdapter(AdminApiAdapter):
                         if "401" in error_msg or "认证失败" in error_msg:
                             key.oauth_invalid_at = datetime.now(timezone.utc)
                             key.oauth_invalid_reason = "Kiro Token 无效或已过期"
+                            key.is_active = False
                             db.commit()
-                            logger.warning("[KIRO_QUOTA] Key {} Token 无效，已标记为异常", key.id)
+                            logger.warning("[KIRO_QUOTA] Key {} Token 无效，已标记为异常并自动停用", key.id)
                         return {
                             "key_id": key.id,
                             "key_name": key.name,

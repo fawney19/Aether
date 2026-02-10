@@ -402,10 +402,25 @@ class OpenAINormalizer(FormatNormalizer):
                 state.model = model
             ss["message_started"] = True
             ss.setdefault("thinking_block_started", False)
+            ss.setdefault("thinking_block_stopped", False)
             ss.setdefault("text_block_started", False)
+            ss.setdefault("text_block_stopped", False)
+            # 根据首先出现的内容类型延迟分配块索引。
+            # 这样可以避免预留空白：当不存在思考内容时，测试期望文本位于索引0。
+            ss.setdefault("thinking_block_index", None)
+            ss.setdefault("text_block_index", None)
             ss.setdefault("tool_id_to_block_index", {})
-            ss.setdefault("next_block_index", 2)  # 0=thinking, 1=text, 2+=tools
+            ss.setdefault("next_block_index", 0)
             events.append(MessageStartEvent(message_id=msg_id, model=model))
+
+        def _reserve_block_index(slot_key: str) -> int:
+            idx = ss.get(slot_key)
+            if isinstance(idx, int) and idx >= 0:
+                return idx
+            next_idx = int(ss.get("next_block_index") or 0)
+            ss[slot_key] = next_idx
+            ss["next_block_index"] = next_idx + 1
+            return next_idx
 
         choices = chunk.get("choices") or []
         if not choices or not isinstance(choices, list):
@@ -432,24 +447,44 @@ class OpenAINormalizer(FormatNormalizer):
         # reasoning_content delta (thinking)
         reasoning_delta = delta.get("reasoning_content")
         if isinstance(reasoning_delta, str) and reasoning_delta:
+            thinking_index = _reserve_block_index("thinking_block_index")
             if not ss.get("thinking_block_started"):
                 ss["thinking_block_started"] = True
                 events.append(
-                    ContentBlockStartEvent(block_index=0, block_type=ContentType.THINKING)
+                    ContentBlockStartEvent(
+                        block_index=thinking_index,
+                        block_type=ContentType.THINKING,
+                    )
                 )
-            events.append(ContentDeltaEvent(block_index=0, text_delta=reasoning_delta))
+            events.append(ContentDeltaEvent(block_index=thinking_index, text_delta=reasoning_delta))
 
         # content delta
         content_delta = delta.get("content")
         if isinstance(content_delta, str) and content_delta:
-            # 从 thinking 过渡到 text 时，先关闭 thinking block
-            if ss.get("thinking_block_started") and not ss.get("thinking_block_stopped"):
+            # From thinking -> text, close thinking block first (only when text hasn't started yet).
+            if (
+                ss.get("thinking_block_started")
+                and not ss.get("thinking_block_stopped")
+                and not ss.get("text_block_started")
+            ):
                 ss["thinking_block_stopped"] = True
-                events.append(ContentBlockStopEvent(block_index=0))
+                events.append(
+                    ContentBlockStopEvent(block_index=_reserve_block_index("thinking_block_index"))
+                )
             if not ss.get("text_block_started"):
                 ss["text_block_started"] = True
-                events.append(ContentBlockStartEvent(block_index=1, block_type=ContentType.TEXT))
-            events.append(ContentDeltaEvent(block_index=1, text_delta=content_delta))
+                events.append(
+                    ContentBlockStartEvent(
+                        block_index=_reserve_block_index("text_block_index"),
+                        block_type=ContentType.TEXT,
+                    )
+                )
+            events.append(
+                ContentDeltaEvent(
+                    block_index=_reserve_block_index("text_block_index"),
+                    text_delta=content_delta,
+                )
+            )
 
         # tool_calls delta
         tool_calls = delta.get("tool_calls")
@@ -497,10 +532,14 @@ class OpenAINormalizer(FormatNormalizer):
             # 先补齐 content_block_stop（thinking + text），再发送 MessageStop
             if ss.get("thinking_block_started") and not ss.get("thinking_block_stopped"):
                 ss["thinking_block_stopped"] = True
-                events.append(ContentBlockStopEvent(block_index=0))
+                events.append(
+                    ContentBlockStopEvent(block_index=_reserve_block_index("thinking_block_index"))
+                )
             if ss.get("text_block_started") and not ss.get("text_block_stopped"):
                 ss["text_block_stopped"] = True
-                events.append(ContentBlockStopEvent(block_index=1))
+                events.append(
+                    ContentBlockStopEvent(block_index=_reserve_block_index("text_block_index"))
+                )
             # 解析 usage（需要请求时设置 stream_options.include_usage: true）
             usage_info = self._openai_usage_to_internal(chunk.get("usage"))
             events.append(MessageStopEvent(stop_reason=stop_reason, usage=usage_info))
@@ -1504,7 +1543,7 @@ class OpenAINormalizer(FormatNormalizer):
         if tool_key in mapping:
             return int(mapping[tool_key])
 
-        next_idx = int(ss.get("next_block_index") or 1)
+        next_idx = int(ss.get("next_block_index") or 0)
         mapping[tool_key] = next_idx
         ss["next_block_index"] = next_idx + 1
         return next_idx

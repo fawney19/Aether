@@ -715,6 +715,7 @@ async def test_model(
                         api_key.oauth_invalid_reason = (
                             f"{OAUTH_ACCOUNT_BLOCK_PREFIX}Google 要求验证账号"
                         )
+                        api_key.is_active = False
                         db.commit()
                         oauth_email = None
                         if getattr(api_key, "auth_config", None):

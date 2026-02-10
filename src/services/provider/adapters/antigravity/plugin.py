@@ -46,16 +46,18 @@ def build_antigravity_url(
     action = "streamGenerateContent" if is_stream else "generateContent"
     path = V1INTERNAL_PATH_TEMPLATE.format(action=action)
 
+    query_params = dict(effective_query_params)
+
     # v1internal 流式请求同样支持 ?alt=sse
     if is_stream:
-        effective_query_params.setdefault("alt", "sse")
+        query_params.setdefault("alt", "sse")
 
     # 移除 v1internal 不支持的查询参数
-    effective_query_params.pop("beta", None)
+    query_params.pop("beta", None)
 
     url = f"{str(base_url).rstrip('/')}{path}"
-    if effective_query_params:
-        query_string = urlencode(effective_query_params, doseq=True)
+    if query_params:
+        query_string = urlencode(query_params, doseq=True)
         if query_string:
             url = f"{url}?{query_string}"
 

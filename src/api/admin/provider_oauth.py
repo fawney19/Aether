@@ -690,8 +690,9 @@ async def refresh_oauth(
             # 标记为失效
             key.oauth_invalid_at = datetime.now(timezone.utc)
             key.oauth_invalid_reason = str(e)
+            key.is_active = False
             db.commit()
-            logger.warning("Kiro Key {} token 刷新失败，已标记为失效: {}", key_id, e)
+            logger.warning("Kiro Key {} token 刷新失败，已标记为失效并自动停用: {}", key_id, e)
             raise InvalidRequestException("Kiro token refresh 失败，请检查凭据是否有效")
 
         # 更新 key
@@ -699,6 +700,7 @@ async def refresh_oauth(
         key.auth_config = crypto_service.encrypt(json.dumps(new_cfg.to_dict()))
         key.oauth_invalid_at = None
         key.oauth_invalid_reason = None
+        key.is_active = True
         db.commit()
 
         return CompleteOAuthResponse(
@@ -787,8 +789,9 @@ async def refresh_oauth(
 
             key.oauth_invalid_at = datetime.now(timezone.utc)
             key.oauth_invalid_reason = error_reason
+            key.is_active = False
             db.commit()
-            logger.warning("Key {} OAuth token 刷新失败，已标记为失效: {}", key_id, error_reason)
+            logger.warning("Key {} OAuth token 刷新失败，已标记为失效并自动停用: {}", key_id, error_reason)
 
         raise InvalidRequestException(f"token refresh 失败: {error_reason}")
 
@@ -841,6 +844,7 @@ async def refresh_oauth(
     if not is_account_level_block(getattr(key, "oauth_invalid_reason", None)):
         key.oauth_invalid_at = None
         key.oauth_invalid_reason = None
+        key.is_active = True
     db.commit()
 
     return CompleteOAuthResponse(

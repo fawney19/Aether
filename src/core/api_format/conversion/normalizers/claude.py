@@ -720,15 +720,21 @@ class ClaudeNormalizer(FormatNormalizer):
 
             btype = str(block.get("type") or "unknown")
             if btype == "thinking":
-                thinking = str(block.get("thinking") or "")
+                thinking_raw = block.get("thinking")
                 signature = block.get("signature")
-                if thinking:
+
+                if isinstance(thinking_raw, str) and thinking_raw:
                     blocks.append(
                         ThinkingBlock(
-                            thinking=thinking,
+                            thinking=thinking_raw,
                             signature=str(signature) if signature else None,
                         )
                     )
+                else:
+                    dropped_key = f"claude_block:{btype}"
+                    dropped[dropped_key] = dropped.get(dropped_key, 0) + 1
+                    blocks.append(UnknownBlock(raw_type=btype, payload=block))
+
                 continue
 
             if btype == "text":

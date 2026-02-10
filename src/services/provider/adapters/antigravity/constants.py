@@ -53,10 +53,14 @@ def get_http_user_agent() -> str:
 
 def update_user_agent_version(version: str) -> None:
     """更新 User-Agent 中的版本号（由 refresh_user_agent 调用）。"""
-    global _ua_version  # noqa: PLW0603
+    global HTTP_USER_AGENT, _ua_version  # noqa: PLW0603
+    version = str(version or "").strip()
+    if not version:
+        return
     with _ua_lock:
         _ua_version = version
-
+        # Backward compat: keep module-level constant in sync.
+        HTTP_USER_AGENT = f"antigravity/{_ua_version} {_PLATFORM_TAG}"
 
 def parse_version_string(text: str) -> str | None:
     """从任意文本中提取 X.Y.Z 格式的版本号。"""

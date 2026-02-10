@@ -180,7 +180,7 @@ def _inject_claude_tool_ids_request(inner_request: dict[str, Any], model: str) -
                     name = "unknown"
 
                 fc_id = fc.get("id")
-                if fc_id is None:
+                if not (isinstance(fc_id, str) and fc_id):
                     # 生成新 ID
                     count = name_counters.get(name, 0)
                     fc_id = f"call_{name}_{count}"
@@ -214,7 +214,7 @@ def _inject_claude_tool_ids_request(inner_request: dict[str, Any], model: str) -
                 continue
 
             fr = part.get("functionResponse") or part.get("function_response")
-            if isinstance(fr, dict) and fr.get("id") is None:
+            if isinstance(fr, dict) and not (isinstance(fr.get("id"), str) and fr.get("id")):
                 name = fr.get("name", "")
                 if not isinstance(name, str) or not name:
                     name = "unknown"
@@ -497,22 +497,20 @@ def _inject_google_search_tool(inner_request: dict[str, Any]) -> None:
 
 
 def _inject_thought_signatures(inner_request: dict[str, Any], session_id: str | None) -> None:
-    """为 functionCall parts 注入 thoughtSignature（从 session signature cache）。
+    """Inject thought signatures into functionCall parts.
 
-    对齐 AM wrapper.rs：当 functionCall part 缺少 thoughtSignature 时，
-    从 session cache 中恢复签名，确保 thinking 模型的多轮 tool call 连续性。
+    Prefer tool-specific signatures (tool_use_id -> thoughtSignature), then fall back
+    to a session-level signature when available.
     """
-    if not session_id:
-        return
 
     try:
         from src.services.provider.adapters.antigravity.signature_cache import signature_cache
     except Exception:
         return
 
-    cached_sig = signature_cache.get_session_signature(session_id)
-    if not cached_sig:
-        return
+    session_sig: str | None = None
+    if session_id:
+        session_sig = signature_cache.get_session_signature(session_id)
 
     contents = inner_request.get("contents")
     if not isinstance(contents, list):
@@ -528,9 +526,48 @@ def _inject_thought_signatures(inner_request: dict[str, Any], session_id: str | 
         for part in parts:
             if not isinstance(part, dict):
                 continue
-            # 只处理有 functionCall 且缺少 thoughtSignature 的 part
-            if "functionCall" in part and part.get("thoughtSignature") is None:
-                part["thoughtSignature"] = cached_sig
+
+            fc = part.get("functionCall") or part.get("function_call")
+            if not isinstance(fc, dict):
+                continue
+
+            # Normalize existing signature aliases to thoughtSignature (if present).
+            sig_val: str | None = None
+            ts = part.get("thoughtSignature")
+            if isinstance(ts, str) and ts.strip():
+                sig_val = ts.strip()
+                if ts != sig_val:
+                    part["thoughtSignature"] = sig_val
+            else:
+                tss = part.get("thought_signature")
+                if isinstance(tss, str) and tss.strip():
+                    sig_val = tss.strip()
+                    part["thoughtSignature"] = sig_val
+                    part.pop("thought_signature", None)
+                else:
+                    legacy = part.get("signature")
+                    if isinstance(legacy, str) and legacy.strip():
+                        sig_val = legacy.strip()
+                        part["thoughtSignature"] = sig_val
+                        part.pop("signature", None)
+
+            if sig_val:
+                continue
+
+            tool_id = fc.get("id")
+            tool_sig: str | None = None
+            if isinstance(tool_id, str) and tool_id:
+                tool_sig = signature_cache.get_tool_signature(tool_id)
+
+            chosen = tool_sig or session_sig
+            if not chosen:
+                continue
+
+            part["thoughtSignature"] = chosen
+            # Avoid sending duplicate aliases once we inject.
+            part.pop("thought_signature", None)
+            if part.get("signature") in (None, ""):
+                part.pop("signature", None)
 
 
 # ---------------------------------------------------------------------------
@@ -765,8 +802,8 @@ def _inject_claude_tool_ids_response(response: dict[str, Any], model: str) -> No
         for part in parts:
             if not isinstance(part, dict):
                 continue
-            fc = part.get("functionCall")
-            if isinstance(fc, dict) and fc.get("id") is None:
+            fc = part.get("functionCall") or part.get("function_call")
+            if isinstance(fc, dict) and not (isinstance(fc.get("id"), str) and fc.get("id")):
                 name = fc.get("name", "unknown")
                 if not isinstance(name, str):
                     name = "unknown"
@@ -959,7 +996,7 @@ def cache_thought_signatures(model: str, response: dict[str, Any]) -> None:
                     signature_cache.cache(model, text, sig)
 
                 # 缓存 tool call signature（Layer 1）
-                fc = part.get("functionCall")
+                fc = part.get("functionCall") or part.get("function_call")
                 if isinstance(fc, dict) and isinstance(sig, str) and sig:
                     tool_id = fc.get("id")
                     if isinstance(tool_id, str) and tool_id:
@@ -1053,9 +1090,9 @@ class AntigravityV1InternalEnvelope:
     def on_http_status(self, *, base_url: str | None, status_code: int) -> None:
         if not base_url:
             return
-        if status_code == 200:
+        if 200 <= status_code < 300:
             url_availability.mark_success(base_url)
-        elif status_code in (429, 500, 502, 503, 504):
+        elif status_code in (404, 408, 429) or 500 <= status_code < 600:
             url_availability.mark_unavailable(base_url)
 
     def on_connection_error(self, *, base_url: str | None, exc: Exception) -> None:  # noqa: ARG002

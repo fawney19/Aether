@@ -742,9 +742,10 @@ class ErrorClassifier:
 
                     key.oauth_invalid_at = datetime.now(timezone.utc)
                     key.oauth_invalid_reason = f"{OAUTH_ACCOUNT_BLOCK_PREFIX}Google 要求验证账号"
+                    key.is_active = False
                     self.db.commit()
                     logger.warning(
-                        "  [{}] {} 因 403 VALIDATION_REQUIRED 已标记为账号异常",
+                        "  [{}] {} 因 403 VALIDATION_REQUIRED 已标记为账号异常并自动停用",
                         request_id,
                         self._format_key_display(key),
                     )

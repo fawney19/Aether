@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from src.services.provider.adapters.antigravity.constants import DUMMY_THOUGHT_SIGNATURE
 from src.services.provider.adapters.antigravity.signature_cache import ThinkingSignatureCache
 
@@ -49,6 +51,22 @@ def test_tool_signature_short_ignored() -> None:
     cache = ThinkingSignatureCache()
     cache.cache_tool_signature("toolu_123", "short")
     assert cache.get_tool_signature("toolu_123") is None
+
+
+def test_tool_signature_cache_enforces_limit(monkeypatch: Any) -> None:
+    import src.services.provider.adapters.antigravity.signature_cache as sc_mod
+
+    # Use a small limit to make eviction deterministic in tests.
+    monkeypatch.setattr(sc_mod, "_TOOL_CACHE_LIMIT", 3)
+    cache = sc_mod.ThinkingSignatureCache()
+    cache.cache_tool_signature("toolu_1", _SIG_A)
+    cache.cache_tool_signature("toolu_2", _SIG_B)
+    cache.cache_tool_signature("toolu_3", _SIG_C)
+    cache.cache_tool_signature("toolu_4", _SIG_D)
+
+    # Oldest entry should be evicted once the limit is exceeded.
+    assert cache.get_tool_signature("toolu_1") is None
+    assert cache.get_tool_signature("toolu_4") == _SIG_D
 
 
 # ===== Layer 2: Thinking Families =====

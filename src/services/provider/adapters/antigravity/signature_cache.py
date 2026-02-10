@@ -85,7 +85,7 @@ class ThinkingSignatureCache:
         with self._lock:
             self._tool_sigs[tool_use_id] = _CacheEntry(signature)
             if len(self._tool_sigs) > _TOOL_CACHE_LIMIT:
-                self._prune(self._tool_sigs)
+                self._prune(self._tool_sigs, limit=_TOOL_CACHE_LIMIT)
 
     def get_tool_signature(self, tool_use_id: str) -> str | None:
         """查找工具调用对应的 signature。"""
@@ -107,7 +107,7 @@ class ThinkingSignatureCache:
         with self._lock:
             self._families[signature] = _CacheEntry(family)
             if len(self._families) > _FAMILY_CACHE_LIMIT:
-                self._prune(self._families)
+                self._prune(self._families, limit=_FAMILY_CACHE_LIMIT)
 
     def get_signature_family(self, signature: str) -> str | None:
         """查找 signature 所属的模型家族。"""
@@ -150,7 +150,7 @@ class ThinkingSignatureCache:
             if should_store:
                 self._sessions[session_id] = _CacheEntry(_SessionEntry(signature, message_count))
                 if len(self._sessions) > _SESSION_CACHE_LIMIT:
-                    self._prune(self._sessions)
+                    self._prune(self._sessions, limit=_SESSION_CACHE_LIMIT)
 
     def get_session_signature(self, session_id: str) -> str | None:
         """获取会话的最新 thinking signature。"""
@@ -210,12 +210,21 @@ class ThinkingSignatureCache:
         return hashlib.sha256(content.encode("utf-8")).hexdigest()[:32]
 
     @staticmethod
-    def _prune(d: dict[str, _CacheEntry]) -> None:
-        """清理已过期的缓存条目。"""
+    def _prune(d: dict[str, _CacheEntry], *, limit: int | None = None) -> None:
+        """Remove expired entries and optionally enforce a size limit."""
         now = time.monotonic()
         expired = [k for k, v in d.items() if v.is_expired(now)]
         for k in expired:
             d.pop(k, None)
+
+        if limit is None or len(d) <= limit:
+            return
+
+        # Evict oldest entries by created_at.
+        excess = len(d) - limit
+        for k, _entry in sorted(d.items(), key=lambda kv: kv[1].created_at)[:excess]:
+            d.pop(k, None)
+
 
     def clear(self) -> None:
         """清空所有缓存层（用于测试或手动重置）。"""

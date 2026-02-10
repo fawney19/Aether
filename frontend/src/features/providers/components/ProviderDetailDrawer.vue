@@ -1518,12 +1518,13 @@ async function handleClearOAuthInvalid(key: EndpointAPIKey) {
   clearingOAuthInvalidKeyId.value = key.id
   try {
     await clearOAuthInvalid(key.id)
-    showSuccess('已清除 OAuth 异常标记')
+    showSuccess('已清除 OAuth 异常标记，Key 已自动启用')
     // 更新本地数据
     const keyInList = providerKeys.value.find(k => k.id === key.id)
     if (keyInList) {
       keyInList.oauth_invalid_at = null
       keyInList.oauth_invalid_reason = null
+      keyInList.is_active = true
     }
     await loadEndpoints()
   } catch (err: any) {

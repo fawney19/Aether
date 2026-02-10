@@ -202,12 +202,26 @@ def build_all_format_configs(
         fmt = next((f for f in candidates if f in format_to_endpoint), None)
         if fmt is not None:
             cfg = format_to_endpoint[fmt]
+
+            base_url = str(getattr(cfg, "base_url", "") or "")
+            extra_headers: dict[str, str] | None
+
+            if isinstance(cfg, EndpointFetchConfig):
+                extra_headers = cfg.extra_headers
+            else:
+                # 允许直接传递类似 ProviderEndpoint 的对象（测试/独立使用场景）。
+                candidate_extra = getattr(cfg, "extra_headers", None)
+                if isinstance(candidate_extra, dict):
+                    extra_headers = {str(k): str(v) for k, v in candidate_extra.items() if k}
+                else:
+                    extra_headers = get_extra_headers_from_endpoint(cfg)
+
             configs.append(
                 {
                     "api_key": api_key_value,
-                    "base_url": cfg.base_url,
+                    "base_url": base_url,
                     "api_format": fmt,
-                    "extra_headers": cfg.extra_headers,
+                    "extra_headers": extra_headers,
                 }
             )
     return configs

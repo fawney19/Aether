@@ -204,3 +204,64 @@ async def test_antigravity_forces_conversion_path_in_stream_with_prefetch() -> N
 
     assert mock_convert.call_count >= 1
     assert any(b"data: {}" in c for c in out)
+
+
+def test_wrap_v1internal_request_injects_thought_signature_from_tool_cache() -> None:
+    from src.services.provider.adapters.antigravity.signature_cache import signature_cache
+
+    signature_cache.clear()
+
+    tool_id = "toolu_123"
+    sig = "a" * 60
+    signature_cache.cache_tool_signature(tool_id, sig)
+
+    gemini_request = {
+        "model": "gemini-2.0-flash",
+        "contents": [
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {"role": "model", "parts": [{"function_call": {"name": "do", "id": tool_id}}]},
+        ],
+    }
+
+    wrapped = wrap_v1internal_request(
+        gemini_request,
+        project_id="project-123",
+        model="gemini-2.0-flash",
+    )
+
+    model_turn = wrapped["request"]["contents"][1]
+    part = model_turn["parts"][0]
+    assert part["thoughtSignature"] == sig
+
+
+def test_wrap_v1internal_request_injects_session_signature_when_tool_cache_missing() -> None:
+    from src.services.provider.adapters.antigravity.signature_cache import signature_cache
+
+    signature_cache.clear()
+
+    session_id = "sid-123"
+    sig = "b" * 60
+    signature_cache.cache_session_signature(session_id, sig, message_count=2)
+
+    gemini_request = {
+        "model": "gemini-2.0-flash",
+        "sessionId": session_id,
+        "contents": [
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {
+                "role": "model",
+                "parts": [{"functionCall": {"name": "do", "id": "toolu_missing"}}],
+            },
+        ],
+    }
+
+    wrapped = wrap_v1internal_request(
+        gemini_request,
+        project_id="project-123",
+        model="gemini-2.0-flash",
+    )
+
+    model_turn = wrapped["request"]["contents"][1]
+    part = model_turn["parts"][0]
+    assert part["thoughtSignature"] == sig
+

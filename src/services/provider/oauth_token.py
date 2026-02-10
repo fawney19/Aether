@@ -103,6 +103,7 @@ async def resolve_oauth_access_token(
                     if not is_account_level_block(getattr(row, "oauth_invalid_reason", None)):
                         row.oauth_invalid_at = None
                         row.oauth_invalid_reason = None
+                        row.is_active = True
                     db.commit()
         except Exception as e:
             # Don't fail caller path; token is still usable for this request.
