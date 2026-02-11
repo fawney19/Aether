@@ -4,7 +4,6 @@ Provider API Keys 管理
 
 from __future__ import annotations
 
-import json
 import time
 import uuid
 from dataclasses import dataclass
@@ -32,6 +31,7 @@ from src.models.endpoint_models import (
 )
 from src.services.cache.provider_cache import ProviderCacheService
 from src.services.model.upstream_fetcher import merge_upstream_metadata
+from src.utils import json_helper as json
 from src.utils.auth_utils import require_admin
 
 router = APIRouter(tags=["Provider Keys"])

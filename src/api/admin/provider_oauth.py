@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import secrets
 import time
 from dataclasses import dataclass
@@ -36,6 +35,7 @@ from src.core.provider_templates.fixed_providers import FIXED_PROVIDERS
 from src.core.provider_templates.types import ProviderType
 from src.database.database import get_db
 from src.models.database import Provider, ProviderAPIKey, User
+from src.utils import json_helper as json
 from src.utils.auth_utils import require_admin
 
 router = APIRouter(prefix="/api/admin/provider-oauth", tags=["Provider OAuth"])

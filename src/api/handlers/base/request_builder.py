@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import re
 import time
 from abc import ABC, abstractmethod
@@ -35,6 +34,7 @@ from src.core.crypto import crypto_service
 from src.core.logger import logger
 from src.core.provider_oauth_utils import enrich_auth_config, post_oauth_token
 from src.models.endpoint_models import _CONDITION_OPS, _TYPE_IS_VALUES, parse_re_flags
+from src.utils import json_helper as json
 
 if TYPE_CHECKING:
     from src.models.database import ProviderAPIKey, ProviderEndpoint

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import re
 import time
 from typing import Any
@@ -15,6 +14,7 @@ from src.clients.http_client import HTTPClientPool
 from src.core.logger import logger
 from src.services.provider.adapters.kiro.headers import build_kiro_ide_tag
 from src.services.provider.adapters.kiro.models.credentials import KiroAuthConfig
+from src.utils import json_helper as json
 
 IDC_AMZ_USER_AGENT = (
     "aws-sdk-js/3.738.0 ua/2.1 os/other lang/js md/browser#unknown_unknown "

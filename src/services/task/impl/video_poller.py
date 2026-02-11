@@ -9,7 +9,6 @@ Implements the video-specific poll/normalize/update logic used by TaskPollerServ
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -36,6 +35,7 @@ from src.core.logger import logger
 from src.database import create_session
 from src.models.database import ProviderAPIKey, ProviderEndpoint, VideoTask
 from src.services.task.service import TaskService
+from src.utils import json_helper as json
 
 
 @dataclass(slots=True)

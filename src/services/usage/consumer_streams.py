@@ -7,7 +7,6 @@ Usage Redis Streams consumer.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import socket
 import time
@@ -25,6 +24,7 @@ from src.core.logger import logger
 from src.database.database import create_session
 from src.services.usage.events import UsageEvent, UsageEventType
 from src.services.usage.service import UsageService
+from src.utils import json_helper as json
 
 
 def _consumer_name() -> str:

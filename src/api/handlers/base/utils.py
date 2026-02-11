@@ -4,12 +4,12 @@ Handler 基础工具函数
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Any
 
 from src.core.api_format import filter_response_headers
 from src.core.exceptions import EmbeddedErrorException, ProviderNotAvailableException
 from src.core.logger import logger
+from src.utils import json_helper as json
 
 if TYPE_CHECKING:
     from src.core.api_format.conversion.registry import FormatConversionRegistry

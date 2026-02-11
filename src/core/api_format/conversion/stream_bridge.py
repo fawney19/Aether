@@ -13,9 +13,10 @@ Used by handler-layer upstream policies that force upstream streaming mode.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator
+
+from src.utils import json_helper as json
 
 from .internal import (
     ContentType,

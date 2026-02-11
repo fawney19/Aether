@@ -4,7 +4,6 @@ OpenAI Video Handler - Sora 视频生成实现
 
 from __future__ import annotations
 
-import json
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator
@@ -41,6 +40,7 @@ from src.models.database import ApiKey, ProviderAPIKey, ProviderEndpoint, User, 
 from src.services.billing.rule_service import BillingRuleLookupResult, BillingRuleService
 from src.services.cache.aware_scheduler import ProviderCandidate
 from src.services.usage.service import UsageService
+from src.utils import json_helper as json
 
 
 class OpenAIVideoHandler(VideoHandlerBase):

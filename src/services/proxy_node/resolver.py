@@ -11,7 +11,6 @@ import base64
 import gzip as _gzip
 import hashlib
 import hmac as _hmac
-import json as _json
 import time
 from typing import Any
 from urllib.parse import quote, urlparse
@@ -21,6 +20,7 @@ import httpx
 from src.config import config
 from src.core.exceptions import ProxyNodeUnavailableError
 from src.core.logger import logger
+from src.utils import json_helper as _json
 
 # ---------------------------------------------------------------------------
 # ProxyNode 信息缓存（降低高频 DB 查询开销）

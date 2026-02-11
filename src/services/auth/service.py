@@ -477,7 +477,20 @@ class AuthService:
         # 更新最后使用时间（使用节流策略，减少数据库写入）
         if _should_update_last_used(key_record.id):
             key_record.last_used_at = datetime.now(timezone.utc)
-            db.commit()  # 立即提交事务,释放数据库锁,避免阻塞后续请求
+
+            # 这里需要 commit 来尽快释放锁，但默认 expire_on_commit=True 会让已加载对象过期，
+            # 导致同一请求后续访问 user/api_key 字段时触发额外 SELECT。
+            original_expire_on_commit = getattr(db, "expire_on_commit", None)
+            try:
+                if original_expire_on_commit is not None:
+                    db.expire_on_commit = False
+                db.commit()  # 立即提交事务,释放数据库锁,避免阻塞后续请求
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                if original_expire_on_commit is not None:
+                    db.expire_on_commit = original_expire_on_commit
 
         api_key_fp = hashlib.sha256(api_key.encode()).hexdigest()[:12]
         logger.debug("API认证成功: 用户 {} (api_key_fp={})", user.email, api_key_fp)

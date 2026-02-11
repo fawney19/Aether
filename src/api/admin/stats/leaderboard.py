@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import date
 from typing import Any, Literal
 
@@ -25,6 +24,7 @@ from src.models.database import (
     User,
 )
 from src.services.system.time_range import TimeRangeParams
+from src.utils import json_helper as json
 
 from .common import (
     _apply_admin_default_range,

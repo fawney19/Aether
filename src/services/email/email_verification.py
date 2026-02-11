@@ -3,13 +3,13 @@
 提供验证码生成、发送、验证等功能
 """
 
-import json
 import secrets
 from datetime import datetime, timezone
 
 from src.clients.redis_client import get_redis_client
 from src.config.settings import Config
 from src.core.logger import logger
+from src.utils import json_helper as json
 
 # 从环境变量加载配置
 _config = Config()

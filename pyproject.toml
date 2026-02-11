@@ -39,6 +39,7 @@ dependencies = [
     "aiosqlite>=0.22.1",
     "loguru>=0.7.3",
     "tiktoken>=0.12.0",
+    "orjson>=3.10",
     "regex>=2026.1.15", # 支持超时的正则库，用于 ReDoS 防护
     "aiofiles>=25.1.0",
     "aiohttp>=3.13.3",
@@ -133,3 +134,4 @@ addopts = [
     "-v"
 ]
 norecursedirs = ["tools/debug"]
+

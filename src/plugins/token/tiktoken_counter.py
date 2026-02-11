@@ -5,6 +5,7 @@ Tiktoken Token计数插件
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any
 
 from src.core.logger import logger
@@ -16,9 +17,37 @@ try:
     import tiktoken
 
     TIKTOKEN_AVAILABLE = True
-except ImportError:
+except ImportError:  # pragma: no cover
     TIKTOKEN_AVAILABLE = False
     tiktoken = None
+
+
+@lru_cache(maxsize=256)
+def _get_encoder_cached(model: str) -> Any:
+    """全局编码器缓存。
+
+    目的：避免在多实例/多请求场景下重复初始化 tiktoken 编码器。
+    """
+    if not TIKTOKEN_AVAILABLE:
+        raise RuntimeError("tiktoken not installed")
+
+    mapping = TiktokenCounterPlugin.MODEL_ENCODINGS
+
+    # 1) 完全匹配
+    if model in mapping:
+        return tiktoken.get_encoding(mapping[model])
+
+    # 2) 前缀匹配（按前缀长度从长到短，避免短前缀抢先匹配）
+    for model_prefix, enc_name in TiktokenCounterPlugin.MODEL_ENCODINGS_PREFIXES:
+        if model.startswith(model_prefix):
+            return tiktoken.get_encoding(enc_name)
+
+    # 3) 尝试使用模型名称
+    try:
+        return tiktoken.encoding_for_model(model)
+    except Exception:
+        # 默认使用 cl100k_base
+        return tiktoken.get_encoding("cl100k_base")
 
 
 class TiktokenCounterPlugin(TokenCounterPlugin):
@@ -49,6 +78,13 @@ class TiktokenCounterPlugin(TokenCounterPlugin):
         "text-embedding-3-large": "cl100k_base",
     }
 
+    # 前缀匹配顺序（从长到短）
+    MODEL_ENCODINGS_PREFIXES = sorted(
+        MODEL_ENCODINGS.items(),
+        key=lambda kv: len(kv[0]),
+        reverse=True,
+    )
+
     # 每个消息的额外Token数
     MESSAGE_OVERHEAD = {
         "gpt-3.5-turbo": 4,  # 每条消息
@@ -66,9 +102,6 @@ class TiktokenCounterPlugin(TokenCounterPlugin):
             logger.warning("tiktoken not installed, plugin disabled")
             return
 
-        # 缓存编码器
-        self._encoders = {}
-
         # 价格表（每1M tokens的价格 USD）
         default_pricing = {
             "gpt-4o": {"input": 2.5, "output": 10},
@@ -84,42 +117,20 @@ class TiktokenCounterPlugin(TokenCounterPlugin):
         )
 
     def _get_encoder(self, model: str) -> Any:
-        """获取模型的编码器"""
-        if model in self._encoders:
-            return self._encoders[model]
-
-        # 获取编码名称
-        encoding_name = None
-
-        # 完全匹配
-        if model in self.MODEL_ENCODINGS:
-            encoding_name = self.MODEL_ENCODINGS[model]
-        else:
-            # 前缀匹配
-            for model_prefix, enc_name in self.MODEL_ENCODINGS.items():
-                if model.startswith(model_prefix):
-                    encoding_name = enc_name
-                    break
-
-        # 如果找不到，尝试使用模型名称
-        if not encoding_name:
-            try:
-                encoder = tiktoken.encoding_for_model(model)
-                self._encoders[model] = encoder
-                return encoder
-            except:
-                # 默认使用cl100k_base
-                encoding_name = "cl100k_base"
-
-        # 创建编码器
-        encoder = tiktoken.get_encoding(encoding_name)
-        self._encoders[model] = encoder
-        return encoder
+        """获取模型的编码器（全局缓存）"""
+        return _get_encoder_cached(model)
 
     def supports_model(self, model: str) -> bool:
         """检查是否支持指定模型"""
         # 支持所有OpenAI模型和一些兼容模型
-        openai_models = ["gpt-4", "gpt-3.5", "text-davinci", "text-embedding", "code-davinci", "o1"]
+        openai_models = [
+            "gpt-4",
+            "gpt-3.5",
+            "text-davinci",
+            "text-embedding",
+            "code-davinci",
+            "o1",
+        ]
         return any(model.startswith(prefix) for prefix in openai_models)
 
     async def count_tokens(self, text: str, model: str | None = None) -> int:
@@ -263,6 +274,9 @@ class TiktokenCounterPlugin(TokenCounterPlugin):
         """获取统计信息"""
         stats = await super().get_stats()
         stats.update(
-            {"encoders_cached": len(self._encoders), "tiktoken_available": TIKTOKEN_AVAILABLE}
+            {
+                "encoders_cached": _get_encoder_cached.cache_info().currsize,
+                "tiktoken_available": TIKTOKEN_AVAILABLE,
+            }
         )
         return stats

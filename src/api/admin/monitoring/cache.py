@@ -1271,11 +1271,10 @@ async def clear_provider_model_mapping_cache(
 
 class AdminModelMappingCacheStatsAdapter(AdminApiAdapter):
     async def handle(self, context: ApiRequestContext) -> dict[str, Any]:  # type: ignore[override]
-        import json
-
         from src.clients.redis_client import get_redis_client
         from src.config.constants import CacheTTL
         from src.models.database import GlobalModel, Model, Provider
+        from src.utils import json_helper as json
 
         db = context.db
 

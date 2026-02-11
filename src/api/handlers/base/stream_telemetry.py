@@ -8,7 +8,6 @@
 """
 
 import asyncio
-import json
 import time
 from typing import Any
 
@@ -27,6 +26,7 @@ from src.services.usage.telemetry_writer import (
     QueueTelemetryWriter,
     TelemetryWriter,
 )
+from src.utils import json_helper as json
 
 
 class StreamTelemetryRecorder:

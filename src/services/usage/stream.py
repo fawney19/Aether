@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -19,6 +18,7 @@ from src.core.logger import logger
 from src.database.database import create_session
 from src.models.database import ApiKey, User
 from src.services.usage.service import UsageService
+from src.utils import json_helper as json
 
 
 class StreamUsageTracker:

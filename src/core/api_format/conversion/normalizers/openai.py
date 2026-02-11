@@ -7,7 +7,6 @@ OpenAI Chat Completions Normalizer
 - 可选：OpenAI error <-> InternalError
 """
 
-import json
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -58,6 +57,7 @@ from src.core.api_format.conversion.stream_events import (
 )
 from src.core.api_format.conversion.stream_state import StreamState
 from src.core.logger import logger
+from src.utils import json_helper as json
 
 
 class OpenAINormalizer(FormatNormalizer):

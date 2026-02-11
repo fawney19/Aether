@@ -841,7 +841,8 @@ def _generate_stable_session_id(inner_request: dict[str, Any]) -> str:
     有助于上游维持会话上下文。
     """
     import hashlib
-    import json
+
+    from src.utils import json_helper as json
 
     try:
         # 使用 contents 字段生成稳定哈希（与 CLIProxyAPI 对齐）

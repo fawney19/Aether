@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Callable
 from typing import Any
 
@@ -20,6 +19,7 @@ import redis.asyncio as aioredis
 
 from src.clients.redis_client import get_redis_client_sync
 from src.core.logger import logger
+from src.utils import json_helper as json
 
 
 class CacheSyncService:

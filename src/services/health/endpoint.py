@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import json
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -20,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from src.core.logger import logger
 from src.models.database import Provider, ProviderAPIKey, ProviderEndpoint, RequestCandidate
+from src.utils import json_helper as json
 
 # 缓存配置
 CACHE_TTL_SECONDS = 30  # 缓存 30 秒

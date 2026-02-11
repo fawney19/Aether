@@ -11,7 +11,6 @@ It intentionally stays lightweight and works with:
 from __future__ import annotations
 
 import codecs
-import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -23,6 +22,7 @@ from src.core.api_format.conversion.stream_state import StreamState
 from src.core.exceptions import EmbeddedErrorException
 from src.core.logger import logger
 from src.services.provider.envelope import ProviderEnvelope
+from src.utils import json_helper as json
 
 
 def _parse_sse_data_line(line: str) -> tuple[Any | None, str]:

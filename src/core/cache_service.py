@@ -4,11 +4,11 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from src.clients.redis_client import get_redis_client
 from src.core.logger import logger
+from src.utils import json_helper as json
 
 
 class CacheService:

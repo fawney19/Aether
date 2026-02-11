@@ -6,7 +6,6 @@ needed by generateAssistantResponse.
 
 from __future__ import annotations
 
-import json
 import uuid
 from typing import Any
 
@@ -17,6 +16,7 @@ from src.services.provider.adapters.kiro.constants import (
 from src.services.provider.adapters.kiro.constants import (
     TOOL_DESCRIPTION_SUFFIXES as _TOOL_DESCRIPTION_SUFFIXES,
 )
+from src.utils import json_helper as json
 
 
 def map_model(model: str) -> str | None:

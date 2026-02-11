@@ -13,10 +13,10 @@ Thinking 整流器（Rectifier）
 """
 
 import copy
-import json
 from typing import Any
 
 from src.core.logger import logger
+from src.utils import json_helper as json
 
 
 class ThinkingRectifier:

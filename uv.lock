@@ -22,6 +22,7 @@ dependencies = [
     { name = "ldap3" },
     { name = "loguru" },
     { name = "openai" },
+    { name = "orjson" },
     { name = "prometheus-client" },
     { name = "psycopg2-binary" },
     { name = "pydantic" },

@@ -4,8 +4,9 @@ OpenAI SSE 流解析器
 解析 OpenAI Chat Completions API 的 Server-Sent Events 流。
 """
 
-import json
 from typing import Any
+
+from src.utils import json_helper as json
 
 
 class OpenAIStreamParser:

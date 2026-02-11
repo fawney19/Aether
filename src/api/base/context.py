@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -11,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from src.core.logger import logger
 from src.models.database import ApiKey, ManagementToken, User
+from src.utils import json_helper as json
 from src.utils.perf import PerfRecorder
 from src.utils.request_utils import get_client_ip
 

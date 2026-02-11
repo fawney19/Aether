@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import json
 import time
 from enum import Enum
 from typing import Any
@@ -13,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from src.core.logger import logger
 from src.models.database import Provider, SystemConfig
+from src.utils import json_helper as json
 
 REQUEST_RECORD_LEVEL_KEY = "request_record_level"
 _LEGACY_REQUEST_LOG_LEVEL_KEY = "request_log_level"

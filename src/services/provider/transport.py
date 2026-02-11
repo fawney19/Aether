@@ -445,9 +445,8 @@ def _build_vertex_ai_url(
     Returns:
         完整的 Vertex AI URL
     """
-    import json
-
     from src.core.crypto import crypto_service
+    from src.utils import json_helper as json
 
     # 优先使用传入的已解密配置，避免重复解密
     auth_config: dict[str, Any] = {}

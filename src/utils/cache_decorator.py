@@ -2,12 +2,12 @@
 
 import functools
 import hashlib
-import json
 from collections.abc import Callable
 from typing import Any
 
 from src.clients.redis_client import get_redis_client_sync
 from src.core.logger import logger
+from src.utils import json_helper as json
 
 
 def _is_adapter_instance(obj: Any) -> bool:

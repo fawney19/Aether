@@ -4,7 +4,6 @@ Telemetry writer abstraction for stream usage.
 
 from __future__ import annotations
 
-import json
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -13,6 +12,7 @@ from src.clients.redis_client import get_redis_client
 from src.config.settings import config
 from src.core.logger import logger
 from src.services.usage.events import UsageEventType, build_usage_event
+from src.utils import json_helper as json
 
 
 class TelemetryWriter(ABC):

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import secrets
 import time
 from collections.abc import Awaitable
@@ -8,6 +7,8 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from redis.asyncio import Redis
+
+from src.utils import json_helper as json
 
 OAUTH_STATE_TTL_SECONDS = 600
 OAUTH_STATE_KEY_PREFIX = "oauth_state:"

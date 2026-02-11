@@ -22,7 +22,7 @@ class CacheTTL:
     L1_LOCAL = 3  # 3秒
 
     # 活跃度热力图缓存 - 历史数据变化不频繁，查询成本高
-    ACTIVITY_HEATMAP = 600  # 10分钟
+    ACTIVITY_HEATMAP = 7200  # 2小时
 
     # 仪表盘统计缓存
     DASHBOARD_STATS = 120  # 2分钟（管理员）

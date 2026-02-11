@@ -11,7 +11,6 @@ Gemini (GenerateContent / streamGenerateContent) Normalizer
 - 响应/流式通常为 camelCase（candidates/finishReason/usageMetadata/modelVersion）。
 """
 
-import json
 from typing import Any
 
 from src.core.api_format.conversion.field_mappings import (
@@ -62,6 +61,7 @@ from src.core.api_format.conversion.stream_events import (
 )
 from src.core.api_format.conversion.stream_state import StreamState
 from src.core.api_format.schema_utils import clean_gemini_schema as _clean_gemini_schema
+from src.utils import json_helper as json
 
 # Valid Gemini Part data-oneof field names (camelCase + snake_case).
 _VALID_PART_DATA_FIELDS = frozenset(
@@ -692,10 +692,18 @@ class GeminiNormalizer(FormatNormalizer):
                     # 关闭前面的 thinking/text block（如果还开着）
                     if ss.get("thinking_block_started") and not ss.get("thinking_block_stopped"):
                         ss["thinking_block_stopped"] = True
-                        events.append(ContentBlockStopEvent(block_index=_reserve_block_index("thinking_block_index")))
+                        events.append(
+                            ContentBlockStopEvent(
+                                block_index=_reserve_block_index("thinking_block_index")
+                            )
+                        )
                     if ss.get("text_block_started") and not ss.get("text_block_stopped"):
                         ss["text_block_stopped"] = True
-                        events.append(ContentBlockStopEvent(block_index=_reserve_block_index("text_block_index")))
+                        events.append(
+                            ContentBlockStopEvent(
+                                block_index=_reserve_block_index("text_block_index")
+                            )
+                        )
 
                     name = str(func_call.get("name") or "")
                     args = func_call.get("args")
@@ -766,10 +774,14 @@ class GeminiNormalizer(FormatNormalizer):
             # 先补齐 content_block_stop（所有已开启的 block），再发送 MessageStop
             if ss.get("thinking_block_started") and not ss.get("thinking_block_stopped"):
                 ss["thinking_block_stopped"] = True
-                events.append(ContentBlockStopEvent(block_index=_reserve_block_index("thinking_block_index")))
+                events.append(
+                    ContentBlockStopEvent(block_index=_reserve_block_index("thinking_block_index"))
+                )
             if ss.get("text_block_started") and not ss.get("text_block_stopped"):
                 ss["text_block_stopped"] = True
-                events.append(ContentBlockStopEvent(block_index=_reserve_block_index("text_block_index")))
+                events.append(
+                    ContentBlockStopEvent(block_index=_reserve_block_index("text_block_index"))
+                )
             events.append(MessageStopEvent(stop_reason=stop_reason, usage=usage_info))
 
         if "error" in chunk:

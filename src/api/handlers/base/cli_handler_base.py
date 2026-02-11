@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import codecs
-import json
 import time
 from collections.abc import AsyncGenerator, Callable
 from typing import (
@@ -26,6 +25,8 @@ import httpx
 from fastapi import BackgroundTasks, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
+
+from src.utils import json_helper as json
 
 if TYPE_CHECKING:
     from src.core.api_format import EndpointDefinition

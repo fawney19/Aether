@@ -133,7 +133,7 @@ class PluginMiddleware:
 
     async def _send_rate_limit_response(self, send: Send, result: RateLimitResult) -> None:
         """发送 429 限流响应"""
-        import json
+        from src.utils import json_helper as json
 
         body = json.dumps(
             {

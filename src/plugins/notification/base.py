@@ -6,13 +6,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from abc import abstractmethod
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
 from src.plugins.common import BasePlugin
+from src.utils import json_helper as json
 
 
 class NotificationLevel(Enum):

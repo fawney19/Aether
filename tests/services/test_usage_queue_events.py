@@ -1267,6 +1267,9 @@ async def test_record_usage_batch_updates_when_status_completed_billing_pending(
         def __init__(self, all_result: list[Any]) -> None:
             self._all_result = all_result
 
+        def options(self, *args: Any, **kwargs: Any) -> "DummyQuery":
+            return self
+
         def filter(self, *args: Any, **kwargs: Any) -> "DummyQuery":
             return self
 
@@ -1325,3 +1328,85 @@ async def test_record_usage_batch_updates_when_status_completed_billing_pending(
     assert existing.response_body == usage_params["response_body"]
     assert existing.billing_status == "settled"
     assert existing.finalized_at is not None
+
+
+@pytest.mark.asyncio
+async def test_record_usage_batch_uses_bulk_insert_mappings_for_new_records(
+    monkeypatch: Any,
+) -> None:
+    """确保批量新建 Usage 走 bulk_insert_mappings（阶段2优化项）。"""
+
+    from src.models.database import Usage
+    from src.services.usage.service import UsageService
+
+    class DummyQuery:
+        def __init__(self, all_result: list[Any]) -> None:
+            self._all_result = all_result
+
+        def options(self, *args: Any, **kwargs: Any) -> "DummyQuery":
+            return self
+
+        def filter(self, *args: Any, **kwargs: Any) -> "DummyQuery":
+            return self
+
+        def all(self) -> list[Any]:
+            return self._all_result
+
+    inserted = Usage(
+        request_id="req-usage-batch-new",
+        provider_name="openai",
+        model="gpt-4",
+        status="completed",
+        billing_status="settled",
+    )
+
+    usage_query_calls = {"count": 0}
+
+    def _query_side_effect(model: Any) -> Any:
+        if model is Usage:
+            usage_query_calls["count"] += 1
+            if usage_query_calls["count"] == 1:
+                # existing_records
+                return DummyQuery([])
+            # inserted_records
+            return DummyQuery([inserted])
+        return DummyQuery([])
+
+    db = MagicMock()
+    db.query.side_effect = _query_side_effect
+
+    usage_params = {
+        "request_id": "req-usage-batch-new",
+        "provider_name": "openai",
+        "model": "gpt-4",
+        "status": "completed",
+    }
+
+    monkeypatch.setattr(
+        UsageService,
+        "_prepare_usage_records_batch",
+        AsyncMock(return_value=[(usage_params, 0.0, None)]),
+    )
+
+    result = await UsageService.record_usage_batch(
+        db,
+        [
+            {
+                "request_id": "req-usage-batch-new",
+                "provider": "openai",
+                "model": "gpt-4",
+                "status": "completed",
+            }
+        ],
+    )
+
+    db.bulk_insert_mappings.assert_called_once()
+    args, _kwargs = db.bulk_insert_mappings.call_args
+    assert args[0] is Usage
+    mappings = args[1]
+    assert isinstance(mappings, list) and len(mappings) == 1
+    assert mappings[0]["request_id"] == "req-usage-batch-new"
+    assert mappings[0]["billing_status"] == "settled"
+    assert mappings[0].get("finalized_at") is not None
+
+    assert result and result[0] is inserted

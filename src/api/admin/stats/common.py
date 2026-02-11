@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Literal
 
@@ -14,6 +13,7 @@ from src.api.base.pipeline import ApiRequestPipeline
 from src.config.settings import config
 from src.models.database import Usage
 from src.services.system.time_range import TimeRangeParams
+from src.utils import json_helper as json
 
 pipeline = ApiRequestPipeline()
 

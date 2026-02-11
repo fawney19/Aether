@@ -22,7 +22,6 @@ Chat Handler Base - Chat API 格式的通用基类
 from __future__ import annotations
 
 import asyncio
-import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
@@ -90,6 +89,7 @@ from src.services.provider.transport import (
     redact_url_for_log,
 )
 from src.services.system.config import SystemConfigService
+from src.utils import json_helper as json
 
 
 def _get_error_status_code(e: Exception, default: int = 400) -> int:

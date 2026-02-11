@@ -10,10 +10,11 @@
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+
+from src.utils import json_helper as json
 
 if TYPE_CHECKING:
     from src.core.api_format.conversion.stream_state import StreamState

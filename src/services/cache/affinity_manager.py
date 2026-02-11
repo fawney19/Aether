@@ -21,7 +21,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import time
 from contextlib import asynccontextmanager
@@ -29,6 +28,7 @@ from typing import Any, NamedTuple
 
 from src.config.constants import CacheTTL
 from src.core.logger import logger
+from src.utils import json_helper as json
 
 
 class CacheAffinity(NamedTuple):

@@ -4,10 +4,10 @@ Claude SSE 流解析器
 解析 Claude Messages API 的 Server-Sent Events 流。
 """
 
-import json
 from typing import Any
 
 from src.api.handlers.base.utils import extract_cache_creation_tokens
+from src.utils import json_helper as json
 
 
 class ClaudeStreamParser:

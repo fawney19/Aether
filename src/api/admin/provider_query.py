@@ -6,7 +6,6 @@ Provider Query API 端点
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any
 
 import httpx
@@ -37,6 +36,7 @@ from src.services.model.upstream_fetcher import (
 )
 from src.services.provider.oauth_token import resolve_oauth_access_token
 from src.services.proxy_node.resolver import resolve_effective_proxy, resolve_proxy_param
+from src.utils import json_helper as json
 from src.utils.auth_utils import get_current_user
 
 router = APIRouter(prefix="/api/admin/provider-query", tags=["Provider Query"])
@@ -877,7 +877,7 @@ async def test_model(
         logger.debug(f"[test-model] Response Body: {response_body}")
         # 尝试解析 response_body (通常是 JSON 字符串)
         parsed_body = response_body
-        import json
+        from src.utils import json_helper as json
 
         if isinstance(response_body, str):
             try:

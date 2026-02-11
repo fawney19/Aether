@@ -7,7 +7,6 @@ Claude Messages API Normalizer
 - 可选：Claude error <-> InternalError
 """
 
-import json
 from typing import Any
 
 from src.core.api_format.conversion.field_mappings import (
@@ -51,6 +50,7 @@ from src.core.api_format.conversion.stream_events import (
     ToolCallDeltaEvent,
 )
 from src.core.api_format.conversion.stream_state import StreamState
+from src.utils import json_helper as json
 
 
 class ClaudeNormalizer(FormatNormalizer):

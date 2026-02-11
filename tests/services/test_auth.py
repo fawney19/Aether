@@ -97,7 +97,7 @@ class TestJWTTokenVerification:
     async def test_verify_expired_token_raises_error(self) -> None:
         """测试验证过期令牌抛出异常"""
         # 创建一个已过期的 token
-        data = {"sub": "user123", "type": "access"}
+        data: dict[str, str | datetime] = {"sub": "user123", "type": "access"}
         expire = datetime.now(timezone.utc) - timedelta(hours=1)
         data["exp"] = expire
         expired_token = jwt.encode(data, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
@@ -268,6 +268,45 @@ class TestAPIKeyAuthentication:
         assert result is not None
         assert result[0] == mock_user
         assert result[1] == mock_api_key
+
+    def test_authenticate_api_key_last_used_commit_disables_expire_on_commit(self) -> None:
+        """当需要更新 last_used_at 时，应临时关闭 expire_on_commit 以避免重复查询。"""
+        mock_user = MagicMock()
+        mock_user.id = "user-123"
+        mock_user.email = "test@example.com"
+        mock_user.is_active = True
+        mock_user.is_deleted = False
+
+        mock_api_key = MagicMock()
+        mock_api_key.id = "key-123"
+        mock_api_key.is_active = True
+        mock_api_key.is_locked = False
+        mock_api_key.expires_at = None
+        mock_api_key.user = mock_user
+        mock_api_key.balance_used_usd = 0.0
+
+        mock_db = MagicMock()
+        mock_db.expire_on_commit = True
+
+        def _commit_side_effect() -> None:
+            assert mock_db.expire_on_commit is False
+
+        mock_db.commit.side_effect = _commit_side_effect
+        mock_db.query.return_value.options.return_value.filter.return_value.first.return_value = (
+            mock_api_key
+        )
+
+        with patch("src.services.auth.service._should_update_last_used", return_value=True):
+            with patch("src.services.auth.service.ApiKey.hash_key", return_value="hashed_key"):
+                with patch(
+                    "src.services.auth.service.ApiKeyService.check_balance",
+                    return_value=(True, 100.0),
+                ):
+                    result = AuthService.authenticate_api_key(mock_db, "sk-test-key")
+
+        assert result is not None
+        assert mock_db.expire_on_commit is True
+        mock_db.commit.assert_called_once()
 
     def test_authenticate_api_key_not_found(self) -> None:
         """测试 API Key 不存在"""

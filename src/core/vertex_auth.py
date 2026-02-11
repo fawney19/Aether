@@ -7,7 +7,6 @@ Access Token 会被缓存，直到过期前 60 秒才刷新。
 
 from __future__ import annotations
 
-import json
 import time
 from collections import OrderedDict
 
@@ -15,6 +14,7 @@ import httpx
 import jwt
 
 from src.core.logger import logger
+from src.utils import json_helper as json
 
 
 class VertexAuthError(Exception):

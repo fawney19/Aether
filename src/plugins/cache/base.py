@@ -6,9 +6,10 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from abc import abstractmethod
 from typing import Any
+
+from src.utils import json_helper as json
 
 from ..common import BasePlugin
 

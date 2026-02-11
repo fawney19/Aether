@@ -6,8 +6,9 @@ StreamSmoother 使用这些提取器来处理不同格式的 SSE 事件。
 """
 
 import copy
-import json
 from abc import ABC, abstractmethod
+
+from src.utils import json_helper as json
 
 
 class ContentExtractor(ABC):

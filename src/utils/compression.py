@@ -5,8 +5,9 @@
 """
 
 import gzip
-import json
 from typing import Any
+
+from src.utils import json_helper as json
 
 
 def compress_json(data: Any) -> bytes | None:

@@ -10,7 +10,6 @@ OpenAI CLI / Responses Normalizer (OPENAI_CLI)
 - 未识别的字段会进入 extra/raw，未知内容块保留在 internal，但默认输出阶段会丢弃。
 """
 
-import json
 import time
 from collections.abc import Callable
 from typing import Any
@@ -54,6 +53,7 @@ from src.core.api_format.conversion.stream_events import (
     UnknownStreamEvent,
 )
 from src.core.api_format.conversion.stream_state import StreamState
+from src.utils import json_helper as json
 
 
 class OpenAICliNormalizer(FormatNormalizer):

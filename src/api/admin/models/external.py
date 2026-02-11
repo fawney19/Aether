@@ -2,7 +2,6 @@
 models.dev 外部模型数据代理
 """
 
-import json
 from typing import Any
 
 import httpx
@@ -12,6 +11,7 @@ from fastapi.responses import JSONResponse
 from src.clients import get_redis_client
 from src.core.logger import logger
 from src.models.database import User
+from src.utils import json_helper as json
 from src.utils.auth_utils import require_admin
 from src.utils.ssl_utils import get_ssl_context
 

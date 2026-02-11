@@ -13,7 +13,6 @@
 
 import asyncio
 import fnmatch
-import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -37,6 +36,7 @@ from src.services.model.upstream_fetcher import (
 from src.services.provider.oauth_token import resolve_oauth_access_token
 from src.services.proxy_node.resolver import resolve_effective_proxy
 from src.services.system.scheduler import get_scheduler
+from src.utils import json_helper as json
 
 # 从环境变量读取间隔，默认 1440 分钟（1 天），限制在 60-10080 分钟之间
 _interval_env = int(os.getenv("MODEL_FETCH_INTERVAL_MINUTES", "1440"))

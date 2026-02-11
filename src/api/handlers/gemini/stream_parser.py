@@ -14,8 +14,9 @@ Gemini streamGenerateContent 常见两种返回（与上游/代理实现有关�
 - https://generativelanguage.googleapis.com/$discovery/rest?version=v1beta
 """
 
-import json
 from typing import Any
+
+from src.utils import json_helper as json
 
 
 class GeminiStreamParser:

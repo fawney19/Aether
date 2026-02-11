@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import json
 from enum import Enum
 from typing import Any
 
@@ -32,6 +31,7 @@ from src.services.health.monitor import health_monitor
 from src.services.provider.format import normalize_endpoint_signature
 from src.services.rate_limit.adaptive_rpm import get_adaptive_rpm_manager
 from src.services.rate_limit.detector import RateLimitType, detect_rate_limit_type
+from src.utils import json_helper as json
 
 
 class ErrorAction(Enum):

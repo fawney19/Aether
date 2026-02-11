@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import codecs
-import json
 import time
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
@@ -45,6 +44,7 @@ from src.core.exceptions import (
 from src.core.logger import logger
 from src.models.database import Provider, ProviderEndpoint
 from src.services.provider.behavior import get_provider_behavior
+from src.utils import json_helper as json
 from src.utils.perf import PerfRecorder
 from src.utils.sse_parser import SSEEventParser
 from src.utils.timeout import read_first_chunk_with_ttfb_timeout

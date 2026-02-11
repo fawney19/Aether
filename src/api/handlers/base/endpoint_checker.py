@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 import uuid
 from collections.abc import Iterable
@@ -32,6 +31,7 @@ from src.core.api_format import (
     redact_headers_for_log,
 )
 from src.core.logger import logger
+from src.utils import json_helper as json
 from src.utils.ssl_utils import get_ssl_context
 
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import random
 import re
 from typing import Any
@@ -20,6 +19,7 @@ from src.services.provider.adapters.antigravity.constants import (
     update_user_agent_version,
 )
 from src.services.provider.adapters.antigravity.url_availability import url_availability
+from src.utils import json_helper as json
 
 # loadCodeAssist 请求体 metadata
 _CODE_ASSIST_METADATA = {

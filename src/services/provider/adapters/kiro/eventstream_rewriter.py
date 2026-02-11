@@ -11,7 +11,6 @@ streams.
 
 from __future__ import annotations
 
-import json
 import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
@@ -20,6 +19,7 @@ from typing import Any
 from src.core.logger import logger
 from src.services.provider.adapters.kiro.constants import CONTEXT_WINDOW_TOKENS
 from src.services.provider.adapters.kiro.parser.decoder import EventStreamDecoder
+from src.utils import json_helper as json
 
 # Safety limit for thinking_buffer to prevent memory exhaustion from
 # pathological upstream responses that never close the thinking tag.
