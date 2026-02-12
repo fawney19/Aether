@@ -24,6 +24,7 @@ from src.core.api_format.conversion.internal import (
     ContentType,
     ErrorType,
     FormatCapabilities,
+    ImageBlock,
     InstructionSegment,
     InternalError,
     InternalMessage,
@@ -1111,6 +1112,13 @@ class OpenAICliNormalizer(FormatNormalizer):
                 if text:
                     blocks.append(TextBlock(text=text))
                 continue
+            if ptype in ("input_image", "output_image"):
+                image_url = part.get("image_url") or part.get("url") or ""
+                if isinstance(image_url, str) and image_url:
+                    blocks.append(self._image_url_to_block(image_url))
+                else:
+                    blocks.append(UnknownBlock(raw_type=ptype, payload=part))
+                continue
             blocks.append(UnknownBlock(raw_type=ptype or "unknown", payload=part))
         return blocks
 
@@ -1189,6 +1197,19 @@ class OpenAICliNormalizer(FormatNormalizer):
                     continue  # 已在上面处理
                 if isinstance(block, UnknownBlock):
                     continue  # 跳过其他未知块
+                if isinstance(block, ImageBlock):
+                    if block.data and block.media_type:
+                        image_url = f"data:{block.media_type};base64,{block.data}"
+                    elif block.url:
+                        image_url = block.url
+                    else:
+                        continue
+                    content_items.append({
+                        "type": "input_image",
+                        "image_url": image_url,
+                    })
+                    has_text = True
+                    continue
                 if isinstance(block, TextBlock) and block.text:
                     # assistant 角色使用 output_text，其他角色使用 input_text
                     text_type = "output_text" if role == "assistant" else "input_text"
@@ -1345,6 +1366,14 @@ class OpenAICliNormalizer(FormatNormalizer):
                 out.append(str(item))
             return out
         return [str(value)]
+
+    def _image_url_to_block(self, url: str) -> ImageBlock:
+        """将 image_url 字符串转换为 ImageBlock（支持 data URL 和外部 URL）"""
+        if url.startswith("data:") and ";base64," in url:
+            header, _, data = url.partition(",")
+            media_type = header.split(";")[0].split(":", 1)[-1]
+            return ImageBlock(data=data, media_type=media_type)
+        return ImageBlock(url=url)
 
     def _extract_extra(self, payload: dict[str, Any], keep_keys: set[str]) -> dict[str, Any]:
         if not isinstance(payload, dict):
