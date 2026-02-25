@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Set as AbstractSet
 from typing import Any
 
@@ -333,24 +334,49 @@ class HeaderBuilder:
 
     def build(self) -> dict[str, str]:
         """构建最终的头部字典
-
-        httpx 要求 header 值可被 latin-1 编码。对于包含非 latin-1 字符
-        （如中文）的值，先 UTF-8 编码再按 latin-1 解码，使 httpx 将原始
-        UTF-8 字节逐字节发送到上游 —— 与 Go net/http 的行为一致。
         """
         result: dict[str, str] = {}
         for original_key, value in self._headers.values():
-            try:
-                value.encode("latin-1")
-            except (UnicodeEncodeError, UnicodeDecodeError):
-                # 将 UTF-8 字节逐字节映射为 latin-1 字符串，httpx 会原样发送
-                logger.debug(
-                    "Header '{}' contains non-latin-1 chars, encoding as raw UTF-8 bytes",
-                    original_key,
-                )
-                value = value.encode("utf-8").decode("latin-1")
-            result[original_key] = value
+            result[original_key] = _normalize_header_value_for_httpx(original_key, value)
         return result
+
+
+def _normalize_header_value_for_httpx(key: str, value: str) -> str:
+    """将 header 值归一化为 httpx/h11 可发送的 ASCII 字符串。
+
+    说明：
+    - 当前 httpx/h11 栈会对 str 类型 header 值执行 ASCII 编码。
+    - 若值包含非 ASCII 字符（如中文），会抛出 UnicodeEncodeError。
+    - 因此这里统一做 ASCII 归一化，确保请求可稳定发出。
+    """
+    try:
+        value.encode("ascii")
+        return value
+    except UnicodeEncodeError:
+        pass
+
+    key_lower = key.lower()
+
+    # Codex CLI 元数据是 JSON 字符串，优先重编码为 ASCII JSON，语义最稳定。
+    if key_lower == "x-codex-turn-metadata":
+        try:
+            normalized = json.dumps(json.loads(value), ensure_ascii=True, separators=(",", ":"))
+            logger.debug(
+                "Header '{}' contains non-ASCII chars, normalized as ASCII JSON",
+                key,
+            )
+            return normalized
+        except Exception:
+            # 非法 JSON 时走通用兜底，避免阻断请求。
+            pass
+
+    # 兜底：转义为 ASCII 可见形式（如中文 -> \\uXXXX，latin-1 -> \\xNN）
+    escaped = value.encode("unicode_escape").decode("ascii")
+    logger.warning(
+        "Header '{}' contains non-ASCII chars, escaped for httpx compatibility",
+        key,
+    )
+    return escaped
 
 
 def build_upstream_headers_for_endpoint(

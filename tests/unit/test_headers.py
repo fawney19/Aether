@@ -1,3 +1,5 @@
+import json
+
 from src.core.api_format import (
     CORE_REDACT_HEADERS,
     HeaderBuilder,
@@ -72,6 +74,25 @@ class TestHeaderBuilder:
         built = builder.build()
         assert built["Authorization"] == "base"
         assert built["X-Test"] == "1"
+
+    def test_non_ascii_value_is_escaped_for_httpx(self) -> None:
+        builder = HeaderBuilder()
+        builder.add("X-Test", "桌面")
+        built = builder.build()
+        assert built["X-Test"] == r"\u684c\u9762"
+
+    def test_codex_turn_metadata_is_normalized_to_ascii_json(self) -> None:
+        builder = HeaderBuilder()
+        raw = (
+            '{"turn_id":"t1","workspaces":{"d:\\\\桌面\\\\123\\\\Aether":{"has_changes":true}}}'
+        )
+        builder.add("x-codex-turn-metadata", raw)
+        built = builder.build()
+
+        normalized = built["x-codex-turn-metadata"]
+        assert normalized.isascii()
+        parsed = json.loads(normalized)
+        assert "d:\\桌面\\123\\Aether" in parsed["workspaces"]
 
 
 class TestBuildUpstreamHeaders:
