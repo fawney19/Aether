@@ -37,10 +37,13 @@
                 <SelectValue placeholder="请选择" />
               </SelectTrigger>
               <SelectContent>
-                <!-- 新建模式：允许自定义、Codex、Kiro 和 Antigravity -->
+                <!-- 新建模式：允许自定义、Claude Code、Codex、Kiro 和 Antigravity -->
                 <template v-if="!isEditMode">
                   <SelectItem value="custom">
                     自定义
+                  </SelectItem>
+                  <SelectItem value="claude_code">
+                    Claude Code
                   </SelectItem>
                   <SelectItem value="codex">
                     Codex
@@ -58,7 +61,7 @@
                     自定义
                   </SelectItem>
                   <SelectItem value="claude_code">
-                    ClaudeCode
+                    Claude Code
                   </SelectItem>
                   <SelectItem value="codex">
                     Codex
@@ -80,6 +83,12 @@
               class="text-xs text-muted-foreground"
             >
               反代使用固定端点且不可修改
+            </p>
+            <p
+              v-if="form.provider_type === 'claude_code'"
+              class="text-xs text-amber-600 dark:text-amber-400"
+            >
+              当前提供商未测试不保证可用性，自行承担风险
             </p>
           </div>
           <div class="space-y-1.5">

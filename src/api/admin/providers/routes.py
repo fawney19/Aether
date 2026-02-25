@@ -295,6 +295,7 @@ class AdminCreateProviderAdapter(AdminApiAdapter):
             pt = (validated_data.provider_type or "custom").strip()
             envelope_provider_types = {
                 ProviderType.ANTIGRAVITY,
+                ProviderType.CLAUDE_CODE,
                 ProviderType.CODEX,
                 ProviderType.KIRO,
             }

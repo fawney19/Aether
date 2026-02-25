@@ -188,7 +188,7 @@ export async function refreshProviderQuota(providerId: string): Promise<RefreshQ
 
 /**
  * 批量导入 OAuth 凭据（通用）
- * 支持的 Provider 类型：Codex、Antigravity、GeminiCli、ClaudeCode、Kiro
+ * 支持的 Provider 类型：Codex、Antigravity、GeminiCli、Claude Code、Kiro
  */
 export interface BatchImportResultItem {
   index: number

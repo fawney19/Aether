@@ -60,6 +60,27 @@ PRESET_MODELS: dict[str, list[dict[str, Any]]] = {
             "display_name": "Claude Haiku 4.5",
         },
     ],
+    # Claude Code (Anthropic Messages API 反代)
+    "claude_code": [
+        {
+            "id": "claude-sonnet-4-6",
+            "object": "model",
+            "owned_by": "anthropic",
+            "display_name": "Claude Sonnet 4.6",
+        },
+        {
+            "id": "claude-opus-4-6",
+            "object": "model",
+            "owned_by": "anthropic",
+            "display_name": "Claude Opus 4.6",
+        },
+        {
+            "id": "claude-haiku-4-5",
+            "object": "model",
+            "owned_by": "anthropic",
+            "display_name": "Claude Haiku 4.5",
+        },
+    ],
     # Codex (OpenAI CLI 反代)
     "codex": [
         {

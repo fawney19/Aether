@@ -353,6 +353,7 @@ class HandlerAdapterBase(ApiAdapter):
 
         is_antigravity = provider_type == ProviderType.ANTIGRAVITY
         is_kiro = provider_type == ProviderType.KIRO
+        is_claude_code = provider_type == ProviderType.CLAUDE_CODE
         is_oauth = auth_type == "oauth"
 
         # ---- URL ----
@@ -421,6 +422,11 @@ class HandlerAdapterBase(ApiAdapter):
             if default_auth_header.lower() != "authorization":
                 headers.pop(default_auth_header, None)
             headers["Authorization"] = f"Bearer {api_key}"
+        elif is_claude_code:
+            # Claude Code 的 API Key 模式固定使用 x-api-key，避免被 claude:cli 的
+            # Authorization 默认行为误导。
+            headers = {k: v for k, v in headers.items() if k.lower() != "authorization"}
+            headers["x-api-key"] = api_key
 
         # ---- Body ----
         body = cls.build_request_body(request_data, base_url=base_url)
@@ -461,6 +467,8 @@ class HandlerAdapterBase(ApiAdapter):
 
             if is_oauth:
                 protected_keys = {"authorization", "content-type"}
+            elif is_claude_code:
+                protected_keys = {"x-api-key", "content-type"}
             else:
                 ep_auth_header, _ = _get_auth_cfg(cls.FORMAT_ID)
                 protected_keys = {ep_auth_header.lower(), "content-type"}
@@ -469,6 +477,9 @@ class HandlerAdapterBase(ApiAdapter):
             header_builder.add_many(headers)
             header_builder.apply_rules(header_rules, protected_keys)
             headers = header_builder.build()
+
+        if is_claude_code and not any(k.lower() == "anthropic-version" for k in headers):
+            headers["anthropic-version"] = "2023-06-01"
 
         # ---- Execute ----
         effective_model_name = model_name or request_data.get("model")

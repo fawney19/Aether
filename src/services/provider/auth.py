@@ -90,6 +90,33 @@ def _get_proxy_config(key: Any, endpoint: Any = None) -> Any:
         return None
 
 
+def _get_provider_type(key: Any, endpoint: Any) -> str:
+    """尽力解析 provider_type（优先 ORM 关联，其次 auth_config）。"""
+    try:
+        provider = getattr(key, "provider", None) or getattr(endpoint, "provider", None)
+        if provider is not None:
+            pt = getattr(provider, "provider_type", None)
+            if pt:
+                return str(pt).strip().lower()
+    except Exception:
+        pass
+
+    encrypted_auth_config = getattr(key, "auth_config", None)
+    if encrypted_auth_config:
+        try:
+            if isinstance(encrypted_auth_config, dict):
+                auth_config = encrypted_auth_config
+            else:
+                auth_config = json.loads(crypto_service.decrypt(encrypted_auth_config))
+            pt = auth_config.get("provider_type")
+            if isinstance(pt, str) and pt.strip():
+                return pt.strip().lower()
+        except Exception:
+            pass
+
+    return ""
+
+
 # ==============================================================================
 # Provider-specific refresh implementations
 # ==============================================================================
@@ -390,5 +417,21 @@ async def get_provider_auth(
     # elif auth_type == "oauth2":
     #     ...
 
-    # 标准 API Key：返回 None，由 build_headers 处理
+    # Provider 特判：claude_code 的 API Key 请求需要 x-api-key 认证头。
+    if auth_type == "api_key":
+        from src.core.provider_types import ProviderType
+
+        provider_type = _get_provider_type(key, endpoint)
+        if provider_type == ProviderType.CLAUDE_CODE.value:
+            decrypted_key = crypto_service.decrypt(key.api_key)
+            return ProviderAuthInfo(
+                auth_header="x-api-key",
+                auth_value=decrypted_key,
+                decrypted_auth_config={
+                    "provider_type": ProviderType.CLAUDE_CODE.value,
+                    "auth_method": "api_key",
+                },
+            )
+
+    # 标准 API Key：返回 None，由 build_headers 自动处理
     return None
