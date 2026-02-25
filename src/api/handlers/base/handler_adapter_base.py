@@ -390,6 +390,25 @@ class HandlerAdapterBase(ApiAdapter):
         merged_extra = dict(extra_headers) if extra_headers else {}
         merged_extra.update(cli_extra)
 
+        if is_claude_code:
+            from src.services.provider.adapters.claude_code.context import (
+                ClaudeCodeRequestContext,
+                set_claude_code_request_context,
+            )
+            from src.services.provider.adapters.claude_code.envelope import claude_code_envelope
+
+            set_claude_code_request_context(
+                ClaudeCodeRequestContext(
+                    auth_method="oauth" if is_oauth else "api_key",
+                    is_stream=bool(request_data.get("stream")),
+                    tool_prefix_enabled=False,
+                )
+            )
+            try:
+                merged_extra.update(claude_code_envelope.extra_headers() or {})
+            finally:
+                set_claude_code_request_context(None)
+
         if is_antigravity:
             merged_extra.update(get_v1internal_extra_headers())
 

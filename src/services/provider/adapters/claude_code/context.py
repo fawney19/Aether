@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import contextvars
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True, slots=True)
 class ClaudeCodeRequestContext:
     """Claude Code 请求级上下文。"""
 
-    auth_method: str = "bearer"  # "bearer" | "api_key"
+    auth_method: str = "bearer"  # "bearer" | "api_key" | "oauth"
     email: str | None = None
+    is_stream: bool = False
+    tool_prefix_enabled: bool = False
+    body_betas: tuple[str, ...] = field(default_factory=tuple)
 
 
 _claude_code_request_context: contextvars.ContextVar[ClaudeCodeRequestContext | None] = (

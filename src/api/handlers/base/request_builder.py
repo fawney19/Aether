@@ -27,6 +27,7 @@ from src.core.api_format import (
 )
 from src.core.crypto import crypto_service
 from src.core.provider_auth_types import ProviderAuthInfo
+from src.core.provider_types import ProviderType
 from src.models.endpoint_models import _CONDITION_OPS, _TYPE_IS_VALUES, parse_re_flags
 from src.services.provider.auth import get_provider_auth
 
@@ -1178,7 +1179,40 @@ class PassthroughRequestBuilder(RequestBuilder):
 
         # 4. 添加额外头部
         if extra_headers:
-            builder.add_many(extra_headers)
+            merged_extra_headers = dict(extra_headers)
+
+            provider_obj = getattr(endpoint, "provider", None) or getattr(key, "provider", None)
+            provider_type = str(getattr(provider_obj, "provider_type", "") or "").strip().lower()
+
+            # Claude Code 特殊处理：保留客户端传入的 anthropic-beta，并与 envelope 默认值合并。
+            if provider_type == ProviderType.CLAUDE_CODE.value:
+                from src.services.provider.adapters.claude_code.envelope import (
+                    merge_anthropic_beta_headers,
+                )
+
+                existing_headers = builder.build()
+                existing_beta = next(
+                    (v for k, v in existing_headers.items() if k.lower() == "anthropic-beta"),
+                    "",
+                )
+                computed_beta = next(
+                    (
+                        v
+                        for k, v in merged_extra_headers.items()
+                        if k.lower() == "anthropic-beta"
+                    ),
+                    "",
+                )
+                if computed_beta:
+                    merged_beta = merge_anthropic_beta_headers(existing_beta, computed_beta)
+                    merged_extra_headers = {
+                        k: v
+                        for k, v in merged_extra_headers.items()
+                        if k.lower() != "anthropic-beta"
+                    }
+                    merged_extra_headers["Anthropic-Beta"] = merged_beta
+
+            builder.add_many(merged_extra_headers)
 
         # 5. 设置认证头（最高优先级，上游始终使用 header 认证）
         builder.add(auth_header, auth_value)
