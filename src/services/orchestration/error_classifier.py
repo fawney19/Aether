@@ -26,6 +26,11 @@ from src.core.exceptions import (
 from src.core.logger import logger
 from src.models.database import Provider, ProviderAPIKey, ProviderEndpoint
 from src.services.orchestration.error_handler import ErrorHandlerService
+from src.services.provider.adapters.claude_code.retry_policy import (
+    is_claude_code_auth_error,
+    is_claude_code_provider,
+    is_claude_code_request_error,
+)
 from src.services.rate_limit.adaptive_rpm import get_adaptive_rpm_manager
 from src.services.scheduling.aware_scheduler import CacheAwareScheduler
 
@@ -432,6 +437,8 @@ class ErrorClassifier:
         error: httpx.HTTPStatusError,
         provider_name: str,
         error_response_text: str | None = None,
+        *,
+        provider_type: str | None = None,
     ) -> ProviderException | UpstreamClientException:
         """
         转换 HTTP 错误为 Provider 异常
@@ -445,6 +452,8 @@ class ErrorClassifier:
             ProviderException 或 UpstreamClientException: 转换后的异常
         """
         status = error.response.status_code if error.response else None
+        provider_type_norm = str(provider_type or "").strip().lower()
+        is_claude_code = is_claude_code_provider(provider_type_norm)
 
         # 提取可读的错误消息
         extracted_message = self._extract_error_message(error_response_text)
@@ -456,6 +465,14 @@ class ErrorClassifier:
             detailed_message = f"上游服务返回错误: {status}"
 
         if status == 401:
+            return ProviderAuthException(provider_name=provider_name)
+
+        if (
+            status is not None
+            and is_claude_code
+            and is_claude_code_auth_error(status, error_response_text)
+        ):
+            logger.warning("检测到 Claude Code 认证/组织级错误: {}", provider_name)
             return ProviderAuthException(provider_name=provider_name)
 
         # 403: 检查是否为 Google VALIDATION_REQUIRED（账号需要手动验证）
@@ -496,12 +513,26 @@ class ErrorClassifier:
             )
 
         # 400 错误：检查是否为客户端请求错误（不应重试）
-        if status == 400 and self.is_client_error(error_response_text):
+        if status == 400 and (
+            self.is_client_error(error_response_text)
+            or (is_claude_code and is_claude_code_request_error(400, error_response_text))
+        ):
             logger.info(f"检测到客户端请求错误，不进行重试: {extracted_message}")
             return UpstreamClientException(
                 message=extracted_message or "请求无效",
                 provider_name=provider_name,
                 status_code=400,
+                upstream_error=error_response_text,
+            )
+
+        if status in {404, 422} and is_claude_code and is_claude_code_request_error(
+            int(status or 0), error_response_text
+        ):
+            logger.info(f"检测到 Claude Code 请求错误，不进行重试: {extracted_message}")
+            return UpstreamClientException(
+                message=extracted_message or "请求无效",
+                provider_name=provider_name,
+                status_code=int(status or 400),
                 upstream_error=error_response_text,
             )
 
@@ -554,7 +585,12 @@ class ErrorClassifier:
         )
 
         # 分类（纯逻辑）
-        converted_error = self.convert_http_error(http_error, provider_name, error_response_text)
+        converted_error = self.convert_http_error(
+            http_error,
+            provider_name,
+            error_response_text,
+            provider_type=str(getattr(provider, "provider_type", "") or ""),
+        )
 
         extra_data: dict[str, Any] = {
             "converted_error": converted_error,

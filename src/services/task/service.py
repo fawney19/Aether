@@ -990,6 +990,23 @@ class TaskService:
                 concurrent_requests=captured_key_concurrent,
                 extra_data=serializable_extra_data,
             )
+            if str(getattr(provider, "provider_type", "") or "").strip().lower() == "claude_code":
+                from src.services.provider.adapters.claude_code.retry_policy import (
+                    should_retry_same_candidate,
+                )
+
+                same_candidate_retry = has_retry_left and should_retry_same_candidate(
+                    status_code,
+                    serializable_extra_data.get("error_response"),
+                )
+                if has_retry_left and not same_candidate_retry:
+                    logger.info(
+                        "  [{}] Claude Code 状态码策略: status={}，切换到下一个候选",
+                        request_id,
+                        status_code,
+                    )
+                return "continue" if same_candidate_retry else "break"
+
             return "continue" if has_retry_left else "break"
 
         if isinstance(cause, error_classifier.RETRIABLE_ERRORS):

@@ -32,6 +32,7 @@ from src.api.handlers.base.stream_context import StreamContext
 from src.api.handlers.base.utils import (
     check_html_response,
     check_prefetched_response_error,
+    extract_cache_creation_tokens,
     get_format_converter_registry,
 )
 from src.config.constants import StreamDefaults
@@ -296,9 +297,13 @@ class StreamProcessor:
         """
         usage: dict[str, Any] | None = None
 
-        # Claude 格式: message_delta 或 message_start
+        # Claude 格式: message_delta/message_start。某些实现会把 usage 放在 delta.usage。
         if event_type == "message_delta":
             usage = evt.get("usage")
+            if not usage:
+                delta = evt.get("delta")
+                if isinstance(delta, dict):
+                    usage = delta.get("usage")
         elif event_type == "message_start":
             message = evt.get("message", {})
             if isinstance(message, dict):
@@ -325,13 +330,12 @@ class StreamProcessor:
                     "cache_creation_tokens": 0,
                 }
 
-        if usage and isinstance(usage, dict):
-            new_input = usage.get("input_tokens", 0) or 0
-            new_output = usage.get("output_tokens", 0) or 0
-            new_cached = usage.get("cache_read_tokens") or usage.get("cache_read_input_tokens") or 0
-            new_cache_creation = (
-                usage.get("cache_creation_tokens") or usage.get("cache_creation_input_tokens") or 0
-            )
+        normalized_usage = self._normalize_usage_payload(usage)
+        if normalized_usage:
+            new_input = normalized_usage.get("input_tokens", 0)
+            new_output = normalized_usage.get("output_tokens", 0)
+            new_cached = normalized_usage.get("cache_read_tokens", 0)
+            new_cache_creation = normalized_usage.get("cache_creation_tokens", 0)
 
             if new_input > ctx.input_tokens:
                 ctx.input_tokens = new_input
@@ -345,7 +349,47 @@ class StreamProcessor:
                 ctx.cache_creation_tokens = new_cache_creation
 
             if any([new_input, new_output, new_cached, new_cache_creation]):
-                ctx.final_usage = usage
+                ctx.final_usage = normalized_usage
+
+    @staticmethod
+    def _normalize_usage_payload(usage: Any) -> dict[str, int] | None:
+        """将不同格式 usage 字段归一化为统一 token 结构。"""
+        if not isinstance(usage, dict):
+            return None
+
+        try:
+            input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+        except Exception:
+            input_tokens = 0
+        try:
+            output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+        except Exception:
+            output_tokens = 0
+        try:
+            cache_read_tokens = int(
+                usage.get("cache_read_tokens")
+                or usage.get("cache_read_input_tokens")
+                or usage.get("cached_tokens")
+                or 0
+            )
+        except Exception:
+            cache_read_tokens = 0
+        try:
+            cache_creation_tokens = int(
+                usage.get("cache_creation_tokens")
+                or usage.get("cache_creation_input_tokens")
+                or extract_cache_creation_tokens(usage)
+                or 0
+            )
+        except Exception:
+            cache_creation_tokens = 0
+
+        return {
+            "input_tokens": max(0, input_tokens),
+            "output_tokens": max(0, output_tokens),
+            "cache_read_tokens": max(0, cache_read_tokens),
+            "cache_creation_tokens": max(0, cache_creation_tokens),
+        }
 
     async def prefetch_and_check_error(
         self,

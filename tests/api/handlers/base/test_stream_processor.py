@@ -83,6 +83,74 @@ def test_process_line_handles_openai_usage_chunk_followed_by_done_without_blank_
     assert ctx.has_completion is True
 
 
+def test_extract_usage_from_claude_message_delta_delta_usage() -> None:
+    ctx = StreamContext(model="test-model", api_format="claude:chat")
+    processor = StreamProcessor(request_id="test-request", default_parser=DummyParser())
+
+    processor._extract_usage_from_converted_event(
+        ctx,
+        {
+            "type": "message_delta",
+            "delta": {
+                "usage": {
+                    "input_tokens": "12",
+                    "output_tokens": "6",
+                    "cache_read_input_tokens": "4",
+                    "cache_creation_input_tokens": "9",
+                }
+            },
+        },
+        "message_delta",
+    )
+
+    assert ctx.input_tokens == 12
+    assert ctx.output_tokens == 6
+    assert ctx.cached_tokens == 4
+    assert ctx.cache_creation_tokens == 9
+    assert ctx.final_usage == {
+        "input_tokens": 12,
+        "output_tokens": 6,
+        "cache_read_tokens": 4,
+        "cache_creation_tokens": 9,
+    }
+
+
+def test_normalize_usage_payload_supports_legacy_keys_and_clamps_values() -> None:
+    normalized = StreamProcessor._normalize_usage_payload(
+        {
+            "prompt_tokens": "11",
+            "completion_tokens": "5",
+            "cached_tokens": "3",
+            "cache_creation": {"ephemeral_5m_input_tokens": 7},
+        }
+    )
+
+    assert normalized == {
+        "input_tokens": 11,
+        "output_tokens": 5,
+        "cache_read_tokens": 3,
+        "cache_creation_tokens": 7,
+    }
+
+
+def test_normalize_usage_payload_negative_values_are_clamped_to_zero() -> None:
+    normalized = StreamProcessor._normalize_usage_payload(
+        {
+            "input_tokens": "-1",
+            "output_tokens": -5,
+            "cache_read_tokens": "-9",
+            "cache_creation_tokens": "-8",
+        }
+    )
+
+    assert normalized == {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+    }
+
+
 class _DummyResponseCtx:
     async def __aexit__(self, exc_type: type | None, exc: BaseException | None, tb: object) -> None:
         return None
