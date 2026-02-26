@@ -17,6 +17,7 @@ from src.api.base.pipeline import ApiRequestPipeline
 from src.config.constants import CacheTTL
 from src.config.settings import config
 from src.core.logger import logger
+from src.core.oauth_plan import extract_oauth_plan_type
 from src.database import get_db
 from src.models.database import (
     ApiKey,
@@ -227,7 +228,8 @@ async def get_usage_records(
       input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, total_tokens,
       cost, actual_cost, rate_multiplier, response_time_ms, first_byte_time_ms, created_at, is_stream,
       input_price_per_1m, output_price_per_1m, cache_creation_price_per_1m, cache_read_price_per_1m,
-      status_code, error_message, status, has_fallback, has_retry, has_rectified, api_format, api_key_name, request_metadata
+      status_code, error_message, status, has_fallback, has_retry, has_rectified, api_format,
+      api_key_name, oauth_plan_type, request_metadata
     - `total`: 符合条件的总记录数
     - `limit`: 当前分页限制
     - `offset`: 当前分页偏移量
@@ -1008,7 +1010,11 @@ class AdminUsageRecordsAdapter(AdminApiAdapter):
             ),
             load_only(User.id, User.email, User.username),
             load_only(ProviderEndpoint.id, ProviderEndpoint.api_format),
-            load_only(ProviderAPIKey.id, ProviderAPIKey.name),
+            load_only(
+                ProviderAPIKey.id,
+                ProviderAPIKey.name,
+                ProviderAPIKey.auth_type,
+            ),
             load_only(ApiKey.id, ApiKey.name, ApiKey.key_encrypted),
         )
         records = (
@@ -1089,6 +1095,32 @@ class AdminUsageRecordsAdapter(AdminApiAdapter):
 
         data = []
         api_key_display_cache: dict[str, str] = {}
+        oauth_key_ids = {
+            str(provider_api_key.id)
+            for _, _, _, provider_api_key, _ in records
+            if provider_api_key
+            and str(getattr(provider_api_key, "auth_type", "") or "").strip().lower() == "oauth"
+        }
+        oauth_plan_type_cache: dict[str, str | None] = {}
+        if oauth_key_ids:
+            oauth_key_rows = (
+                db.query(
+                    ProviderAPIKey.id,
+                    ProviderAPIKey.auth_config,
+                    ProviderAPIKey.upstream_metadata,
+                )
+                .filter(ProviderAPIKey.id.in_(oauth_key_ids))
+                .all()
+            )
+            oauth_plan_type_cache = {
+                str(key_id): extract_oauth_plan_type(
+                    auth_config,
+                    upstream_metadata=upstream_metadata,
+                    silent=True,
+                )
+                for key_id, auth_config, upstream_metadata in oauth_key_rows
+            }
+
         for usage, user, endpoint, provider_api_key, user_api_key in records:
             actual_cost = (
                 float(usage.actual_total_cost_usd)
@@ -1119,6 +1151,14 @@ class AdminUsageRecordsAdapter(AdminApiAdapter):
                 has_format_conversion = bool(
                     client_fmt and endpoint_fmt and client_fmt != endpoint_fmt
                 )
+
+            oauth_plan_type: str | None = None
+            if (
+                provider_api_key
+                and str(getattr(provider_api_key, "auth_type", "") or "").strip().lower() == "oauth"
+            ):
+                provider_key_id = str(provider_api_key.id)
+                oauth_plan_type = oauth_plan_type_cache.get(provider_key_id)
 
             data.append(
                 {
@@ -1166,6 +1206,7 @@ class AdminUsageRecordsAdapter(AdminApiAdapter):
                     "endpoint_api_format": endpoint_api_format,
                     "has_format_conversion": bool(has_format_conversion),
                     "api_key_name": provider_api_key.name if provider_api_key else None,
+                    "oauth_plan_type": oauth_plan_type,
                     "request_metadata": usage.request_metadata,  # Provider 响应元数据
                 }
             )

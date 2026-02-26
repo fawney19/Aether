@@ -414,11 +414,20 @@
           </TableCell>
           <TableCell
             v-if="isAdmin"
-            class="py-4 w-[60px]"
+            class="py-4 w-[100px]"
           >
             <div class="flex items-center gap-1">
               <div class="flex flex-col text-xs gap-0.5">
-                <span>{{ record.provider }}</span>
+                <div class="flex items-center gap-1 min-w-0">
+                  <span class="truncate">{{ record.provider }}</span>
+                  <span
+                    v-if="record.oauth_plan_type"
+                    class="text-[10px] px-1 py-0.5 rounded border border-border/60 text-muted-foreground whitespace-nowrap"
+                    :title="`账号类型: ${formatOAuthPlanType(record.oauth_plan_type)}`"
+                  >
+                    {{ formatOAuthPlanType(record.oauth_plan_type) }}
+                  </span>
+                </div>
                 <span
                   v-if="record.api_key_name"
                   class="text-muted-foreground truncate"
@@ -666,6 +675,7 @@ import {
 } from '@/components/ui'
 import { RefreshCcw, Search } from 'lucide-vue-next'
 import { formatTokens, formatCurrency } from '@/utils/format'
+import { formatOAuthPlanType } from '@/utils/oauthPlanType'
 import { formatDateTime } from '../composables'
 import { useRowClick } from '@/composables/useRowClick'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'

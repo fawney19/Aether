@@ -17,6 +17,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from src.core.logger import logger
+from src.core.oauth_plan import extract_antigravity_tier_from_code_assist
 from src.services.provider.adapters.antigravity.constants import V1INTERNAL_PATH_TEMPLATE
 from src.services.provider.adapters.antigravity.url_availability import url_availability
 from src.services.provider.request_context import set_selected_base_url
@@ -112,7 +113,7 @@ async def enrich_antigravity(
             code_assist = await load_code_assist(access_token, proxy_config=proxy_config)
 
             # 提取 tier 信息（对齐 sub2api：优先 paidTier，fallback currentTier）
-            tier_str = _extract_tier_from_code_assist(code_assist)
+            tier_str = extract_antigravity_tier_from_code_assist(code_assist)
             if tier_str:
                 auth_config["tier"] = tier_str
                 logger.info("[enrich] Antigravity tier: {}", tier_str)
@@ -142,58 +143,6 @@ async def enrich_antigravity(
                 logger.info("[enrich] Antigravity 随机 project_id fallback: {}", fallback)
 
     return auth_config
-
-
-def _extract_tier_from_code_assist(code_assist: dict[str, Any]) -> str:
-    """从 loadCodeAssist 响应中提取用户层级，返回 Free/Pro/Ultra。
-
-    对齐 sub2api/CLIProxyAPI：优先 paidTier，fallback currentTier。
-    兼容 tier 为字符串或 {"id": "...", "tierType": "..."} 两种格式。
-    """
-    # 优先 paidTier（付费订阅级别）
-    paid_tier = code_assist.get("paidTier")
-    tier = _normalize_tier(_extract_tier_raw(paid_tier))
-    if tier:
-        return tier
-
-    # fallback currentTier
-    current_tier = code_assist.get("currentTier")
-    tier = _normalize_tier(_extract_tier_raw(current_tier))
-    if tier:
-        return tier
-
-    return "Free"
-
-
-def _extract_tier_raw(tier_obj: Any) -> str:
-    """从 tier 对象中提取原始标识，兼容字符串和字典两种格式。"""
-    if isinstance(tier_obj, str) and tier_obj.strip():
-        return tier_obj.strip()
-    if isinstance(tier_obj, dict):
-        for key in ("id", "tierType"):
-            val = tier_obj.get(key)
-            if isinstance(val, str) and val.strip():
-                return val.strip()
-    return ""
-
-
-def _normalize_tier(raw: str) -> str:
-    """将上游 tier 标识归一化为 Free/Pro/Ultra。
-
-    上游格式示例：
-    - id: "free-tier", "g1-pro-tier", "g1-ultra-tier"
-    - tierType: "FREE", "PAID"
-    """
-    if not raw:
-        return ""
-    lower = raw.lower()
-    if "ultra" in lower:
-        return "Ultra"
-    if "pro" in lower or "paid" in lower:
-        return "Pro"
-    if "free" in lower or "legacy" in lower:
-        return "Free"
-    return raw
 
 
 # ---------------------------------------------------------------------------

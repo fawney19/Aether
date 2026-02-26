@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse
 
-import httpx
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
@@ -31,6 +30,7 @@ from src.clients.redis_client import get_redis_client
 from src.core.crypto import crypto_service
 from src.core.exceptions import InvalidRequestException, NotFoundException
 from src.core.logger import logger
+from src.core.oauth_plan import decrypt_auth_config_to_dict, normalize_oauth_plan_type
 from src.core.provider_oauth_utils import enrich_auth_config, post_oauth_token
 from src.core.provider_templates.fixed_providers import FIXED_PROVIDERS
 from src.core.provider_templates.types import ProviderType
@@ -357,6 +357,41 @@ def _build_kiro_key_name(
     return f"{base} ({method})"
 
 
+def _normalize_codex_plan_group(plan_type: Any) -> str | None:
+    """将 Codex plan_type 归一化到判重分组。
+
+    分组规则：
+    - free
+    - team/plus/enterprise（同组）
+    """
+    normalized = normalize_oauth_plan_type(plan_type)
+    if not normalized:
+        return None
+    if normalized == "free":
+        return "free"
+    if normalized in {"team", "plus", "enterprise"}:
+        return "team_plus_enterprise"
+    return None
+
+
+def _is_codex_cross_plan_group_non_duplicate(
+    *,
+    new_provider_type: Any,
+    existing_provider_type: Any,
+    new_plan_type: Any,
+    existing_plan_type: Any,
+) -> bool:
+    """Codex 账号在 free 与 Team/Plus/Enterprise 之间不判重。"""
+    new_pt = str(new_provider_type or "").strip().lower()
+    existing_pt = str(existing_provider_type or "").strip().lower()
+    if new_pt != ProviderType.CODEX.value and existing_pt != ProviderType.CODEX.value:
+        return False
+
+    new_group = _normalize_codex_plan_group(new_plan_type)
+    existing_group = _normalize_codex_plan_group(existing_plan_type)
+    return bool(new_group and existing_group and new_group != existing_group)
+
+
 def _check_duplicate_oauth_account(
     db: Session,
     provider_id: str,
@@ -402,9 +437,9 @@ def _check_duplicate_oauth_account(
         if not existing_key.auth_config:
             continue
         try:
-            decrypted_config = json.loads(
-                crypto_service.decrypt(existing_key.auth_config, silent=True)
-            )
+            decrypted_config = decrypt_auth_config_to_dict(existing_key.auth_config, silent=True)
+            if not decrypted_config:
+                continue
             existing_email = decrypted_config.get("email")
             existing_user_id = decrypted_config.get("user_id")
             existing_auth_method = decrypted_config.get("auth_method")
@@ -422,8 +457,8 @@ def _check_duplicate_oauth_account(
                 if is_kiro:
                     # Kiro: 只有 email + auth_method 都相同才视为重复
                     if (
-                        new_auth_method
-                        and existing_auth_method
+                        isinstance(new_auth_method, str)
+                        and isinstance(existing_auth_method, str)
                         and new_auth_method.lower() == existing_auth_method.lower()
                     ):
                         is_duplicate = True

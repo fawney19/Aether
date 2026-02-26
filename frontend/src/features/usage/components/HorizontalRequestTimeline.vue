@@ -372,6 +372,7 @@ import { ChevronLeft, ChevronRight, ExternalLink } from 'lucide-vue-next'
 import { requestTraceApi, type RequestTrace, type CandidateRecord } from '@/api/requestTrace'
 import { log } from '@/utils/logger'
 import { parseApiError } from '@/utils/errorParser'
+import { formatOAuthPlanType } from '@/utils/oauthPlanType'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 
 // 节点组类型
@@ -744,8 +745,9 @@ const formatAuthTypeWithPlan = (authType: string, planType?: string): string => 
     'gemini_cli': 'Gemini CLI',
   }
   const typeName = labels[authType] || authType
-  if (planType) {
-    return `${typeName} ${planType}`
+  const planLabel = formatOAuthPlanType(planType)
+  if (planLabel) {
+    return `${typeName} ${planLabel}`
   }
   return typeName
 }

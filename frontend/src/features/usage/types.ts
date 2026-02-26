@@ -68,6 +68,7 @@ export interface UsageRecord {
   } | null
   provider?: string  // 仅管理员可见
   api_key_name?: string
+  oauth_plan_type?: string  // OAuth 账号类型（如 free/plus/team/enterprise）
   rate_multiplier?: number
   model: string
   target_model?: string | null  // 映射后的目标模型名（若无映射则为空）

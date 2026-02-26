@@ -22,6 +22,7 @@ from src.core.crypto import crypto_service
 from src.core.exceptions import InvalidRequestException, NotFoundException
 from src.core.key_capabilities import get_capability
 from src.core.logger import logger
+from src.core.oauth_plan import extract_oauth_plan_type_from_auth_config_data
 from src.core.provider_types import ProviderType
 from src.database import get_db
 from src.models.database import Provider, ProviderAPIKey, ProviderEndpoint, User
@@ -869,12 +870,7 @@ def _build_key_response(
             auth_config = json.loads(decrypted_config)
             oauth_expires_at = auth_config.get("expires_at")
             oauth_email = auth_config.get("email")
-            oauth_plan_type = auth_config.get("plan_type")  # Codex: plus/free/team/enterprise
-            # Antigravity 使用 "tier" 字段（如 "PAID"/"FREE"），做小写化 fallback
-            if not oauth_plan_type:
-                ag_tier = auth_config.get("tier")
-                if ag_tier and isinstance(ag_tier, str):
-                    oauth_plan_type = ag_tier.lower()
+            oauth_plan_type = extract_oauth_plan_type_from_auth_config_data(auth_config)
             oauth_account_id = auth_config.get("account_id")  # Codex: chatgpt_account_id
         except Exception as e:
             logger.error("Failed to decrypt auth_config for key {}: {}", key.id, e)
@@ -1347,7 +1343,9 @@ class AdminRefreshProviderQuotaAdapter(AdminApiAdapter):
                         try:
                             decrypted_config = crypto_service.decrypt(key.auth_config)
                             auth_config_data = json.loads(decrypted_config)
-                            oauth_plan_type = auth_config_data.get("plan_type")
+                            oauth_plan_type = extract_oauth_plan_type_from_auth_config_data(
+                                auth_config_data
+                            )
                             oauth_account_id = auth_config_data.get("account_id")
                         except Exception:
                             pass

@@ -1107,6 +1107,12 @@ import {
 } from '@/api/endpoints'
 import type { UpstreamMetadata, AntigravityModelQuota } from '@/api/endpoints/types'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
+import {
+  formatOAuthPlanType,
+  getOAuthPlanTypeClass,
+  isNonFreeOAuthPlan,
+  normalizeOAuthPlanType,
+} from '@/utils/oauthPlanType'
 
 // 扩展端点类型,包含密钥列表
 interface ProviderEndpointWithKeys extends ProviderEndpoint {
@@ -2242,20 +2248,6 @@ function getKeyRateMultiplier(key: EndpointAPIKey, format: string): number {
   return 1.0
 }
 
-// OAuth 订阅类型格式化
-function formatOAuthPlanType(planType: string): string {
-  const labels: Record<string, string> = {
-    plus: 'Plus',
-    pro: 'Pro',
-    free: 'Free',
-    paid: 'Paid',
-    team: 'Team',
-    enterprise: 'Enterprise',
-    ultra: 'Ultra',
-  }
-  return labels[planType.toLowerCase()] || planType
-}
-
 // Codex 剩余额度样式（基于已用百分比计算剩余）
 function getQuotaRemainingClass(usedPercent: number): string {
   const remaining = 100 - usedPercent
@@ -2274,9 +2266,11 @@ function getQuotaRemainingBarColor(usedPercent: number): string {
 
 // 判断是否为 Codex Team/Plus/Enterprise 账号（有 5H 限额，显示 3 列）
 function isCodexTeamPlan(key: EndpointAPIKey): boolean {
-  const planType = key.oauth_plan_type?.toLowerCase() || key.upstream_metadata?.codex?.plan_type?.toLowerCase()
+  const planType =
+    normalizeOAuthPlanType(key.oauth_plan_type)
+    ?? normalizeOAuthPlanType(key.upstream_metadata?.codex?.plan_type)
   // Free 账号返回 false（2 列），其他所有账号返回 true（3 列）
-  return planType !== undefined && planType !== 'free'
+  return isNonFreeOAuthPlan(planType)
 }
 
 interface AntigravityQuotaItem {
@@ -2442,22 +2436,6 @@ function formatResetTime(seconds: number): string {
     return `${hours}小时 ${minutes}分钟`
   }
   return `${minutes}分钟`
-}
-
-// OAuth 订阅类型样式
-function getOAuthPlanTypeClass(planType: string): string {
-  const classes: Record<string, string> = {
-    plus: 'border-green-500/50 text-green-600 dark:text-green-400',
-    pro: 'border-blue-500/50 text-blue-600 dark:text-blue-400',
-    free: 'border-primary/50 text-primary',
-    paid: 'border-blue-500/50 text-blue-600 dark:text-blue-400',
-    team: 'border-purple-500/50 text-purple-600 dark:text-purple-400',
-    enterprise: 'border-amber-500/50 text-amber-600 dark:text-amber-400',
-    ultra: 'border-amber-500/50 text-amber-600 dark:text-amber-400',
-    'pro+': 'border-purple-500/50 text-purple-600 dark:text-purple-400',
-    power: 'border-amber-500/50 text-amber-600 dark:text-amber-400',
-  }
-  return classes[planType.toLowerCase()] || ''
 }
 
 // OAuth 状态信息（包括失效和过期）

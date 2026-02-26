@@ -9,7 +9,6 @@ import asyncio
 import json
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
@@ -19,6 +18,7 @@ from src.core.api_format import get_extra_headers_from_endpoint
 from src.core.cache_service import CacheService
 from src.core.crypto import crypto_service
 from src.core.logger import logger
+from src.core.oauth_plan import decrypt_auth_config_to_dict, normalize_antigravity_tier
 from src.core.provider_types import ProviderType
 from src.database.database import get_db
 from src.models.database import Provider, ProviderEndpoint, User
@@ -79,15 +79,13 @@ def _antigravity_sort_keys(api_keys: list[Any]) -> list[Any]:
     for api_key in api_keys:
         availability = 0 if getattr(api_key, "oauth_invalid_at", None) else 1
         tier_weight = 0
-        encrypted_auth_config = getattr(api_key, "auth_config", None)
-        if encrypted_auth_config:
-            try:
-                decrypted = crypto_service.decrypt(encrypted_auth_config)
-                auth_config = json.loads(decrypted)
-                tier = (auth_config.get("tier") or "").lower()
+        auth_config = decrypt_auth_config_to_dict(
+            getattr(api_key, "auth_config", None), silent=True
+        )
+        if auth_config:
+            tier = normalize_antigravity_tier(auth_config.get("tier"))
+            if tier:
                 tier_weight = _ANTIGRAVITY_TIER_PRIORITY.get(tier, 0)
-            except Exception:
-                pass
         sort_keys.append(((availability, tier_weight), api_key))
 
     sort_keys.sort(key=lambda x: x[0], reverse=True)

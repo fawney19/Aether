@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -17,6 +16,7 @@ from src.api.base.admin_adapter import AdminApiAdapter
 from src.api.base.context import ApiRequestContext
 from src.api.base.pipeline import ApiRequestPipeline
 from src.core.crypto import crypto_service
+from src.core.oauth_plan import extract_oauth_plan_type
 from src.database import get_db
 from src.models.database import Provider, ProviderAPIKey, ProviderEndpoint
 from src.services.request.candidate import RequestCandidateService
@@ -255,35 +255,12 @@ class AdminGetRequestTraceAdapter(AdminApiAdapter):
                     key_auth_type_map[k.id] = (
                         provider_type_map.get(pid, "oauth") if pid else "oauth"
                     )
-                    # 提取 plan_type（不同 provider 存储位置不同）
-                    oauth_plan_type = None
-                    # 1. Codex: auth_config.plan_type
-                    # 2. Antigravity: auth_config.tier
-                    if k.auth_config:
-                        try:
-                            decrypted_config = crypto_service.decrypt(k.auth_config)
-                            auth_config = json.loads(decrypted_config)
-                            oauth_plan_type = auth_config.get("plan_type")
-                            if not oauth_plan_type:
-                                ag_tier = auth_config.get("tier")
-                                if ag_tier and isinstance(ag_tier, str):
-                                    oauth_plan_type = ag_tier.lower()
-                        except Exception:
-                            pass
-                    # 3. Kiro: upstream_metadata.kiro.subscription_title
-                    #    subscription_title 通常为 "KIRO FREE" / "KIRO PRO+" 等，
-                    #    去掉 provider 名称前缀，只保留等级部分
-                    if not oauth_plan_type:
-                        um = getattr(k, "upstream_metadata", None) or {}
-                        kiro_meta = um.get("kiro") if isinstance(um, dict) else None
-                        if isinstance(kiro_meta, dict):
-                            sub_title = kiro_meta.get("subscription_title")
-                            if sub_title and isinstance(sub_title, str):
-                                # "KIRO FREE" -> "Free", "KIRO PRO+" -> "Pro+"
-                                ptype = provider_type_map.get(pid, "") if pid else ""
-                                if ptype and sub_title.upper().startswith(ptype.upper()):
-                                    sub_title = sub_title[len(ptype) :].strip()
-                                oauth_plan_type = sub_title
+                    oauth_plan_type = extract_oauth_plan_type(
+                        getattr(k, "auth_config", None),
+                        upstream_metadata=getattr(k, "upstream_metadata", None),
+                        provider_type=provider_type_map.get(pid, None) if pid else None,
+                        silent=True,
+                    )
                     key_oauth_plan_map[k.id] = oauth_plan_type
                     continue
                 else:
