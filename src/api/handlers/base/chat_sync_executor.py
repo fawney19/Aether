@@ -425,6 +425,7 @@ class ChatSyncExecutor:
         envelope = prep.envelope
         upstream_is_stream = prep.upstream_is_stream
         auth_info = prep.auth_info
+        tls_profile = prep.tls_profile
 
         # 构建请求（上游始终使用 header 认证，不跟随客户端的 query 方式）
         provider_payload, provider_hdrs = handler._request_builder.build(
@@ -496,7 +497,9 @@ class ChatSyncExecutor:
 
         delegate_cfg = resolve_delegate_config(_effective_proxy)
         http_client = await HTTPClientPool.get_upstream_client(
-            delegate_cfg, proxy_config=_effective_proxy
+            delegate_cfg,
+            proxy_config=_effective_proxy,
+            tls_profile=tls_profile,
         )
 
         # 注意：不使用 async with，因为复用的客户端不应该被关闭

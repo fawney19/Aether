@@ -520,6 +520,7 @@ class ClaudeNormalizer(FormatNormalizer):
             message_raw = chunk.get("message")
             message: dict[str, Any] = message_raw if isinstance(message_raw, dict) else {}
             msg_id = str(message.get("id") or "")
+            usage_info = self._claude_usage_to_internal(message.get("usage"))
             # 保留初始化时设置的 model（客户端请求的模型），仅在空时用上游值
             model = state.model or str(message.get("model") or "")
             state.message_id = msg_id or state.message_id
@@ -527,7 +528,9 @@ class ClaudeNormalizer(FormatNormalizer):
                 state.model = model
             ss["message_started"] = True
             ss.setdefault("block_index_to_tool_id", {})
-            events.append(MessageStartEvent(message_id=msg_id, model=model))
+            if usage_info is not None:
+                ss["usage"] = message.get("usage")
+            events.append(MessageStartEvent(message_id=msg_id, model=model, usage=usage_info))
             return events
 
         if event_type == "content_block_start":

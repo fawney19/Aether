@@ -102,6 +102,7 @@ class ProviderRequestResult:
     provider_api_format: str = ""
     client_api_format: str = ""
     auth_info: Any = None
+    tls_profile: str | None = None
 
 
 class ChatHandlerBase(BaseMessageHandler, ABC):
@@ -695,6 +696,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             request_body = dict(original_request_body)
 
         provider_type = str(getattr(provider, "provider_type", "") or "").lower()
+        claude_tls_profile: str | None = None
         behavior = get_provider_behavior(
             provider_type=provider_type,
             endpoint_sig=provider_api_format,
@@ -713,6 +715,16 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             client_is_stream=client_is_stream,
             policy=upstream_policy,
         )
+        if provider_type == "claude_code":
+            from src.services.provider.adapters.claude_code.context import (
+                build_and_set_claude_code_request_context,
+            )
+
+            _claude_ctx, claude_tls_profile = build_and_set_claude_code_request_context(
+                provider_config=getattr(provider, "config", None),
+                key_id=str(getattr(key, "id", "") or ""),
+                is_stream=upstream_is_stream,
+            )
 
         # 跨格式：先做请求体转换（失败触发 failover）
         registry = get_format_converter_registry()
@@ -776,6 +788,18 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 url_model=url_model,
                 decrypted_auth_config=auth_info.decrypted_auth_config if auth_info else None,
             )
+            if provider_type == "claude_code":
+                from src.services.provider.adapters.claude_code.context import (
+                    get_claude_code_request_context,
+                )
+                from src.services.provider.adapters.claude_code.envelope import (
+                    enforce_distributed_session_controls,
+                )
+
+                await enforce_distributed_session_controls(
+                    request_body,
+                    get_claude_code_request_context(),
+                )
 
         # Provider envelope: extra upstream headers (e.g. dedicated User-Agent).
         extra_headers: dict[str, str] = {}
@@ -793,6 +817,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             provider_api_format=provider_api_format,
             client_api_format=client_api_format,
             auth_info=auth_info,
+            tls_profile=claude_tls_profile,
         )
 
     async def _execute_stream_request(
@@ -853,6 +878,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
         envelope = prep.envelope
         upstream_is_stream = prep.upstream_is_stream
         auth_info = prep.auth_info
+        tls_profile = prep.tls_profile
 
         # 构建请求（上游始终使用 header 认证，不跟随客户端的 query 方式）
         provider_payload, provider_headers = self._request_builder.build(
@@ -908,7 +934,9 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             request_timeout_sync = provider.request_timeout or config.http_request_timeout
             delegate_cfg = resolve_delegate_config(effective_proxy)
             http_client = await HTTPClientPool.get_upstream_client(
-                delegate_cfg, proxy_config=effective_proxy
+                delegate_cfg,
+                proxy_config=effective_proxy,
+                tls_profile=tls_profile,
             )
 
             try:
@@ -1104,7 +1132,9 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
 
         delegate_cfg = resolve_delegate_config(effective_proxy)
         http_client = await HTTPClientPool.get_upstream_client(
-            delegate_cfg, proxy_config=effective_proxy
+            delegate_cfg,
+            proxy_config=effective_proxy,
+            tls_profile=tls_profile,
         )
 
         # 用于存储内部函数的结果（必须在函数定义前声明，供 nonlocal 使用）

@@ -283,6 +283,40 @@ def test_claude_stream_chunk_and_event_roundtrip_basic() -> None:
     assert out_events[-1]["type"] == "message_stop"
 
 
+def test_claude_stream_message_start_preserves_usage() -> None:
+    n = ClaudeNormalizer()
+    state = StreamState(model="claude-3-sonnet")
+
+    chunk = {
+        "type": "message_start",
+        "message": {
+            "id": "msg_usage_start",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-3-sonnet",
+            "content": [],
+            "usage": {
+                "input_tokens": 9,
+                "output_tokens": 0,
+                "cache_read_input_tokens": 3,
+            },
+        },
+    }
+
+    events = n.stream_chunk_to_internal(chunk, state)
+    assert len(events) == 1
+    start_event = events[0]
+    assert isinstance(start_event, MessageStartEvent)
+    assert start_event.usage is not None
+    assert start_event.usage.input_tokens == 9
+    assert start_event.usage.cache_read_tokens == 3
+
+    out = n.stream_event_from_internal(start_event, StreamState(model="claude-3-sonnet"))
+    assert out[0]["type"] == "message_start"
+    assert out[0]["message"]["usage"]["input_tokens"] == 9
+    assert out[0]["message"]["usage"]["cache_read_input_tokens"] == 3
+
+
 def test_claude_error_conversion() -> None:
     n = ClaudeNormalizer()
     err_resp = {

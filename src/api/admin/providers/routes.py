@@ -37,6 +37,60 @@ MAPPING_PREVIEW_MAX_MODELS = 500
 MAPPING_PREVIEW_TIMEOUT_SECONDS = 10.0
 
 
+def _should_enable_format_conversion_by_default(provider_type: str | None) -> bool:
+    """固定类型 Provider 默认是否开启格式转换。"""
+    pt = (provider_type or "custom").strip().lower()
+    envelope_provider_types = {
+        ProviderType.ANTIGRAVITY.value,
+        ProviderType.CLAUDE_CODE.value,
+        ProviderType.CODEX.value,
+        ProviderType.KIRO.value,
+    }
+    return pt in envelope_provider_types
+
+
+def _normalize_provider_type(provider_type: str | None) -> str:
+    return (provider_type or "custom").strip().lower()
+
+
+def _merge_claude_code_advanced_config(
+    *,
+    provider_type: str | None,
+    provider_config: dict[str, Any] | None,
+    claude_code_advanced: dict[str, Any] | None,
+    claude_advanced_in_payload: bool,
+) -> tuple[dict[str, Any] | None, bool]:
+    """合并并规范 claude_code_advanced，确保仅在 claude_code 下保留。"""
+    normalized_provider_type = _normalize_provider_type(provider_type)
+    merged_config = dict(provider_config or {})
+    config_changed = False
+
+    if normalized_provider_type != ProviderType.CLAUDE_CODE.value:
+        if claude_advanced_in_payload and claude_code_advanced is not None:
+            raise InvalidRequestException(
+                "claude_code_advanced 仅适用于 provider_type=claude_code"
+            )
+        if "claude_code_advanced" in merged_config:
+            merged_config.pop("claude_code_advanced", None)
+            config_changed = True
+        return merged_config or None, config_changed
+
+    if not claude_advanced_in_payload:
+        return merged_config or None, config_changed
+
+    if claude_code_advanced is None:
+        if "claude_code_advanced" in merged_config:
+            merged_config.pop("claude_code_advanced", None)
+            config_changed = True
+    else:
+        next_value = dict(claude_code_advanced)
+        if merged_config.get("claude_code_advanced") != next_value:
+            merged_config["claude_code_advanced"] = next_value
+            config_changed = True
+
+    return merged_config or None, config_changed
+
+
 # ========== Response Models ==========
 
 
@@ -290,15 +344,20 @@ class AdminCreateProviderAdapter(AdminApiAdapter):
                 else ProviderBillingType.PAY_AS_YOU_GO
             )
 
-            # 有 envelope 包装的 Provider 类型（如 Antigravity、Codex）需要格式转换来正确
-            # 解包上游响应，创建时默认开启 enable_format_conversion。
-            pt = (validated_data.provider_type or "custom").strip()
-            envelope_provider_types = {
-                ProviderType.ANTIGRAVITY,
-                ProviderType.CODEX,
-                ProviderType.KIRO,
-            }
-            default_enable_format_conversion = pt in envelope_provider_types
+            # 有 envelope 包装的 Provider 类型（如 ClaudeCode、Antigravity、Codex）需要
+            # 格式转换来正确解包上游响应，创建时默认开启 enable_format_conversion。
+            pt = _normalize_provider_type(validated_data.provider_type)
+            default_enable_format_conversion = _should_enable_format_conversion_by_default(pt)
+            provider_config, _ = _merge_claude_code_advanced_config(
+                provider_type=pt,
+                provider_config=validated_data.config,
+                claude_code_advanced=(
+                    validated_data.claude_code_advanced.model_dump(exclude_none=True)
+                    if validated_data.claude_code_advanced is not None
+                    else None
+                ),
+                claude_advanced_in_payload=validated_data.claude_code_advanced is not None,
+            )
 
             # 创建 Provider 对象
             provider = Provider(
@@ -319,7 +378,7 @@ class AdminCreateProviderAdapter(AdminApiAdapter):
                 # 超时配置
                 stream_first_byte_timeout=validated_data.stream_first_byte_timeout,
                 request_timeout=validated_data.request_timeout,
-                config=validated_data.config,
+                config=provider_config or None,
                 # 有 envelope 的反代类型默认开启格式转换
                 enable_format_conversion=default_enable_format_conversion,
             )
@@ -411,6 +470,31 @@ class AdminUpdateProviderAdapter(AdminApiAdapter):
         try:
             # 更新字段（只更新非 None 的字段）
             update_data = validated_data.model_dump(exclude_unset=True)
+            config_in_payload = "config" in update_data
+            claude_advanced_in_payload = "claude_code_advanced" in update_data
+            provider_config = (
+                dict(update_data.pop("config") or {})
+                if config_in_payload
+                else dict(provider.config or {})
+            )
+            claude_advanced = (
+                update_data.pop("claude_code_advanced") if claude_advanced_in_payload else None
+            )
+            target_provider_type = (
+                update_data.get("provider_type")
+                or getattr(provider, "provider_type", None)
+                or "custom"
+            )
+
+            provider_config, config_changed_by_claude = _merge_claude_code_advanced_config(
+                provider_type=target_provider_type,
+                provider_config=provider_config,
+                claude_code_advanced=claude_advanced,
+                claude_advanced_in_payload=claude_advanced_in_payload,
+            )
+
+            if config_in_payload or claude_advanced_in_payload or config_changed_by_claude:
+                update_data["config"] = provider_config
 
             for field, value in update_data.items():
                 if field == "billing_type" and value is not None:

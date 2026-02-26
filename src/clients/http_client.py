@@ -25,7 +25,7 @@ from src.services.proxy_node.resolver import (
     get_system_proxy_config,
     make_proxy_param,
 )
-from src.utils.ssl_utils import get_ssl_context
+from src.utils.ssl_utils import get_ssl_context, get_ssl_context_for_profile
 
 # 模块级锁，避免类属性延迟初始化的竞态条件
 _proxy_clients_lock = asyncio.Lock()
@@ -186,6 +186,7 @@ class HTTPClientPool:
     async def get_proxy_client(
         cls,
         proxy_config: dict[str, Any] | None = None,
+        tls_profile: str | None = None,
     ) -> httpx.AsyncClient:
         """
         获取代理客户端（带缓存复用）
@@ -205,6 +206,9 @@ class HTTPClientPool:
             proxy_config = get_system_proxy_config()
 
         cache_key = compute_proxy_cache_key(proxy_config)
+        tls_profile_key = str(tls_profile or "").strip().lower()
+        if tls_profile_key:
+            cache_key = f"{cache_key}::tls:{tls_profile_key}"
 
         # 无代理时返回默认客户端
         if cache_key == "__no_proxy__":
@@ -222,6 +226,8 @@ class HTTPClientPool:
                 else:
                     # 更新最后使用时间
                     cls._proxy_clients[cache_key] = (client, time.time())
+                    if tls_profile_key:
+                        logger.debug("复用代理客户端 TLS profile={} key={}", tls_profile_key, cache_key)
                     return client
 
             # 淘汰旧客户端（如果超过上限）
@@ -230,7 +236,7 @@ class HTTPClientPool:
             # 创建新客户端（使用默认超时，请求时可覆盖）
             client_config: dict[str, Any] = {
                 "http2": False,
-                "verify": get_ssl_context(),
+                "verify": get_ssl_context_for_profile(tls_profile),
                 "follow_redirects": True,
                 "limits": httpx.Limits(
                     max_connections=config.http_max_connections,
@@ -262,6 +268,8 @@ class HTTPClientPool:
             logger.debug(
                 "创建代理客户端(缓存): {}, 缓存数量: {}", proxy_label, len(cls._proxy_clients)
             )
+            if tls_profile_key:
+                logger.debug("创建代理客户端 TLS profile={} key={}", tls_profile_key, cache_key)
 
             return client
 
@@ -335,6 +343,7 @@ class HTTPClientPool:
         cls,
         proxy_config: dict[str, Any] | None = None,
         timeout: httpx.Timeout | None = None,
+        tls_profile: str | None = None,
         **kwargs: Any,
     ) -> httpx.AsyncClient:
         """
@@ -352,7 +361,7 @@ class HTTPClientPool:
         """
         client_config: dict[str, Any] = {
             "http2": False,
-            "verify": get_ssl_context(),
+            "verify": get_ssl_context_for_profile(tls_profile),
             "follow_redirects": True,
         }
 
@@ -385,6 +394,7 @@ class HTTPClientPool:
         cls,
         delegate_cfg: dict[str, Any] | None,
         proxy_config: dict[str, Any] | None = None,
+        tls_profile: str | None = None,
     ) -> httpx.AsyncClient:
         """
         获取可复用的上游请求客户端（自动选择 tunnel/代理模式）
@@ -394,7 +404,7 @@ class HTTPClientPool:
         """
         if delegate_cfg and delegate_cfg.get("tunnel"):
             return await cls._get_tunnel_client(delegate_cfg["node_id"])
-        return await cls.get_proxy_client(proxy_config=proxy_config)
+        return await cls.get_proxy_client(proxy_config=proxy_config, tls_profile=tls_profile)
 
     @classmethod
     async def create_upstream_stream_client(
@@ -402,6 +412,7 @@ class HTTPClientPool:
         delegate_cfg: dict[str, Any] | None,
         proxy_config: dict[str, Any] | None = None,
         timeout: httpx.Timeout | None = None,
+        tls_profile: str | None = None,
     ) -> httpx.AsyncClient:
         """
         创建上游流式请求客户端（自动选择 tunnel/代理模式）
@@ -410,7 +421,11 @@ class HTTPClientPool:
         """
         if delegate_cfg and delegate_cfg.get("tunnel"):
             return await cls._get_tunnel_client(delegate_cfg["node_id"], timeout=timeout)
-        return cls.create_client_with_proxy(proxy_config=proxy_config, timeout=timeout)
+        return cls.create_client_with_proxy(
+            proxy_config=proxy_config,
+            timeout=timeout,
+            tls_profile=tls_profile,
+        )
 
     @classmethod
     async def _get_tunnel_client(

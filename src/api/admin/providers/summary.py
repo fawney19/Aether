@@ -15,9 +15,10 @@ from src.api.base.context import ApiRequestContext
 from src.api.base.models_service import invalidate_models_list_cache
 from src.api.base.pipeline import ApiRequestPipeline
 from src.core.enums import ProviderBillingType
-from src.core.exceptions import NotFoundException
+from src.core.exceptions import InvalidRequestException, NotFoundException
 from src.core.logger import logger
 from src.database import get_db
+from src.models.admin_requests import ClaudeCodeAdvancedConfig
 from src.models.database import (
     Model,
     Provider,
@@ -213,6 +214,38 @@ async def update_provider_settings(
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
+def _extract_claude_code_advanced_from_config(
+    provider_config: dict[str, Any] | None,
+    *,
+    provider_id: str,
+) -> ClaudeCodeAdvancedConfig | None:
+    """从 Provider.config 中安全提取 Claude Code 高级配置。"""
+    raw_config = (provider_config or {}).get("claude_code_advanced")
+    if raw_config is None:
+        return None
+
+    if isinstance(raw_config, ClaudeCodeAdvancedConfig):
+        return raw_config
+
+    if not isinstance(raw_config, dict):
+        logger.warning(
+            "Provider {} 的 claude_code_advanced 类型无效: {}，已忽略",
+            provider_id,
+            type(raw_config).__name__,
+        )
+        return None
+
+    try:
+        return ClaudeCodeAdvancedConfig.model_validate(raw_config)
+    except Exception as exc:
+        logger.warning(
+            "Provider {} 的 claude_code_advanced 配置无效，已忽略: {}",
+            provider_id,
+            str(exc),
+        )
+        return None
+
+
 def _build_provider_summary(db: Session, provider: Provider) -> ProviderWithEndpointsSummary:
     endpoints = db.query(ProviderEndpoint).filter(ProviderEndpoint.provider_id == provider.id).all()
 
@@ -311,11 +344,24 @@ def _build_provider_summary(db: Session, provider: Provider) -> ProviderWithEndp
         for e in endpoints
     ]
 
+    provider_config_raw = provider.config
+    provider_config = provider_config_raw if isinstance(provider_config_raw, dict) else {}
+    if provider_config_raw is not None and not isinstance(provider_config_raw, dict):
+        logger.warning(
+            "Provider {} 的 config 类型无效: {}，按空配置处理",
+            provider.id,
+            type(provider_config_raw).__name__,
+        )
+
     # 检查是否配置了 Provider Ops（余额监控等）
-    provider_ops_config = (provider.config or {}).get("provider_ops")
+    provider_ops_config = provider_config.get("provider_ops")
     ops_configured = bool(provider_ops_config)
     ops_architecture_id = (
         provider_ops_config.get("architecture_id") if provider_ops_config else None
+    )
+    claude_code_advanced = _extract_claude_code_advanced_from_config(
+        provider_config,
+        provider_id=str(provider.id),
     )
 
     return ProviderWithEndpointsSummary(
@@ -338,6 +384,7 @@ def _build_provider_summary(db: Session, provider: Provider) -> ProviderWithEndp
         proxy=provider.proxy,
         stream_first_byte_timeout=provider.stream_first_byte_timeout,
         request_timeout=provider.request_timeout,
+        claude_code_advanced=claude_code_advanced,
         total_endpoints=total_endpoints,
         active_endpoints=active_endpoints,
         total_keys=total_keys,
@@ -496,6 +543,21 @@ class AdminUpdateProviderSettingsAdapter(AdminApiAdapter):
             raise NotFoundException("Provider not found", "provider")
 
         update_dict = self.update_data.model_dump(exclude_unset=True)
+        if "claude_code_advanced" in update_dict:
+            claude_advanced = update_dict.pop("claude_code_advanced")
+            provider_type = str(getattr(provider, "provider_type", "") or "").strip().lower()
+            if claude_advanced is not None and provider_type != "claude_code":
+                raise InvalidRequestException(
+                    "claude_code_advanced 仅适用于 provider_type=claude_code"
+                )
+
+            provider_config = dict(provider.config or {})
+            if claude_advanced is None:
+                provider_config.pop("claude_code_advanced", None)
+            else:
+                provider_config["claude_code_advanced"] = dict(claude_advanced)
+            update_dict["config"] = provider_config or None
+
         if "billing_type" in update_dict and update_dict["billing_type"] is not None:
             update_dict["billing_type"] = ProviderBillingType(update_dict["billing_type"])
 

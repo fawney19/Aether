@@ -1,5 +1,9 @@
 import client from '../client'
-import type { ProviderWithEndpointsSummary, ProxyConfig } from './types'
+import type {
+  ClaudeCodeAdvancedConfig,
+  ProviderWithEndpointsSummary,
+  ProxyConfig,
+} from './types'
 
 /**
  * 获取 Providers 摘要（包含 Endpoints 统计）
@@ -41,6 +45,7 @@ export async function updateProvider(
     max_probe_interval_minutes: number
     enable_format_conversion: boolean  // 是否允许格式转换（提供商级别开关）
     is_active: boolean
+    claude_code_advanced: ClaudeCodeAdvancedConfig | null
   }>
 ): Promise<ProviderWithEndpointsSummary> {
   const response = await client.patch(`/api/admin/providers/${providerId}`, data)
@@ -68,6 +73,7 @@ export async function createProvider(
     stream_first_byte_timeout?: number | null
     request_timeout?: number | null
     proxy?: ProxyConfig | null
+    claude_code_advanced?: ClaudeCodeAdvancedConfig | null
   }
 ): Promise<{ id: string; name: string; message?: string }> {
   const response = await client.post('/api/admin/providers/', data)

@@ -357,6 +357,43 @@ def _build_kiro_key_name(
     return f"{base} ({method})"
 
 
+def _normalize_codex_plan_group(plan_type: Any) -> str | None:
+    """将 Codex plan_type 归一化到判重分组。
+
+    分组规则：
+    - free
+    - team/plus/enterprise（同组）
+    """
+    if not isinstance(plan_type, str):
+        return None
+    normalized = plan_type.strip().lower()
+    if not normalized:
+        return None
+    if normalized == "free":
+        return "free"
+    if normalized in {"team", "plus", "enterprise"}:
+        return "team_plus_enterprise"
+    return None
+
+
+def _is_codex_cross_plan_group_non_duplicate(
+    *,
+    new_provider_type: Any,
+    existing_provider_type: Any,
+    new_plan_type: Any,
+    existing_plan_type: Any,
+) -> bool:
+    """Codex 账号在 free 与 Team/Plus/Enterprise 之间不判重。"""
+    new_pt = str(new_provider_type or "").strip().lower()
+    existing_pt = str(existing_provider_type or "").strip().lower()
+    if new_pt != ProviderType.CODEX.value and existing_pt != ProviderType.CODEX.value:
+        return False
+
+    new_group = _normalize_codex_plan_group(new_plan_type)
+    existing_group = _normalize_codex_plan_group(existing_plan_type)
+    return bool(new_group and existing_group and new_group != existing_group)
+
+
 def _check_duplicate_oauth_account(
     db: Session,
     provider_id: str,
@@ -368,6 +405,7 @@ def _check_duplicate_oauth_account(
 
     通过以下字段判断重复：
     - user_id: Codex 等使用用户级别 ID（同 team 下不同成员共享 account_id 但 user_id 不同）
+      对 Codex 额外按账号类型分组：free 与 Team/Plus/Enterprise 互不判重
     - email + auth_method: Kiro 使用 email + auth_method 组合判断
       （同一邮箱可能通过 Social 和 IdC 两种方式登录，视为不同账号）
     - email: 其他 OAuth Provider 使用邮箱判断
@@ -383,6 +421,7 @@ def _check_duplicate_oauth_account(
     new_user_id = auth_config.get("user_id")
     new_auth_method = auth_config.get("auth_method")  # Kiro: social / idc
     new_provider_type = auth_config.get("provider_type")
+    new_plan_type = auth_config.get("plan_type")
 
     # 如果没有可用于识别的字段，跳过检查
     if not new_email and not new_user_id:
@@ -409,12 +448,19 @@ def _check_duplicate_oauth_account(
             existing_user_id = decrypted_config.get("user_id")
             existing_auth_method = decrypted_config.get("auth_method")
             existing_provider_type = decrypted_config.get("provider_type")
+            existing_plan_type = decrypted_config.get("plan_type")
 
             is_duplicate = False
 
             # user_id 相同即重复（Codex 等，同一 team 下不同成员共享 account_id 但 user_id 不同）
             if new_user_id and existing_user_id and new_user_id == existing_user_id:
-                is_duplicate = True
+                if not _is_codex_cross_plan_group_non_duplicate(
+                    new_provider_type=new_provider_type,
+                    existing_provider_type=existing_provider_type,
+                    new_plan_type=new_plan_type,
+                    existing_plan_type=existing_plan_type,
+                ):
+                    is_duplicate = True
 
             # email 判断
             if not is_duplicate and new_email and existing_email and new_email == existing_email:
@@ -428,7 +474,13 @@ def _check_duplicate_oauth_account(
                     ):
                         is_duplicate = True
                 else:
-                    is_duplicate = True
+                    if not _is_codex_cross_plan_group_non_duplicate(
+                        new_provider_type=new_provider_type,
+                        existing_provider_type=existing_provider_type,
+                        new_plan_type=new_plan_type,
+                        existing_plan_type=existing_plan_type,
+                    ):
+                        is_duplicate = True
 
             if is_duplicate:
                 # 失效账号允许覆盖

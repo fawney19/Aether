@@ -26,9 +26,13 @@ from src.core.api_format import (
     make_signature_key,
 )
 from src.core.crypto import crypto_service
-from src.core.provider_auth_types import ProviderAuthInfo
 from src.models.endpoint_models import _CONDITION_OPS, _TYPE_IS_VALUES, parse_re_flags
-from src.services.provider.auth import get_provider_auth
+from src.services.provider.adapters.claude_code.constants import (
+    BETA_CLAUDE_CODE,
+    BETA_CONTEXT_1M,
+    BETA_OAUTH,
+)
+from src.services.provider.auth import get_provider_auth  # noqa: F401
 
 # ==============================================================================
 # 统一的头部配置常量
@@ -1114,6 +1118,93 @@ class PassthroughRequestBuilder(RequestBuilder):
         """
         return dict(original_body)
 
+    @staticmethod
+    def _merge_comma_header_values(primary: str, secondary: str) -> str:
+        """合并逗号分隔 header 值并去重，保持 primary 在前。"""
+        seen: set[str] = set()
+        merged: list[str] = []
+
+        def _append(raw: str) -> None:
+            for token in str(raw or "").split(","):
+                token = token.strip()
+                if not token or token in seen:
+                    continue
+                seen.add(token)
+                merged.append(token)
+
+        _append(primary)
+        _append(secondary)
+        return ",".join(merged)
+
+    @classmethod
+    def _drop_beta_token(cls, value: str, token: str) -> str:
+        """从逗号分隔 header 中移除指定 token。"""
+        if not value or token not in value:
+            return value
+        return cls._merge_comma_header_values(
+            ",".join(
+                p.strip()
+                for p in str(value).split(",")
+                if p.strip() and p.strip() != token
+            ),
+            "",
+        )
+
+    @staticmethod
+    def _is_claude_code_oauth_beta(value: str) -> bool:
+        """检查 anthropic-beta 是否处于 Claude Code OAuth 场景。"""
+        tokens = {p.strip() for p in str(value).split(",") if p.strip()}
+        return BETA_CLAUDE_CODE in tokens and BETA_OAUTH in tokens
+
+    @classmethod
+    def _merge_extra_headers_with_original(
+        cls,
+        original_headers: dict[str, str],
+        extra_headers: dict[str, str] | None,
+        *,
+        provider_type: str | None = None,
+    ) -> dict[str, str] | None:
+        """合并 extra_headers 与原始头部中的特定字段。"""
+        if not extra_headers:
+            return None
+
+        merged_extra = dict(extra_headers)
+        beta_extra_key = next((k for k in merged_extra if k.lower() == "anthropic-beta"), None)
+        if beta_extra_key is None:
+            return merged_extra
+
+        incoming_beta = next(
+            (v for k, v in original_headers.items() if k.lower() == "anthropic-beta"),
+            "",
+        )
+        merged_beta = str(merged_extra.get(beta_extra_key) or "")
+        if incoming_beta:
+            merged_beta = cls._merge_comma_header_values(
+                merged_beta,
+                str(incoming_beta),
+            )
+
+        normalized_provider_type = str(provider_type or "").strip().lower()
+        # Claude Code OAuth 不允许 context-1m beta，需在合并后移除。
+        if (
+            normalized_provider_type == "claude_code"
+            and cls._is_claude_code_oauth_beta(merged_beta)
+        ):
+            merged_beta = cls._drop_beta_token(merged_beta, BETA_CONTEXT_1M)
+
+        merged_extra[beta_extra_key] = merged_beta
+        return merged_extra
+
+    @staticmethod
+    def _resolve_provider_type(endpoint: Any, key: Any) -> str | None:
+        for obj in (getattr(endpoint, "provider", None), getattr(key, "provider", None)):
+            if obj is None:
+                continue
+            pt = getattr(obj, "provider_type", None)
+            if pt:
+                return str(pt).strip().lower()
+        return None
+
     def build_headers(
         self,
         original_headers: dict[str, str],
@@ -1177,8 +1268,14 @@ class PassthroughRequestBuilder(RequestBuilder):
             builder.apply_rules(header_rules, protected_keys)
 
         # 4. 添加额外头部
-        if extra_headers:
-            builder.add_many(extra_headers)
+        provider_type = self._resolve_provider_type(endpoint, key)
+        effective_extra_headers = self._merge_extra_headers_with_original(
+            original_headers,
+            extra_headers,
+            provider_type=provider_type,
+        )
+        if effective_extra_headers:
+            builder.add_many(effective_extra_headers)
 
         # 5. 设置认证头（最高优先级，上游始终使用 header 认证）
         builder.add(auth_header, auth_value)

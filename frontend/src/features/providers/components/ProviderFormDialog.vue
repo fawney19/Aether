@@ -37,10 +37,13 @@
                 <SelectValue placeholder="请选择" />
               </SelectTrigger>
               <SelectContent>
-                <!-- 新建模式：允许自定义、Codex、Kiro 和 Antigravity -->
+                <!-- 新建模式：允许自定义及各反代类型 -->
                 <template v-if="!isEditMode">
                   <SelectItem value="custom">
                     自定义
+                  </SelectItem>
+                  <SelectItem value="claude_code">
+                    ClaudeCode
                   </SelectItem>
                   <SelectItem value="codex">
                     Codex
@@ -260,6 +263,97 @@
           />
         </div>
       </div>
+
+      <!-- Claude Code 高级配置 -->
+      <Collapsible
+        v-if="form.provider_type === 'claude_code'"
+        v-model:open="claudeAdvancedOpen"
+        class="space-y-3"
+      >
+        <CollapsibleTrigger as-child>
+          <button
+            type="button"
+            class="w-full flex items-center justify-between py-1.5 px-2 -mx-2 rounded-md hover:bg-muted/50 transition-colors border-b"
+          >
+            <span class="text-sm font-medium">高级配置</span>
+            <ChevronDown
+              class="w-4 h-4 text-muted-foreground transition-transform"
+              :class="{ '-rotate-90': !claudeAdvancedOpen }"
+            />
+          </button>
+        </CollapsibleTrigger>
+
+        <CollapsibleContent class="space-y-3">
+          <div class="space-y-3 p-3 border rounded-lg bg-muted/50">
+            <div class="flex items-center justify-between">
+              <div class="space-y-0.5">
+                <span class="text-sm font-medium">会话数量控制</span>
+                <p class="text-xs text-muted-foreground">
+                  限制同时活跃的会话数量
+                </p>
+              </div>
+              <Switch
+                :model-value="form.claude_session_control_enabled"
+                @update:model-value="(v: boolean) => form.claude_session_control_enabled = v"
+              />
+            </div>
+
+            <div
+              v-if="form.claude_session_control_enabled"
+              class="grid grid-cols-2 gap-4"
+            >
+              <div class="space-y-1.5">
+                <Label class="text-xs">最大会话数</Label>
+                <Input
+                  :model-value="form.claude_max_sessions ?? ''"
+                  type="number"
+                  min="1"
+                  max="1000"
+                  placeholder="例如 20"
+                  @update:model-value="(v) => form.claude_max_sessions = parseNumberInput(v)"
+                />
+              </div>
+              <div class="space-y-1.5">
+                <Label class="text-xs">会话空闲超时 (分钟)</Label>
+                <Input
+                  :model-value="form.claude_session_idle_timeout_minutes ?? ''"
+                  type="number"
+                  min="1"
+                  max="1440"
+                  placeholder="默认 5"
+                  @update:model-value="(v) => form.claude_session_idle_timeout_minutes = parseNumberInput(v) ?? 5"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div class="flex items-center justify-between p-3 border rounded-lg bg-muted/50">
+            <div class="space-y-0.5">
+              <span class="text-sm font-medium">TLS 指纹模拟</span>
+              <p class="text-xs text-muted-foreground">
+                模拟 Node.js / Claude Code 客户端的 TLS 指纹
+              </p>
+            </div>
+            <Switch
+              :model-value="form.claude_enable_tls_fingerprint"
+              @update:model-value="(v: boolean) => form.claude_enable_tls_fingerprint = v"
+            />
+          </div>
+
+          <div class="flex items-center justify-between p-3 border rounded-lg bg-muted/50">
+            <div class="space-y-0.5">
+              <span class="text-sm font-medium">会话 ID 伪装</span>
+              <p class="text-xs text-muted-foreground">
+                启用后在 15 分钟内固定 metadata.user_id 中的 session ID
+              </p>
+            </div>
+            <Switch
+              :model-value="form.claude_session_id_masking_enabled"
+              @update:model-value="(v: boolean) => form.claude_session_id_masking_enabled = v"
+            />
+          </div>
+        </CollapsibleContent>
+      </Collapsible>
     </form>
 
     <template #footer>
@@ -294,8 +388,11 @@ import {
   SelectContent,
   SelectItem,
   Switch,
+  Collapsible,
+  CollapsibleTrigger,
+  CollapsibleContent,
 } from '@/components/ui'
-import { Server, SquarePen } from 'lucide-vue-next'
+import { Server, SquarePen, ChevronDown } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
 import { useFormDialog } from '@/composables/useFormDialog'
 import { createProvider, updateProvider, type ProviderWithEndpointsSummary } from '@/api/endpoints'
@@ -318,6 +415,7 @@ const emit = defineEmits<{
 
 const { success, error: showError } = useToast()
 const loading = ref(false)
+const claudeAdvancedOpen = ref(true)
 const proxyNodeSelectRef = ref<InstanceType<typeof ProxyNodeSelect> | null>(null)
 const proxyNodesStore = useProxyNodesStore()
 
@@ -366,10 +464,17 @@ const form = ref({
   // 代理配置
   proxy_enabled: false,
   proxy_node_id: '',
+  // Claude Code 高级配置
+  claude_session_control_enabled: false,
+  claude_max_sessions: undefined as number | undefined,
+  claude_session_idle_timeout_minutes: 5,
+  claude_enable_tls_fingerprint: false,
+  claude_session_id_masking_enabled: false,
 })
 
 // 重置表单
 function resetForm() {
+  claudeAdvancedOpen.value = true
   form.value = {
     name: '',
     provider_type: 'custom',
@@ -393,6 +498,12 @@ function resetForm() {
     // 代理配置
     proxy_enabled: false,
     proxy_node_id: '',
+    // Claude Code 高级配置
+    claude_session_control_enabled: false,
+    claude_max_sessions: undefined,
+    claude_session_idle_timeout_minutes: 5,
+    claude_enable_tls_fingerprint: false,
+    claude_session_id_masking_enabled: false,
   }
 }
 
@@ -400,7 +511,11 @@ function resetForm() {
 function loadProviderData() {
   if (!props.provider) return
 
+  claudeAdvancedOpen.value = true
   const proxy = props.provider.proxy
+  const claudeAdvanced = props.provider.claude_code_advanced || null
+  const claudeMaxSessions = claudeAdvanced?.max_sessions
+  const claudeSessionControlEnabled = typeof claudeMaxSessions === 'number' && claudeMaxSessions > 0
   form.value = {
     name: props.provider.name,
     provider_type: props.provider.provider_type || 'custom',
@@ -426,6 +541,12 @@ function loadProviderData() {
     // 代理配置
     proxy_enabled: proxy?.enabled ?? false,
     proxy_node_id: proxy?.node_id || '',
+    // Claude Code 高级配置
+    claude_session_control_enabled: claudeSessionControlEnabled,
+    claude_max_sessions: claudeSessionControlEnabled ? claudeMaxSessions : undefined,
+    claude_session_idle_timeout_minutes: claudeAdvanced?.session_idle_timeout_minutes ?? 5,
+    claude_enable_tls_fingerprint: claudeAdvanced?.enable_tls_fingerprint ?? false,
+    claude_session_id_masking_enabled: claudeAdvanced?.session_id_masking_enabled ?? false,
   }
 
   // 如果有代理配置，确保加载节点列表（直接调用 store，避免 ref 未挂载时静默失败）
@@ -458,6 +579,14 @@ const handleSubmit = async () => {
     return
   }
 
+  // Claude Code 高级配置验证
+  if (form.value.provider_type === 'claude_code' && form.value.claude_session_control_enabled) {
+    if (!form.value.claude_max_sessions || form.value.claude_max_sessions < 1) {
+      showError('请填写有效的最大会话数（>=1）', '验证失败')
+      return
+    }
+  }
+
   loading.value = true
   try {
     // 构建代理配置
@@ -465,6 +594,18 @@ const handleSubmit = async () => {
       node_id: form.value.proxy_node_id,
       enabled: true,
     } : null
+    const claudeCodeAdvanced = form.value.provider_type === 'claude_code'
+      ? {
+          max_sessions: form.value.claude_session_control_enabled
+            ? (form.value.claude_max_sessions ?? undefined)
+            : null,
+          session_idle_timeout_minutes: form.value.claude_session_control_enabled
+            ? (form.value.claude_session_idle_timeout_minutes ?? 5)
+            : null,
+          enable_tls_fingerprint: form.value.claude_enable_tls_fingerprint,
+          session_id_masking_enabled: form.value.claude_session_id_masking_enabled,
+        }
+      : undefined
 
     const payload = {
       name: form.value.name,
@@ -485,6 +626,7 @@ const handleSubmit = async () => {
       stream_first_byte_timeout: form.value.stream_first_byte_timeout ?? null,
       request_timeout: form.value.request_timeout ?? null,
       proxy,
+      claude_code_advanced: claudeCodeAdvanced,
     }
 
     if (isEditMode.value && props.provider) {

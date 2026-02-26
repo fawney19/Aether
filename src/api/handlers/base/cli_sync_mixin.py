@@ -147,6 +147,17 @@ class CliSyncMixin:
                 client_is_stream=False,
                 policy=upstream_policy,
             )
+            claude_tls_profile: str | None = None
+            if provider_type == "claude_code":
+                from src.services.provider.adapters.claude_code.context import (
+                    build_and_set_claude_code_request_context,
+                )
+
+                _claude_ctx, claude_tls_profile = build_and_set_claude_code_request_context(
+                    provider_config=getattr(provider, "config", None),
+                    key_id=str(getattr(key, "id", "") or ""),
+                    is_stream=upstream_is_stream,
+                )
 
             # 跨格式：先做请求体转换（失败触发 failover）
             if needs_conversion and provider_api_format:
@@ -202,6 +213,18 @@ class CliSyncMixin:
                     url_model=url_model,
                     decrypted_auth_config=auth_info.decrypted_auth_config if auth_info else None,
                 )
+                if provider_type == "claude_code":
+                    from src.services.provider.adapters.claude_code.context import (
+                        get_claude_code_request_context,
+                    )
+                    from src.services.provider.adapters.claude_code.envelope import (
+                        enforce_distributed_session_controls,
+                    )
+
+                    await enforce_distributed_session_controls(
+                        request_body,
+                        get_claude_code_request_context(),
+                    )
 
             # Provider envelope: extra upstream headers (e.g. dedicated User-Agent).
             extra_headers: dict[str, str] = {}
@@ -274,7 +297,9 @@ class CliSyncMixin:
 
             delegate_cfg = resolve_delegate_config(_effective_proxy)
             http_client = await HTTPClientPool.get_upstream_client(
-                delegate_cfg, proxy_config=_effective_proxy
+                delegate_cfg,
+                proxy_config=_effective_proxy,
+                tls_profile=claude_tls_profile,
             )
 
             # 注意：不使用 async with，因为复用的客户端不应该被关闭

@@ -319,6 +319,17 @@ class CliStreamMixin:
             client_is_stream=True,
             policy=upstream_policy,
         )
+        claude_tls_profile: str | None = None
+        if provider_type == "claude_code":
+            from src.services.provider.adapters.claude_code.context import (
+                build_and_set_claude_code_request_context,
+            )
+
+            _claude_ctx, claude_tls_profile = build_and_set_claude_code_request_context(
+                provider_config=getattr(provider, "config", None),
+                key_id=str(getattr(key, "id", "") or ""),
+                is_stream=upstream_is_stream,
+            )
 
         # 跨格式：先做请求体转换（失败触发 failover）
         if needs_conversion and provider_api_format:
@@ -374,6 +385,18 @@ class CliStreamMixin:
                 url_model=url_model,
                 decrypted_auth_config=auth_info.decrypted_auth_config if auth_info else None,
             )
+            if provider_type == "claude_code":
+                from src.services.provider.adapters.claude_code.context import (
+                    get_claude_code_request_context,
+                )
+                from src.services.provider.adapters.claude_code.envelope import (
+                    enforce_distributed_session_controls,
+                )
+
+                await enforce_distributed_session_controls(
+                    request_body,
+                    get_claude_code_request_context(),
+                )
 
         # Provider envelope: extra upstream headers (e.g. dedicated User-Agent).
         extra_headers: dict[str, str] = {}
@@ -429,7 +452,9 @@ class CliStreamMixin:
             request_timeout_sync = provider.request_timeout or config.http_request_timeout
             delegate_cfg = resolve_delegate_config(effective_proxy)
             http_client = await HTTPClientPool.get_upstream_client(
-                delegate_cfg, proxy_config=effective_proxy
+                delegate_cfg,
+                proxy_config=effective_proxy,
+                tls_profile=claude_tls_profile,
             )
 
             try:
@@ -622,8 +647,20 @@ class CliStreamMixin:
         from src.services.proxy_node.resolver import build_stream_kwargs, resolve_delegate_config
 
         delegate_cfg = resolve_delegate_config(effective_proxy)
+        claude_tls_profile: str | None = None
+        if str(ctx.provider_type or "").strip().lower() == "claude_code":
+            from src.services.provider.adapters.claude_code.context import (
+                get_claude_code_request_context,
+                resolve_claude_code_tls_profile,
+            )
+
+            claude_ctx = get_claude_code_request_context()
+            claude_tls_profile = resolve_claude_code_tls_profile(claude_ctx)
+
         http_client = await HTTPClientPool.get_upstream_client(
-            delegate_cfg, proxy_config=effective_proxy
+            delegate_cfg,
+            proxy_config=effective_proxy,
+            tls_profile=claude_tls_profile,
         )
 
         # 用于存储内部函数的结果（必须在函数定义前声明，供 nonlocal 使用）

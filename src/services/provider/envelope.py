@@ -119,10 +119,14 @@ def ensure_providers_bootstrapped() -> None:
         from src.services.provider.adapters.antigravity.plugin import (
             register_all as _reg_antigravity,
         )
+        from src.services.provider.adapters.claude_code.plugin import (
+            register_all as _reg_claude_code,
+        )
         from src.services.provider.adapters.codex.plugin import register_all as _reg_codex
         from src.services.provider.adapters.kiro.plugin import register_all as _reg_kiro
 
         _reg_antigravity()
+        _reg_claude_code()
         _reg_codex()
         _reg_kiro()
 

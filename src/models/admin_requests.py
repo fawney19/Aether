@@ -80,6 +80,35 @@ class ProxyConfig(BaseModel):
         return self
 
 
+class ClaudeCodeAdvancedConfig(BaseModel):
+    """Claude Code 高级配置。"""
+
+    max_sessions: int | None = Field(
+        None, ge=1, le=1000, description="最大活跃会话数（为空表示不限制）"
+    )
+    session_idle_timeout_minutes: int | None = Field(
+        None, ge=1, le=1440, description="会话空闲超时（分钟）"
+    )
+    enable_tls_fingerprint: bool = Field(
+        False, description="是否启用 TLS 指纹模拟（模拟 Node.js/Claude Code 客户端）"
+    )
+    session_id_masking_enabled: bool = Field(
+        False, description="是否启用会话 ID 伪装（固定 metadata.user_id 中 session 片段）"
+    )
+
+    @model_validator(mode="after")
+    def normalize_session_control(self) -> "ClaudeCodeAdvancedConfig":
+        # 未启用会话限制时，不保留超时配置，避免产生误导。
+        if self.max_sessions is None:
+            self.session_idle_timeout_minutes = None
+            return self
+
+        # 启用会话限制但未设置超时时，回落到 5 分钟默认值。
+        if self.session_idle_timeout_minutes is None:
+            self.session_idle_timeout_minutes = 5
+        return self
+
+
 class CreateProviderRequest(BaseModel):
     """创建 Provider 请求"""
 
@@ -148,6 +177,9 @@ class CreateProviderRequest(BaseModel):
     request_timeout: float | None = Field(
         None, ge=1, le=600, description="非流式请求整体超时（秒）"
     )
+    claude_code_advanced: ClaudeCodeAdvancedConfig | None = Field(
+        None, description="Claude Code 高级配置"
+    )
     config: dict[str, Any] | None = Field(None, description="其他配置")
 
     @field_validator("provider_type")
@@ -214,6 +246,13 @@ class CreateProviderRequest(BaseModel):
             valid_types = [t.value for t in ProviderBillingType]
             raise ValueError(f"无效的计费类型，有效值为: {', '.join(valid_types)}")
 
+    @model_validator(mode="after")
+    def validate_claude_code_advanced_scope(self) -> "CreateProviderRequest":
+        provider_type = (self.provider_type or "custom").strip()
+        if self.claude_code_advanced is not None and provider_type != "claude_code":
+            raise ValueError("claude_code_advanced 仅适用于 provider_type=claude_code")
+        return self
+
 
 class UpdateProviderRequest(BaseModel):
     """更新 Provider 请求"""
@@ -244,6 +283,9 @@ class UpdateProviderRequest(BaseModel):
     request_timeout: float | None = Field(
         None, ge=1, le=600, description="非流式请求整体超时（秒）"
     )
+    claude_code_advanced: ClaudeCodeAdvancedConfig | None = Field(
+        None, description="Claude Code 高级配置"
+    )
     config: dict[str, Any] | None = None
 
     # 复用相同的验证器
@@ -257,6 +299,15 @@ class UpdateProviderRequest(BaseModel):
     _validate_provider_type = field_validator("provider_type")(
         CreateProviderRequest.validate_provider_type.__func__
     )
+
+    @model_validator(mode="after")
+    def validate_claude_code_advanced_scope(self) -> "UpdateProviderRequest":
+        # 更新场景下 provider_type 可能不在 payload 中，最终校验由路由层结合数据库值完成。
+        if self.claude_code_advanced is not None and self.provider_type is not None:
+            provider_type = (self.provider_type or "custom").strip()
+            if provider_type != "claude_code":
+                raise ValueError("claude_code_advanced 仅适用于 provider_type=claude_code")
+        return self
 
 
 class CreateEndpointRequest(BaseModel):
