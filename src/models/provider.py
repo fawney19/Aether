@@ -369,19 +369,19 @@ class ProviderAPIKey(ExportMixin, Base):
 
     # 认证类型
     # - "api_key": 标准 API Key 认证（默认）
-    # - "vertex_ai": Google Vertex AI 认证（Service Account JSON）
-    # - 未来可扩展：oauth2, azure_ad, aws_iam 等
+    # - "service_account": GCP Service Account JSON 认证
+    # - "oauth": OAuth access_token / refresh_token 认证
     auth_type = Column(String(20), default="api_key", nullable=False)
 
     # API密钥（加密存储）
     # - auth_type="api_key" 时：存储 API Key 字符串
-    # - auth_type="vertex_ai" 等：可为空，敏感凭证存在 auth_config 中
+    # - auth_type="service_account"/"oauth" 时：可为占位符，敏感凭证存在 auth_config 中
     api_key = Column(Text, nullable=False)  # 使用 Text 支持加密后的 OAuth token
 
     # 认证配置（加密存储）
     # - auth_type="api_key" 时：可为空
-    # - auth_type="vertex_ai" 时：存储加密后的 Service Account JSON
-    # - auth_type="oauth2" 时：存储加密后的 {client_id, client_secret, token_url, scope}
+    # - auth_type="service_account" 时：存储加密后的 Service Account JSON
+    # - auth_type="oauth" 时：存储加密后的 {refresh_token, expires_at, ...}
     auth_config = Column(Text, nullable=True)
     name = Column(String(100), nullable=False)  # 密钥名称（必填，用于识别）
     note = Column(String(500), nullable=True)  # 备注说明（可选）

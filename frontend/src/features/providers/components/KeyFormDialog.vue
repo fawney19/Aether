@@ -32,7 +32,7 @@
             data-1p-ignore="true"
           />
         </div>
-        <div>
+        <div v-if="providerType === 'vertex_ai'">
           <Label :for="authTypeSelectId">认证类型</Label>
           <Select
             v-model="form.auth_type"
@@ -44,8 +44,8 @@
               <SelectItem value="api_key">
                 API Key
               </SelectItem>
-              <SelectItem value="vertex_ai">
-                Vertex AI
+              <SelectItem value="service_account">
+                Service Account
               </SelectItem>
             </SelectContent>
           </Select>
@@ -55,10 +55,10 @@
       <!-- API 密钥 / Service Account JSON -->
       <div>
         <Label :for="apiKeyInputId">
-          {{ form.auth_type === 'vertex_ai' ? 'Service Account JSON' : 'API 密钥' }}
+          {{ form.auth_type === 'service_account' ? 'Service Account JSON' : 'API 密钥' }}
           {{ editingKey ? '' : '*' }}
         </Label>
-        <template v-if="form.auth_type === 'vertex_ai'">
+        <template v-if="form.auth_type === 'service_account'">
           <Textarea
             :id="apiKeyInputId"
             v-model="form.auth_config_text"
@@ -101,11 +101,11 @@
       </div>
 
       <!-- API 格式选择 -->
-      <div v-if="sortedApiFormats.length > 0">
+      <div v-if="visibleApiFormats.length > 0">
         <Label class="mb-1.5 block">支持的 API 格式 *</Label>
         <div class="grid grid-cols-2 gap-2">
           <div
-            v-for="format in sortedApiFormats"
+            v-for="format in visibleApiFormats"
             :key="format"
             class="flex items-center justify-between rounded-md border px-2 py-1.5 transition-colors cursor-pointer"
             :class="form.api_formats.includes(format)
@@ -309,7 +309,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { Dialog, Button, Input, Label, Switch, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, Textarea } from '@/components/ui'
 import { Key, SquarePen } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
@@ -346,8 +346,26 @@ const emit = defineEmits<{
 
 const { success, error: showError } = useToast()
 
-// 排序后的可用 API 格式列表
-const sortedApiFormats = computed(() => sortApiFormats(props.availableApiFormats))
+function getVertexAllowedFormatsByAuth(authType: 'api_key' | 'service_account'): Set<string> {
+  if (authType === 'api_key') {
+    return new Set(['gemini:chat'])
+  }
+  return new Set(['gemini:chat', 'claude:chat'])
+}
+
+function normalizeApiFormat(format: string): string {
+  return String(format || '').trim().toLowerCase()
+}
+
+// 按 provider/auth_type 过滤后的可用 API 格式列表
+const visibleApiFormats = computed(() => {
+  const sorted = sortApiFormats(props.availableApiFormats)
+  if (props.providerType !== 'vertex_ai') {
+    return sorted
+  }
+  const allowed = getVertexAllowedFormatsByAuth(form.value.auth_type)
+  return sorted.filter(fmt => allowed.has(normalizeApiFormat(fmt)))
+})
 
 // 默认认证类型
 const defaultAuthType = 'api_key' as const
@@ -370,8 +388,8 @@ const showAutoFetchWarning = computed(() => {
 // 检查是否正在切换认证类型
 const switchingToVertexAI = computed(() =>
   !!props.editingKey &&
-  props.editingKey.auth_type !== 'vertex_ai' &&
-  form.value.auth_type === 'vertex_ai'
+  props.editingKey.auth_type !== 'service_account' &&
+  form.value.auth_type === 'service_account'
 )
 const switchingToApiKey = computed(() =>
   !!props.editingKey &&
@@ -386,7 +404,7 @@ const canSave = computed(() => {
   // 新增模式下根据认证类型判断必填字段
   if (!props.editingKey) {
     if (form.value.auth_type === 'api_key' && !form.value.api_key.trim()) return false
-    if (form.value.auth_type === 'vertex_ai' && !form.value.auth_config_text.trim()) return false
+    if (form.value.auth_type === 'service_account' && !form.value.auth_config_text.trim()) return false
   } else {
     // 编辑模式下切换认证类型时，必须填写对应字段
     if (switchingToApiKey.value && !form.value.api_key.trim()) return false
@@ -417,7 +435,7 @@ const defaultAutoFetchModels = computed(() =>
 const form = ref({
   name: '',
   api_key: '',  // 标准 API Key
-  auth_type: 'api_key' as 'api_key' | 'vertex_ai',  // 认证类型
+  auth_type: 'api_key' as 'api_key' | 'service_account',  // 认证类型
   auth_config_text: '',  // Service Account JSON 文本（用于表单输入）
   api_formats: [] as string[],  // 支持的 API 格式列表
   rate_multipliers: {} as Record<string, number>,  // 按 API 格式的成本倍率
@@ -432,6 +450,21 @@ const form = ref({
   model_include_patterns_text: '',  // 包含规则文本（逗号分隔）
   model_exclude_patterns_text: ''   // 排除规则文本（逗号分隔）
 })
+
+watch(
+  [() => form.value.auth_type, () => props.providerType, () => props.availableApiFormats],
+  () => {
+    if (props.providerType !== 'vertex_ai') {
+      return
+    }
+    const allowed = getVertexAllowedFormatsByAuth(form.value.auth_type)
+    const filtered = form.value.api_formats.filter(fmt => allowed.has(normalizeApiFormat(fmt)))
+    if (filtered.length !== form.value.api_formats.length) {
+      form.value.api_formats = [...filtered]
+    }
+  },
+  { immediate: true }
+)
 
 // 加载能力列表
 async function loadCapabilities() {
@@ -517,7 +550,7 @@ function loadKeyData() {
   form.value = {
     name: props.editingKey.name,
     api_key: '',
-    auth_type: props.editingKey.auth_type === 'vertex_ai' ? 'vertex_ai' : 'api_key',
+    auth_type: props.editingKey.auth_type === 'service_account' ? 'service_account' : 'api_key',
     auth_config_text: '',  // auth_config 不返回给前端，编辑时需要重新输入
     api_formats: props.editingKey.api_formats?.length > 0
       ? [...props.editingKey.api_formats]
@@ -564,7 +597,7 @@ function parsePatternText(text: string): string[] {
 
 // 解析 Service Account JSON 文本
 function parseAuthConfig(): Record<string, unknown> | null {
-  if (form.value.auth_type !== 'vertex_ai') return null
+  if (form.value.auth_type !== 'service_account') return null
   const text = form.value.auth_config_text.trim()
   if (!text) return null
   try {
@@ -588,7 +621,7 @@ async function handleSave() {
       showError('请输入 API 密钥', '验证失败')
       return
     }
-  } else if (form.value.auth_type === 'vertex_ai') {
+  } else if (form.value.auth_type === 'service_account') {
     if (!props.editingKey && !form.value.auth_config_text.trim()) {
       showError('请输入 Service Account JSON', '验证失败')
       return
@@ -664,7 +697,7 @@ async function handleSave() {
       if (form.value.auth_type === 'api_key' && form.value.api_key.trim()) {
         updateData.api_key = form.value.api_key
       }
-      if (form.value.auth_type === 'vertex_ai' && authConfig) {
+      if (form.value.auth_type === 'service_account' && authConfig) {
         updateData.auth_config = authConfig
       }
 

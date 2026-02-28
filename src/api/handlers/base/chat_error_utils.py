@@ -13,7 +13,7 @@ from src.api.handlers.base.utils import get_format_converter_registry
 from src.core.exceptions import ThinkingSignatureException, UpstreamClientException
 from src.core.logger import logger
 from src.models.database import ProviderAPIKey
-from src.services.provider.transport import get_vertex_ai_effective_format
+from src.services.provider.adapters.vertex_ai.transport import get_effective_format as get_vertex_ai_effective_format
 from src.services.scheduling.aware_scheduler import ProviderCandidate
 
 
@@ -23,7 +23,7 @@ def _get_error_status_code(e: Exception, default: int = 400) -> int:
     return code if isinstance(code, int) and code > 0 else default
 
 
-def _resolve_vertex_ai_format(
+def _resolve_dynamic_format(
     key: ProviderAPIKey,
     auth_info: Any,
     model: str,
@@ -32,9 +32,9 @@ def _resolve_vertex_ai_format(
     candidate: ProviderCandidate | None,
 ) -> tuple[str, bool]:
     """
-    解析 Vertex AI 动态格式并计算 needs_conversion
+    解析动态格式并计算 needs_conversion
 
-    当 auth_type=vertex_ai 时，同一个 GCP 项目可以访问 Gemini 和 Claude，
+    对于 Vertex AI 等跨格式 Provider，同一个项目可以访问 Gemini 和 Claude，
     但它们的请求/响应格式不同，需要根据模型名动态选择。
     用户可通过 auth_config.model_format_mapping 配置自定义映射。
 
@@ -49,9 +49,13 @@ def _resolve_vertex_ai_format(
     Returns:
         (effective_provider_format, needs_conversion) 元组
     """
-    key_auth_type = getattr(key, "auth_type", "api_key")
+    from src.core.provider_types import ProviderType
 
-    if key_auth_type == "vertex_ai":
+    # 判断是否为 Vertex AI provider（基于 provider_type 而非 auth_type）
+    provider = getattr(key, "provider", None)
+    provider_type = getattr(provider, "provider_type", None) if provider else None
+
+    if provider_type == ProviderType.VERTEX_AI:
         vertex_auth_config = auth_info.decrypted_auth_config if auth_info else None
         effective_format = get_vertex_ai_effective_format(model, vertex_auth_config)
         if effective_format.upper() != provider_api_format.upper():

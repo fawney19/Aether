@@ -838,6 +838,8 @@ async def test_model(
                 auth_type=auth_type,
                 provider_type=p_type if p_type else None,
                 decrypted_auth_config=oauth_meta if oauth_meta else None,
+                provider_endpoint=endpoint,
+                provider_api_key=api_key,
                 proxy_config=test_proxy,
             )
 
@@ -859,12 +861,56 @@ async def test_model(
                 return True
             return False
 
+        def _extract_error_message(resp: dict) -> str:
+            """从 check 响应中提取错误信息（用于判断是否值得回退）。"""
+            resp_data = resp.get("response", {}) if isinstance(resp, dict) else {}
+            body = resp_data.get("response_body", {})
+            parsed = body
+            if isinstance(body, str):
+                try:
+                    parsed = json.loads(body)
+                except (json.JSONDecodeError, ValueError):
+                    parsed = body
+
+            if isinstance(parsed, dict):
+                err = parsed.get("error")
+                if isinstance(err, dict):
+                    msg = err.get("message")
+                    if isinstance(msg, str):
+                        return msg
+                if isinstance(err, str):
+                    return err
+
+            err_raw = resp.get("error")
+            if isinstance(err_raw, str):
+                return err_raw
+            if isinstance(err_raw, dict):
+                msg = err_raw.get("message")
+                if isinstance(msg, str):
+                    return msg
+            return ""
+
+        def _should_fallback_to_non_stream(resp: dict) -> bool:
+            """仅在“流式特有失败”时回退到非流式，避免 429/鉴权错误的无效重试。"""
+            status = int(resp.get("status_code") or 0)
+            if status in {404, 405, 415, 501}:
+                return True
+
+            if status == 400:
+                msg = _extract_error_message(resp).lower()
+                stream_markers = ("stream", "sse", "streamgeneratecontent")
+                unsupported_markers = ("not support", "unsupported", "invalid argument")
+                if any(k in msg for k in stream_markers) and any(k in msg for k in unsupported_markers):
+                    return True
+
+            return False
+
         # 策略：优先流式，若失败回退到非流式
         used_stream = True
         logger.debug("[test-model] 尝试流式请求...")
         response = await _do_check(check_request)
 
-        if _response_has_error(response):
+        if _response_has_error(response) and _should_fallback_to_non_stream(response):
             logger.info(
                 "[test-model] 流式请求失败 (status={})，回退到非流式请求",
                 response.get("status_code", "?"),
@@ -940,21 +986,30 @@ async def test_model(
                     else:
                         logger.warning("[test-model] Key {} 因 403 verify 已标记为异常", api_key.id)
 
+                upstream_status = int(response.get("status_code", 0) or error_obj.get("code", 0) or 500)
+                if not (400 <= upstream_status <= 599):
+                    upstream_status = 500
                 raise HTTPException(
-                    status_code=500,
+                    status_code=upstream_status,
                     detail=str(error_message)[:500] if error_message else "Provider error",
                 )
             else:
                 logger.debug(f"[test-model] Error: {error_obj}")
                 # error_obj 可能是字符串，截断以避免泄露过多上游信息
+                upstream_status = int(response.get("status_code", 0) or 500)
+                if not (400 <= upstream_status <= 599):
+                    upstream_status = 500
                 raise HTTPException(
-                    status_code=500,
+                    status_code=upstream_status,
                     detail=str(error_obj)[:500] if error_obj else "Provider error",
                 )
         elif "error" in response:
             logger.debug(f"[test-model] Error: {response['error']}")
+            upstream_status = int(response.get("status_code", 0) or 500)
+            if not (400 <= upstream_status <= 599):
+                upstream_status = 500
             raise HTTPException(
-                status_code=500,
+                status_code=upstream_status,
                 detail=str(response["error"])[:500],
             )
         else:

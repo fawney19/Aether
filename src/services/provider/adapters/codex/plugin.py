@@ -37,6 +37,7 @@ def build_codex_url(
     *,
     is_stream: bool,
     effective_query_params: dict[str, Any],
+    **_kwargs: Any,
 ) -> str:
     """构建 Codex OAuth URL。
 

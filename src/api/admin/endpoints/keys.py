@@ -278,6 +278,35 @@ def _normalize_auth_type(raw: str) -> str:
     return "oauth" if t == "kiro" else t
 
 
+def _validate_vertex_api_formats(
+    provider_type: str | None,
+    auth_type: str,
+    api_formats: list[str] | None,
+) -> None:
+    """校验 Vertex Provider 的 key.api_formats 与 auth_type 是否匹配。"""
+    if str(provider_type or "").strip().lower() != ProviderType.VERTEX_AI.value:
+        return
+
+    formats = [str(fmt or "").strip().lower() for fmt in (api_formats or []) if str(fmt or "").strip()]
+    if not formats:
+        return
+
+    if auth_type == "api_key":
+        allowed = {"gemini:chat"}
+    elif auth_type in {"service_account", "vertex_ai"}:
+        allowed = {"gemini:chat", "claude:chat"}
+    else:
+        return
+
+    invalid = sorted({fmt for fmt in formats if fmt not in allowed})
+    if invalid:
+        allowed_text = ", ".join(sorted(allowed))
+        invalid_text = ", ".join(invalid)
+        raise InvalidRequestException(
+            f"Vertex {auth_type} 不支持以下 API 格式: {invalid_text}；允许: {allowed_text}"
+        )
+
+
 def check_duplicate_key(
     db: Session,
     provider_id: str,
@@ -291,14 +320,14 @@ def check_duplicate_key(
 
     对于不同的认证类型，使用不同的比较方式：
     - api_key: 比较 API Key 的哈希值
-    - vertex_ai: 比较 Service Account 的 client_email
+    - service_account: 比较 Service Account 的 client_email
 
     Args:
         db: 数据库会话
         provider_id: Provider ID
-        auth_type: 认证类型 (api_key, vertex_ai, oauth)
+        auth_type: 认证类型 (api_key, service_account, oauth)
         new_api_key: 新的 API Key（用于 api_key 类型）
-        new_auth_config: 新的认证配置（用于 vertex_ai 类型）
+        new_auth_config: 新的认证配置（用于 service_account 类型）
         exclude_key_id: 要排除的 Key ID（用于更新场景）
     """
     if auth_type == "api_key" and new_api_key:
@@ -331,7 +360,7 @@ def check_duplicate_key(
                 # 解密失败时跳过该 Key
                 continue
 
-    elif auth_type == "vertex_ai" and new_auth_config:
+    elif auth_type in ("service_account", "vertex_ai") and new_auth_config:
         new_client_email = (
             new_auth_config.get("client_email") if isinstance(new_auth_config, dict) else None
         )
@@ -341,7 +370,7 @@ def check_duplicate_key(
         # 仅查询同 auth_type 且有 auth_config 的 Keys
         query = db.query(ProviderAPIKey).filter(
             ProviderAPIKey.provider_id == provider_id,
-            ProviderAPIKey.auth_type == "vertex_ai",
+            ProviderAPIKey.auth_type.in_(["service_account", "vertex_ai"]),
             ProviderAPIKey.auth_config.isnot(None),
         )
         if exclude_key_id:
@@ -400,16 +429,16 @@ class AdminUpdateEndpointKeyAdapter(AdminApiAdapter):
         # auth_type 切换校验 + 字段归一化
         if "auth_type" in update_data:
             if target_auth_type == "api_key":
-                if current_auth_type in {"vertex_ai", "oauth"} and not update_data.get("api_key"):
+                if current_auth_type in {"service_account", "vertex_ai", "oauth"} and not update_data.get("api_key"):
                     raise InvalidRequestException("切换到 API Key 认证模式时，必须提供新的 API Key")
                 # 切换回 API Key：清理非本模式配置
                 update_data["auth_config"] = None
-            elif target_auth_type == "vertex_ai":
-                if current_auth_type != "vertex_ai" and not update_data.get("auth_config"):
+            elif target_auth_type == "service_account":
+                if current_auth_type not in {"service_account", "vertex_ai"} and not update_data.get("auth_config"):
                     raise InvalidRequestException(
-                        "从 API Key 切换到 Vertex AI 认证模式时，必须提供 Service Account JSON"
+                        "切换到 Service Account 认证模式时，必须提供 Service Account JSON"
                     )
-                # Vertex AI 不使用 api_key：写入占位符（若未提供 api_key）
+                # Service Account 不使用 api_key：写入占位符（若未提供 api_key）
                 if "api_key" not in update_data:
                     update_data["api_key"] = "__placeholder__"
             elif target_auth_type == "oauth":
@@ -427,6 +456,15 @@ class AdminUpdateEndpointKeyAdapter(AdminApiAdapter):
             new_api_key=update_data.get("api_key"),
             new_auth_config=update_data.get("auth_config"),
             exclude_key_id=self.key_id,
+        )
+
+        # Vertex Provider: auth_type 与 api_formats 的组合必须合法
+        provider = getattr(key, "provider", None)
+        effective_api_formats = update_data.get("api_formats", key.api_formats)
+        _validate_vertex_api_formats(
+            getattr(provider, "provider_type", None),
+            target_auth_type,
+            effective_api_formats,
         )
 
         if "api_key" in update_data and update_data["api_key"] is not None:
@@ -571,15 +609,15 @@ class AdminRevealEndpointKeyAdapter(AdminApiAdapter):
 
         auth_type = _normalize_auth_type(getattr(key, "auth_type", "api_key"))
 
-        # Vertex AI 类型返回 auth_config（需要解密）
-        if auth_type == "vertex_ai":
+        # Service Account 类型返回 auth_config（需要解密）
+        if auth_type in ("service_account", "vertex_ai"):
             encrypted_auth_config = getattr(key, "auth_config", None)
             if encrypted_auth_config:
                 try:
                     decrypted_config = crypto_service.decrypt(encrypted_auth_config)
                     auth_config = json.loads(decrypted_config)
                     logger.info(f"[REVEAL] 查看 Auth Config: ID={self.key_id}, Name={key.name}")
-                    return {"auth_type": "vertex_ai", "auth_config": auth_config}
+                    return {"auth_type": auth_type, "auth_config": auth_config}
                 except Exception as e:
                     logger.error(f"解密 Auth Config 失败: ID={self.key_id}, Error={e}")
                     raise InvalidRequestException(
@@ -588,14 +626,13 @@ class AdminRevealEndpointKeyAdapter(AdminApiAdapter):
             # 兼容：auth_config 为空时尝试从 api_key 解密（仅对迁移前的旧数据有效）
             try:
                 decrypted_key = crypto_service.decrypt(key.api_key)
-                # 检查是否是新格式的占位符（表示 auth_config 丢失）
                 if decrypted_key == "__placeholder__":
-                    logger.error(f"Vertex AI Key 缺少 auth_config: ID={self.key_id}")
+                    logger.error(f"Service Account Key 缺少 auth_config: ID={self.key_id}")
                     raise InvalidRequestException("认证配置丢失，请重新添加该密钥。")
                 logger.info(
-                    f"[REVEAL] 查看完整 Key (legacy vertex_ai): ID={self.key_id}, Name={key.name}"
+                    f"[REVEAL] 查看完整 Key (legacy SA): ID={self.key_id}, Name={key.name}"
                 )
-                return {"auth_type": "vertex_ai", "auth_config": decrypted_key}
+                return {"auth_type": auth_type, "auth_config": decrypted_key}
             except InvalidRequestException:
                 raise
             except Exception as e:
@@ -751,7 +788,7 @@ class AdminGetKeysGroupedByFormatAdapter(AdminApiAdapter):
                 continue  # 跳过没有 API 格式的 Key
 
             auth_type = _normalize_auth_type(getattr(key, "auth_type", "api_key"))
-            if auth_type == "vertex_ai":
+            if auth_type in ("service_account", "vertex_ai"):
                 masked_key = "[Service Account]"
             elif auth_type == "oauth":
                 masked_key = "[OAuth Token]"
@@ -834,8 +871,8 @@ def _build_key_response(
     """构建 Key 响应对象的辅助函数"""
     auth_type = _normalize_auth_type(getattr(key, "auth_type", "api_key"))
 
-    if auth_type == "vertex_ai":
-        # Vertex AI 使用 Service Account，不显示占位符
+    if auth_type in ("service_account", "vertex_ai"):
+        # Service Account 不显示占位符
         masked_key = "[Service Account]"
     elif auth_type == "oauth":
         masked_key = "[OAuth Token]"
@@ -989,7 +1026,7 @@ class AdminCreateProviderKeyAdapter(AdminApiAdapter):
         if auth_type == "api_key":
             if not self.key_data.api_key:
                 raise InvalidRequestException("API Key 认证模式下 api_key 为必填字段")
-        elif auth_type == "vertex_ai":
+        elif auth_type == "service_account":
             if not self.key_data.auth_config:
                 raise InvalidRequestException("Service Account 认证模式下 auth_config 为必填字段")
         elif auth_type == "oauth":
@@ -1004,6 +1041,13 @@ class AdminCreateProviderKeyAdapter(AdminApiAdapter):
             auth_type=auth_type,
             new_api_key=self.key_data.api_key,
             new_auth_config=self.key_data.auth_config,
+        )
+
+        # Vertex Provider: auth_type 与 api_formats 的组合必须合法
+        _validate_vertex_api_formats(
+            getattr(provider, "provider_type", None),
+            auth_type,
+            self.key_data.api_formats,
         )
 
         # 加密 API Key（如果有）

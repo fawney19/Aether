@@ -1545,7 +1545,7 @@ async def _resolve_provider_auth(
             if account_id:
                 auth_headers["chatgpt-account-id"] = str(account_id)
 
-    elif auth_type == "vertex_ai":
+    elif auth_type in ("service_account", "vertex_ai"):
         from src.api.handlers.base.request_builder import get_provider_auth
 
         auth_info = await get_provider_auth(endpoint, provider_key)

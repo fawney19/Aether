@@ -13,7 +13,7 @@ export interface CandidateRecord {
   key_id?: string
   key_name?: string  // 密钥名称
   key_preview?: string  // 密钥脱敏预览（如 sk-***abc），OAuth 类型不返回
-  key_auth_type?: string  // 密钥认证类型（api_key, oauth, vertex_ai 等）
+  key_auth_type?: string  // 密钥认证类型（api_key, service_account, oauth 等）
   key_oauth_plan_type?: string  // OAuth 账号套餐类型（free/plus/team/enterprise）
   key_capabilities?: Record<string, boolean> | null  // Key 支持的能力
   required_capabilities?: Record<string, boolean> | null  // 请求实际需要的能力标签

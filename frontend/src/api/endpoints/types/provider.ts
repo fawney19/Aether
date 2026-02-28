@@ -204,7 +204,7 @@ export interface EndpointAPIKey {
   api_formats: string[]  // 支持的 endpoint signature 列表（如 "openai:chat"）
   api_key_masked: string
   api_key_plain?: string | null
-  auth_type: 'api_key' | 'vertex_ai' | 'oauth'  // 认证类型（必返回）
+  auth_type: 'api_key' | 'service_account' | 'oauth'  // 认证类型（必返回）
   name: string  // 密钥名称（必填，用于识别）
   rate_multipliers?: Record<string, number> | null  // 按 endpoint signature 的成本倍率
   internal_priority: number  // Key 内部优先级
@@ -351,7 +351,7 @@ export interface EndpointAPIKeyUpdate {
   api_formats?: string[]  // 支持的 API 格式列表
   name?: string
   api_key?: string  // 仅在需要更新时提供
-  auth_type?: 'api_key' | 'vertex_ai' | 'oauth'  // 认证类型
+  auth_type?: 'api_key' | 'service_account' | 'oauth'  // 认证类型
   auth_config?: Record<string, unknown>  // 认证配置（Vertex AI Service Account JSON）
   rate_multipliers?: Record<string, number> | null  // 按 API 格式的成本倍率
   internal_priority?: number
@@ -440,7 +440,7 @@ export interface PublicEndpointStatusMonitorResponse {
   formats: PublicEndpointStatusMonitor[]
 }
 
-export type ProviderType = 'custom' | 'claude_code' | 'codex' | 'gemini_cli' | 'antigravity' | 'kiro'
+export type ProviderType = 'custom' | 'claude_code' | 'codex' | 'gemini_cli' | 'antigravity' | 'kiro' | 'vertex_ai'
 
 export interface ClaudeCodeAdvancedConfig {
   // 会话数量控制：null/undefined 表示不限制

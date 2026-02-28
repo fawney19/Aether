@@ -160,11 +160,40 @@ class ProviderCompleteOAuthResponse(BaseModel):
 # ==============================================================================
 
 
+def _get_fixed_template(provider_type: str) -> Any | None:
+    try:
+        return FIXED_PROVIDERS.get(ProviderType(provider_type))
+    except Exception:
+        return None
+
+
+def _supports_oauth(template: Any | None) -> bool:
+    if not template:
+        return False
+    oauth = getattr(template, "oauth", None)
+    if oauth is None:
+        return False
+    return bool(
+        str(getattr(oauth, "authorize_url", "") or "").strip()
+        and str(getattr(oauth, "token_url", "") or "").strip()
+        and str(getattr(oauth, "client_id", "") or "").strip()
+    )
+
+
 def _require_fixed_provider(provider: Provider) -> str:
-    provider_type = (getattr(provider, "provider_type", "custom") or "custom").strip()
-    if provider_type == ProviderType.CUSTOM:
+    provider_type = str(getattr(provider, "provider_type", "custom") or "custom").strip().lower()
+    if not _get_fixed_template(provider_type):
         raise InvalidRequestException("该 Provider 不是固定类型，无法使用 provider-oauth")
     return provider_type
+
+
+def _require_oauth_template(provider_type: str) -> Any:
+    template = _get_fixed_template(provider_type)
+    if not template:
+        raise InvalidRequestException("不支持的 provider_type")
+    if not _supports_oauth(template):
+        raise InvalidRequestException("该 Provider 不支持 OAuth 授权")
+    return template
 
 
 def _resolve_proxy_for_oauth(
@@ -517,6 +546,8 @@ async def supported_types(_: User = Depends(require_admin)) -> list[dict[str, An
     # 不返回 client_secret
     result: list[dict[str, Any]] = []
     for provider_type, template in FIXED_PROVIDERS.items():
+        if not _supports_oauth(template):
+            continue
         result.append(
             {
                 "provider_type": (
@@ -553,12 +584,7 @@ async def start_oauth(
         raise NotFoundException("Provider 不存在", "provider")
     provider_type = _require_fixed_provider(provider)
 
-    try:
-        template = FIXED_PROVIDERS.get(ProviderType(provider_type))
-    except Exception:
-        template = None
-    if not template:
-        raise InvalidRequestException("不支持的 provider_type")
+    template = _require_oauth_template(provider_type)
 
     redis = await get_redis_client(require_redis=True)
     assert redis is not None
@@ -646,12 +672,7 @@ async def complete_oauth(
         raise NotFoundException("Provider 不存在", "provider")
     provider_type = _require_fixed_provider(provider)
 
-    try:
-        template = FIXED_PROVIDERS.get(ProviderType(provider_type))
-    except Exception:
-        template = None
-    if not template:
-        raise InvalidRequestException("不支持的 provider_type")
+    template = _require_oauth_template(provider_type)
 
     # exchange token
     token_url = template.oauth.token_url
@@ -815,12 +836,7 @@ async def refresh_oauth(
             email=None,
         )
 
-    try:
-        template = FIXED_PROVIDERS.get(ProviderType(provider_type))
-    except Exception:
-        template = None
-    if not template:
-        raise InvalidRequestException("不支持的 provider_type")
+    template = _require_oauth_template(provider_type)
 
     encrypted_auth_config = getattr(key, "auth_config", None)
     if not encrypted_auth_config:
@@ -983,12 +999,7 @@ async def start_provider_oauth(
     if provider_type == ProviderType.KIRO.value:
         raise InvalidRequestException("Kiro 不支持 OAuth 授权，请使用导入授权。")
 
-    try:
-        template = FIXED_PROVIDERS.get(ProviderType(provider_type))
-    except Exception:
-        template = None
-    if not template:
-        raise InvalidRequestException("不支持的 provider_type")
+    template = _require_oauth_template(provider_type)
 
     redis = await get_redis_client(require_redis=True)
     assert redis is not None
@@ -1073,12 +1084,7 @@ async def complete_provider_oauth(
     if provider_type == ProviderType.KIRO.value:
         raise InvalidRequestException("Kiro 不支持 OAuth 授权，请使用导入授权。")
 
-    try:
-        template = FIXED_PROVIDERS.get(ProviderType(provider_type))
-    except Exception:
-        template = None
-    if not template:
-        raise InvalidRequestException("不支持的 provider_type")
+    template = _require_oauth_template(provider_type)
 
     # exchange token
     token_url = template.oauth.token_url
@@ -1436,12 +1442,7 @@ async def import_refresh_token(
             replaced=replaced,
         )
 
-    try:
-        template = FIXED_PROVIDERS.get(ProviderType(provider_type))
-    except Exception:
-        template = None
-    if not template:
-        raise InvalidRequestException("不支持的 provider_type")
+    template = _require_oauth_template(provider_type)
 
     # 用 refresh_token 换取 access_token
     refresh_token = payload.refresh_token.strip()
@@ -1618,12 +1619,7 @@ async def batch_import_oauth(
         )
 
     # 标准 OAuth Provider（Codex、Antigravity、GeminiCli、ClaudeCode）
-    try:
-        template = FIXED_PROVIDERS.get(ProviderType(provider_type))
-    except Exception:
-        template = None
-    if not template:
-        raise InvalidRequestException(f"不支持的 provider_type: {provider_type}")
+    template = _require_oauth_template(provider_type)
 
     # 解析 Token 列表
     tokens = _parse_tokens_input(payload.credentials)

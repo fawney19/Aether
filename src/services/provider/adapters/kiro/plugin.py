@@ -42,6 +42,7 @@ def build_kiro_url(
     *,
     is_stream: bool,
     effective_query_params: dict[str, Any],
+    **_kwargs: Any,
 ) -> str:
     """Build Kiro generateAssistantResponse URL.
 

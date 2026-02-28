@@ -48,12 +48,22 @@ def _should_enable_format_conversion_by_default(provider_type: str | None) -> bo
         ProviderType.CLAUDE_CODE.value,
         ProviderType.CODEX.value,
         ProviderType.KIRO.value,
+        ProviderType.VERTEX_AI.value,
     }
     return pt in envelope_provider_types
 
 
 def _normalize_provider_type(provider_type: str | None) -> str:
     return (provider_type or "custom").strip().lower()
+
+
+def _get_fixed_provider_template(provider_type: str | None) -> Any | None:
+    """Return fixed-provider template when provider_type is managed by FIXED_PROVIDERS."""
+    normalized = _normalize_provider_type(provider_type)
+    try:
+        return FIXED_PROVIDERS.get(ProviderType(normalized))
+    except Exception:
+        return None
 
 
 def _merge_pool_advanced_config(
@@ -423,33 +433,28 @@ class AdminCreateProviderAdapter(AdminApiAdapter):
             db.flush()  # flush 获取 ID，但不提交，保持在同一事务中
 
             # 固定类型 Provider：自动创建并锁定预置 Endpoints（同一事务）
-            provider_type = (provider.provider_type or "custom").strip()
-            if provider_type != ProviderType.CUSTOM:
-                try:
-                    template = FIXED_PROVIDERS.get(ProviderType(provider_type))
-                except Exception:
-                    template = None
-                if template:
-                    now = datetime.now(timezone.utc)
-                    for sig in template.endpoint_signatures:
-                        endpoint = ProviderEndpoint(
-                            id=str(uuid.uuid4()),
-                            provider_id=provider.id,
-                            api_format=sig,
-                            api_family=sig.split(":", 1)[0],
-                            endpoint_kind=sig.split(":", 1)[1],
-                            base_url=template.api_base_url,
-                            custom_path=None,
-                            header_rules=None,
-                            max_retries=provider.max_retries or 2,
-                            is_active=True,
-                            config=None,
-                            proxy=None,
-                            format_acceptance_config=None,
-                            created_at=now,
-                            updated_at=now,
-                        )
-                        db.add(endpoint)
+            template = _get_fixed_provider_template(provider.provider_type)
+            if template:
+                now = datetime.now(timezone.utc)
+                for sig in template.endpoint_signatures:
+                    endpoint = ProviderEndpoint(
+                        id=str(uuid.uuid4()),
+                        provider_id=provider.id,
+                        api_format=sig,
+                        api_family=sig.split(":", 1)[0],
+                        endpoint_kind=sig.split(":", 1)[1],
+                        base_url=template.api_base_url,
+                        custom_path=None,
+                        header_rules=None,
+                        max_retries=provider.max_retries or 2,
+                        is_active=True,
+                        config=None,
+                        proxy=None,
+                        format_acceptance_config=None,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    db.add(endpoint)
 
             db.commit()
             db.refresh(provider)

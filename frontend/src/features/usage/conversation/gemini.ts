@@ -131,15 +131,20 @@ export class GeminiParser implements ApiFormatParser {
         apiFormat: 'gemini',
       }
 
-      // Gemini 响应格式: { candidates: [{ content: { parts: [...] } }] }
-      const candidates = body.candidates as RawObject[] | undefined
-      const candidate = candidates?.[0] as RawObject | undefined
-      const candidateContent = candidate?.content as RawObject | undefined
-      if (candidateContent?.parts && Array.isArray(candidateContent.parts)) {
-        const contentBlocks = this.parseParts(candidateContent.parts as RawObject[])
+      // Gemini 原生响应格式: { candidates: [{ content: { parts: [...] } }] }
+      const candidateParts = this.getCandidateParts(body)
+      if (candidateParts.length > 0) {
+        const contentBlocks = this.parseParts(candidateParts)
         if (contentBlocks.length > 0) {
           result.messages.push(createMessage('assistant', contentBlocks))
+          return result
         }
+      }
+
+      // 统一响应格式（例如 status/output/output_text）
+      const unifiedMessages = this.parseUnifiedOutputMessages(body)
+      if (unifiedMessages.length > 0) {
+        result.messages.push(...unifiedMessages)
       }
 
       return result
@@ -363,12 +368,10 @@ export class GeminiParser implements ApiFormatParser {
       const body = responseBody as RawObject
       const blocks: RenderBlock[] = []
 
-      // Gemini 响应格式: { candidates: [{ content: { parts: [...] } }] }
-      const candidates = body.candidates as RawObject[] | undefined
-      const candidate = candidates?.[0] as RawObject | undefined
-      const candidateContent = candidate?.content as RawObject | undefined
-      if (candidateContent?.parts && Array.isArray(candidateContent.parts)) {
-        const parts = candidateContent.parts as RawObject[]
+      // Gemini 原生响应格式: { candidates: [{ content: { parts: [...] } }] }
+      const candidateParts = this.getCandidateParts(body)
+      if (candidateParts.length > 0) {
+        const parts = candidateParts
         const contentBlocks = this.renderParts(parts)
         if (contentBlocks.length > 0) {
           const badges = this.getBadgesForParts(parts)
@@ -376,8 +379,12 @@ export class GeminiParser implements ApiFormatParser {
             roleLabel: 'Assistant',
             badges: badges.length > 0 ? badges : undefined,
           }))
+          return { blocks, isStream: false }
         }
       }
+
+      // 统一响应格式（例如 status/output/output_text）
+      blocks.push(...this.renderUnifiedOutputMessages(body))
 
       return { blocks, isStream: false }
     } catch (e) {
@@ -580,6 +587,117 @@ export class GeminiParser implements ApiFormatParser {
     }
 
     return badges
+  }
+
+  /**
+   * 提取 Gemini candidates 中的 parts
+   */
+  private getCandidateParts(body: RawObject): RawObject[] {
+    const candidates = body.candidates as RawObject[] | undefined
+    const candidate = candidates?.[0] as RawObject | undefined
+    const candidateContent = candidate?.content as RawObject | undefined
+    if (Array.isArray(candidateContent?.parts)) {
+      return candidateContent.parts as RawObject[]
+    }
+    return []
+  }
+
+  /**
+   * 解析统一响应格式中的 output 消息
+   */
+  private parseUnifiedOutputMessages(body: RawObject): ParsedMessage[] {
+    const output = body.output
+    if (!Array.isArray(output)) {
+      return []
+    }
+
+    const messages: ParsedMessage[] = []
+    for (const rawItem of output) {
+      const item = rawItem as RawObject
+      if (item?.type !== 'message') {
+        continue
+      }
+
+      const texts = this.extractUnifiedOutputTexts(item.content)
+      if (texts.length === 0) {
+        continue
+      }
+
+      messages.push(createMessage(
+        this.mapUnifiedOutputRole(item.role),
+        texts.map(text => createTextBlock(text))
+      ))
+    }
+
+    return messages
+  }
+
+  /**
+   * 渲染统一响应格式中的 output 消息
+   */
+  private renderUnifiedOutputMessages(body: RawObject): RenderBlock[] {
+    const output = body.output
+    if (!Array.isArray(output)) {
+      return []
+    }
+
+    const blocks: RenderBlock[] = []
+    for (const rawItem of output) {
+      const item = rawItem as RawObject
+      if (item?.type !== 'message') {
+        continue
+      }
+
+      const texts = this.extractUnifiedOutputTexts(item.content)
+      if (texts.length === 0) {
+        continue
+      }
+
+      const role = this.mapUnifiedOutputRole(item.role)
+      blocks.push(createMessageBlock(
+        role,
+        texts.map(text => createTextRenderBlock(text)),
+        { roleLabel: this.getRoleLabel(role) }
+      ))
+    }
+
+    return blocks
+  }
+
+  /**
+   * 提取统一响应格式的文本内容
+   */
+  private extractUnifiedOutputTexts(content: unknown): string[] {
+    if (typeof content === 'string') {
+      return content ? [content] : []
+    }
+
+    if (!Array.isArray(content)) {
+      return []
+    }
+
+    const texts: string[] = []
+    for (const rawPart of content) {
+      const part = rawPart as RawObject
+      if (
+        (part.type === 'output_text' || part.type === 'text' || part.type === 'input_text') &&
+        typeof part.text === 'string'
+      ) {
+        texts.push(part.text)
+      }
+    }
+    return texts
+  }
+
+  /**
+   * 映射统一 output 结构的角色
+   */
+  private mapUnifiedOutputRole(role: unknown): MessageRole {
+    if (role === 'assistant' || role === 'model') return 'assistant'
+    if (role === 'user') return 'user'
+    if (role === 'system') return 'system'
+    if (role === 'tool') return 'tool'
+    return 'assistant'
   }
 
   /**

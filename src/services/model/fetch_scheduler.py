@@ -408,13 +408,13 @@ class ModelFetchScheduler:
                 db.commit()
                 return "error"
 
-            # Vertex AI 类型不支持自动获取模型
+            # Service Account 类型不支持自动获取模型（Vertex AI SA / 旧 vertex_ai auth_type）
             auth_type = getattr(key, "auth_type", "api_key") or "api_key"
-            if auth_type == "vertex_ai":
-                key.last_models_fetch_error = "auto_fetch_models 暂不支持 Vertex AI 类型的 Key"
+            if auth_type in ("service_account", "vertex_ai"):
+                key.last_models_fetch_error = "auto_fetch_models 暂不支持 Service Account 类型的 Key"
                 key.last_models_fetch_at = now
                 db.commit()
-                logger.info(f"Key {key.id} 为 Vertex AI 类型，跳过自动获取模型")
+                logger.info(f"Key {key.id} 为 Service Account 类型，跳过自动获取模型")
                 return "skip"
 
             # 基础校验：必须有 api_key（OAuth: 加密 access_token；API Key: 加密 key）

@@ -212,7 +212,7 @@ class GeminiVeoHandler(VideoHandlerBase):
             task_type="video",
             submit_func=_submit,
             extract_external_task_id=_extract_task_id,
-            supported_auth_types={"api_key", "vertex_ai"},
+            supported_auth_types={"api_key", "service_account", "vertex_ai"},
             allow_format_conversion=True,
             max_candidates=10,
         )

@@ -21,6 +21,7 @@ class ProviderType(str, Enum):
     CODEX = "codex"
     GEMINI_CLI = "gemini_cli"
     ANTIGRAVITY = "antigravity"
+    VERTEX_AI = "vertex_ai"
 
 
 # 所有有效 provider_type 值的集合（用于校验）

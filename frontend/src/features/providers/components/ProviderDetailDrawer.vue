@@ -214,7 +214,7 @@
                 <div class="p-4 border-b border-border/60">
                   <div class="flex items-center justify-between">
                     <h3 class="text-sm font-semibold">
-                      {{ provider.provider_type === 'custom' ? '密钥管理' : '账号管理' }}
+                      {{ isKeyManagedProviderType(provider.provider_type) ? '密钥管理' : '账号管理' }}
                     </h3>
                     <div class="flex items-center gap-2">
                       <Button
@@ -225,7 +225,7 @@
                         @click="handleAddKeyToFirstEndpoint"
                       >
                         <Plus class="w-3.5 h-3.5 mr-1.5" />
-                        {{ provider.provider_type === 'custom' ? '添加密钥' : '添加账号' }}
+                        {{ isKeyManagedProviderType(provider.provider_type) ? '添加密钥' : '添加账号' }}
                       </Button>
                     </div>
                   </div>
@@ -291,7 +291,7 @@
                           </div>
                           <div class="flex items-center gap-1">
                             <span class="text-[11px] font-mono text-muted-foreground">
-                              {{ key.auth_type === 'oauth' ? '[Refresh Token]' : (key.auth_type === 'vertex_ai' ? 'Vertex AI' : key.api_key_masked) }}
+                              {{ key.auth_type === 'oauth' ? '[Refresh Token]' : (key.auth_type === 'service_account' ? '[Service Account]' : key.api_key_masked) }}
                             </span>
                             <Button
                               v-if="key.auth_type === 'oauth'"
@@ -856,7 +856,7 @@
                     v-if="shouldPaginateKeys"
                     class="px-4 py-2 flex items-center justify-between text-xs text-muted-foreground mt-auto"
                   >
-                    <span>共 {{ allKeys.length }} 个{{ provider.provider_type === 'custom' ? '密钥' : '账号' }}</span>
+                    <span>共 {{ allKeys.length }} 个{{ isKeyManagedProviderType(provider.provider_type) ? '密钥' : '账号' }}</span>
                     <div class="flex items-center gap-1.5">
                       <Button
                         variant="ghost"
@@ -888,11 +888,11 @@
                 >
                   <Key class="w-12 h-12 mx-auto mb-3 opacity-50" />
                   <p class="text-sm">
-                    {{ provider.provider_type === 'custom' ? '暂无密钥配置' : '暂无账号配置' }}
+                    {{ isKeyManagedProviderType(provider.provider_type) ? '暂无密钥配置' : '暂无账号配置' }}
                   </p>
                   <p class="text-xs mt-1">
                     {{ endpoints.length > 0
-                      ? (provider.provider_type === 'custom' ? '点击上方"添加密钥"按钮创建第一个密钥' : '点击上方"添加账号"按钮添加第一个账号')
+                      ? (isKeyManagedProviderType(provider.provider_type) ? '点击上方"添加密钥"按钮创建第一个密钥' : '点击上方"添加账号"按钮添加第一个账号')
                       : '请先添加端点，然后再添加密钥' }}
                   </p>
                 </div>
@@ -1136,6 +1136,18 @@ const endpoints = ref<ProviderEndpointWithKeys[]>([])
 const providerKeys = ref<EndpointAPIKey[]>([])  // Provider 级别的 keys
 const providerModels = ref<Model[]>([])  // Provider 级别的 models
 const providerMappingPreview = ref<ProviderMappingPreviewResponse | null>(null)  // 映射预览
+
+const oauthAccountProviderTypes = new Set([
+  'claude_code',
+  'codex',
+  'gemini_cli',
+  'antigravity',
+  'kiro',
+])
+const isOAuthAccountProviderType = (providerType?: string | null): boolean =>
+  oauthAccountProviderTypes.has((providerType || '').toLowerCase())
+const isKeyManagedProviderType = (providerType?: string | null): boolean =>
+  !isOAuthAccountProviderType(providerType)
 
 // 系统级格式转换配置
 const systemFormatConversionEnabled = ref(false)
@@ -1413,11 +1425,11 @@ function handleAddKey(endpoint: ProviderEndpoint) {
 function handleAddKeyToFirstEndpoint() {
   if (endpoints.value.length === 0) return
 
-  // 非自定义提供商：打开 OAuth 账号对话框
-  if (provider.value?.provider_type !== 'custom') {
+  // OAuth 账号型提供商：打开 OAuth 账号对话框
+  if (isOAuthAccountProviderType(provider.value?.provider_type)) {
     oauthAccountDialogOpen.value = true
   } else {
-    // 自定义提供商：打开密钥表单对话框
+    // 密钥型提供商（custom/vertex_ai）：打开密钥表单对话框
     handleAddKey(endpoints.value[0])
   }
 }
@@ -1451,8 +1463,8 @@ async function copyFullKey(key: EndpointAPIKey) {
     const result = await revealEndpointKey(key.id)
     let textToCopy: string
 
-    if (result.auth_type === 'vertex_ai' && result.auth_config) {
-      // Vertex AI 类型：复制 auth_config JSON
+    if (result.auth_type === 'service_account' && result.auth_config) {
+      // Service Account 类型：复制 auth_config JSON
       textToCopy = typeof result.auth_config === 'string'
         ? result.auth_config
         : JSON.stringify(result.auth_config, null, 2)

@@ -157,11 +157,15 @@ def ensure_providers_bootstrapped() -> None:
         )
         from src.services.provider.adapters.codex.plugin import register_all as _reg_codex
         from src.services.provider.adapters.kiro.plugin import register_all as _reg_kiro
+        from src.services.provider.adapters.vertex_ai.plugin import (
+            register_all as _reg_vertex_ai,
+        )
 
         _reg_antigravity()
         _reg_claude_code()
         _reg_codex()
         _reg_kiro()
+        _reg_vertex_ai()
 
 
 __all__ = [

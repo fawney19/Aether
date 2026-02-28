@@ -16,6 +16,7 @@ def build_claude_code_url(
     *,
     is_stream: bool,
     effective_query_params: dict[str, Any],
+    **_kwargs: Any,
 ) -> str:
     """Build Claude Code upstream URL and avoid duplicate /v1/messages suffix."""
     _ = is_stream

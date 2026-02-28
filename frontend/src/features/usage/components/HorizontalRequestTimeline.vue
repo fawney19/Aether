@@ -785,14 +785,14 @@ const isCapabilityUsed = (cap: string): boolean => {
 // 判断是否为 OAuth 类型（provider_type 为具体值时也算 OAuth）
 const isOAuthType = (authType?: string): boolean => {
   if (!authType) return false
-  return !['api_key', 'vertex_ai'].includes(authType)
+  return !['api_key', 'service_account'].includes(authType)
 }
 
 // 格式化认证类型（合并 plan 信息，避免冗余）
 const formatAuthTypeWithPlan = (authType: string, planType?: string): string => {
   const labels: Record<string, string> = {
     'oauth': 'OAuth',
-    'vertex_ai': 'Vertex AI',
+    'service_account': 'Service Account',
     'kiro': 'Kiro',
     'codex': 'Codex',
     'antigravity': 'Antigravity',

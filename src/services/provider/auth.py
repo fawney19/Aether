@@ -393,58 +393,12 @@ async def get_provider_auth(
             auth_value=f"Bearer {effective_token}",
             decrypted_auth_config=decrypted_auth_config,
         )
-    if auth_type == "vertex_ai":
-        from src.core.vertex_auth import VertexAuthError, VertexAuthService
+    if auth_type in ("service_account", "vertex_ai"):
+        # service_account: GCP Service Account JSON → JWT → Access Token
+        # "vertex_ai" 保留为向后兼容（迁移期间旧数据可能仍使用该值）
+        from src.services.provider.adapters.vertex_ai.auth import _auth_service_account
 
-        try:
-            # 优先从 auth_config 读取，兼容从 api_key 读取（过渡期）
-            encrypted_auth_config = getattr(key, "auth_config", None)
-            if encrypted_auth_config:
-                # auth_config 可能是加密字符串或未加密的 dict
-                if isinstance(encrypted_auth_config, dict):
-                    # 已经是 dict，直接使用（兼容未加密存储的情况）
-                    sa_json = encrypted_auth_config
-                else:
-                    # 是加密字符串，需要解密
-                    decrypted_config = crypto_service.decrypt(encrypted_auth_config)
-                    sa_json = json.loads(decrypted_config)
-            else:
-                # 兼容旧数据：从 api_key 读取
-                decrypted_key = crypto_service.decrypt(key.api_key)
-                # 检查是否是占位符（表示 auth_config 丢失）
-                if decrypted_key == "__placeholder__":
-                    raise InvalidRequestException("认证配置丢失，请重新添加该密钥。")
-                sa_json = json.loads(decrypted_key)
-
-            if not isinstance(sa_json, dict):
-                raise InvalidRequestException("Service Account JSON 无效，请重新添加该密钥。")
-
-            # 获取 Access Token（注入代理配置，core 层不依赖 services）
-            from src.services.proxy_node.resolver import build_proxy_client_kwargs
-
-            service = VertexAuthService(sa_json)
-            access_token = await service.get_access_token(
-                httpx_client_kwargs=build_proxy_client_kwargs(timeout=30),
-            )
-
-            # Vertex AI 使用 Bearer token
-            return ProviderAuthInfo(
-                auth_header="Authorization",
-                auth_value=f"Bearer {access_token}",
-                decrypted_auth_config=sa_json,
-            )
-        except InvalidRequestException:
-            raise
-        except VertexAuthError as e:
-            raise InvalidRequestException(f"Vertex AI 认证失败：{e}")
-        except json.JSONDecodeError:
-            raise InvalidRequestException("Service Account JSON 格式无效，请重新添加该密钥。")
-        except Exception:
-            raise InvalidRequestException("Vertex AI 认证失败，请检查 Key 的 auth_config")
-
-    # 其他认证类型可在此扩展
-    # elif auth_type == "oauth2":
-    #     ...
+        return await _auth_service_account(key)
 
     # 标准 API Key：返回 None，由 build_headers 处理
     return None

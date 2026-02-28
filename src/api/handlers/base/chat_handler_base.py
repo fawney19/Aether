@@ -41,7 +41,7 @@ from src.api.handlers.base.base_handler import (
 from src.api.handlers.base.chat_error_utils import (
     _build_error_json_payload,
     _get_error_status_code,
-    _resolve_vertex_ai_format,
+    _resolve_dynamic_format,
 )
 from src.api.handlers.base.parsers import get_parser_for_format
 from src.api.handlers.base.request_builder import PassthroughRequestBuilder, get_provider_auth
@@ -674,11 +674,11 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
 
         流式和非流式请求共享此逻辑，唯一差异是 client_is_stream 参数。
         """
-        # 提前获取认证信息（Vertex AI 格式判断需要使用 auth_config）
+        # 提前获取认证信息（动态格式判断需要使用 auth_config）
         auth_info = await get_provider_auth(endpoint, key)
 
-        # 解析 Vertex AI 动态格式并计算 needs_conversion
-        provider_api_format, needs_conversion = _resolve_vertex_ai_format(
+        # 解析动态格式并计算 needs_conversion（Vertex AI 等跨格式 Provider）
+        provider_api_format, needs_conversion = _resolve_dynamic_format(
             key, auth_info, model, provider_api_format, client_api_format, candidate
         )
 

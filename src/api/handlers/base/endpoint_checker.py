@@ -73,6 +73,7 @@ async def run_endpoint_check(
     db: Any | None = None,  # Session对象，需要时才导入
     user: Any | None = None,  # User对象
     proxy_config: dict[str, Any] | None = None,  # 原始代理配置（支持 tunnel 模式）
+    is_stream: bool | None = None,  # 显式流式标记（优先于 body/url 推断）
 ) -> dict[str, Any]:
     """
     执行端点检查（重构版本，使用新的架构）：
@@ -95,6 +96,7 @@ async def run_endpoint_check(
         user=user,
         request_id=str(uuid.uuid4())[:8],
         proxy_config=proxy_config,
+        is_stream=is_stream,
     )
 
     # 使用协调器执行检查
@@ -567,6 +569,7 @@ class EndpointCheckRequest:
     request_id: str | None = None
     timeout: float = 30.0
     proxy_config: dict[str, Any] | None = None  # 原始代理配置（支持 tunnel 模式）
+    is_stream: bool | None = None  # 显式流式标记（优先于 body/url 推断）
 
 
 @dataclass
@@ -593,8 +596,22 @@ class HttpRequestExecutor:
         start_time = time.time()
         request_id = request.request_id or str(uuid.uuid4())[:8]
 
-        # 检查是否是流式请求
-        is_stream = request.json_body.get("stream", False) if request.json_body else False
+        # 检查是否是流式请求（优先显式参数，其次 body，最后 URL 推断）
+        if request.is_stream is not None:
+            is_stream = bool(request.is_stream)
+        else:
+            is_stream = request.json_body.get("stream", False) if request.json_body else False
+            if not is_stream:
+                lowered_url = (request.url or "").lower()
+                if any(
+                    marker in lowered_url
+                    for marker in (
+                        ":streamgeneratecontent",
+                        "/stream",
+                        "stream=true",
+                    )
+                ):
+                    is_stream = True
 
         try:
             from src.services.proxy_node.resolver import build_proxy_client_kwargs

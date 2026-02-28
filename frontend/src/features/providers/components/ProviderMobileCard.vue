@@ -179,7 +179,7 @@
         端点 {{ provider.active_endpoints }}/{{ provider.total_endpoints }}
       </span>
       <span class="text-muted-foreground">
-        {{ provider.provider_type && provider.provider_type !== 'custom' ? '账号' : '密钥' }} {{ provider.active_keys }}/{{ provider.total_keys }}
+        {{ isKeyManagedProviderType(provider.provider_type) ? '密钥' : '账号' }} {{ provider.active_keys }}/{{ provider.total_keys }}
       </span>
       <span class="text-muted-foreground">
         模型 {{ provider.active_models }}/{{ provider.total_models }}
@@ -269,6 +269,16 @@ const vAutoFocus = {
 }
 
 const localDescriptionValue = ref('')
+
+const oauthAccountProviderTypes = new Set([
+  'claude_code',
+  'codex',
+  'gemini_cli',
+  'antigravity',
+  'kiro',
+])
+const isKeyManagedProviderType = (providerType?: string | null): boolean =>
+  !oauthAccountProviderTypes.has((providerType || '').toLowerCase())
 
 watch(
   () => props.editingDescriptionId,

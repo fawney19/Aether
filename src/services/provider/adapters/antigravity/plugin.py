@@ -31,6 +31,7 @@ def build_antigravity_url(
     *,
     is_stream: bool,
     effective_query_params: dict[str, Any],
+    **_kwargs: Any,
 ) -> str:
     """构建 Antigravity v1internal URL。
 

@@ -338,6 +338,8 @@ class HandlerAdapterBase(ApiAdapter):
         auth_type: str | None = None,
         provider_type: str | None = None,
         decrypted_auth_config: dict[str, Any] | None = None,
+        provider_endpoint: Any | None = None,
+        provider_api_key: Any | None = None,
         # 代理配置
         proxy_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -352,8 +354,10 @@ class HandlerAdapterBase(ApiAdapter):
         from src.core.provider_types import ProviderType
 
         is_antigravity = provider_type == ProviderType.ANTIGRAVITY
+        is_vertex = provider_type == ProviderType.VERTEX_AI
         is_kiro = provider_type == ProviderType.KIRO
         is_oauth = auth_type == "oauth"
+        vertex_auth_info: Any | None = None
 
         # ---- URL ----
         if is_kiro:
@@ -381,6 +385,26 @@ class HandlerAdapterBase(ApiAdapter):
             effective_base_url = ordered_urls[0] if ordered_urls else base_url
             path = V1INTERNAL_PATH_TEMPLATE.format(action="generateContent")
             url = f"{str(effective_base_url).rstrip('/')}{path}"
+        elif is_vertex and provider_endpoint is not None and provider_api_key is not None:
+            from src.services.provider.auth import get_provider_auth
+            from src.services.provider.transport import build_provider_url
+
+            vertex_auth_info = await get_provider_auth(provider_endpoint, provider_api_key)
+            effective_auth_config = (
+                vertex_auth_info.decrypted_auth_config if vertex_auth_info else decrypted_auth_config
+            )
+            if effective_auth_config:
+                decrypted_auth_config = effective_auth_config
+
+            effective_model_name = model_name or request_data.get("model", "")
+            path_params = {"model": effective_model_name} if effective_model_name else None
+            url = build_provider_url(
+                provider_endpoint,
+                path_params=path_params,
+                is_stream=bool(request_data.get("stream", False)),
+                key=provider_api_key,
+                decrypted_auth_config=effective_auth_config,
+            )
         else:
             url = cls.build_endpoint_url(base_url, request_data, model_name)
 
@@ -412,15 +436,24 @@ class HandlerAdapterBase(ApiAdapter):
             )
             merged_extra.update(kiro_headers)
 
-        headers = cls.build_headers_with_extra(api_key, merged_extra if merged_extra else None)
+        if is_vertex and provider_endpoint is not None and provider_api_key is not None:
+            headers = dict(merged_extra)
+            if (
+                vertex_auth_info
+                and getattr(vertex_auth_info, "auth_header", None)
+                and getattr(vertex_auth_info, "auth_value", None)
+            ):
+                headers[str(vertex_auth_info.auth_header)] = str(vertex_auth_info.auth_value)
+        else:
+            headers = cls.build_headers_with_extra(api_key, merged_extra if merged_extra else None)
 
-        if is_oauth:
-            from src.core.api_format import get_auth_config_for_endpoint
+            if is_oauth:
+                from src.core.api_format import get_auth_config_for_endpoint
 
-            default_auth_header, _ = get_auth_config_for_endpoint(cls.FORMAT_ID)
-            if default_auth_header.lower() != "authorization":
-                headers.pop(default_auth_header, None)
-            headers["Authorization"] = f"Bearer {api_key}"
+                default_auth_header, _ = get_auth_config_for_endpoint(cls.FORMAT_ID)
+                if default_auth_header.lower() != "authorization":
+                    headers.pop(default_auth_header, None)
+                headers["Authorization"] = f"Bearer {api_key}"
 
         # ---- Body ----
         body = cls.build_request_body(request_data, base_url=base_url)
@@ -464,6 +497,8 @@ class HandlerAdapterBase(ApiAdapter):
             else:
                 ep_auth_header, _ = _get_auth_cfg(cls.FORMAT_ID)
                 protected_keys = {ep_auth_header.lower(), "content-type"}
+                if vertex_auth_info and getattr(vertex_auth_info, "auth_header", None):
+                    protected_keys.add(str(vertex_auth_info.auth_header).lower())
 
             header_builder = HeaderBuilder()
             header_builder.add_many(headers)
@@ -479,6 +514,7 @@ class HandlerAdapterBase(ApiAdapter):
             headers=headers,
             json_body=body,
             api_format=cls.FORMAT_ID,
+            is_stream=bool(request_data.get("stream", False)),
             db=db,
             user=user,
             provider_name=provider_name,

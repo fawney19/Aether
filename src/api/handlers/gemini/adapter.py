@@ -296,6 +296,8 @@ class GeminiChatAdapter(ChatAdapterBase):
         auth_type: str | None = None,
         provider_type: str | None = None,
         decrypted_auth_config: dict[str, Any] | None = None,
+        provider_endpoint: Any | None = None,
+        provider_api_key: Any | None = None,
         # 代理配置
         proxy_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -313,7 +315,9 @@ class GeminiChatAdapter(ChatAdapterBase):
             }
 
         is_antigravity = provider_type and provider_type.lower() == "antigravity"
+        is_vertex = provider_type and provider_type.lower() == "vertex_ai"
         is_oauth = auth_type == "oauth"
+        vertex_auth_info: Any | None = None
 
         # Antigravity provider 使用 v1internal 路径，而非标准 Gemini API 路径
         if is_antigravity:
@@ -327,6 +331,25 @@ class GeminiChatAdapter(ChatAdapterBase):
             ag_base = ordered_urls[0] if ordered_urls else base_url
             path = V1INTERNAL_PATH_TEMPLATE.format(action="generateContent")
             url = f"{str(ag_base).rstrip('/')}{path}"
+        elif is_vertex and provider_endpoint is not None and provider_api_key is not None:
+            # Vertex AI: test-model 必须走统一 provider transport/auth，
+            # 否则会错误命中普通 Gemini URL（导致 404）。
+            from src.services.provider.auth import get_provider_auth
+            from src.services.provider.transport import build_provider_url
+
+            vertex_auth_info = await get_provider_auth(provider_endpoint, provider_api_key)
+            effective_auth_config = (
+                vertex_auth_info.decrypted_auth_config if vertex_auth_info else decrypted_auth_config
+            )
+            if effective_auth_config:
+                decrypted_auth_config = effective_auth_config
+            url = build_provider_url(
+                provider_endpoint,
+                path_params={"model": effective_model_name},
+                is_stream=bool(request_data.get("stream", False)),
+                key=provider_api_key,
+                decrypted_auth_config=effective_auth_config,
+            )
         else:
             # 使用基类配置方法，但重写URL构建逻辑
             base_url_resolved = cls.build_endpoint_url(base_url)
@@ -337,16 +360,25 @@ class GeminiChatAdapter(ChatAdapterBase):
         merged_extra = dict(extra_headers) if extra_headers else {}
         if is_antigravity:
             merged_extra.update(get_v1internal_extra_headers())
-        headers = cls.build_headers_with_extra(api_key, merged_extra if merged_extra else None)
+        if is_vertex and provider_endpoint is not None and provider_api_key is not None:
+            headers = dict(merged_extra)
+            if (
+                vertex_auth_info
+                and getattr(vertex_auth_info, "auth_header", None)
+                and getattr(vertex_auth_info, "auth_value", None)
+            ):
+                headers[str(vertex_auth_info.auth_header)] = str(vertex_auth_info.auth_value)
+        else:
+            headers = cls.build_headers_with_extra(api_key, merged_extra if merged_extra else None)
 
-        # OAuth 统一处理：替换端点默认认证头（x-goog-api-key）为 Authorization: Bearer
-        if is_oauth:
-            from src.core.api_format import get_auth_config_for_endpoint
+            # OAuth 统一处理：替换端点默认认证头（x-goog-api-key）为 Authorization: Bearer
+            if is_oauth:
+                from src.core.api_format import get_auth_config_for_endpoint
 
-            default_auth_header, _ = get_auth_config_for_endpoint(cls.FORMAT_ID)
-            if default_auth_header.lower() != "authorization":
-                headers.pop(default_auth_header, None)
-            headers["Authorization"] = f"Bearer {api_key}"
+                default_auth_header, _ = get_auth_config_for_endpoint(cls.FORMAT_ID)
+                if default_auth_header.lower() != "authorization":
+                    headers.pop(default_auth_header, None)
+                headers["Authorization"] = f"Bearer {api_key}"
 
         body = cls.build_request_body(request_data)
 
@@ -373,6 +405,8 @@ class GeminiChatAdapter(ChatAdapterBase):
 
             auth_header, _ = get_auth_config_for_endpoint(cls.FORMAT_ID)
             protected_keys = {auth_header.lower(), "content-type"}
+            if vertex_auth_info and getattr(vertex_auth_info, "auth_header", None):
+                protected_keys.add(str(vertex_auth_info.auth_header).lower())
 
             header_builder = HeaderBuilder()
             header_builder.add_many(headers)
@@ -385,6 +419,7 @@ class GeminiChatAdapter(ChatAdapterBase):
             headers=headers,
             json_body=body,
             api_format=cls.FORMAT_ID,
+            is_stream=bool(request_data.get("stream", False)),
             # 用量计算参数（现在强制记录）
             db=db,
             user=user,
