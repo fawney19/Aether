@@ -18,6 +18,7 @@ from src.services.provider_keys.quota_refresh import (
     refresh_codex_key_quota,
     refresh_kiro_key_quota,
 )
+from src.services.scheduling.quota_skipper import is_key_quota_exhausted
 
 QuotaRefreshHandler = Callable[..., Awaitable[dict]]
 
@@ -155,6 +156,50 @@ async def refresh_provider_quota_for_provider(
                 db.add(key)
 
     db.commit()
+
+    # 根据配额状态设置/清除 Redis 冷却（仅 Codex / Kiro）
+    if provider_type in {ProviderType.CODEX, ProviderType.KIRO}:
+        from src.services.provider.pool import redis_ops
+
+        pid = str(provider.id)
+        _QUOTA_COOLDOWN_REASON = "quota_exhausted"
+        # 配额耗尽冷却 TTL：设为 7 天，下次刷新恢复时会主动清除
+        _QUOTA_COOLDOWN_TTL = 7 * 24 * 3600
+        key_map = {str(k.id): k for k in keys}
+
+        for r in results:
+            kid = r.get("key_id")
+            if not kid:
+                continue
+            key_obj = key_map.get(str(kid))
+            status = r.get("status")
+
+            # 优先使用刷新策略返回值；缺失时仅做“耗尽”兜底判断。
+            # 注意：未明确“未耗尽”时，不应清除已有 quota_exhausted 冷却，避免误判。
+            exhausted_raw = r.get("quota_exhausted")
+            exhausted: bool | None = exhausted_raw if isinstance(exhausted_raw, bool) else None
+            if exhausted is None and key_obj is not None and status in {"success", "no_metadata"}:
+                inferred_exhausted, _ = is_key_quota_exhausted(
+                    provider_type, key_obj, model_name=""
+                )
+                if inferred_exhausted:
+                    exhausted = True
+
+            if exhausted is True:
+                await redis_ops.set_cooldown(
+                    pid,
+                    kid,
+                    _QUOTA_COOLDOWN_REASON,
+                    ttl=_QUOTA_COOLDOWN_TTL,
+                )
+                continue
+
+            # 仅在成功刷新且“明确未耗尽”时清除配额冷却，避免错误响应导致误清除。
+            if status == "success" and exhausted is False:
+                # 配额恢复，仅清除配额类冷却（不影响其他错误码冷却）
+                existing = await redis_ops.get_cooldown(pid, kid)
+                if existing == _QUOTA_COOLDOWN_REASON:
+                    await redis_ops.clear_cooldown(pid, kid)
 
     failed_details = [
         f"{r.get('key_name', r.get('key_id', '?'))}: {r.get('message', 'unknown')}"

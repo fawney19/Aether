@@ -949,6 +949,7 @@ const COOLDOWN_REASON_MAP: Record<string, string> = {
   auth_failed_401: '401 认证失败',
   payment_required_402: '402 欠费',
   server_error_500: '500 错误',
+  quota_exhausted: '额度耗尽',
 }
 
 function formatCooldownReason(reason: string): string {

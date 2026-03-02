@@ -147,12 +147,24 @@ async def refresh_kiro_key_quota(
             except Exception as exc:
                 logger.warning("更新 auth_config 失败 (key={}): {}", key.id, exc)
 
-        return {
+        # 判断配额是否耗尽：剩余额度 <= 0
+        remaining = metadata.get("remaining")
+        quota_exhausted: bool | None = None
+        if isinstance(remaining, (int, float)):
+            quota_exhausted = remaining <= 0.0
+
+        result: dict[str, object] = {
             "key_id": key.id,
             "key_name": key.name,
             "status": "success",
             "metadata": metadata,
         }
+        if quota_exhausted is not None:
+            result["quota_exhausted"] = quota_exhausted
+        if quota_exhausted is True:
+            result["quota_exhausted_reason"] = "Kiro 账号配额剩余 0"
+
+        return result
 
     # 响应成功但没有限额信息
     return {

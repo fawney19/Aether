@@ -298,3 +298,244 @@ async def test_refresh_provider_quota_handler_exception_returns_error(
     assert result["total"] == 1
     assert result["results"][0]["status"] == "error"
     assert "unit-test boom" in result["results"][0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_provider_quota_no_metadata_uses_existing_metadata_set_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.services.provider.pool import redis_ops
+
+    provider = SimpleNamespace(
+        id="p1",
+        provider_type=ProviderType.CODEX,
+        endpoints=[SimpleNamespace(api_format="openai:cli", is_active=True)],
+    )
+    key = SimpleNamespace(
+        id="k1",
+        name="K1",
+        is_active=True,
+        upstream_metadata={"codex": {"primary_used_percent": 100.0}},
+    )
+    db = _FakeDB(provider=provider, keys=[key])
+    set_calls: list[tuple[str, str, str, int]] = []
+    clear_calls: list[tuple[str, str]] = []
+
+    async def _fake_handler(**kwargs: Any) -> dict[str, Any]:
+        _ = kwargs
+        return {"key_id": "k1", "key_name": "K1", "status": "no_metadata"}
+
+    async def _fake_set(provider_id: str, key_id: str, reason: str, ttl: int) -> None:
+        set_calls.append((provider_id, key_id, reason, ttl))
+
+    async def _fake_get(provider_id: str, key_id: str) -> str | None:
+        _ = provider_id, key_id
+        return None
+
+    async def _fake_clear(provider_id: str, key_id: str) -> None:
+        clear_calls.append((provider_id, key_id))
+
+    monkeypatch.setattr(
+        quota_service_module,
+        "_select_refresh_endpoint",
+        lambda provider, provider_type: provider.endpoints[0],
+    )
+    monkeypatch.setattr(
+        quota_service_module, "_resolve_quota_refresh_handler", lambda _: _fake_handler
+    )
+    monkeypatch.setattr(redis_ops, "set_cooldown", _fake_set)
+    monkeypatch.setattr(redis_ops, "get_cooldown", _fake_get)
+    monkeypatch.setattr(redis_ops, "clear_cooldown", _fake_clear)
+
+    result = await refresh_provider_quota_for_provider(
+        db=cast(Any, db),
+        provider_id="p1",
+        codex_wham_usage_url="https://example.test/wham/usage",
+    )
+
+    assert result["success"] == 0
+    assert result["failed"] == 1
+    assert set_calls == [("p1", "k1", "quota_exhausted", 7 * 24 * 3600)]
+    assert clear_calls == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_provider_quota_success_without_flag_does_not_clear_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.services.provider.pool import redis_ops
+
+    provider = SimpleNamespace(
+        id="p1",
+        provider_type=ProviderType.CODEX,
+        endpoints=[SimpleNamespace(api_format="openai:cli", is_active=True)],
+    )
+    key = SimpleNamespace(
+        id="k1",
+        name="K1",
+        is_active=True,
+        upstream_metadata={"codex": {"primary_used_percent": 10.0}},
+    )
+    db = _FakeDB(provider=provider, keys=[key])
+    set_calls: list[tuple[str, str, str, int]] = []
+    clear_calls: list[tuple[str, str]] = []
+
+    async def _fake_handler(**kwargs: Any) -> dict[str, Any]:
+        _ = kwargs
+        return {"key_id": "k1", "key_name": "K1", "status": "success"}
+
+    async def _fake_set(provider_id: str, key_id: str, reason: str, ttl: int) -> None:
+        set_calls.append((provider_id, key_id, reason, ttl))
+
+    async def _fake_get(provider_id: str, key_id: str) -> str | None:
+        _ = provider_id, key_id
+        return "quota_exhausted"
+
+    async def _fake_clear(provider_id: str, key_id: str) -> None:
+        clear_calls.append((provider_id, key_id))
+
+    monkeypatch.setattr(
+        quota_service_module,
+        "_select_refresh_endpoint",
+        lambda provider, provider_type: provider.endpoints[0],
+    )
+    monkeypatch.setattr(
+        quota_service_module, "_resolve_quota_refresh_handler", lambda _: _fake_handler
+    )
+    monkeypatch.setattr(redis_ops, "set_cooldown", _fake_set)
+    monkeypatch.setattr(redis_ops, "get_cooldown", _fake_get)
+    monkeypatch.setattr(redis_ops, "clear_cooldown", _fake_clear)
+
+    result = await refresh_provider_quota_for_provider(
+        db=cast(Any, db),
+        provider_id="p1",
+        codex_wham_usage_url="https://example.test/wham/usage",
+    )
+
+    assert result["success"] == 1
+    assert result["failed"] == 0
+    assert set_calls == []
+    assert clear_calls == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_provider_quota_success_explicit_not_exhausted_clears_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.services.provider.pool import redis_ops
+
+    provider = SimpleNamespace(
+        id="p1",
+        provider_type=ProviderType.CODEX,
+        endpoints=[SimpleNamespace(api_format="openai:cli", is_active=True)],
+    )
+    key = SimpleNamespace(
+        id="k1",
+        name="K1",
+        is_active=True,
+        upstream_metadata={"codex": {"primary_used_percent": 10.0}},
+    )
+    db = _FakeDB(provider=provider, keys=[key])
+    set_calls: list[tuple[str, str, str, int]] = []
+    clear_calls: list[tuple[str, str]] = []
+
+    async def _fake_handler(**kwargs: Any) -> dict[str, Any]:
+        _ = kwargs
+        return {
+            "key_id": "k1",
+            "key_name": "K1",
+            "status": "success",
+            "quota_exhausted": False,
+        }
+
+    async def _fake_set(provider_id: str, key_id: str, reason: str, ttl: int) -> None:
+        set_calls.append((provider_id, key_id, reason, ttl))
+
+    async def _fake_get(provider_id: str, key_id: str) -> str | None:
+        _ = provider_id, key_id
+        return "quota_exhausted"
+
+    async def _fake_clear(provider_id: str, key_id: str) -> None:
+        clear_calls.append((provider_id, key_id))
+
+    monkeypatch.setattr(
+        quota_service_module,
+        "_select_refresh_endpoint",
+        lambda provider, provider_type: provider.endpoints[0],
+    )
+    monkeypatch.setattr(
+        quota_service_module, "_resolve_quota_refresh_handler", lambda _: _fake_handler
+    )
+    monkeypatch.setattr(redis_ops, "set_cooldown", _fake_set)
+    monkeypatch.setattr(redis_ops, "get_cooldown", _fake_get)
+    monkeypatch.setattr(redis_ops, "clear_cooldown", _fake_clear)
+
+    result = await refresh_provider_quota_for_provider(
+        db=cast(Any, db),
+        provider_id="p1",
+        codex_wham_usage_url="https://example.test/wham/usage",
+    )
+
+    assert result["success"] == 1
+    assert result["failed"] == 0
+    assert set_calls == []
+    assert clear_calls == [("p1", "k1")]
+
+
+@pytest.mark.asyncio
+async def test_refresh_provider_quota_no_metadata_not_exhausted_does_not_clear_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.services.provider.pool import redis_ops
+
+    provider = SimpleNamespace(
+        id="p1",
+        provider_type=ProviderType.CODEX,
+        endpoints=[SimpleNamespace(api_format="openai:cli", is_active=True)],
+    )
+    key = SimpleNamespace(
+        id="k1",
+        name="K1",
+        is_active=True,
+        upstream_metadata={"codex": {"primary_used_percent": 50.0}},
+    )
+    db = _FakeDB(provider=provider, keys=[key])
+    set_calls: list[tuple[str, str, str, int]] = []
+    clear_calls: list[tuple[str, str]] = []
+
+    async def _fake_handler(**kwargs: Any) -> dict[str, Any]:
+        _ = kwargs
+        return {"key_id": "k1", "key_name": "K1", "status": "no_metadata"}
+
+    async def _fake_set(provider_id: str, key_id: str, reason: str, ttl: int) -> None:
+        set_calls.append((provider_id, key_id, reason, ttl))
+
+    async def _fake_get(provider_id: str, key_id: str) -> str | None:
+        _ = provider_id, key_id
+        return "quota_exhausted"
+
+    async def _fake_clear(provider_id: str, key_id: str) -> None:
+        clear_calls.append((provider_id, key_id))
+
+    monkeypatch.setattr(
+        quota_service_module,
+        "_select_refresh_endpoint",
+        lambda provider, provider_type: provider.endpoints[0],
+    )
+    monkeypatch.setattr(
+        quota_service_module, "_resolve_quota_refresh_handler", lambda _: _fake_handler
+    )
+    monkeypatch.setattr(redis_ops, "set_cooldown", _fake_set)
+    monkeypatch.setattr(redis_ops, "get_cooldown", _fake_get)
+    monkeypatch.setattr(redis_ops, "clear_cooldown", _fake_clear)
+
+    result = await refresh_provider_quota_for_provider(
+        db=cast(Any, db),
+        provider_id="p1",
+        codex_wham_usage_url="https://example.test/wham/usage",
+    )
+
+    assert result["success"] == 0
+    assert result["failed"] == 1
+    assert set_calls == []
+    assert clear_calls == []

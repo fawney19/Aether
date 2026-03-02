@@ -27,6 +27,7 @@ from src.models.database import GlobalModel, Provider, ProviderAPIKey, ProviderE
 from src.models.endpoint_models import ProviderWithEndpointsSummary
 from src.services.cache.model_cache import ModelCacheService
 from src.services.cache.provider_cache import ProviderCacheService
+from src.services.provider_keys.quota_cooldown import resolve_effective_cooldown_reason
 
 from .summary import _build_provider_summary
 
@@ -962,6 +963,7 @@ async def get_pool_status(
 
     key_ids = [str(k.id) for k in keys]
     pid = str(provider.id)
+    provider_type = str(getattr(provider, "provider_type", "custom") or "custom")
 
     import asyncio
 
@@ -988,7 +990,12 @@ async def get_pool_status(
     key_statuses: list[PoolKeyStatus] = []
     for k in keys:
         kid = str(k.id)
-        cd_reason = cooldowns.get(kid)
+        redis_cd_reason = cooldowns.get(kid)
+        cd_reason = resolve_effective_cooldown_reason(
+            provider_type=provider_type,
+            key=k,
+            redis_reason=redis_cd_reason,
+        )
 
         key_statuses.append(
             PoolKeyStatus(
@@ -996,7 +1003,7 @@ async def get_pool_status(
                 key_name=k.name or "",
                 is_active=bool(k.is_active),
                 cooldown_reason=cd_reason,
-                cooldown_ttl_seconds=cooldown_ttls.get(kid) if cd_reason else None,
+                cooldown_ttl_seconds=cooldown_ttls.get(kid) if redis_cd_reason else None,
                 cost_window_usage=cost_totals.get(kid, 0),
                 cost_limit=pcfg.cost_limit_per_key_tokens,
                 sticky_sessions=sticky_counts.get(kid, 0),

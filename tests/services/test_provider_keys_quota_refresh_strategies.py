@@ -33,10 +33,12 @@ class _FakeResponse:
         status_code: int,
         payload: Any = None,
         json_exc: Exception | None = None,
+        headers: dict[str, Any] | None = None,
     ) -> None:
         self.status_code = status_code
         self._payload = payload
         self._json_exc = json_exc
+        self.headers = headers or {}
 
     def json(self) -> Any:
         if self._json_exc:
@@ -192,8 +194,69 @@ async def test_codex_refresher_success_updates_metadata(
     )
 
     assert result["status"] == "success"
+    assert "quota_exhausted" not in result
     assert metadata_updates == {"k1": {"codex": {"used_percent": 10.0}}}
     assert state_updates == {"k1": {"oauth_invalid_at": None, "oauth_invalid_reason": None}}
+
+
+@pytest.mark.asyncio
+async def test_codex_refresher_fallbacks_to_headers_when_body_has_no_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.services.provider_keys.quota_refresh import codex_refresher as module
+
+    key = SimpleNamespace(
+        id="k1",
+        name="K1",
+        api_key="enc",
+        auth_type="api_key",
+        auth_config=None,
+        proxy=None,
+    )
+    provider = SimpleNamespace(proxy=None)
+    endpoint = SimpleNamespace()
+    metadata_updates: dict[str, dict[str, Any]] = {}
+    state_updates: dict[str, dict[str, Any]] = {}
+
+    async def _fake_auth_info(_endpoint: Any, _key: Any) -> Any:
+        return None
+
+    _install_module(
+        monkeypatch,
+        "src.services.proxy_node.resolver",
+        {
+            "resolve_effective_proxy": lambda provider_proxy, key_proxy: None,
+            "build_proxy_client_kwargs": lambda proxy, timeout: {"timeout": timeout},
+        },
+    )
+    monkeypatch.setattr(module, "get_provider_auth", _fake_auth_info)
+    monkeypatch.setattr(module.crypto_service, "decrypt", lambda _v: "sk-test")
+    monkeypatch.setattr(module, "parse_codex_wham_usage_response", lambda _data: None)
+    monkeypatch.setattr(
+        module,
+        "parse_codex_usage_headers",
+        lambda _headers: {"primary_used_percent": 100.0, "secondary_used_percent": 3.0},
+    )
+    response = _FakeResponse(status_code=200, payload={"ok": True})
+    monkeypatch.setattr(
+        module.httpx, "AsyncClient", lambda **kwargs: _FakeAsyncClient(response, **kwargs)
+    )
+
+    result = await refresh_codex_key_quota(
+        db=cast(Any, _FakeDB()),
+        provider=cast(Any, provider),
+        key=cast(Any, key),
+        endpoint=cast(Any, endpoint),
+        codex_wham_usage_url="https://example.test",
+        metadata_updates=metadata_updates,
+        state_updates=state_updates,
+    )
+
+    assert result["status"] == "success"
+    assert result["quota_exhausted"] is True
+    assert metadata_updates == {
+        "k1": {"codex": {"primary_used_percent": 100.0, "secondary_used_percent": 3.0}}
+    }
 
 
 @pytest.mark.asyncio
@@ -691,6 +754,7 @@ async def test_kiro_refresher_success_updates_metadata_and_auth_config(
     )
 
     assert result["status"] == "success"
+    assert "quota_exhausted" not in result
     assert metadata_updates["k1"]["kiro"]["is_banned"] is False
     assert metadata_updates["k1"]["kiro"]["quota"] == 1
     assert key.auth_config == "enc"

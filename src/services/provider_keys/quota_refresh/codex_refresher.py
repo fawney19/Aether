@@ -14,7 +14,10 @@ from src.api.handlers.base.request_builder import get_provider_auth
 from src.core.crypto import crypto_service
 from src.models.database import Provider, ProviderAPIKey, ProviderEndpoint
 from src.services.provider_keys.auth_type import normalize_auth_type
-from src.services.provider_keys.codex_usage_parser import parse_codex_wham_usage_response
+from src.services.provider_keys.codex_usage_parser import (
+    parse_codex_usage_headers,
+    parse_codex_wham_usage_response,
+)
 
 
 def _normalize_plan_type(value: Any) -> str | None:
@@ -127,6 +130,13 @@ async def refresh_codex_key_quota(
             "status_code": response.status_code,
         }
 
+    # 兜底：部分上游场景 body 不含 rate_limit，但响应头携带 x-codex-* 配额字段。
+    if not metadata:
+        try:
+            metadata = parse_codex_usage_headers(response.headers)
+        except Exception:
+            metadata = None
+
     if metadata:
         # 收集元数据，稍后统一更新数据库（存储到 codex 子对象）
         metadata_updates[key.id] = {"codex": metadata}
@@ -134,12 +144,32 @@ async def refresh_codex_key_quota(
             "oauth_invalid_at": None,
             "oauth_invalid_reason": None,
         }
-        return {
+
+        # 判断配额是否耗尽：周限额(primary) 或 5H限额(secondary) 任一剩余为 0
+        exhausted_parts: list[str] = []
+        weekly_used = metadata.get("primary_used_percent")
+        five_hour_used = metadata.get("secondary_used_percent")
+        has_quota_signal = isinstance(weekly_used, (int, float)) or isinstance(
+            five_hour_used, (int, float)
+        )
+        if isinstance(weekly_used, (int, float)) and weekly_used >= 100.0 - 1e-6:
+            exhausted_parts.append("周限额剩余 0%")
+        if isinstance(five_hour_used, (int, float)) and five_hour_used >= 100.0 - 1e-6:
+            exhausted_parts.append("5H 限额剩余 0%")
+
+        result: dict[str, Any] = {
             "key_id": key.id,
             "key_name": key.name,
             "status": "success",
             "metadata": metadata,
         }
+        if exhausted_parts:
+            result["quota_exhausted"] = True
+            result["quota_exhausted_reason"] = "Codex " + "，".join(exhausted_parts)
+        elif has_quota_signal:
+            result["quota_exhausted"] = False
+
+        return result
 
     # 响应成功但没有限额信息
     return {

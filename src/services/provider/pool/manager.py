@@ -22,6 +22,7 @@ from src.core.logger import logger
 from src.services.provider.pool import redis_ops
 from src.services.provider.pool.config import PoolConfig
 from src.services.provider.pool.trace import PoolCandidateTrace, PoolSchedulingTrace
+from src.services.provider_keys.quota_cooldown import resolve_effective_cooldown_reason
 
 if TYPE_CHECKING:
     from src.models.database import ProviderAPIKey
@@ -31,11 +32,17 @@ if TYPE_CHECKING:
 class PoolManager:
     """Coordinate pool-level scheduling for a single Provider."""
 
-    __slots__ = ("provider_id", "config")
+    __slots__ = ("provider_id", "config", "provider_type")
 
-    def __init__(self, provider_id: str, config: PoolConfig) -> None:
+    def __init__(
+        self,
+        provider_id: str,
+        config: PoolConfig,
+        provider_type: str | None = None,
+    ) -> None:
         self.provider_id = provider_id
         self.config = config
+        self.provider_type = str(provider_type or "").strip().lower() or None
 
     # ------------------------------------------------------------------
     # Core scheduling: reorder candidate list for pool-aware selection
@@ -191,7 +198,16 @@ class PoolManager:
                 continue
 
             # Cooldown?
-            cd_reason = cooldowns.get(kid)
+            redis_cd_reason = cooldowns.get(kid)
+            candidate_provider_type = self.provider_type or (
+                str(getattr(getattr(c, "provider", None), "provider_type", "") or "").strip()
+                or None
+            )
+            cd_reason = resolve_effective_cooldown_reason(
+                provider_type=candidate_provider_type,
+                key=c.key,
+                redis_reason=redis_cd_reason,
+            )
             if cd_reason is not None:
                 c.is_skipped = True
                 c.skip_reason = f"pool cooldown: {cd_reason}"
@@ -199,7 +215,7 @@ class PoolManager:
                 ct.skipped = True
                 ct.skip_type = "cooldown"
                 ct.cooldown_reason = cd_reason
-                ct.cooldown_ttl = cooldown_ttls.get(kid)
+                ct.cooldown_ttl = cooldown_ttls.get(kid) if redis_cd_reason is not None else None
                 _attach_pool_extra(c, ct)
                 trace.candidate_traces[kid] = ct
                 continue
@@ -371,8 +387,16 @@ class PoolManager:
 
         for k in keys:
             kid = str(k.id)
-
-            if cooldowns.get(kid) is not None:
+            key_provider_type = self.provider_type or (
+                str(getattr(getattr(k, "provider", None), "provider_type", "") or "").strip()
+                or None
+            )
+            cd_reason = resolve_effective_cooldown_reason(
+                provider_type=key_provider_type,
+                key=k,
+                redis_reason=cooldowns.get(kid),
+            )
+            if cd_reason is not None:
                 continue
             if kid in cost_exhausted:
                 continue

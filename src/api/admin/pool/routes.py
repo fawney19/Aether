@@ -27,6 +27,7 @@ from src.database import get_db
 from src.models.database import Provider, ProviderAPIKey
 from src.services.provider.pool import redis_ops as pool_redis
 from src.services.provider.pool.config import parse_pool_config
+from src.services.provider_keys.quota_cooldown import resolve_effective_cooldown_reason
 
 from .schemas import (
     BatchActionRequest,
@@ -137,6 +138,20 @@ def _format_quota_value(value: float) -> str:
     return f"{value:.1f}"
 
 
+def _format_reset_time(seconds: int | float | None) -> str | None:
+    if seconds is None or seconds <= 0:
+        return None
+    total = int(seconds)
+    days = total // 86400
+    hours = (total % 86400) // 3600
+    minutes = (total % 3600) // 60
+    if days > 0:
+        return f"{days}天{hours}小时后重置"
+    if hours > 0:
+        return f"{hours}小时{minutes}分钟后重置"
+    return f"{minutes}分钟后重置"
+
+
 def _build_codex_account_quota(upstream_metadata: dict[str, Any]) -> str | None:
     codex = upstream_metadata.get("codex")
     if not isinstance(codex, dict):
@@ -146,11 +161,15 @@ def _build_codex_account_quota(upstream_metadata: dict[str, Any]) -> str | None:
 
     primary_used = _to_float(codex.get("primary_used_percent"))
     if primary_used is not None:
-        parts.append(f"周剩余 {_format_percent(100.0 - primary_used)}")
+        reset_text = _format_reset_time(codex.get("primary_reset_seconds"))
+        suffix = f" ({reset_text})" if reset_text else ""
+        parts.append(f"周剩余 {_format_percent(100.0 - primary_used)}{suffix}")
 
     secondary_used = _to_float(codex.get("secondary_used_percent"))
     if secondary_used is not None:
-        parts.append(f"5H剩余 {_format_percent(100.0 - secondary_used)}")
+        reset_text = _format_reset_time(codex.get("secondary_reset_seconds"))
+        suffix = f" ({reset_text})" if reset_text else ""
+        parts.append(f"5H剩余 {_format_percent(100.0 - secondary_used)}{suffix}")
 
     if parts:
         return " | ".join(parts)
@@ -177,11 +196,7 @@ def _build_kiro_account_quota(upstream_metadata: dict[str, Any]) -> str | None:
         remaining = 100.0 - usage_percentage
         current_usage = _to_float(kiro.get("current_usage"))
         usage_limit = _to_float(kiro.get("usage_limit"))
-        if (
-            current_usage is not None
-            and usage_limit is not None
-            and usage_limit > 0
-        ):
+        if current_usage is not None and usage_limit is not None and usage_limit > 0:
             return (
                 f"剩余 {_format_percent(remaining)} "
                 f"({_format_quota_value(current_usage)}/{_format_quota_value(usage_limit)})"
@@ -278,6 +293,7 @@ class AdminPoolOverviewAdapter(AdminApiAdapter):
         for p in providers:
             pid = str(p.id)
             pcfg = parse_pool_config(getattr(p, "config", None))
+            provider_type = str(getattr(p, "provider_type", "custom") or "custom")
 
             # Non-pool providers: skip Redis + key queries entirely.
             if pcfg is None:
@@ -285,7 +301,7 @@ class AdminPoolOverviewAdapter(AdminApiAdapter):
                     PoolOverviewItem(
                         provider_id=pid,
                         provider_name=p.name,
-                        provider_type=str(getattr(p, "provider_type", "custom") or "custom"),
+                        provider_type=provider_type,
                         pool_enabled=False,
                     )
                 )
@@ -297,13 +313,22 @@ class AdminPoolOverviewAdapter(AdminApiAdapter):
             cooldown_count = 0
             if key_ids:
                 cooldowns = await pool_redis.batch_get_cooldowns(pid, key_ids)
-                cooldown_count = sum(1 for v in cooldowns.values() if v is not None)
+                cooldown_count = sum(
+                    1
+                    for k in keys
+                    if resolve_effective_cooldown_reason(
+                        provider_type=provider_type,
+                        key=k,
+                        redis_reason=cooldowns.get(str(k.id)),
+                    )
+                    is not None
+                )
 
             items.append(
                 PoolOverviewItem(
                     provider_id=pid,
                     provider_name=p.name,
-                    provider_type=str(getattr(p, "provider_type", "custom") or "custom"),
+                    provider_type=provider_type,
                     total_keys=len(keys),
                     active_keys=sum(1 for k in keys if k.is_active),
                     cooldown_count=cooldown_count,
@@ -343,7 +368,7 @@ class AdminListPoolKeysAdapter(AdminApiAdapter):
             q = q.filter(ProviderAPIKey.is_active.is_(True))
         elif self.status == "inactive":
             q = q.filter(ProviderAPIKey.is_active.is_(False))
-        # "cooldown" filtering is done post-query (Redis state)
+        # "cooldown" filtering is done post-query (Redis + 配额元数据兜底)
 
         total = q.count()
 
@@ -354,7 +379,16 @@ class AdminListPoolKeysAdapter(AdminApiAdapter):
             all_keys = q.order_by(ProviderAPIKey.created_at.desc()).limit(_max_scan).all()
             key_ids = [str(k.id) for k in all_keys]
             cooldowns = await pool_redis.batch_get_cooldowns(pid, key_ids) if key_ids else {}
-            all_keys = [k for k in all_keys if cooldowns.get(str(k.id)) is not None]
+            all_keys = [
+                k
+                for k in all_keys
+                if resolve_effective_cooldown_reason(
+                    provider_type=provider_type,
+                    key=k,
+                    redis_reason=cooldowns.get(str(k.id)),
+                )
+                is not None
+            ]
             total = len(all_keys)
             offset = (self.page - 1) * self.page_size
             keys = all_keys[offset : offset + self.page_size]
@@ -401,8 +435,13 @@ class AdminListPoolKeysAdapter(AdminApiAdapter):
         key_details: list[PoolKeyDetail] = []
         for k in keys:
             kid = str(k.id)
-            cd_reason = cooldowns.get(kid)
-            cd_ttl = cooldown_ttls.get(kid) if cd_reason else None
+            redis_cd_reason = cooldowns.get(kid)
+            cd_reason = resolve_effective_cooldown_reason(
+                provider_type=provider_type,
+                key=k,
+                redis_reason=redis_cd_reason,
+            )
+            cd_ttl = cooldown_ttls.get(kid) if redis_cd_reason else None
 
             key_details.append(
                 PoolKeyDetail(

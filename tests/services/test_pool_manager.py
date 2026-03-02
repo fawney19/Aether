@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -11,11 +12,31 @@ from src.services.provider.pool.config import PoolConfig
 from src.services.provider.pool.manager import PoolManager
 
 
-def _make_candidate(key_id: str, *, is_skipped: bool = False) -> SimpleNamespace:
+def _make_candidate(
+    key_id: str,
+    *,
+    is_skipped: bool = False,
+    provider_type: str | None = None,
+    upstream_metadata: dict[str, Any] | None = None,
+) -> Any:
     return SimpleNamespace(
-        key=SimpleNamespace(id=key_id),
+        provider=SimpleNamespace(provider_type=provider_type),
+        key=SimpleNamespace(id=key_id, upstream_metadata=upstream_metadata or {}),
         is_skipped=is_skipped,
         skip_reason=None,
+    )
+
+
+def _make_key(
+    key_id: str,
+    *,
+    provider_type: str | None = None,
+    upstream_metadata: dict[str, Any] | None = None,
+) -> Any:
+    return SimpleNamespace(
+        id=key_id,
+        provider=SimpleNamespace(provider_type=provider_type),
+        upstream_metadata=upstream_metadata or {},
     )
 
 
@@ -95,6 +116,53 @@ async def test_reorder_cooldown_keys_are_skipped(pool: PoolManager) -> None:
 
 
 @pytest.mark.asyncio
+async def test_reorder_metadata_quota_exhausted_keys_are_skipped() -> None:
+    pool = PoolManager("provider-1", PoolConfig(), provider_type="codex")
+    exhausted_meta = {"codex": {"primary_used_percent": 100, "secondary_used_percent": 20}}
+    healthy_meta = {"codex": {"primary_used_percent": 20, "secondary_used_percent": 10}}
+    c1 = _make_candidate("key-1", provider_type="codex", upstream_metadata=exhausted_meta)
+    c2 = _make_candidate("key-2", provider_type="codex", upstream_metadata=healthy_meta)
+
+    with (
+        patch(
+            "src.services.provider.pool.redis_ops.batch_get_cooldowns",
+            new_callable=AsyncMock,
+            return_value={"key-1": (None, None), "key-2": (None, None)},
+        ),
+        patch(
+            "src.services.provider.pool.redis_ops.get_lru_scores",
+            new_callable=AsyncMock,
+            return_value={},
+        ),
+    ):
+        result = await pool.reorder_candidates(None, [c1, c2])
+
+    assert c1.is_skipped is True
+    assert c1.skip_reason == "pool cooldown: quota_exhausted"
+    assert result[0].key.id == "key-2"
+
+
+@pytest.mark.asyncio
+async def test_reorder_redis_cooldown_reason_has_priority_over_metadata() -> None:
+    pool = PoolManager("provider-1", PoolConfig(), provider_type="codex")
+    exhausted_meta = {"codex": {"primary_used_percent": 100, "secondary_used_percent": 100}}
+    c1 = _make_candidate("key-1", provider_type="codex", upstream_metadata=exhausted_meta)
+
+    with patch(
+        "src.services.provider.pool.redis_ops.batch_get_cooldowns",
+        new_callable=AsyncMock,
+        return_value={"key-1": ("rate_limited_429", 120)},
+    ):
+        result = await pool.reorder_candidates(None, [c1])
+
+    assert result[0].is_skipped is True
+    assert result[0].skip_reason == "pool cooldown: rate_limited_429"
+    extra = getattr(result[0], "_pool_extra_data", None) or {}
+    assert extra["pool_skip"]["cooldown_reason"] == "rate_limited_429"
+    assert extra["pool_skip"]["cooldown_ttl"] == 120
+
+
+@pytest.mark.asyncio
 async def test_reorder_cost_exhausted_keys_are_skipped() -> None:
     pool = PoolManager(
         "provider-1",
@@ -159,6 +227,42 @@ async def test_reorder_lru_sorts_least_recently_used_first(
     assert available[0].key.id == "key-2"
     assert available[1].key.id == "key-3"
     assert available[2].key.id == "key-1"
+
+
+# ---------------------------------------------------------------------------
+# select_key
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_select_key_sticky_metadata_cooldown_falls_back() -> None:
+    pool = PoolManager("provider-1", PoolConfig(), provider_type="codex")
+    exhausted_meta = {"codex": {"primary_used_percent": 100, "secondary_used_percent": 50}}
+    healthy_meta = {"codex": {"primary_used_percent": 10, "secondary_used_percent": 20}}
+    k1 = _make_key("key-1", provider_type="codex", upstream_metadata=exhausted_meta)
+    k2 = _make_key("key-2", provider_type="codex", upstream_metadata=healthy_meta)
+
+    with (
+        patch(
+            "src.services.provider.pool.redis_ops.get_sticky_binding",
+            new_callable=AsyncMock,
+            return_value="key-1",
+        ),
+        patch(
+            "src.services.provider.pool.redis_ops.batch_get_cooldowns",
+            new_callable=AsyncMock,
+            return_value={"key-1": None, "key-2": None},
+        ),
+        patch(
+            "src.services.provider.pool.redis_ops.get_lru_scores",
+            new_callable=AsyncMock,
+            return_value={"key-1": 100.0, "key-2": 10.0},
+        ),
+    ):
+        selected = await pool.select_key("sess-1", [k1, k2])
+
+    assert selected is not None
+    assert selected.id == "key-2"
 
 
 # ---------------------------------------------------------------------------

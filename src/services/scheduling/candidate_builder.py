@@ -676,6 +676,6 @@ class CandidateBuilder:
         provider_type = str(getattr(provider, "provider_type", "") or "")
         hook = get_pool_hook(provider_type)
         session_uuid = hook.extract_session_uuid(request_body) if hook and request_body else None
-        mgr = PoolManager(str(provider.id), pool_cfg)
+        mgr = PoolManager(str(provider.id), pool_cfg, provider_type=provider_type)
         release_db_connection_before_await(db)
         return await mgr.select_key(session_uuid, active_keys)

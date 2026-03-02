@@ -243,7 +243,7 @@ class TaskService:
 
                 provider_type = str(getattr(provider, "provider_type", "") or "")
                 session_uuid = TaskService._extract_session_uuid(provider_type, request_body)
-                mgr = PoolManager(pid, pool_cfg)
+                mgr = PoolManager(pid, pool_cfg, provider_type=provider_type)
                 reordered = await mgr.reorder_candidates(session_uuid, group)
                 result.extend(reordered)
 
@@ -284,7 +284,7 @@ class TaskService:
             provider_type = str(getattr(provider, "provider_type", "") or "")
             session_uuid = TaskService._extract_session_uuid(provider_type, request_body)
 
-            mgr = PoolManager(provider_id, pool_cfg)
+            mgr = PoolManager(provider_id, pool_cfg, provider_type=provider_type)
             await mgr.on_request_success(
                 session_uuid=session_uuid,
                 key_id=key_id,
