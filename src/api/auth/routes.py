@@ -17,6 +17,7 @@ from src.api.base.context import ApiRequestContext
 from src.api.base.pipeline import ApiRequestPipeline
 from src.core.exceptions import InvalidRequestException
 from src.core.logger import logger
+from src.core.validators import PasswordValidator
 from src.database import get_db
 from src.models.api import (
     LoginRequest,
@@ -37,6 +38,7 @@ from src.models.api import (
 from src.models.database import AuditEventType, User, UserRole
 from src.services.auth.service import AuthService
 from src.services.email import EmailSenderService, EmailVerificationService
+from src.services.rate_limit.account_lockout import AccountLockoutService
 from src.services.rate_limit.ip_limiter import IPRateLimiter
 from src.services.system.audit import AuditService
 from src.services.system.config import SystemConfigService
@@ -179,7 +181,7 @@ async def change_password(request: Request, db: Session = Depends(get_db)) -> An
     修改密码
 
     修改当前用户的登录密码，需提供旧密码验证。
-    密码长度至少 6 位。
+    密码长度至少 8 位，且必须包含大写字母、小写字母和数字。
     """
     adapter = AuthChangePasswordAdapter()
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
@@ -251,6 +253,7 @@ class AuthLoginAdapter(AuthPublicAdapter):
     async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
         db = context.db
         payload = context.ensure_json_body()
+        login_identifier = str(payload.get("email", "")).strip()
 
         try:
             login_request = LoginRequest.model_validate(payload)
@@ -273,20 +276,54 @@ class AuthLoginAdapter(AuthPublicAdapter):
                 detail=f"登录请求过于频繁，请在 {reset_after} 秒后重试",
             )
 
-        user = await AuthService.authenticate_user(
-            db, login_request.email, login_request.password, login_request.auth_type
-        )
-        if not user:
+        if not login_identifier:
+            login_identifier = login_request.email
+
+        # 账户级锁定检查（基于登录标识，非 user_id）
+        is_locked, lock_remaining = await AccountLockoutService.is_locked(login_identifier)
+        if is_locked:
             AuditService.log_login_attempt(
                 db=db,
                 email=login_request.email,
                 success=False,
                 ip_address=client_ip,
                 user_agent=user_agent,
-                error_reason="邮箱或密码错误",
+                error_reason="登录失败次数过多，账户已锁定",
             )
             db.commit()
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="邮箱或密码错误")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"登录失败次数过多，请在 {lock_remaining} 秒后重试",
+            )
+
+        user = await AuthService.authenticate_user(
+            db, login_request.email, login_request.password, login_request.auth_type
+        )
+        if not user:
+            triggered_lockout, _ = await AccountLockoutService.record_failed_attempt(
+                login_identifier
+            )
+            error_reason = "邮箱或密码错误"
+            status_code = status.HTTP_401_UNAUTHORIZED
+            detail = "邮箱或密码错误"
+
+            if triggered_lockout:
+                status_code = status.HTTP_429_TOO_MANY_REQUESTS
+                detail = "登录失败次数过多，请稍后重试"
+                error_reason = "登录失败次数过多，账户已锁定"
+
+            AuditService.log_login_attempt(
+                db=db,
+                email=login_request.email,
+                success=False,
+                ip_address=client_ip,
+                user_agent=user_agent,
+                error_reason=error_reason,
+            )
+            db.commit()
+            raise HTTPException(status_code=status_code, detail=detail)
+
+        await AccountLockoutService.reset_failed_attempts(login_identifier)
 
         AuditService.log_login_attempt(
             db=db,
@@ -607,8 +644,13 @@ class AuthChangePasswordAdapter(AuthenticatedApiAdapter):
         user = context.user
         if not user.verify_password(old_password):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="旧密码错误")
-        if len(new_password) < 6:
-            raise InvalidRequestException("密码长度至少6位")
+        if old_password == new_password:
+            raise InvalidRequestException("新密码不能与旧密码相同")
+
+        is_valid, error_msg = PasswordValidator.validate(new_password)
+        if not is_valid:
+            raise InvalidRequestException(error_msg or "密码不符合安全要求")
+
         user.set_password(new_password)
         context.db.commit()
         logger.info(f"用户修改密码: {user.email}")

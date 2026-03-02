@@ -559,7 +559,7 @@ class UpdateUserRequest(BaseModel):
     username: str | None = Field(None, min_length=1, max_length=50)
     email: str | None = Field(None, max_length=100)
     password: str | None = Field(
-        None, min_length=6, max_length=128, description="新密码（留空保持不变）"
+        None, min_length=8, max_length=128, description="新密码（留空保持不变）"
     )
     quota_usd: float | None = Field(None, ge=0)
     is_active: bool | None = None

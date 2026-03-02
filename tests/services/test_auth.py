@@ -194,9 +194,17 @@ class TestUserAuthentication:
         mock_db = MagicMock()
         mock_db.query.return_value.filter.return_value.first.return_value = None
 
-        result = await AuthService.authenticate_user(mock_db, "nonexistent@example.com", "password")
+        with patch(
+            "src.services.auth.service.run_in_threadpool",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as mock_threadpool:
+            result = await AuthService.authenticate_user(
+                mock_db, "nonexistent@example.com", "password"
+            )
 
         assert result is None
+        assert mock_threadpool.await_count == 1
 
     @pytest.mark.asyncio
     async def test_authenticate_user_wrong_password(self) -> None:

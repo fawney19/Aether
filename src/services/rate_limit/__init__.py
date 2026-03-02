@@ -9,6 +9,7 @@ from src.services.rate_limit.adaptive_rpm import (
     AdaptiveRPMManager,
     get_adaptive_rpm_manager,
 )
+from src.services.rate_limit.account_lockout import AccountLockoutService
 from src.services.rate_limit.concurrency_manager import ConcurrencyManager
 from src.services.rate_limit.detector import RateLimitDetector
 from src.services.rate_limit.ip_limiter import IPRateLimiter
@@ -16,6 +17,7 @@ from src.services.rate_limit.ip_limiter import IPRateLimiter
 __all__ = [
     "AdaptiveConcurrencyManager",  # 向后兼容
     "AdaptiveRPMManager",
+    "AccountLockoutService",
     "ConcurrencyManager",
     "IPRateLimiter",
     "RateLimitDetector",

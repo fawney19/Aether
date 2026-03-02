@@ -82,7 +82,7 @@ class RegisterRequest(BaseModel):
 
     email: str | None = Field(None, max_length=255, description="邮箱地址（可选）")
     username: str = Field(..., min_length=2, max_length=50, description="用户名")
-    password: str = Field(..., min_length=6, max_length=128, description="密码")
+    password: str = Field(..., min_length=8, max_length=128, description="密码")
 
     @field_validator("email")
     @classmethod
@@ -107,20 +107,6 @@ class RegisterRequest(BaseModel):
             raise ValueError("用户名不能为空")
         if not re.match(r"^[a-zA-Z0-9_.\-]+$", v):
             raise ValueError("用户名只能包含字母、数字、下划线、连字符和点号")
-        return v
-
-    @classmethod
-    @field_validator("password")
-    def validate_password(cls, v: Any) -> Any:
-        """验证密码强度"""
-        if len(v) < 6:
-            raise ValueError("密码至少需要6个字符")
-        if not re.search(r"[A-Z]", v):
-            raise ValueError("密码必须包含至少一个大写字母")
-        if not re.search(r"[a-z]", v):
-            raise ValueError("密码必须包含至少一个小写字母")
-        if not re.search(r"\d", v):
-            raise ValueError("密码必须包含至少一个数字")
         return v
 
 
@@ -238,7 +224,7 @@ class CreateUserRequest(BaseModel):
     """创建用户请求"""
 
     username: str = Field(..., min_length=2, max_length=50, description="用户名")
-    password: str = Field(..., min_length=6, max_length=128, description="密码")
+    password: str = Field(..., min_length=8, max_length=128, description="密码")
     email: str | None = Field(None, max_length=255, description="邮箱地址（可选）")
     role: UserRole | None = Field(UserRole.USER, description="用户角色")
     quota_usd: float | None = Field(default=None, description="USD配额，null表示使用系统默认配额")
@@ -314,20 +300,6 @@ class CreateUserRequest(BaseModel):
             seen.add(norm)
             out.append(norm)
         return out
-
-    @classmethod
-    @field_validator("password")
-    def validate_password(cls, v: Any) -> Any:
-        """验证密码强度"""
-        if len(v) < 6:
-            raise ValueError("密码至少需要6个字符")
-        if not re.search(r"[A-Z]", v):
-            raise ValueError("密码必须包含至少一个大写字母")
-        if not re.search(r"[a-z]", v):
-            raise ValueError("密码必须包含至少一个小写字母")
-        if not re.search(r"\d", v):
-            raise ValueError("密码必须包含至少一个数字")
-        return v
 
 
 class UpdateUserRequest(BaseModel):
@@ -781,7 +753,7 @@ class ChangePasswordRequest(BaseModel):
     """修改密码请求"""
 
     old_password: str | None = None  # 可选：首次设置密码时不需要
-    new_password: str
+    new_password: str = Field(..., min_length=8, max_length=128)
 
 
 class CreateMyApiKeyRequest(BaseModel):

@@ -14,6 +14,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 import jwt
+import bcrypt
 from fastapi import HTTPException, status
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import IntegrityError
@@ -85,6 +86,7 @@ JWT_ALGORITHM = config.jwt_algorithm
 JWT_EXPIRATION_HOURS = config.jwt_expiration_hours
 # Refresh token 有效期设为7天
 REFRESH_TOKEN_EXPIRATION_DAYS = 7
+_DUMMY_HASH = "$2b$12$iYGfjd1o2Vr6OiMgUj3w0OA/4DCh3ku0dMXsWBVxah5b.UD0eOg7u"
 
 
 class AuthService:
@@ -214,6 +216,10 @@ class AuthService:
         user = db.query(User).filter(or_(User.email == email, User.username == email)).first()
 
         if not user:
+            # timing-safe: 用户不存在时也执行一次 bcrypt，避免与"密码错误"路径出现明显时延差异
+            await run_in_threadpool(
+                bcrypt.checkpw, password.encode("utf-8"), _DUMMY_HASH.encode("utf-8")
+            )
             logger.warning(f"登录失败 - 用户不存在: {email}")
             return None
 

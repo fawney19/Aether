@@ -119,6 +119,12 @@
                 type="password"
                 class="mt-1"
               />
+              <p
+                class="mt-1 text-xs"
+                :class="passwordHintIsError ? 'text-destructive' : 'text-muted-foreground'"
+              >
+                {{ passwordHintText }}
+              </p>
             </div>
             <div>
               <Label for="confirm-password">确认{{ profile?.has_password ? '新' : '' }}密码</Label>
@@ -509,6 +515,9 @@ const oauthActionLoading = ref(false)
 const oauthLinks = ref<OAuthLinkInfo[]>([])
 const bindableProviders = ref<OAuthProviderInfo[]>([])
 const emailConfigured = ref(false) // 系统是否配置了邮箱服务
+const uppercaseRegex = /[A-Z]/
+const lowercaseRegex = /[a-z]/
+const digitRegex = /\d/
 
 // 原始值，用于检测是否有修改
 const originalProfileForm = ref({ email: '', username: '' })
@@ -550,6 +559,56 @@ function handleLanguageChange(value: string) {
   languageSelectOpen.value = false
   updatePreferences()
 }
+
+function formatMissingItems(items: string[]): string {
+  if (items.length === 0) return ''
+  if (items.length === 1) return items[0]
+  if (items.length === 2) return `${items[0]}和${items[1]}`
+  return `${items.slice(0, -1).join('、')}和${items[items.length - 1]}`
+}
+
+function getPasswordValidationError(password: string): string | null {
+  const missingLength = password.length < 8
+  const missingTypes: string[] = []
+
+  if (!uppercaseRegex.test(password)) {
+    missingTypes.push('大写字母')
+  }
+  if (!lowercaseRegex.test(password)) {
+    missingTypes.push('小写字母')
+  }
+  if (!digitRegex.test(password)) {
+    missingTypes.push('数字')
+  }
+
+  const missingComplexityText =
+    missingTypes.length > 0 ? `必须包含${formatMissingItems(missingTypes)}` : ''
+
+  if (missingLength && missingComplexityText) {
+    return `至少 8 位，且${missingComplexityText}`
+  }
+  if (missingLength) {
+    return '至少 8 位'
+  }
+  if (missingComplexityText) {
+    return missingComplexityText
+  }
+  return null
+}
+
+const passwordHintText = computed(() => {
+  const password = passwordForm.value.new_password
+  if (!password) {
+    return '至少 8 位，且必须包含大写字母、小写字母和数字'
+  }
+  return getPasswordValidationError(password) ?? '密码符合要求'
+})
+
+const passwordHintIsError = computed(() => {
+  const password = passwordForm.value.new_password
+  if (!password) return false
+  return !!getPasswordValidationError(password)
+})
 
 onMounted(async () => {
   await loadProfile()
@@ -751,8 +810,9 @@ async function changePassword() {
     return
   }
 
-  if (passwordForm.value.new_password.length < 6) {
-    showError('密码长度至少6位', '密码错误')
+  const passwordError = getPasswordValidationError(passwordForm.value.new_password)
+  if (passwordError) {
+    showError(passwordError, '密码错误')
     return
   }
 

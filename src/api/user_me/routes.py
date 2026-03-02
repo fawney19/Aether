@@ -22,6 +22,7 @@ from src.core.exceptions import (
     translate_pydantic_error,
 )
 from src.core.logger import logger
+from src.core.validators import PasswordValidator
 from src.database import get_db
 from src.models.api import (
     ChangePasswordRequest,
@@ -108,7 +109,7 @@ async def change_my_password(request: Request, db: Session = Depends(get_db)) ->
 
     **请求体**:
     - `old_password`: 当前密码
-    - `new_password`: 新密码（至少 6 位）
+    - `new_password`: 新密码（至少 8 位，且必须包含大写字母、小写字母和数字）
     """
     adapter = ChangePasswordAdapter()
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
@@ -531,10 +532,13 @@ class ChangePasswordAdapter(AuthenticatedApiAdapter):
                 raise InvalidRequestException("请输入当前密码")
             if not user.verify_password(request.old_password):
                 raise InvalidRequestException("旧密码错误")
+            if request.old_password == request.new_password:
+                raise InvalidRequestException("新密码不能与旧密码相同")
         # 无密码（如 OAuth 用户首次设置）：无需旧密码
 
-        if len(request.new_password) < 6:
-            raise InvalidRequestException("密码长度至少6位")
+        is_valid, error_msg = PasswordValidator.validate(request.new_password)
+        if not is_valid:
+            raise InvalidRequestException(error_msg or "密码不符合安全要求")
 
         user.set_password(request.new_password)
         user.updated_at = datetime.now(timezone.utc)

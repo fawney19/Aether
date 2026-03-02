@@ -157,11 +157,17 @@
             data-lpignore="true"
             data-1p-ignore="true"
             :name="`pwd-${formNonce}`"
-            placeholder="至少 6 个字符"
+            placeholder="至少 8 个字符，包含大小写字母和数字"
             required
             class="-webkit-text-security-disc"
             :disabled="isLoading"
           />
+          <p
+            class="text-xs"
+            :class="passwordHintIsError ? 'text-destructive' : 'text-muted-foreground'"
+          >
+            {{ passwordHintText }}
+          </p>
         </div>
 
         <!-- Confirm Password -->
@@ -377,6 +383,9 @@ const sendCodeButtonText = computed(() => {
 
 // 用户名验证
 const usernameRegex = /^[a-zA-Z0-9_.-]+$/
+const uppercaseRegex = /[A-Z]/
+const lowercaseRegex = /[a-z]/
+const digitRegex = /\d/
 const usernameError = computed(() => {
   const username = formData.value.username.trim()
   if (!username) return ''
@@ -384,6 +393,56 @@ const usernameError = computed(() => {
   if (username.length > 30) return '用户名长度不能超过30个字符'
   if (!usernameRegex.test(username)) return '用户名只能包含字母、数字、下划线、连字符和点号'
   return ''
+})
+
+function formatMissingItems(items: string[]): string {
+  if (items.length === 0) return ''
+  if (items.length === 1) return items[0]
+  if (items.length === 2) return `${items[0]}和${items[1]}`
+  return `${items.slice(0, -1).join('、')}和${items[items.length - 1]}`
+}
+
+function getPasswordValidationError(password: string): string | null {
+  const missingLength = password.length < 8
+  const missingTypes: string[] = []
+
+  if (!uppercaseRegex.test(password)) {
+    missingTypes.push('大写字母')
+  }
+  if (!lowercaseRegex.test(password)) {
+    missingTypes.push('小写字母')
+  }
+  if (!digitRegex.test(password)) {
+    missingTypes.push('数字')
+  }
+
+  const missingComplexityText =
+    missingTypes.length > 0 ? `必须包含${formatMissingItems(missingTypes)}` : ''
+
+  if (missingLength && missingComplexityText) {
+    return `至少 8 位，且${missingComplexityText}`
+  }
+  if (missingLength) {
+    return '至少 8 位'
+  }
+  if (missingComplexityText) {
+    return missingComplexityText
+  }
+  return null
+}
+
+const passwordHintText = computed(() => {
+  const password = formData.value.password
+  if (!password) {
+    return '至少 8 位，且必须包含大写字母、小写字母和数字'
+  }
+  return getPasswordValidationError(password) ?? '密码符合要求'
+})
+
+const passwordHintIsError = computed(() => {
+  const password = formData.value.password
+  if (!password) return false
+  return !!getPasswordValidationError(password)
 })
 
 const canSubmit = computed(() => {
@@ -410,8 +469,7 @@ const canSubmit = computed(() => {
     return false
   }
 
-  // Check password length
-  if (formData.value.password.length < 6) {
+  if (getPasswordValidationError(formData.value.password)) {
     return false
   }
 
@@ -623,9 +681,9 @@ const handleSubmit = async () => {
     return
   }
 
-  // Validate password length
-  if (formData.value.password.length < 6) {
-    showError('密码长度至少 6 位', '密码过短')
+  const passwordError = getPasswordValidationError(formData.value.password)
+  if (passwordError) {
+    showError(passwordError, '密码错误')
     return
   }
 

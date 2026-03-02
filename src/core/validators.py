@@ -3,14 +3,47 @@
 包含密码复杂度验证和其他输入验证
 """
 
+from __future__ import annotations
+
 import re
+from pathlib import Path
+
+from src.core.logger import logger
 
 
 class PasswordValidator:
     """密码复杂度验证器"""
 
-    MIN_LENGTH = 6  # 降低到6位
+    MIN_LENGTH = 8
     MAX_LENGTH = 128
+    _UPPERCASE_REGEX = re.compile(r"[A-Z]")
+    _LOWERCASE_REGEX = re.compile(r"[a-z]")
+    _DIGIT_REGEX = re.compile(r"\d")
+    _COMMON_PASSWORDS_PATH = (
+        Path(__file__).resolve().parent.parent / "data" / "common_passwords.txt"
+    )
+    _COMMON_PASSWORDS: set[str] | None = None
+
+    @classmethod
+    def _load_common_passwords(cls) -> set[str]:
+        """惰性加载常见弱密码黑名单。"""
+        if cls._COMMON_PASSWORDS is not None:
+            return cls._COMMON_PASSWORDS
+
+        common_passwords: set[str] = set()
+        try:
+            with cls._COMMON_PASSWORDS_PATH.open("r", encoding="utf-8") as file:
+                common_passwords = {line.strip().lower() for line in file if line.strip()}
+            logger.info(f"已加载常见密码黑名单: {len(common_passwords)} 条")
+        except FileNotFoundError:
+            logger.warning(
+                f"常见密码黑名单文件不存在: {cls._COMMON_PASSWORDS_PATH}，将仅执行长度和复杂度校验"
+            )
+        except Exception as exc:
+            logger.warning(f"加载常见密码黑名单失败: {exc}，将仅执行长度和复杂度校验")
+
+        cls._COMMON_PASSWORDS = common_passwords
+        return common_passwords
 
     @classmethod
     def validate(cls, password: str) -> tuple[bool, str | None]:
@@ -18,7 +51,9 @@ class PasswordValidator:
         验证密码复杂度
 
         要求：
-        - 长度至少6个字符
+        - 长度至少8个字符
+        - 必须包含大写字母、小写字母、数字
+        - 不允许使用常见弱密码黑名单中的密码（1K）
 
         Args:
             password: 待验证的密码
@@ -35,71 +70,20 @@ class PasswordValidator:
         if len(password) > cls.MAX_LENGTH:
             return False, f"密码长度不能超过{cls.MAX_LENGTH}个字符"
 
-        # 简化密码复杂度要求 - 只检查长度
-        # 不再要求大小写字母、数字和特殊字符
+        if not cls._UPPERCASE_REGEX.search(password):
+            return False, "密码必须包含至少一个大写字母"
 
-        # 检查常见弱密码
-        weak_passwords = [
-            "password123",
-            "admin123",
-            "12345678",
-            "qwerty123",
-            "password@123",
-            "admin@123",
-            "Password123!",
-            "Admin123!",
-        ]
-        if password.lower() in [p.lower() for p in weak_passwords]:
+        if not cls._LOWERCASE_REGEX.search(password):
+            return False, "密码必须包含至少一个小写字母"
+
+        if not cls._DIGIT_REGEX.search(password):
+            return False, "密码必须包含至少一个数字"
+
+        common_passwords = cls._load_common_passwords()
+        if password.lower() in common_passwords:
             return False, "密码过于简单，请使用更复杂的密码"
 
         return True, None
-
-    @classmethod
-    def get_password_strength(cls, password: str) -> str:
-        """
-        获取密码强度评级
-
-        Args:
-            password: 密码
-
-        Returns:
-            强度评级: 弱、中、强、非常强
-        """
-        if not password:
-            return "无效"
-
-        score = 0
-
-        # 长度评分
-        if len(password) >= 8:
-            score += 1
-        if len(password) >= 12:
-            score += 1
-        if len(password) >= 16:
-            score += 1
-
-        # 字符类型评分
-        if re.search(r"[a-z]", password):
-            score += 1
-        if re.search(r"[A-Z]", password):
-            score += 1
-        if re.search(r"\d", password):
-            score += 1
-        if re.search(r'[!@#$%^&*()_+\-=\[\]{};:\'",.<>?/\\|`~]', password):
-            score += 2
-
-        # 额外复杂度评分
-        if re.search(r"[^\w\s]", password):  # 非字母数字字符
-            score += 1
-
-        if score < 3:
-            return "弱"
-        elif score < 5:
-            return "中"
-        elif score < 7:
-            return "强"
-        else:
-            return "非常强"
 
 
 class EmailValidator:

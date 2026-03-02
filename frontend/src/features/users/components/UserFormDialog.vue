@@ -85,17 +85,17 @@
               data-lpignore="true"
               :name="`field-${formNonce}`"
               :required="!isEditMode"
-              minlength="6"
-              :placeholder="isEditMode ? '留空保持原密码' : '至少6个字符'"
+              minlength="8"
+              :placeholder="isEditMode ? '留空保持原密码' : '至少8个字符，含大小写字母和数字'"
               :class="!passwordFocused && form.password.length === 0 ? 'h-10 text-transparent' : 'h-10'"
               @focus="passwordFocused = true"
               @blur="passwordFocused = form.password.length > 0"
             />
             <p
-              v-if="!isEditMode"
-              class="text-xs text-muted-foreground"
+              class="text-xs"
+              :class="passwordHintIsError ? 'text-destructive' : 'text-muted-foreground'"
             >
-              密码至少需要6个字符
+              {{ passwordHintText }}
             </p>
           </div>
 
@@ -115,7 +115,7 @@
               data-lpignore="true"
               :name="`confirm-${formNonce}`"
               required
-              minlength="6"
+              minlength="8"
               placeholder="再次输入新密码"
               class="h-10"
             />
@@ -482,6 +482,9 @@ const { isEditMode, handleDialogUpdate, handleCancel } = useFormDialog({
 
 // 用户名验证
 const usernameRegex = /^[a-zA-Z0-9_.-]+$/
+const uppercaseRegex = /[A-Z]/
+const lowercaseRegex = /[a-z]/
+const digitRegex = /\d/
 const usernameError = computed(() => {
   const username = form.value.username.trim()
   if (!username) return ''
@@ -491,14 +494,72 @@ const usernameError = computed(() => {
   return ''
 })
 
+function formatMissingItems(items: string[]): string {
+  if (items.length === 0) return ''
+  if (items.length === 1) return items[0]
+  if (items.length === 2) return `${items[0]}和${items[1]}`
+  return `${items.slice(0, -1).join('、')}和${items[items.length - 1]}`
+}
+
+function getPasswordValidationError(password: string): string | null {
+  const missingLength = password.length < 8
+  const missingTypes: string[] = []
+
+  if (!uppercaseRegex.test(password)) {
+    missingTypes.push('大写字母')
+  }
+  if (!lowercaseRegex.test(password)) {
+    missingTypes.push('小写字母')
+  }
+  if (!digitRegex.test(password)) {
+    missingTypes.push('数字')
+  }
+
+  const missingComplexityText =
+    missingTypes.length > 0 ? `必须包含${formatMissingItems(missingTypes)}` : ''
+
+  if (missingLength && missingComplexityText) {
+    return `至少 8 位，且${missingComplexityText}`
+  }
+  if (missingLength) {
+    return '至少 8 位'
+  }
+  if (missingComplexityText) {
+    return missingComplexityText
+  }
+  return null
+}
+
 // 表单验证
 const isFormValid = computed(() => {
   const hasUsername = form.value.username.trim().length > 0
   const usernameValid = !usernameError.value
-  const hasPassword = isEditMode.value || form.value.password.length >= 6
-  // 编辑模式下如果填写了密码，必须确认密码一致
-  const passwordConfirmed = !isEditMode.value || form.value.password.length === 0 || form.value.password === form.value.confirmPassword
-  return hasUsername && usernameValid && hasPassword && passwordConfirmed
+  const passwordFilled = form.value.password.length > 0
+  const passwordValid = passwordFilled
+    ? !getPasswordValidationError(form.value.password)
+    : isEditMode.value
+  // 编辑模式下可留空；填写时必须确认一致。创建模式不展示确认输入框。
+  const passwordConfirmed = isEditMode.value
+    ? !passwordFilled || form.value.password === form.value.confirmPassword
+    : true
+  return hasUsername && usernameValid && passwordValid && passwordConfirmed
+})
+
+const passwordHintText = computed(() => {
+  const password = form.value.password
+  if (isEditMode.value && !password) {
+    return '留空保持原密码'
+  }
+  if (!password) {
+    return '至少 8 位，且必须包含大写字母、小写字母和数字'
+  }
+  return getPasswordValidationError(password) ?? '密码符合要求'
+})
+
+const passwordHintIsError = computed(() => {
+  const password = form.value.password
+  if (!password) return false
+  return !!getPasswordValidationError(password)
 })
 
 // 加载访问控制选项
