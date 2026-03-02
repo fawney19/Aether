@@ -80,6 +80,18 @@ const routes: RouteRecordRaw[] = [
     component: () => importWithRetry(() => import('@/views/public/AuthCallback.vue')),
     meta: { requiresAuth: false }
   },
+  {
+    path: '/login',
+    name: 'Login',
+    component: () => importWithRetry(() => import('@/views/public/LoginPage.vue')),
+    meta: { requiresAuth: false, guestOnly: true }
+  },
+  {
+    path: '/register',
+    name: 'Register',
+    component: () => importWithRetry(() => import('@/views/public/RegisterPage.vue')),
+    meta: { requiresAuth: false, guestOnly: true }
+  },
 
   {
     path: '/dashboard',
@@ -292,8 +304,14 @@ router.beforeEach(async (to, from, next) => {
     const requiresAuth = to.matched.some(record => record.meta.requiresAuth !== false)
     if (requiresAuth && !isAuthenticated) {
       sessionStorage.setItem('redirectPath', to.fullPath)
-      log.debug('No valid token found, redirecting to home')
-      return next('/')
+      log.debug('No valid token found, redirecting to login')
+      return next('/login')
+    }
+
+    const isGuestOnly = to.matched.some(record => record.meta.guestOnly === true)
+    if (isGuestOnly && isAuthenticated) {
+      const isAdmin = authStore.user?.role === 'admin'
+      return next(isAdmin ? '/admin/dashboard' : '/dashboard')
     }
 
     // 管理端检查

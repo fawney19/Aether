@@ -81,7 +81,7 @@ onMounted(async () => {
     showError(errorMessageFromCode(errorCode))
     clearUrlState()
     const redirectPath = consumeRedirectPath()
-    await router.replace(redirectPath || '/')
+    await router.replace(redirectPath || '/login')
     return
   }
 
@@ -95,7 +95,7 @@ onMounted(async () => {
 
   if (!accessToken) {
     showError('未获取到访问令牌')
-    await router.replace('/')
+    await router.replace('/login')
     return
   }
 
