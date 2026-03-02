@@ -47,6 +47,8 @@ pub struct ServerContext {
 /// Aggregate metrics for reporting to Aether.
 pub struct ProxyMetrics {
     pub total_requests: AtomicU64,
+    /// Cumulative connection-establishment latency in nanoseconds
+    /// (DNS + TCP/TLS + TTFB, excludes response body streaming).
     pub total_latency_ns: AtomicU64,
     pub failed_requests: AtomicU64,
     pub dns_failures: AtomicU64,
@@ -64,8 +66,10 @@ impl ProxyMetrics {
         }
     }
 
-    pub fn record_request(&self, elapsed: Duration) {
-        let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+    /// Record a completed request with its connection-establishment latency
+    /// (DNS + TCP/TLS + TTFB, excludes response body streaming).
+    pub fn record_request(&self, connect_elapsed: Duration) {
+        let nanos = u64::try_from(connect_elapsed.as_nanos()).unwrap_or(u64::MAX);
         self.total_requests.fetch_add(1, Ordering::Release);
         self.total_latency_ns.fetch_add(nanos, Ordering::Release);
     }

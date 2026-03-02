@@ -15,6 +15,14 @@
             <div class="flex items-center gap-2">
               <Button
                 size="sm"
+                variant="outline"
+                class="h-7 text-xs"
+                @click="showBatchUpgradeDialog = true"
+              >
+                升级
+              </Button>
+              <Button
+                size="sm"
                 class="h-7 text-xs"
                 @click="showAddDialog = true"
               >
@@ -90,6 +98,14 @@
             </Select>
             <div class="h-4 w-px bg-border" />
             <Button
+              variant="outline"
+              size="sm"
+              class="h-8 text-xs"
+              @click="showBatchUpgradeDialog = true"
+            >
+              批量升级
+            </Button>
+            <Button
               variant="ghost"
               size="icon"
               class="h-8 w-8"
@@ -131,6 +147,9 @@
               </TableHead>
               <TableHead class="w-[100px] h-12 font-semibold text-center">
                 延迟
+              </TableHead>
+              <TableHead class="w-[120px] h-12 font-semibold text-center">
+                版本
               </TableHead>
               <TableHead class="w-[160px] h-12 font-semibold">
                 最后心跳
@@ -191,6 +210,9 @@
               </TableCell>
               <TableCell class="py-4 text-center">
                 <span class="text-sm tabular-nums">{{ node.avg_latency_ms != null ? `${node.avg_latency_ms.toFixed(0)}ms` : '-' }}</span>
+              </TableCell>
+              <TableCell class="py-4 text-center">
+                <span class="text-sm tabular-nums">{{ node.is_manual ? '-' : nodeProxyVersion(node) }}</span>
               </TableCell>
               <TableCell class="py-4">
                 <span class="text-xs text-muted-foreground">{{ formatTime(node.last_heartbeat_at) }}</span>
@@ -258,7 +280,7 @@
             </TableRow>
             <TableRow v-if="paginatedNodes.length === 0">
               <TableCell
-                colspan="9"
+                colspan="10"
                 class="py-12 text-center text-muted-foreground text-sm"
               >
                 {{ store.loading ? '加载中...' : '暂无代理节点' }}
@@ -296,6 +318,12 @@
                 <HardwareTooltip :node="node" />
               </div>
               <code class="text-xs text-muted-foreground">{{ nodeAddress(node) }}</code>
+              <div
+                v-if="!node.is_manual"
+                class="text-[11px] text-muted-foreground mt-1"
+              >
+                版本: {{ nodeProxyVersion(node) }}
+              </div>
             </div>
             <Badge
               :variant="statusVariant(node.status)"
@@ -540,6 +568,16 @@
             />
           </div>
         </div>
+        <div class="space-y-1.5">
+          <Label>升级到版本</Label>
+          <Input
+            v-model="configForm.upgrade_to"
+            placeholder="例如 0.2.3"
+          />
+          <p class="text-xs text-muted-foreground">
+            留空可清除已有升级指令
+          </p>
+        </div>
         <div
           v-if="configNode"
           class="text-xs text-muted-foreground"
@@ -559,6 +597,43 @@
           @click="handleSaveConfig"
         >
           {{ savingConfig ? '保存中...' : '保存' }}
+        </Button>
+      </template>
+    </Dialog>
+
+    <!-- 批量升级对话框 -->
+    <Dialog
+      :model-value="showBatchUpgradeDialog"
+      title="批量升级"
+      description="向所有在线 tunnel 节点下发升级版本指令"
+      :icon="Settings"
+      size="sm"
+      @update:model-value="(open: boolean) => { if (!open) { showBatchUpgradeDialog = false; batchUpgradeVersion = '' } }"
+    >
+      <form
+        class="space-y-4"
+        @submit.prevent="handleBatchUpgrade"
+      >
+        <div class="space-y-1.5">
+          <Label>目标版本</Label>
+          <Input
+            v-model="batchUpgradeVersion"
+            placeholder="例如 0.2.3"
+          />
+        </div>
+      </form>
+      <template #footer>
+        <Button
+          variant="outline"
+          @click="showBatchUpgradeDialog = false; batchUpgradeVersion = ''"
+        >
+          取消
+        </Button>
+        <Button
+          :disabled="batchUpgrading || !batchUpgradeVersion.trim()"
+          @click="handleBatchUpgrade"
+        >
+          {{ batchUpgrading ? '下发中...' : '确认下发' }}
         </Button>
       </template>
     </Dialog>
@@ -699,7 +774,11 @@ const configForm = ref({
   allowed_ports: '',
   log_level: 'info',
   heartbeat_interval: '30',
+  upgrade_to: '',
 })
+const showBatchUpgradeDialog = ref(false)
+const batchUpgradeVersion = ref('')
+const batchUpgrading = ref(false)
 
 // 连接事件对话框
 const showEventsDialog = ref(false)
@@ -840,6 +919,7 @@ function handleConfig(node: ProxyNode) {
     allowed_ports: rc.allowed_ports?.join(', ') || '',
     log_level: rc.log_level || 'info',
     heartbeat_interval: String(rc.heartbeat_interval || node.heartbeat_interval || 30),
+    upgrade_to: rc.upgrade_to || '',
   }
   showConfigDialog.value = true
 }
@@ -873,6 +953,12 @@ async function handleSaveConfig() {
     if (!isNaN(hb) && hb >= 5) {
       data.heartbeat_interval = hb
     }
+    const targetVersion = configForm.value.upgrade_to.trim()
+    if (targetVersion) {
+      data.upgrade_to = targetVersion
+    } else if (configNode.value.remote_config?.upgrade_to) {
+      data.upgrade_to = null
+    }
     await proxyNodesApi.updateNodeConfig(configNode.value.id, data)
     success('远程配置已保存，将在下次心跳时生效')
     handleConfigDialogClose(false)
@@ -881,6 +967,23 @@ async function handleSaveConfig() {
     toastError(parseApiError(err, '保存失败'))
   } finally {
     savingConfig.value = false
+  }
+}
+
+async function handleBatchUpgrade() {
+  const version = batchUpgradeVersion.value.trim()
+  if (!version || batchUpgrading.value) return
+  batchUpgrading.value = true
+  try {
+    const result = await proxyNodesApi.batchUpgrade(version)
+    success(`升级指令已下发：${result.updated} 个节点，跳过 ${result.skipped} 个`)
+    showBatchUpgradeDialog.value = false
+    batchUpgradeVersion.value = ''
+    await store.fetchNodes()
+  } catch (err: unknown) {
+    toastError(parseApiError(err, '批量升级下发失败'))
+  } finally {
+    batchUpgrading.value = false
   }
 }
 
@@ -1008,5 +1111,14 @@ function nodeAddress(node: ProxyNode) {
   if (node.is_manual) return node.proxy_url || `${node.ip}:${node.port}`
   if (node.tunnel_mode) return node.ip || 'WebSocket Tunnel'
   return `${node.ip}:${node.port}`
+}
+
+function nodeProxyVersion(node: ProxyNode) {
+  const metadata = node.proxy_metadata
+  if (!metadata || typeof metadata !== 'object') return '-'
+  const version = (metadata as Record<string, unknown>).version
+  if (typeof version !== 'string') return '-'
+  const normalized = version.trim()
+  return normalized || '-'
 }
 </script>

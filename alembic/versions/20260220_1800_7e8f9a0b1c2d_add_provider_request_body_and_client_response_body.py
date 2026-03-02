@@ -10,8 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-import sqlalchemy as sa
-from sqlalchemy import inspect
+from sqlalchemy import text
 
 from alembic import op
 
@@ -24,33 +23,24 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     conn = op.get_bind()
-    inspector = inspect(conn)
-    existing_columns = {col["name"] for col in inspector.get_columns("usage")}
-
-    if "provider_request_body" not in existing_columns:
-        op.add_column("usage", sa.Column("provider_request_body", sa.JSON(), nullable=True))
-    if "provider_request_body_compressed" not in existing_columns:
-        op.add_column(
-            "usage", sa.Column("provider_request_body_compressed", sa.LargeBinary(), nullable=True)
-        )
-    if "client_response_body" not in existing_columns:
-        op.add_column("usage", sa.Column("client_response_body", sa.JSON(), nullable=True))
-    if "client_response_body_compressed" not in existing_columns:
-        op.add_column(
-            "usage", sa.Column("client_response_body_compressed", sa.LargeBinary(), nullable=True)
-        )
+    # Use PostgreSQL native IF NOT EXISTS to avoid duplicate-column races
+    # when migrations are triggered concurrently (e.g. startup + manual run).
+    conn.execute(text("ALTER TABLE usage ADD COLUMN IF NOT EXISTS provider_request_body JSON"))
+    conn.execute(
+        text("ALTER TABLE usage ADD COLUMN IF NOT EXISTS provider_request_body_compressed BYTEA")
+    )
+    conn.execute(text("ALTER TABLE usage ADD COLUMN IF NOT EXISTS client_response_body JSON"))
+    conn.execute(
+        text("ALTER TABLE usage ADD COLUMN IF NOT EXISTS client_response_body_compressed BYTEA")
+    )
 
 
 def downgrade() -> None:
     conn = op.get_bind()
-    inspector = inspect(conn)
-    existing_columns = {col["name"] for col in inspector.get_columns("usage")}
-
     for col in (
         "client_response_body_compressed",
         "client_response_body",
         "provider_request_body_compressed",
         "provider_request_body",
     ):
-        if col in existing_columns:
-            op.drop_column("usage", col)
+        conn.execute(text(f"ALTER TABLE usage DROP COLUMN IF EXISTS {col}"))

@@ -3,12 +3,14 @@ Alembic 环境配置
 用于数据库迁移的运行时环境设置
 """
 
-from logging.config import fileConfig
-from sqlalchemy import engine_from_config, pool
-from alembic import context
 import os
 import sys
+from logging.config import fileConfig
 from pathlib import Path
+
+from sqlalchemy import engine_from_config, pool, text
+
+from alembic import context
 
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -48,6 +50,10 @@ if config.config_file_name is not None:
 # 目标元数据（包含所有表定义）
 target_metadata = Base.metadata
 
+# PostgreSQL 全局迁移锁，避免多进程并发执行 Alembic 导致竞态（重复加列/索引等）
+# ID 由 crc32("aether-alembic-migration") 拼接生成，仅需全局唯一即可
+MIGRATION_ADVISORY_LOCK_ID = 582694137405821
+
 
 def run_migrations_offline() -> None:
     """
@@ -83,15 +89,31 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            compare_type=True,  # 比较列类型变更
-            compare_server_default=True,  # 比较默认值变更
-        )
+        lock_acquired = False
+        try:
+            if connection.dialect.name == "postgresql":
+                connection.execute(
+                    text("SELECT pg_advisory_lock(:lock_id)"),
+                    {"lock_id": MIGRATION_ADVISORY_LOCK_ID},
+                )
+                lock_acquired = True
 
-        with context.begin_transaction():
-            context.run_migrations()
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+                compare_type=True,  # 比较列类型变更
+                compare_server_default=True,  # 比较默认值变更
+            )
+
+            with context.begin_transaction():
+                context.run_migrations()
+        finally:
+            if lock_acquired:
+                connection.rollback()
+                connection.execute(
+                    text("SELECT pg_advisory_unlock(:lock_id)"),
+                    {"lock_id": MIGRATION_ADVISORY_LOCK_ID},
+                )
 
 
 # 根据模式选择运行方式

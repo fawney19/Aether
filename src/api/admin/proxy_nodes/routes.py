@@ -39,11 +39,15 @@ class ProxyNodeRegisterRequest(BaseModel):
     # 指标（可选）
     active_connections: int | None = Field(None, ge=0, description="当前活跃连接数")
     total_requests: int | None = Field(None, ge=0, description="累计请求数")
-    avg_latency_ms: float | None = Field(None, ge=0, description="平均延迟（毫秒）")
+    avg_latency_ms: float | None = Field(None, ge=0, description="平均连接建立延迟(ms)")
 
     # 硬件信息
     hardware_info: dict | None = Field(None, description="硬件信息 JSON")
     estimated_max_concurrency: int | None = Field(None, ge=0, description="估算最大并发连接数")
+    proxy_metadata: dict[str, Any] | None = Field(None, description="aether-proxy 元数据（版本等）")
+    proxy_version: str | None = Field(
+        None, max_length=20, description="兼容字段：aether-proxy 软件版本"
+    )
 
     @field_validator("ip")
     @classmethod
@@ -62,7 +66,11 @@ class ProxyNodeHeartbeatRequest(BaseModel):
 
     active_connections: int | None = Field(None, ge=0, description="当前活跃连接数")
     total_requests: int | None = Field(None, ge=0, description="累计请求数")
-    avg_latency_ms: float | None = Field(None, ge=0, description="平均延迟（毫秒）")
+    avg_latency_ms: float | None = Field(None, ge=0, description="平均连接建立延迟(ms)")
+    proxy_metadata: dict[str, Any] | None = Field(None, description="aether-proxy 元数据（版本等）")
+    proxy_version: str | None = Field(
+        None, max_length=20, description="兼容字段：aether-proxy 软件版本"
+    )
 
 
 class ProxyNodeUnregisterRequest(BaseModel):
@@ -76,6 +84,7 @@ class ProxyNodeRemoteConfigRequest(BaseModel):
     allowed_ports: list[int] | None = Field(None, description="允许代理的目标端口")
     log_level: str | None = Field(None, description="日志级别 (trace/debug/info/warn/error)")
     heartbeat_interval: int | None = Field(None, ge=5, le=600, description="心跳间隔（秒）")
+    upgrade_to: str | None = Field(None, max_length=50, description="下发升级目标版本")
 
     @field_validator("allowed_ports")
     @classmethod
@@ -92,6 +101,28 @@ class ProxyNodeRemoteConfigRequest(BaseModel):
         if v is not None and v not in ("trace", "debug", "info", "warn", "error"):
             raise ValueError("log_level 必须是 trace/debug/info/warn/error 之一")
         return v
+
+    @field_validator("upgrade_to")
+    @classmethod
+    def validate_upgrade_to(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        vv = v.strip()
+        if not vv:
+            return None
+        return vv
+
+
+class ProxyNodeBatchUpgradeRequest(BaseModel):
+    version: str = Field(..., min_length=1, max_length=50, description="目标版本号")
+
+    @field_validator("version")
+    @classmethod
+    def validate_version(cls, v: str) -> str:
+        vv = v.strip()
+        if not vv:
+            raise ValueError("version 不能为空")
+        return vv
 
 
 class ManualProxyNodeCreateRequest(BaseModel):
@@ -187,6 +218,12 @@ async def create_manual_proxy_node(request: Request, db: Session = Depends(get_d
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
+@router.post("/upgrade")
+async def batch_upgrade_proxy_nodes(request: Request, db: Session = Depends(get_db)) -> Any:
+    adapter = AdminBatchUpgradeProxyNodesAdapter()
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
 @router.patch("/{node_id}")
 async def update_manual_proxy_node(
     node_id: str, request: Request, db: Session = Depends(get_db)
@@ -274,6 +311,8 @@ class AdminRegisterProxyNodeAdapter(AdminApiAdapter):
             active_connections=req.active_connections,
             total_requests=req.total_requests,
             avg_latency_ms=req.avg_latency_ms,
+            proxy_metadata=req.proxy_metadata,
+            proxy_version=req.proxy_version,
             registered_by=context.user.id if context.user else None,
         )
 
@@ -305,6 +344,8 @@ class AdminHeartbeatProxyNodeAdapter(AdminApiAdapter):
             active_connections=req.active_connections,
             total_requests=req.total_requests,
             avg_latency_ms=req.avg_latency_ms,
+            proxy_metadata=req.proxy_metadata,
+            proxy_version=req.proxy_version,
         )
 
         context.add_audit_metadata(
@@ -477,6 +518,7 @@ class AdminUpdateProxyNodeConfigAdapter(AdminApiAdapter):
 
         # Build config dict with only the supplied fields
         config_updates: dict[str, Any] = {}
+        fields_set = req.model_fields_set
         if req.node_name is not None:
             config_updates["node_name"] = req.node_name
         if req.allowed_ports is not None:
@@ -485,6 +527,8 @@ class AdminUpdateProxyNodeConfigAdapter(AdminApiAdapter):
             config_updates["log_level"] = req.log_level
         if req.heartbeat_interval is not None:
             config_updates["heartbeat_interval"] = req.heartbeat_interval
+        if "upgrade_to" in fields_set:
+            config_updates["upgrade_to"] = req.upgrade_to
 
         node = ProxyNodeService.update_node_config(
             context.db, node_id=self.node_id, config_updates=config_updates
@@ -502,6 +546,29 @@ class AdminUpdateProxyNodeConfigAdapter(AdminApiAdapter):
             "remote_config": node.remote_config,
             "node": node_to_dict(node),
         }
+
+
+@dataclass
+class AdminBatchUpgradeProxyNodesAdapter(AdminApiAdapter):
+    """批量向在线 tunnel 节点下发升级指令。"""
+
+    name: str = "admin_batch_upgrade_proxy_nodes"
+
+    async def handle(self, context: ApiRequestContext) -> Any:
+        payload = context.ensure_json_body()
+        try:
+            req = ProxyNodeBatchUpgradeRequest.model_validate(payload)
+        except ValidationError as exc:
+            raise InvalidRequestException("输入验证失败: " + _format_validation_error(exc))
+
+        result = ProxyNodeService.batch_upgrade_online_nodes(context.db, version=req.version)
+        context.add_audit_metadata(
+            action="proxy_node_batch_upgrade",
+            version=result["version"],
+            updated=result["updated"],
+            skipped=result["skipped"],
+        )
+        return result
 
 
 class TestProxyUrlRequest(BaseModel):

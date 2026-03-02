@@ -1,6 +1,6 @@
 //! Tunnel heartbeat: sends metrics over the tunnel, processes ACKs.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -8,7 +8,7 @@ use std::time::UNIX_EPOCH;
 
 use bytes::Bytes;
 use tokio::sync::watch;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::registration::client::RemoteConfig;
@@ -18,8 +18,15 @@ use crate::state::ServerContext;
 use super::protocol::{Frame, MsgType};
 use super::writer::FrameSender;
 
+const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+static UPGRADE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static NON_ROOT_UPGRADE_WARNED: AtomicBool = AtomicBool::new(false);
+
 enum AckDecision {
-    Accept(Option<u64>),
+    Accept {
+        heartbeat_id: Option<u64>,
+        upgrade_to: Option<String>,
+    },
     Ignore,
 }
 
@@ -130,7 +137,10 @@ pub fn spawn(
                 }
                 Some(ack_payload) = ack_rx.recv() => {
                     match handle_ack(&server, &ack_payload) {
-                        AckDecision::Accept(ack_id) => {
+                        AckDecision::Accept {
+                            heartbeat_id: ack_id,
+                            upgrade_to,
+                        } => {
                             if let Some((pending_id, _)) = pending {
                                 match ack_id {
                                     Some(id) if id == pending_id => {
@@ -144,6 +154,7 @@ pub fn spawn(
                                     _ => {}
                                 }
                             }
+                            maybe_trigger_upgrade(upgrade_to);
                         }
                         AckDecision::Ignore => {}
                     }
@@ -229,6 +240,9 @@ fn build_heartbeat_payload(
         "failed_requests": snapshot.failed,
         "dns_failures": snapshot.dns_failures,
         "stream_errors": snapshot.stream_errors,
+        "proxy_metadata": {
+            "version": CURRENT_VERSION,
+        },
     });
 
     Bytes::from(serde_json::to_vec(&payload).unwrap_or_default())
@@ -236,7 +250,10 @@ fn build_heartbeat_payload(
 
 fn handle_ack(server: &ServerContext, payload: &[u8]) -> AckDecision {
     if payload.is_empty() {
-        return AckDecision::Accept(None);
+        return AckDecision::Accept {
+            heartbeat_id: None,
+            upgrade_to: None,
+        };
     }
 
     #[derive(serde::Deserialize)]
@@ -247,6 +264,8 @@ fn handle_ack(server: &ServerContext, payload: &[u8]) -> AckDecision {
         config_version: u64,
         #[serde(default)]
         heartbeat_id: Option<u64>,
+        #[serde(default)]
+        upgrade_to: Option<String>,
     }
 
     match serde_json::from_slice::<AckPayload>(payload) {
@@ -254,11 +273,68 @@ fn handle_ack(server: &ServerContext, payload: &[u8]) -> AckDecision {
             if let Some(ref rc) = ack.remote_config {
                 runtime::apply_remote_config(&server.dynamic, rc, ack.config_version);
             }
-            AckDecision::Accept(ack.heartbeat_id)
+            AckDecision::Accept {
+                heartbeat_id: ack.heartbeat_id,
+                upgrade_to: ack.upgrade_to.and_then(normalize_upgrade_target),
+            }
         }
         Err(e) => {
             warn!(error = %e, "failed to parse heartbeat ACK");
             AckDecision::Ignore
         }
     }
+}
+
+fn normalize_upgrade_target(raw: String) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = trimmed.strip_prefix("proxy-v").unwrap_or(trimmed);
+    if normalized == CURRENT_VERSION {
+        return None;
+    }
+    Some(normalized.to_string())
+}
+
+fn maybe_trigger_upgrade(version: Option<String>) {
+    let Some(target_version) = version else {
+        return;
+    };
+    if !crate::setup::service::is_root() {
+        if NON_ROOT_UPGRADE_WARNED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            warn!(
+                target_version = %target_version,
+                "remote upgrade skipped: root privileges are required"
+            );
+        }
+        return;
+    }
+    if UPGRADE_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        debug!(target_version = %target_version, "upgrade already in progress, ignoring");
+        return;
+    }
+
+    tokio::spawn(async move {
+        info!(target_version = %target_version, "received remote upgrade instruction");
+        match crate::setup::upgrade::perform_upgrade(&target_version).await {
+            Ok(()) => {
+                info!(target_version = %target_version, "remote upgrade finished");
+            }
+            Err(e) => {
+                warn!(
+                    target_version = %target_version,
+                    error = %e,
+                    "remote upgrade failed"
+                );
+                UPGRADE_IN_PROGRESS.store(false, Ordering::Release);
+            }
+        }
+    });
 }

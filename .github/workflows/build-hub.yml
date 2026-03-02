@@ -7,6 +7,12 @@ on:
 
 permissions:
   contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  GHCR_IMAGE: fawney19/aether-hub
+  DOCKERHUB_IMAGE: fawney19/aether-hub
 
 jobs:
   build:
@@ -83,9 +89,84 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "aether-hub ${{ github.ref_name }}"
+          name: "${{ github.ref_name }}"
           generate_release_notes: true
           files: |
             artifacts/aether-hub-*
             artifacts/SHA256SUMS.txt
           fail_on_unmatched_files: true
+
+  docker:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: aether-hub-linux-*
+          merge-multiple: true
+          path: artifacts
+
+      - name: Prepare binaries
+        run: |
+          mkdir -p aether-hub/build/linux-amd64 aether-hub/build/linux-arm64
+          tar xzf artifacts/aether-hub-linux-amd64.tar.gz -C aether-hub/build/linux-amd64
+          tar xzf artifacts/aether-hub-linux-arm64.tar.gz -C aether-hub/build/linux-arm64
+
+      - name: Generate CI Dockerfile
+        run: |
+          cat > aether-hub/Dockerfile.ci << 'EOF'
+          FROM debian:bookworm-slim
+          ARG TARGETARCH
+          RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+          COPY build/linux-${TARGETARCH}/aether-hub /usr/local/bin/aether-hub
+          EXPOSE 8085
+          ENTRYPOINT ["/usr/local/bin/aether-hub"]
+          CMD ["--bind", "0.0.0.0:8085"]
+          EOF
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.REGISTRY }}/${{ env.GHCR_IMAGE }}
+            docker.io/${{ env.DOCKERHUB_IMAGE }}
+          tags: |
+            type=match,pattern=hub-v(.*),group=1
+            type=match,pattern=hub-v(\d+\.\d+),group=1
+            type=sha,prefix=
+          flavor: |
+            latest=auto
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./aether-hub
+          file: ./aether-hub/Dockerfile.ci
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64

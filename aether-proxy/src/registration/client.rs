@@ -20,6 +20,8 @@ struct RegisterRequest {
     hardware_info: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     estimated_max_concurrency: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proxy_metadata: Option<serde_json::Value>,
     tunnel_mode: bool,
 }
 
@@ -107,6 +109,9 @@ impl AetherClient {
             heartbeat_interval: config.heartbeat_interval,
             hardware_info: hw.and_then(|h| serde_json::to_value(h).ok()),
             estimated_max_concurrency: hw.map(|h| h.estimated_max_concurrency),
+            proxy_metadata: Some(serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"),
+            })),
             tunnel_mode: true,
         };
 

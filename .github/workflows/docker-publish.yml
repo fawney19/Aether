@@ -184,20 +184,12 @@ jobs:
     steps:
       - name: Get latest hub release tag
         id: hub-tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG=$(
-            curl -sL "https://api.github.com/repos/${{ env.GITHUB_REPO }}/releases" | \
-            python3 - <<'PY'
-          import json, sys
-          releases = json.load(sys.stdin)
-          for r in releases:
-              tag = r.get('tag_name', '')
-              if tag.startswith('hub-v') and not r.get('draft') and not r.get('prerelease'):
-                  print(tag)
-                  break
-          PY
-          )
-          if [ -z "$TAG" ]; then
+          TAG=$(gh release list --repo "${{ env.GITHUB_REPO }}" --limit 50 --json tagName,isDraft,isPrerelease \
+            --jq '[.[] | select(.tagName | startswith("hub-v")) | select(.isDraft == false and .isPrerelease == false)] | .[0].tagName')
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
             echo "No hub release found"
             exit 1
           fi
@@ -278,12 +270,11 @@ jobs:
           echo "Hub release tag: ${{ needs.download-hub.outputs.hub_tag }}"
 
       - name: Build and push app image (amd64)
+        id: build-amd64
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile.app
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           no-cache-filters: builder
           cache-from: type=gha,scope=app-amd64
@@ -292,14 +283,14 @@ jobs:
             HUB_RELEASE_REPO=${{ env.GITHUB_REPO }}
             HUB_TAG=${{ needs.download-hub.outputs.hub_tag }}
           platforms: linux/amd64
+          outputs: type=image,"name=${{ env.REGISTRY }}/${{ env.APP_IMAGE_NAME }},docker.io/fawney19/aether",push-by-digest=true,name-canonical=true,push=true
 
       - name: Build and push app image (arm64)
+        id: build-arm64
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile.app
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           no-cache-filters: builder
           cache-from: type=gha,scope=app-arm64
@@ -308,3 +299,29 @@ jobs:
             HUB_RELEASE_REPO=${{ env.GITHUB_REPO }}
             HUB_TAG=${{ needs.download-hub.outputs.hub_tag }}
           platforms: linux/arm64
+          outputs: type=image,"name=${{ env.REGISTRY }}/${{ env.APP_IMAGE_NAME }},docker.io/fawney19/aether",push-by-digest=true,name-canonical=true,push=true
+
+      - name: Create multi-arch manifest and push
+        run: |
+          # Extract digests
+          AMD64_DIGEST="${{ steps.build-amd64.outputs.digest }}"
+          ARM64_DIGEST="${{ steps.build-arm64.outputs.digest }}"
+          echo "amd64 digest: $AMD64_DIGEST"
+          echo "arm64 digest: $ARM64_DIGEST"
+
+          # For each tag, create multi-arch manifest on each registry
+          TAGS=$(echo "${{ steps.meta.outputs.tags }}" | tr '\n' ' ')
+          for FULL_TAG in $TAGS; do
+            # Determine which registry this tag belongs to
+            if [[ "$FULL_TAG" == ghcr.io/* ]]; then
+              REPO="${{ env.REGISTRY }}/${{ env.APP_IMAGE_NAME }}"
+            elif [[ "$FULL_TAG" == docker.io/* ]]; then
+              REPO="docker.io/fawney19/aether"
+            else
+              continue
+            fi
+            echo "Creating manifest for $FULL_TAG"
+            docker buildx imagetools create -t "$FULL_TAG" \
+              "$REPO@$AMD64_DIGEST" \
+              "$REPO@$ARM64_DIGEST"
+          done

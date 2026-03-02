@@ -470,7 +470,7 @@ class TunnelManager:
 
         def _sync_heartbeat() -> dict[str, Any]:
             from src.database import create_session
-            from src.services.proxy_node.service import ProxyNodeService
+            from src.services.proxy_node.service import ProxyNodeService, build_heartbeat_ack
 
             db = create_session()
             try:
@@ -483,12 +483,10 @@ class TunnelManager:
                     failed_requests=data.get("failed_requests"),
                     dns_failures=data.get("dns_failures"),
                     stream_errors=data.get("stream_errors"),
+                    proxy_metadata=data.get("proxy_metadata"),
+                    proxy_version=data.get("proxy_version"),
                 )
-                result: dict[str, Any] = {}
-                if node.remote_config:
-                    result["remote_config"] = node.remote_config
-                    result["config_version"] = node.config_version or 0
-                return result
+                return build_heartbeat_ack(node)
             finally:
                 db.close()
 

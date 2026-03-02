@@ -76,7 +76,10 @@ async def test_handle_heartbeat_normalizes_id_and_updates_db(
 
     def _fake_heartbeat(db: Any, **kwargs: Any) -> Any:
         heartbeat_calls.append(kwargs)
-        return SimpleNamespace(remote_config={"heartbeat_interval": 8}, config_version=5)
+        return SimpleNamespace(
+            remote_config={"heartbeat_interval": 8, "upgrade_to": "0.2.3"},
+            config_version=5,
+        )
 
     redis = _StubRedis(set_result=True)
     monkeypatch.setattr(manager, "_send_frame", _fake_send_frame)
@@ -97,6 +100,7 @@ async def test_handle_heartbeat_normalizes_id_and_updates_db(
                 "failed_requests": 1,
                 "dns_failures": 2,
                 "stream_errors": 0,
+                "proxy_metadata": {"version": "0.2.1"},
             }
         )
     )
@@ -104,13 +108,15 @@ async def test_handle_heartbeat_normalizes_id_and_updates_db(
     assert len(redis.calls) == 1
     assert redis.calls[0][0] == "hub:heartbeat:node-1:sess-1:15"
     assert heartbeat_calls and heartbeat_calls[0]["node_id"] == "node-1"
+    assert heartbeat_calls[0]["proxy_metadata"] == {"version": "0.2.1"}
     assert len(captured_frames) == 1
 
     ack = _decode_ack(captured_frames[0])
     assert ack["heartbeat_id"] == 15
     assert isinstance(ack["heartbeat_id"], int)
-    assert ack["remote_config"] == {"heartbeat_interval": 8}
+    assert ack["remote_config"] == {"heartbeat_interval": 8, "upgrade_to": "0.2.3"}
     assert ack["config_version"] == 5
+    assert ack["upgrade_to"] == "0.2.3"
 
 
 @pytest.mark.asyncio
@@ -182,10 +188,18 @@ async def test_handle_heartbeat_redis_error_falls_back_to_db_update(
     )
 
     await manager._handle_heartbeat(
-        _heartbeat_frame({"node_id": "node-1", "heartbeat_id": 99, "total_requests": 1})
+        _heartbeat_frame(
+            {
+                "node_id": "node-1",
+                "heartbeat_id": 99,
+                "total_requests": 1,
+                "proxy_metadata": {"version": "0.2.2"},
+            }
+        )
     )
 
     assert heartbeat_calls and heartbeat_calls[0]["total_requests"] == 1
+    assert heartbeat_calls[0]["proxy_metadata"] == {"version": "0.2.2"}
     assert len(captured_frames) == 1
     ack = _decode_ack(captured_frames[0])
     assert ack == {"heartbeat_id": 99}

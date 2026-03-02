@@ -55,13 +55,15 @@ pub async fn handle_stream(
     mut body_rx: mpsc::Receiver<Frame>,
     frame_tx: FrameSender,
 ) {
-    let start = Instant::now();
     server.active_connections.fetch_add(1, Ordering::Release);
 
-    handle_stream_inner(&state, &server, stream_id, meta, &mut body_rx, &frame_tx).await;
+    let connect_elapsed =
+        handle_stream_inner(&state, &server, stream_id, meta, &mut body_rx, &frame_tx).await;
 
     server.active_connections.fetch_sub(1, Ordering::Release);
-    server.metrics.record_request(start.elapsed());
+    if let Some(d) = connect_elapsed {
+        server.metrics.record_request(d);
+    }
 }
 
 /// Send a frame to the writer with a timeout. Returns false if send failed.
@@ -80,6 +82,9 @@ async fn send_frame(tx: &FrameSender, frame: Frame) -> bool {
     }
 }
 
+/// Returns the connection-establishment duration (DNS + TCP/TLS + TTFB) if the
+/// upstream request succeeded, or `None` if the request never reached the
+/// response-headers stage.
 async fn handle_stream_inner(
     state: &AppState,
     server: &ServerContext,
@@ -87,7 +92,7 @@ async fn handle_stream_inner(
     meta: RequestMeta,
     body_rx: &mut mpsc::Receiver<Frame>,
     frame_tx: &FrameSender,
-) {
+) -> Option<Duration> {
     // Collect request body
     let mut body_parts: Vec<Bytes> = Vec::new();
     let mut body_done = false;
@@ -106,7 +111,7 @@ async fn handle_stream_inner(
                                 &format!("gzip decompress failed: {e}"),
                             )
                             .await;
-                            return;
+                            return None;
                         }
                     };
                     if !payload.is_empty() {
@@ -120,11 +125,11 @@ async fn handle_stream_inner(
                 {
                     body_done = true;
                     if frame.msg_type == MsgType::StreamError {
-                        return; // Client cancelled
+                        return None; // Client cancelled
                     }
                 }
             }
-            None => return, // Channel closed
+            None => return None, // Channel closed
         }
     }
 
@@ -146,7 +151,7 @@ async fn handle_stream_inner(
         Ok(u) => u,
         Err(e) => {
             send_error(frame_tx, stream_id, &format!("invalid URL: {e}")).await;
-            return;
+            return None;
         }
     };
 
@@ -160,7 +165,7 @@ async fn handle_stream_inner(
                 &format!("unsupported URL scheme: {other}"),
             )
             .await;
-            return;
+            return None;
         }
     }
 
@@ -168,13 +173,13 @@ async fn handle_stream_inner(
         Some(h) => h.to_string(),
         None => {
             send_error(frame_tx, stream_id, "missing host in URL").await;
-            return;
+            return None;
         }
     };
     let port = target_url.port_or_known_default().unwrap_or(443);
 
     // DNS + target validation (populates dns_cache for SafeDnsResolver)
-    let dns_start = Instant::now();
+    let connect_start = Instant::now();
     {
         let allowed_ports = Arc::clone(&server.dynamic.load().allowed_ports);
         if let Err(e) =
@@ -182,10 +187,10 @@ async fn handle_stream_inner(
         {
             server.metrics.dns_failures.fetch_add(1, Ordering::Release);
             send_error(frame_tx, stream_id, &format!("target blocked: {e}")).await;
-            return;
+            return None;
         }
     }
-    let dns_ms = dns_start.elapsed().as_millis() as u64;
+    let dns_ms = connect_start.elapsed().as_millis() as u64;
 
     // Execute upstream request
     let client = &state.reqwest_client;
@@ -231,9 +236,13 @@ async fn handle_stream_inner(
                 format!("upstream error: {e}")
             };
             send_error(frame_tx, stream_id, &msg).await;
-            return;
+            return None;
         }
     };
+
+    // Capture connection-establishment duration (DNS + TCP/TLS + TTFB)
+    // before proceeding to stream the response body.
+    let connect_elapsed = connect_start.elapsed();
 
     // Send RESPONSE_HEADERS
     let status = response.status().as_u16();
@@ -271,7 +280,7 @@ async fn handle_stream_inner(
     )
     .await
     {
-        return;
+        return Some(connect_elapsed);
     }
 
     // Stream response body — relay upstream bytes through the tunnel.
@@ -291,7 +300,7 @@ async fn handle_stream_inner(
                     )
                     .await
                     {
-                        return;
+                        return Some(connect_elapsed);
                     }
                 } else {
                     // Split oversized chunks, compress each slice
@@ -306,7 +315,7 @@ async fn handle_stream_inner(
                         )
                         .await
                         {
-                            return;
+                            return Some(connect_elapsed);
                         }
                         offset = end;
                     }
@@ -316,7 +325,7 @@ async fn handle_stream_inner(
                 server.metrics.stream_errors.fetch_add(1, Ordering::Release);
                 warn!(stream_id, error = %e, "upstream body read error");
                 send_error(frame_tx, stream_id, &format!("body read error: {e}")).await;
-                return;
+                return Some(connect_elapsed);
             }
         }
     }
@@ -334,6 +343,7 @@ async fn handle_stream_inner(
     .await;
 
     debug!(stream_id, status, "stream completed");
+    Some(connect_elapsed)
 }
 
 async fn send_error(tx: &FrameSender, stream_id: u32, msg: &str) {

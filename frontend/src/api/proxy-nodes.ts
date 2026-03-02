@@ -5,6 +5,7 @@ export interface ProxyNodeRemoteConfig {
   allowed_ports?: number[]
   log_level?: string
   heartbeat_interval?: number
+  upgrade_to?: string | null
 }
 
 export interface ProxyNode {
@@ -37,6 +38,7 @@ export interface ProxyNode {
   failed_requests: number
   dns_failures: number
   stream_errors: number
+  proxy_metadata: Record<string, unknown> | null
   created_at: string
   updated_at: string
 }
@@ -106,6 +108,14 @@ export const proxyNodesApi = {
 
   async updateNodeConfig(nodeId: string, data: ProxyNodeRemoteConfig): Promise<{ node_id: string; config_version: number; remote_config: ProxyNodeRemoteConfig; node: ProxyNode }> {
     const response = await apiClient.put<{ node_id: string; config_version: number; remote_config: ProxyNodeRemoteConfig; node: ProxyNode }>(`/api/admin/proxy-nodes/${nodeId}/config`, data)
+    return response.data
+  },
+
+  async batchUpgrade(version: string): Promise<{ version: string; updated: number; skipped: number; node_ids: string[] }> {
+    const response = await apiClient.post<{ version: string; updated: number; skipped: number; node_ids: string[] }>(
+      '/api/admin/proxy-nodes/upgrade',
+      { version }
+    )
     return response.data
   },
 

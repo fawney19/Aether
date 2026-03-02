@@ -919,10 +919,11 @@ class ProxyNode(Base):
     # 性能指标（心跳上报）
     active_connections = Column(Integer, default=0, nullable=False)
     total_requests = Column(BigInteger, default=0, nullable=False)
-    avg_latency_ms = Column(Float, nullable=True)
+    avg_latency_ms = Column(Float, nullable=True, comment="平均连接建立延迟(ms), DNS+TCP/TLS+TTFB")
     failed_requests = Column(BigInteger, default=0, nullable=False, comment="累计失败请求数")
     dns_failures = Column(BigInteger, default=0, nullable=False, comment="累计 DNS 失败数")
     stream_errors = Column(BigInteger, default=0, nullable=False, comment="累计流错误数")
+    proxy_metadata = Column(JSON, nullable=True, comment="aether-proxy 上报元数据（版本等）")
 
     # 硬件信息（注册时上报，JSON 可扩展）
     hardware_info = Column(

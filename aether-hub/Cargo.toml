@@ -1,6 +1,6 @@
 [package]
 name = "aether-hub"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 description = "Tunnel Hub for Aether - frame router between workers and proxies"
 
