@@ -78,6 +78,7 @@ export interface PoolKeyDetail {
   key_name: string
   is_active: boolean
   auth_type: string
+  oauth_plan_type: string | null
   account_quota: string | null
   cooldown_reason: string | null
   cooldown_ttl_seconds: number | null

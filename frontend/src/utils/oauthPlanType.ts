@@ -10,6 +10,30 @@ const PLAN_TYPE_LABELS: Record<string, string> = {
   ultra: 'Ultra',
 }
 
+const PROVIDER_PLAN_TYPE_LABELS: Record<string, Record<string, string>> = {
+  codex: {
+    free: 'Free',
+    plus: 'Plus',
+    pro: 'Pro',
+    team: 'Team',
+    enterprise: 'Enterprise',
+  },
+  antigravity: {
+    free: 'Free',
+    paid: 'Pro',
+    pro: 'Pro',
+    ultra: 'Ultra',
+    legacy: 'Free',
+  },
+  kiro: {
+    free: 'Free',
+    pro: 'Pro',
+    'pro+': 'Pro+',
+    power: 'Power',
+    ultra: 'Ultra',
+  },
+}
+
 const PLAN_TYPE_CLASS_NAMES: Record<string, string> = {
   plus: 'border-green-500/50 text-green-600 dark:text-green-400',
   pro: 'border-blue-500/50 text-blue-600 dark:text-blue-400',
@@ -34,10 +58,27 @@ export function normalizeOAuthPlanType(planType?: string | null): string | null 
   return normalized
 }
 
-export function formatOAuthPlanType(planType?: string | null): string {
+function normalizeProviderType(providerType?: string | null): string | null {
+  if (typeof providerType !== 'string') {
+    return null
+  }
+  const normalized = providerType.trim().toLowerCase()
+  return normalized || null
+}
+
+export function formatOAuthPlanType(planType?: string | null, providerType?: string | null): string {
   const normalized = normalizeOAuthPlanType(planType)
   if (!normalized) {
     return ''
+  }
+
+  const normalizedProviderType = normalizeProviderType(providerType)
+  if (normalizedProviderType) {
+    const providerLabels = PROVIDER_PLAN_TYPE_LABELS[normalizedProviderType]
+    const providerLabel = providerLabels?.[normalized]
+    if (providerLabel) {
+      return providerLabel
+    }
   }
 
   const knownLabel = PLAN_TYPE_LABELS[normalized]

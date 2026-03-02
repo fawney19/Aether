@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.api.base.admin_adapter import AdminApiAdapter
@@ -23,8 +24,9 @@ from src.api.base.pipeline import ApiRequestPipeline
 from src.core.crypto import crypto_service
 from src.core.exceptions import NotFoundException
 from src.core.logger import logger
+from src.core.oauth_plan import extract_oauth_plan_type
 from src.database import get_db
-from src.models.database import Provider, ProviderAPIKey
+from src.models.database import Provider, ProviderAPIKey, Usage
 from src.services.provider.pool import redis_ops as pool_redis
 from src.services.provider.pool.config import parse_pool_config
 from src.services.provider_keys.quota_cooldown import resolve_effective_cooldown_reason
@@ -403,6 +405,24 @@ class AdminListPoolKeysAdapter(AdminApiAdapter):
 
         # Batch fetch Redis state (parallel where possible)
         key_ids = [str(k.id) for k in keys]
+        # last_used_at 按 Usage 实时聚合，避免依赖 ProviderAPIKey 冗余字段
+        last_used_map: dict[str, datetime] = {}
+        if key_ids:
+            usage_rows = (
+                db.query(
+                    Usage.provider_api_key_id.label("key_id"),
+                    func.max(Usage.created_at).label("last_used_at"),
+                )
+                .filter(Usage.provider_api_key_id.in_(key_ids))
+                .group_by(Usage.provider_api_key_id)
+                .all()
+            )
+            last_used_map = {
+                str(row.key_id): row.last_used_at
+                for row in usage_rows
+                if row.key_id is not None and row.last_used_at is not None
+            }
+
         if key_ids:
             _lru_coro = (
                 pool_redis.get_lru_scores(pid, key_ids)
@@ -435,6 +455,8 @@ class AdminListPoolKeysAdapter(AdminApiAdapter):
         key_details: list[PoolKeyDetail] = []
         for k in keys:
             kid = str(k.id)
+            upstream_metadata = getattr(k, "upstream_metadata", None)
+            last_used_dt = last_used_map.get(kid)
             redis_cd_reason = cooldowns.get(kid)
             cd_reason = resolve_effective_cooldown_reason(
                 provider_type=provider_type,
@@ -449,9 +471,14 @@ class AdminListPoolKeysAdapter(AdminApiAdapter):
                     key_name=k.name or "",
                     is_active=bool(k.is_active),
                     auth_type=str(getattr(k, "auth_type", "api_key") or "api_key"),
+                    oauth_plan_type=extract_oauth_plan_type(
+                        getattr(k, "auth_config", None),
+                        upstream_metadata=upstream_metadata,
+                        provider_type=provider_type,
+                    ),
                     account_quota=_build_account_quota(
                         provider_type,
-                        getattr(k, "upstream_metadata", None),
+                        upstream_metadata,
                     ),
                     cooldown_reason=cd_reason,
                     cooldown_ttl_seconds=cd_ttl,
@@ -462,9 +489,7 @@ class AdminListPoolKeysAdapter(AdminApiAdapter):
                     created_at=(
                         k.created_at.isoformat() if getattr(k, "created_at", None) else None
                     ),
-                    last_used_at=(
-                        k.last_used_at.isoformat() if getattr(k, "last_used_at", None) else None
-                    ),
+                    last_used_at=(last_used_dt.isoformat() if last_used_dt else None),
                 )
             )
 

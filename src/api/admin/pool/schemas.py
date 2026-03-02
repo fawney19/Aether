@@ -39,6 +39,7 @@ class PoolKeyDetail(BaseModel):
     key_name: str
     is_active: bool
     auth_type: str = "api_key"
+    oauth_plan_type: str | None = None
     account_quota: str | None = None
     cooldown_reason: str | None = None
     cooldown_ttl_seconds: int | None = None

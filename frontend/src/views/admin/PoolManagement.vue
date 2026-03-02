@@ -332,9 +332,19 @@
                   >
                 </TableCell>
                 <TableCell class="py-3">
-                  <span class="text-sm truncate max-w-[200px] block">
-                    {{ key.key_name || '未命名' }}
-                  </span>
+                  <div class="flex items-center gap-1.5 min-w-0">
+                    <span class="text-sm truncate max-w-[200px] block">
+                      {{ key.key_name || '未命名' }}
+                    </span>
+                    <Badge
+                      v-if="shouldShowPlanTypeBadge(key)"
+                      variant="outline"
+                      class="text-[10px] px-1.5 py-0 shrink-0"
+                      :class="getOAuthPlanTypeClass(key.oauth_plan_type)"
+                    >
+                      {{ formatPoolOAuthPlanType(key.oauth_plan_type) }}
+                    </Badge>
+                  </div>
                 </TableCell>
                 <TableCell
                   v-if="showAccountQuotaColumn"
@@ -506,6 +516,14 @@
                   <span class="text-sm font-medium truncate">
                     {{ key.key_name || '未命名' }}
                   </span>
+                  <Badge
+                    v-if="shouldShowPlanTypeBadge(key)"
+                    variant="outline"
+                    class="text-[10px] px-1.5 py-0 shrink-0"
+                    :class="getOAuthPlanTypeClass(key.oauth_plan_type)"
+                  >
+                    {{ formatPoolOAuthPlanType(key.oauth_plan_type) }}
+                  </Badge>
                   <Badge
                     :variant="key.is_active ? (key.cooldown_reason ? 'destructive' : 'default') : 'secondary'"
                     class="text-[10px] shrink-0"
@@ -730,6 +748,7 @@ import {
 import RefreshButton from '@/components/ui/refresh-button.vue'
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
+import { formatOAuthPlanType, getOAuthPlanTypeClass } from '@/utils/oauthPlanType'
 import {
   getPoolOverview,
   listPoolKeys,
@@ -756,10 +775,23 @@ async function loadOverview() {
   overviewLoading.value = true
   try {
     const res = await getPoolOverview()
-    poolProviders.value = res.items.filter(item => item.pool_enabled)
-    // Auto-select first provider if none selected
-    if (!selectedProviderId.value && res.items.length > 0) {
-      await selectProvider(res.items[0].provider_id)
+    const enabledProviders = res.items.filter(item => item.pool_enabled)
+    poolProviders.value = enabledProviders
+
+    if (enabledProviders.length === 0) {
+      selectedProviderId.value = null
+      selectedProviderData.value = null
+      selectedKeys.value.clear()
+      keyPage.value = { total: 0, page: 1, page_size: pageSize.value, keys: [] }
+      return
+    }
+
+    const hasValidSelectedProvider = !!selectedProviderId.value
+      && enabledProviders.some(item => item.provider_id === selectedProviderId.value)
+
+    // 默认选中第一个开启号池模式的 Provider；若当前选中项失效则自动纠正
+    if (!hasValidSelectedProvider) {
+      await selectProvider(enabledProviders[0].provider_id)
     }
   } catch (err) {
     showError(parseApiError(err))
@@ -798,6 +830,19 @@ const showAccountQuotaColumn = computed(() => {
     || selectedProviderType.value === 'kiro'
     || selectedProviderType.value === 'antigravity'
 })
+
+function shouldShowPlanTypeBadge(key: PoolKeyDetail): boolean {
+  if (key.auth_type !== 'oauth' || !key.oauth_plan_type) {
+    return false
+  }
+  return selectedProviderType.value === 'codex'
+    || selectedProviderType.value === 'kiro'
+    || selectedProviderType.value === 'antigravity'
+}
+
+function formatPoolOAuthPlanType(planType?: string | null): string {
+  return formatOAuthPlanType(planType, selectedProviderType.value)
+}
 
 async function selectProvider(id: string) {
   selectedProviderId.value = id
