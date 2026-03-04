@@ -481,7 +481,7 @@ class CliSyncMixin:
 
             # 统一入口：总是通过 TaskService
             from src.services.task import TaskService
-            from src.services.task.context import TaskMode
+            from src.services.task.core.context import TaskMode
 
             exec_result = await TaskService(self.db, self.redis).execute(
                 task_type="cli",

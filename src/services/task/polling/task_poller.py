@@ -21,7 +21,7 @@ from src.core.api_format.conversion.internal_video import InternalVideoPollResul
 from src.core.logger import logger
 from src.database import create_session
 from src.services.system.scheduler import get_scheduler
-from src.services.task.impl.video_poller import VideoPollContext, VideoTaskPollerAdapter
+from src.services.task.video.poller_adapter import VideoPollContext, VideoTaskPollerAdapter
 
 
 @runtime_checkable

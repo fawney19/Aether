@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from typing import Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -31,6 +32,19 @@ from src.core.modules import get_module_registry
 from src.database import init_db
 from src.middleware.plugin_middleware import PluginMiddleware
 from src.plugins.manager import get_plugin_manager
+
+if TYPE_CHECKING:
+    from redis.asyncio.client import Redis
+
+    from src.core.modules.base import ModuleDefinition
+    from src.plugins.manager import PluginManager
+    from src.services.model.fetch_scheduler import ModelFetchScheduler
+    from src.services.rate_limit.concurrency_manager import ConcurrencyManager
+    from src.services.system.maintenance_scheduler import MaintenanceScheduler
+    from src.services.system.scheduler import TaskScheduler
+    from src.services.task.polling.task_poller import TaskPollerService
+    from src.services.usage.quota_scheduler import QuotaScheduler
+    from src.utils.task_coordinator import StartupTaskCoordinator
 
 
 async def initialize_providers() -> None:
@@ -76,23 +90,40 @@ async def initialize_providers() -> None:
         logger.exception("从数据库初始化提供商失败")
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> Any:
-    """应用生命周期管理"""
-    # 禁用uvicorn的access日志(在子进程中执行)
+@dataclass
+class LifecycleState:
+    """应用生命周期阶段共享的运行时状态。"""
+
+    redis_client: Redis | None = None
+    concurrency_manager: ConcurrencyManager | None = None
+    plugin_manager: PluginManager | None = None
+    available_modules: list[ModuleDefinition] = field(default_factory=list)
+    task_coordinator: StartupTaskCoordinator | None = None
+    quota_scheduler: QuotaScheduler | None = None
+    maintenance_scheduler: MaintenanceScheduler | None = None
+    model_fetch_scheduler: ModelFetchScheduler | None = None
+    task_poller: TaskPollerService | None = None
+    task_scheduler: TaskScheduler | None = None
+
+
+def _configure_uvicorn_access_log() -> None:
+    """禁用 uvicorn access 日志（在子进程中执行）。"""
     import logging
 
     logging.getLogger("uvicorn.access").setLevel(logging.CRITICAL)
     logging.getLogger("uvicorn.access").disabled = True
 
-    # 启动时执行
+
+def _log_startup_banner() -> None:
     logger.info("=" * 60)
     from src import __version__
 
     logger.info(f"AI Proxy v{__version__} - GlobalModel Architecture")
     logger.info("=" * 60)
 
-    # 安全配置验证（生产环境会阻止启动）
+
+def _validate_security_or_raise() -> None:
+    """启动前安全配置校验。"""
     security_errors = config.validate_security_config()
     if security_errors:
         for error in security_errors:
@@ -104,6 +135,9 @@ async def lifespan(app: FastAPI) -> Any:
                 + "\n".join(f"  - {e}" for e in security_errors)
             )
 
+
+async def _initialize_core_infrastructure(state: LifecycleState) -> None:
+    """初始化数据库、缓存、并发与基础后台组件。"""
     # 记录启动警告（密码、连接池、JWT 等）
     config.log_startup_warnings()
 
@@ -122,10 +156,9 @@ async def lifespan(app: FastAPI) -> Any:
     logger.info("初始化全局Redis客户端...")
     from src.clients.redis_client import get_redis_client
 
-    redis_client = None
     try:
-        redis_client = await get_redis_client(require_redis=config.require_redis)
-        if redis_client:
+        state.redis_client = await get_redis_client(require_redis=config.require_redis)
+        if state.redis_client:
             logger.info("[OK] Redis客户端初始化成功，缓存亲和性功能已启用")
         else:
             logger.warning(
@@ -136,13 +169,13 @@ async def lifespan(app: FastAPI) -> Any:
             logger.exception("[ERROR] Redis连接失败，应用启动中止")
             raise
         logger.warning(f"Redis连接失败，但配置允许降级，将继续使用内存模式: {e}")
-        redis_client = None
+        state.redis_client = None
 
     # 初始化并发管理器（内部会使用Redis）
     logger.info("初始化并发管理器...")
     from src.services.rate_limit.concurrency_manager import get_concurrency_manager
 
-    concurrency_manager = await get_concurrency_manager()
+    state.concurrency_manager = await get_concurrency_manager()
 
     # 初始化批量提交器（提升数据库并发能力）
     logger.info("初始化批量提交器...")
@@ -167,10 +200,13 @@ async def lifespan(app: FastAPI) -> Any:
 
         await start_usage_queue_consumer()
 
+
+async def _initialize_plugins_and_modules(app: FastAPI, state: LifecycleState) -> None:
+    """初始化插件系统、模块系统，并注册路由与钩子。"""
     # 初始化插件系统
     logger.info("初始化插件系统...")
-    plugin_manager = get_plugin_manager()
-    init_results = await plugin_manager.initialize_all()
+    state.plugin_manager = get_plugin_manager()
+    init_results = await state.plugin_manager.initialize_all()
     successful = sum(1 for success in init_results.values() if success)
     logger.info(f"插件初始化完成: {successful}/{len(init_results)} 个插件成功启动")
 
@@ -204,8 +240,8 @@ async def lifespan(app: FastAPI) -> Any:
 
     # 注册可用模块的路由
     # 注意：模块的 router 自带 prefix，api_prefix 字段仅用于日志和文档
-    available_modules = module_registry.get_available_modules()
-    for module in available_modules:
+    state.available_modules = module_registry.get_available_modules()
+    for module in state.available_modules:
         if module.router_factory:
             router = module.router_factory()
             app.include_router(router)
@@ -216,7 +252,7 @@ async def lifespan(app: FastAPI) -> Any:
         if module.on_startup:
             await module.on_startup()
 
-    logger.info(f"功能模块初始化完成: {len(available_modules)}/{len(ALL_MODULES)} 个模块可用")
+    logger.info(f"功能模块初始化完成: {len(state.available_modules)}/{len(ALL_MODULES)} 个模块可用")
 
     # 显式 bootstrap provider plugins（注册 envelope/enricher 等）
     # 使 core/provider_oauth_utils 不需要在运行时 lazy import services 层
@@ -229,72 +265,89 @@ async def lifespan(app: FastAPI) -> Any:
 
     register_default_parsers()
 
-    logger.info(f"服务启动成功: http://{config.host}:{config.port}")
-    logger.info("=" * 60)
 
+async def _start_background_services(state: LifecycleState) -> None:
+    """启动调度器与后台轮询服务。"""
     # 启动月卡额度重置调度器（仅一个 worker 执行）
     logger.info("启动月卡额度重置调度器...")
     from src.services.model.fetch_scheduler import get_model_fetch_scheduler
     from src.services.system.maintenance_scheduler import get_maintenance_scheduler
-    from src.services.task.task_poller import get_task_poller
+    from src.services.task.polling.task_poller import get_task_poller
     from src.services.usage.quota_scheduler import get_quota_scheduler
     from src.utils.task_coordinator import StartupTaskCoordinator
 
-    quota_scheduler = get_quota_scheduler()
-    maintenance_scheduler = get_maintenance_scheduler()
-    model_fetch_scheduler = get_model_fetch_scheduler()
-    task_poller = get_task_poller()
-    task_coordinator = StartupTaskCoordinator(redis_client)
+    state.quota_scheduler = get_quota_scheduler()
+    state.maintenance_scheduler = get_maintenance_scheduler()
+    state.model_fetch_scheduler = get_model_fetch_scheduler()
+    state.task_poller = get_task_poller()
+    state.task_coordinator = StartupTaskCoordinator(state.redis_client)
 
     # 启动额度调度器
-    quota_scheduler_active = await task_coordinator.acquire("quota_scheduler")
+    quota_scheduler_active = await state.task_coordinator.acquire("quota_scheduler")
     if quota_scheduler_active:
-        await quota_scheduler.start()
+        await state.quota_scheduler.start()
     else:
         logger.info("检测到其他 worker 已运行额度调度器，本实例跳过")
-        quota_scheduler = None  # type: ignore[assignment]
+        state.quota_scheduler = None
 
     # 启动维护调度器
-    maintenance_scheduler_active = await task_coordinator.acquire("maintenance_scheduler")
+    maintenance_scheduler_active = await state.task_coordinator.acquire("maintenance_scheduler")
     if maintenance_scheduler_active:
         logger.info("启动系统维护调度器...")
-        await maintenance_scheduler.start()
+        await state.maintenance_scheduler.start()
     else:
         logger.info("检测到其他 worker 已运行维护调度器，本实例跳过")
-        maintenance_scheduler = None  # type: ignore[assignment]
+        state.maintenance_scheduler = None
 
     # 启动模型自动获取调度器
-    model_fetch_scheduler_active = await task_coordinator.acquire("model_fetch_scheduler")
+    model_fetch_scheduler_active = await state.task_coordinator.acquire("model_fetch_scheduler")
     if model_fetch_scheduler_active:
         logger.info("启动模型自动获取调度器...")
-        await model_fetch_scheduler.start()
+        await state.model_fetch_scheduler.start()
     else:
         logger.info("检测到其他 worker 已运行模型获取调度器，本实例跳过")
-        model_fetch_scheduler = None  # type: ignore[assignment]
+        state.model_fetch_scheduler = None
 
     # 启动异步任务轮询服务（当前仅视频）
-    task_poller_active = await task_coordinator.acquire("task_poller:video")
+    task_poller_active = await state.task_coordinator.acquire("task_poller:video")
     if task_poller_active:
         logger.info("启动 TaskPoller（video）...")
-        await task_poller.start()
+        await state.task_poller.start()
     else:
         logger.info("检测到其他 worker 已运行 TaskPoller（video），本实例跳过")
-        task_poller = None  # type: ignore[assignment]
+        state.task_poller = None
 
     # 启动统一的定时任务调度器
     from src.services.system.scheduler import get_scheduler
 
-    task_scheduler = get_scheduler()
-    task_scheduler.start()
+    state.task_scheduler = get_scheduler()
+    state.task_scheduler.start()
 
     # 启动缓存预热（后台任务，不阻塞启动）
     from src.services.system.cache_warmup import start_cache_warmup
 
     await start_cache_warmup()
 
-    yield  # 应用运行期间
 
-    # 关闭时执行
+async def _run_startup(app: FastAPI) -> LifecycleState:
+    """执行完整启动流程并返回生命周期状态。"""
+    _configure_uvicorn_access_log()
+    _log_startup_banner()
+    _validate_security_or_raise()
+
+    state = LifecycleState()
+    await _initialize_core_infrastructure(state)
+    await _initialize_plugins_and_modules(app, state)
+
+    logger.info(f"服务启动成功: http://{config.host}:{config.port}")
+    logger.info("=" * 60)
+
+    await _start_background_services(state)
+    return state
+
+
+async def _run_shutdown(state: LifecycleState) -> None:
+    """执行完整关闭流程。"""
     logger.info("正在关闭服务...")
 
     # 停止 Codex 配额异步同步器（停止前会 flush 待同步事件）
@@ -321,47 +374,52 @@ async def lifespan(app: FastAPI) -> Any:
         await stop_usage_queue_consumer()
 
     # 停止维护调度器
-    if maintenance_scheduler:
+    if state.maintenance_scheduler:
         logger.info("停止系统维护调度器...")
-        await maintenance_scheduler.stop()
-        await task_coordinator.release("maintenance_scheduler")
+        await state.maintenance_scheduler.stop()
+        if state.task_coordinator:
+            await state.task_coordinator.release("maintenance_scheduler")
 
     # 停止月卡额度重置调度器，并释放分布式锁
-    logger.info("停止月卡额度重置调度器...")
-    if quota_scheduler:
-        await quota_scheduler.stop()
-    if task_coordinator:
-        await task_coordinator.release("quota_scheduler")
+    if state.quota_scheduler:
+        logger.info("停止月卡额度重置调度器...")
+        await state.quota_scheduler.stop()
+        if state.task_coordinator:
+            await state.task_coordinator.release("quota_scheduler")
 
     # 停止模型自动获取调度器
-    if model_fetch_scheduler:
+    if state.model_fetch_scheduler:
         logger.info("停止模型自动获取调度器...")
-        await model_fetch_scheduler.stop()
-        await task_coordinator.release("model_fetch_scheduler")
+        await state.model_fetch_scheduler.stop()
+        if state.task_coordinator:
+            await state.task_coordinator.release("model_fetch_scheduler")
 
-    if task_poller:
+    if state.task_poller:
         logger.info("停止 TaskPoller（video）...")
-        await task_poller.stop()
-        await task_coordinator.release("task_poller:video")
+        await state.task_poller.stop()
+        if state.task_coordinator:
+            await state.task_coordinator.release("task_poller:video")
 
     # 停止统一的定时任务调度器
     logger.info("停止定时任务调度器...")
-    task_scheduler.stop()
+    if state.task_scheduler:
+        state.task_scheduler.stop()
 
     # 关闭插件系统
     logger.info("关闭插件系统...")
-    await plugin_manager.shutdown_all()
+    if state.plugin_manager:
+        await state.plugin_manager.shutdown_all()
 
     # 关闭功能模块
     logger.info("关闭功能模块...")
-    for module in available_modules:
+    for module in state.available_modules:
         if module.on_shutdown:
             await module.on_shutdown()
 
     # 关闭并发管理器
     logger.info("关闭并发管理器...")
-    if concurrency_manager:
-        await concurrency_manager.close()
+    if state.concurrency_manager:
+        await state.concurrency_manager.close()
 
     # 关闭全局Redis客户端
     logger.info("关闭全局Redis客户端...")
@@ -374,6 +432,16 @@ async def lifespan(app: FastAPI) -> Any:
     await close_http_clients()
 
     logger.info("服务已关闭")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> Any:
+    """应用生命周期管理"""
+    state = await _run_startup(app)
+    try:
+        yield  # 应用运行期间
+    finally:
+        await _run_shutdown(state)
 
 
 from src import __version__ as app_version

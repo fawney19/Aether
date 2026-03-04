@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -7,8 +7,8 @@ import pytest
 
 from src.services.candidate.schema import CandidateKey
 from src.services.candidate.submit import SubmitOutcome
-from src.services.task.context import TaskMode
-from src.services.task.protocol import AttemptKind
+from src.services.task.core.context import TaskMode
+from src.services.task.core.protocol import AttemptKind
 from src.services.task.service import TaskService
 
 
@@ -48,7 +48,7 @@ async def test_task_service_execute_async_returns_execution_result() -> None:
     )
 
     svc.submit_with_failover = AsyncMock(return_value=outcome)  # type: ignore[method-assign]
-    svc._recorder.get_candidate_keys = MagicMock(  # type: ignore[attr-defined, method-assign]
+    svc._execute_facade_ops._get_candidate_keys = MagicMock(  # type: ignore[attr-defined, method-assign]
         return_value=[
             CandidateKey(candidate_index=0, retry_index=0, status="success", provider_id="p1")
         ]
@@ -79,7 +79,7 @@ async def test_task_service_execute_sync_passes_request_headers_and_body() -> No
     db = MagicMock()
     svc = TaskService(db)
     sentinel_result = object()
-    svc._execute_sync_unified = AsyncMock(  # type: ignore[method-assign]
+    svc._sync_ops.execute_sync_unified = AsyncMock(  # type: ignore[attr-defined, method-assign]
         return_value=sentinel_result
     )
 
@@ -102,8 +102,83 @@ async def test_task_service_execute_sync_passes_request_headers_and_body() -> No
     )
 
     assert result is sentinel_result
-    svc._execute_sync_unified.assert_awaited_once()  # type: ignore[attr-defined]
-    kwargs = svc._execute_sync_unified.await_args.kwargs  # type: ignore[attr-defined, union-attr]
+    svc._sync_ops.execute_sync_unified.assert_awaited_once()  # type: ignore[attr-defined]
+    kwargs = svc._sync_ops.execute_sync_unified.await_args.kwargs  # type: ignore[attr-defined, union-attr]
     assert kwargs["request_headers"] == request_headers
     assert kwargs["request_body"] == request_body
     assert kwargs["request_body_ref"] == request_body_ref
+
+
+@pytest.mark.asyncio
+async def test_task_service_execute_delegates_to_execute_facade_ops() -> None:
+    svc = TaskService(MagicMock())
+    sentinel = object()
+    svc._execute_facade_ops.execute = AsyncMock(return_value=sentinel)  # type: ignore[attr-defined, method-assign]
+
+    result = await svc.execute(
+        task_type="chat",
+        task_mode=TaskMode.SYNC,
+        api_format="openai:chat",
+        model_name="m",
+        user_api_key=MagicMock(id="u", user_id="user"),
+        request_func=AsyncMock(),
+        request_id="rid",
+    )
+
+    assert result is sentinel
+    svc._execute_facade_ops.execute.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_task_service_submit_with_failover_delegates_to_submit_facade_ops() -> None:
+    svc = TaskService(MagicMock())
+    sentinel = object()
+    svc._submit_facade_ops.submit_with_failover = AsyncMock(  # type: ignore[attr-defined, method-assign]
+        return_value=sentinel
+    )
+
+    result = await svc.submit_with_failover(
+        api_format="openai:video",
+        model_name="sora",
+        affinity_key="a1",
+        user_api_key=MagicMock(id="u", user_id="user"),
+        request_id="rid",
+        task_type="video",
+        submit_func=AsyncMock(),
+        extract_external_task_id=lambda payload: payload.get("id"),
+    )
+
+    assert result is sentinel
+    svc._submit_facade_ops.submit_with_failover.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_task_service_poll_delegates_to_video_facade_ops() -> None:
+    svc = TaskService(MagicMock())
+    sentinel = object()
+    svc._video_facade_ops.poll = AsyncMock(return_value=sentinel)  # type: ignore[attr-defined, method-assign]
+
+    result = await svc.poll("task-1", user_id="user-1")
+
+    assert result is sentinel
+    svc._video_facade_ops.poll.assert_awaited_once_with("task-1", user_id="user-1")  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_task_service_cancel_delegates_to_video_facade_ops() -> None:
+    svc = TaskService(MagicMock())
+    sentinel = object()
+    svc._video_facade_ops.cancel = AsyncMock(return_value=sentinel)  # type: ignore[attr-defined, method-assign]
+
+    result = await svc.cancel(
+        "task-1",
+        user_id="user-1",
+        original_headers={"x-test": "1"},
+    )
+
+    assert result is sentinel
+    svc._video_facade_ops.cancel.assert_awaited_once_with(  # type: ignore[attr-defined]
+        "task-1",
+        user_id="user-1",
+        original_headers={"x-test": "1"},
+    )

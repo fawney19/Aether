@@ -6,8 +6,13 @@ import httpx
 import pytest
 
 from src.config.settings import config
-from src.services.candidate.submit import AllCandidatesFailedError, UpstreamClientRequestError
+from src.services.candidate.submit import (
+    AllCandidatesFailedError,
+    SubmitOutcome,
+    UpstreamClientRequestError,
+)
 from src.services.task.service import TaskService
+from src.services.task.submit.outcome_builder import SubmitPayloadParseResult
 
 
 def _make_candidate(
@@ -356,7 +361,7 @@ async def test_submit_with_failover_applies_pool_reorder_before_submit(
 
     reordered = [pool_candidate_b, pool_candidate_a]
     apply_pool_reorder = AsyncMock(return_value=(reordered, []))
-    monkeypatch.setattr(svc, "_apply_pool_reorder", apply_pool_reorder)
+    monkeypatch.setattr(svc._submit_ops, "_apply_pool_reorder", apply_pool_reorder)  # type: ignore[attr-defined]
 
     submit = AsyncMock(return_value=httpx.Response(200, json={"id": "task-pooled"}))
     body = {"session_id": "sid-123"}
@@ -379,8 +384,245 @@ async def test_submit_with_failover_applies_pool_reorder_before_submit(
     assert outcome.candidate.key.id == "k-b"
     assert submit.await_count == 1
     fetch_candidates.assert_awaited_once()
-    assert fetch_candidates.await_args.kwargs.get("request_body") == body
+    await_args = fetch_candidates.await_args
+    assert await_args is not None
+    assert await_args.kwargs.get("request_body") == body
     apply_pool_reorder.assert_awaited_once_with(
         [pool_candidate_a, pool_candidate_b],
         request_body=body,
     )
+
+
+@pytest.mark.asyncio
+async def test_submit_with_failover_orchestrates_prepare_and_execute_layers() -> None:
+    db = MagicMock()
+    svc = TaskService(db)
+    candidate = _make_candidate(provider_id="p2", endpoint_id="e2", key_id="k2")
+
+    prepared = SimpleNamespace(candidates=[candidate], record_map={(0, 0): "rc-1"})
+    outcome = SubmitOutcome(
+        candidate=candidate,  # type: ignore[arg-type]
+        candidate_keys=[{"index": 0, "provider_id": "p2", "selected": True}],
+        external_task_id="task-layered",
+        rule_lookup=None,
+        upstream_payload={"id": "task-layered"},
+        upstream_headers={"x-test": "1"},
+        upstream_status_code=200,
+    )
+
+    svc._submit_ops._prepare_ops.prepare_candidates = AsyncMock(  # type: ignore[attr-defined, method-assign]
+        return_value=prepared
+    )
+    svc._submit_ops._execute_ops.execute_submit_loop = AsyncMock(  # type: ignore[attr-defined, method-assign]
+        return_value=outcome
+    )
+
+    result = await svc.submit_with_failover(
+        api_format="openai:video",
+        model_name="sora",
+        affinity_key="a1",
+        user_api_key=MagicMock(user_id="u1"),
+        request_id="rid-1",
+        task_type="video",
+        submit_func=AsyncMock(),
+        extract_external_task_id=lambda payload: payload.get("id"),
+        supported_auth_types={"api_key"},
+        allow_format_conversion=False,
+        max_candidates=10,
+    )
+
+    assert result.external_task_id == "task-layered"
+    svc._submit_ops._prepare_ops.prepare_candidates.assert_awaited_once()  # type: ignore[attr-defined]
+    svc._submit_ops._execute_ops.execute_submit_loop.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_submit_with_failover_execute_layer_orchestrates_filter_and_attempt() -> None:
+    db = MagicMock()
+    svc = TaskService(db)
+    candidate = _make_candidate(provider_id="p2", endpoint_id="e2", key_id="k2")
+
+    prepared = SimpleNamespace(candidates=[candidate], record_map={(0, 0): "rc-1"})
+    outcome = SubmitOutcome(
+        candidate=candidate,  # type: ignore[arg-type]
+        candidate_keys=[{"index": 0, "provider_id": "p2", "selected": True}],
+        external_task_id="task-inner",
+        rule_lookup=None,
+        upstream_payload={"id": "task-inner"},
+        upstream_headers={"x-test": "1"},
+        upstream_status_code=200,
+    )
+
+    svc._submit_ops._prepare_ops.prepare_candidates = AsyncMock(  # type: ignore[attr-defined, method-assign]
+        return_value=prepared
+    )
+    svc._submit_ops._execute_ops._filter_ops.build_candidate_info = MagicMock(  # type: ignore[attr-defined, method-assign]
+        return_value={
+            "index": 0,
+            "provider_id": "p2",
+            "provider_name": "prov",
+            "endpoint_id": "e2",
+            "key_id": "k2",
+            "key_name": "key",
+            "auth_type": "api_key",
+            "priority": 0,
+            "is_cached": False,
+        }
+    )
+    svc._submit_ops._execute_ops._filter_ops.prepare_candidate_for_attempt = MagicMock(  # type: ignore[attr-defined, method-assign]
+        return_value=SimpleNamespace(record_id="rc-1", rule_lookup=None)
+    )
+    svc._submit_ops._execute_ops._attempt_ops.submit_candidate = AsyncMock(  # type: ignore[attr-defined, method-assign]
+        return_value=(outcome, 200)
+    )
+
+    result = await svc.submit_with_failover(
+        api_format="openai:video",
+        model_name="sora",
+        affinity_key="a1",
+        user_api_key=MagicMock(user_id="u1"),
+        request_id="rid-2",
+        task_type="video",
+        submit_func=AsyncMock(),
+        extract_external_task_id=lambda payload: payload.get("id"),
+        supported_auth_types={"api_key"},
+        allow_format_conversion=False,
+        max_candidates=10,
+    )
+
+    assert result.external_task_id == "task-inner"
+    svc._submit_ops._execute_ops._filter_ops.build_candidate_info.assert_called_once()  # type: ignore[attr-defined]
+    svc._submit_ops._execute_ops._filter_ops.prepare_candidate_for_attempt.assert_called_once()  # type: ignore[attr-defined]
+    svc._submit_ops._execute_ops._attempt_ops.submit_candidate.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_submit_with_failover_attempt_layer_delegates_to_response_ops() -> None:
+    db = MagicMock()
+    svc = TaskService(db)
+    candidate = _make_candidate(provider_id="p3", endpoint_id="e3", key_id="k3")
+
+    prepared = SimpleNamespace(candidates=[candidate], record_map={(0, 0): "rc-3"})
+    outcome = SubmitOutcome(
+        candidate=candidate,  # type: ignore[arg-type]
+        candidate_keys=[{"index": 0, "provider_id": "p3", "selected": True}],
+        external_task_id="task-attempt",
+        rule_lookup=None,
+        upstream_payload={"id": "task-attempt"},
+        upstream_headers={"x-test": "1"},
+        upstream_status_code=200,
+    )
+
+    svc._submit_ops._prepare_ops.prepare_candidates = AsyncMock(  # type: ignore[attr-defined, method-assign]
+        return_value=prepared
+    )
+    svc._submit_ops._execute_ops._filter_ops.build_candidate_info = MagicMock(  # type: ignore[attr-defined, method-assign]
+        return_value={
+            "index": 0,
+            "provider_id": "p3",
+            "provider_name": "prov3",
+            "endpoint_id": "e3",
+            "key_id": "k3",
+            "key_name": "key3",
+            "auth_type": "api_key",
+            "priority": 0,
+            "is_cached": False,
+        }
+    )
+    svc._submit_ops._execute_ops._filter_ops.prepare_candidate_for_attempt = MagicMock(  # type: ignore[attr-defined, method-assign]
+        return_value=SimpleNamespace(record_id="rc-3", rule_lookup=None)
+    )
+    svc._submit_ops._execute_ops._attempt_ops._record_ops.mark_pending = MagicMock()  # type: ignore[attr-defined, method-assign]
+    svc._submit_ops._execute_ops._attempt_ops._response_ops.handle_submit_response = MagicMock(  # type: ignore[attr-defined, method-assign]
+        return_value=(outcome, 200)
+    )
+
+    submit = AsyncMock(return_value=httpx.Response(200, json={"id": "task-attempt"}))
+
+    result = await svc.submit_with_failover(
+        api_format="openai:video",
+        model_name="sora",
+        affinity_key="a1",
+        user_api_key=MagicMock(user_id="u1"),
+        request_id="rid-3",
+        task_type="video",
+        submit_func=submit,
+        extract_external_task_id=lambda payload: payload.get("id"),
+        supported_auth_types={"api_key"},
+        allow_format_conversion=False,
+        max_candidates=10,
+    )
+
+    assert result.external_task_id == "task-attempt"
+    svc._submit_ops._execute_ops._attempt_ops._record_ops.mark_pending.assert_called_once()  # type: ignore[attr-defined]
+    submit.assert_awaited_once_with(candidate)
+    svc._submit_ops._execute_ops._attempt_ops._response_ops.handle_submit_response.assert_called_once()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_submit_with_failover_response_layer_delegates_to_decider_and_builder() -> None:
+    db = MagicMock()
+    svc = TaskService(db)
+    candidate = _make_candidate(provider_id="p4", endpoint_id="e4", key_id="k4")
+
+    prepared = SimpleNamespace(candidates=[candidate], record_map={(0, 0): "rc-4"})
+    outcome = SubmitOutcome(
+        candidate=candidate,  # type: ignore[arg-type]
+        candidate_keys=[{"index": 0, "provider_id": "p4", "selected": True}],
+        external_task_id="task-response",
+        rule_lookup=None,
+        upstream_payload={"id": "task-response"},
+        upstream_headers={"x-test": "1"},
+        upstream_status_code=200,
+    )
+
+    svc._submit_ops._prepare_ops.prepare_candidates = AsyncMock(  # type: ignore[attr-defined, method-assign]
+        return_value=prepared
+    )
+    svc._submit_ops._execute_ops._filter_ops.build_candidate_info = MagicMock(  # type: ignore[attr-defined, method-assign]
+        return_value={
+            "index": 0,
+            "provider_id": "p4",
+            "provider_name": "prov4",
+            "endpoint_id": "e4",
+            "key_id": "k4",
+            "key_name": "key4",
+            "auth_type": "api_key",
+            "priority": 0,
+            "is_cached": False,
+        }
+    )
+    svc._submit_ops._execute_ops._filter_ops.prepare_candidate_for_attempt = MagicMock(  # type: ignore[attr-defined, method-assign]
+        return_value=SimpleNamespace(record_id="rc-4", rule_lookup=None)
+    )
+    response_ops = svc._submit_ops._execute_ops._attempt_ops._response_ops  # type: ignore[attr-defined]
+    response_ops._rule_decider.detect_error_stop_pattern = MagicMock(return_value=None)  # type: ignore[attr-defined, method-assign]
+    response_ops._rule_decider.detect_success_failover_pattern = MagicMock(return_value=None)  # type: ignore[attr-defined, method-assign]
+    response_ops._outcome_builder.parse_payload = MagicMock(  # type: ignore[attr-defined, method-assign]
+        return_value=SubmitPayloadParseResult(payload={"id": "task-response"})
+    )
+    response_ops._outcome_builder.build_success_outcome = MagicMock(  # type: ignore[attr-defined, method-assign]
+        return_value=outcome
+    )
+
+    submit = AsyncMock(return_value=httpx.Response(200, json={"id": "task-response"}))
+
+    result = await svc.submit_with_failover(
+        api_format="openai:video",
+        model_name="sora",
+        affinity_key="a1",
+        user_api_key=MagicMock(user_id="u1"),
+        request_id="rid-4",
+        task_type="video",
+        submit_func=submit,
+        extract_external_task_id=lambda payload: payload.get("id"),
+        supported_auth_types={"api_key"},
+        allow_format_conversion=False,
+        max_candidates=10,
+    )
+
+    assert result.external_task_id == "task-response"
+    response_ops._rule_decider.detect_error_stop_pattern.assert_not_called()  # type: ignore[attr-defined]
+    response_ops._rule_decider.detect_success_failover_pattern.assert_called_once()  # type: ignore[attr-defined]
+    response_ops._outcome_builder.parse_payload.assert_called_once()  # type: ignore[attr-defined]
+    response_ops._outcome_builder.build_success_outcome.assert_called_once()  # type: ignore[attr-defined]

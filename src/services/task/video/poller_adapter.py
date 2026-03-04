@@ -10,6 +10,7 @@ Implements the video-specific poll/normalize/update logic used by TaskPollerServ
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -36,7 +37,6 @@ from src.core.video_utils import (
 from src.database import create_session
 from src.models.database import ProviderAPIKey, ProviderEndpoint, VideoTask
 from src.services.provider.auth import get_provider_auth
-from src.services.task.service import TaskService
 
 
 @dataclass(slots=True)
@@ -84,6 +84,20 @@ class PollHTTPError(RuntimeError):
         self.original_message = message
 
 
+VideoTaskFinalizeFn = Callable[[Session, VideoTask, Any | None], Awaitable[None]]
+
+
+async def _default_finalize_video_task(
+    db: Session,
+    task: VideoTask,
+    redis_client: Any | None,
+) -> None:
+    """默认终态结算逻辑（延迟导入，避免 task 模块循环依赖）。"""
+    from src.services.task.video.operations import VideoTaskOperationsService
+
+    await VideoTaskOperationsService(db, redis_client=redis_client).finalize_video_task(task)
+
+
 class VideoTaskPollerAdapter:
     task_type = "video"
 
@@ -102,9 +116,10 @@ class VideoTaskPollerAdapter:
     consecutive_failure_alert_threshold = 5
     max_backoff_seconds = 300
 
-    def __init__(self) -> None:
+    def __init__(self, finalize_video_task_fn: VideoTaskFinalizeFn | None = None) -> None:
         self._openai_normalizer = OpenAINormalizer()
         self._gemini_normalizer = GeminiNormalizer()
+        self._finalize_video_task = finalize_video_task_fn or _default_finalize_video_task
 
     def sanitize_error_message(self, message: str) -> str:
         return sanitize_error_message(message)
@@ -287,7 +302,7 @@ class VideoTaskPollerAdapter:
             # 终态结算
             if task.status in (VideoStatus.COMPLETED.value, VideoStatus.FAILED.value):
                 try:
-                    await TaskService(db, redis_client=redis_client).finalize_video_task(task)
+                    await self._finalize_video_task(db, task, redis_client)
                 except Exception as exc:
                     logger.exception(
                         "Failed to record video usage for task={}: {}",
@@ -365,78 +380,37 @@ class VideoTaskPollerAdapter:
         self, db: Session, task: VideoTask, *, redis_client: Any | None
     ) -> None:
         """
-        旧版单任务轮询方法（保留向后兼容）
-
-        注意：此方法在 HTTP 请求期间持有数据库连接，建议使用分阶段方法。
+        兼容入口：复用三阶段轮询流程，避免维护重复逻辑。
         """
+        ctx_or_result = await self.prepare_poll_context(db, task)
+
+        if isinstance(ctx_or_result, InternalVideoPollResult):
+            await self.update_task_after_poll(
+                task_id=task.id,
+                result=ctx_or_result,
+                ctx=None,
+                redis_client=redis_client,
+            )
+            return
+
+        ctx = ctx_or_result
+        error_exception: Exception | None = None
         try:
-            result = await self._poll_task_status(db, task)
-            if result.status == VideoStatus.COMPLETED:
-                task.status = VideoStatus.COMPLETED.value
-                task.video_url = result.video_url
-                task.video_expires_at = result.expires_at
-                task.completed_at = datetime.now(timezone.utc)
-                task.progress_percent = 100
-                if result.video_urls:
-                    task.video_urls = result.video_urls
-                if result.video_duration_seconds is not None:
-                    task.video_duration_seconds = result.video_duration_seconds
-                self._attach_poll_raw_response(task, result)
-            elif result.status == VideoStatus.FAILED:
-                task.status = VideoStatus.FAILED.value
-                task.error_code = result.error_code
-                task.error_message = result.error_message
-                task.completed_at = datetime.now(timezone.utc)
-                self._attach_poll_raw_response(task, result)
-            else:
-                task.poll_count += 1
-                task.progress_percent = result.progress_percent
-                task.next_poll_at = datetime.now(timezone.utc) + timedelta(
-                    seconds=task.poll_interval_seconds
-                )
-        except Exception as exc:
-            task.poll_count += 1
-            error_msg = sanitize_error_message(str(exc))
-            logger.warning("Poll error for task {}: {}", task.id, error_msg)
-            task.progress_message = f"Poll error: {error_msg}"
+            result = await self.poll_task_http(ctx)
+        except Exception as http_exc:
+            error_exception = http_exc
+            result = InternalVideoPollResult(
+                status=None,  # type: ignore[arg-type]
+                error_message=str(http_exc),
+            )
 
-            status_code = exc.status_code if isinstance(exc, PollHTTPError) else None
-            is_permanent = self._is_permanent_error(exc, status_code=status_code)
-            if is_permanent:
-                task.status = VideoStatus.FAILED.value
-                task.error_code = "poll_permanent_error"
-                task.error_message = error_msg
-                task.completed_at = datetime.now(timezone.utc)
-            else:
-                backoff = min(
-                    task.poll_interval_seconds * (2 ** min(task.retry_count, 5)),
-                    self.max_backoff_seconds,
-                )
-                task.retry_count += 1
-                task.next_poll_at = datetime.now(timezone.utc) + timedelta(seconds=backoff)
-
-        # 超时：超过最大轮询次数且未进入终态
-        task.updated_at = datetime.now(timezone.utc)
-        if task.poll_count >= task.max_poll_count and task.status not in [
-            VideoStatus.COMPLETED.value,
-            VideoStatus.FAILED.value,
-            VideoStatus.CANCELLED.value,
-        ]:
-            task.status = VideoStatus.FAILED.value
-            task.error_code = "poll_timeout"
-            task.error_message = f"Task timed out after {task.poll_count} polls"
-            task.completed_at = datetime.now(timezone.utc)
-
-        # 终态结算
-        if task.status in (VideoStatus.COMPLETED.value, VideoStatus.FAILED.value):
-            try:
-                await TaskService(db, redis_client=redis_client).finalize_video_task(task)
-            except Exception as exc:
-                logger.exception(
-                    "Failed to record video usage for task={}: {}",
-                    task.id,
-                    sanitize_error_message(str(exc)),
-                )
+        await self.update_task_after_poll(
+            task_id=task.id,
+            result=result,
+            ctx=ctx,
+            redis_client=redis_client,
+            error_exception=error_exception,
+        )
 
     def _attach_poll_raw_response(self, task: VideoTask, result: InternalVideoPollResult) -> None:
         if not result.raw_response:

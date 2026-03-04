@@ -1,15 +1,17 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from src.models.database import Provider, ProviderAPIKey, ProviderEndpoint
 from src.services.candidate.failover import FailoverEngine
 from src.services.candidate.policy import RetryMode, RetryPolicy, SkipPolicy
-from src.services.orchestration.error_classifier import ErrorAction
-from src.services.task.protocol import AttemptKind, AttemptResult
+from src.services.orchestration.error_classifier import ErrorAction, ErrorClassifier
+from src.services.scheduling.schemas import ProviderCandidate
+from src.services.task.core.protocol import AttemptKind, AttemptResult
 
 
 def _make_candidate(
@@ -27,16 +29,22 @@ def _make_candidate(
     needs_conversion: bool = False,
     provider_max_retries: int | None = None,
     provider_config: dict[str, Any] | None = None,
-) -> SimpleNamespace:
-    provider = SimpleNamespace(
-        id=provider_id,
-        name=provider_name,
-        max_retries=provider_max_retries,
-        config=provider_config,
+) -> ProviderCandidate:
+    provider = cast(
+        Provider,
+        SimpleNamespace(
+            id=provider_id,
+            name=provider_name,
+            max_retries=provider_max_retries,
+            config=provider_config,
+        ),
     )
-    endpoint = SimpleNamespace(id=endpoint_id)
-    key = SimpleNamespace(id=key_id, name=key_name, auth_type=auth_type, priority=priority)
-    return SimpleNamespace(
+    endpoint = cast(ProviderEndpoint, SimpleNamespace(id=endpoint_id))
+    key = cast(
+        ProviderAPIKey,
+        SimpleNamespace(id=key_id, name=key_name, auth_type=auth_type, priority=priority),
+    )
+    return ProviderCandidate(
         provider=provider,
         endpoint=endpoint,
         key=key,
@@ -61,10 +69,14 @@ class _StubErrorClassifier:
         return self._action
 
 
+def _stub_classifier(*, action: ErrorAction, client_error: bool = False) -> ErrorClassifier:
+    return cast(ErrorClassifier, _StubErrorClassifier(action=action, client_error=client_error))
+
+
 @pytest.mark.asyncio
 async def test_failover_engine_success_first_candidate() -> None:
     db = MagicMock()
-    engine = FailoverEngine(db, error_classifier=_StubErrorClassifier(action=ErrorAction.BREAK))
+    engine = FailoverEngine(db, error_classifier=_stub_classifier(action=ErrorAction.BREAK))
 
     candidates = [_make_candidate(provider_id="p1"), _make_candidate(provider_id="p2")]
 
@@ -96,7 +108,7 @@ async def test_failover_engine_success_first_candidate() -> None:
 @pytest.mark.asyncio
 async def test_failover_engine_continue_to_next_candidate_on_error() -> None:
     db = MagicMock()
-    engine = FailoverEngine(db, error_classifier=_StubErrorClassifier(action=ErrorAction.BREAK))
+    engine = FailoverEngine(db, error_classifier=_stub_classifier(action=ErrorAction.BREAK))
 
     candidates = [_make_candidate(provider_id="p1"), _make_candidate(provider_id="p2")]
 
@@ -131,7 +143,7 @@ async def test_failover_engine_continue_to_next_candidate_on_error() -> None:
 async def test_failover_engine_retry_same_candidate_when_classifier_says_continue() -> None:
     db = MagicMock()
     # ErrorAction.CONTINUE => retry current candidate (mapped to FailoverAction.RETRY)
-    engine = FailoverEngine(db, error_classifier=_StubErrorClassifier(action=ErrorAction.CONTINUE))
+    engine = FailoverEngine(db, error_classifier=_stub_classifier(action=ErrorAction.CONTINUE))
 
     candidates = [_make_candidate(provider_id="p1", is_cached=True, provider_max_retries=2)]
 
@@ -166,7 +178,7 @@ async def test_failover_engine_continues_when_classifier_raises() -> None:
     """After the 'default failover' change, RAISE no longer stops failover.
     All candidates should be attempted."""
     db = MagicMock()
-    engine = FailoverEngine(db, error_classifier=_StubErrorClassifier(action=ErrorAction.RAISE))
+    engine = FailoverEngine(db, error_classifier=_stub_classifier(action=ErrorAction.RAISE))
 
     candidates = [_make_candidate(provider_id="p1"), _make_candidate(provider_id="p2")]
     attempt = AsyncMock(side_effect=RuntimeError("client-ish"))
@@ -199,7 +211,7 @@ async def _empty_stream() -> AsyncIterator[bytes]:
 @pytest.mark.asyncio
 async def test_failover_engine_stream_probe_wraps_first_chunk() -> None:
     db = MagicMock()
-    engine = FailoverEngine(db, error_classifier=_StubErrorClassifier(action=ErrorAction.BREAK))
+    engine = FailoverEngine(db, error_classifier=_stub_classifier(action=ErrorAction.BREAK))
 
     candidates = [_make_candidate(provider_id="p1")]
     attempt = AsyncMock(
@@ -233,7 +245,7 @@ async def test_failover_engine_stream_probe_wraps_first_chunk() -> None:
 @pytest.mark.asyncio
 async def test_failover_engine_stream_probe_empty_triggers_failover() -> None:
     db = MagicMock()
-    engine = FailoverEngine(db, error_classifier=_StubErrorClassifier(action=ErrorAction.BREAK))
+    engine = FailoverEngine(db, error_classifier=_stub_classifier(action=ErrorAction.BREAK))
 
     candidates = [_make_candidate(provider_id="p1"), _make_candidate(provider_id="p2")]
 
@@ -272,7 +284,7 @@ async def test_failover_engine_pre_expand_marks_unused_slots_on_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db = MagicMock()
-    engine = FailoverEngine(db, error_classifier=_StubErrorClassifier(action=ErrorAction.BREAK))
+    engine = FailoverEngine(db, error_classifier=_stub_classifier(action=ErrorAction.BREAK))
 
     # patch low-level record updater to observe unused marking
     engine._update_record = MagicMock()  # type: ignore[method-assign]
@@ -332,7 +344,7 @@ class _HttpError(Exception):
 async def test_error_stop_pattern_with_matching_status_code_stops_failover() -> None:
     """When status_codes is set and matches, failover should stop."""
     db = MagicMock()
-    engine = FailoverEngine(db, error_classifier=_StubErrorClassifier(action=ErrorAction.BREAK))
+    engine = FailoverEngine(db, error_classifier=_stub_classifier(action=ErrorAction.BREAK))
 
     config = {
         "failover_rules": {
@@ -375,7 +387,7 @@ async def test_error_stop_pattern_with_matching_status_code_stops_failover() -> 
 async def test_error_stop_pattern_with_non_matching_status_code_continues() -> None:
     """When status_codes is set but doesn't match, the rule is skipped and failover continues."""
     db = MagicMock()
-    engine = FailoverEngine(db, error_classifier=_StubErrorClassifier(action=ErrorAction.BREAK))
+    engine = FailoverEngine(db, error_classifier=_stub_classifier(action=ErrorAction.BREAK))
 
     config = {
         "failover_rules": {
@@ -419,7 +431,7 @@ async def test_error_stop_pattern_with_non_matching_status_code_continues() -> N
 async def test_error_stop_pattern_without_status_codes_matches_any() -> None:
     """When status_codes is not set, the rule matches any status code (existing behavior)."""
     db = MagicMock()
-    engine = FailoverEngine(db, error_classifier=_StubErrorClassifier(action=ErrorAction.BREAK))
+    engine = FailoverEngine(db, error_classifier=_stub_classifier(action=ErrorAction.BREAK))
 
     config = {
         "failover_rules": {

@@ -1176,7 +1176,7 @@ async def test_model_failover(
     """
     from src.services.candidate.failover import FailoverEngine
     from src.services.candidate.policy import RetryMode, RetryPolicy, SkipPolicy
-    from src.services.task.protocol import AttemptKind, AttemptResult
+    from src.services.task.core.protocol import AttemptKind, AttemptResult
 
     # 1. 加载 Provider
     provider = (
