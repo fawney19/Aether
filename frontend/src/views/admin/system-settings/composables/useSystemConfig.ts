@@ -11,7 +11,7 @@ export interface SystemConfig {
   // 网络代理
   system_proxy_node_id: string | null
   // 基础配置
-  default_user_quota_usd: number
+  default_user_initial_gift_usd: number
   rate_limit_per_minute: number
   enable_registration: boolean
   // 独立余额 Key 过期管理
@@ -34,16 +34,7 @@ export interface SystemConfig {
   // 定时任务
   enable_provider_checkin: boolean
   provider_checkin_time: string
-  enable_user_quota_reset: boolean
-  user_quota_reset_time: string
-  user_quota_reset_interval_days: number
   enable_oauth_token_refresh: boolean
-  // 独立密钥额度重置
-  enable_standalone_key_quota_reset: boolean
-  standalone_key_quota_reset_time: string
-  standalone_key_quota_reset_interval_days: number
-  standalone_key_quota_reset_mode: string
-  standalone_key_quota_reset_key_ids: string[]
 }
 
 const CONFIG_KEYS = [
@@ -53,7 +44,7 @@ const CONFIG_KEYS = [
   // 网络代理
   'system_proxy_node_id',
   // 基础配置
-  'default_user_quota_usd',
+  'default_user_initial_gift_usd',
   'rate_limit_per_minute',
   'enable_registration',
   // 独立余额 Key 过期管理
@@ -76,16 +67,7 @@ const CONFIG_KEYS = [
   // 定时任务
   'enable_provider_checkin',
   'provider_checkin_time',
-  'enable_user_quota_reset',
-  'user_quota_reset_time',
-  'user_quota_reset_interval_days',
   'enable_oauth_token_refresh',
-  // 独立密钥额度重置
-  'enable_standalone_key_quota_reset',
-  'standalone_key_quota_reset_time',
-  'standalone_key_quota_reset_interval_days',
-  'standalone_key_quota_reset_mode',
-  'standalone_key_quota_reset_key_ids',
 ]
 
 function createDefaultConfig(): SystemConfig {
@@ -96,7 +78,7 @@ function createDefaultConfig(): SystemConfig {
     // 网络代理
     system_proxy_node_id: null,
     // 基础配置
-    default_user_quota_usd: 10.0,
+    default_user_initial_gift_usd: 10.0,
     rate_limit_per_minute: 0,
     enable_registration: false,
     // 独立余额 Key 过期管理
@@ -119,16 +101,7 @@ function createDefaultConfig(): SystemConfig {
     // 定时任务
     enable_provider_checkin: true,
     provider_checkin_time: '01:05',
-    enable_user_quota_reset: false,
-    user_quota_reset_time: '05:00',
-    user_quota_reset_interval_days: 1,
     enable_oauth_token_refresh: true,
-    // 独立密钥额度重置
-    enable_standalone_key_quota_reset: false,
-    standalone_key_quota_reset_time: '05:00',
-    standalone_key_quota_reset_interval_days: 1,
-    standalone_key_quota_reset_mode: 'all',
-    standalone_key_quota_reset_key_ids: [],
   }
 }
 
@@ -164,7 +137,7 @@ export function useSystemConfig() {
   const hasBasicConfigChanges = computed(() => {
     if (!originalConfig.value) return false
     return (
-      systemConfig.value.default_user_quota_usd !== originalConfig.value.default_user_quota_usd ||
+      systemConfig.value.default_user_initial_gift_usd !== originalConfig.value.default_user_initial_gift_usd ||
       systemConfig.value.rate_limit_per_minute !== originalConfig.value.rate_limit_per_minute ||
       systemConfig.value.enable_registration !== originalConfig.value.enable_registration ||
       systemConfig.value.auto_delete_expired_keys !== originalConfig.value.auto_delete_expired_keys ||
@@ -234,7 +207,6 @@ export function useSystemConfig() {
             ;(systemConfig.value as Record<string, unknown>)[key] = response.value
           }
         } catch {
-          // 配置不存在时使用默认值，无需处理
         }
       }
       originalConfig.value = JSON.parse(JSON.stringify(systemConfig.value))
@@ -309,9 +281,9 @@ export function useSystemConfig() {
     try {
       const configItems = [
         {
-          key: 'default_user_quota_usd',
-          value: systemConfig.value.default_user_quota_usd,
-          description: '默认用户配额（美元）',
+          key: 'default_user_initial_gift_usd',
+          value: systemConfig.value.default_user_initial_gift_usd,
+          description: '默认用户初始赠款（美元）',
         },
         {
           key: 'rate_limit_per_minute',
@@ -341,7 +313,7 @@ export function useSystemConfig() {
         )
       )
       if (originalConfig.value) {
-        originalConfig.value.default_user_quota_usd = systemConfig.value.default_user_quota_usd
+        originalConfig.value.default_user_initial_gift_usd = systemConfig.value.default_user_initial_gift_usd
         originalConfig.value.rate_limit_per_minute = systemConfig.value.rate_limit_per_minute
         originalConfig.value.enable_registration = systemConfig.value.enable_registration
         originalConfig.value.auto_delete_expired_keys =

@@ -406,11 +406,20 @@ def init_admin_user(db: Session) -> None:
             role=UserRole.ADMIN,
             is_active=True,
         )
-        admin.quota_usd = cast(Any, 1000.0)
         admin.set_password(config.admin_password)
 
         db.add(admin)
         db.flush()  # 分配ID，但不提交事务（由外层 init_db 统一 commit）
+
+        from src.services.wallet import WalletService
+
+        WalletService.initialize_user_wallet(
+            db,
+            user=admin,
+            initial_gift_usd=0,
+            unlimited=True,
+            description="系统管理员初始化钱包",
+        )
 
         logger.info(f"创建管理员账户成功: {admin.email} ({admin.username})")
     except Exception as e:
@@ -429,9 +438,8 @@ def init_default_models(db: Session) -> None:
 
 def init_system_configs(db: Session) -> None:
     """初始化系统配置"""
-
     configs: list[dict[str, Any]] = [
-        {"key": "default_user_quota_usd", "value": 10.0, "description": "新用户默认美元配额"},
+        {"key": "default_user_initial_gift_usd", "value": 10.0, "description": "新用户默认初始赠款（美元）"},
         {"key": "rate_limit_per_minute", "value": 60, "description": "每分钟请求限制"},
         {"key": "enable_registration", "value": False, "description": "是否开放用户注册"},
         {"key": "require_email_verification", "value": False, "description": "是否需要邮箱验证"},

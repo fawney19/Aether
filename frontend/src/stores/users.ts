@@ -102,19 +102,12 @@ export const useUsersStore = defineStore('users', () => {
     }
   }
 
-  async function resetUserQuota(userId: string) {
-    loading.value = true
-    error.value = null
-
+  async function getFullApiKey(userId: string, keyId: string): Promise<{ key: string }> {
     try {
-      await usersApi.resetUserQuota(userId)
-      // 刷新用户列表以获取最新数据
-      await fetchUsers()
+      return await usersApi.getFullApiKey(userId, keyId)
     } catch (err: unknown) {
-      error.value = parseApiError(err, '重置配额失败')
+      error.value = parseApiError(err, '获取完整 API Key 失败')
       throw err
-    } finally {
-      loading.value = false
     }
   }
 
@@ -129,6 +122,6 @@ export const useUsersStore = defineStore('users', () => {
     getUserApiKeys,
     createApiKey,
     deleteApiKey,
-    resetUserQuota
+    getFullApiKey
   }
 })

@@ -8,7 +8,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import and_, func
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
 from src.core.logger import logger
@@ -30,13 +30,14 @@ class UserService:
         username: str,
         password: str,
         role: UserRole = UserRole.USER,
-        quota_usd: float | None = 10.0,
+        initial_gift_usd: float | None = 10.0,
+        unlimited: bool = False,
         email_verified: bool = False,
         allowed_providers: list[str] | None = None,
         allowed_api_formats: list[str] | None = None,
         allowed_models: list[str] | None = None,
     ) -> User:
-        """创建新用户，quota_usd 为 None 表示无限制，email 为 None 表示无邮箱"""
+        """创建新用户。"""
 
         # 验证邮箱格式（仅当提供邮箱时）
         if email is not None:
@@ -66,7 +67,6 @@ class UserService:
             email_verified=email_verified if email else False,
             username=username,
             role=role,
-            quota_usd=quota_usd,
             is_active=True,
             allowed_providers=allowed_providers,
             allowed_api_formats=allowed_api_formats,
@@ -75,6 +75,18 @@ class UserService:
         user.set_password(password)
 
         db.add(user)
+        db.flush()
+
+        from src.services.wallet import WalletService
+
+        WalletService.initialize_user_wallet(
+            db,
+            user=user,
+            initial_gift_usd=initial_gift_usd,
+            unlimited=unlimited,
+            description="用户初始赠款",
+        )
+
         db.commit()  # 立即提交事务,释放数据库锁
         db.refresh(user)
 
@@ -91,7 +103,8 @@ class UserService:
         password: str,
         api_key_name: str = "默认密钥",
         role: UserRole = UserRole.USER,
-        quota_usd: float | None = 10.0,
+        initial_gift_usd: float | None = 10.0,
+        unlimited: bool = False,
         concurrent_limit: int = 5,
     ) -> tuple[User, ApiKey]:
         """
@@ -104,7 +117,8 @@ class UserService:
             password: 密码
             api_key_name: API密钥名称
             role: 用户角色
-            quota_usd: USD配额，None 表示无限制
+            initial_gift_usd: 初始赠款（USD）
+            unlimited: 是否无限制
             concurrent_limit: 并发限制
 
         Returns:
@@ -115,7 +129,13 @@ class UserService:
         """
         # 创建用户
         user = UserService.create_user(
-            db=db, email=email, username=username, password=password, role=role, quota_usd=quota_usd
+            db=db,
+            email=email,
+            username=username,
+            password=password,
+            role=role,
+            initial_gift_usd=initial_gift_usd,
+            unlimited=unlimited,
         )
 
         # 导入API密钥服务（避免循环导入）
@@ -187,7 +207,6 @@ class UserService:
         updatable_fields = [
             "email",
             "username",
-            "quota_usd",
             "is_active",
             "role",
             # 访问限制字段
@@ -198,7 +217,6 @@ class UserService:
 
         # 允许设置为 None 的字段（表示无限制）
         nullable_fields = [
-            "quota_usd",
             "allowed_providers",
             "allowed_api_formats",
             "allowed_models",
@@ -245,8 +263,10 @@ class UserService:
         from src.models.database import (
             AnnouncementRead,
             ApiKey,
+            PaymentOrder,
+            RefundRequest,
             UserPreference,
-            UserQuota,
+            Wallet,
         )
 
         user = db.query(User).filter(User.id == user_id).first()
@@ -256,13 +276,45 @@ class UserService:
         # 记录删除信息用于日志
         email = user.email
 
+        # 删除前阻断未完结账务，避免级联删除导致资金状态不一致。
+        wallet_ids = [
+            wallet_id
+            for (wallet_id,) in (
+                db.query(Wallet.id)
+                .outerjoin(ApiKey, Wallet.api_key_id == ApiKey.id)
+                .filter(or_(Wallet.user_id == user_id, ApiKey.user_id == user_id))
+                .all()
+            )
+        ]
+        if wallet_ids:
+            pending_refund_count = (
+                db.query(RefundRequest)
+                .filter(
+                    RefundRequest.wallet_id.in_(wallet_ids),
+                    RefundRequest.status.in_(["pending_approval", "approved", "processing"]),
+                )
+                .count()
+            )
+            if pending_refund_count > 0:
+                raise ValueError("用户存在未完结退款，禁止删除")
+
+            pending_order_count = (
+                db.query(PaymentOrder)
+                .filter(
+                    PaymentOrder.wallet_id.in_(wallet_ids),
+                    PaymentOrder.status.in_(["pending", "paid"]),
+                )
+                .count()
+            )
+            if pending_order_count > 0:
+                raise ValueError("用户存在未完结充值订单，禁止删除")
+
         # 手动删除子记录，避免 SQLAlchemy 的 ORM cascade 与数据库 CASCADE 冲突
         # 这些表的数据库外键已经设置了 ON DELETE CASCADE，但 SQLAlchemy 会先尝试 UPDATE 设置为 NULL
         # 所以我们手动删除来避免这个问题
         db.query(UserPreference).filter(UserPreference.user_id == user_id).delete(
             synchronize_session=False
         )
-        db.query(UserQuota).filter(UserQuota.user_id == user_id).delete(synchronize_session=False)
         db.query(AnnouncementRead).filter(AnnouncementRead.user_id == user_id).delete(
             synchronize_session=False
         )
@@ -324,30 +376,6 @@ class UserService:
         logger.info(f"密码更改成功: 用户ID {user_id}")
         return True, "密码更改成功"
 
-    @staticmethod
-    def update_user_quota(
-        db: Session,
-        user_id: str,
-        quota_usd: float | None = None,
-    ) -> User | None:
-        """更新用户配额"""
-        user = db.query(User).filter(User.id == user_id).first()
-        if not user:
-            return None
-
-        if quota_usd is not None:
-            user.quota_usd = quota_usd
-
-        db.commit()
-        db.refresh(user)
-
-        # 清除用户缓存
-        asyncio.create_task(UserCacheService.invalidate_user_cache(user.id, user.email))
-
-        logger.debug(f"更新用户配额: {user.email} (USD: {quota_usd})")
-        return user
-
-    @staticmethod
     def get_user_usage_stats(
         db: Session,
         user_id: str,

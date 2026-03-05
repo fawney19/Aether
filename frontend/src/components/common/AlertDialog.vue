@@ -1,7 +1,7 @@
 <template>
   <Dialog
     :model-value="modelValue"
-    :z-index="80"
+    :z-index="120"
     @update:model-value="handleClose"
   >
     <template #header>
@@ -28,9 +28,8 @@
           v-for="(line, index) in descriptionLines"
           :key="index"
           :class="getLineClass(index)"
-        >
-          {{ line }}
-        </p>
+          v-html="renderLine(line)"
+        />
       </div>
 
       <!-- 自定义内容插槽 -->
@@ -102,6 +101,24 @@ const emit = defineEmits<Emits>()
 const descriptionLines = computed(() => {
   return props.description.split('\n').filter(line => line.trim())
 })
+
+function escapeHtml(raw: string): string {
+  return raw
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
+function renderLine(line: string): string {
+  const escaped = escapeHtml(line)
+  // 支持最小语法加粗：**text**
+  return escaped.replace(
+    /\*\*(.+?)\*\*/g,
+    '<strong class="font-semibold text-foreground">$1</strong>'
+  )
+}
 
 // 根据行索引获取样式（中间行高亮）
 function getLineClass(index: number): string {

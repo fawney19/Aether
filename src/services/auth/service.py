@@ -31,7 +31,6 @@ if TYPE_CHECKING:
 from src.models.database import ApiKey, User, UserRole
 from src.services.auth.jwt_blacklist import JWTBlacklistService
 from src.services.cache.user_cache import UserCacheService
-from src.services.user.apikey import ApiKeyService
 
 # API Key last_used_at 更新节流配置
 # 同一个 API Key 在此时间间隔内只会更新一次 last_used_at
@@ -336,9 +335,9 @@ class AuthService:
                 username = f"{base_username}_ldap_{int(time.time())}{uuid.uuid4().hex[:4]}"
                 logger.info(f"LDAP 用户名冲突，使用新用户名: {ldap_user['username']} -> {username}")
 
-            # 读取系统配置的默认配额
-            default_quota = SystemConfigService.get_config(
-                db, "default_user_quota_usd", default=10.0
+            # 读取系统配置的默认初始赠款
+            default_initial_gift = SystemConfigService.get_config(
+                db, "default_user_initial_gift_usd", default=None
             )
 
             # 创建新用户
@@ -353,11 +352,22 @@ class AuthService:
                 role=UserRole.USER,
                 is_active=True,
                 last_login_at=datetime.now(timezone.utc),
-                quota_usd=default_quota,
             )
 
             try:
                 db.add(user)
+                db.flush()
+
+                from src.services.wallet import WalletService
+
+                WalletService.initialize_user_wallet(
+                    db,
+                    user=user,
+                    initial_gift_usd=default_initial_gift,
+                    unlimited=False,
+                    description="LDAP 注册初始赠款",
+                )
+
                 db.commit()
                 db.refresh(user)
                 logger.info(f"LDAP 用户创建成功: {ldap_user['email']} (ID: {user.id})")
@@ -408,7 +418,7 @@ class AuthService:
             logger.warning("API认证失败 - 密钥已禁用")
             return None
 
-        if key_record.is_locked:
+        if key_record.is_locked and not key_record.is_standalone:
             logger.warning("API认证失败 - 密钥已被管理员锁定")
             raise ForbiddenException("该密钥已被管理员锁定，请联系管理员")
 
@@ -423,17 +433,6 @@ class AuthService:
             if expires_at < datetime.now(timezone.utc):
                 logger.warning("API认证失败 - 密钥已过期")
                 return None
-
-        # 检查余额限制（仅独立Key）
-        is_balance_ok, remaining = ApiKeyService.check_balance(key_record)
-        if not is_balance_ok:
-            # 获取剩余余额用于日志
-            remaining_balance = ApiKeyService.get_remaining_balance(key_record)
-            logger.warning(
-                f"API认证失败 - 余额不足 "
-                f"(已用: ${key_record.balance_used_usd:.4f}, 剩余: ${remaining_balance:.4f})"
-            )
-            return None
 
         # 获取用户
         user = key_record.user
@@ -467,23 +466,22 @@ class AuthService:
         return user, key_record
 
     @staticmethod
-    def check_user_quota(user: User, estimated_cost: float = 0) -> bool:
-        """检查用户配额"""
-        if user.role == UserRole.ADMIN:
-            return True  # 管理员无限制
+    def check_user_balance_access(user: User, estimated_cost: float = 0) -> bool:
+        """按钱包余额/额度模式校验请求可用性。"""
+        from src.services.wallet import WalletService
 
-        # NULL 表示无限制
-        if user.quota_usd is None:
+        _ = estimated_cost
+        if user.role == UserRole.ADMIN:
             return True
 
-        # 检查美元配额
-        if user.used_usd + estimated_cost > user.quota_usd:
-            logger.warning(
-                f"用户配额不足: {user.email} (已用: ${user.used_usd:.2f}, 配额: ${user.quota_usd:.2f})"
-            )
+        wallet = getattr(user, "wallet", None)
+        if wallet is None:
             return False
-
-        return True
+        if wallet.status != "active":
+            return False
+        if WalletService.is_unlimited_wallet(wallet):
+            return True
+        return WalletService.get_spendable_balance_value(wallet) > 0
 
     @staticmethod
     def check_permission(user: User, required_role: UserRole = UserRole.USER) -> bool:

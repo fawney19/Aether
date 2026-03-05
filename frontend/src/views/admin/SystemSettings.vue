@@ -56,7 +56,7 @@
           <!-- 基础配置 -->
           <BasicConfigSection
             id="section-basic"
-            :default-user-quota-usd="systemConfig.default_user_quota_usd"
+            :default-user-initial-gift-usd="systemConfig.default_user_initial_gift_usd"
             :rate-limit-per-minute="systemConfig.rate_limit_per_minute"
             :enable-registration="systemConfig.enable_registration"
             :auto-delete-expired-keys="systemConfig.auto_delete_expired_keys"
@@ -64,7 +64,7 @@
             :loading="basicConfigLoading"
             :has-changes="hasBasicConfigChanges"
             @save="saveBasicConfig"
-            @update:default-user-quota-usd="systemConfig.default_user_quota_usd = $event"
+            @update:default-user-initial-gift-usd="systemConfig.default_user_initial_gift_usd = $event"
             @update:rate-limit-per-minute="systemConfig.rate_limit_per_minute = $event"
             @update:enable-registration="systemConfig.enable_registration = $event"
             @update:auto-delete-expired-keys="systemConfig.auto_delete_expired_keys = $event"
@@ -113,15 +113,6 @@
           <ScheduledTasksSection
             id="section-scheduled"
             :scheduled-tasks="scheduledTasks"
-            :quota-reset-interval-days="systemConfig.user_quota_reset_interval_days"
-            :standalone-key-reset-interval-days="systemConfig.standalone_key_quota_reset_interval_days"
-            :standalone-key-reset-mode="systemConfig.standalone_key_quota_reset_mode"
-            :standalone-key-reset-key-ids="systemConfig.standalone_key_quota_reset_key_ids"
-            :standalone-keys="standaloneKeys"
-            @update:quota-reset-interval-days="systemConfig.user_quota_reset_interval_days = $event"
-            @update:standalone-key-reset-interval-days="systemConfig.standalone_key_quota_reset_interval_days = $event"
-            @update:standalone-key-reset-mode="handleStandaloneKeyResetModeChange"
-            @toggle-standalone-key-reset-key-id="handleToggleStandaloneKeyResetKeyId"
           />
 
           <!-- 系统版本信息 -->
@@ -201,7 +192,6 @@
 import { ref, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { PageHeader, PageContainer } from '@/components/layout'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
-import { adminApi } from '@/api/admin'
 
 // Composables
 import { useSystemConfig } from './system-settings/composables/useSystemConfig'
@@ -344,50 +334,13 @@ const {
 const {
   scheduledTasks,
   initPreviousValues,
-  saveStandaloneKeyResetMode,
-  saveStandaloneKeyResetKeyIds,
 } = useScheduledTasks(systemConfig)
-
-// 独立密钥列表（用于定时任务配置中的密钥选择）
-const standaloneKeys = ref<Array<{ id: string; name?: string; key_display?: string; current_balance_usd?: number | null }>>([])
-
-async function loadStandaloneKeys() {
-  try {
-    const result = await adminApi.getAllApiKeys({ limit: 2000 })
-    standaloneKeys.value = result.api_keys.map((k) => ({
-      id: k.id,
-      name: k.name,
-      key_display: k.key_display,
-      current_balance_usd: k.current_balance_usd,
-    }))
-  } catch {
-    // 加载失败不影响其他功能
-  }
-}
-
-function handleStandaloneKeyResetModeChange(mode: string) {
-  systemConfig.value.standalone_key_quota_reset_mode = mode
-  saveStandaloneKeyResetMode(mode)
-}
-
-function handleToggleStandaloneKeyResetKeyId(keyId: string) {
-  const ids = [...systemConfig.value.standalone_key_quota_reset_key_ids]
-  const idx = ids.indexOf(keyId)
-  if (idx >= 0) {
-    ids.splice(idx, 1)
-  } else {
-    ids.push(keyId)
-  }
-  systemConfig.value.standalone_key_quota_reset_key_ids = ids
-  saveStandaloneKeyResetKeyIds(ids)
-}
 
 onMounted(async () => {
   await Promise.all([
     loadSystemConfig(),
     loadSystemVersion(),
     proxyNodesStore.ensureLoaded(),
-    loadStandaloneKeys(),
   ])
   // 配置加载完成后初始化定时任务的原始值
   initPreviousValues()

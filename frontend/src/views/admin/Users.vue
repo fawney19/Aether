@@ -173,22 +173,19 @@
         <Table>
           <TableHeader>
             <TableRow class="border-b border-border/60 hover:bg-transparent">
-              <TableHead class="w-[200px] h-12 font-semibold">
+              <TableHead class="w-[260px] h-12 font-semibold">
                 用户信息
               </TableHead>
-              <TableHead class="w-[180px] h-12 font-semibold">
-                邮箱
+              <TableHead class="w-[240px] h-12 font-semibold">
+                钱包
               </TableHead>
-              <TableHead class="w-[180px] h-12 font-semibold">
+              <TableHead class="w-[170px] h-12 font-semibold">
                 使用统计
-              </TableHead>
-              <TableHead class="w-[180px] h-12 font-semibold">
-                配额(美元)
               </TableHead>
               <TableHead class="w-[110px] h-12 font-semibold">
                 创建时间
               </TableHead>
-              <TableHead class="w-[90px] h-12 font-semibold text-center">
+              <TableHead class="w-[180px] h-12 font-semibold">
                 状态
               </TableHead>
               <TableHead class="w-[220px] h-12 font-semibold text-center">
@@ -210,28 +207,55 @@
                     </AvatarFallback>
                   </Avatar>
                   <div class="flex-1 min-w-0">
-                    <div
-                      class="truncate text-sm font-semibold mb-1"
-                      :title="user.username"
-                    >
-                      {{ user.username }}
+                    <div class="mb-1 flex items-center gap-1.5">
+                      <div
+                        class="truncate text-sm font-semibold"
+                        :title="user.username"
+                      >
+                        {{ user.username }}
+                      </div>
+                      <Badge
+                        :variant="user.role === 'admin' ? 'default' : 'secondary'"
+                        class="h-5 px-1.5 py-0 text-[10px] font-medium flex-shrink-0"
+                      >
+                        {{ user.role === 'admin' ? '管理员' : '普通用户' }}
+                      </Badge>
                     </div>
-                    <Badge
-                      :variant="user.role === 'admin' ? 'default' : 'secondary'"
-                      class="text-xs px-2 py-0.5"
+                    <div
+                      class="truncate text-xs text-muted-foreground"
+                      :title="user.email || '-'"
                     >
-                      {{ user.role === 'admin' ? '管理员' : '普通用户' }}
-                    </Badge>
+                      {{ user.email || '-' }}
+                    </div>
                   </div>
                 </div>
               </TableCell>
               <TableCell class="py-4">
-                <span
-                  class="block truncate text-sm text-muted-foreground"
-                  :title="user.email || '-'"
-                >
-                  {{ user.email || '-' }}
-                </span>
+                <div class="space-y-1.5">
+                  <div class="flex items-center gap-1 text-[11px] text-muted-foreground">
+                    <span>余额：</span>
+                    <Badge
+                      v-if="isUserUnlimited(user)"
+                      variant="secondary"
+                      class="h-5 px-1.5 py-0 text-[10px] font-medium"
+                    >
+                      无限额度
+                    </Badge>
+                    <span
+                      v-else
+                      class="text-sm font-semibold tabular-nums"
+                      :class="isNegativeWalletValue(getUserWalletTotalBalance(user)) ? 'text-rose-600' : 'text-foreground'"
+                    >
+                      {{ formatCurrencyValue(getUserWalletTotalBalance(user), '-') }}
+                    </span>
+                  </div>
+                  <div class="flex items-center gap-2 text-[11px] text-muted-foreground flex-wrap">
+                    <span>
+                      已消费：
+                      <span class="font-medium tabular-nums text-foreground">${{ getUserWalletConsumed(user).toFixed(2) }}</span>
+                    </span>
+                  </div>
+                </div>
               </TableCell>
               <TableCell class="py-4">
                 <div
@@ -255,35 +279,25 @@
                   <span v-else>无数据</span>
                 </div>
               </TableCell>
-              <TableCell class="py-4">
-                <div class="space-y-1.5 text-xs">
-                  <div
-                    v-if="user.quota_usd != null"
-                    class="text-muted-foreground"
-                  >
-                    当前: <span class="font-semibold text-foreground">${{ (user.used_usd || 0).toFixed(2) }}</span> / <span class="font-medium">${{ user.quota_usd.toFixed(2) }}</span>
-                  </div>
-                  <div
-                    v-else
-                    class="text-muted-foreground"
-                  >
-                    当前: <span class="font-semibold text-foreground">${{ (user.used_usd || 0).toFixed(2) }}</span> / <span class="font-medium text-amber-600">无限制</span>
-                  </div>
-                  <div class="text-muted-foreground">
-                    累计: <span class="font-medium text-foreground">${{ (user.total_usd || 0).toFixed(2) }}</span>
-                  </div>
-                </div>
-              </TableCell>
               <TableCell class="py-4 text-xs text-muted-foreground">
                 {{ formatDate(user.created_at) }}
               </TableCell>
-              <TableCell class="py-4 text-center">
-                <Badge
-                  :variant="user.is_active ? 'success' : 'destructive'"
-                  class="font-medium px-3 py-1"
-                >
-                  {{ user.is_active ? '活跃' : '禁用' }}
-                </Badge>
+              <TableCell class="py-4">
+                <div class="flex flex-col items-start gap-1.5">
+                  <Badge
+                    :variant="user.is_active ? 'success' : 'destructive'"
+                    class="h-5 px-1.5 py-0 text-[10px] font-medium"
+                  >
+                    {{ user.is_active ? '活跃' : '禁用' }}
+                  </Badge>
+                  <Badge
+                    v-if="getUserWallet(user.id)"
+                    :variant="walletStatusBadge(getUserWalletStatus(user.id))"
+                    class="h-5 px-1.5 py-0 text-[10px] font-medium"
+                  >
+                    {{ walletStatusLabel(getUserWalletStatus(user.id)) }}
+                  </Badge>
+                </div>
               </TableCell>
               <TableCell class="py-4">
                 <div class="flex justify-center gap-1">
@@ -300,7 +314,16 @@
                     variant="ghost"
                     size="icon"
                     class="h-8 w-8"
-                    title="查看API Keys"
+                    title="资金操作"
+                    @click="openWalletActionDialog(user)"
+                  >
+                    <DollarSign class="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="h-8 w-8"
+                    title="API Keys"
                     @click="manageApiKeys(user)"
                   >
                     <Key class="h-4 w-4" />
@@ -325,15 +348,6 @@
                     variant="ghost"
                     size="icon"
                     class="h-8 w-8"
-                    title="重置配额"
-                    @click="resetQuota(user)"
-                  >
-                    <RotateCcw class="h-4 w-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    class="h-8 w-8"
                     title="删除用户"
                     @click="deleteUser(user)"
                   >
@@ -347,144 +361,196 @@
       </div>
 
       <!-- 移动端卡片列表 -->
-      <div class="xl:hidden divide-y divide-border/40">
+      <div class="xl:hidden bg-muted/[0.14] p-3 sm:p-4">
         <div
-          v-for="user in paginatedUsers"
-          :key="user.id"
-          class="p-4 sm:p-5 hover:bg-muted/30 transition-colors"
+          v-if="paginatedUsers.length === 0"
+          class="rounded-2xl border border-dashed border-border/60 bg-card/70 px-6 py-10 text-center"
         >
-          <!-- 用户头部 -->
-          <div class="flex items-start justify-between mb-3 sm:mb-4">
-            <div class="flex items-center gap-2 sm:gap-3">
-              <Avatar class="h-10 w-10 sm:h-12 sm:w-12 ring-2 ring-background shadow-md flex-shrink-0">
-                <AvatarFallback class="bg-primary text-sm sm:text-base font-bold text-white">
-                  {{ user.username.charAt(0).toUpperCase() }}
-                </AvatarFallback>
-              </Avatar>
-              <div class="min-w-0">
-                <div class="font-semibold text-sm sm:text-base mb-1 truncate">
-                  {{ user.username }}
+          <Avatar class="mx-auto mb-3 h-12 w-12">
+            <AvatarFallback class="bg-muted text-base font-semibold text-muted-foreground">
+              U
+            </AvatarFallback>
+          </Avatar>
+          <p class="text-sm font-medium text-foreground">
+            {{ searchQuery || filterRole !== 'all' || filterStatus !== 'all' ? '未找到匹配的用户' : '暂无用户' }}
+          </p>
+          <p
+            v-if="searchQuery || filterRole !== 'all' || filterStatus !== 'all'"
+            class="mt-1 text-xs text-muted-foreground"
+          >
+            尝试调整筛选条件
+          </p>
+        </div>
+
+        <div
+          v-else
+          class="space-y-3.5"
+        >
+          <div
+            v-for="user in paginatedUsers"
+            :key="user.id"
+            class="rounded-2xl border border-border/60 bg-card/95 p-4 shadow-[0_10px_26px_-22px_hsl(var(--foreground))]"
+          >
+            <div class="space-y-4">
+              <div class="flex items-start gap-3">
+                <Avatar class="h-10 w-10 ring-2 ring-background shadow-md flex-shrink-0">
+                  <AvatarFallback class="bg-primary text-sm font-bold text-white">
+                    {{ user.username.charAt(0).toUpperCase() }}
+                  </AvatarFallback>
+                </Avatar>
+                <div class="min-w-0 flex-1 space-y-1.5">
+                  <div class="flex items-center gap-1.5">
+                    <div
+                      class="truncate text-sm font-semibold text-foreground"
+                      :title="user.username"
+                    >
+                      {{ user.username }}
+                    </div>
+                    <Badge
+                      :variant="user.role === 'admin' ? 'default' : 'secondary'"
+                      class="h-5 px-1.5 py-0 text-[10px] font-medium flex-shrink-0"
+                    >
+                      {{ user.role === 'admin' ? '管理员' : '普通用户' }}
+                    </Badge>
+                  </div>
+                  <div
+                    class="truncate text-[11px] text-muted-foreground"
+                    :title="user.email || '-'"
+                  >
+                    {{ user.email || '-' }}
+                  </div>
                 </div>
+              </div>
+
+              <div class="flex flex-wrap items-center gap-1.5">
                 <Badge
-                  :variant="user.role === 'admin' ? 'default' : 'secondary'"
-                  class="text-xs"
+                  :variant="user.is_active ? 'success' : 'destructive'"
+                  class="h-5 px-1.5 py-0 text-[10px] font-medium"
                 >
-                  {{ user.role === 'admin' ? '管理员' : '普通用户' }}
+                  {{ user.is_active ? '活跃' : '禁用' }}
+                </Badge>
+                <Badge
+                  v-if="getUserWallet(user.id)"
+                  :variant="walletStatusBadge(getUserWalletStatus(user.id))"
+                  class="h-5 px-1.5 py-0 text-[10px] font-medium"
+                >
+                  {{ walletStatusLabel(getUserWalletStatus(user.id)) }}
                 </Badge>
               </div>
-            </div>
-            <Badge
-              :variant="user.is_active ? 'success' : 'destructive'"
-              class="font-medium text-xs flex-shrink-0"
-            >
-              {{ user.is_active ? '活跃' : '禁用' }}
-            </Badge>
-          </div>
 
-          <!-- 用户信息 -->
-          <div class="space-y-2 sm:space-y-3 mb-3 sm:mb-4">
-            <div class="text-xs sm:text-sm">
-              <span class="text-muted-foreground">邮箱:</span>
-              <span class="ml-2 text-foreground truncate block sm:inline">{{ user.email || '-' }}</span>
-            </div>
-
-            <div
-              v-if="userStats[user.id]"
-              class="grid grid-cols-2 gap-2 p-2 sm:p-3 bg-muted/50 rounded-lg text-xs"
-            >
-              <div>
-                <div class="text-muted-foreground mb-1">
-                  请求次数
-                </div>
-                <div class="font-semibold text-sm text-foreground">
-                  {{ formatNumber(userStats[user.id]?.request_count) }}
-                </div>
-              </div>
-              <div>
-                <div class="text-muted-foreground mb-1">
-                  Tokens
-                </div>
-                <div class="font-semibold text-sm text-foreground">
-                  {{ formatTokens(userStats[user.id]?.total_tokens ?? 0) }}
+              <div class="rounded-xl border border-border/60 bg-muted/40 p-3.5">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="space-y-1">
+                    <p class="text-[11px] text-muted-foreground">
+                      余额：
+                    </p>
+                    <Badge
+                      v-if="isUserUnlimited(user)"
+                      variant="secondary"
+                      class="h-5 px-1.5 py-0 text-[10px] font-medium"
+                    >
+                      无限额度
+                    </Badge>
+                    <p
+                      v-else
+                      class="text-base font-semibold tabular-nums leading-none"
+                      :class="isNegativeWalletValue(getUserWalletTotalBalance(user)) ? 'text-rose-600' : 'text-foreground'"
+                    >
+                      {{ formatCurrencyValue(getUserWalletTotalBalance(user), '-') }}
+                    </p>
+                  </div>
+                  <div class="text-right">
+                    <p class="text-[11px] text-muted-foreground">
+                      已消费：
+                    </p>
+                    <p class="text-sm font-medium tabular-nums text-foreground">
+                      ${{ getUserWalletConsumed(user).toFixed(2) }}
+                    </p>
+                  </div>
                 </div>
               </div>
-            </div>
 
-            <div class="p-2 sm:p-3 bg-muted/50 rounded-lg text-xs space-y-1">
-              <div v-if="user.quota_usd != null">
-                <span class="text-muted-foreground">当前配额:</span>
-                <span class="ml-2 font-semibold text-sm">${{ (user.used_usd || 0).toFixed(2) }}</span> / ${{ user.quota_usd.toFixed(2) }}
+              <div class="grid grid-cols-2 gap-2.5 text-xs">
+                <div class="rounded-lg border border-border/50 bg-background/70 p-2.5">
+                  <div class="mb-1 text-muted-foreground">
+                    请求次数
+                  </div>
+                  <div class="font-semibold text-foreground">
+                    {{ formatNumber(userStats[user.id]?.request_count) }}
+                  </div>
+                </div>
+                <div class="rounded-lg border border-border/50 bg-background/70 p-2.5">
+                  <div class="mb-1 text-muted-foreground">
+                    Tokens
+                  </div>
+                  <div class="font-semibold text-foreground">
+                    {{ formatTokens(userStats[user.id]?.total_tokens ?? 0) }}
+                  </div>
+                </div>
               </div>
-              <div v-else>
-                <span class="text-muted-foreground">当前配额:</span>
-                <span class="ml-2 font-semibold text-sm">${{ (user.used_usd || 0).toFixed(2) }}</span> / <span class="text-amber-600">无限制</span>
+
+              <div class="rounded-lg bg-muted/35 p-2.5 text-[11px] text-muted-foreground">
+                <div class="flex items-center justify-between gap-2">
+                  <span>创建时间</span>
+                  <span class="font-medium text-foreground">{{ formatDate(user.created_at) }}</span>
+                </div>
               </div>
-              <div>
-                <span class="text-muted-foreground">累计消费:</span>
-                <span class="ml-2 font-semibold text-sm">${{ (user.total_usd || 0).toFixed(2) }}</span>
-              </div>
-              <div>
-                <span class="text-muted-foreground">创建时间:</span>
-                <span class="ml-2 text-sm">{{ formatDate(user.created_at) }}</span>
+
+              <div class="grid grid-cols-2 gap-2 pt-0.5">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="h-8 text-xs"
+                  @click="editUser(user)"
+                >
+                  <SquarePen class="mr-1.5 h-3.5 w-3.5" />
+                  编辑
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="h-8 text-xs"
+                  @click="openWalletActionDialog(user)"
+                >
+                  <DollarSign class="mr-1.5 h-3.5 w-3.5" />
+                  资金
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="h-8 text-xs"
+                  @click="manageApiKeys(user)"
+                >
+                  <Key class="mr-1.5 h-3.5 w-3.5" />
+                  API Keys
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="h-8 text-xs"
+                  @click="toggleUserStatus(user)"
+                >
+                  <PauseCircle
+                    v-if="user.is_active"
+                    class="mr-1.5 h-3.5 w-3.5"
+                  />
+                  <PlayCircle
+                    v-else
+                    class="mr-1.5 h-3.5 w-3.5"
+                  />
+                  {{ user.is_active ? '禁用' : '启用' }}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="col-span-2 h-8 border-rose-200 text-xs text-rose-600 hover:bg-rose-50 dark:border-rose-900/60 dark:hover:bg-rose-950/40"
+                  @click="deleteUser(user)"
+                >
+                  <Trash2 class="mr-1.5 h-3.5 w-3.5" />
+                  删除
+                </Button>
               </div>
             </div>
-          </div>
-
-          <!-- 操作按钮 - 响应式布局 -->
-          <div class="grid grid-cols-2 sm:flex sm:flex-wrap gap-1.5 sm:gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              class="text-xs sm:text-sm h-8 sm:h-9 sm:flex-1 sm:min-w-[90px]"
-              @click="editUser(user)"
-            >
-              <SquarePen class="h-3 w-3 sm:h-3.5 sm:w-3.5 sm:mr-1.5" />
-              <span class="hidden sm:inline">编辑</span>
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              class="text-xs sm:text-sm h-8 sm:h-9 sm:flex-1 sm:min-w-[100px]"
-              @click="manageApiKeys(user)"
-            >
-              <Key class="h-3 w-3 sm:h-3.5 sm:w-3.5 sm:mr-1.5" />
-              <span class="hidden sm:inline">API Keys</span>
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              class="text-xs sm:text-sm h-8 sm:h-9 sm:flex-1 sm:min-w-[90px]"
-              :class="user.is_active ? 'text-amber-600' : 'text-emerald-600'"
-              @click="toggleUserStatus(user)"
-            >
-              <PauseCircle
-                v-if="user.is_active"
-                class="h-3 w-3 sm:h-3.5 sm:w-3.5 sm:mr-1.5"
-              />
-              <PlayCircle
-                v-else
-                class="h-3 w-3 sm:h-3.5 sm:w-3.5 sm:mr-1.5"
-              />
-              <span class="hidden sm:inline">{{ user.is_active ? '禁用' : '启用' }}</span>
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              class="text-xs sm:text-sm h-8 sm:h-9"
-              @click="resetQuota(user)"
-            >
-              <RotateCcw class="h-3 w-3 sm:h-3.5 sm:w-3.5 sm:mr-1.5" />
-              <span class="hidden sm:inline">重置</span>
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              class="col-span-2 text-xs sm:text-sm h-8 sm:h-9 text-rose-600 sm:col-span-1"
-              @click="deleteUser(user)"
-            >
-              <Trash2 class="h-3 w-3 sm:h-3.5 sm:w-3.5 sm:mr-1.5" />
-              <span class="hidden sm:inline">删除</span>
-            </Button>
           </div>
         </div>
       </div>
@@ -659,6 +725,17 @@
       </template>
     </Dialog>
 
+    <WalletOpsDrawer
+      :open="showWalletActionDialogState"
+      :wallet="walletActionTarget?.wallet || null"
+      :owner-name="walletActionTarget?.user.username || ''"
+      :owner-subtitle="walletActionTarget?.user.email || '未设置邮箱'"
+      context-label="用户钱包"
+      accent="emerald"
+      @close="closeWalletActionDrawer"
+      @changed="handleWalletDrawerChanged"
+    />
+
     <!-- 新 API Key 显示对话框 -->
     <Dialog
       v-model="showNewApiKeyDialog"
@@ -720,11 +797,13 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useUsersStore } from '@/stores/users'
 import type { User, ApiKey } from '@/api/users'
+import { adminWalletApi, type AdminWallet } from '@/api/admin-wallets'
 import { useToast } from '@/composables/useToast'
 import { useConfirm } from '@/composables/useConfirm'
 import { useClipboard } from '@/composables/useClipboard'
 import { usageApi, type UsageByUser } from '@/api/usage'
 import { adminApi } from '@/api/admin'
+import { walletStatusBadge, walletStatusLabel } from '@/utils/walletDisplay'
 
 // UI 组件
 import {
@@ -757,7 +836,7 @@ import {
   Key,
   PauseCircle,
   PlayCircle,
-  RotateCcw,
+  DollarSign,
   Trash2,
   Copy,
   Search,
@@ -768,11 +847,12 @@ import {
 
 // 功能组件
 import UserFormDialog, { type UserFormData } from '@/features/users/components/UserFormDialog.vue'
+import WalletOpsDrawer from '@/features/wallet/components/WalletOpsDrawer.vue'
 import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
 
 const { success, error } = useToast()
-const { confirmDanger, confirmWarning } = useConfirm()
+const { confirmDanger } = useConfirm()
 const { copyToClipboard } = useClipboard()
 const usersStore = useUsersStore()
 
@@ -793,6 +873,10 @@ const apiKeyInput = ref<HTMLInputElement>()
 // 用户统计
 const userStats = ref<Record<string, UsageByUser>>({})
 const loadingStats = ref(false)
+const userWalletMap = ref<Record<string, AdminWallet>>({})
+
+const showWalletActionDialogState = ref(false)
+const walletActionTarget = ref<{ user: User; wallet: AdminWallet } | null>(null)
 
 const searchQuery = ref('')
 const filterRole = ref('all')
@@ -846,13 +930,15 @@ watch([searchQuery, filterRole, filterStatus], () => {
 })
 
 onMounted(async () => {
-  await usersStore.fetchUsers()
-  await loadUserStats()
+  await refreshUsers()
 })
 
 async function refreshUsers() {
-  await usersStore.fetchUsers()
-  await loadUserStats()
+  await Promise.all([
+    usersStore.fetchUsers(),
+    loadUserStats(),
+    loadUserWallets()
+  ])
 }
 
 function formatDate(dateString: string) {
@@ -874,6 +960,20 @@ async function loadUserStats() {
   }
 }
 
+async function loadUserWallets() {
+  try {
+    const wallets = await adminWalletApi.listAllWallets()
+    userWalletMap.value = wallets
+      .filter((wallet) => wallet.owner_type === 'user' && !!wallet.user_id)
+      .reduce<Record<string, AdminWallet>>((acc, wallet) => {
+        acc[wallet.user_id as string] = wallet
+        return acc
+      }, {})
+  } catch (err) {
+    log.error('加载用户钱包失败:', err)
+  }
+}
+
 function formatTokens(tokens: number): string {
   if (tokens >= 1000000) {
     return `${(tokens / 1000000).toFixed(1)}M`
@@ -886,6 +986,48 @@ function formatTokens(tokens: number): string {
 function formatNumber(value?: number | null): string {
   const numericValue = typeof value === 'number' && Number.isFinite(value) ? value : 0
   return numericValue.toLocaleString()
+}
+
+function getUserWallet(userId: string): AdminWallet | null {
+  return userWalletMap.value[userId] || null
+}
+
+function isUserUnlimited(user: User): boolean {
+  const wallet = getUserWallet(user.id)
+  if (wallet?.limit_mode === 'unlimited' || wallet?.unlimited === true) {
+    return true
+  }
+  return Boolean(user.unlimited)
+}
+
+function getUserWalletTotalBalance(user: User): number | null {
+  if (isUserUnlimited(user)) {
+    return null
+  }
+  const wallet = getUserWallet(user.id)
+  if (!wallet) {
+    return null
+  }
+  return wallet.balance
+}
+
+function getUserWalletConsumed(user: User): number {
+  return getUserWallet(user.id)?.total_consumed ?? 0
+}
+
+function getUserWalletStatus(userId: string): string | null {
+  return getUserWallet(userId)?.status ?? null
+}
+
+function formatCurrencyValue(value: number | null, nullLabel = '-'): string {
+  if (value == null) {
+    return nullLabel
+  }
+  return `$${value.toFixed(2)}`
+}
+
+function isNegativeWalletValue(value: number | null): boolean {
+  return typeof value === 'number' && value < 0
 }
 
 async function toggleUserStatus(user: User) {
@@ -919,7 +1061,7 @@ function editUser(user: User) {
     id: user.id,
     username: user.username,
     email: user.email,
-    quota_usd: user.quota_usd,
+    unlimited: user.unlimited,
     role: user.role,
     is_active: user.is_active,
     allowed_providers: [...(user.allowed_providers || [])],
@@ -934,7 +1076,7 @@ function closeUserFormDialog() {
   editingUser.value = null
 }
 
-async function handleUserFormSubmit(data: UserFormData & { password?: string }) {
+async function handleUserFormSubmit(data: UserFormData & { password?: string; unlimited?: boolean }) {
   userFormDialogRef.value?.setSaving(true)
   try {
     if (data.id) {
@@ -942,7 +1084,7 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string }) 
       const updateData: Record<string, unknown> = {
         username: data.username,
         email: data.email || undefined,
-        quota_usd: data.quota_usd,
+        unlimited: data.unlimited,
         role: data.role,
         allowed_providers: data.allowed_providers,
         allowed_api_formats: data.allowed_api_formats,
@@ -952,6 +1094,7 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string }) 
         updateData.password = data.password
       }
       await usersStore.updateUser(data.id, updateData)
+      await loadUserWallets()
       success('用户信息已更新')
     } else {
       // 创建用户
@@ -959,8 +1102,8 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string }) 
         username: data.username,
         password: data.password ?? '',
         email: data.email || undefined,
-        quota_usd: data.quota_usd,
-        unlimited: (data as Record<string, unknown>).unlimited as boolean | undefined,
+        initial_gift_usd: data.initial_gift_usd,
+        unlimited: data.unlimited,
         role: data.role,
         allowed_providers: data.allowed_providers,
         allowed_api_formats: data.allowed_api_formats,
@@ -970,6 +1113,7 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string }) 
       if (data.is_active === false && newUser) {
         await usersStore.updateUser(newUser.id, { is_active: false })
       }
+      await loadUserWallets()
       success('用户创建成功')
     }
     closeUserFormDialog()
@@ -1046,8 +1190,9 @@ async function deleteApiKey(apiKey: ApiKey) {
 }
 
 async function toggleLockApiKey(apiKey: ApiKey) {
+  if (!selectedUser.value) return
   try {
-    const response = await adminApi.toggleLockApiKey(apiKey.id)
+    const response = await adminApi.toggleUserApiKeyLock(selectedUser.value.id, apiKey.id)
     // 更新本地状态
     const index = userApiKeys.value.findIndex(k => k.id === apiKey.id)
     if (index !== -1) {
@@ -1061,9 +1206,9 @@ async function toggleLockApiKey(apiKey: ApiKey) {
 }
 
 async function copyFullKey(apiKey: ApiKey) {
+  if (!selectedUser.value) return
   try {
-    // 调用后端 API 获取完整密钥
-    const response = await adminApi.getFullApiKey(apiKey.id)
+    const response = await usersStore.getFullApiKey(selectedUser.value.id, apiKey.id)
     await copyToClipboard(response.key)
   } catch (err: unknown) {
     log.error('复制密钥失败:', err)
@@ -1071,19 +1216,30 @@ async function copyFullKey(apiKey: ApiKey) {
   }
 }
 
-async function resetQuota(user: User) {
-  const confirmed = await confirmWarning(
-    `确定要重置用户 ${user.username} 的配额使用量吗？\n\n这将把已使用金额重置为0。`,
-    '重置配额'
-  )
+function openWalletActionDialog(user: User) {
+  const wallet = getUserWallet(user.id)
+  if (!wallet) {
+    error('该用户的钱包尚未初始化，暂时无法进行资金操作')
+    return
+  }
 
-  if (!confirmed) return
+  walletActionTarget.value = {
+    user,
+    wallet,
+  }
+  showWalletActionDialogState.value = true
+}
 
-  try {
-    await usersStore.resetUserQuota(user.id)
-    success('配额已重置')
-  } catch (err: unknown) {
-    error(parseApiError(err, '未知错误'), '重置配额失败')
+function closeWalletActionDrawer() {
+  showWalletActionDialogState.value = false
+}
+
+async function handleWalletDrawerChanged() {
+  await loadUserWallets()
+  if (!walletActionTarget.value) return
+  const latestWallet = getUserWallet(walletActionTarget.value.user.id)
+  if (latestWallet) {
+    walletActionTarget.value.wallet = latestWallet
   }
 }
 

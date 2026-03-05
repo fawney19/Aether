@@ -3,15 +3,17 @@ UsageService 测试
 
 测试用量统计服务的核心功能：
 - 成本计算
-- 配额检查
+- 钱包准入检查
 - 用量统计查询
 """
 
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.services.usage.service import UsageService
+from src.services.wallet import WalletAccessResult
 
 
 class TestCostCalculation:
@@ -120,14 +122,12 @@ class TestCostCalculation:
         assert total_cost == 0
 
 
-class TestQuotaCheck:
-    """测试配额检查"""
+class TestBalanceCheck:
+    """测试钱包准入检查"""
 
-    def test_check_user_quota_sufficient(self) -> None:
-        """测试配额充足"""
+    def test_check_request_balance_sufficient(self) -> None:
+        """测试余额充足"""
         mock_user = MagicMock()
-        mock_user.quota_usd = 100.0
-        mock_user.used_usd = 30.0
         mock_user.role = MagicMock()
         mock_user.role.value = "user"
 
@@ -136,15 +136,19 @@ class TestQuotaCheck:
 
         mock_db = MagicMock()
 
-        is_ok, message = UsageService.check_user_quota(mock_db, mock_user, api_key=mock_api_key)
+        with patch(
+            "src.services.wallet.WalletService.check_request_allowed",
+            return_value=WalletAccessResult(True, Decimal("70"), "OK"),
+        ):
+            is_ok, message = UsageService.check_request_balance(
+                mock_db, mock_user, api_key=mock_api_key
+            )
 
         assert is_ok is True
 
-    def test_check_user_quota_exceeded(self) -> None:
-        """测试配额超限（当有预估成本时）"""
+    def test_check_request_balance_exceeded(self) -> None:
+        """测试余额耗尽时拦截新请求"""
         mock_user = MagicMock()
-        mock_user.quota_usd = 100.0
-        mock_user.used_usd = 99.0  # 接近配额上限
         mock_user.role = MagicMock()
         mock_user.role.value = "user"
 
@@ -153,19 +157,20 @@ class TestQuotaCheck:
 
         mock_db = MagicMock()
 
-        # 当预估成本超过剩余配额时应该返回 False
-        is_ok, message = UsageService.check_user_quota(
-            mock_db, mock_user, estimated_cost=5.0, api_key=mock_api_key
-        )
+        with patch(
+            "src.services.wallet.WalletService.check_request_allowed",
+            return_value=WalletAccessResult(False, Decimal("0"), "钱包余额不足"),
+        ):
+            is_ok, message = UsageService.check_request_balance(
+                mock_db, mock_user, estimated_cost=5.0, api_key=mock_api_key
+            )
 
         assert is_ok is False
-        assert "配额" in message
+        assert "余额" in message
 
-    def test_check_user_quota_no_limit(self) -> None:
+    def test_check_request_balance_no_limit(self) -> None:
         """测试无配额限制（None）"""
         mock_user = MagicMock()
-        mock_user.quota_usd = None
-        mock_user.used_usd = 1000.0
         mock_user.role = MagicMock()
         mock_user.role.value = "user"
 
@@ -174,17 +179,21 @@ class TestQuotaCheck:
 
         mock_db = MagicMock()
 
-        is_ok, message = UsageService.check_user_quota(mock_db, mock_user, api_key=mock_api_key)
+        with patch(
+            "src.services.wallet.WalletService.check_request_allowed",
+            return_value=WalletAccessResult(True, None, "OK"),
+        ):
+            is_ok, message = UsageService.check_request_balance(
+                mock_db, mock_user, api_key=mock_api_key
+            )
 
         assert is_ok is True
 
-    def test_check_user_quota_admin_bypass(self) -> None:
-        """测试管理员绕过配额检查"""
+    def test_check_request_balance_admin_bypass(self) -> None:
+        """测试管理员绕过余额检查"""
         from src.models.database import UserRole
 
         mock_user = MagicMock()
-        mock_user.quota_usd = 0.0
-        mock_user.used_usd = 1000.0
         mock_user.role = UserRole.ADMIN
 
         mock_api_key = MagicMock()
@@ -192,55 +201,58 @@ class TestQuotaCheck:
 
         mock_db = MagicMock()
 
-        is_ok, message = UsageService.check_user_quota(mock_db, mock_user, api_key=mock_api_key)
+        with patch(
+            "src.services.wallet.WalletService.check_request_allowed",
+            return_value=WalletAccessResult(True, None, "OK"),
+        ):
+            is_ok, message = UsageService.check_request_balance(
+                mock_db, mock_user, api_key=mock_api_key
+            )
 
         assert is_ok is True
 
     def test_check_standalone_api_key_balance(self) -> None:
-        """测试独立 API Key 余额检查"""
+        """测试独立 API Key 余额充足"""
         mock_user = MagicMock()
-        mock_user.quota_usd = 0.0
-        mock_user.used_usd = 0.0
         mock_user.role = MagicMock()
         mock_user.role.value = "user"
 
         mock_api_key = MagicMock()
         mock_api_key.is_standalone = True
-        mock_api_key.current_balance_usd = 50.0
-        mock_api_key.balance_used_usd = 10.0
 
         mock_db = MagicMock()
 
-        is_ok, message = UsageService.check_user_quota(mock_db, mock_user, api_key=mock_api_key)
+        with patch(
+            "src.services.wallet.WalletService.check_request_allowed",
+            return_value=WalletAccessResult(True, Decimal("40"), "OK"),
+        ):
+            is_ok, message = UsageService.check_request_balance(
+                mock_db, mock_user, api_key=mock_api_key
+            )
 
         assert is_ok is True
 
     def test_check_standalone_api_key_insufficient_balance(self) -> None:
-        """测试独立 API Key 余额不足"""
+        """测试独立 API Key 余额耗尽时拦截"""
         mock_user = MagicMock()
-        mock_user.quota_usd = 100.0
-        mock_user.used_usd = 0.0
         mock_user.role = MagicMock()
         mock_user.role.value = "user"
 
         mock_api_key = MagicMock()
         mock_api_key.is_standalone = True
-        mock_api_key.current_balance_usd = 10.0
-        mock_api_key.balance_used_usd = 9.0  # 剩余 $1
 
         mock_db = MagicMock()
 
-        # 需要 mock ApiKeyService.get_remaining_balance
         with patch(
-            "src.services.user.apikey.ApiKeyService.get_remaining_balance",
-            return_value=1.0,
+            "src.services.wallet.WalletService.check_request_allowed",
+            return_value=WalletAccessResult(False, Decimal("0"), "钱包余额不足"),
         ):
-            # 预估成本 $5 超过剩余余额 $1
-            is_ok, message = UsageService.check_user_quota(
+            is_ok, message = UsageService.check_request_balance(
                 mock_db, mock_user, estimated_cost=5.0, api_key=mock_api_key
             )
 
         assert is_ok is False
+        assert "Key余额不足" in message
 
 
 class TestUsageStatistics:

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from src.core.logger import logger
 from src.models.database import ApiKey, Provider, ProxyNode, Usage, User, UserModelUsageCount
+from src.services.billing.precision import to_money_decimal
 from src.services.provider_keys.codex_quota_sync_dispatcher import (
     dispatch_codex_quota_sync_from_response_headers,
 )
@@ -20,6 +21,7 @@ from src.services.usage._recording_helpers import (
     update_existing_usage,
 )
 from src.services.usage._types import UsageCostInfo, UsageRecordParams
+from src.services.wallet import WalletService
 
 
 def _extract_manual_proxy_node_id(metadata: dict[str, Any] | None) -> str | None:
@@ -69,12 +71,12 @@ def _increment_proxy_node_requests(
 class UsageRecordingMixin(UsageBillingIntegrationMixin):
     """记录用量相关方法"""
 
-    # Metadata pruning configuration -- re-export from helpers for backward compatibility
+    # Metadata pruning configuration
     _METADATA_PRUNE_KEYS: tuple[str, ...] = METADATA_PRUNE_KEYS
     _METADATA_KEEP_KEYS: frozenset[str] = METADATA_KEEP_KEYS
 
     # ------------------------------------------------------------------
-    # Backward-compatible thin wrappers
+    # Helper wrappers
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -120,6 +122,54 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
     def _sanitize_request_metadata(cls, metadata: dict[str, Any]) -> dict[str, Any]:
         """元数据清理（委托到模块级函数）"""
         return sanitize_request_metadata(metadata)
+
+    @staticmethod
+    def _is_terminal_status(status: str | None) -> bool:
+        return status in {"completed", "failed", "cancelled"}
+
+    @staticmethod
+    def _is_usage_finalized(usage: Usage) -> bool:
+        return getattr(usage, "billing_status", None) in {"settled", "void"} and getattr(
+            usage, "finalized_at", None
+        ) is not None
+
+    @classmethod
+    def _finalize_usage_billing(
+        cls,
+        db: Session,
+        *,
+        usage: Usage,
+        total_cost: float,
+        status: str | None,
+        finalized_at: datetime | None = None,
+    ) -> tuple[bool, bool]:
+        """完成 usage 的结算状态，并在需要时扣减钱包。
+
+        Returns:
+            (是否首次进入终态, 是否发生扣费)
+        """
+
+        if not cls._is_terminal_status(status):
+            if getattr(usage, "billing_status", None) is None:
+                usage.billing_status = "pending"
+            return False, False
+
+        if getattr(usage, "billing_status", None) in {"settled", "void"} and getattr(
+            usage, "finalized_at", None
+        ) is not None:
+            return False, False
+
+        now = finalized_at or datetime.now(timezone.utc)
+        charge_amount = to_money_decimal(total_cost)
+        usage.finalized_at = usage.finalized_at or now
+
+        if charge_amount > 0:
+            usage.billing_status = "settled"
+            WalletService.apply_usage_charge(db, usage=usage, amount_usd=charge_amount)
+            return True, True
+
+        usage.billing_status = "void" if status in {"failed", "cancelled"} else "settled"
+        return True, False
 
     # ------------------------------------------------------------------
     # Recording methods
@@ -221,7 +271,8 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
             use_tiered_pricing=use_tiered_pricing,
             target_model=target_model,
         )
-        usage_params, _ = await cls._prepare_usage_record(params)
+        usage_params, total_cost = await cls._prepare_usage_record(params)
+        total_cost = to_money_decimal(total_cost)
 
         # 创建 Usage 记录
         usage = Usage(**usage_params)
@@ -243,17 +294,19 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
 
         # 更新 Provider 月度使用量（原子操作）
         if provider_id:
-            actual_total_cost = usage_params["actual_total_cost_usd"]
+            actual_total_cost = float(usage_params["actual_total_cost_usd"])
             db.execute(
                 update(Provider)
                 .where(Provider.id == provider_id)
                 .values(monthly_used_usd=Provider.monthly_used_usd + actual_total_cost)
             )
 
-        # 结算标记：record_usage_async 写入的 Usage 通常为终态记录
-        if status not in ("pending", "streaming"):
-            usage.billing_status = "settled"
-            usage.finalized_at = datetime.now(timezone.utc)
+        cls._finalize_usage_billing(
+            db,
+            usage=usage,
+            total_cost=total_cost,
+            status=status,
+        )
 
         dispatch_codex_quota_sync_from_response_headers(
             provider_api_key_id=provider_api_key_id,
@@ -363,10 +416,18 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
             target_model=target_model,
         )
         usage_params, total_cost = await cls._prepare_usage_record(params)
+        total_cost = to_money_decimal(total_cost)
 
         # 检查是否已存在相同 request_id 的记录
-        existing_usage = db.query(Usage).filter(Usage.request_id == request_id).first()
+        existing_usage = db.query(Usage).filter(Usage.request_id == request_id).with_for_update().first()
         if existing_usage:
+            if cls._is_usage_finalized(existing_usage):
+                logger.debug(
+                    "request_id {} 已完成结算，跳过重复记账 (billing_status={})",
+                    request_id,
+                    getattr(existing_usage, "billing_status", None),
+                )
+                return existing_usage
             logger.debug(
                 f"request_id {request_id} 已存在，更新现有记录 "
                 f"(status: {existing_usage.status} -> {status})"
@@ -389,75 +450,53 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
 
         from src.models.database import ApiKey as ApiKeyModel
         from src.models.database import GlobalModel
-        from src.models.database import User as UserModel
-
-        # 更新用户使用量（独立 Key 不计入创建者的使用记录）
-        if user and not (api_key and api_key.is_standalone):
-            db.execute(
-                update(UserModel)
-                .where(UserModel.id == user.id)
-                .values(
-                    used_usd=UserModel.used_usd + total_cost,
-                    total_usd=UserModel.total_usd + total_cost,
-                    updated_at=sql_func.now(),
-                )
-            )
-
-        # 更新 API 密钥使用量
-        if api_key:
-            if api_key.is_standalone:
-                db.execute(
-                    update(ApiKeyModel)
-                    .where(ApiKeyModel.id == api_key.id)
-                    .values(
-                        total_requests=ApiKeyModel.total_requests + 1,
-                        total_cost_usd=ApiKeyModel.total_cost_usd + total_cost,
-                        balance_used_usd=ApiKeyModel.balance_used_usd + total_cost,
-                        last_used_at=sql_func.now(),
-                        updated_at=sql_func.now(),
-                    )
-                )
-            else:
-                db.execute(
-                    update(ApiKeyModel)
-                    .where(ApiKeyModel.id == api_key.id)
-                    .values(
-                        total_requests=ApiKeyModel.total_requests + 1,
-                        total_cost_usd=ApiKeyModel.total_cost_usd + total_cost,
-                        last_used_at=sql_func.now(),
-                        updated_at=sql_func.now(),
-                    )
-                )
-
-        # 更新 GlobalModel 使用计数
-        db.execute(
-            update(GlobalModel)
-            .where(GlobalModel.name == model)
-            .values(usage_count=GlobalModel.usage_count + 1)
+        accounted, charge_applied = cls._finalize_usage_billing(
+            db,
+            usage=usage,
+            total_cost=total_cost,
+            status=status,
         )
 
-        # 更新用户-模型调用次数计数器
-        cls._increment_user_model_usage(db, user, model)
+        if accounted:
+            # 更新 API 密钥使用量
+            if api_key:
+                values: dict[str, Any] = {
+                    "total_requests": ApiKeyModel.total_requests + 1,
+                    "last_used_at": sql_func.now(),
+                    "updated_at": sql_func.now(),
+                }
+                if charge_applied:
+                    values["total_cost_usd"] = ApiKeyModel.total_cost_usd + float(to_money_decimal(total_cost))
+                db.execute(
+                    update(ApiKeyModel)
+                    .where(ApiKeyModel.id == api_key.id)
+                    .values(**values)
+                )
 
-        # 更新 Provider 月度使用量
-        if provider_id:
-            actual_total_cost = usage_params["actual_total_cost_usd"]
+            # 更新 GlobalModel 使用计数
             db.execute(
-                update(Provider)
-                .where(Provider.id == provider_id)
-                .values(monthly_used_usd=Provider.monthly_used_usd + actual_total_cost)
+                update(GlobalModel)
+                .where(GlobalModel.name == model)
+                .values(usage_count=GlobalModel.usage_count + 1)
             )
 
-        # 更新手动代理节点请求计数（tunnel 节点由心跳上报，不在此处统计）
-        manual_node_id = _extract_manual_proxy_node_id(metadata)
-        if manual_node_id:
-            failed = {manual_node_id: 1} if status == "failed" else None
-            _increment_proxy_node_requests(db, {manual_node_id: 1}, failed)
+            # 更新用户-模型调用次数计数器
+            cls._increment_user_model_usage(db, user, model)
 
-        # 结算标记：终态请求写入 settled + finalized_at
-        if status not in ("pending", "streaming"):
-            usage.billing_status = "settled"
-            usage.finalized_at = datetime.now(timezone.utc)
+            # 更新 Provider 月度使用量
+            if charge_applied and provider_id:
+                actual_total_cost = float(usage_params["actual_total_cost_usd"])
+                db.execute(
+                    update(Provider)
+                    .where(Provider.id == provider_id)
+                    .values(monthly_used_usd=Provider.monthly_used_usd + actual_total_cost)
+                )
+
+            # 更新手动代理节点请求计数（tunnel 节点由心跳上报，不在此处统计）
+            manual_node_id = _extract_manual_proxy_node_id(metadata)
+            if manual_node_id:
+                failed = {manual_node_id: 1} if status == "failed" else None
+                _increment_proxy_node_requests(db, {manual_node_id: 1}, failed)
 
         dispatch_codex_quota_sync_from_response_headers(
             provider_api_key_id=provider_api_key_id,
@@ -542,10 +581,14 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
         cache_creation_cost = 0.0
         cache_read_cost = 0.0
         cache_cost = 0.0
-        request_cost = (
-            float(request_cost_usd) if request_cost_usd is not None else float(total_cost_usd)
+        request_cost_decimal = (
+            to_money_decimal(request_cost_usd)
+            if request_cost_usd is not None
+            else to_money_decimal(total_cost_usd)
         )
-        total_cost = float(total_cost_usd)
+        total_cost_decimal = to_money_decimal(total_cost_usd)
+        request_cost = float(request_cost_decimal)
+        total_cost = float(total_cost_decimal)
 
         usage_params = build_usage_params(
             db=db,
@@ -598,10 +641,8 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
             ),
         )
 
-        # Upsert（并发幂等：优先用 billing_status 作为结算闸门）
-        from sqlalchemy import update
-
-        existing_usage = db.query(Usage).filter(Usage.request_id == request_id).first()
+        # Upsert（并发幂等：锁定 request_id 对应行，避免重复结算）
+        existing_usage = db.query(Usage).filter(Usage.request_id == request_id).with_for_update().first()
         if existing_usage:
             # 避免重复记账：若已结算/作废，直接返回（防止并发重复加计数）
             if getattr(existing_usage, "billing_status", None) in ("settled", "void"):
@@ -611,25 +652,6 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
                     getattr(existing_usage, "billing_status", None),
                 )
                 return existing_usage
-
-            # 并发闸门：只有 billing_status='pending' 的那一次调用可以继续
-            now = datetime.now(timezone.utc)
-            claim = db.execute(
-                update(Usage)
-                .where(
-                    Usage.request_id == request_id,
-                    Usage.billing_status == "pending",
-                )
-                .values(billing_status="settled", finalized_at=now)
-            )
-            if claim.rowcount != 1:
-                # 已被其他 worker 抢先处理（或被 VOID）
-                latest = db.query(Usage).filter(Usage.request_id == request_id).first()
-                return latest or existing_usage
-
-            # 同步 ORM 对象（避免后续代码读到旧值）
-            existing_usage.billing_status = "settled"
-            existing_usage.finalized_at = now
 
             cls._update_existing_usage(existing_usage, usage_params, target_model)
             usage = existing_usage
@@ -649,69 +671,43 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
 
         from src.models.database import ApiKey as ApiKeyModel
         from src.models.database import GlobalModel
-        from src.models.database import User as UserModel
-
-        # 更新用户使用量（独立 Key 不计入创建者）
-        if user and not (api_key and api_key.is_standalone):
-            db.execute(
-                update(UserModel)
-                .where(UserModel.id == user.id)
-                .values(
-                    used_usd=UserModel.used_usd + total_cost,
-                    total_usd=UserModel.total_usd + total_cost,
-                    updated_at=sql_func.now(),
-                )
-            )
-
-        # 更新 API 密钥使用量
-        if api_key:
-            if api_key.is_standalone:
-                db.execute(
-                    update(ApiKeyModel)
-                    .where(ApiKeyModel.id == api_key.id)
-                    .values(
-                        total_requests=ApiKeyModel.total_requests + 1,
-                        total_cost_usd=ApiKeyModel.total_cost_usd + total_cost,
-                        balance_used_usd=ApiKeyModel.balance_used_usd + total_cost,
-                        last_used_at=sql_func.now(),
-                        updated_at=sql_func.now(),
-                    )
-                )
-            else:
-                db.execute(
-                    update(ApiKeyModel)
-                    .where(ApiKeyModel.id == api_key.id)
-                    .values(
-                        total_requests=ApiKeyModel.total_requests + 1,
-                        total_cost_usd=ApiKeyModel.total_cost_usd + total_cost,
-                        last_used_at=sql_func.now(),
-                        updated_at=sql_func.now(),
-                    )
-                )
-
-        # 更新 GlobalModel 使用计数
-        db.execute(
-            update(GlobalModel)
-            .where(GlobalModel.name == model)
-            .values(usage_count=GlobalModel.usage_count + 1)
+        accounted, charge_applied = cls._finalize_usage_billing(
+            db,
+            usage=usage,
+            total_cost=total_cost,
+            status=status,
         )
 
-        # 更新用户-模型调用次数计数器
-        cls._increment_user_model_usage(db, user, model)
+        if accounted:
+            # 更新 API 密钥使用量
+            if api_key:
+                values: dict[str, Any] = {
+                    "total_requests": ApiKeyModel.total_requests + 1,
+                    "last_used_at": sql_func.now(),
+                    "updated_at": sql_func.now(),
+                }
+                if charge_applied:
+                    values["total_cost_usd"] = ApiKeyModel.total_cost_usd + float(total_cost_decimal)
+                db.execute(update(ApiKeyModel).where(ApiKeyModel.id == api_key.id).values(**values))
 
-        # 更新 Provider 月度使用量（使用 actual_total_cost）
-        if provider_id:
-            actual_total_cost = usage_params["actual_total_cost_usd"]
+            # 更新 GlobalModel 使用计数
             db.execute(
-                update(Provider)
-                .where(Provider.id == provider_id)
-                .values(monthly_used_usd=Provider.monthly_used_usd + actual_total_cost)
+                update(GlobalModel)
+                .where(GlobalModel.name == model)
+                .values(usage_count=GlobalModel.usage_count + 1)
             )
 
-        # 结算标记：record_usage_with_custom_cost 写入/更新的 Usage 通常为终态记录
-        if status not in ("pending", "streaming"):
-            usage.billing_status = "settled"
-            usage.finalized_at = datetime.now(timezone.utc)
+            # 更新用户-模型调用次数计数器
+            cls._increment_user_model_usage(db, user, model)
+
+            # 更新 Provider 月度使用量（使用 actual_total_cost）
+            if charge_applied and provider_id:
+                actual_total_cost = float(usage_params["actual_total_cost_usd"])
+                db.execute(
+                    update(Provider)
+                    .where(Provider.id == provider_id)
+                    .values(monthly_used_usd=Provider.monthly_used_usd + actual_total_cost)
+                )
 
         dispatch_codex_quota_sync_from_response_headers(
             provider_api_key_id=provider_api_key_id,
@@ -770,7 +766,6 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
 
         from src.models.database import ApiKey as ApiKeyModel
         from src.models.database import GlobalModel
-        from src.models.database import User as UserModel
 
         # 分离需要更新和需要新建的记录
         request_ids = [r.get("request_id") for r in records if r.get("request_id")]
@@ -782,15 +777,17 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
             # 查询已存在的 Usage 记录（包括 pending/streaming 状态）
             from sqlalchemy.orm import selectinload
 
-            existing_records = (
+            existing_query = (
                 db.query(Usage)
                 .options(
                     selectinload(Usage.user),
                     selectinload(Usage.api_key),
                 )
                 .filter(Usage.request_id.in_(request_ids))
-                .all()
             )
+            if hasattr(existing_query, "with_for_update"):
+                existing_query = existing_query.with_for_update()
+            existing_records = existing_query.all()
             existing_usages = {u.request_id: u for u in existing_records}
 
             for record in records:
@@ -826,7 +823,6 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
             )
 
         usages: list[Usage] = []
-        user_costs: dict[str, float] = defaultdict(float)  # user_id -> total_cost
         apikey_stats: dict[str, dict[str, Any]] = defaultdict(
             lambda: {"requests": 0, "cost": 0.0, "is_standalone": False}
         )
@@ -858,6 +854,7 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
 
         skipped_count = 0
         updated_count = 0
+        inserted_count = 0
         total_count = len(all_records)
 
         # 辅助函数：构建 UsageRecordParams
@@ -949,7 +946,6 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
         insert_results = prepared_results[len(update_params_list) :]
 
         finalized_at = datetime.now(timezone.utc)
-        terminal_statuses = {"completed", "failed", "cancelled"}
 
         # 1. 处理需要更新的记录
         for i, (record, request_id, params) in enumerate(update_params_list):
@@ -965,42 +961,40 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
 
                 # 更新已存在的 Usage 记录
                 cls._update_existing_usage(existing_usage, usage_params, record.get("target_model"))
-                # 结算标记：pending -> settled（幂等闸门由 prefilter 控制）
-                if (
-                    usage_params.get("status") in terminal_statuses
-                    and getattr(existing_usage, "billing_status", None) == "pending"
-                ):
-                    existing_usage.billing_status = "settled"
-                    if getattr(existing_usage, "finalized_at", None) is None:
-                        existing_usage.finalized_at = finalized_at
+                accounted, charge_applied = cls._finalize_usage_billing(
+                    db,
+                    usage=existing_usage,
+                    total_cost=total_cost,
+                    status=usage_params.get("status"),
+                    finalized_at=finalized_at,
+                )
                 usages.append(existing_usage)
                 updated_count += 1
 
                 # 聚合统计
-                model_name = record.get("model") or "unknown"
-                model_counts[model_name] += 1
-                if user:
-                    user_model_counts[(str(user.id), model_name)] += 1
+                if accounted:
+                    model_name = record.get("model") or "unknown"
+                    model_counts[model_name] += 1
+                    if user:
+                        user_model_counts[(str(user.id), model_name)] += 1
 
-                provider_id = record.get("provider_id")
-                if provider_id:
-                    actual_cost = usage_params.get("actual_total_cost_usd", 0)
-                    provider_costs[provider_id] += actual_cost
+                    provider_id = record.get("provider_id")
+                    if charge_applied and provider_id:
+                        actual_cost = usage_params.get("actual_total_cost_usd", 0)
+                        provider_costs[provider_id] += actual_cost
 
-                if user and not (api_key and api_key.is_standalone):
-                    user_costs[str(user.id)] += total_cost
+                    if api_key:
+                        key_id = str(api_key.id)
+                        apikey_stats[key_id]["requests"] += 1
+                        if charge_applied:
+                            apikey_stats[key_id]["cost"] += total_cost
+                        apikey_stats[key_id]["is_standalone"] = api_key.is_standalone
 
-                if api_key:
-                    key_id = str(api_key.id)
-                    apikey_stats[key_id]["requests"] += 1
-                    apikey_stats[key_id]["cost"] += total_cost
-                    apikey_stats[key_id]["is_standalone"] = api_key.is_standalone
-
-                manual_nid = _extract_manual_proxy_node_id(record.get("metadata"))
-                if manual_nid:
-                    proxy_node_counts[manual_nid] += 1
-                    if record.get("status") == "failed":
-                        proxy_node_failed[manual_nid] += 1
+                    manual_nid = _extract_manual_proxy_node_id(record.get("metadata"))
+                    if manual_nid:
+                        proxy_node_counts[manual_nid] += 1
+                        if record.get("status") == "failed":
+                            proxy_node_failed[manual_nid] += 1
 
                 provider_api_key_id = record.get("provider_api_key_id")
                 response_headers = record.get("response_headers")
@@ -1016,10 +1010,7 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
                 logger.warning("批量记录中更新失败: {}, request_id={}", e, request_id)
                 continue
 
-        # 2. 处理需要新建的记录（批量插入）
-        insert_mappings: list[dict[str, Any]] = []
-        insert_request_ids: list[str] = []
-
+        # 2. 处理需要新建的记录
         for i, (record, request_id, params) in enumerate(insert_params_list):
             try:
                 usage_params, total_cost, exc = insert_results[i]
@@ -1029,45 +1020,43 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
                 user = params.user
                 api_key = params.api_key
 
-                # 终态记录：补齐 settled/finalized_at；非终态：确保 billing_status=pending
-                status = usage_params.get("status")
-                if status in terminal_statuses:
-                    if usage_params.get("billing_status") in (None, "pending"):
-                        usage_params["billing_status"] = "settled"
-                    usage_params.setdefault("finalized_at", finalized_at)
-                elif usage_params.get("billing_status") is None:
-                    usage_params["billing_status"] = "pending"
-
-                insert_mappings.append(usage_params)
-                insert_request_ids.append(request_id)
+                usage = Usage(**usage_params)
+                db.add(usage)
+                accounted, charge_applied = cls._finalize_usage_billing(
+                    db,
+                    usage=usage,
+                    total_cost=total_cost,
+                    status=usage_params.get("status"),
+                    finalized_at=finalized_at,
+                )
+                usages.append(usage)
+                inserted_count += 1
 
                 # 聚合统计
-                model_name = record.get("model") or "unknown"
-                model_counts[model_name] += 1
-                if user:
-                    user_model_counts[(str(user.id), model_name)] += 1
+                if accounted:
+                    model_name = record.get("model") or "unknown"
+                    model_counts[model_name] += 1
+                    if user:
+                        user_model_counts[(str(user.id), model_name)] += 1
 
-                provider_id = record.get("provider_id")
-                if provider_id:
-                    actual_cost = usage_params.get("actual_total_cost_usd", 0)
-                    provider_costs[provider_id] += actual_cost
+                    provider_id = record.get("provider_id")
+                    if charge_applied and provider_id:
+                        actual_cost = usage_params.get("actual_total_cost_usd", 0)
+                        provider_costs[provider_id] += actual_cost
 
-                # 用户统计（独立 Key 不计入创建者）
-                if user and not (api_key and api_key.is_standalone):
-                    user_costs[str(user.id)] += total_cost
+                    # API Key 统计
+                    if api_key:
+                        key_id = str(api_key.id)
+                        apikey_stats[key_id]["requests"] += 1
+                        if charge_applied:
+                            apikey_stats[key_id]["cost"] += total_cost
+                        apikey_stats[key_id]["is_standalone"] = api_key.is_standalone
 
-                # API Key 统计
-                if api_key:
-                    key_id = str(api_key.id)
-                    apikey_stats[key_id]["requests"] += 1
-                    apikey_stats[key_id]["cost"] += total_cost
-                    apikey_stats[key_id]["is_standalone"] = api_key.is_standalone
-
-                manual_nid = _extract_manual_proxy_node_id(record.get("metadata"))
-                if manual_nid:
-                    proxy_node_counts[manual_nid] += 1
-                    if record.get("status") == "failed":
-                        proxy_node_failed[manual_nid] += 1
+                    manual_nid = _extract_manual_proxy_node_id(record.get("metadata"))
+                    if manual_nid:
+                        proxy_node_counts[manual_nid] += 1
+                        if record.get("status") == "failed":
+                            proxy_node_failed[manual_nid] += 1
 
                 provider_api_key_id = record.get("provider_api_key_id")
                 response_headers = record.get("response_headers")
@@ -1082,24 +1071,6 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
                 skipped_count += 1
                 logger.warning("批量记录中跳过无效记录: {}, request_id={}", e, request_id)
                 continue
-
-        if insert_mappings:
-            try:
-                db.bulk_insert_mappings(Usage, insert_mappings)
-
-                # 仅用于保持返回值语义：将新建记录读回为 ORM 对象
-                inserted_records = (
-                    db.query(Usage).filter(Usage.request_id.in_(insert_request_ids)).all()
-                )
-                inserted_map = {u.request_id: u for u in inserted_records}
-                for rid in insert_request_ids:
-                    inserted_usage = inserted_map.get(rid)
-                    if inserted_usage is not None:
-                        usages.append(inserted_usage)
-            except Exception as e:
-                logger.error("批量插入 Usage 记录时出错: {}", e)
-                db.rollback()
-                raise
 
         # 统计跳过的记录，失败率超过 10% 时提升日志级别
         if skipped_count > 0:
@@ -1152,47 +1123,21 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
                 db.execute(
                     update(Provider)
                     .where(Provider.id == provider_id)
-                    .values(monthly_used_usd=Provider.monthly_used_usd + cost)
-                )
-
-        # 批量更新用户使用量
-        for user_id, cost in user_costs.items():
-            if cost > 0:
-                db.execute(
-                    update(UserModel)
-                    .where(UserModel.id == user_id)
-                    .values(
-                        used_usd=UserModel.used_usd + cost,
-                        total_usd=UserModel.total_usd + cost,
-                        updated_at=sql_func.now(),
-                    )
+                    .values(monthly_used_usd=Provider.monthly_used_usd + float(cost))
                 )
 
         # 批量更新 API Key 统计
         for key_id, stats in apikey_stats.items():
-            if stats["is_standalone"]:
-                db.execute(
-                    update(ApiKeyModel)
-                    .where(ApiKeyModel.id == key_id)
-                    .values(
-                        total_requests=ApiKeyModel.total_requests + stats["requests"],
-                        total_cost_usd=ApiKeyModel.total_cost_usd + stats["cost"],
-                        balance_used_usd=ApiKeyModel.balance_used_usd + stats["cost"],
-                        last_used_at=sql_func.now(),
-                        updated_at=sql_func.now(),
-                    )
+            db.execute(
+                update(ApiKeyModel)
+                .where(ApiKeyModel.id == key_id)
+                .values(
+                    total_requests=ApiKeyModel.total_requests + stats["requests"],
+                    total_cost_usd=ApiKeyModel.total_cost_usd + float(to_money_decimal(stats["cost"])),
+                    last_used_at=sql_func.now(),
+                    updated_at=sql_func.now(),
                 )
-            else:
-                db.execute(
-                    update(ApiKeyModel)
-                    .where(ApiKeyModel.id == key_id)
-                    .values(
-                        total_requests=ApiKeyModel.total_requests + stats["requests"],
-                        total_cost_usd=ApiKeyModel.total_cost_usd + stats["cost"],
-                        last_used_at=sql_func.now(),
-                        updated_at=sql_func.now(),
-                    )
-                )
+            )
 
         # 批量更新手动代理节点请求计数
         _increment_proxy_node_requests(db, proxy_node_counts, proxy_node_failed)
@@ -1208,7 +1153,6 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
         # 单次提交所有更改
         try:
             db.commit()
-            inserted_count = len(insert_mappings)
             total_written = updated_count + inserted_count
             if updated_count > 0:
                 logger.debug("批量记录成功: 更新 {} 条, 新建 {} 条", updated_count, inserted_count)

@@ -346,7 +346,7 @@ class BaseMessageHandler:
         from src.core.exceptions import (
             ModelNotSupportedException,
             ProviderException,
-            QuotaExceededException,
+            BalanceInsufficientException,
             RateLimitException,
             UpstreamClientException,
         )
@@ -355,7 +355,7 @@ class BaseMessageHandler:
             error,
             (
                 ProviderException,
-                QuotaExceededException,
+                BalanceInsufficientException,
                 RateLimitException,
                 ModelNotSupportedException,
                 UpstreamClientException,

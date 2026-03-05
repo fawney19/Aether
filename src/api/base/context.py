@@ -34,7 +34,7 @@ class ApiRequestContext:
     query_params: dict[str, str]
     raw_body: bytes | None = None
     json_body: dict[str, Any] | None = None
-    quota_remaining: float | None = None
+    balance_remaining: float | None = None
     mode: str = "standard"  # standard / proxy
     api_format_hint: str | None = None
 

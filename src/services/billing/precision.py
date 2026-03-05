@@ -31,6 +31,11 @@ def to_decimal(value: float | int | str | Decimal | None) -> Decimal:
     return Decimal(str(value))
 
 
+def to_money_decimal(value: float | int | str | Decimal | None) -> Decimal:
+    """Convert values to Decimal and quantize to billing storage precision."""
+    return quantize_cost(to_decimal(value))
+
+
 def quantize_decimal(value: Decimal, *, precision: int) -> Decimal:
     """Quantize a Decimal to the given number of decimal places (ROUND_HALF_UP)."""
     quantizer = Decimal(10) ** -precision

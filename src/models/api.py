@@ -241,8 +241,10 @@ class CreateUserRequest(BaseModel):
     password: str = Field(..., min_length=6, max_length=128, description="密码")
     email: str | None = Field(None, max_length=255, description="邮箱地址（可选）")
     role: UserRole | None = Field(UserRole.USER, description="用户角色")
-    quota_usd: float | None = Field(default=None, description="USD配额，null表示使用系统默认配额")
-    unlimited: bool = Field(default=False, description="是否无限配额")
+    initial_gift_usd: float | None = Field(
+        default=None, description="初始赠款（USD），null 表示使用系统默认初始赠款"
+    )
+    unlimited: bool = Field(default=False, description="是否无限制")
     # 访问限制字段
     allowed_providers: list[str] | None = Field(
         default=None, description="允许使用的提供商ID列表，null表示无限制"
@@ -254,16 +256,16 @@ class CreateUserRequest(BaseModel):
         default=None, description="允许使用的模型名称列表，null表示无限制"
     )
 
-    @field_validator("quota_usd", mode="before")
+    @field_validator("initial_gift_usd", mode="before")
     @classmethod
-    def validate_quota_usd(cls, v: Any) -> Any:
-        """验证配额值，null表示使用系统默认配额"""
+    def validate_initial_gift_usd(cls, v: Any) -> Any:
+        """验证初始赠款金额，null 表示使用系统默认初始赠款。"""
         if v is None:
             return None
         if isinstance(v, (int, float)) and v >= 0 and v <= 10000:
             return float(v)
         if isinstance(v, (int, float)):
-            raise ValueError("配额必须在 0-10000 范围内")
+            raise ValueError("初始赠款必须在 0-10000 范围内")
         return v
 
     @field_validator("email")
@@ -337,10 +339,10 @@ class UpdateUserRequest(BaseModel):
     username: str | None = None
     password: str | None = None
     role: UserRole | None = None
+    unlimited: bool | None = None
     allowed_providers: list[str] | None = None  # 允许使用的提供商 ID 列表
     allowed_api_formats: list[str] | None = None  # 允许使用的 API 格式列表
     allowed_models: list[str] | None = None  # 允许使用的模型名称列表
-    quota_usd: float | None = None
     is_active: bool | None = None
 
     @field_validator("allowed_api_formats")
@@ -348,19 +350,6 @@ class UpdateUserRequest(BaseModel):
     def validate_allowed_api_formats(cls, v: list[str] | None) -> list[str] | None:
         # 与 CreateUserRequest 保持一致
         return CreateUserRequest.validate_allowed_api_formats(v)
-
-    @field_validator("quota_usd", mode="before")
-    @classmethod
-    def validate_quota_usd(cls, v: Any) -> Any:
-        """验证配额值，允许null表示无限制"""
-        if v is None:
-            return None
-        if isinstance(v, (int, float)) and v >= 0 and v <= 10000:
-            return float(v)
-        if isinstance(v, (int, float)):
-            raise ValueError("配额必须在 0-10000 范围内")
-        return v
-
 
 class CreateApiKeyRequest(BaseModel):
     """创建API密钥请求"""
@@ -370,10 +359,13 @@ class CreateApiKeyRequest(BaseModel):
     allowed_api_formats: list[str] | None = None  # 允许使用的 API 格式列表
     allowed_models: list[str] | None = None  # 允许使用的模型名称列表
     rate_limit: int | None = None  # None = 无限制
-    expire_days: int | None = None  # None = 永不过期，数字 = 多少天后过期（兼容旧版）
+    expire_days: int | None = None  # None = 永不过期，数字 = 多少天后过期
     expires_at: str | None = None  # ISO 日期字符串，如 "2025-12-31"，优先于 expire_days
     initial_balance_usd: float | None = Field(
         None, description="初始余额（USD），仅用于独立Key，None = 无限制"
+    )
+    unlimited_balance: bool | None = Field(
+        None, description="是否无限余额（编辑独立Key时用于切换额度模式）"
     )
     is_standalone: bool = Field(False, description="是否为独立余额Key（给非注册用户使用）")
     auto_delete_on_expiry: bool = Field(
@@ -397,8 +389,7 @@ class UserResponse(BaseModel):
     allowed_providers: list[str] | None = None  # 允许使用的提供商 ID 列表
     allowed_api_formats: list[str] | None = None  # 允许使用的 API 格式列表
     allowed_models: list[str] | None = None  # 允许使用的模型名称列表
-    quota_usd: float
-    used_usd: float
+    unlimited: bool = False
     is_active: bool
     created_at: datetime
     updated_at: datetime
@@ -421,8 +412,6 @@ class ApiKeyResponse(BaseModel):
     rate_limit: int
     is_active: bool
     expires_at: datetime | None = None
-    balance_used_usd: float = 0.0
-    current_balance_usd: float | None = None  # NULL = 无限制
     is_standalone: bool = False
     force_capabilities: dict[str, bool] | None = None  # 强制开启的能力
     created_at: datetime

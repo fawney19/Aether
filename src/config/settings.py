@@ -103,6 +103,9 @@ class Config:
         # API Key 配置
         self.api_key_prefix = os.getenv("API_KEY_PREFIX", "sk")
 
+        # 支付回调安全配置（公开回调入口必须携带该共享密钥）
+        self.payment_callback_secret = os.getenv("PAYMENT_CALLBACK_SECRET", "").strip()
+
         # LLM API 速率限制配置（每分钟请求数）
         self.llm_api_rate_limit = int(os.getenv("LLM_API_RATE_LIMIT", "100"))
         self.public_api_rate_limit = int(os.getenv("PUBLIC_API_RATE_LIMIT", "60"))
@@ -458,6 +461,11 @@ class Config:
         # CORS 配置警告（生产环境）
         if self.environment == "production" and not self.cors_origins:
             logger.warning("生产环境 CORS 未配置，前端将无法访问 API。请设置 CORS_ORIGINS。")
+        if self.environment == "production" and not self.payment_callback_secret:
+            logger.warning(
+                "生产环境未设置 PAYMENT_CALLBACK_SECRET，支付回调将被拒绝。"
+                "如需启用支付回调，请配置共享密钥。"
+            )
 
     def validate_security_config(self) -> list[str]:
         """

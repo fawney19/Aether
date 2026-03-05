@@ -38,15 +38,16 @@ async def test_video_cancel_openai_route_end_to_end(monkeypatch: pytest.MonkeyPa
     """
     pipeline = ApiRequestPipeline()
 
-    # Pipeline auth/quota/audit shortcuts
-    user = SimpleNamespace(id="u1", username="u1", role="user", quota_usd=None, used_usd=0.0)
+    # Pipeline auth/balance/audit shortcuts
+    user = SimpleNamespace(id="u1", username="u1", role="user")
     api_key = SimpleNamespace(id="ak1", user_id="u1", is_standalone=False)
     monkeypatch.setattr(
         pipeline.auth_service, "authenticate_api_key", lambda _db, _k: (user, api_key)
     )
     monkeypatch.setattr(
-        pipeline.usage_service, "check_user_quota", lambda *_args, **_kwargs: (True, "ok")
+        pipeline.usage_service, "check_request_balance", lambda *_args, **_kwargs: (True, "ok")
     )
+    monkeypatch.setattr(pipeline, "_calculate_balance_remaining", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(pipeline.audit_service, "log_event", MagicMock())
 
     # DB stubs used by TaskService.cancel
@@ -152,15 +153,16 @@ async def test_video_cancel_gemini_route_end_to_end(monkeypatch: pytest.MonkeyPa
     """
     pipeline = ApiRequestPipeline()
 
-    # Pipeline auth/quota/audit shortcuts
-    user = SimpleNamespace(id="u1", username="u1", role="user", quota_usd=None, used_usd=0.0)
+    # Pipeline auth/balance/audit shortcuts
+    user = SimpleNamespace(id="u1", username="u1", role="user")
     api_key = SimpleNamespace(id="ak1", user_id="u1", is_standalone=False)
     monkeypatch.setattr(
         pipeline.auth_service, "authenticate_api_key", lambda _db, _k: (user, api_key)
     )
     monkeypatch.setattr(
-        pipeline.usage_service, "check_user_quota", lambda *_args, **_kwargs: (True, "ok")
+        pipeline.usage_service, "check_request_balance", lambda *_args, **_kwargs: (True, "ok")
     )
+    monkeypatch.setattr(pipeline, "_calculate_balance_remaining", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(pipeline.audit_service, "log_event", MagicMock())
 
     # DB stubs used by TaskService.cancel

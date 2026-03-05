@@ -561,7 +561,7 @@ class UpdateUserRequest(BaseModel):
     password: str | None = Field(
         None, min_length=6, max_length=128, description="新密码（留空保持不变）"
     )
-    quota_usd: float | None = Field(None, ge=0)
+    unlimited: bool | None = Field(None, description="是否无限制（true=无限制，false=有限制）")
     is_active: bool | None = None
     role: str | None = None
     allowed_providers: list[str] | None = Field(None, description="允许使用的提供商 ID 列表")

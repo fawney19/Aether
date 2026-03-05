@@ -1925,8 +1925,8 @@ class TaskService:
         Update billing/usage for a completed/failed video task (Phase 3.1 facade).
 
         Async video billing flow:
-        - Submit success: Usage is already settled with cost=0
-        - Poll completion: update actual cost (success -> bill, failure -> keep 0)
+        - Submit success: Usage remains billing_status=pending, only records provider context
+        - Poll completion: write final cost once (success -> bill, failure -> void/0)
 
         Returns True when updated, False when skipped (already finalized).
         """

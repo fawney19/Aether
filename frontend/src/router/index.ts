@@ -123,6 +123,11 @@ const routes: RouteRecordRaw[] = [
         component: () => importWithRetry(() => import('@/views/user/Settings.vue'))
       },
       {
+        path: 'wallet',
+        name: 'WalletCenter',
+        component: () => importWithRetry(() => import('@/views/user/WalletCenter.vue'))
+      },
+      {
         path: 'models',
         name: 'ModelCatalog',
         component: () => importWithRetry(() => import('@/views/user/ModelCatalog.vue'))
@@ -153,6 +158,11 @@ const routes: RouteRecordRaw[] = [
         path: 'keys',
         name: 'ApiKeys',
         component: () => importWithRetry(() => import('@/views/admin/ApiKeys.vue'))
+      },
+      {
+        path: 'wallets',
+        name: 'WalletsManagement',
+        component: () => importWithRetry(() => import('@/views/admin/WalletsManagement.vue'))
       },
       {
         path: 'management-tokens',

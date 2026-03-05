@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from src.core.exceptions import NotFoundException
 from src.core.logger import logger
 from src.models.database import Provider, User, UserPreference
+from src.services.wallet import WalletService
 
 
 class PreferenceService:
@@ -98,6 +99,8 @@ class PreferenceService:
             raise NotFoundException("User not found")
 
         preferences = PreferenceService.get_or_create_preferences(db, user_id)
+        wallet = WalletService.get_wallet(db, user_id=user.id)
+        billing = WalletService.serialize_wallet_summary(wallet)
 
         # 构建返回数据
         user_data = {
@@ -125,12 +128,10 @@ class PreferenceService:
                     "announcements": preferences.announcement_notifications,
                 },
             },
-            # 配额信息
-            "quota_usd": user.quota_usd,
-            "used_usd": user.used_usd,
+            "billing": billing,
             "stats": {
-                "total_cost": user.used_usd,
-                "total_cost_all_time": user.total_usd,
+                "total_cost": billing["total_consumed"],
+                "total_cost_all_time": billing["total_consumed"],
                 "api_keys_count": len(user.api_keys),
             },
         }

@@ -339,7 +339,7 @@
                       使用提醒
                     </Label>
                     <p class="text-xs text-muted-foreground mt-1">
-                      当接近配额限制时提醒
+                      当余额接近不足时提醒
                     </p>
                   </div>
                   <Switch
@@ -407,30 +407,45 @@
           </div>
         </Card>
 
-        <!-- 使用配额 -->
+        <!-- 钱包状态 -->
         <Card class="p-6">
           <h3 class="text-lg font-medium text-foreground mb-4">
-            使用配额
+            钱包状态
           </h3>
           <div class="space-y-4">
-            <div>
+            <div class="flex justify-between text-sm">
+              <span class="text-muted-foreground">总余额</span>
+              <span class="text-foreground">
+                <template v-if="isUnlimitedBilling()">
+                  无限制
+                </template>
+                <template v-else>
+                  {{ formatCurrency(profile?.billing?.balance || 0) }}
+                </template>
+              </span>
+            </div>
+            <div class="flex justify-between text-sm">
+              <span class="text-muted-foreground">充值余额</span>
+              <span class="text-foreground">{{ formatCurrency(profile?.billing?.recharge_balance || 0) }}</span>
+            </div>
+            <div class="flex justify-between text-sm">
+              <span class="text-muted-foreground">赠款余额</span>
+              <span class="text-foreground">{{ formatCurrency(profile?.billing?.gift_balance || 0) }}</span>
+            </div>
+            <div class="flex justify-between text-sm">
+              <span class="text-muted-foreground">累计消费</span>
+              <span class="text-foreground">{{ formatCurrency(profile?.billing?.total_consumed || 0) }}</span>
+            </div>
+
+            <div v-if="!isUnlimitedBilling()">
               <div class="flex justify-between text-sm mb-1">
-                <span class="text-muted-foreground">配额使用(美元)</span>
-                <span class="text-foreground">
-                  <template v-if="isUnlimitedQuota()">
-                    {{ formatCurrency(profile?.used_usd || 0) }} /
-                    <span class="text-warning">无限制</span>
-                  </template>
-                  <template v-else>
-                    {{ formatCurrency(profile?.used_usd || 0) }} /
-                    {{ formatCurrency(profile?.quota_usd || 0) }}
-                  </template>
-                </span>
+                <span class="text-muted-foreground">累计消费占比</span>
+                <span class="text-foreground">{{ getBillingUsagePercentage().toFixed(1) }}%</span>
               </div>
               <div class="w-full bg-muted rounded-full h-2.5">
                 <div
                   class="bg-success h-2.5 rounded-full"
-                  :style="`width: ${getUsagePercentage()}%`"
+                  :style="`width: ${getBillingUsagePercentage()}%`"
                 />
               </div>
             </div>
@@ -804,17 +819,17 @@ async function updatePreferences() {
   }
 }
 
-function getUsagePercentage(): number {
-  if (!profile.value) return 0
-
-  const quota = profile.value.quota_usd
-  const used = profile.value.used_usd
-  if (quota == null || quota === 0) return 0
-  return Math.min(100, (used / quota) * 100)
+function getBillingUsagePercentage(): number {
+  const billing = profile.value?.billing
+  if (!billing) return 0
+  const consumed = billing.total_consumed || 0
+  const denominator = consumed + (billing.balance || 0)
+  if (denominator <= 0) return 0
+  return Math.min(100, (consumed / denominator) * 100)
 }
 
-function isUnlimitedQuota(): boolean {
-  return profile.value?.quota_usd == null
+function isUnlimitedBilling(): boolean {
+  return profile.value?.billing?.unlimited === true
 }
 
 function formatDate(dateString?: string): string {

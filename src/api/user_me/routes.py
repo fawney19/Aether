@@ -15,6 +15,7 @@ from src.api.base.authenticated_adapter import AuthenticatedApiAdapter
 from src.api.base.context import ApiRequestContext
 from src.api.base.pipeline import ApiRequestPipeline
 from src.core.crypto import crypto_service
+from src.core.enums import UserRole
 from src.core.exceptions import (
     ForbiddenException,
     InvalidRequestException,
@@ -43,6 +44,7 @@ from src.models.database import (
 )
 from src.services.system.time_range import TimeRangeParams
 from src.services.usage.service import UsageService
+from src.services.wallet import WalletService
 from src.services.user.apikey import ApiKeyService
 from src.services.user.preference import PreferenceService
 
@@ -78,7 +80,7 @@ async def get_my_profile(request: Request, db: Session = Depends(get_db)) -> Any
 
     返回当前登录用户的完整信息，包括基本信息和偏好设置。
 
-    **返回字段**: id, email, username, role, is_active, quota_usd, used_usd, preferences 等
+    **返回字段**: id, email, username, role, is_active, billing, preferences 等
     """
     adapter = MeProfileAdapter()
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
@@ -809,7 +811,7 @@ class GetUsageAdapter(AuthenticatedApiAdapter):
 
         # 管理员可以看到真实成本
         total_actual_cost = 0.0
-        if user.role == "admin":
+        if user.role == UserRole.ADMIN:
             total_actual_cost = (
                 sum(item.get("actual_total_cost_usd", 0.0) for item in filtered_summary)
                 if filtered_summary
@@ -828,7 +830,7 @@ class GetUsageAdapter(AuthenticatedApiAdapter):
                 "total_cost_usd": 0.0,
             }
             # 管理员可以看到真实成本
-            if user.role == "admin":
+            if user.role == UserRole.ADMIN:
                 base_stats["actual_total_cost_usd"] = 0.0
 
             stats = model_summary.setdefault(model_name, base_stats)
@@ -838,7 +840,7 @@ class GetUsageAdapter(AuthenticatedApiAdapter):
             stats["total_tokens"] += item["total_tokens"]
             stats["total_cost_usd"] += item["total_cost_usd"]
             # 管理员可以看到真实成本
-            if user.role == "admin":
+            if user.role == UserRole.ADMIN:
                 stats["actual_total_cost_usd"] += item.get("actual_total_cost_usd", 0.0)
 
         summary_by_model = sorted(model_summary.values(), key=lambda x: x["requests"], reverse=True)
@@ -965,6 +967,7 @@ class GetUsageAdapter(AuthenticatedApiAdapter):
             )
         avg_response_ms = avg_resp_query.scalar() or 0
         avg_response_time = float(avg_response_ms) / 1000.0 if avg_response_ms else 0
+        wallet = WalletService.get_wallet(db, user_id=user.id)
 
         # 构建响应数据
         response_data = {
@@ -974,8 +977,7 @@ class GetUsageAdapter(AuthenticatedApiAdapter):
             "total_tokens": total_tokens,
             "total_cost": total_cost,
             "avg_response_time": avg_response_time,
-            "quota_usd": user.quota_usd,
-            "used_usd": user.used_usd,
+            "billing": WalletService.serialize_wallet_summary(wallet),
             "summary_by_model": summary_by_model,
             # 分页信息
             "pagination": {
@@ -984,11 +986,11 @@ class GetUsageAdapter(AuthenticatedApiAdapter):
                 "offset": self.offset,
                 "has_more": self.offset + self.limit < total_records,
             },
-            "records": self._build_usage_records(usage_records, is_admin=(user.role == "admin")),
+            "records": self._build_usage_records(usage_records, is_admin=(user.role == UserRole.ADMIN)),
         }
 
         # 管理员可以看到真实成本
-        if user.role == "admin":
+        if user.role == UserRole.ADMIN:
             response_data["total_actual_cost"] = total_actual_cost
             # 为每条记录添加真实成本和倍率信息
             for i, (r, _, _) in enumerate(usage_records):
@@ -1122,7 +1124,7 @@ class GetMyActivityHeatmapAdapter(AuthenticatedApiAdapter):
         result = await UsageService.get_cached_heatmap(
             db=context.db,
             user_id=user.id,
-            include_actual_cost=user.role == "admin",
+            include_actual_cost=user.role == UserRole.ADMIN,
         )
         context.add_audit_metadata(action="activity_heatmap")
         return result

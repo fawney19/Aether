@@ -4,7 +4,7 @@ Alembic 环境配置
 """
 
 from logging.config import fileConfig
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, pool, text
 from alembic import context
 import os
 import sys
@@ -48,6 +48,9 @@ if config.config_file_name is not None:
 # 目标元数据（包含所有表定义）
 target_metadata = Base.metadata
 
+# PostgreSQL advisory lock ID for migration serialization
+MIGRATION_ADVISORY_LOCK_ID = 20260301
+
 
 def run_migrations_offline() -> None:
     """
@@ -83,15 +86,42 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            compare_type=True,  # 比较列类型变更
-            compare_server_default=True,  # 比较默认值变更
-        )
+        lock_acquired = False
+        migration_failed = False
+        try:
+            if connection.dialect.name == "postgresql":
+                connection.execute(
+                    text("SELECT pg_advisory_lock(:lock_id)"),
+                    {"lock_id": MIGRATION_ADVISORY_LOCK_ID},
+                )
+                lock_acquired = True
 
-        with context.begin_transaction():
-            context.run_migrations()
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+                compare_type=True,  # 比较列类型变更
+                compare_server_default=True,  # 比较默认值变更
+            )
+
+            with context.begin_transaction():
+                context.run_migrations()
+        except Exception:
+            migration_failed = True
+            raise
+        finally:
+            if lock_acquired:
+                # 仅在迁移失败时回滚，避免把已成功迁移和版本号更新回滚掉。
+                if connection.in_transaction():
+                    if migration_failed:
+                        connection.rollback()
+                    else:
+                        connection.commit()
+                connection.execute(
+                    text("SELECT pg_advisory_unlock(:lock_id)"),
+                    {"lock_id": MIGRATION_ADVISORY_LOCK_ID},
+                )
+                if connection.in_transaction():
+                    connection.commit()
 
 
 # 根据模式选择运行方式

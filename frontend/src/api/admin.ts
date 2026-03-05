@@ -1,4 +1,5 @@
 import apiClient from './client'
+import type { BillingSummary } from './auth'
 
 // LDAP 配置导出结构
 export interface LDAPConfigExport {
@@ -60,9 +61,8 @@ export interface UserExport {
   allowed_api_formats?: string[] | null
   allowed_models?: string[] | null
   model_capability_settings?: Record<string, Record<string, boolean>>
-  quota_usd?: number | null
-  used_usd?: number
-  total_usd?: number
+  unlimited?: boolean
+  wallet?: BillingSummary | null
   is_active: boolean
   api_keys: UserApiKeyExport[]
 }
@@ -72,8 +72,6 @@ export interface UserApiKeyExport {
   key_encrypted?: string | null
   name?: string | null
   is_standalone: boolean
-  balance_used_usd?: number
-  current_balance_usd?: number | null
   allowed_providers?: string[] | null
   allowed_api_formats?: string[] | null
   allowed_models?: string[] | null
@@ -304,10 +302,7 @@ export interface AdminApiKey {
   name?: string
   key_display?: string  // 脱敏后的密钥显示
   is_active: boolean
-  is_locked: boolean  // 管理员锁定标志
   is_standalone: boolean  // 是否为独立余额Key
-  balance_used_usd?: number  // 已使用余额（仅独立Key）
-  current_balance_usd?: number | null  // 当前余额（独立Key预付费模式，null表示无限制）
   total_requests?: number
   total_tokens?: number
   total_cost_usd?: number
@@ -329,7 +324,8 @@ export interface CreateStandaloneApiKeyRequest {
   allowed_models?: string[] | null
   rate_limit?: number | null  // null = 无限制
   expires_at?: string | null  // ISO 日期字符串，如 "2025-12-31"，null = 永不过期
-  initial_balance_usd: number  // 初始余额，必须设置
+  initial_balance_usd: number | null  // 初始余额，null = 无限制
+  unlimited_balance?: boolean | null  // 编辑时仅切换额度模式，不调整余额数值
   auto_delete_on_expiry?: boolean  // 过期后是否自动删除
 }
 
@@ -477,7 +473,10 @@ export const adminApi = {
   },
 
   // 更新独立余额Key
-  async updateApiKey(keyId: string, data: Partial<CreateStandaloneApiKeyRequest>): Promise<AdminApiKey & { message: string }> {
+  async updateApiKey(
+    keyId: string,
+    data: Partial<CreateStandaloneApiKeyRequest>
+  ): Promise<AdminApiKey & { message: string }> {
     const response = await apiClient.put<AdminApiKey & { message: string }>(
       `/api/admin/api-keys/${keyId}`,
       data
@@ -501,27 +500,10 @@ export const adminApi = {
     return response.data
   },
 
-  // 切换API密钥锁定状态（锁定/解锁）
-  async toggleLockApiKey(keyId: string): Promise<ApiKeyLockResponse> {
+  // 切换用户普通 API Key 锁定状态（锁定/解锁）
+  async toggleUserApiKeyLock(userId: string, keyId: string): Promise<ApiKeyLockResponse> {
     const response = await apiClient.patch<ApiKeyLockResponse>(
-      `/api/admin/api-keys/${keyId}/lock`
-    )
-    return response.data
-  },
-
-  // 为独立余额Key调整余额
-  async addApiKeyBalance(keyId: string, amountUsd: number): Promise<AdminApiKey & { message: string }> {
-    const response = await apiClient.patch<AdminApiKey & { message: string }>(
-      `/api/admin/api-keys/${keyId}/balance`,
-      { amount_usd: amountUsd }
-    )
-    return response.data
-  },
-
-  // 重置独立余额Key的已使用额度
-  async resetApiKeyUsage(keyId: string): Promise<AdminApiKey & { message: string }> {
-    const response = await apiClient.patch<AdminApiKey & { message: string }>(
-      `/api/admin/api-keys/${keyId}/reset-usage`
+      `/api/admin/users/${userId}/api-keys/${keyId}/lock`
     )
     return response.data
   },

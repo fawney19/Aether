@@ -6,14 +6,13 @@ export interface User {
   email: string
   role: 'admin' | 'user'
   is_active: boolean
-  quota_usd: number | null
-  used_usd: number
-  total_usd: number
+  unlimited: boolean
   allowed_providers: string[] | null  // 允许使用的提供商 ID 列表
   allowed_api_formats: string[] | null  // 允许使用的 API 格式列表
   allowed_models: string[] | null  // 允许使用的模型名称列表
   created_at: string
   updated_at?: string
+  last_login_at?: string | null
 }
 
 export interface CreateUserRequest {
@@ -21,7 +20,7 @@ export interface CreateUserRequest {
   password: string
   email: string
   role?: 'admin' | 'user'
-  quota_usd?: number | null
+  initial_gift_usd?: number | null
   unlimited?: boolean
   allowed_providers?: string[] | null
   allowed_api_formats?: string[] | null
@@ -32,7 +31,7 @@ export interface UpdateUserRequest {
   email?: string
   is_active?: boolean
   role?: 'admin' | 'user'
-  quota_usd?: number | null
+  unlimited?: boolean
   password?: string
   allowed_providers?: string[] | null
   allowed_api_formats?: string[] | null
@@ -50,8 +49,6 @@ export interface ApiKey {
   is_active: boolean
   is_locked: boolean  // 管理员锁定标志
   is_standalone: boolean  // 是否为独立余额Key
-  balance_used_usd?: number  // 已使用余额（仅独立Key）
-  current_balance_usd?: number | null  // 当前余额（独立Key预付费模式，null表示无限制）
   rate_limit?: number  // 速率限制（请求/分钟）
   total_requests?: number  // 总请求数
   total_cost_usd?: number  // 总费用
@@ -96,10 +93,12 @@ export const usersApi = {
     await apiClient.delete(`/api/admin/users/${userId}/api-keys/${keyId}`)
   },
 
-  async resetUserQuota(userId: string): Promise<void> {
-    await apiClient.patch(`/api/admin/users/${userId}/quota`)
+  async getFullApiKey(userId: string, keyId: string): Promise<{ key: string }> {
+    const response = await apiClient.get<{ key: string }>(
+      `/api/admin/users/${userId}/api-keys/${keyId}/full-key`
+    )
+    return response.data
   },
-
   // 管理员统计
   async getUsageStats(): Promise<Record<string, unknown>> {
     const response = await apiClient.get('/api/admin/usage/stats')

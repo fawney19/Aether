@@ -89,15 +89,30 @@ export interface AuthSettingsResponse {
   ldap_exclusive: boolean
 }
 
+export interface BillingSummary {
+  id?: string | null
+  balance: number
+  recharge_balance: number
+  gift_balance: number
+  refundable_balance: number
+  currency: string
+  status: string
+  limit_mode: 'finite' | 'unlimited'
+  unlimited: boolean
+  total_recharged: number
+  total_consumed: number
+  total_refunded: number
+  total_adjusted: number
+  updated_at?: string | null
+}
+
 export interface User {
   id: string // UUID
   username: string
   email?: string
   role: string  // 'admin' or 'user'
   is_active: boolean
-  quota_usd?: number | null
-  used_usd?: number
-  total_usd?: number
+  billing?: BillingSummary
   allowed_providers?: string[] | null  // 允许使用的提供商 ID 列表
   allowed_api_formats?: string[] | null  // 允许使用的 API 格式列表
   allowed_models?: string[] | null  // 允许使用的模型名称列表

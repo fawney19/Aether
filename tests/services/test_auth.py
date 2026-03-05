@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import jwt
 import pytest
 
+from src.core.exceptions import ForbiddenException
 from src.core.enums import AuthSource
 from src.models.database import UserRole
 from src.services.auth.service import (
@@ -251,7 +252,6 @@ class TestAPIKeyAuthentication:
         mock_api_key.is_locked = False
         mock_api_key.expires_at = None
         mock_api_key.user = mock_user
-        mock_api_key.balance_used_usd = 0.0
 
         mock_db = MagicMock()
         mock_db.query.return_value.options.return_value.filter.return_value.first.return_value = (
@@ -259,11 +259,7 @@ class TestAPIKeyAuthentication:
         )
 
         with patch("src.services.auth.service.ApiKey.hash_key", return_value="hashed_key"):
-            with patch(
-                "src.services.auth.service.ApiKeyService.check_balance",
-                return_value=(True, 100.0),
-            ):
-                result = AuthService.authenticate_api_key(mock_db, "sk-test-key")
+            result = AuthService.authenticate_api_key(mock_db, "sk-test-key")
 
         assert result is not None
         assert result[0] == mock_user
@@ -283,7 +279,6 @@ class TestAPIKeyAuthentication:
         mock_api_key.is_locked = False
         mock_api_key.expires_at = None
         mock_api_key.user = mock_user
-        mock_api_key.balance_used_usd = 0.0
 
         mock_db = MagicMock()
         mock_db.expire_on_commit = True
@@ -298,11 +293,7 @@ class TestAPIKeyAuthentication:
 
         with patch("src.services.auth.service._should_update_last_used", return_value=True):
             with patch("src.services.auth.service.ApiKey.hash_key", return_value="hashed_key"):
-                with patch(
-                    "src.services.auth.service.ApiKeyService.check_balance",
-                    return_value=(True, 100.0),
-                ):
-                    result = AuthService.authenticate_api_key(mock_db, "sk-test-key")
+                result = AuthService.authenticate_api_key(mock_db, "sk-test-key")
 
         assert result is not None
         assert mock_db.expire_on_commit is True
@@ -335,6 +326,51 @@ class TestAPIKeyAuthentication:
             result = AuthService.authenticate_api_key(mock_db, "sk-inactive-key")
 
         assert result is None
+
+    def test_authenticate_api_key_locked_non_standalone_raises_forbidden(self) -> None:
+        """测试普通用户 API Key 被锁定会拒绝认证"""
+        mock_api_key = MagicMock()
+        mock_api_key.is_active = True
+        mock_api_key.is_locked = True
+        mock_api_key.is_standalone = False
+
+        mock_db = MagicMock()
+        mock_db.query.return_value.options.return_value.filter.return_value.first.return_value = (
+            mock_api_key
+        )
+
+        with patch("src.services.auth.service.ApiKey.hash_key", return_value="hashed_key"):
+            with pytest.raises(ForbiddenException):
+                AuthService.authenticate_api_key(mock_db, "sk-locked-key")
+
+    def test_authenticate_api_key_locked_standalone_can_pass(self) -> None:
+        """测试独立 Key 即使历史上被锁定也不因锁定字段拒绝认证"""
+        mock_user = MagicMock()
+        mock_user.id = "user-standalone"
+        mock_user.email = "standalone@example.com"
+        mock_user.is_active = True
+        mock_user.is_deleted = False
+
+        mock_api_key = MagicMock()
+        mock_api_key.id = "key-standalone"
+        mock_api_key.is_active = True
+        mock_api_key.is_locked = True
+        mock_api_key.is_standalone = True
+        mock_api_key.expires_at = None
+        mock_api_key.user = mock_user
+
+        mock_db = MagicMock()
+        mock_db.query.return_value.options.return_value.filter.return_value.first.return_value = (
+            mock_api_key
+        )
+
+        with patch("src.services.auth.service._should_update_last_used", return_value=False):
+            with patch("src.services.auth.service.ApiKey.hash_key", return_value="hashed_key"):
+                result = AuthService.authenticate_api_key(mock_db, "sk-standalone-key")
+
+        assert result is not None
+        assert result[0] == mock_user
+        assert result[1] == mock_api_key
 
     def test_authenticate_api_key_expired(self) -> None:
         """测试 API Key 已过期"""

@@ -19,8 +19,10 @@ from src.api.announcements import router as announcement_router
 from src.api.auth import router as auth_router
 from src.api.dashboard import router as dashboard_router
 from src.api.monitoring import router as monitoring_router
+from src.api.payment import router as payment_router
 from src.api.public import router as public_router
 from src.api.user_me import router as me_router
+from src.api.wallet import router as wallet_router
 from src.clients.http_client import HTTPClientPool, close_http_clients
 
 # 核心模块
@@ -510,6 +512,8 @@ else:
 app.include_router(auth_router)  # 认证相关
 app.include_router(admin_router)  # 管理员端点
 app.include_router(me_router)  # 用户个人端点
+app.include_router(wallet_router)  # 钱包端点
+app.include_router(payment_router)  # 支付回调端点
 app.include_router(announcement_router)  # 公告系统
 app.include_router(dashboard_router)  # 仪表盘端点
 app.include_router(public_router)  # 公开API端点（用户可查看提供商和模型）

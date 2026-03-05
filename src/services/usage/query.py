@@ -125,66 +125,45 @@ class UsageQueryMixin:
         return result
 
     @staticmethod
-    def check_user_quota(
+    def check_request_balance(
         db: Session,
         user: User,
         estimated_tokens: int = 0,
         estimated_cost: float = 0,
         api_key: ApiKey | None = None,
     ) -> tuple[bool, str]:
-        """检查用户配额或独立Key余额
+        """检查请求是否满足余额条件（支持独立 Key）。"""
+        from src.services.wallet import WalletService
 
-        Args:
-            db: 数据库会话
-            user: 用户对象
-            estimated_tokens: 预估token数
-            estimated_cost: 预估费用
-            api_key: API Key对象（用于检查独立余额Key）
-
-        Returns:
-            (是否通过, 消息)
-        """
-
-        # 如果是独立余额Key，检查Key的余额而不是用户配额
-        if api_key and api_key.is_standalone:
-            # 导入 ApiKeyService 以使用统一的余额计算方法
-            from src.services.user.apikey import ApiKeyService
-
-            # NULL 表示无限制
-            if api_key.current_balance_usd is None:
-                return True, "OK"
-
-            # 使用统一的余额计算方法
-            remaining_balance = ApiKeyService.get_remaining_balance(api_key)
-            if remaining_balance is None:
-                return True, "OK"
-
-            # 检查余额是否充足
-            if remaining_balance < estimated_cost:
-                return (
-                    False,
-                    f"Key余额不足（剩余: ${remaining_balance:.2f}，需要: ${estimated_cost:.2f}）",
-                )
-
+        wallet_access = WalletService.check_request_allowed(
+            db,
+            user=None if (api_key and api_key.is_standalone) else user,
+            api_key=api_key,
+        )
+        if wallet_access.allowed:
             return True, "OK"
 
-        # 普通Key：检查用户配额
-        # 管理员无限制
+        if wallet_access.message == "钱包欠费，请先充值":
+            if api_key and api_key.is_standalone:
+                return False, "Key欠费，请先调账或充值"
+            return False, "账户欠费，请先充值"
+
+        if wallet_access.message == "钱包不可用":
+            if api_key and api_key.is_standalone:
+                return False, "Key钱包不可用"
+            return False, "钱包不可用"
+
+        remaining = float(wallet_access.remaining) if wallet_access.remaining is not None else None
+        if api_key and api_key.is_standalone:
+            if remaining is None:
+                return False, "Key余额不足"
+            return False, f"Key余额不足（剩余: ${remaining:.2f}）"
+
         if user.role == UserRole.ADMIN:
             return True, "OK"
-
-        # NULL 表示无限制
-        if user.quota_usd is None:
-            return True, "OK"
-
-        # 有配额限制，检查是否超额
-        used_usd = float(user.used_usd or 0)
-        quota_usd = float(user.quota_usd)
-        if used_usd + estimated_cost > quota_usd:
-            remaining = quota_usd - used_usd
-            return False, f"配额不足（剩余: ${remaining:.2f}）"
-
-        return True, "OK"
+        if remaining is None:
+            return False, wallet_access.message or "余额不足"
+        return False, f"余额不足（剩余: ${remaining:.2f}）"
 
     @staticmethod
     def get_usage_summary(
@@ -210,14 +189,14 @@ class UsageQueryMixin:
         if end_date:
             query = query.filter(Usage.created_at < end_date)
 
-        # 使用跨数据库兼容的日期函数
+        # 使用跨数据库可用的日期函数
         from src.utils.database_helpers import date_trunc_portable
 
         # 检测数据库方言
         bind = db.bind
         dialect = bind.dialect.name if bind is not None else "sqlite"
 
-        # 根据分组类型选择日期函数（兼容多种数据库）
+        # 根据分组类型选择日期函数（适配多种数据库）
         if group_by == "day":
             date_func = date_trunc_portable(dialect, "day", Usage.created_at)
         elif group_by == "week":
