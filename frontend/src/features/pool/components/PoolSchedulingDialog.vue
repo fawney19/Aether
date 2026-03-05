@@ -427,7 +427,10 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
-  saved: []
+  saved: [payload: {
+    pool_advanced: PoolAdvancedConfig | null
+    claude_code_advanced: ClaudeCodeAdvancedConfig | null
+  }]
 }>()
 
 const FALLBACK_PRESET_DEFS: PoolPresetMeta[] = [
@@ -875,7 +878,10 @@ async function handleSave() {
     }
     await updateProvider(props.providerId, payload)
     success('号池调度已保存')
-    emit('saved')
+    emit('saved', {
+      pool_advanced: payload.pool_advanced ?? null,
+      claude_code_advanced: payload.claude_code_advanced ?? null,
+    })
     emit('update:modelValue', false)
   } catch (err) {
     showError(parseApiError(err))

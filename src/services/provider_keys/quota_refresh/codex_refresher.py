@@ -96,6 +96,18 @@ async def refresh_codex_key_quota(
         response = await client.get(codex_wham_usage_url, headers=headers)
 
     if response.status_code != 200:
+        if response.status_code == 402:
+            provider_id = str(getattr(provider, "id", "") or "").strip()
+            key_id = str(getattr(key, "id", "") or "").strip()
+            if provider_id and key_id:
+                from src.services.provider.pool import redis_ops as pool_redis
+
+                await pool_redis.set_cooldown(
+                    provider_id,
+                    key_id,
+                    "payment_required_402",
+                    ttl=3600,
+                )
         return {
             "key_id": key.id,
             "key_name": key.name,

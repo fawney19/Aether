@@ -140,6 +140,57 @@ async def test_codex_refresher_http_non_200_returns_error(
 
 
 @pytest.mark.asyncio
+async def test_codex_refresher_http_402_sets_pool_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.services.provider.pool import redis_ops as pool_redis
+    from src.services.provider_keys.quota_refresh import codex_refresher as module
+
+    key = SimpleNamespace(
+        id="k1", name="K1", api_key="enc", auth_type="api_key", auth_config=None, proxy=None
+    )
+    provider = SimpleNamespace(id="p1", proxy=None)
+    endpoint = SimpleNamespace()
+    cooldown_calls: list[tuple[str, str, str, int]] = []
+
+    async def _fake_auth_info(_endpoint: Any, _key: Any) -> Any:
+        return None
+
+    async def _fake_set_cooldown(provider_id: str, key_id: str, reason: str, ttl: int) -> None:
+        cooldown_calls.append((provider_id, key_id, reason, ttl))
+
+    _install_module(
+        monkeypatch,
+        "src.services.proxy_node.resolver",
+        {
+            "resolve_effective_proxy": lambda provider_proxy, key_proxy: None,
+            "build_proxy_client_kwargs": lambda proxy, timeout: {"timeout": timeout},
+        },
+    )
+    monkeypatch.setattr(module, "get_provider_auth", _fake_auth_info)
+    monkeypatch.setattr(module.crypto_service, "decrypt", lambda _v: "sk-test")
+    monkeypatch.setattr(pool_redis, "set_cooldown", _fake_set_cooldown)
+    response = _FakeResponse(status_code=402, payload={"x": 1})
+    monkeypatch.setattr(
+        module.httpx, "AsyncClient", lambda **kwargs: _FakeAsyncClient(response, **kwargs)
+    )
+
+    result = await refresh_codex_key_quota(
+        db=cast(Any, _FakeDB()),
+        provider=cast(Any, provider),
+        key=cast(Any, key),
+        endpoint=cast(Any, endpoint),
+        codex_wham_usage_url="https://example.test",
+        metadata_updates={},
+        state_updates={},
+    )
+
+    assert result["status"] == "error"
+    assert result["status_code"] == 402
+    assert cooldown_calls == [("p1", "k1", "payment_required_402", 3600)]
+
+
+@pytest.mark.asyncio
 async def test_codex_refresher_success_updates_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

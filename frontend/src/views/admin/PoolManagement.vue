@@ -553,7 +553,7 @@
                     <div class="flex items-center justify-between gap-2">
                       <span class="text-muted-foreground">Token</span>
                       <span class="tabular-nums text-foreground/90">
-                        {{ formatStatInteger(key.total_tokens) }}
+                        {{ formatStatToken(key.total_tokens) }}
                       </span>
                     </div>
                     <div class="flex items-center justify-between gap-2">
@@ -1003,7 +1003,7 @@
                   </div>
                   <div class="flex items-center justify-between gap-2">
                     <span class="text-muted-foreground">Token</span>
-                    <span class="tabular-nums">{{ formatStatInteger(key.total_tokens) }}</span>
+                    <span class="tabular-nums">{{ formatStatToken(key.total_tokens) }}</span>
                   </div>
                   <div class="flex items-center justify-between gap-2">
                     <span class="text-muted-foreground">费用</span>
@@ -1118,7 +1118,7 @@
       :provider-type="selectedProviderType"
       :current-config="selectedProviderConfig"
       :current-claude-config="selectedProviderClaudeConfig"
-      @saved="loadOverview"
+      @saved="handleSchedulingDialogSaved"
     />
     <KeyFormDialog
       v-if="selectedProviderId"
@@ -1979,6 +1979,20 @@ async function handleAccountDialogSaved() {
   await refreshCurrentPageQuotaInBackground({ silent: true })
 }
 
+async function handleSchedulingDialogSaved(payload: {
+  pool_advanced: PoolAdvancedConfig | null
+  claude_code_advanced: ClaudeCodeAdvancedConfig | null
+}) {
+  if (selectedProviderData.value) {
+    selectedProviderData.value = {
+      ...selectedProviderData.value,
+      pool_advanced: payload.pool_advanced,
+      claude_code_advanced: payload.claude_code_advanced,
+    }
+  }
+  await loadOverview()
+}
+
 // --- Formatting ---
 const COOLDOWN_REASON_MAP: Record<string, string> = {
   rate_limited_429: '429 限流',
@@ -2402,6 +2416,17 @@ function formatStatInteger(value: number | null | undefined): string {
   const n = Number(value ?? 0)
   if (!Number.isFinite(n) || n <= 0) return '0'
   return Math.round(n).toLocaleString('en-US')
+}
+
+function formatStatToken(value: number | null | undefined): string {
+  const n = Number(value ?? 0)
+  if (!Number.isFinite(n) || n <= 0) return '0'
+  if (n < 1_000_000) return Math.round(n).toLocaleString('en-US')
+
+  const millions = n / 1_000_000
+  if (millions >= 100) return `${Math.round(millions)}M`
+  if (millions >= 10) return `${millions.toFixed(1)}M`
+  return `${millions.toFixed(2)}M`
 }
 
 function formatStatUsd(value: number | null | undefined): string {
