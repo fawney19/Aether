@@ -23,6 +23,7 @@ from src.models.endpoint_models import (
     EndpointAPIKeyResponse,
     EndpointAPIKeyUpdate,
 )
+from src.services.provider.fingerprint import generate_fingerprint, normalize_fingerprint
 from src.services.provider_keys.auth_type import normalize_auth_type
 from src.services.provider_keys.duplicate_check import check_duplicate_key
 from src.services.provider_keys.key_side_effects import (
@@ -282,6 +283,12 @@ def _prepare_update_key_payload(
         else:
             update_data["proxy"] = key_data.proxy.model_dump(exclude_none=True)
 
+    if "fingerprint" in key_data.model_fields_set:
+        if key_data.fingerprint is None:
+            update_data["fingerprint"] = None
+        else:
+            update_data["fingerprint"] = normalize_fingerprint(key_data.fingerprint, key_id)
+
     return _UpdateKeyPreparation(
         update_data=update_data,
         auto_fetch_enabled_before=auto_fetch_enabled_before,
@@ -335,8 +342,10 @@ def _prepare_create_key_payload(
     if key_data.auth_config:
         encrypted_auth_config = crypto_service.encrypt(json.dumps(key_data.auth_config))
 
+    new_key_id = str(uuid.uuid4())
+
     new_key = ProviderAPIKey(
-        id=str(uuid.uuid4()),
+        id=new_key_id,
         provider_id=provider_id,
         api_formats=key_data.api_formats,
         auth_type=auth_type,
@@ -359,6 +368,7 @@ def _prepare_create_key_payload(
         model_exclude_patterns=(
             key_data.model_exclude_patterns if key_data.model_exclude_patterns else None
         ),
+        fingerprint=generate_fingerprint(seed=new_key_id),
         request_count=0,
         success_count=0,
         error_count=0,

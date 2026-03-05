@@ -21,13 +21,17 @@ from src.services.provider.adapters.claude_code.envelope import (
     claude_code_envelope,
     merge_anthropic_beta_tokens,
 )
+from src.services.provider.fingerprint import load_fingerprint
+from src.services.provider.request_context import set_current_fingerprint
 
 
 @pytest.fixture(autouse=True)
-def _reset_claude_code_context():
+def _reset_claude_code_context() -> None:  # type: ignore[misc]
     set_claude_code_request_context(None)
+    set_current_fingerprint(None)
     yield
     set_claude_code_request_context(None)
+    set_current_fingerprint(None)
 
 
 def test_merge_anthropic_beta_tokens_adds_required_and_deduplicates() -> None:
@@ -45,7 +49,7 @@ def test_merge_anthropic_beta_tokens_adds_required_and_deduplicates() -> None:
 
 
 def test_claude_code_envelope_extra_headers_include_required_defaults(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(config, "internal_user_agent_claude_cli", "claude-code/test")
 
@@ -59,6 +63,43 @@ def test_claude_code_envelope_extra_headers_include_required_defaults(
     assert headers.get("Anthropic-Dangerous-Direct-Browser-Access") == "true"
     assert headers.get("User-Agent") == "claude-code/test"
     assert "x-stainless-helper-method" not in headers
+
+
+def test_claude_code_envelope_extra_headers_use_current_fingerprint() -> None:
+    fp = load_fingerprint(
+        {
+            "stainless_package_version": "1.0.5",
+            "stainless_os": "Windows",
+            "stainless_arch": "x64",
+            "stainless_runtime_version": "v22.12.0",
+            "stainless_timeout": "900",
+            "user_agent": "Mozilla/5.0 test-fingerprint",
+        },
+        "key-fingerprint-1",
+    )
+    set_current_fingerprint(fp)
+
+    headers = claude_code_envelope.extra_headers() or {}
+    assert headers.get("X-Stainless-Package-Version") == "1.0.5"
+    assert headers.get("X-Stainless-OS") == "Windows"
+    assert headers.get("X-Stainless-Arch") == "x64"
+    assert headers.get("X-Stainless-Runtime-Version") == "v22.12.0"
+    assert headers.get("X-Stainless-Timeout") == "900"
+    assert headers.get("User-Agent") == "Mozilla/5.0 test-fingerprint"
+
+
+def test_claude_code_prepare_context_prefers_fingerprint_tls_profile() -> None:
+    fp = load_fingerprint({"impersonate": "chrome124"}, "key-fingerprint-2")
+    set_current_fingerprint(fp)
+
+    tls_profile = claude_code_envelope.prepare_context(
+        provider_config={"claude_code_advanced": {"enable_tls_fingerprint": True}},
+        key_id="key-fingerprint-2",
+        is_stream=False,
+        provider_id="provider-1",
+    )
+
+    assert tls_profile == "chrome124"
 
 
 def test_claude_code_envelope_adds_stream_helper_header_for_stream_request() -> None:

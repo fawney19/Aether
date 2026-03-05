@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Set as AbstractSet
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.core.api_format.enums import ApiFamily
 from src.core.api_format.metadata import (
@@ -25,6 +25,9 @@ from src.core.api_format.metadata import (
 )
 from src.core.api_format.signature import EndpointSignature, parse_signature_key
 from src.core.logger import logger
+
+if TYPE_CHECKING:
+    from src.services.provider.fingerprint import FingerprintProfile
 
 # =============================================================================
 # 头部常量定义
@@ -123,6 +126,59 @@ RESPONSE_DROP_HEADERS: frozenset[str] = (
     )
     | HOP_BY_HOP_HEADERS
 )
+
+
+_DEFAULT_CHROME_MAJOR = "140"
+
+
+def _extract_chrome_major(version: str) -> str:
+    value = str(version or "").strip()
+    if not value:
+        return _DEFAULT_CHROME_MAJOR
+    return value.split(".", 1)[0] or _DEFAULT_CHROME_MAJOR
+
+
+def _resolve_sec_ch_platform(fp: FingerprintProfile) -> str:
+    os_name = (fp.stainless_os or "").strip().lower()
+    platform_info = (fp.platform_info or "").strip().lower()
+
+    if os_name.startswith("win") or "windows" in platform_info:
+        return '"Windows"'
+    if os_name in {"mac", "macos", "darwin"} or "darwin" in platform_info:
+        return '"macOS"'
+    return '"Linux"'
+
+
+def build_browser_fingerprint_headers(fp: FingerprintProfile | None = None) -> dict[str, str]:
+    """Build browser fingerprint headers, optionally overridden by per-key fingerprint."""
+    headers = {**BROWSER_FINGERPRINT_HEADERS}
+    if fp is None:
+        return headers
+
+    chrome_major = _extract_chrome_major(fp.chrome_version)
+    headers["User-Agent"] = fp.user_agent or headers["User-Agent"]
+    headers["sec-ch-ua"] = f'"Not=A?Brand";v="24", "Chromium";v="{chrome_major}"'
+    headers["sec-ch-ua-platform"] = _resolve_sec_ch_platform(fp)
+    return headers
+
+
+def build_anthropic_extra_headers(fp: FingerprintProfile | None = None) -> dict[str, str]:
+    """Build Anthropic extra headers, optionally overridden by per-key fingerprint."""
+    headers = {**_ANTHROPIC_EXTRA_HEADERS}
+    if fp is None:
+        return headers
+
+    headers["x-stainless-os"] = fp.stainless_os or headers["x-stainless-os"]
+    headers["x-stainless-arch"] = fp.stainless_arch or headers["x-stainless-arch"]
+    headers["x-stainless-package-version"] = (
+        fp.stainless_package_version or headers["x-stainless-package-version"]
+    )
+    # browser:chrome runtime-version = Chrome 版本；
+    # CLI 路径(ClaudeCodeEnvelope)使用 Node.js，其 extra_headers 会以 fp.stainless_runtime_version 覆盖。
+    headers["x-stainless-runtime-version"] = (
+        fp.chrome_version or headers["x-stainless-runtime-version"]
+    )
+    return headers
 
 
 # =============================================================================
@@ -568,12 +624,12 @@ def build_adapter_base_headers_for_endpoint(
     auth_value = f"Bearer {api_key}" if auth_type == "bearer" else api_key
 
     # 以浏览器指纹为底层默认值，绕过 Cloudflare 等反爬防护
-    headers: dict[str, str] = {**BROWSER_FINGERPRINT_HEADERS}
+    headers: dict[str, str] = build_browser_fingerprint_headers()
 
     # Claude API family 额外注入 Anthropic 专属 header
     definition = resolve_endpoint_definition(endpoint)
     if definition and definition.api_family == ApiFamily.CLAUDE:
-        headers.update(_ANTHROPIC_EXTRA_HEADERS)
+        headers.update(build_anthropic_extra_headers())
 
     headers[auth_header] = auth_value
     headers["Content-Type"] = "application/json"

@@ -40,6 +40,8 @@ from src.core.exceptions import (
 )
 from src.core.logger import logger
 from src.services.provider.behavior import get_provider_behavior
+from src.services.provider.fingerprint import ensure_key_fingerprint
+from src.services.provider.request_context import set_current_fingerprint
 from src.services.provider.stream_policy import (
     enforce_stream_mode_for_upstream,
     get_upstream_stream_policy,
@@ -324,6 +326,8 @@ class CliStreamMixin:
             bool(getattr(candidate, "needs_conversion", False)) if candidate else False
         )
         ctx.needs_conversion = needs_conversion
+
+        set_current_fingerprint(ensure_key_fingerprint(key, persist_if_missing=True))
 
         provider_type = str(getattr(provider, "provider_type", "") or "").lower()
         behavior = get_provider_behavior(

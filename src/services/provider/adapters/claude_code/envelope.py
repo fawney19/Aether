@@ -26,6 +26,7 @@ from src.services.provider.adapters.claude_code.context import (
     get_claude_code_request_context,
     set_claude_code_request_context,
 )
+from src.services.provider.request_context import get_current_fingerprint
 
 _SESSION_MARKER = "_session_"
 _DUMMY_THINKING_SIGNATURE = "skip_thought_signature_validator"
@@ -488,6 +489,7 @@ class ClaudeCodeEnvelope:
     def extra_headers(self) -> dict[str, str] | None:
         ctx = get_claude_code_request_context()
         is_stream = bool(ctx.is_stream) if ctx else False
+        fp = get_current_fingerprint()
 
         headers = dict(CLAUDE_CODE_DEFAULT_HEADERS)
         headers["Accept"] = DEFAULT_ACCEPT
@@ -496,9 +498,17 @@ class ClaudeCodeEnvelope:
         if is_stream:
             headers["x-stainless-helper-method"] = STREAM_HELPER_METHOD
 
-        ua = str(getattr(config, "internal_user_agent_claude_cli", "") or "").strip()
-        if ua:
-            headers["User-Agent"] = ua
+        if fp:
+            headers["X-Stainless-Package-Version"] = fp.stainless_package_version
+            headers["X-Stainless-OS"] = fp.stainless_os
+            headers["X-Stainless-Arch"] = fp.stainless_arch
+            headers["X-Stainless-Runtime-Version"] = fp.stainless_runtime_version
+            headers["X-Stainless-Timeout"] = fp.stainless_timeout
+            headers["User-Agent"] = fp.user_agent
+        else:
+            ua = str(getattr(config, "internal_user_agent_claude_cli", "") or "").strip()
+            if ua:
+                headers["User-Agent"] = ua
 
         return headers
 
@@ -586,6 +596,9 @@ class ClaudeCodeEnvelope:
             is_stream=is_stream,
             provider_id=provider_id,
         )
+        fp = get_current_fingerprint()
+        if _ctx.enable_tls_fingerprint and fp:
+            return fp.impersonate
         return tls_profile
 
     async def post_wrap_request(self, request_body: dict[str, Any]) -> None:

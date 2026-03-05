@@ -10,9 +10,17 @@ per request.
 from __future__ import annotations
 
 import contextvars
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.services.provider.fingerprint import FingerprintProfile
 
 _selected_base_url: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "provider_selected_base_url",
+    default=None,
+)
+_current_fingerprint: contextvars.ContextVar[FingerprintProfile | None] = contextvars.ContextVar(
+    "provider_current_fingerprint",
     default=None,
 )
 
@@ -25,4 +33,17 @@ def get_selected_base_url() -> str | None:
     return _selected_base_url.get()
 
 
-__all__ = ["get_selected_base_url", "set_selected_base_url"]
+def set_current_fingerprint(fp: FingerprintProfile | None) -> None:
+    _current_fingerprint.set(fp)
+
+
+def get_current_fingerprint() -> FingerprintProfile | None:
+    return _current_fingerprint.get()
+
+
+__all__ = [
+    "get_current_fingerprint",
+    "get_selected_base_url",
+    "set_current_fingerprint",
+    "set_selected_base_url",
+]

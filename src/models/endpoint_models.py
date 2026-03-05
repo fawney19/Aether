@@ -654,6 +654,10 @@ class EndpointAPIKeyUpdate(BaseModel):
         default=None,
         description="Key 级别代理配置（覆盖 Provider 级别代理），null=使用 Provider 级别代理",
     )
+    fingerprint: dict[str, Any] | None = Field(
+        default=None,
+        description="请求指纹配置（TLS + HTTP 头部）",
+    )
 
     @field_validator("api_formats")
     @classmethod
@@ -822,6 +826,10 @@ class EndpointAPIKeyResponse(BaseModel):
     # Key 级别代理配置
     proxy: dict[str, Any] | None = Field(
         None, description="Key 级别代理配置（覆盖 Provider 级别代理）"
+    )
+    fingerprint: dict[str, Any] | None = Field(
+        None,
+        description="请求指纹配置（TLS + HTTP 头部）",
     )
 
     # 时间戳

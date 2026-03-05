@@ -53,7 +53,6 @@ class PoolSchedulingSummary:
     status: str  # available / degraded / blocked
     reason: str
     label: str
-    score: float
     candidate_eligible: bool
     blocked_count: int
     degraded_count: int
@@ -408,7 +407,6 @@ def summarize_pool_scheduling_dimensions(
             status="available",
             reason="available",
             label="可用",
-            score=100.0,
             candidate_eligible=True,
             blocked_count=0,
             degraded_count=0,
@@ -417,18 +415,12 @@ def summarize_pool_scheduling_dimensions(
     blocked = [item for item in dimensions if item.status == "blocked" or item.blocking]
     degraded = [item for item in dimensions if item.status == "degraded"]
 
-    total_weight = sum(max(item.weight, 1) for item in dimensions)
-    weighted_score = sum(
-        max(item.weight, 1) * max(min(item.score, 1.0), 0.0) for item in dimensions
-    ) / max(total_weight, 1)
-
     if blocked:
         primary = blocked[0]
         return PoolSchedulingSummary(
             status="blocked",
             reason=primary.code,
             label=primary.label,
-            score=round(weighted_score * 100, 1),
             candidate_eligible=False,
             blocked_count=len(blocked),
             degraded_count=len(degraded),
@@ -440,7 +432,6 @@ def summarize_pool_scheduling_dimensions(
             status="degraded",
             reason=primary.code,
             label=primary.label,
-            score=round(weighted_score * 100, 1),
             candidate_eligible=True,
             blocked_count=0,
             degraded_count=len(degraded),
@@ -450,7 +441,6 @@ def summarize_pool_scheduling_dimensions(
         status="available",
         reason="available",
         label="可用",
-        score=round(weighted_score * 100, 1),
         candidate_eligible=True,
         blocked_count=0,
         degraded_count=0,

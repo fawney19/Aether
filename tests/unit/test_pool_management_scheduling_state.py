@@ -12,11 +12,6 @@ def test_pool_scheduling_state_manual_disabled_is_blocked() -> None:
         reason,
         _label,
         reasons,
-        score,
-        candidate_eligible,
-        blocked_count,
-        _degraded_count,
-        dimensions,
     ) = _build_pool_scheduling_state(
         is_active=False,
         account_blocked=False,
@@ -34,11 +29,7 @@ def test_pool_scheduling_state_manual_disabled_is_blocked() -> None:
 
     assert status == "blocked"
     assert reason == "manual_disabled"
-    assert candidate_eligible is False
-    assert blocked_count >= 1
-    assert score < 100
     assert any(item.code == "manual_disabled" for item in reasons)
-    assert any(item.code == "manual_disabled" for item in dimensions)
 
 
 def test_pool_scheduling_state_cooldown_detail_is_mapped() -> None:
@@ -47,11 +38,6 @@ def test_pool_scheduling_state_cooldown_detail_is_mapped() -> None:
         reason,
         _label,
         reasons,
-        _score,
-        _candidate_eligible,
-        _blocked_count,
-        _degraded_count,
-        dimensions,
     ) = _build_pool_scheduling_state(
         is_active=True,
         account_blocked=False,
@@ -69,9 +55,7 @@ def test_pool_scheduling_state_cooldown_detail_is_mapped() -> None:
 
     assert reason == "cooldown"
     cooldown_reason = next(item for item in reasons if item.code == "cooldown")
-    cooldown_dimension = next(item for item in dimensions if item.code == "cooldown")
     assert cooldown_reason.detail == "429 限流"
-    assert cooldown_dimension.detail == "429 限流"
 
 
 def test_pool_scheduling_state_cost_soft_is_degraded() -> None:
@@ -80,11 +64,6 @@ def test_pool_scheduling_state_cost_soft_is_degraded() -> None:
         reason,
         _label,
         _reasons,
-        _score,
-        candidate_eligible,
-        blocked_count,
-        degraded_count,
-        _dimensions,
     ) = _build_pool_scheduling_state(
         is_active=True,
         account_blocked=False,
@@ -102,9 +81,6 @@ def test_pool_scheduling_state_cost_soft_is_degraded() -> None:
 
     assert status == "degraded"
     assert reason == "cost_soft"
-    assert candidate_eligible is True
-    assert blocked_count == 0
-    assert degraded_count >= 1
 
 
 def test_known_banned_reason_account_block_prefix() -> None:

@@ -27,6 +27,7 @@ from src.core.exceptions import NotFoundException
 from src.core.logger import logger
 from src.database import get_db
 from src.models.database import Provider, ProviderAPIKey, Usage
+from src.services.provider.fingerprint import generate_fingerprint
 from src.services.provider.pool import redis_ops as pool_redis
 from src.services.provider.pool.account_state import resolve_pool_account_state
 from src.services.provider.pool.config import parse_pool_config
@@ -47,7 +48,6 @@ from .schemas import (
     PoolKeysPageResponse,
     PoolOverviewItem,
     PoolOverviewResponse,
-    PoolSchedulingDimension,
     PoolSchedulingReason,
     PresetDimensionMetaResponse,
     PresetModeMetaResponse,
@@ -144,7 +144,14 @@ async def batch_import_keys(
 # POST /api/admin/pool/{provider_id}/keys/batch-action
 # ---------------------------------------------------------------------------
 
-ALLOWED_ACTIONS = {"enable", "disable", "delete", "clear_cooldown", "reset_cost"}
+ALLOWED_ACTIONS = {
+    "enable",
+    "disable",
+    "delete",
+    "clear_cooldown",
+    "reset_cost",
+    "regenerate_fingerprint",
+}
 
 _COOLDOWN_REASON_LABELS: dict[str, str] = {
     "rate_limited_429": "429 限流",
@@ -508,17 +515,7 @@ def _build_pool_scheduling_state(
     cost_limit: int | None,
     cost_soft_threshold_percent: int,
     health_score: float,
-) -> tuple[
-    str,
-    str,
-    str,
-    list[PoolSchedulingReason],
-    float,
-    bool,
-    int,
-    int,
-    list[PoolSchedulingDimension],
-]:
+) -> tuple[str, str, str, list[PoolSchedulingReason]]:
     """Build unified scheduling state for frontend display."""
     snapshot = PoolSchedulingSnapshot(
         is_active=is_active,
@@ -537,28 +534,12 @@ def _build_pool_scheduling_state(
     dimensions_raw = evaluate_pool_scheduling_dimensions(snapshot)
     summary = summarize_pool_scheduling_dimensions(dimensions_raw)
 
-    scheduling_dimensions: list[PoolSchedulingDimension] = []
     scheduling_reasons: list[PoolSchedulingReason] = []
-
     for item in dimensions_raw:
-        detail = item.detail
-        if item.code == "cooldown":
-            detail = _format_cooldown_detail(detail)
-
-        model = PoolSchedulingDimension(
-            code=item.code,
-            label=item.label,
-            status=item.status,
-            blocking=bool(item.blocking or item.status == "blocked"),
-            source=item.source,
-            weight=item.weight,
-            score=item.score,
-            ttl_seconds=item.ttl_seconds,
-            detail=detail,
-        )
-        scheduling_dimensions.append(model)
-
         if item.status != "ok":
+            detail = item.detail
+            if item.code == "cooldown":
+                detail = _format_cooldown_detail(detail)
             scheduling_reasons.append(
                 PoolSchedulingReason(
                     code=item.code,
@@ -575,11 +556,6 @@ def _build_pool_scheduling_state(
         summary.reason,
         summary.label,
         scheduling_reasons,
-        summary.score,
-        summary.candidate_eligible,
-        summary.blocked_count,
-        summary.degraded_count,
-        scheduling_dimensions,
     )
 
 
@@ -600,7 +576,7 @@ async def batch_action_keys(
     request: Request,
     db: Session = Depends(get_db),
 ) -> BatchActionResponse:
-    """Batch enable/disable/delete/clear_cooldown/reset_cost on pool keys."""
+    """Batch enable/disable/delete/clear_cooldown/reset_cost/regenerate_fingerprint on pool keys."""
     adapter = AdminBatchActionKeysAdapter(provider_id=provider_id, body=body)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
@@ -902,11 +878,6 @@ class AdminListPoolKeysAdapter(AdminApiAdapter):
                 scheduling_reason,
                 scheduling_label,
                 scheduling_reasons,
-                scheduling_score,
-                candidate_eligible,
-                scheduling_blocked_count,
-                scheduling_degraded_count,
-                scheduling_dimensions,
             ) = _build_pool_scheduling_state(
                 is_active=bool(k.is_active),
                 account_blocked=account_state.blocked,
@@ -1014,6 +985,11 @@ class AdminListPoolKeysAdapter(AdminApiAdapter):
                     model_include_patterns=include_patterns,
                     model_exclude_patterns=exclude_patterns,
                     proxy=_mask_proxy_password(getattr(k, "proxy", None)),
+                    fingerprint=(
+                        getattr(k, "fingerprint", None)
+                        if isinstance(getattr(k, "fingerprint", None), dict)
+                        else None
+                    ),
                     account_quota=_build_account_quota(
                         provider_type,
                         getattr(k, "upstream_metadata", None),
@@ -1035,11 +1011,6 @@ class AdminListPoolKeysAdapter(AdminApiAdapter):
                     scheduling_reason=scheduling_reason,
                     scheduling_label=scheduling_label,
                     scheduling_reasons=scheduling_reasons,
-                    scheduling_score=scheduling_score,
-                    candidate_eligible=candidate_eligible,
-                    scheduling_blocked_count=scheduling_blocked_count,
-                    scheduling_degraded_count=scheduling_degraded_count,
-                    scheduling_dimensions=scheduling_dimensions,
                 )
             )
 
@@ -1077,13 +1048,15 @@ class AdminBatchImportKeysAdapter(AdminApiAdapter):
 
             try:
                 encrypted_key = crypto_service.encrypt(item.api_key)
+                new_key_id = str(uuid.uuid4())
                 new_key = ProviderAPIKey(
-                    id=str(uuid.uuid4()),
+                    id=new_key_id,
                     provider_id=self.provider_id,
                     name=item.name or f"imported-{idx}",
                     api_key=encrypted_key,
                     auth_type=item.auth_type or "api_key",
                     proxy=key_proxy,
+                    fingerprint=generate_fingerprint(seed=new_key_id),
                     is_active=True,
                     created_at=now,
                     updated_at=now,
@@ -1178,7 +1151,11 @@ class AdminBatchActionKeysAdapter(AdminApiAdapter):
                 await pool_redis.clear_cost(pid, kid)
                 affected += 1
 
-        if self.body.action in {"enable", "disable", "delete"}:
+            elif self.body.action == "regenerate_fingerprint":
+                key.fingerprint = generate_fingerprint(seed=None)
+                affected += 1
+
+        if self.body.action in {"enable", "disable", "delete", "regenerate_fingerprint"}:
             try:
                 db.commit()
             except Exception as exc:
@@ -1192,6 +1169,7 @@ class AdminBatchActionKeysAdapter(AdminApiAdapter):
             "delete": "deleted",
             "clear_cooldown": "cooldown cleared",
             "reset_cost": "cost reset",
+            "regenerate_fingerprint": "fingerprint regenerated",
         }
 
         admin_name = context.user.username if context.user else "admin"

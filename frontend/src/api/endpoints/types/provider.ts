@@ -442,8 +442,6 @@ export interface ClaudeCodeAdvancedConfig {
   // 会话数量控制：null/undefined 表示不限制
   max_sessions?: number | null
   session_idle_timeout_minutes?: number | null
-  // TLS 指纹模拟（模拟 Node.js/Claude Code 客户端指纹）
-  enable_tls_fingerprint?: boolean
   // 会话 ID 伪装（固定 metadata.user_id 中 session 片段）
   session_id_masking_enabled?: boolean
   // Cache TTL 统一（强制所有 cache_control 使用相同 TTL 类型）

@@ -14,6 +14,8 @@ import uuid
 # ============== API 端点 ==============
 # 唯一定义在 core 层，此处 re-export 保持向后兼容
 from src.core.provider_templates.fixed_providers import ANTIGRAVITY_PROD_URL as PROD_BASE_URL
+from src.services.provider.fingerprint import resolve_platform_token
+from src.services.provider.request_context import get_current_fingerprint
 
 DAILY_BASE_URL = "https://daily-cloudcode-pa.googleapis.com"
 SANDBOX_BASE_URL = "https://daily-cloudcode-pa.sandbox.googleapis.com"
@@ -39,11 +41,27 @@ def _detect_platform_info() -> str:
 
 _PLATFORM_INFO = _detect_platform_info()
 
+
+def _build_antigravity_http_user_agent(
+    *,
+    platform_token: str,
+    version: str,
+    chrome_version: str,
+    electron_version: str,
+) -> str:
+    return (
+        f"Mozilla/5.0 ({platform_token}) AppleWebKit/537.36 (KHTML, like Gecko) "
+        f"Antigravity/{version} Chrome/{chrome_version} "
+        f"Electron/{electron_version} Safari/537.36"
+    )
+
+
 # HTTP Header User-Agent（对齐 AM constants.rs: 完整 Electron 浏览器格式）
-HTTP_USER_AGENT = (
-    f"Mozilla/5.0 ({_PLATFORM_INFO}) AppleWebKit/537.36 (KHTML, like Gecko) "
-    f"Antigravity/{_FALLBACK_VERSION} Chrome/{_FALLBACK_CHROME} "
-    f"Electron/{_FALLBACK_ELECTRON} Safari/537.36"
+HTTP_USER_AGENT = _build_antigravity_http_user_agent(
+    platform_token=_PLATFORM_INFO,
+    version=_FALLBACK_VERSION,
+    chrome_version=_FALLBACK_CHROME,
+    electron_version=_FALLBACK_ELECTRON,
 )
 
 # V1InternalRequest.userAgent 字段（固定值）
@@ -57,10 +75,11 @@ _ua_version: str = _FALLBACK_VERSION
 def get_http_user_agent() -> str:
     """返回当前 HTTP User-Agent 字符串（对齐 AM Electron UA 格式）。"""
     with _ua_lock:
-        return (
-            f"Mozilla/5.0 ({_PLATFORM_INFO}) AppleWebKit/537.36 (KHTML, like Gecko) "
-            f"Antigravity/{_ua_version} Chrome/{_FALLBACK_CHROME} "
-            f"Electron/{_FALLBACK_ELECTRON} Safari/537.36"
+        return _build_antigravity_http_user_agent(
+            platform_token=_PLATFORM_INFO,
+            version=_ua_version,
+            chrome_version=_FALLBACK_CHROME,
+            electron_version=_FALLBACK_ELECTRON,
         )
 
 
@@ -72,10 +91,11 @@ def update_user_agent_version(version: str) -> None:
         return
     with _ua_lock:
         _ua_version = version
-        HTTP_USER_AGENT = (
-            f"Mozilla/5.0 ({_PLATFORM_INFO}) AppleWebKit/537.36 (KHTML, like Gecko) "
-            f"Antigravity/{_ua_version} Chrome/{_FALLBACK_CHROME} "
-            f"Electron/{_FALLBACK_ELECTRON} Safari/537.36"
+        HTTP_USER_AGENT = _build_antigravity_http_user_agent(
+            platform_token=_PLATFORM_INFO,
+            version=_ua_version,
+            chrome_version=_FALLBACK_CHROME,
+            electron_version=_FALLBACK_ELECTRON,
         )
 
 
@@ -94,16 +114,43 @@ URL_UNAVAILABLE_TTL_SECONDS = 300  # 5 分钟
 _SESSION_ID = uuid.uuid4().hex  # 每次进程启动生成一个固定 session ID
 
 
+def _normalize_node_version(raw: str | None) -> str:
+    text = str(raw or "").strip()
+    if text.startswith(("v", "V")):
+        text = text[1:]
+    return text or "18.18.2"
+
+
 def get_v1internal_extra_headers() -> dict[str, str]:
     """构建 v1internal 请求需要的额外 header（对齐 AM upstream/client.rs）。"""
+    fp = get_current_fingerprint()
     with _ua_lock:
         version = _ua_version
+
+    user_agent = get_http_user_agent()
+    session_id = _SESSION_ID
+    node_version = "18.18.2"
+
+    if fp:
+        user_agent = _build_antigravity_http_user_agent(
+            platform_token=resolve_platform_token(
+                platform_info=fp.platform_info,
+                stainless_os=fp.stainless_os,
+                stainless_arch=fp.stainless_arch,
+            ),
+            version=version,
+            chrome_version=fp.chrome_version or _FALLBACK_CHROME,
+            electron_version=fp.electron_version or _FALLBACK_ELECTRON,
+        )
+        session_id = fp.vscode_session_id or _SESSION_ID
+        node_version = _normalize_node_version(fp.node_version)
+
     return {
-        "User-Agent": get_http_user_agent(),
+        "User-Agent": user_agent,
         "x-client-name": "antigravity",
         "x-client-version": version,
-        "x-vscode-sessionid": _SESSION_ID,
-        "x-goog-api-client": "gl-node/18.18.2 fire/0.8.6 grpc/1.10.x",
+        "x-vscode-sessionid": session_id,
+        "x-goog-api-client": f"gl-node/{node_version} fire/0.8.6 grpc/1.10.x",
     }
 
 

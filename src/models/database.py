@@ -1660,6 +1660,9 @@ class ProviderAPIKey(ExportMixin, Base):
     # null 表示使用 Provider 级别代理（默认行为）
     proxy = Column(JSON, nullable=True, default=None)
 
+    # 每个账号持久化的请求指纹配置（TLS impersonate + HTTP header 维度）
+    fingerprint = Column(JSON, nullable=True, default=None)
+
     # 时间戳
     created_at = Column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False

@@ -291,9 +291,6 @@
                 >
                   配额
                 </TableHead>
-                <TableHead class="w-[180px] font-semibold whitespace-nowrap">
-                  调度
-                </TableHead>
                 <TableHead class="w-24 font-semibold whitespace-nowrap">
                   状态
                 </TableHead>
@@ -313,7 +310,7 @@
                 v-for="key in keyPage.keys"
                 :key="key.key_id"
                 class="border-b border-border/40 last:border-b-0 hover:bg-muted/30 transition-colors"
-                :class="{ 'opacity-50': !key.is_active }"
+                :class="getRowClass(key)"
               >
                 <TableCell class="py-3">
                   <div class="max-w-[260px] min-w-0">
@@ -440,95 +437,6 @@
                   >-</span>
                 </TableCell>
                 <TableCell class="py-3">
-                  <div
-                    class="grid grid-rows-[16px_16px] gap-1 w-20"
-                    :title="getSchedulingDimensionTitle(key)"
-                  >
-                    <div class="h-4 flex items-center justify-between gap-1">
-                      <span
-                        class="text-[11px] font-normal leading-none tabular-nums"
-                        :class="isCandidateEligible(key) ? 'text-foreground' : 'text-destructive'"
-                      >
-                        {{ getSchedulingScore(key).toFixed(1) }}
-                      </span>
-                      <Popover
-                        :open="schedulingDetailDesktopPopoverOpenKeyId === key.key_id"
-                        @update:open="(v: boolean) => handleSchedulingDetailDesktopPopoverToggle(key.key_id, v)"
-                      >
-                        <PopoverTrigger as-child>
-                          <button
-                            type="button"
-                            class="inline-flex h-4 w-4 items-center justify-center text-muted-foreground hover:text-foreground"
-                            title="查看计算详情"
-                            @click.stop
-                          >
-                            <CircleHelp class="w-3 h-3" />
-                          </button>
-                        </PopoverTrigger>
-                        <PopoverContent
-                          class="w-72 p-3"
-                          side="bottom"
-                          align="start"
-                        >
-                          <div class="space-y-2">
-                            <div class="text-xs font-medium">
-                              调度分计算详情
-                            </div>
-                            <div class="max-h-56 overflow-y-auto space-y-2 pr-1">
-                              <div
-                                v-for="item in getSchedulingRuleEntries(key)"
-                                :key="`${key.key_id}-score-detail-${item.code}`"
-                                class="rounded-md border border-border/60 p-2"
-                              >
-                                <div class="flex items-center justify-between gap-2">
-                                  <span class="text-[11px] font-medium">
-                                    {{ item.label }}
-                                  </span>
-                                  <Badge
-                                    :variant="getSchedulingDimensionStatusVariant(item.status)"
-                                    class="text-[10px]"
-                                  >
-                                    {{ getSchedulingDimensionStatusLabel(item.status) }}
-                                  </Badge>
-                                </div>
-                                <div
-                                  v-if="item.weight != null || item.score != null"
-                                  class="text-[10px] text-muted-foreground mt-1"
-                                >
-                                  <span v-if="item.weight != null">权重 {{ item.weight }}</span>
-                                  <span v-if="item.weight != null && item.score != null"> · </span>
-                                  <span v-if="item.score != null">分值 {{ Math.round(item.score * 100) }}</span>
-                                </div>
-                                <div
-                                  v-if="item.detail"
-                                  class="text-[10px] text-muted-foreground mt-1 break-all"
-                                >
-                                  {{ item.detail }}
-                                </div>
-                                <div
-                                  v-if="item.ttl_seconds && item.ttl_seconds > 0"
-                                  class="text-[10px] text-muted-foreground mt-1"
-                                >
-                                  剩余 {{ formatTTL(item.ttl_seconds) }}
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        </PopoverContent>
-                      </Popover>
-                    </div>
-                    <div class="h-4 flex items-center">
-                      <div class="w-full h-1.5 bg-border rounded-full overflow-hidden">
-                        <div
-                          class="h-full transition-all duration-300"
-                          :class="getSchedulingScoreBarColor(getSchedulingScore(key))"
-                          :style="{ width: `${Math.max(Math.min(getSchedulingScore(key), 100), 0)}%` }"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </TableCell>
-                <TableCell class="py-3">
                   <Badge
                     :variant="getSchedulingBadgeVariant(key)"
                     class="text-[10px]"
@@ -553,7 +461,7 @@
                     <div class="flex items-center justify-between gap-2">
                       <span class="text-muted-foreground">Token</span>
                       <span class="tabular-nums text-foreground/90">
-                        {{ formatStatToken(key.total_tokens) }}
+                        {{ formatTokenCount(key.total_tokens) }}
                       </span>
                     </div>
                     <div class="flex items-center justify-between gap-2">
@@ -691,7 +599,7 @@
             v-for="key in keyPage.keys"
             :key="key.key_id"
             class="p-4 sm:p-5 hover:bg-muted/30 transition-colors"
-            :class="{ 'opacity-50': !key.is_active }"
+            :class="getRowClass(key)"
           >
             <div class="flex items-center gap-3">
               <div class="flex-1 min-w-0">
@@ -896,94 +804,8 @@
             </div>
             <div
               class="mt-2.5 grid gap-2"
-              :class="showAccountQuotaColumn ? 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-5' : 'grid-cols-2 sm:grid-cols-4'"
+              :class="showAccountQuotaColumn ? 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-4' : 'grid-cols-2 sm:grid-cols-3'"
             >
-              <div class="p-2 bg-muted/50 rounded-lg text-xs">
-                <div class="text-muted-foreground mb-0.5">
-                  调度
-                </div>
-                <div class="w-24 flex items-center justify-between gap-1">
-                  <div
-                    class="font-normal tabular-nums text-[10px] leading-none"
-                    :class="isCandidateEligible(key) ? 'text-foreground' : 'text-destructive'"
-                    :title="getSchedulingDimensionTitle(key)"
-                  >
-                    {{ getSchedulingScore(key).toFixed(1) }}
-                  </div>
-                  <Popover
-                    :open="schedulingDetailMobilePopoverOpenKeyId === key.key_id"
-                    @update:open="(v: boolean) => handleSchedulingDetailMobilePopoverToggle(key.key_id, v)"
-                  >
-                    <PopoverTrigger as-child>
-                      <button
-                        type="button"
-                        class="inline-flex h-4 w-4 items-center justify-center text-muted-foreground hover:text-foreground"
-                        title="查看计算详情"
-                        @click.stop
-                      >
-                        <CircleHelp class="w-3 h-3" />
-                      </button>
-                    </PopoverTrigger>
-                    <PopoverContent
-                      class="w-72 p-3"
-                      side="bottom"
-                      align="start"
-                    >
-                      <div class="space-y-2">
-                        <div class="text-xs font-medium">
-                          调度分计算详情
-                        </div>
-                        <div class="max-h-56 overflow-y-auto space-y-2 pr-1">
-                          <div
-                            v-for="item in getSchedulingRuleEntries(key)"
-                            :key="`${key.key_id}-mobile-score-detail-${item.code}`"
-                            class="rounded-md border border-border/60 p-2"
-                          >
-                            <div class="flex items-center justify-between gap-2">
-                              <span class="text-[11px] font-medium">
-                                {{ item.label }}
-                              </span>
-                              <Badge
-                                :variant="getSchedulingDimensionStatusVariant(item.status)"
-                                class="text-[10px]"
-                              >
-                                {{ getSchedulingDimensionStatusLabel(item.status) }}
-                              </Badge>
-                            </div>
-                            <div
-                              v-if="item.weight != null || item.score != null"
-                              class="text-[10px] text-muted-foreground mt-1"
-                            >
-                              <span v-if="item.weight != null">权重 {{ item.weight }}</span>
-                              <span v-if="item.weight != null && item.score != null"> · </span>
-                              <span v-if="item.score != null">分值 {{ Math.round(item.score * 100) }}</span>
-                            </div>
-                            <div
-                              v-if="item.detail"
-                              class="text-[10px] text-muted-foreground mt-1 break-all"
-                            >
-                              {{ item.detail }}
-                            </div>
-                            <div
-                              v-if="item.ttl_seconds && item.ttl_seconds > 0"
-                              class="text-[10px] text-muted-foreground mt-1"
-                            >
-                              剩余 {{ formatTTL(item.ttl_seconds) }}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </PopoverContent>
-                  </Popover>
-                </div>
-                <div class="w-24 h-1.5 bg-border rounded-full overflow-hidden mt-1">
-                  <div
-                    class="h-full transition-all duration-300"
-                    :class="getSchedulingScoreBarColor(getSchedulingScore(key))"
-                    :style="{ width: `${Math.max(Math.min(getSchedulingScore(key), 100), 0)}%` }"
-                  />
-                </div>
-              </div>
               <div class="p-2 bg-muted/50 rounded-lg text-xs">
                 <div class="text-muted-foreground mb-0.5">
                   最后使用
@@ -1003,7 +825,7 @@
                   </div>
                   <div class="flex items-center justify-between gap-2">
                     <span class="text-muted-foreground">Token</span>
-                    <span class="tabular-nums">{{ formatStatToken(key.total_tokens) }}</span>
+                    <span class="tabular-nums">{{ formatTokenCount(key.total_tokens) }}</span>
                   </div>
                   <div class="flex items-center justify-between gap-2">
                     <span class="text-muted-foreground">费用</span>
@@ -1162,7 +984,6 @@ import {
   Globe,
   SquarePen,
   Trash2,
-  CircleHelp,
   Ban,
 } from 'lucide-vue-next'
 
@@ -1392,8 +1213,6 @@ async function selectProvider(id: string) {
   oauthKeyEditDialogOpen.value = false
   proxyDesktopPopoverOpenKeyId.value = null
   proxyMobilePopoverOpenKeyId.value = null
-  schedulingDetailDesktopPopoverOpenKeyId.value = null
-  schedulingDetailMobilePopoverOpenKeyId.value = null
   suppressFiltersWatch = true
   currentPage.value = 1
   searchQuery.value = ''
@@ -1438,8 +1257,6 @@ const recoveringHealthKeyId = ref<string | null>(null)
 const savingProxyKeyId = ref<string | null>(null)
 const proxyDesktopPopoverOpenKeyId = ref<string | null>(null)
 const proxyMobilePopoverOpenKeyId = ref<string | null>(null)
-const schedulingDetailDesktopPopoverOpenKeyId = ref<string | null>(null)
-const schedulingDetailMobilePopoverOpenKeyId = ref<string | null>(null)
 const deletingKeyId = ref<string | null>(null)
 const togglingKeyId = ref<string | null>(null)
 
@@ -1753,20 +1570,6 @@ function handleProxyMobilePopoverToggle(keyId: string, open: boolean) {
   }
 }
 
-function handleSchedulingDetailDesktopPopoverToggle(keyId: string, open: boolean) {
-  schedulingDetailDesktopPopoverOpenKeyId.value = open ? keyId : null
-  if (open) {
-    schedulingDetailMobilePopoverOpenKeyId.value = null
-  }
-}
-
-function handleSchedulingDetailMobilePopoverToggle(keyId: string, open: boolean) {
-  schedulingDetailMobilePopoverOpenKeyId.value = open ? keyId : null
-  if (open) {
-    schedulingDetailDesktopPopoverOpenKeyId.value = null
-  }
-}
-
 async function setKeyProxy(key: PoolKeyDetail, nodeId: string) {
   savingProxyKeyId.value = key.key_id
   try {
@@ -2048,7 +1851,7 @@ function getSchedulingBadgeVariant(key: PoolKeyDetail): PoolStatusVariant {
   if (getAccountAlertLabel(key)) return 'destructive'
 
   const reason = key.scheduling_reason
-  if (reason === 'manual_disabled') return 'dark'
+  if (reason === 'manual_disabled') return 'secondary'
   if (reason === 'cooldown' || reason === 'circuit_open' || reason === 'cost_exhausted') return 'destructive'
   if (reason === 'cost_soft' || reason === 'cost') return 'warning'
   if (reason === 'health_low' || reason === 'health_degraded' || reason === 'health') return 'warning'
@@ -2063,14 +1866,6 @@ function getSchedulingBadgeVariant(key: PoolKeyDetail): PoolStatusVariant {
 function getSchedulingTitle(key: PoolKeyDetail): string {
   const accountAlertTitle = getAccountAlertTitle(key)
   if (accountAlertTitle) return accountAlertTitle
-
-  if (key.scheduling_dimensions && key.scheduling_dimensions.length > 0) {
-    return key.scheduling_dimensions.map((item) => {
-      const ttl = item.ttl_seconds && item.ttl_seconds > 0 ? ` (${formatTTL(item.ttl_seconds)})` : ''
-      const detail = item.detail ? ` - ${item.detail}` : ''
-      return `${item.label}: ${item.status}${ttl}${detail}`
-    }).join('\n')
-  }
 
   const reasons = key.scheduling_reasons ?? []
   if (reasons.length > 0) {
@@ -2088,94 +1883,17 @@ function getSchedulingTitle(key: PoolKeyDetail): string {
   return getSchedulingBadgeLabel(key)
 }
 
-function getSchedulingScore(key: PoolKeyDetail): number {
-  const raw = key.scheduling_score
-  if (typeof raw === 'number' && Number.isFinite(raw)) {
-    return Math.max(Math.min(raw, 100), 0)
-  }
-  const status = getSchedulingStatus(key)
-  if (status === 'blocked') return 35
-  if (status === 'degraded') return 68
-  return 100
-}
-
-function getSchedulingScoreBarColor(score: number): string {
-  if (score >= 80) return 'bg-green-500 dark:bg-green-400'
-  if (score >= 50) return 'bg-yellow-500 dark:bg-yellow-400'
-  return 'bg-red-500 dark:bg-red-400'
-}
-
-function isCandidateEligible(key: PoolKeyDetail): boolean {
-  if (typeof key.candidate_eligible === 'boolean') return key.candidate_eligible
-  return getSchedulingStatus(key) !== 'blocked'
-}
-
-function getSchedulingDimensionTitle(key: PoolKeyDetail): string {
-  const dimensions = key.scheduling_dimensions ?? []
-  if (!dimensions.length) return ''
-  return dimensions.map((item) => {
-    const ttl = item.ttl_seconds && item.ttl_seconds > 0 ? ` (${formatTTL(item.ttl_seconds)})` : ''
-    const detail = item.detail ? ` - ${item.detail}` : ''
-    return `${item.label}: ${item.status}${ttl}${detail}`
-  }).join('\n')
-}
-
-function getSchedulingRuleEntries(
-  key: PoolKeyDetail,
-): NonNullable<PoolKeyDetail['scheduling_dimensions']> {
-  const dimensions = key.scheduling_dimensions ?? []
-  if (dimensions.length > 0) {
-    return dimensions
-  }
-
-  const reasons = key.scheduling_reasons ?? []
-  if (reasons.length > 0) {
-    return reasons.map((reason) => ({
-      code: reason.code,
-      label: reason.label,
-      status: reason.blocking ? 'blocked' : 'degraded',
-      blocking: reason.blocking,
-      source: reason.source,
-      weight: 0,
-      score: 0,
-      ttl_seconds: reason.ttl_seconds ?? null,
-      detail: reason.detail ?? null,
-    }))
-  }
-
-  const fallbackStatus = getSchedulingStatus(key)
-  return [
-    {
-      code: key.scheduling_reason ?? 'available',
-      label: getSchedulingBadgeLabel(key),
-      status: fallbackStatus === 'available' ? 'ok' : fallbackStatus,
-      blocking: fallbackStatus === 'blocked',
-      source: 'pool',
-      weight: 0,
-      score: 0,
-      ttl_seconds: null,
-      detail: null,
-    },
-  ]
-}
-
-function getSchedulingDimensionStatusLabel(status: string): string {
-  if (status === 'blocked') return '阻塞'
-  if (status === 'degraded') return '降级'
-  return '可用'
-}
-
-function getSchedulingDimensionStatusVariant(status: string): PoolStatusVariant {
-  if (status === 'blocked') return 'destructive'
-  if (status === 'degraded') return 'warning'
-  return 'default'
-}
-
 function formatTTL(seconds: number): string {
   if (seconds <= 0) return ''
   const m = Math.floor(seconds / 60)
   const s = seconds % 60
   return m > 0 ? `${m}m ${s}s` : `${s}s`
+}
+
+function getRowClass(key: PoolKeyDetail): string {
+  const status = getSchedulingStatus(key)
+  if (!key.is_active || status === 'blocked') return 'bg-muted/50 opacity-60'
+  return ''
 }
 
 function getHealthScoreColor(score: number): string {
@@ -2418,15 +2136,12 @@ function formatStatInteger(value: number | null | undefined): string {
   return Math.round(n).toLocaleString('en-US')
 }
 
-function formatStatToken(value: number | null | undefined): string {
+function formatTokenCount(value: number | null | undefined): string {
   const n = Number(value ?? 0)
   if (!Number.isFinite(n) || n <= 0) return '0'
-  if (n < 1_000_000) return Math.round(n).toLocaleString('en-US')
-
-  const millions = n / 1_000_000
-  if (millions >= 100) return `${Math.round(millions)}M`
-  if (millions >= 10) return `${millions.toFixed(1)}M`
-  return `${millions.toFixed(2)}M`
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
+  return String(Math.round(n))
 }
 
 function formatStatUsd(value: number | null | undefined): string {
@@ -2439,11 +2154,13 @@ function formatStatUsd(value: number | null | undefined): string {
 }
 
 function formatRelativeTime(isoStr: string): string {
-  const diff = (Date.now() - new Date(isoStr).getTime()) / 1000
-  if (diff < 60) return '刚刚'
-  if (diff < 3600) return `${Math.floor(diff / 60)}m 前`
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h 前`
-  return `${Math.floor(diff / 86400)}d 前`
+  const date = new Date(isoStr)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const M = pad(date.getMonth() + 1)
+  const D = pad(date.getDate())
+  const h = pad(date.getHours())
+  const m = pad(date.getMinutes())
+  return `${M}-${D} ${h}:${m}`
 }
 
 // --- Init ---

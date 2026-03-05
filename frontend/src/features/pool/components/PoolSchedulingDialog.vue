@@ -205,18 +205,6 @@
           </h3>
           <div class="flex items-center justify-between p-3 border rounded-lg bg-muted/50">
             <div class="space-y-0.5">
-              <span class="text-sm font-medium">TLS 指纹模拟</span>
-              <p class="text-xs text-muted-foreground">
-                模拟 Node.js / Claude Code 客户端指纹
-              </p>
-            </div>
-            <Switch
-              :model-value="claudeForm.enable_tls_fingerprint"
-              @update:model-value="(v: boolean) => claudeForm.enable_tls_fingerprint = v"
-            />
-          </div>
-          <div class="flex items-center justify-between p-3 border rounded-lg bg-muted/50">
-            <div class="space-y-0.5">
               <span class="text-sm font-medium">Session ID 伪装</span>
               <p class="text-xs text-muted-foreground">
                 固定 metadata.user_id 中 session 片段
@@ -510,7 +498,6 @@ interface ClaudeFormState {
   session_control_enabled: boolean
   max_sessions: number | undefined
   session_idle_timeout_minutes: number
-  enable_tls_fingerprint: boolean
   session_id_masking_enabled: boolean
   cache_ttl_override_enabled: boolean
   cache_ttl_override_target: string
@@ -521,7 +508,6 @@ const claudeForm = ref<ClaudeFormState>({
   session_control_enabled: true,
   max_sessions: undefined,
   session_idle_timeout_minutes: 5,
-  enable_tls_fingerprint: true,
   session_id_masking_enabled: true,
   cache_ttl_override_enabled: false,
   cache_ttl_override_target: 'ephemeral',
@@ -826,7 +812,6 @@ watch(() => props.modelValue, async (open) => {
     session_control_enabled: cc?.max_sessions !== null,
     max_sessions: cc?.max_sessions ?? undefined,
     session_idle_timeout_minutes: cc?.session_idle_timeout_minutes ?? 5,
-    enable_tls_fingerprint: cc?.enable_tls_fingerprint !== false,
     session_id_masking_enabled: cc?.session_id_masking_enabled !== false,
     cache_ttl_override_enabled: cc?.cache_ttl_override_enabled ?? false,
     cache_ttl_override_target: cc?.cache_ttl_override_target ?? 'ephemeral',
@@ -869,7 +854,6 @@ async function handleSave() {
       payload.claude_code_advanced = {
         max_sessions: cf.session_control_enabled ? (cf.max_sessions ?? null) : null,
         session_idle_timeout_minutes: cf.session_control_enabled ? cf.session_idle_timeout_minutes : null,
-        enable_tls_fingerprint: cf.enable_tls_fingerprint,
         session_id_masking_enabled: cf.session_id_masking_enabled,
         cache_ttl_override_enabled: cf.cache_ttl_override_enabled,
         cache_ttl_override_target: cf.cache_ttl_override_enabled ? cf.cache_ttl_override_target : undefined,

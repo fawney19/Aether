@@ -1491,8 +1491,11 @@ class AdminImportConfigAdapter(AdminApiAdapter):
                         )
                         encrypted_auth_config = crypto_service.encrypt(auth_config_str)
 
+                    from src.services.provider.fingerprint import generate_fingerprint
+
+                    new_key_id = str(uuid.uuid4())
                     new_key = ProviderAPIKey(
-                        id=str(uuid.uuid4()),
+                        id=new_key_id,
                         provider_id=provider_id,
                         api_formats=normalized_formats,
                         auth_type=key_data.get("auth_type", "api_key"),
@@ -1514,6 +1517,7 @@ class AdminImportConfigAdapter(AdminApiAdapter):
                         model_exclude_patterns=key_data.get("model_exclude_patterns"),
                         is_active=key_data.get("is_active", True),
                         proxy=key_data.get("proxy"),
+                        fingerprint=generate_fingerprint(seed=new_key_id),
                         health_by_format={},
                         circuit_breaker_by_format={},
                     )

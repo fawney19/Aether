@@ -19,6 +19,7 @@ import httpx
 
 from src.config import config
 from src.core.logger import logger
+from src.services.provider.fingerprint import KNOWN_IMPERSONATE_PROFILES
 from src.services.proxy_node.resolver import (
     build_proxy_url,
     compute_proxy_cache_key,
@@ -246,17 +247,28 @@ class HTTPClientPool:
             proxy_url = build_proxy_url(proxy_config) if proxy_config else None
 
             # curl_cffi Transport: real TLS fingerprint impersonation.
-            # When tls_profile requires fingerprint impersonation and curl_cffi
-            # is available, use CurlCffiTransport instead of the default httpx
-            # transport. This gives us a genuine browser/Node.js TLS handshake.
-            if tls_profile_key == "claude_code_nodejs":
+            # Supports:
+            # - "claude_code_nodejs" (legacy alias, uses default chrome120 impersonate)
+            # - direct chrome impersonate profile names (e.g. "chrome124")
+            use_curl_cffi_tls = False
+            if tls_profile_key:
+                use_curl_cffi_tls = (
+                    tls_profile_key == "claude_code_nodejs"
+                    or tls_profile_key in KNOWN_IMPERSONATE_PROFILES
+                )
+
+            if use_curl_cffi_tls:
                 from src.clients.curl_cffi_transport import (
                     CURL_CFFI_AVAILABLE,
                     CurlCffiTransport,
                 )
 
                 if CURL_CFFI_AVAILABLE:
-                    transport = CurlCffiTransport(proxy=proxy_url)
+                    transport_kwargs: dict[str, Any] = {"proxy": proxy_url}
+                    if tls_profile_key != "claude_code_nodejs":
+                        transport_kwargs["impersonate"] = tls_profile_key
+
+                    transport = CurlCffiTransport(**transport_kwargs)
                     client = httpx.AsyncClient(
                         transport=transport,
                         follow_redirects=True,

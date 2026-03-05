@@ -40,7 +40,6 @@ def test_summary_available_when_all_dimensions_ok() -> None:
     assert summary.candidate_eligible is True
     assert summary.blocked_count == 0
     assert summary.degraded_count == 0
-    assert summary.score == 100.0
 
 
 def test_summary_blocked_when_manual_disabled() -> None:
@@ -51,7 +50,6 @@ def test_summary_blocked_when_manual_disabled() -> None:
     assert summary.reason == "manual_disabled"
     assert summary.candidate_eligible is False
     assert summary.blocked_count >= 1
-    assert summary.score < 100.0
 
 
 def test_summary_blocked_when_account_state_blocked() -> None:
@@ -114,7 +112,6 @@ def test_empty_summary_defaults_to_available() -> None:
     summary = summarize_pool_scheduling_dimensions([])
     assert summary.status == "available"
     assert summary.reason == "available"
-    assert summary.score == 100.0
 
 
 def test_dimension_result_keeps_degraded_health_details() -> None:
