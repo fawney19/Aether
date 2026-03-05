@@ -7,10 +7,12 @@ from sqlalchemy.orm import Session
 
 from src.core.logger import logger
 from src.models.database import ApiKey, Usage, User
+from src.services.billing.precision import to_money_decimal
 from src.services.provider_keys.codex_quota_sync_dispatcher import (
     dispatch_codex_quota_sync_from_response_headers,
 )
 from src.services.system.config import SystemConfigService
+from src.services.wallet import WalletService
 
 
 class UsageLifecycleMixin:
@@ -156,41 +158,32 @@ class UsageLifecycleMixin:
         - 仅当 billing_status='pending' 时才会生效（rowcount==1）
         - 不在本方法内 commit，由调用方决定事务提交时机
         """
-        from sqlalchemy import update
-
         now = datetime.now(timezone.utc)
-        cost = float(total_cost_usd)
-        request_cost = float(request_cost_usd) if request_cost_usd is not None else cost
+        cost = to_money_decimal(total_cost_usd)
+        request_cost = to_money_decimal(request_cost_usd) if request_cost_usd is not None else cost
 
-        result = db.execute(
-            update(Usage)
-            .where(
-                Usage.request_id == request_id,
-                Usage.billing_status == "pending",
-            )
-            .values(
-                billing_status="settled",
-                finalized_at=now,
-                total_cost_usd=cost,
-                request_cost_usd=request_cost,
-                status=status,
-                status_code=status_code,
-                error_message=error_message,
-                response_time_ms=response_time_ms,
-            )
-        )
-        if result.rowcount != 1:
+        usage = db.query(Usage).filter(Usage.request_id == request_id).with_for_update().first()
+        if not usage or usage.billing_status != "pending":
             return False
 
+        usage.billing_status = "settled"
+        usage.finalized_at = now
+        usage.total_cost_usd = cost
+        usage.request_cost_usd = request_cost
+        usage.status = status
+        usage.status_code = status_code
+        usage.error_message = error_message
+        usage.response_time_ms = response_time_ms
+        if cost > 0:
+            WalletService.apply_usage_charge(db, usage=usage, amount_usd=cost)
+
         # 写入审计快照（只在本次 finalize 生效时执行）
-        usage = db.query(Usage).filter(Usage.request_id == request_id).first()
-        if usage:
-            metadata = usage.request_metadata or {}
-            if billing_snapshot is not None:
-                metadata["billing_snapshot"] = billing_snapshot
-            if extra_metadata:
-                metadata.update(extra_metadata)
-            usage.request_metadata = cls._sanitize_request_metadata(metadata)
+        metadata = usage.request_metadata or {}
+        if billing_snapshot is not None:
+            metadata["billing_snapshot"] = billing_snapshot
+        if extra_metadata:
+            metadata.update(extra_metadata)
+        usage.request_metadata = cls._sanitize_request_metadata(metadata)
 
         return True
 
@@ -210,27 +203,20 @@ class UsageLifecycleMixin:
         - 仅当 billing_status='pending' 时才会生效（rowcount==1）
         - 不在本方法内 commit，由调用方决定事务提交时机
         """
-        from sqlalchemy import update
-
         now = datetime.now(timezone.utc)
-        result = db.execute(
-            update(Usage)
-            .where(
-                Usage.request_id == request_id,
-                Usage.billing_status == "pending",
-            )
-            .values(
-                billing_status="void",
-                finalized_at=now,
-                total_cost_usd=0.0,
-                request_cost_usd=0.0,
-                status="cancelled",
-                status_code=status_code,
-                error_message=reason,
-                response_time_ms=None,
-            )
-        )
-        return result.rowcount == 1
+        usage = db.query(Usage).filter(Usage.request_id == request_id).with_for_update().first()
+        if not usage or usage.billing_status != "pending":
+            return False
+
+        usage.billing_status = "void"
+        usage.finalized_at = now
+        usage.total_cost_usd = to_money_decimal(0)
+        usage.request_cost_usd = to_money_decimal(0)
+        usage.status = "cancelled"
+        usage.status_code = status_code
+        usage.error_message = reason
+        usage.response_time_ms = None
+        return True
 
     @classmethod
     def finalize_submitted(
@@ -252,17 +238,13 @@ class UsageLifecycleMixin:
         """
         异步任务提交成功时的幂等结算。
 
-        将 pending 使用记录标记为 settled，费用暂时为 0。
-        后续轮询完成后通过 update_settled_billing 更新实际费用。
+        将 pending 使用记录保留为 pending，仅补齐已知的 provider/响应信息。
+        后续轮询完成后通过 update_settled_billing 一次性写入实际费用并扣钱包。
 
         约定：
         - 仅当 billing_status='pending' 时才会生效（rowcount==1）
         - 不在本方法内 commit，由调用方决定事务提交时机
         """
-        from sqlalchemy import update
-
-        now = datetime.now(timezone.utc)
-
         # 处理响应头和响应体
         should_log_headers = SystemConfigService.should_log_headers(db)
         should_log_body = SystemConfigService.should_log_body(db)
@@ -284,11 +266,7 @@ class UsageLifecycleMixin:
             )
 
         values: dict[str, Any] = {
-            "billing_status": "settled",
-            "finalized_at": now,
-            "total_cost_usd": 0.0,
-            "request_cost_usd": 0.0,
-            "status": "completed",
+            "status": "pending",
             "status_code": status_code,
             "response_time_ms": response_time_ms,
             "provider_name": provider_name,
@@ -305,15 +283,12 @@ class UsageLifecycleMixin:
         if processed_response_body is not None:
             values["response_body"] = processed_response_body
 
-        result = db.execute(
-            update(Usage)
-            .where(
-                Usage.request_id == request_id,
-                Usage.billing_status == "pending",
-            )
-            .values(**values)
-        )
-        finalized = result.rowcount == 1
+        usage = db.query(Usage).filter(Usage.request_id == request_id).with_for_update().first()
+        if not usage or usage.billing_status != "pending":
+            return False
+        for key, value in values.items():
+            setattr(usage, key, value)
+        finalized = True
         if finalized:
             dispatch_codex_quota_sync_from_response_headers(
                 provider_api_key_id=provider_api_key_id,
@@ -338,54 +313,51 @@ class UsageLifecycleMixin:
         extra_metadata: dict[str, Any] | None = None,
     ) -> bool:
         """
-        更新已结算记录的计费信息（用于异步任务轮询完成后）。
+        写入异步任务最终账单（轮询完成后调用）。
 
-        与 finalize_settled 不同：
-        - finalize_settled: pending -> settled（首次结算）
-        - update_settled_billing: settled -> settled（更新费用）
+        语义：
+        - 正常路径：pending -> settled / void（首次最终结算）
+        - 补写路径：已写入 0 成本但尚未扣钱包的记录，可补写一次最终值
+        - 已 void 的记录不可再结算
+        - 已扣钱包（wallet_balance_after 已存在）的记录不可重复扣费
 
         约定：
-        - 仅当 billing_status='settled' 时才会生效
         - 不在本方法内 commit，由调用方决定事务提交时机
         """
-        from sqlalchemy import update
-
         now = datetime.now(timezone.utc)
-        cost = float(total_cost_usd)
-        request_cost = float(request_cost_usd) if request_cost_usd is not None else cost
+        cost = to_money_decimal(total_cost_usd)
+        request_cost = to_money_decimal(request_cost_usd) if request_cost_usd is not None else cost
 
-        values: dict[str, Any] = {
-            "total_cost_usd": cost,
-            "request_cost_usd": request_cost,
-            "status": status,
-            "status_code": status_code,
-        }
-        if error_message is not None:
-            values["error_message"] = error_message
-        if response_time_ms is not None:
-            values["response_time_ms"] = response_time_ms
-
-        result = db.execute(
-            update(Usage)
-            .where(
-                Usage.request_id == request_id,
-                Usage.billing_status == "settled",
-            )
-            .values(**values)
-        )
-        if result.rowcount != 1:
+        usage = db.query(Usage).filter(Usage.request_id == request_id).with_for_update().first()
+        if not usage or usage.billing_status == "void":
             return False
 
+        if usage.billing_status == "settled" and usage.wallet_balance_after is not None:
+            return False
+
+        usage.total_cost_usd = cost
+        usage.request_cost_usd = request_cost
+        usage.status = status
+        usage.status_code = status_code
+        if error_message is not None:
+            usage.error_message = error_message
+        if response_time_ms is not None:
+            usage.response_time_ms = response_time_ms
+        usage.finalized_at = usage.finalized_at or now
+        if cost > 0:
+            usage.billing_status = "settled"
+            WalletService.apply_usage_charge(db, usage=usage, amount_usd=cost)
+        else:
+            usage.billing_status = "void" if status in {"failed", "cancelled"} else "settled"
+
         # 写入审计快照
-        usage = db.query(Usage).filter(Usage.request_id == request_id).first()
-        if usage:
-            metadata = usage.request_metadata or {}
-            if billing_snapshot is not None:
-                metadata["billing_snapshot"] = billing_snapshot
-            if extra_metadata:
-                metadata.update(extra_metadata)
-            metadata["billing_updated_at"] = now.isoformat()
-            usage.request_metadata = cls._sanitize_request_metadata(metadata)
+        metadata = usage.request_metadata or {}
+        if billing_snapshot is not None:
+            metadata["billing_snapshot"] = billing_snapshot
+        if extra_metadata:
+            metadata.update(extra_metadata)
+        metadata["billing_updated_at"] = now.isoformat()
+        usage.request_metadata = cls._sanitize_request_metadata(metadata)
 
         return True
 
@@ -409,26 +381,22 @@ class UsageLifecycleMixin:
         - 仅当 billing_status='settled' 时才会生效
         - 不在本方法内 commit，由调用方决定事务提交时机
         """
-        from sqlalchemy import update
-
         now = datetime.now(timezone.utc)
-        result = db.execute(
-            update(Usage)
-            .where(
-                Usage.request_id == request_id,
-                Usage.billing_status == "settled",
-            )
-            .values(
-                billing_status="void",
-                finalized_at=now,
-                total_cost_usd=0.0,
-                request_cost_usd=0.0,
-                status="cancelled",
-                status_code=status_code,
-                error_message=reason,
-            )
-        )
-        return result.rowcount == 1
+        usage = db.query(Usage).filter(Usage.request_id == request_id).with_for_update().first()
+        if not usage or usage.billing_status != "settled":
+            return False
+        if usage.wallet_balance_after is not None and to_money_decimal(usage.total_cost_usd) > 0:
+            # 已实际扣费的记录当前不做自动回滚，避免 silent inconsistency。
+            return False
+
+        usage.billing_status = "void"
+        usage.finalized_at = now
+        usage.total_cost_usd = to_money_decimal(0)
+        usage.request_cost_usd = to_money_decimal(0)
+        usage.status = "cancelled"
+        usage.status_code = status_code
+        usage.error_message = reason
+        return True
 
     @classmethod
     def update_usage_status(
@@ -549,11 +517,11 @@ class UsageLifecycleMixin:
                     db, provider_request_body, is_request=True
                 )
 
-        # 结算状态：当请求进入终态时，将 billing_status 标记为 settled
-        # 注意：取消是否应 VOID/部分结算由更高层策略决定；这里默认终态均视为已结算。
-        if status in ("completed", "failed", "cancelled"):
-            if getattr(usage, "billing_status", None) == "pending":
-                usage.billing_status = "settled"
+        # 仅在“明确不会收费”的终态下直接关闭账单。
+        # completed 的费用通常要由后续 record_usage / update_settled_billing 写入，
+        # 这里不能提前把 billing_status 置为 settled，否则会阻断真正扣费。
+        if status in ("failed", "cancelled") and getattr(usage, "billing_status", None) == "pending":
+            usage.billing_status = "void"
             if getattr(usage, "finalized_at", None) is None:
                 usage.finalized_at = datetime.now(timezone.utc)
 

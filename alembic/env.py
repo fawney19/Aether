@@ -90,6 +90,7 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         lock_acquired = False
+        migration_failed = False
         try:
             if connection.dialect.name == "postgresql":
                 connection.execute(
@@ -107,13 +108,23 @@ def run_migrations_online() -> None:
 
             with context.begin_transaction():
                 context.run_migrations()
+        except Exception:
+            migration_failed = True
+            raise
         finally:
             if lock_acquired:
-                connection.rollback()
+                # 仅在迁移失败时回滚，避免把已成功迁移和版本号更新回滚掉。
+                if connection.in_transaction():
+                    if migration_failed:
+                        connection.rollback()
+                    else:
+                        connection.commit()
                 connection.execute(
                     text("SELECT pg_advisory_unlock(:lock_id)"),
                     {"lock_id": MIGRATION_ADVISORY_LOCK_ID},
                 )
+                if connection.in_transaction():
+                    connection.commit()
 
 
 # 根据模式选择运行方式

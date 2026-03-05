@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from src.core.logger import logger
 from src.models.database import User
 from src.services.auth.service import AuthService
+from src.services.wallet import WalletService
 
 from .base import AuthContext, AuthPlugin
 
@@ -82,18 +83,22 @@ class JwtAuthPlugin(AuthPlugin):
                 logger.warning("JWT认证失败 - Token身份校验失败")
                 return None
 
+            wallet_access = WalletService.check_request_allowed(db, user=user, api_key=None)
+
             # 创建认证上下文
             auth_context = AuthContext(
                 user_id=user.id,
                 user_name=user.username,
-                permissions={"can_use_api": True, "is_admin": user.role.value == "admin"},
-                quota_info={
-                    "quota_usd": user.quota_usd,
-                    "used_usd": user.used_usd,
-                    "remaining_usd": (
-                        None if user.quota_usd is None else user.quota_usd - user.used_usd
+                permissions={
+                    "can_use_api": wallet_access.allowed,
+                    "is_admin": user.role.value == "admin",
+                },
+                billing_info={
+                    "billing": WalletService.serialize_wallet_summary(
+                        WalletService.get_wallet(db, user_id=user.id)
                     ),
-                    "quota_ok": True,  # JWT用户通常已经通过前端验证
+                    "balance_ok": wallet_access.allowed,
+                    "message": wallet_access.message,
                 },
                 metadata={
                     "auth_method": "jwt",

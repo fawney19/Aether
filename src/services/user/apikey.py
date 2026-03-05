@@ -30,7 +30,6 @@ class ApiKeyService:
         concurrent_limit: int = 5,
         expire_days: int | None = None,
         expires_at: datetime | None = None,  # 直接传入过期时间，优先于 expire_days
-        initial_balance_usd: float | None = None,
         is_standalone: bool = False,
         auto_delete_on_expiry: bool = False,
     ) -> tuple[ApiKey, str]:
@@ -47,7 +46,6 @@ class ApiKeyService:
             concurrent_limit: 并发限制
             expire_days: 过期天数，None = 永不过期
             expires_at: 直接指定过期时间，优先于 expire_days
-            initial_balance_usd: 初始余额（USD），仅用于独立Key，None = 无限制
             is_standalone: 是否为独立余额Key（仅管理员可创建）
             auto_delete_on_expiry: 过期后是否自动删除（True=物理删除，False=仅禁用）
         """
@@ -74,8 +72,6 @@ class ApiKeyService:
             rate_limit=rate_limit,
             concurrent_limit=concurrent_limit,
             expires_at=final_expires_at,
-            balance_used_usd=0.0,
-            current_balance_usd=initial_balance_usd,  # 直接使用初始余额，None = 无限制
             is_standalone=is_standalone,
             auto_delete_on_expiry=auto_delete_on_expiry,
             is_active=True,
@@ -87,7 +83,7 @@ class ApiKeyService:
 
         logger.info(
             f"创建API密钥: 用户ID {user_id}, 密钥名 {api_key.name}, "
-            f"独立Key={is_standalone}, 初始余额={initial_balance_usd}"
+            f"独立Key={is_standalone}"
         )
         return api_key, key  # 返回密钥对象和明文密钥
 
@@ -143,7 +139,6 @@ class ApiKeyService:
             "concurrent_limit",
             "is_active",
             "expires_at",
-            "balance_limit_usd",
             "auto_delete_on_expiry",
         ]
 
@@ -189,48 +184,6 @@ class ApiKeyService:
         return True
 
     @staticmethod
-    def get_remaining_balance(api_key: ApiKey) -> float | None:
-        """计算剩余余额（仅用于独立Key）
-
-        Returns:
-            剩余余额，None 表示无限制或非独立Key
-        """
-        if not api_key.is_standalone:
-            return None
-
-        if api_key.current_balance_usd is None:
-            return None
-
-        # 剩余余额 = 当前余额 - 已使用余额
-        remaining = api_key.current_balance_usd - (api_key.balance_used_usd or 0)
-        return max(0, remaining)  # 不能为负数
-
-    @staticmethod
-    def check_balance(api_key: ApiKey) -> tuple[bool, float | None]:
-        """检查余额限制（仅用于独立Key）
-
-        Returns:
-            (is_allowed, remaining_balance): 是否允许请求，剩余余额（None表示无限制）
-        """
-        if not api_key.is_standalone:
-            # 非独立Key不检查余额
-            return True, None
-
-        # 使用新的预付费模式: current_balance_usd
-        if api_key.current_balance_usd is None:
-            # 无余额限制
-            return True, None
-
-        # 使用统一的余额计算方法
-        remaining = ApiKeyService.get_remaining_balance(api_key)
-        is_allowed = remaining > 0 if remaining is not None else True
-
-        if not is_allowed:
-            logger.warning(f"API密钥余额不足: Key ID {api_key.id}, " f"剩余余额 ${remaining:.4f}")
-
-        return is_allowed, remaining
-
-    @staticmethod
     def check_rate_limit(db: Session, api_key: ApiKey, window_minutes: int = 1) -> tuple[bool, int]:
         """检查速率限制
 
@@ -262,57 +215,6 @@ class ApiKeyService:
             )
 
         return is_allowed, api_key.rate_limit - request_count
-
-    @staticmethod
-    def add_balance(db: Session, key_id: str, amount_usd: float) -> ApiKey | None:
-        """为独立余额Key调整余额
-
-        Args:
-            db: 数据库会话
-            key_id: API Key ID
-            amount_usd: 要调整的余额金额（USD），正数为增加，负数为扣除
-
-        Returns:
-            更新后的API Key对象，如果Key不存在或不是独立Key则返回None
-        """
-        api_key = db.query(ApiKey).filter(ApiKey.id == key_id).first()
-        if not api_key:
-            logger.warning(f"余额调整失败: Key ID {key_id} 不存在")
-            return None
-
-        if not api_key.is_standalone:
-            logger.warning(f"余额调整失败: Key ID {key_id} 不是独立余额Key")
-            return None
-
-        if amount_usd == 0:
-            logger.warning(f"余额调整失败: 调整金额不能为0，当前值 ${amount_usd}")
-            return None
-
-        # 如果是扣除（负数），检查是否超过当前余额
-        if amount_usd < 0:
-            current = api_key.current_balance_usd or 0
-            if abs(amount_usd) > current:
-                logger.warning(
-                    f"余额扣除失败: 扣除金额 ${abs(amount_usd):.4f} 超过当前余额 ${current:.4f}"
-                )
-                return None
-
-        # 调整当前余额
-        if api_key.current_balance_usd is None:
-            api_key.current_balance_usd = amount_usd if amount_usd > 0 else 0
-        else:
-            api_key.current_balance_usd = max(0, api_key.current_balance_usd + amount_usd)
-
-        api_key.updated_at = datetime.now(timezone.utc)
-        db.commit()
-        db.refresh(api_key)
-
-        action = "增加" if amount_usd > 0 else "扣除"
-        logger.info(
-            f"余额调整成功: Key ID {key_id}, {action} ${abs(amount_usd):.4f}, "
-            f"新余额 ${api_key.current_balance_usd:.4f}"
-        )
-        return api_key
 
     @staticmethod
     def cleanup_expired_keys(db: Session, auto_delete: bool = False) -> int:

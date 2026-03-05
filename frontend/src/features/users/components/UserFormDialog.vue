@@ -144,49 +144,14 @@
 
           <div class="space-y-2">
             <Label
-              for="form-quota"
-              class="text-sm font-medium"
-            >配额(美元)</Label>
-            <div class="flex items-center space-x-3">
-              <Input
-                id="form-quota"
-                v-model.number="form.quota"
-                type="number"
-                step="0.01"
-                min="0"
-                max="10000"
-                :placeholder="isEditMode ? '10' : '使用系统默认'"
-                :disabled="form.unlimited"
-                :class="form.unlimited ? 'flex-1 h-10 opacity-50' : 'flex-1 h-10'"
-              />
-              <div class="flex items-center justify-center gap-2 border rounded-lg px-3 py-2 bg-muted/50 w-24">
-                <input
-                  id="form-unlimited"
-                  v-model="form.unlimited"
-                  type="checkbox"
-                  class="h-4 w-4 rounded border-gray-300 cursor-pointer"
-                >
-                <Label
-                  for="form-unlimited"
-                  class="whitespace-nowrap cursor-pointer text-sm"
-                >无限制</Label>
-              </div>
-            </div>
-          </div>
-
-          <div class="space-y-2">
-            <Label
               for="form-role"
               class="text-sm font-medium"
             >用户角色</Label>
-            <div class="flex items-center gap-3">
-              <Select
-                v-model="form.role"
-                class="flex-1"
-              >
+            <div class="w-full">
+              <Select v-model="form.role">
                 <SelectTrigger
                   id="form-role"
-                  class="h-10"
+                  class="h-10 w-full text-sm"
                 >
                   <SelectValue />
                 </SelectTrigger>
@@ -199,20 +164,29 @@
                   </SelectItem>
                 </SelectContent>
               </Select>
-              <div
-                v-if="!isEditMode"
-                class="flex items-center justify-center gap-2 border rounded-lg px-3 py-2 bg-muted/50 w-24"
-              >
-                <input
-                  id="form-active"
-                  v-model="form.is_active"
-                  type="checkbox"
-                  class="h-4 w-4 rounded border-gray-300 cursor-pointer"
-                >
-                <Label
-                  for="form-active"
-                  class="whitespace-nowrap cursor-pointer text-sm"
-                >启用用户</Label>
+            </div>
+          </div>
+
+          <div
+            v-if="!isEditMode"
+            class="space-y-2"
+          >
+            <Label
+              for="form-active"
+              class="text-sm font-medium"
+            >启用用户</Label>
+            <div class="flex items-center gap-3">
+              <Switch
+                id="form-active"
+                v-model="form.is_active"
+              />
+              <div class="flex flex-col">
+                <span class="text-sm text-foreground">
+                  {{ form.is_active ? '已启用' : '已禁用' }}
+                </span>
+                <span class="text-xs text-muted-foreground">
+                  {{ form.is_active ? '允许登录与请求' : '阻止登录与请求' }}
+                </span>
               </div>
             </div>
           </div>
@@ -332,6 +306,44 @@
             v-model="form.allowed_models"
             :models="globalModels"
           />
+
+          <div class="space-y-2">
+            <Label class="text-sm font-medium">无限制额度</Label>
+            <div class="flex items-center gap-3">
+              <Switch v-model="form.unlimited" />
+              <div class="flex flex-col">
+                <span class="text-sm text-foreground">
+                  {{ form.unlimited ? '已启用' : '已关闭' }}
+                </span>
+                <span class="text-xs text-muted-foreground">
+                  {{ form.unlimited ? '无限制：忽略钱包余额校验' : '有限制：按钱包余额校验' }}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div
+            v-if="!isEditMode && !form.unlimited"
+            class="space-y-2"
+          >
+            <Label
+              for="form-initial-gift"
+              class="text-sm font-medium"
+            >初始赠款额度 (USD) <span class="text-muted-foreground">*</span></Label>
+            <Input
+              id="form-initial-gift"
+              :model-value="form.initial_gift_usd ?? ''"
+              type="number"
+              step="0.01"
+              min="0.01"
+              placeholder="10.00"
+              class="h-10"
+              @update:model-value="(v) => form.initial_gift_usd = parseNumberInput(v, { allowFloat: true, min: 0.01 })"
+            />
+            <p class="text-xs text-muted-foreground">
+              最小值 $0.01
+            </p>
+          </div>
         </div>
       </div>
     </form>
@@ -363,6 +375,7 @@ import {
   Button,
   Input,
   Label,
+  Switch,
   Select,
   SelectTrigger,
   SelectValue,
@@ -376,13 +389,15 @@ import { getProvidersSummary } from '@/api/endpoints/providers'
 import { getGlobalModels } from '@/api/global-models'
 import { adminApi } from '@/api/admin'
 import { log } from '@/utils/logger'
+import { parseNumberInput } from '@/utils/form'
 import type { ProviderWithEndpointsSummary, GlobalModelResponse } from '@/api/endpoints/types'
 
 export interface UserFormData {
   id?: string
   username: string
   email: string
-  quota_usd?: number | null
+  initial_gift_usd?: number | null
+  unlimited?: boolean
   role: 'admin' | 'user'
   is_active?: boolean
   allowed_providers?: string[] | null
@@ -397,7 +412,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: []
-  submit: [data: UserFormData & { password?: string }]
+  submit: [data: UserFormData & { password?: string; unlimited?: boolean }]
 }>()
 
 const isOpen = computed(() => props.open)
@@ -420,7 +435,7 @@ const form = ref({
   password: '',
   confirmPassword: '',
   email: '',
-  quota: null as number | null,
+  initial_gift_usd: 10 as number | undefined,
   role: 'user' as 'admin' | 'user',
   unlimited: false,
   is_active: true,
@@ -441,7 +456,7 @@ function resetForm() {
     password: '',
     confirmPassword: '',
     email: '',
-    quota: null,
+    initial_gift_usd: 10,
     role: 'user',
     unlimited: false,
     is_active: true,
@@ -461,9 +476,9 @@ function loadUserData() {
     password: '',
     confirmPassword: '',
     email: props.user.email || '',
-    quota: props.user.quota_usd == null ? 10 : props.user.quota_usd,
+    initial_gift_usd: undefined,
     role: props.user.role,
-    unlimited: props.user.quota_usd == null,
+    unlimited: props.user.unlimited ?? false,
     is_active: props.user.is_active ?? true,
     allowed_providers: [...(props.user.allowed_providers || [])],
     allowed_api_formats: [...(props.user.allowed_api_formats || [])],
@@ -542,7 +557,10 @@ const isFormValid = computed(() => {
   const passwordConfirmed = isEditMode.value
     ? !passwordFilled || form.value.password === form.value.confirmPassword
     : true
-  return hasUsername && usernameValid && passwordValid && passwordConfirmed
+  const initialGiftValid = isEditMode.value ||
+    form.value.unlimited ||
+    (typeof form.value.initial_gift_usd === 'number' && form.value.initial_gift_usd >= 0.01)
+  return hasUsername && usernameValid && passwordValid && passwordConfirmed && initialGiftValid
 })
 
 const passwordHintText = computed(() => {
@@ -593,19 +611,14 @@ function toggleSelection(field: 'allowed_providers' | 'allowed_api_formats' | 'a
 async function handleSubmit() {
   saving.value = true
   try {
-    const data: UserFormData & { password?: string; unlimited?: boolean } = {
+    const data: UserFormData & { password?: string; unlimited: boolean } = {
       username: form.value.username,
       email: form.value.email.trim() || '',
-      quota_usd: form.value.unlimited ? null : form.value.quota,
+      unlimited: form.value.unlimited,
       role: form.value.role,
       allowed_providers: form.value.allowed_providers.length > 0 ? form.value.allowed_providers : null,
       allowed_api_formats: form.value.allowed_api_formats.length > 0 ? form.value.allowed_api_formats : null,
       allowed_models: form.value.allowed_models.length > 0 ? form.value.allowed_models : null
-    }
-
-    // 创建模式下传递 unlimited 字段
-    if (!isEditMode.value) {
-      data.unlimited = form.value.unlimited
     }
 
     if (isEditMode.value && props.user?.id) {
@@ -614,6 +627,9 @@ async function handleSubmit() {
 
     if (!isEditMode.value) {
       data.is_active = form.value.is_active
+      if (!form.value.unlimited && form.value.initial_gift_usd != null) {
+        data.initial_gift_usd = form.value.initial_gift_usd
+      }
     }
 
     if (form.value.password) {
@@ -640,6 +656,20 @@ watch(isOpen, (val) => {
     loadAccessControlOptions()
   }
 })
+
+watch(
+  () => form.value.unlimited,
+  (unlimited) => {
+    if (isEditMode.value) {
+      return
+    }
+    if (unlimited) {
+      form.value.initial_gift_usd = undefined
+    } else if (form.value.initial_gift_usd == null) {
+      form.value.initial_gift_usd = 10
+    }
+  }
+)
 
 defineExpose({
   setSaving

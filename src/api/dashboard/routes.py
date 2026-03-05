@@ -33,6 +33,7 @@ from src.services.system.stats_aggregator import (
     query_time_series,
 )
 from src.services.system.time_range import TimeRangeParams
+from src.services.wallet import WalletService
 from src.utils.cache_decorator import cache_result
 
 router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
@@ -102,7 +103,7 @@ async def get_dashboard_stats(request: Request, db: Session = Depends(get_db)) -
     - `users`: 用户统计（total, active）
 
     **返回字段（普通用户）**:
-    - `stats`: 统计卡片数组，包含 API 密钥、本月请求、配额使用、总Token 等信息
+    - `stats`: 统计卡片数组，包含 API 密钥、本月请求、钱包状态、总Token 等信息
     - `today`: 今日统计
     - `token_breakdown`: Token 详细分类
     - `cache_stats`: 缓存统计信息
@@ -777,20 +778,18 @@ class UserDashboardStatsAdapter(DashboardAdapter):
             int(cache_stats_today.cache_read_tokens or 0) if cache_stats_today else 0
         )
 
-        # 配额状态
-        if user.quota_usd is None:
-            quota_value = "无限制"
-            quota_change = f"已用 ${user.used_usd:.2f}"
-            quota_high = False
-        elif user.quota_usd > 0:
-            percent = min(100, int((user.used_usd / user.quota_usd) * 100))
-            quota_value = f"${user.quota_usd:.0f}"
-            quota_change = f"已用 ${user.used_usd:.2f}"
-            quota_high = percent > 80
+        wallet = WalletService.get_wallet(db, user_id=user.id)
+        billing = WalletService.serialize_wallet_summary(wallet)
+        wallet_balance = float(billing["balance"])
+        wallet_consumed = float(billing["total_consumed"])
+        if bool(billing["unlimited"]):
+            wallet_value = "无限制"
+            wallet_change = f"累计消费 ${wallet_consumed:.2f}"
+            wallet_high = False
         else:
-            quota_value = "$0"
-            quota_change = f"已用 ${user.used_usd:.2f}"
-            quota_high = True
+            wallet_value = f"${wallet_balance:.2f}"
+            wallet_change = f"累计消费 ${wallet_consumed:.2f}"
+            wallet_high = wallet_balance <= 0
 
         return {
             "stats": [
@@ -811,10 +810,10 @@ class UserDashboardStatsAdapter(DashboardAdapter):
                     "icon": "Activity",
                 },
                 {
-                    "name": "配额使用",
-                    "value": quota_value,
-                    "change": quota_change,
-                    "changeType": "increase" if quota_high else "neutral",
+                    "name": "钱包状态",
+                    "value": wallet_value,
+                    "change": wallet_change,
+                    "changeType": "increase" if wallet_high else "neutral",
                     "icon": "TrendingUp",
                 },
                 {

@@ -18,19 +18,19 @@
           for="default-quota"
           class="block text-sm font-medium"
         >
-          默认用户配额(美元)
+          默认用户初始赠款(美元)
         </Label>
         <Input
           id="default-quota"
-          :model-value="defaultUserQuotaUsd"
+          :model-value="defaultUserInitialGiftUsd"
           type="number"
           step="0.01"
           placeholder="10.00"
           class="mt-1"
-          @update:model-value="$emit('update:defaultUserQuotaUsd', Number($event))"
+          @update:model-value="$emit('update:defaultUserInitialGiftUsd', Number($event))"
         />
         <p class="mt-1 text-xs text-muted-foreground">
-          新用户注册时的默认配额
+          新用户注册时的默认初始赠款
         </p>
       </div>
 
@@ -128,7 +128,7 @@ import Checkbox from '@/components/ui/checkbox.vue'
 import { CardSection } from '@/components/layout'
 
 defineProps<{
-  defaultUserQuotaUsd: number
+  defaultUserInitialGiftUsd: number
   rateLimitPerMinute: number
   enableRegistration: boolean
   autoDeleteExpiredKeys: boolean
@@ -139,7 +139,7 @@ defineProps<{
 
 defineEmits<{
   save: []
-  'update:defaultUserQuotaUsd': [value: number]
+  'update:defaultUserInitialGiftUsd': [value: number]
   'update:rateLimitPerMinute': [value: number]
   'update:enableRegistration': [value: boolean]
   'update:autoDeleteExpiredKeys': [value: boolean]

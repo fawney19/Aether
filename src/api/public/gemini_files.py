@@ -39,6 +39,7 @@ from src.services.auth.service import AuthService
 from src.services.gemini_files_mapping import delete_file_key_mapping, store_file_key_mapping
 from src.services.provider.transport import redact_url_for_log
 from src.services.scheduling.aware_scheduler import CacheAwareScheduler, ProviderCandidate
+from src.services.usage.service import UsageService
 
 
 @dataclass
@@ -109,6 +110,22 @@ def _build_upstream_headers(
     headers["x-goog-api-key"] = upstream_api_key
 
     return headers
+
+
+def _ensure_balance_access(db: Session, user: User, api_key: ApiKey) -> None:
+    access_ok, message = UsageService.check_request_balance(db, user, api_key=api_key)
+    if access_ok:
+        return
+    raise HTTPException(
+        status_code=429,
+        detail={
+            "error": {
+                "code": 429,
+                "message": message or "Insufficient balance",
+                "status": "RESOURCE_EXHAUSTED",
+            }
+        },
+    )
 
 
 def _build_upstream_url(
@@ -276,6 +293,7 @@ async def _resolve_upstream_context(
         )
 
     user, user_api_key = auth_result
+    _ensure_balance_access(db, user, user_api_key)
     model_name = _resolve_files_model_name(db, user_api_key, user)
     if not model_name:
         raise HTTPException(
@@ -728,6 +746,7 @@ async def download_file(
             )
 
         user, _user_api_key = auth_result
+        _ensure_balance_access(db, user, _user_api_key)
 
         # 根据前缀判断处理方式
         if file_id.startswith("aev_"):

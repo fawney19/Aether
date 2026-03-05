@@ -27,7 +27,7 @@ class AuthContext:
     api_key_id: int | None = None
     api_key_name: str | None = None
     permissions: dict[str, bool] = None
-    quota_info: dict[str, Any] = None
+    billing_info: dict[str, Any] = None
     metadata: dict[str, Any] = None
 
     def __post_init__(self) -> None:

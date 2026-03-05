@@ -15,7 +15,7 @@
 ### 用户系统
 - **users**: 用户账户管理
 - **api_keys**: API 密钥管理
-- **user_quotas**: 用户配额管理
+- **wallets**: 统一钱包账户（充值余额/赠款余额/无限制模式）
 - **user_preferences**: 用户偏好设置
 
 ### Provider 三层架构

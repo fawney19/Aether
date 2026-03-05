@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from src.models.database import ApiKey, Usage, User
+from src.services.billing.precision import to_money_decimal
 from src.services.system.config import SystemConfigService
 from src.services.usage._types import UsageCostInfo
 from src.services.usage.error_classifier import classify_error
@@ -205,19 +206,19 @@ def build_usage_params(
         "cache_read_input_tokens": cache_read_input_tokens,
         "cache_creation_input_tokens_5m": cache_creation_input_tokens_5m,
         "cache_creation_input_tokens_1h": cache_creation_input_tokens_1h,
-        "input_cost_usd": input_cost,
-        "output_cost_usd": output_cost,
-        "cache_cost_usd": cache_cost,
-        "cache_creation_cost_usd": cache_creation_cost,
-        "cache_read_cost_usd": cache_read_cost,
-        "request_cost_usd": request_cost,
-        "total_cost_usd": total_cost,
-        "actual_input_cost_usd": actual_input_cost,
-        "actual_output_cost_usd": actual_output_cost,
-        "actual_cache_creation_cost_usd": actual_cache_creation_cost,
-        "actual_cache_read_cost_usd": actual_cache_read_cost,
-        "actual_request_cost_usd": actual_request_cost,
-        "actual_total_cost_usd": actual_total_cost,
+        "input_cost_usd": to_money_decimal(input_cost),
+        "output_cost_usd": to_money_decimal(output_cost),
+        "cache_cost_usd": to_money_decimal(cache_cost),
+        "cache_creation_cost_usd": to_money_decimal(cache_creation_cost),
+        "cache_read_cost_usd": to_money_decimal(cache_read_cost),
+        "request_cost_usd": to_money_decimal(request_cost),
+        "total_cost_usd": to_money_decimal(total_cost),
+        "actual_input_cost_usd": to_money_decimal(actual_input_cost),
+        "actual_output_cost_usd": to_money_decimal(actual_output_cost),
+        "actual_cache_creation_cost_usd": to_money_decimal(actual_cache_creation_cost),
+        "actual_cache_read_cost_usd": to_money_decimal(actual_cache_read_cost),
+        "actual_request_cost_usd": to_money_decimal(actual_request_cost),
+        "actual_total_cost_usd": to_money_decimal(actual_total_cost),
         "rate_multiplier": actual_rate_multiplier,
         "input_price_per_1m": input_price,
         "output_price_per_1m": output_price,

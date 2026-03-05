@@ -133,8 +133,6 @@ class UserCacheService:
             "role": user.role.value if user.role else None,
             "is_active": user.is_active,
             "auth_source": user.auth_source.value if user.auth_source else None,
-            "quota_usd": float(user.quota_usd) if user.quota_usd is not None else None,
-            "used_usd": float(user.used_usd),
             "created_at": user.created_at.isoformat() if user.created_at else None,
             "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
             "model_capability_settings": user.model_capability_settings,
@@ -159,7 +157,6 @@ class UserCacheService:
             email_verified=user_dict.get("email_verified", False),
             username=user_dict["username"],
             is_active=user_dict["is_active"],
-            used_usd=user_dict["used_usd"],
         )
 
         # 设置可选字段
@@ -168,9 +165,6 @@ class UserCacheService:
 
         if user_dict.get("auth_source"):
             user.auth_source = AuthSource(user_dict["auth_source"])
-
-        if user_dict.get("quota_usd") is not None:
-            user.quota_usd = user_dict["quota_usd"]
 
         if user_dict.get("created_at"):
             user.created_at = datetime.fromisoformat(user_dict["created_at"])

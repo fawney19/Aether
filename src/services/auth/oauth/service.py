@@ -428,7 +428,9 @@ class OAuthService:
             or (email.split("@", 1)[0] if email else None)
             or f"user_{uuid.uuid4().hex[:8]}"
         )
-        default_quota = SystemConfigService.get_config(db, "default_user_quota_usd", default=10.0)
+        default_initial_gift = SystemConfigService.get_config(
+            db, "default_user_initial_gift_usd", default=None
+        )
 
         # 生成唯一用户名 + 创建用户（简单重试）
         user: User | None = None
@@ -445,9 +447,20 @@ class OAuthService:
                     role=UserRole.USER,
                     is_active=True,
                     last_login_at=now,
-                    quota_usd=default_quota,
                 )
                 db.add(user)
+                db.flush()
+
+                from src.services.wallet import WalletService
+
+                WalletService.initialize_user_wallet(
+                    db,
+                    user=user,
+                    initial_gift_usd=default_initial_gift,
+                    unlimited=False,
+                    description="OAuth 注册初始赠款",
+                )
+
                 db.commit()
                 db.refresh(user)
                 last_error = None

@@ -3,7 +3,7 @@ API Pipeline 测试
 
 测试 ApiRequestPipeline 的核心功能：
 - 认证流程（API Key、JWT Token）
-- 配额计算
+- 余额计算
 - 审计日志记录
 """
 
@@ -17,56 +17,43 @@ from src.api.base.pipeline import ApiRequestPipeline
 from src.core.enums import UserRole
 
 
-class TestPipelineQuotaCalculation:
-    """测试 Pipeline 配额计算"""
+class TestPipelineBalanceCalculation:
+    """测试 Pipeline 余额计算"""
 
     @pytest.fixture
     def pipeline(self) -> ApiRequestPipeline:
         return ApiRequestPipeline()
 
-    def test_calculate_quota_remaining_with_quota(self, pipeline: ApiRequestPipeline) -> None:
-        """测试有配额限制时计算剩余配额"""
+    def test_calculate_balance_remaining_with_balance(self, pipeline: ApiRequestPipeline) -> None:
+        """测试有限制钱包时计算剩余余额"""
         mock_user = MagicMock()
-        mock_user.quota_usd = 100.0
-        mock_user.used_usd = 30.0
+        mock_db = MagicMock()
 
-        remaining = pipeline._calculate_quota_remaining(mock_user)
+        with patch(
+            "src.api.base.pipeline.WalletService.get_balance_snapshot",
+            return_value=70.0,
+        ):
+            remaining = pipeline._calculate_balance_remaining(mock_db, mock_user)
 
         assert remaining == 70.0
 
-    def test_calculate_quota_remaining_no_quota(self, pipeline: ApiRequestPipeline) -> None:
-        """测试无配额限制时返回 None"""
+    def test_calculate_balance_remaining_unlimited(self, pipeline: ApiRequestPipeline) -> None:
+        """测试无限制钱包时返回 None"""
         mock_user = MagicMock()
-        mock_user.quota_usd = None
-        mock_user.used_usd = 30.0
+        mock_db = MagicMock()
 
-        remaining = pipeline._calculate_quota_remaining(mock_user)
+        with patch(
+            "src.api.base.pipeline.WalletService.get_balance_snapshot",
+            return_value=None,
+        ):
+            remaining = pipeline._calculate_balance_remaining(mock_db, mock_user)
 
         assert remaining is None
 
-    def test_calculate_quota_remaining_negative_quota(self, pipeline: ApiRequestPipeline) -> None:
-        """测试负配额时返回 None"""
-        mock_user = MagicMock()
-        mock_user.quota_usd = -1
-        mock_user.used_usd = 0.0
-
-        remaining = pipeline._calculate_quota_remaining(mock_user)
-
-        assert remaining is None
-
-    def test_calculate_quota_remaining_exceeded(self, pipeline: ApiRequestPipeline) -> None:
-        """测试配额已超时返回 0"""
-        mock_user = MagicMock()
-        mock_user.quota_usd = 100.0
-        mock_user.used_usd = 150.0
-
-        remaining = pipeline._calculate_quota_remaining(mock_user)
-
-        assert remaining == 0.0
-
-    def test_calculate_quota_remaining_none_user(self, pipeline: ApiRequestPipeline) -> None:
+    def test_calculate_balance_remaining_none_user(self, pipeline: ApiRequestPipeline) -> None:
         """测试用户为 None 时返回 None"""
-        remaining = pipeline._calculate_quota_remaining(None)
+        mock_db = MagicMock()
+        remaining = pipeline._calculate_balance_remaining(mock_db, None)
 
         assert remaining is None
 
@@ -266,12 +253,10 @@ class TestPipelineAuthentication:
 
         assert exc_info.value.status_code == 401
 
-    def test_authenticate_client_quota_exceeded(self, pipeline: ApiRequestPipeline) -> None:
-        """测试配额超限时抛出异常"""
+    def test_authenticate_client_balance_exceeded(self, pipeline: ApiRequestPipeline) -> None:
+        """测试余额不足时抛出异常"""
         mock_user = MagicMock()
         mock_user.id = "user-123"
-        mock_user.quota_usd = 100.0
-        mock_user.used_usd = 100.0
 
         mock_api_key = MagicMock()
         mock_api_key.id = "key-123"
@@ -294,13 +279,17 @@ class TestPipelineAuthentication:
         ):
             with patch.object(
                 pipeline.usage_service,
-                "check_user_quota",
-                return_value=(False, "配额不足"),
+                "check_request_balance",
+                return_value=(False, "余额不足"),
             ):
-                from src.core.exceptions import QuotaExceededException
+                with patch(
+                    "src.api.base.pipeline.WalletService.get_balance_snapshot",
+                    return_value=0.0,
+                ):
+                    from src.core.exceptions import BalanceInsufficientException
 
-                with pytest.raises(QuotaExceededException):
-                    pipeline._authenticate_client(mock_request, mock_db, mock_adapter)
+                    with pytest.raises(BalanceInsufficientException):
+                        pipeline._authenticate_client(mock_request, mock_db, mock_adapter)
 
 
 class TestPipelineAdminAuth:

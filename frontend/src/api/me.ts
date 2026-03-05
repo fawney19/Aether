@@ -1,6 +1,7 @@
 import apiClient from './client'
 import type { ActivityHeatmap } from '@/types/activity'
 import type { TieredPricingConfig } from './endpoints/types'
+import type { BillingSummary } from './auth'
 
 export interface Profile {
   id: string // UUID
@@ -8,9 +9,7 @@ export interface Profile {
   username: string
   role: string
   is_active: boolean
-  quota_usd: number | null
-  used_usd: number
-  total_usd?: number  // 累积消费总额
+  billing: BillingSummary
   created_at: string
   updated_at?: string
   last_login_at?: string
@@ -102,8 +101,7 @@ export interface UsageResponse {
   total_cost: number  // 官方费率
   total_actual_cost?: number  // 倍率消耗（仅管理员可见）
   avg_response_time: number
-  quota_usd: number | null
-  used_usd: number
+  billing: BillingSummary
   summary_by_model: ModelSummary[]
   summary_by_provider?: ProviderSummary[]
   pagination?: {

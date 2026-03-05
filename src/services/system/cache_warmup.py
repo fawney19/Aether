@@ -16,6 +16,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from src.core.enums import UserRole
 from src.core.logger import logger
 from src.database import create_session
 
@@ -80,7 +81,7 @@ class CacheWarmupService:
             db = create_session()
 
             # 获取一个管理员用户用于构造 context
-            admin_user = db.query(DBUser).filter(DBUser.role == "admin").first()
+            admin_user = db.query(DBUser).filter(DBUser.role == UserRole.ADMIN).first()
             if not admin_user:
                 logger.info("缓存预热: 无管理员用户，跳过仪表盘统计预热")
                 return True
@@ -138,7 +139,7 @@ class CacheWarmupService:
             db = create_session()
 
             # 获取一个管理员用户
-            admin_user = db.query(DBUser).filter(DBUser.role == "admin").first()
+            admin_user = db.query(DBUser).filter(DBUser.role == UserRole.ADMIN).first()
             if not admin_user:
                 logger.info("缓存预热: 无管理员用户，跳过每日统计预热")
                 return True

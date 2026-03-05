@@ -22,7 +22,7 @@
               {{ isEditMode ? '编辑独立余额 API Key' : '创建独立余额 API Key' }}
             </h3>
             <p class="text-xs text-muted-foreground">
-              {{ isEditMode ? '修改密钥名称、有效期和访问限制' : '用于非注册用户调用接口，不关联用户配额，必须设置余额限制' }}
+              {{ isEditMode ? '修改密钥名称、有效期和访问限制' : '用于非注册用户调用接口，可设置初始余额或无限制额度' }}
             </p>
           </div>
         </div>
@@ -34,7 +34,6 @@
         <!-- 左侧：基础设置 -->
         <div class="pr-6 space-y-4">
           <div class="flex items-center gap-2 pb-2 border-b border-border/60">
-            <Key class="h-4 w-4 text-muted-foreground" />
             <span class="text-sm font-medium">基础设置</span>
           </div>
 
@@ -50,31 +49,6 @@
               placeholder="例如: 用户A专用"
               class="h-10"
             />
-          </div>
-
-          <!-- 初始余额 - 仅创建模式显示 -->
-          <div
-            v-if="!isEditMode"
-            class="space-y-2"
-          >
-            <Label
-              for="form-balance"
-              class="text-sm font-medium"
-            >初始余额 (USD) <span class="text-rose-500">*</span></Label>
-            <Input
-              id="form-balance"
-              :model-value="form.initial_balance_usd ?? ''"
-              type="number"
-              step="0.01"
-              min="0.01"
-              required
-              placeholder="10.00"
-              class="h-10"
-              @update:model-value="(v) => form.initial_balance_usd = parseNumberInput(v, { allowFloat: true }) ?? 10"
-            />
-            <p class="text-xs text-muted-foreground">
-              独立Key必须设置余额限制，最小值 $0.01
-            </p>
           </div>
 
           <div class="space-y-2">
@@ -137,12 +111,49 @@
               @update:model-value="(v) => form.rate_limit = parseNumberInput(v, { min: 1, max: 10000 })"
             />
           </div>
+
+          <div class="space-y-2">
+            <Label class="text-sm font-medium">无限制额度</Label>
+            <div class="flex items-center gap-3">
+              <Switch v-model="form.unlimited_balance" />
+              <div class="flex flex-col">
+                <span class="text-sm text-foreground">
+                  {{ form.unlimited_balance ? '已启用' : '已关闭' }}
+                </span>
+                <span class="text-xs text-muted-foreground">
+                  {{ form.unlimited_balance ? '无限制：忽略钱包余额校验' : '有限制：按钱包余额校验' }}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div
+            v-if="!isEditMode && !form.unlimited_balance"
+            class="space-y-2"
+          >
+            <Label
+              for="form-balance"
+              class="text-sm font-medium"
+            >初始余额 (USD) <span class="text-rose-500">*</span></Label>
+            <Input
+              id="form-balance"
+              :model-value="form.initial_balance_usd ?? ''"
+              type="number"
+              step="0.01"
+              min="0.01"
+              placeholder="10.00"
+              class="h-10"
+              @update:model-value="(v) => form.initial_balance_usd = parseNumberInput(v, { allowFloat: true, min: 0.01 })"
+            />
+            <p class="text-xs text-muted-foreground">
+              最小值 $0.01
+            </p>
+          </div>
         </div>
 
         <!-- 右侧：访问限制 -->
         <div class="pl-6 space-y-4 border-l border-border">
           <div class="flex items-center gap-2 pb-2 border-b border-border/60">
-            <Shield class="h-4 w-4 text-muted-foreground" />
             <span class="text-sm font-medium">访问限制</span>
             <span class="text-xs text-muted-foreground">(留空不限)</span>
           </div>
@@ -279,8 +290,9 @@ import {
   Button,
   Input,
   Label,
+  Switch,
 } from '@/components/ui'
-import { Plus, SquarePen, Key, Shield, ChevronDown, X } from 'lucide-vue-next'
+import { Plus, SquarePen, ChevronDown, X } from 'lucide-vue-next'
 import { useFormDialog } from '@/composables/useFormDialog'
 import { ModelMultiSelect } from '@/components/common'
 import { getProvidersSummary } from '@/api/endpoints/providers'
@@ -294,6 +306,7 @@ export interface StandaloneKeyFormData {
   id?: string
   name: string
   initial_balance_usd?: number
+  unlimited_balance?: boolean
   expires_at?: string  // ISO 日期字符串，如 "2025-12-31"，undefined = 永不过期
   rate_limit?: number
   auto_delete_on_expiry: boolean
@@ -328,6 +341,7 @@ const allApiFormats = ref<string[]>([])
 const form = ref<StandaloneKeyFormData>({
   name: '',
   initial_balance_usd: 10,
+  unlimited_balance: false,
   expires_at: undefined,
   rate_limit: undefined,
   auto_delete_on_expiry: false,
@@ -347,6 +361,7 @@ function resetForm() {
   form.value = {
     name: '',
     initial_balance_usd: 10,
+    unlimited_balance: false,
     expires_at: undefined,
     rate_limit: undefined,
     auto_delete_on_expiry: false,
@@ -364,6 +379,7 @@ function loadKeyData() {
     id: props.apiKey.id,
     name: props.apiKey.name || '',
     initial_balance_usd: props.apiKey.initial_balance_usd,
+    unlimited_balance: props.apiKey.initial_balance_usd == null,
     expires_at: props.apiKey.expires_at,
     rate_limit: props.apiKey.rate_limit,
     auto_delete_on_expiry: props.apiKey.auto_delete_on_expiry,
@@ -431,6 +447,17 @@ watch(isOpen, (val) => {
     loadAccessRestrictionOptions()
   }
 })
+
+watch(
+  () => form.value.unlimited_balance,
+  (unlimited) => {
+    if (unlimited) {
+      form.value.initial_balance_usd = undefined
+    } else if (form.value.initial_balance_usd == null) {
+      form.value.initial_balance_usd = 10
+    }
+  }
+)
 
 defineExpose({
   setSaving

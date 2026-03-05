@@ -34,7 +34,7 @@ from src.core.exceptions import (
     ProviderNotAvailableException,
     ProviderRateLimitException,
     ProviderTimeoutException,
-    QuotaExceededException,
+    BalanceInsufficientException,
     UpstreamClientException,
 )
 from src.core.logger import logger
@@ -66,7 +66,7 @@ class CliAdapterBase(HandlerAdapterBase):
         api_key = context.api_key
         db = context.db
         request_id = context.request_id
-        quota_remaining_value = context.quota_remaining
+        balance_remaining_value = context.balance_remaining
         start_time = context.start_time
         client_ip = context.client_ip
         user_agent = context.user_agent
@@ -107,14 +107,14 @@ class CliAdapterBase(HandlerAdapterBase):
         context.add_audit_metadata(**audit_metadata)
 
         # 格式化额度显示
-        quota_display = (
-            "unlimited" if quota_remaining_value is None else f"${quota_remaining_value:.2f}"
+        balance_display = (
+            "unlimited" if balance_remaining_value is None else f"${balance_remaining_value:.2f}"
         )
 
         # 请求开始日志
         logger.info(
             f"[REQ] {request_id[:8]} | {self.FORMAT_ID} | {getattr(api_key, 'name', 'unknown')} | "
-            f"{model} | {'stream' if stream else 'sync'} | quota:{quota_display}"
+            f"{model} | {'stream' if stream else 'sync'} | balance:{balance_display}"
         )
 
         try:
@@ -163,7 +163,7 @@ class CliAdapterBase(HandlerAdapterBase):
 
         except (
             ModelNotSupportedException,
-            QuotaExceededException,
+            BalanceInsufficientException,
             InvalidRequestException,
         ) as e:
             logger.debug("客户端请求错误: {}", e.error_type)

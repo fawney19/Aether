@@ -1192,6 +1192,50 @@ body[theme-mode='dark'] .literary-annotation {
     background-color: hsl(var(--muted-foreground) / 0.5);
   }
 
+  /* Tabs styled as existing outline buttons (used by wallet/payment pages) */
+  .tabs-button-list {
+    background-color: transparent !important;
+    border: 0 !important;
+    padding: 0 !important;
+    height: auto !important;
+    gap: 0.5rem;
+  }
+
+  .tabs-button-list .tabs-indicator {
+    display: none !important;
+  }
+
+  .tabs-button-list button[data-value] {
+    border: 1px solid color-mix(in srgb, var(--border) 60%, transparent) !important;
+    background-color: color-mix(in srgb, var(--card) 60%, transparent) !important;
+    color: var(--foreground) !important;
+    border-radius: 0.5rem !important;
+    backdrop-filter: blur(8px);
+    transition: all 0.2s ease !important;
+  }
+
+  .tabs-button-list button[data-state='active'] {
+    background-color: var(--primary) !important;
+    color: var(--primary-foreground) !important;
+    border-color: transparent !important;
+    box-shadow: var(--shadow-sm);
+    font-weight: 700;
+  }
+
+  .tabs-button-list button[data-state='active']:hover {
+    filter: brightness(0.95);
+  }
+
+  .tabs-button-list button[data-state='inactive'] {
+    color: var(--foreground) !important;
+  }
+
+  .tabs-button-list button[data-state='inactive']:hover {
+    border-color: rgb(var(--color-primary-rgb) / 0.6) !important;
+    color: var(--primary) !important;
+    background-color: rgb(var(--color-primary-rgb) / 0.1) !important;
+  }
+
   /* Password masking without type="password" to prevent browser autofill */
   .-webkit-text-security-disc {
     -webkit-text-security: disc;

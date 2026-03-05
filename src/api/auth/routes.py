@@ -42,6 +42,7 @@ from src.services.rate_limit.account_lockout import AccountLockoutService
 from src.services.rate_limit.ip_limiter import IPRateLimiter
 from src.services.system.audit import AuditService
 from src.services.system.config import SystemConfigService
+from src.services.wallet import WalletService
 from src.services.user.service import UserService
 from src.utils.request_utils import get_client_ip, get_user_agent
 
@@ -168,7 +169,7 @@ async def get_current_user_info(request: Request, db: Session = Depends(get_db))
     """
     获取当前用户信息
 
-    返回当前登录用户的基本信息，包括邮箱、用户名、角色、配额等。
+    返回当前登录用户的基本信息，包括邮箱、用户名、角色、钱包信息等。
     需要 Bearer Token 认证。
     """
     adapter = AuthCurrentUserAdapter()
@@ -556,9 +557,9 @@ class AuthRegisterAdapter(AuthPublicAdapter):
                 )
 
         try:
-            # 读取系统配置的默认配额
-            default_quota = SystemConfigService.get_config(
-                db, "default_user_quota_usd", default=10.0
+            # 读取系统配置的默认初始赠款
+            default_initial_gift = SystemConfigService.get_config(
+                db, "default_user_initial_gift_usd", default=None
             )
 
             # email_verified 逻辑：
@@ -571,7 +572,7 @@ class AuthRegisterAdapter(AuthPublicAdapter):
                 username=register_request.username,
                 password=register_request.password,
                 role=UserRole.USER,
-                quota_usd=default_quota,
+                initial_gift_usd=default_initial_gift,
                 email_verified=bool(require_verification and email),
             )
             AuditService.log_event(
@@ -616,15 +617,14 @@ class AuthRegisterAdapter(AuthPublicAdapter):
 class AuthCurrentUserAdapter(AuthenticatedApiAdapter):
     async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
         user = context.user
+        wallet = WalletService.get_wallet(context.db, user_id=user.id)
         return {
             "id": user.id,
             "email": user.email,
             "username": user.username,
             "role": user.role.value,
             "is_active": user.is_active,
-            "quota_usd": user.quota_usd,
-            "used_usd": user.used_usd,
-            "total_usd": user.total_usd,
+            "billing": WalletService.serialize_wallet_summary(wallet),
             "allowed_providers": user.allowed_providers,
             "allowed_api_formats": user.allowed_api_formats,
             "allowed_models": user.allowed_models,

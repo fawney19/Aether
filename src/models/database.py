@@ -25,6 +25,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -71,13 +72,13 @@ class User(Base):
 
     __tablename__ = "users"
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     # OAuth 用户可能没有邮箱；Postgres unique 允许多个 NULL
     email = Column(String(255), unique=True, index=True, nullable=True)
     # 注意：所有创建用户的入口必须显式写入 true/false，禁止依赖默认值
     email_verified = Column(Boolean, nullable=False)
     username = Column(String(100), unique=True, index=True, nullable=False)
-    # OAuth 用户可能没有本地密码（v1 仅做字段兼容）
+    # OAuth 用户可能没有本地密码
     password_hash = Column(String(255), nullable=True)
     role = Column(
         Enum(
@@ -113,11 +114,6 @@ class User(Base):
     model_capability_settings = Column(JSON, nullable=True)  # 用户针对特定模型的能力配置
     # 示例: {"claude-sonnet-4-20250514": {"cache_1h": true}}
 
-    # 配额管理
-    quota_usd = Column(Float, nullable=True)  # 美元配额(NULL 表示无限制)
-    used_usd = Column(Float, default=0.0)  # 当前周期已使用美元
-    total_usd = Column(Float, default=0.0)  # 累积消费总额
-
     # 状态
     is_active = Column(Boolean, default=True, nullable=False)
     is_deleted = Column(Boolean, default=False, nullable=False)
@@ -142,9 +138,6 @@ class User(Base):
     preferences = relationship(
         "UserPreference", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
-    quotas = relationship(
-        "UserQuota", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
-    )
     announcement_reads = relationship(
         "AnnouncementRead",
         back_populates="user",
@@ -154,6 +147,14 @@ class User(Base):
 
     # 关系 - SET NULL: 保留历史记录，让数据库处理 SET NULL
     usage_records = relationship("Usage", back_populates="user", passive_deletes=True)
+    wallet = relationship("Wallet", back_populates="user", uselist=False, passive_deletes=True)
+    payment_orders = relationship("PaymentOrder", back_populates="user", passive_deletes=True)
+    refund_requests = relationship(
+        "RefundRequest",
+        back_populates="user",
+        passive_deletes=True,
+        foreign_keys="RefundRequest.user_id",
+    )
     authored_announcements = relationship(
         "Announcement",
         back_populates="author",
@@ -179,8 +180,14 @@ class ApiKey(Base):
     """API密钥模型"""
 
     __tablename__ = "api_keys"
+    __table_args__ = (
+        CheckConstraint(
+            "(NOT is_standalone) OR (NOT is_locked)",
+            name="ck_api_keys_standalone_not_locked",
+        ),
+    )
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     key_hash = Column(String(64), unique=True, index=True, nullable=False)  # API密钥的SHA256哈希
     key_encrypted = Column(Text, nullable=True)  # 加密后的完整密钥，用于查看
@@ -190,9 +197,7 @@ class ApiKey(Base):
     total_requests = Column(Integer, default=0)
     total_cost_usd = Column(Float, default=0.0)
 
-    # 余额管理（仅用于独立余额 Key）
-    balance_used_usd = Column(Float, default=0.0)  # 已使用余额（USD），用于统计
-    current_balance_usd = Column(Float, nullable=True)  # 当前余额（USD），NULL 表示无限制
+    # 钱包体系：余额/额度由 wallets 表统一管理
     is_standalone = Column(
         Boolean, default=False, nullable=False
     )  # 是否为独立余额 Key（给非注册用户使用）
@@ -210,7 +215,7 @@ class ApiKey(Base):
 
     # 状态
     is_active = Column(Boolean, default=True, nullable=False)
-    is_locked = Column(Boolean, default=False, nullable=False)  # 管理员锁定，用户无法使用/操作
+    is_locked = Column(Boolean, default=False, nullable=False)  # 仅普通用户Key可锁定
     last_used_at = Column(DateTime(timezone=True), nullable=True)
     expires_at = Column(DateTime(timezone=True), nullable=True)  # 过期时间
     auto_delete_on_expiry = Column(Boolean, default=False, nullable=False)  # 过期后是否自动删除
@@ -229,6 +234,7 @@ class ApiKey(Base):
     # 关系
     user = relationship("User", back_populates="api_keys")
     usage_records = relationship("Usage", back_populates="api_key")
+    wallet = relationship("Wallet", back_populates="api_key", uselist=False, passive_deletes=True)
     provider_mappings = relationship(
         "ApiKeyProviderMapping", back_populates="api_key", cascade="all, delete-orphan"
     )
@@ -308,9 +314,10 @@ class Usage(Base):
         Index("idx_usage_model_created", "model", "created_at"),
     )
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     api_key_id = Column(String(36), ForeignKey("api_keys.id", ondelete="SET NULL"), nullable=True)
+    wallet_id = Column(String(36), ForeignKey("wallets.id", ondelete="SET NULL"), nullable=True)
 
     # 请求信息
     request_id = Column(String(100), unique=True, index=True, nullable=False)
@@ -343,7 +350,7 @@ class Usage(Base):
     # 成本计算
     input_cost_usd = Column(Float, default=0.0)
     output_cost_usd = Column(Float, default=0.0)
-    cache_cost_usd = Column(Float, default=0.0)  # 总缓存成本（兼容旧数据）
+    cache_cost_usd = Column(Float, default=0.0)  # 总缓存成本
     cache_creation_cost_usd = Column(Float, default=0.0)  # 缓存创建成本
     cache_read_cost_usd = Column(Float, default=0.0)  # 缓存读取成本
     request_cost_usd = Column(Float, default=0.0)  # 按次计费成本
@@ -395,6 +402,12 @@ class Usage(Base):
     # - void: 作废（不收费，如任务未开始就取消）
     billing_status = Column(String(20), default="settled", nullable=False, index=True)
     finalized_at = Column(DateTime(timezone=True), nullable=True)  # 结算完成时间（可选）
+    wallet_balance_before = Column(Numeric(20, 8), nullable=True)  # 结算前可用总余额快照
+    wallet_balance_after = Column(Numeric(20, 8), nullable=True)  # 结算后可用总余额快照
+    wallet_recharge_balance_before = Column(Numeric(20, 8), nullable=True)  # 结算前充值余额
+    wallet_recharge_balance_after = Column(Numeric(20, 8), nullable=True)  # 结算后充值余额
+    wallet_gift_balance_before = Column(Numeric(20, 8), nullable=True)  # 结算前赠款余额
+    wallet_gift_balance_after = Column(Numeric(20, 8), nullable=True)  # 结算后赠款余额
 
     # 完整请求和响应记录
     request_headers = Column(JSON, nullable=True)  # 客户端请求头
@@ -426,6 +439,7 @@ class Usage(Base):
     # 关系
     user = relationship("User", back_populates="usage_records")
     api_key = relationship("ApiKey", back_populates="usage_records")
+    wallet = relationship("Wallet", back_populates="usage_records")
     provider_obj = relationship("Provider")  # 使用 provider_obj 避免与 provider 字段名冲突
     provider_endpoint = relationship("ProviderEndpoint")
     provider_api_key = relationship("ProviderAPIKey")
@@ -471,31 +485,42 @@ class Usage(Base):
         return None
 
 
-class UserQuota(Base):
-    """用户配额历史记录"""
+class Wallet(Base):
+    """统一钱包模型（用户钱包 / 独立 API Key 钱包）"""
 
-    __tablename__ = "user_quotas"
+    __tablename__ = "wallets"
+    __table_args__ = (
+        CheckConstraint(
+            "(user_id IS NOT NULL AND api_key_id IS NULL) OR (user_id IS NULL AND api_key_id IS NOT NULL)",
+            name="ck_wallet_single_owner",
+        ),
+        Index("idx_wallets_user_id", "user_id"),
+        Index("idx_wallets_api_key_id", "api_key_id"),
+        Index("idx_wallets_status", "status"),
+        Index("idx_wallets_limit_mode", "limit_mode"),
+    )
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
-    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, unique=True)
+    api_key_id = Column(
+        String(36), ForeignKey("api_keys.id", ondelete="CASCADE"), nullable=True, unique=True
+    )
 
-    # 配额类型
-    quota_type = Column(String(50), nullable=False)  # monthly, daily, custom
+    # balance: 充值余额（可退款余额）
+    balance = Column(Numeric(20, 8), nullable=False, default=0)
+    # gift_balance: 赠款余额（不可退款）
+    gift_balance = Column(Numeric(20, 8), nullable=False, default=0)
+    # finite: 按余额校验；unlimited: 忽略余额放行，但仍统计消费
+    limit_mode = Column(String(20), nullable=False, default="finite")
+    currency = Column(String(3), nullable=False, default="USD")
+    status = Column(String(20), nullable=False, default="active")
 
-    # 配额值
-    quota_usd = Column(Float, nullable=False)
+    total_recharged = Column(Numeric(20, 8), nullable=False, default=0)
+    total_consumed = Column(Numeric(20, 8), nullable=False, default=0)
+    total_refunded = Column(Numeric(20, 8), nullable=False, default=0)
+    total_adjusted = Column(Numeric(20, 8), nullable=False, default=0)
+    version = Column(Integer, nullable=False, default=0)
 
-    # 时间范围
-    period_start = Column(DateTime(timezone=True), nullable=False)
-    period_end = Column(DateTime(timezone=True), nullable=False)
-
-    # 使用情况
-    used_usd = Column(Float, default=0.0)
-
-    # 状态
-    is_active = Column(Boolean, default=True)
-
-    # 时间戳
     created_at = Column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )
@@ -506,8 +531,184 @@ class UserQuota(Base):
         nullable=False,
     )
 
-    # 关系
-    user = relationship("User", back_populates="quotas")
+    user = relationship("User", back_populates="wallet")
+    api_key = relationship("ApiKey", back_populates="wallet")
+    usage_records = relationship("Usage", back_populates="wallet")
+    transactions = relationship(
+        "WalletTransaction", back_populates="wallet", cascade="all, delete-orphan"
+    )
+    payment_orders = relationship("PaymentOrder", back_populates="wallet")
+    refund_requests = relationship("RefundRequest", back_populates="wallet")
+
+
+class WalletTransaction(Base):
+    """钱包资金流水（只记录资金动作，不重复记录每次请求消费）"""
+
+    __tablename__ = "wallet_transactions"
+    __table_args__ = (
+        Index("idx_wallet_tx_wallet_created", "wallet_id", "created_at"),
+        Index("idx_wallet_tx_link", "link_type", "link_id"),
+        Index("idx_wallet_tx_category_created", "category", "created_at"),
+        Index("idx_wallet_tx_reason_created", "reason_code", "created_at"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    wallet_id = Column(String(36), ForeignKey("wallets.id", ondelete="CASCADE"), nullable=False)
+
+    category = Column(String(20), nullable=False)
+    reason_code = Column(String(40), nullable=False)
+    amount = Column(Numeric(20, 8), nullable=False)
+    # 总可用余额（充值+赠款）快照
+    balance_before = Column(Numeric(20, 8), nullable=False)
+    balance_after = Column(Numeric(20, 8), nullable=False)
+    # 分账户快照（审计用）
+    recharge_balance_before = Column(Numeric(20, 8), nullable=True)
+    recharge_balance_after = Column(Numeric(20, 8), nullable=True)
+    gift_balance_before = Column(Numeric(20, 8), nullable=True)
+    gift_balance_after = Column(Numeric(20, 8), nullable=True)
+
+    link_type = Column(String(30), nullable=True)
+    link_id = Column(String(100), nullable=True)
+    operator_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    description = Column(Text, nullable=True)
+
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+
+    wallet = relationship("Wallet", back_populates="transactions")
+    operator = relationship("User")
+
+
+class PaymentOrder(Base):
+    """充值订单"""
+
+    __tablename__ = "payment_orders"
+    __table_args__ = (
+        UniqueConstraint("order_no", name="uq_payment_orders_order_no"),
+        Index("idx_payment_orders_wallet_created", "wallet_id", "created_at"),
+        Index("idx_payment_orders_user_created", "user_id", "created_at"),
+        Index("idx_payment_orders_status", "status"),
+        Index("idx_payment_orders_gateway_order_id", "gateway_order_id"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    order_no = Column(String(64), nullable=False)
+    wallet_id = Column(String(36), ForeignKey("wallets.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    amount_usd = Column(Numeric(20, 8), nullable=False)
+    pay_amount = Column(Numeric(20, 2), nullable=True)
+    pay_currency = Column(String(3), nullable=True)
+    exchange_rate = Column(Numeric(18, 8), nullable=True)
+    refunded_amount_usd = Column(Numeric(20, 8), nullable=False, default=0)
+    refundable_amount_usd = Column(Numeric(20, 8), nullable=False, default=0)
+
+    payment_method = Column(String(30), nullable=False)
+    gateway_order_id = Column(String(128), nullable=True)
+    gateway_response = Column(JSONB, nullable=True)
+
+    status = Column(String(20), nullable=False, default="pending")
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    paid_at = Column(DateTime(timezone=True), nullable=True)
+    credited_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+
+    wallet = relationship("Wallet", back_populates="payment_orders")
+    user = relationship("User", back_populates="payment_orders")
+    callbacks = relationship("PaymentCallback", back_populates="payment_order")
+    refund_requests = relationship("RefundRequest", back_populates="payment_order")
+
+
+class PaymentCallback(Base):
+    """支付回调日志（幂等与审计）"""
+
+    __tablename__ = "payment_callbacks"
+    __table_args__ = (
+        UniqueConstraint("callback_key", name="uq_payment_callbacks_callback_key"),
+        Index("idx_payment_callbacks_order", "order_no"),
+        Index("idx_payment_callbacks_gateway_order", "gateway_order_id"),
+        Index("idx_payment_callbacks_created", "created_at"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    payment_order_id = Column(
+        String(36), ForeignKey("payment_orders.id", ondelete="SET NULL"), nullable=True
+    )
+    payment_method = Column(String(30), nullable=False)
+
+    callback_key = Column(String(128), nullable=False)
+    order_no = Column(String(64), nullable=True)
+    gateway_order_id = Column(String(128), nullable=True)
+    payload_hash = Column(String(128), nullable=True)
+    signature_valid = Column(Boolean, nullable=False, default=False)
+    status = Column(String(20), nullable=False, default="received")
+    payload = Column(JSONB, nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+
+    payment_order = relationship("PaymentOrder", back_populates="callbacks")
+
+
+class RefundRequest(Base):
+    """退款申请（原路退款 / 非原路人工打款）"""
+
+    __tablename__ = "refund_requests"
+    __table_args__ = (
+        UniqueConstraint("refund_no", name="uq_refund_requests_refund_no"),
+        UniqueConstraint("idempotency_key", name="uq_refund_requests_idempotency_key"),
+        Index("idx_refund_wallet_created", "wallet_id", "created_at"),
+        Index("idx_refund_user_created", "user_id", "created_at"),
+        Index("idx_refund_status", "status"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    refund_no = Column(String(64), nullable=False)
+    wallet_id = Column(String(36), ForeignKey("wallets.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    payment_order_id = Column(
+        String(36), ForeignKey("payment_orders.id", ondelete="SET NULL"), nullable=True
+    )
+
+    source_type = Column(String(30), nullable=False)  # payment_order/manual_recharge/card_recharge
+    source_id = Column(String(100), nullable=True)
+    refund_mode = Column(String(30), nullable=False)  # original_channel/offline_payout
+    amount_usd = Column(Numeric(20, 8), nullable=False)
+
+    status = Column(String(30), nullable=False, default="pending_approval")
+    reason = Column(Text, nullable=True)
+    requested_by = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    approved_by = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    processed_by = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    gateway_refund_id = Column(String(128), nullable=True)
+    payout_method = Column(String(50), nullable=True)
+    payout_reference = Column(String(255), nullable=True)
+    payout_proof = Column(JSONB, nullable=True)
+    failure_reason = Column(Text, nullable=True)
+    idempotency_key = Column(String(128), nullable=True)
+
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    wallet = relationship("Wallet", back_populates="refund_requests")
+    user = relationship("User", back_populates="refund_requests", foreign_keys=[user_id])
+    payment_order = relationship("PaymentOrder", back_populates="refund_requests")
 
 
 class SystemConfig(Base):
@@ -515,7 +716,7 @@ class SystemConfig(Base):
 
     __tablename__ = "system_configs"
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     key = Column(String(100), unique=True, nullable=False)
     value = Column(JSON, nullable=False)
     description = Column(Text, nullable=True)
@@ -701,7 +902,7 @@ class Provider(ExportMixin, Base):
         }
     )
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name = Column(String(100), unique=True, nullable=False, index=True)  # 提供商名称（唯一）
     description = Column(Text, nullable=True)  # 提供商描述
     website = Column(String(500), nullable=True)  # 主站网站
@@ -812,7 +1013,7 @@ class ProviderEndpoint(ExportMixin, Base):
         }
     )
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     provider_id = Column(String(36), ForeignKey("providers.id", ondelete="CASCADE"), nullable=False)
 
     # API 格式和配置
@@ -884,7 +1085,7 @@ class ProxyNode(Base):
 
     __tablename__ = "proxy_nodes"
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name = Column(String(100), nullable=False)  # 节点名
     ip = Column(String(512), nullable=False)  # 公网 IP 或手动节点的主机名（含协议前缀）
     port = Column(Integer, nullable=False)  # 代理端口
@@ -1014,7 +1215,7 @@ class GlobalModel(ExportMixin, Base):
         }
     )
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     name = Column(String(100), unique=True, nullable=False, index=True)  # 统一模型名（唯一）
     display_name = Column(String(100), nullable=False)
 
@@ -1114,7 +1315,7 @@ class Model(ExportMixin, Base):
         }
     )
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     provider_id = Column(String(36), ForeignKey("providers.id"), nullable=False)
     # 必须关联一个 GlobalModel
     global_model_id = Column(String(36), ForeignKey("global_models.id"), nullable=False, index=True)
@@ -1538,7 +1739,7 @@ class ProviderAPIKey(ExportMixin, Base):
         }
     )
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
 
     # 外键关系 - 直接关联 Provider
     provider_id = Column(
@@ -1546,7 +1747,7 @@ class ProviderAPIKey(ExportMixin, Base):
     )
 
     # API 格式支持列表（核心字段）
-    # None 表示支持所有格式（兼容历史数据），空列表 [] 表示不支持任何格式
+    # None 表示支持所有格式，空列表 [] 表示不支持任何格式
     api_formats = Column(JSON, nullable=True, default=list)  # ["claude:chat", "claude:cli"]
 
     # 认证类型
@@ -1794,7 +1995,7 @@ class UserPreference(Base):
 
     __tablename__ = "user_preferences"
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(
         String(36), ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False
     )
@@ -1835,7 +2036,7 @@ class Announcement(Base):
 
     __tablename__ = "announcements"
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     title = Column(String(200), nullable=False)
     content = Column(Text, nullable=False)  # 支持 Markdown
     type = Column(String(20), default="info")  # info, warning, maintenance, important
@@ -1876,7 +2077,7 @@ class AnnouncementRead(Base):
 
     __tablename__ = "announcement_reads"
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     announcement_id = Column(String(36), ForeignKey("announcements.id"), nullable=False)
     read_at = Column(
@@ -1940,7 +2141,7 @@ class ManagementToken(Base):
     TOKEN_PREFIX = "ae_"
     TOKEN_RANDOM_LENGTH = 40
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
 
     # Token 信息
@@ -2114,7 +2315,7 @@ class AuditLog(Base):
 
     __tablename__ = "audit_logs"
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     event_type = Column(String(50), nullable=False, index=True)
     user_id = Column(
         String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
@@ -2691,7 +2892,7 @@ class GeminiFileMapping(Base):
 
     __tablename__ = "gemini_file_mappings"
 
-    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
 
     # 文件名（如 files/abc123xyz）
     file_name = Column(String(255), nullable=False, unique=True, index=True)

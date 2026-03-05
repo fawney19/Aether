@@ -89,7 +89,7 @@
               <!-- 刷新按钮 -->
               <RefreshButton
                 :loading="loading"
-                @click="loadApiKeys"
+                @click="refreshApiKeys"
               />
             </div>
           </div>
@@ -102,8 +102,8 @@
                 <TableHead class="w-[200px] h-12 font-semibold">
                   密钥信息
                 </TableHead>
-                <TableHead class="w-[160px] h-12 font-semibold">
-                  余额 (已用/总额)
+                <TableHead class="w-[240px] h-12 font-semibold">
+                  钱包
                 </TableHead>
                 <TableHead class="w-[130px] h-12 font-semibold">
                   使用统计
@@ -114,7 +114,7 @@
                 <TableHead class="w-[140px] h-12 font-semibold">
                   最近使用
                 </TableHead>
-                <TableHead class="w-[70px] h-12 font-semibold text-center">
+                <TableHead class="w-[180px] h-12 font-semibold">
                   状态
                 </TableHead>
                 <TableHead class="w-[130px] h-12 font-semibold text-center">
@@ -189,12 +189,28 @@
                   </div>
                 </TableCell>
                 <TableCell class="py-4">
-                  <div class="text-xs">
-                    <div class="flex items-center gap-1.5">
-                      <span class="font-mono font-medium">${{ (apiKey.balance_used_usd || 0).toFixed(2) }}</span>
-                      <span class="text-muted-foreground">/</span>
-                      <span :class="isBalanceLimited(apiKey) ? 'font-mono font-medium text-primary' : 'font-mono text-muted-foreground'">
-                        {{ isBalanceLimited(apiKey) ? `$${(apiKey.current_balance_usd || 0).toFixed(2)}` : '无限' }}
+                  <div class="space-y-1.5">
+                    <div class="flex items-center gap-1 text-[11px] text-muted-foreground">
+                      <span>余额：</span>
+                      <Badge
+                        v-if="isApiKeyUnlimited(apiKey)"
+                        variant="secondary"
+                        class="h-5 px-1.5 py-0 text-[10px] font-medium"
+                      >
+                        无限额度
+                      </Badge>
+                      <span
+                        v-else
+                        class="text-sm font-semibold tabular-nums"
+                        :class="isNegativeWalletAmount(getApiKeyWalletTotalBalance(apiKey)) ? 'text-rose-600' : 'text-foreground'"
+                      >
+                        {{ formatWalletAmount(getApiKeyWalletTotalBalance(apiKey), '-') }}
+                      </span>
+                    </div>
+                    <div class="flex items-center gap-2 text-[11px] text-muted-foreground flex-wrap">
+                      <span>
+                        已消费：
+                        <span class="font-medium tabular-nums text-foreground">${{ getApiKeyWalletConsumed(apiKey).toFixed(2) }}</span>
                       </span>
                     </div>
                   </div>
@@ -242,20 +258,20 @@
                     >暂无记录</span>
                   </div>
                 </TableCell>
-                <TableCell class="py-4 text-center">
-                  <div class="flex flex-col items-center gap-1">
+                <TableCell class="py-4">
+                  <div class="flex flex-col items-start gap-1.5">
                     <Badge
                       :variant="apiKey.is_active ? 'success' : 'destructive'"
-                      class="font-medium"
+                      class="h-5 px-1.5 py-0 text-[10px] font-medium"
                     >
                       {{ apiKey.is_active ? '活跃' : '禁用' }}
                     </Badge>
                     <Badge
-                      v-if="apiKey.is_locked"
-                      variant="secondary"
-                      class="text-xs"
+                      v-if="getApiKeyWallet(apiKey.id)"
+                      :variant="walletStatusBadge(getApiKeyWalletStatus(apiKey.id))"
+                      class="h-5 px-1.5 py-0 text-[10px] font-medium"
                     >
-                      已锁定
+                      {{ walletStatusLabel(getApiKeyWalletStatus(apiKey.id)) }}
                     </Badge>
                   </div>
                 </TableCell>
@@ -274,35 +290,10 @@
                       variant="ghost"
                       size="icon"
                       class="h-8 w-8"
-                      title="调整余额"
+                      title="资金操作"
                       @click="openAddBalanceDialog(apiKey)"
                     >
                       <DollarSign class="h-4 w-4" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      class="h-8 w-8"
-                      title="重置额度"
-                      @click="resetKeyUsage(apiKey)"
-                    >
-                      <RotateCcw class="h-4 w-4" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      class="h-8 w-8"
-                      :title="apiKey.is_locked ? '解锁' : '锁定'"
-                      @click="toggleLockApiKey(apiKey)"
-                    >
-                      <Lock
-                        v-if="apiKey.is_locked"
-                        class="h-4 w-4"
-                      />
-                      <LockOpen
-                        v-else
-                        class="h-4 w-4"
-                      />
                     </Button>
                     <Button
                       variant="ghost"
@@ -329,207 +320,207 @@
           </Table>
         </div>
 
-        <div class="xl:hidden divide-y divide-border/40">
+        <div class="xl:hidden bg-muted/[0.14] p-3 sm:p-4">
           <div
-            v-if="apiKeys.length === 0"
-            class="p-8 text-center"
+            v-if="filteredApiKeys.length === 0"
+            class="rounded-2xl border border-dashed border-border/60 bg-card/70 px-6 py-10 text-center"
           >
-            <Key class="h-12 w-12 mx-auto mb-3 text-muted-foreground/50" />
-            <p class="text-muted-foreground">
-              暂无独立余额 Key
+            <Key class="mx-auto mb-3 h-12 w-12 text-muted-foreground/50" />
+            <p class="text-sm font-medium text-foreground">
+              {{ hasActiveFilters ? '未找到匹配的 Key' : '暂无独立余额 Key' }}
+            </p>
+            <p
+              v-if="hasActiveFilters"
+              class="mt-1 text-xs text-muted-foreground"
+            >
+              尝试调整筛选条件
             </p>
           </div>
+
           <div
-            v-for="apiKey in apiKeys"
-            :key="apiKey.id"
-            class="p-4 sm:p-5 hover:bg-muted/30 transition-colors"
+            v-else
+            class="space-y-3.5"
           >
-            <div class="space-y-4">
-              <div class="flex items-start justify-between gap-3">
-                <div class="space-y-2">
-                  <div class="flex items-center gap-2">
-                    <code class="inline-flex rounded-lg bg-muted px-3 py-1.5 text-xs font-mono font-semibold">
-                      {{ apiKey.key_display || 'sk-****' }}
-                    </code>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      class="h-7 w-7 hover:bg-muted flex-shrink-0"
-                      title="复制完整密钥"
-                      @click="copyKeyPrefix(apiKey)"
+            <div
+              v-for="apiKey in filteredApiKeys"
+              :key="apiKey.id"
+              class="rounded-2xl border border-border/60 bg-card/95 p-4 shadow-[0_10px_26px_-22px_hsl(var(--foreground))]"
+            >
+              <div class="space-y-4">
+                <div class="flex items-start gap-3">
+                  <div class="min-w-0 flex-1 space-y-2">
+                    <div class="flex items-center gap-2">
+                      <code class="inline-flex max-w-[190px] sm:max-w-[240px] truncate rounded-lg bg-muted px-3 py-1.5 text-[11px] font-mono font-semibold text-foreground/90">
+                        {{ apiKey.key_display || 'sk-****' }}
+                      </code>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        class="h-7 w-7 flex-shrink-0 hover:bg-muted"
+                        title="复制完整密钥"
+                        @click="copyKeyPrefix(apiKey)"
+                      >
+                        <Copy class="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                    <div
+                      class="truncate text-sm font-semibold text-foreground"
+                      :class="{ 'text-muted-foreground': !apiKey.name }"
+                      :title="apiKey.name || '未命名 Key'"
                     >
-                      <Copy class="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                  <div
-                    class="text-sm font-semibold text-foreground"
-                    :class="{ 'text-muted-foreground': !apiKey.name }"
-                  >
-                    {{ apiKey.name || '未命名 Key' }}
+                      {{ apiKey.name || '未命名 Key' }}
+                    </div>
                   </div>
                 </div>
-                <div class="flex flex-col items-end gap-1">
+
+                <div class="flex flex-wrap items-center gap-1.5">
                   <Badge
                     :variant="apiKey.is_active ? 'success' : 'destructive'"
-                    class="text-xs flex-shrink-0"
+                    class="h-5 px-1.5 py-0 text-[10px] font-medium"
                   >
                     {{ apiKey.is_active ? '活跃' : '禁用' }}
                   </Badge>
                   <Badge
-                    v-if="apiKey.is_locked"
-                    variant="secondary"
-                    class="text-xs"
+                    v-if="getApiKeyWallet(apiKey.id)"
+                    :variant="walletStatusBadge(getApiKeyWalletStatus(apiKey.id))"
+                    class="h-5 px-1.5 py-0 text-[10px] font-medium"
                   >
-                    已锁定
+                    {{ walletStatusLabel(getApiKeyWalletStatus(apiKey.id)) }}
+                  </Badge>
+                  <Badge
+                    v-if="apiKey.auto_delete_on_expiry"
+                    variant="secondary"
+                    class="h-5 px-1.5 py-0 text-[10px] font-medium"
+                  >
+                    过期自动删除
                   </Badge>
                 </div>
-              </div>
 
-              <div class="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-                <span class="inline-flex items-center gap-1 rounded-full border border-border/60 px-2.5 py-0.5">
-                  {{ isBalanceLimited(apiKey) ? '限额 Key' : '无限额度' }}
-                </span>
-                <span
-                  v-if="apiKey.auto_delete_on_expiry"
-                  class="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-0.5"
-                >
-                  过期自动删除
-                </span>
-              </div>
+                <div class="rounded-xl border border-border/60 bg-muted/40 p-3.5">
+                  <div class="flex items-start justify-between gap-3">
+                    <div class="space-y-1">
+                      <p class="text-[11px] text-muted-foreground">
+                        余额：
+                      </p>
+                      <Badge
+                        v-if="isApiKeyUnlimited(apiKey)"
+                        variant="secondary"
+                        class="h-5 px-1.5 py-0 text-[10px] font-medium"
+                      >
+                        无限额度
+                      </Badge>
+                      <p
+                        v-else
+                        class="text-base font-semibold tabular-nums leading-none"
+                        :class="isNegativeWalletAmount(getApiKeyWalletTotalBalance(apiKey)) ? 'text-rose-600' : 'text-foreground'"
+                      >
+                        {{ formatWalletAmount(getApiKeyWalletTotalBalance(apiKey), '-') }}
+                      </p>
+                    </div>
+                    <div class="text-right">
+                      <p class="text-[11px] text-muted-foreground">
+                        已消费：
+                      </p>
+                      <p class="text-sm font-medium tabular-nums text-foreground">
+                        ${{ getApiKeyWalletConsumed(apiKey).toFixed(2) }}
+                      </p>
+                    </div>
+                  </div>
+                </div>
 
-              <div class="space-y-2 p-3 bg-muted/50 rounded-lg text-xs">
-                <div class="flex items-center justify-between text-muted-foreground">
-                  <span>已用</span>
-                  <span class="font-semibold">${{ (apiKey.balance_used_usd || 0).toFixed(2) }}</span>
+                <div class="grid grid-cols-2 gap-2.5 text-xs">
+                  <div class="rounded-lg border border-border/50 bg-background/70 p-2.5">
+                    <div class="mb-1 text-muted-foreground">
+                      速率限制
+                    </div>
+                    <div class="font-semibold text-foreground">
+                      {{ apiKey.rate_limit ? `${apiKey.rate_limit}/min` : '未设置' }}
+                    </div>
+                  </div>
+                  <div class="rounded-lg border border-border/50 bg-background/70 p-2.5">
+                    <div class="mb-1 text-muted-foreground">
+                      请求次数
+                    </div>
+                    <div class="font-semibold text-foreground">
+                      {{ (apiKey.total_requests || 0).toLocaleString() }}
+                    </div>
+                  </div>
+                  <div class="col-span-2 rounded-lg border border-border/50 bg-background/70 p-2.5">
+                    <div class="mb-1 text-muted-foreground">
+                      有效期
+                    </div>
+                    <div class="font-semibold text-foreground">
+                      {{ apiKey.expires_at ? formatDate(apiKey.expires_at) : '永不过期' }}
+                    </div>
+                    <div
+                      v-if="apiKey.expires_at"
+                      class="text-[11px] text-muted-foreground"
+                    >
+                      {{ getRelativeTime(apiKey.expires_at) }}
+                    </div>
+                  </div>
                 </div>
-                <div class="flex items-center justify-between text-muted-foreground">
-                  <span>剩余</span>
-                  <span :class="getBalanceRemaining(apiKey) > 0 ? 'font-semibold text-emerald-600' : 'font-semibold text-rose-600'">
-                    {{ isBalanceLimited(apiKey) ? `$${getBalanceRemaining(apiKey).toFixed(2)}` : '无限制' }}
-                  </span>
-                </div>
-                <div class="flex items-center justify-between text-amber-600">
-                  <span>总费用</span>
-                  <span>${{ (apiKey.total_cost_usd || 0).toFixed(4) }}</span>
-                </div>
-                <div
-                  v-if="isBalanceLimited(apiKey)"
-                  class="h-1.5 rounded-full bg-background/40 overflow-hidden"
-                >
-                  <div
-                    class="h-full rounded-full bg-emerald-500"
-                    :style="{ width: `${getBalanceProgress(apiKey)}%` }"
-                  />
-                </div>
-              </div>
 
-              <div class="grid grid-cols-2 gap-2 text-xs">
-                <div class="p-2 bg-muted/40 rounded-lg">
-                  <div class="text-muted-foreground mb-1">
-                    速率限制
+                <div class="rounded-lg bg-muted/35 p-2.5 text-[11px] text-muted-foreground">
+                  <div class="flex items-center justify-between gap-2">
+                    <span>创建</span>
+                    <span class="font-medium text-foreground">{{ formatDate(apiKey.created_at) }}</span>
                   </div>
-                  <div class="font-semibold">
-                    {{ apiKey.rate_limit ? `${apiKey.rate_limit}/min` : '未设置' }}
-                  </div>
-                </div>
-                <div class="p-2 bg-muted/40 rounded-lg">
-                  <div class="text-muted-foreground mb-1">
-                    请求次数
-                  </div>
-                  <div class="font-semibold">
-                    {{ (apiKey.total_requests || 0).toLocaleString() }}
-                  </div>
-                </div>
-                <div class="p-2 bg-muted/40 rounded-lg col-span-2">
-                  <div class="text-muted-foreground mb-1">
-                    有效期
-                  </div>
-                  <div class="font-semibold">
-                    {{ apiKey.expires_at ? formatDate(apiKey.expires_at) : '永不过期' }}
+                  <div class="mt-1 flex items-center justify-between gap-2">
+                    <span>最近使用</span>
+                    <span
+                      v-if="apiKey.last_used_at"
+                      class="font-medium text-foreground"
+                    >{{ formatDate(apiKey.last_used_at) }}</span>
+                    <span v-else>暂无记录</span>
                   </div>
                   <div
                     v-if="apiKey.expires_at"
-                    class="text-[11px] text-muted-foreground"
+                    class="mt-1 flex items-center justify-between gap-2"
                   >
-                    {{ getRelativeTime(apiKey.expires_at) }}
+                    <span>过期后</span>
+                    <span>{{ apiKey.auto_delete_on_expiry ? '自动删除' : '仅禁用' }}</span>
                   </div>
                 </div>
-              </div>
 
-              <div class="text-xs text-muted-foreground space-y-1">
-                <p>创建: {{ formatDate(apiKey.created_at) }}</p>
-                <p>
-                  最近使用:
-                  <span
-                    v-if="apiKey.last_used_at"
-                    class="font-medium text-foreground"
-                  >{{ formatDate(apiKey.last_used_at) }}</span>
-                  <span v-else>暂无记录</span>
-                </p>
-                <p v-if="apiKey.expires_at">
-                  过期后: {{ apiKey.auto_delete_on_expiry ? '自动删除' : '仅禁用' }}
-                </p>
-              </div>
-
-              <div class="grid grid-cols-2 gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  @click="editApiKey(apiKey)"
-                >
-                  <SquarePen class="h-3.5 w-3.5 mr-1.5" />
-                  编辑
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  class="text-blue-600"
-                  @click="openAddBalanceDialog(apiKey)"
-                >
-                  <DollarSign class="h-3.5 w-3.5 mr-1.5" />
-                  调整
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  class="text-amber-600"
-                  @click="resetKeyUsage(apiKey)"
-                >
-                  <RotateCcw class="h-3.5 w-3.5 mr-1.5" />
-                  重置
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  @click="toggleLockApiKey(apiKey)"
-                >
-                  <Lock
-                    v-if="apiKey.is_locked"
-                    class="h-3.5 w-3.5 mr-1.5"
-                  />
-                  <LockOpen
-                    v-else
-                    class="h-3.5 w-3.5 mr-1.5"
-                  />
-                  {{ apiKey.is_locked ? '解锁' : '锁定' }}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  @click="toggleApiKey(apiKey)"
-                >
-                  <Power class="h-3.5 w-3.5 mr-1.5" />
-                  {{ apiKey.is_active ? '禁用' : '启用' }}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  class="text-rose-600 col-span-2"
-                  @click="deleteApiKey(apiKey)"
-                >
-                  <Trash2 class="h-3.5 w-3.5 mr-1.5" />
-                  删除
-                </Button>
+                <div class="grid grid-cols-2 gap-2 pt-0.5">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="h-8 text-xs"
+                    @click="editApiKey(apiKey)"
+                  >
+                    <SquarePen class="mr-1.5 h-3.5 w-3.5" />
+                    编辑
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="h-8 text-xs"
+                    @click="openAddBalanceDialog(apiKey)"
+                  >
+                    <DollarSign class="mr-1.5 h-3.5 w-3.5" />
+                    资金
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="h-8 text-xs"
+                    @click="toggleApiKey(apiKey)"
+                  >
+                    <Power class="mr-1.5 h-3.5 w-3.5" />
+                    {{ apiKey.is_active ? '禁用' : '启用' }}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="col-span-2 h-8 border-rose-200 text-xs text-rose-600 hover:bg-rose-50 dark:border-rose-900/60 dark:hover:bg-rose-950/40"
+                    @click="deleteApiKey(apiKey)"
+                  >
+                    <Trash2 class="mr-1.5 h-3.5 w-3.5" />
+                    删除
+                  </Button>
+                </div>
               </div>
             </div>
           </div>
@@ -611,96 +602,17 @@
       </template>
     </Dialog>
 
-    <!-- 余额调整对话框 -->
-    <Dialog
-      v-model="showAddBalanceDialog"
-      size="md"
-    >
-      <template #header>
-        <div class="border-b border-border px-6 py-4">
-          <div class="flex items-center gap-3">
-            <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-100 dark:bg-blue-900/30 flex-shrink-0">
-              <DollarSign class="h-5 w-5 text-blue-600 dark:text-blue-400" />
-            </div>
-            <div class="flex-1 min-w-0">
-              <h3 class="text-lg font-semibold text-foreground leading-tight">
-                余额调整
-              </h3>
-              <p class="text-xs text-muted-foreground">
-                增加或扣除 API Key 余额
-              </p>
-            </div>
-          </div>
-        </div>
-      </template>
-
-      <div class="space-y-4">
-        <div class="p-3 bg-muted/50 rounded-lg text-sm">
-          <div class="font-medium mb-2">
-            当前余额信息
-          </div>
-          <div class="space-y-1 text-xs text-muted-foreground">
-            <div>已用: <span class="font-semibold text-foreground">${{ (addBalanceKey.balance_used_usd || 0).toFixed(2) }}</span></div>
-            <div>当前余额: <span class="font-semibold text-foreground">${{ (addBalanceKey.current_balance_usd || 0).toFixed(2) }}</span></div>
-          </div>
-        </div>
-
-        <div class="space-y-2">
-          <Label
-            for="addBalanceAmount"
-            class="text-sm font-medium"
-          >调整金额 (USD)</Label>
-          <Input
-            id="addBalanceAmount"
-            :model-value="addBalanceAmount ?? ''"
-            type="number"
-            step="0.01"
-            placeholder="正数为增加，负数为扣除"
-            class="h-11"
-            @update:model-value="(v) => addBalanceAmount = parseNumberInput(v, { allowFloat: true })"
-          />
-          <p class="text-xs text-muted-foreground">
-            <span
-              v-if="addBalanceAmount && addBalanceAmount > 0"
-              class="text-emerald-600"
-            >
-              增加 ${{ addBalanceAmount.toFixed(2) }}，调整后余额: ${{ ((addBalanceKey.current_balance_usd || 0) + addBalanceAmount).toFixed(2) }}
-            </span>
-            <span
-              v-else-if="addBalanceAmount && addBalanceAmount < 0"
-              class="text-rose-600"
-            >
-              扣除 ${{ Math.abs(addBalanceAmount).toFixed(2) }}，调整后余额: ${{ Math.max(0, (addBalanceKey.current_balance_usd || 0) + addBalanceAmount).toFixed(2) }}
-            </span>
-            <span
-              v-else
-              class="text-muted-foreground"
-            >
-              输入正数增加余额，负数扣除余额
-            </span>
-          </p>
-        </div>
-      </div>
-
-      <template #footer>
-        <div class="flex gap-3 justify-end">
-          <Button
-            variant="outline"
-            class="h-10 px-5"
-            @click="showAddBalanceDialog = false"
-          >
-            取消
-          </Button>
-          <Button
-            :disabled="addingBalance || !addBalanceAmount || addBalanceAmount === 0"
-            class="h-10 px-5"
-            @click="handleAddBalance"
-          >
-            {{ addingBalance ? '调整中...' : '确认调整' }}
-          </Button>
-        </div>
-      </template>
-    </Dialog>
+    <WalletOpsDrawer
+      :open="showWalletActionDrawer"
+      :wallet="walletActionTarget?.wallet || null"
+      :owner-name="walletActionTarget?.apiKey.name || walletActionTarget?.apiKey.key_display || '未命名 Key'"
+      :owner-subtitle="walletActionTarget?.apiKey.key_display || walletActionTarget?.apiKey.username || ''"
+      context-label="独立密钥钱包"
+      accent="blue"
+      :show-refunds="false"
+      @close="closeWalletActionDrawer"
+      @changed="handleWalletDrawerChanged"
+    />
   </div>
 </template>
 
@@ -710,6 +622,9 @@ import { useToast } from '@/composables/useToast'
 import { useConfirm } from '@/composables/useConfirm'
 import { useClipboard } from '@/composables/useClipboard'
 import { adminApi, type AdminApiKey, type CreateStandaloneApiKeyRequest } from '@/api/admin'
+import { adminWalletApi, type AdminWallet } from '@/api/admin-wallets'
+import { walletStatusBadge, walletStatusLabel } from '@/utils/walletDisplay'
+import WalletOpsDrawer from '@/features/wallet/components/WalletOpsDrawer.vue'
 
 import {
   Dialog,
@@ -743,14 +658,10 @@ import {
   Copy,
   CheckCircle,
   SquarePen,
-  Search,
-  Lock,
-  LockOpen,
-  RotateCcw
+  Search
 } from 'lucide-vue-next'
 
 import { StandaloneKeyFormDialog, type StandaloneKeyFormData } from '@/features/api-keys'
-import { parseNumberInput } from '@/utils/form'
 import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
 
@@ -759,6 +670,7 @@ const { confirmDanger } = useConfirm()
 const { copyToClipboard } = useClipboard()
 
 const apiKeys = ref<AdminApiKey[]>([])
+const apiKeyWalletMap = ref<Record<string, AdminWallet>>({})
 const loading = ref(false)
 const total = ref(0)
 const currentPage = ref(1)
@@ -839,19 +751,11 @@ const filteredApiKeys = computed(() => {
   return result
 })
 
-// 充值相关状态
-const showAddBalanceDialog = ref(false)
-const addBalanceKey = ref({
-  id: '',
-  name: '',
-  balance_used_usd: 0,
-  current_balance_usd: 0
-})
-const addBalanceAmount = ref<number | undefined>(undefined)
-const addingBalance = ref(false)
+const showWalletActionDrawer = ref(false)
+const walletActionTarget = ref<{ apiKey: AdminApiKey; wallet: AdminWallet } | null>(null)
 
 onMounted(async () => {
-  await loadApiKeys()
+  await refreshApiKeys()
 })
 
 async function loadApiKeys() {
@@ -871,9 +775,29 @@ async function loadApiKeys() {
   }
 }
 
+async function loadApiKeyWallets() {
+  try {
+    const wallets = await adminWalletApi.listAllWallets()
+    apiKeyWalletMap.value = wallets
+      .filter((wallet) => wallet.owner_type === 'api_key' && !!wallet.api_key_id)
+      .reduce<Record<string, AdminWallet>>((acc, wallet) => {
+        acc[wallet.api_key_id as string] = wallet
+        return acc
+      }, {})
+  } catch (err: unknown) {
+    log.error('加载独立 Key 钱包失败:', err)
+  }
+}
+
+async function refreshApiKeys() {
+  // 先拉取 Key 列表，再拉钱包，避免并发请求导致新钱包映射短暂缺失。
+  await loadApiKeys()
+  await loadApiKeyWallets()
+}
+
 function handlePageChange(page: number) {
   currentPage.value = page
-  loadApiKeys()
+  refreshApiKeys()
 }
 
 async function toggleApiKey(apiKey: AdminApiKey) {
@@ -890,20 +814,6 @@ async function toggleApiKey(apiKey: AdminApiKey) {
   }
 }
 
-async function toggleLockApiKey(apiKey: AdminApiKey) {
-  try {
-    const response = await adminApi.toggleLockApiKey(apiKey.id)
-    const index = apiKeys.value.findIndex(k => k.id === apiKey.id)
-    if (index !== -1) {
-      apiKeys.value[index].is_locked = response.is_locked
-    }
-    success(response.message)
-  } catch (err: unknown) {
-    log.error('切换密钥锁定状态失败:', err)
-    error(parseApiError(err, '操作失败'))
-  }
-}
-
 async function deleteApiKey(apiKey: AdminApiKey) {
   const confirmed = await confirmDanger(
     `确定要删除这个独立余额 Key 吗？\n\n${apiKey.name || apiKey.key_display || 'sk-****'}\n\n此操作无法撤销。`,
@@ -916,6 +826,7 @@ async function deleteApiKey(apiKey: AdminApiKey) {
     const response = await adminApi.deleteApiKey(apiKey.id)
     apiKeys.value = apiKeys.value.filter(k => k.id !== apiKey.id)
     total.value = total.value - 1
+    delete apiKeyWalletMap.value[apiKey.id]
     success(response.message)
   } catch (err: unknown) {
     log.error('删除密钥失败:', err)
@@ -936,6 +847,8 @@ function editApiKey(apiKey: AdminApiKey) {
   editingKeyData.value = {
     id: apiKey.id,
     name: apiKey.name || '',
+    initial_balance_usd: isApiKeyUnlimited(apiKey) ? undefined : (getApiKeyWalletTotalBalance(apiKey) ?? undefined),
+    unlimited_balance: isApiKeyUnlimited(apiKey),
     expires_at: expiresAt,
     rate_limit: apiKey.rate_limit ?? undefined,
     auto_delete_on_expiry: apiKey.auto_delete_on_expiry || false,
@@ -947,63 +860,73 @@ function editApiKey(apiKey: AdminApiKey) {
   showKeyFormDialog.value = true
 }
 
+function getApiKeyWallet(apiKeyId: string): AdminWallet | null {
+  return apiKeyWalletMap.value[apiKeyId] || null
+}
+
+function isApiKeyUnlimited(apiKey: AdminApiKey): boolean {
+  const wallet = getApiKeyWallet(apiKey.id)
+  return wallet?.limit_mode === 'unlimited' || wallet?.unlimited === true
+}
+
+function getApiKeyWalletTotalBalance(apiKey: AdminApiKey): number | null {
+  if (isApiKeyUnlimited(apiKey)) {
+    return null
+  }
+  const wallet = getApiKeyWallet(apiKey.id)
+  return wallet ? wallet.balance : 0
+}
+
+function getApiKeyWalletConsumed(apiKey: AdminApiKey): number {
+  return getApiKeyWallet(apiKey.id)?.total_consumed ?? (apiKey.total_cost_usd || 0)
+}
+
+function getApiKeyWalletStatus(apiKeyId: string): string | null {
+  return getApiKeyWallet(apiKeyId)?.status ?? null
+}
+
+function formatWalletAmount(value: number | null, nullLabel = '无限制'): string {
+  if (value == null) {
+    return nullLabel
+  }
+  return `$${value.toFixed(2)}`
+}
+
+function isNegativeWalletAmount(value: number | null): boolean {
+  return typeof value === 'number' && value < 0
+}
+
 function openAddBalanceDialog(apiKey: AdminApiKey) {
-  addBalanceKey.value = {
-    id: apiKey.id,
-    name: apiKey.name || apiKey.key_display || 'sk-****',
-    balance_used_usd: apiKey.balance_used_usd || 0,
-    current_balance_usd: apiKey.current_balance_usd || 0
-  }
-
-  addBalanceAmount.value = undefined
-  showAddBalanceDialog.value = true
-}
-
-async function handleAddBalance() {
-  if (!addBalanceAmount.value || addBalanceAmount.value === 0) {
-    error('调整金额不能为 0')
+  const wallet = getApiKeyWallet(apiKey.id)
+  if (!wallet) {
+    error('该独立 Key 的钱包尚未初始化，暂时无法进行资金操作')
     return
   }
 
-  // 验证扣除金额不能超过当前余额
-  if (addBalanceAmount.value < 0 && Math.abs(addBalanceAmount.value) > (addBalanceKey.value.current_balance_usd || 0)) {
-    error('扣除金额不能超过当前余额')
+  walletActionTarget.value = {
+    apiKey,
+    wallet
+  }
+  showWalletActionDrawer.value = true
+}
+
+function closeWalletActionDrawer() {
+  showWalletActionDrawer.value = false
+}
+
+async function handleWalletDrawerChanged() {
+  await refreshApiKeys()
+  if (!walletActionTarget.value) {
     return
   }
 
-  addingBalance.value = true
-  try {
-    const response = await adminApi.addApiKeyBalance(addBalanceKey.value.id, addBalanceAmount.value)
-
-    // 重新加载列表
-    await loadApiKeys()
-
-    showAddBalanceDialog.value = false
-    const action = addBalanceAmount.value > 0 ? '增加' : '扣除'
-    const amount = Math.abs(addBalanceAmount.value).toFixed(2)
-    success(response.message || `余额${action}成功，${action} $${amount}`)
-  } catch (err: unknown) {
-    log.error('余额调整失败:', err)
-    error(parseApiError(err, '调整失败'))
-  } finally {
-    addingBalance.value = false
+  const latestKey = apiKeys.value.find((item) => item.id === walletActionTarget.value?.apiKey.id)
+  const latestWallet = getApiKeyWallet(walletActionTarget.value.apiKey.id)
+  if (latestKey) {
+    walletActionTarget.value.apiKey = latestKey
   }
-}
-
-async function resetKeyUsage(apiKey: AdminApiKey) {
-  const confirmed = await confirmDanger(
-    `确定要重置此 Key 的已使用额度吗？\n\n${apiKey.name || apiKey.key_display || 'sk-****'}\n\n已使用额度将归零，当前余额不变。`,
-    '重置使用额度'
-  )
-  if (!confirmed) return
-
-  try {
-    const response = await adminApi.resetApiKeyUsage(apiKey.id)
-    await loadApiKeys()
-    success(response.message)
-  } catch (err: unknown) {
-    log.error('重置使用额度失败:', err)
-    error(parseApiError(err, '重置失败'))
+  if (latestWallet) {
+    walletActionTarget.value.wallet = latestWallet
   }
 }
 
@@ -1032,27 +955,7 @@ function closeNewKeyDialog() {
 }
 
 function isBalanceLimited(apiKey: AdminApiKey): boolean {
-  return apiKey.current_balance_usd !== null && apiKey.current_balance_usd !== undefined
-}
-
-function getBalanceProgress(apiKey: AdminApiKey): number {
-  if (!isBalanceLimited(apiKey)) {
-    return 0
-  }
-
-  // 总额 = 当前余额 + 已使用
-  const used = apiKey.balance_used_usd || 0
-  const remaining = apiKey.current_balance_usd || 0
-  const total = used + remaining
-
-  if (total <= 0) {
-    return 0
-  }
-
-  // 进度条显示剩余比例（绿色部分）
-  const ratio = (remaining / total) * 100
-  const normalized = Number.isFinite(ratio) ? ratio : 0
-  return Math.max(0, Math.min(100, normalized))
+  return !isApiKeyUnlimited(apiKey)
 }
 
 function isExpiringSoon(apiKey: AdminApiKey): boolean {
@@ -1064,15 +967,6 @@ function isExpiringSoon(apiKey: AdminApiKey): boolean {
   const now = Date.now()
   const diffDays = (expiresAt - now) / (1000 * 60 * 60 * 24)
   return diffDays > 0 && diffDays <= EXPIRY_SOON_DAYS
-}
-
-function getBalanceRemaining(apiKey: AdminApiKey): number {
-  // 计算剩余余额 = 当前余额 - 已使用余额
-  if (apiKey.current_balance_usd === null || apiKey.current_balance_usd === undefined) {
-    return 0
-  }
-  const remaining = apiKey.current_balance_usd - (apiKey.balance_used_usd || 0)
-  return Math.max(0, remaining)  // 不能为负数
 }
 
 function formatDate(dateString: string): string {
@@ -1133,6 +1027,7 @@ async function handleKeyFormSubmit(data: StandaloneKeyFormData) {
       // 更新
       const updateData: Partial<CreateStandaloneApiKeyRequest> = {
         name: data.name || undefined,
+        unlimited_balance: Boolean(data.unlimited_balance),
         rate_limit: data.rate_limit ?? null,  // undefined = 无限制，显式传 null
         expires_at: data.expires_at || null,  // undefined/空 = 永不过期
         auto_delete_on_expiry: data.auto_delete_on_expiry,
@@ -1141,22 +1036,27 @@ async function handleKeyFormSubmit(data: StandaloneKeyFormData) {
         allowed_api_formats: data.allowed_api_formats,
         allowed_models: data.allowed_models
       }
-      const { message: _, ...updated } = await adminApi.updateApiKey(data.id, updateData)
-      // 局部更新：直接替换列表中对应的记录
+      const { message: _, wallet: __, ...updated } = await adminApi.updateApiKey(data.id, updateData)
+      // 局部更新：合并字段，避免覆盖丢失列表已有信息
       const index = apiKeys.value.findIndex(k => k.id === data.id)
       if (index !== -1) {
-        apiKeys.value[index] = updated
+        apiKeys.value[index] = {
+          ...apiKeys.value[index],
+          ...updated,
+        }
       }
+      await loadApiKeyWallets()
       success('API Key 更新成功')
     } else {
       // 创建
-      if (!data.initial_balance_usd || data.initial_balance_usd <= 0) {
+      const isUnlimited = Boolean(data.unlimited_balance)
+      if (!isUnlimited && (!data.initial_balance_usd || data.initial_balance_usd <= 0)) {
         error('初始余额必须大于 0')
         return
       }
       const createData: CreateStandaloneApiKeyRequest = {
         name: data.name || undefined,
-        initial_balance_usd: data.initial_balance_usd,
+        initial_balance_usd: isUnlimited ? null : (data.initial_balance_usd as number),
         rate_limit: data.rate_limit ?? null,  // undefined = 无限制，显式传 null
         expires_at: data.expires_at || null,  // undefined/空 = 永不过期
         auto_delete_on_expiry: data.auto_delete_on_expiry,
@@ -1169,7 +1069,7 @@ async function handleKeyFormSubmit(data: StandaloneKeyFormData) {
       newKeyValue.value = response.key
       showNewKeyDialog.value = true
       success('独立 Key 创建成功')
-      await loadApiKeys()
+      await refreshApiKeys()
     }
     closeKeyFormDialog()
   } catch (err: unknown) {
