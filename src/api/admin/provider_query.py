@@ -45,6 +45,9 @@ if TYPE_CHECKING:
 
 router = APIRouter(prefix="/api/admin/provider-query", tags=["Provider Query"])
 
+_ADMIN_TEST_CONCURRENCY = 8
+_admin_test_semaphore = asyncio.Semaphore(max(_ADMIN_TEST_CONCURRENCY, 1))
+
 
 # ---------------------------------------------------------------------------
 # Provider-level upstream models cache (for multi-key ordered fetch)
@@ -834,7 +837,7 @@ async def test_model(
         logger.debug(f"[test-model] 端点 API Format: {endpoint.api_format}")
         logger.debug(f"[test-model] 使用 Key: {api_key.name or api_key.id} (auth_type={auth_type})")
 
-        # 准备测试请求数据（优先使用流式）
+        # 准备测试请求数据（默认非流式，显式请求时才走流式）
         check_request = {
             "model": request.model_name,
             "messages": [
@@ -842,7 +845,7 @@ async def test_model(
             ],
             "max_tokens": 30,
             "temperature": 0.7,
-            "stream": True,
+            "stream": bool(request.stream),
         }
 
         # 获取端点规则（不在此处应用，传递给 check_endpoint 在格式转换后应用）
@@ -952,15 +955,37 @@ async def test_model(
 
             return False
 
-        # 策略：优先流式，若失败回退到非流式
-        used_stream = True
-        logger.debug("[test-model] 尝试流式请求...")
+        # 策略：默认非流式；仅显式流式请求时在流式特有失败下回退到非流式
+        used_stream = bool(check_request.get("stream"))
+        fallback_to_non_stream = False
+        logger.info(
+            "[admin-test-model] start | provider_id={} provider={} endpoint_id={} api_key_id={} api_format={} model={} stream={} auth_type={}",
+            provider.id,
+            provider.name,
+            getattr(endpoint, "id", None),
+            api_key.id,
+            endpoint.api_format,
+            request.model_name,
+            used_stream,
+            auth_type,
+        )
         response = await _do_check(check_request)
 
-        if _response_has_error(response) and _should_fallback_to_non_stream(response):
+        if (
+            used_stream
+            and _response_has_error(response)
+            and _should_fallback_to_non_stream(response)
+        ):
+            fallback_to_non_stream = True
             logger.info(
-                "[test-model] 流式请求失败 (status={})，回退到非流式请求",
+                "[admin-test-model] fallback-to-non-stream | provider_id={} endpoint_id={} api_key_id={} api_format={} model={} status_code={} error={}",
+                provider.id,
+                getattr(endpoint, "id", None),
+                api_key.id,
+                endpoint.api_format,
+                request.model_name,
                 response.get("status_code", "?"),
+                _extract_error_message(response)[:200],
             )
             check_request["stream"] = False
             used_stream = False
@@ -974,6 +999,19 @@ async def test_model(
         response_body = response_data.get("response_body", {})
         logger.debug(f"[test-model] Response Data: {response_data}")
         logger.debug(f"[test-model] Response Body: {response_body}")
+        logger.info(
+            "[admin-test-model] finish | provider_id={} endpoint_id={} api_key_id={} api_format={} model={} stream={} fallback_to_non_stream={} local_protocol_error={} status_code={} has_error={}",
+            provider.id,
+            getattr(endpoint, "id", None),
+            api_key.id,
+            endpoint.api_format,
+            request.model_name,
+            used_stream,
+            fallback_to_non_stream,
+            "LocalProtocolError" in (str(response.get("error") or "") + str(response.get("response") or "")),
+            response.get("status_code", 0),
+            _response_has_error(response),
+        )
         # 尝试解析 response_body (通常是 JSON 字符串)
         parsed_body = response_body
         import json
@@ -1380,40 +1418,55 @@ async def test_model_failover(
             if not adapter_class:
                 raise Exception(f"Unknown API format: {endpoint.api_format}")
 
-            # 构建测试请求
+            # 构建测试请求（默认非流式）
             check_request = {
                 "model": effective_model,
                 "messages": [{"role": "user", "content": request.message or "Hello"}],
                 "max_tokens": 30,
                 "temperature": 0.7,
-                "stream": True,
+                "stream": False,
             }
 
             body_rules = getattr(endpoint, "body_rules", None)
             header_rules = getattr(endpoint, "header_rules", None)
 
-            # 执行检查
-            response = await adapter_class.check_endpoint(
-                None,
-                endpoint.base_url,
-                api_key_value,
-                check_request,
-                extra_headers if extra_headers else None,
-                body_rules=body_rules,
-                header_rules=header_rules,
-                db=db,
-                user=current_user,
-                provider_name=provider.name,
-                provider_id=str(provider.id),
-                api_key_id=str(key.id),
-                model_name=effective_model,
-                auth_type=auth_type,
-                provider_type=p_type if p_type else None,
-                decrypted_auth_config=oauth_meta if oauth_meta else None,
-                provider_endpoint=endpoint,
-                provider_api_key=key,
-                proxy_config=effective_proxy,
+            logger.info(
+                "[admin-test-failover] attempt-start | provider_id={} provider={} endpoint_id={} endpoint_format={} key_id={} key_name={} model={} stream={} candidate_index={} auth_type={}",
+                provider.id,
+                provider.name,
+                getattr(endpoint, "id", None),
+                endpoint.api_format,
+                key.id,
+                getattr(key, "name", None),
+                effective_model,
+                check_request["stream"],
+                candidate_idx,
+                auth_type,
             )
+
+            # 执行检查
+            async with _admin_test_semaphore:
+                response = await adapter_class.check_endpoint(
+                    None,
+                    endpoint.base_url,
+                    api_key_value,
+                    check_request,
+                    extra_headers if extra_headers else None,
+                    body_rules=body_rules,
+                    header_rules=header_rules,
+                    db=db,
+                    user=current_user,
+                    provider_name=provider.name,
+                    provider_id=str(provider.id),
+                    api_key_id=str(key.id),
+                    model_name=effective_model,
+                    auth_type=auth_type,
+                    provider_type=p_type if p_type else None,
+                    decrypted_auth_config=oauth_meta if oauth_meta else None,
+                    provider_endpoint=endpoint,
+                    provider_api_key=key,
+                    proxy_config=effective_proxy,
+                )
 
             latency_ms = int((time.monotonic() - start_time) * 1000)
             status_code = response.get("status_code", 0)
@@ -1442,6 +1495,18 @@ async def test_model_failover(
                     error_msg = str(
                         err_val.get("message", err_val) if isinstance(err_val, dict) else err_val
                     )[:300]
+                logger.warning(
+                    "[admin-test-failover] attempt-failed | provider_id={} endpoint_id={} key_id={} model={} stream={} candidate_index={} status_code={} local_protocol_error={} error={}",
+                    provider.id,
+                    getattr(endpoint, "id", None),
+                    key.id,
+                    effective_model,
+                    check_request["stream"],
+                    candidate_idx,
+                    status_code,
+                    "LocalProtocolError" in error_msg,
+                    error_msg,
+                )
                 attempts.append(
                     TestAttemptDetail(
                         candidate_index=candidate_idx,
@@ -1461,6 +1526,17 @@ async def test_model_failover(
                 raise Exception(f"Upstream error: status={status_code}, error={error_msg}")
 
             # 成功
+            logger.info(
+                "[admin-test-failover] attempt-success | provider_id={} endpoint_id={} key_id={} model={} stream={} candidate_index={} status_code={} latency_ms={}",
+                provider.id,
+                getattr(endpoint, "id", None),
+                key.id,
+                effective_model,
+                check_request["stream"],
+                candidate_idx,
+                status_code,
+                latency_ms,
+            )
             attempts.append(
                 TestAttemptDetail(
                     candidate_index=candidate_idx,
@@ -1485,6 +1561,16 @@ async def test_model_failover(
 
         except Exception as exc:
             latency_ms = int((time.monotonic() - start_time) * 1000)
+            logger.warning(
+                "[admin-test-failover] attempt-exception | provider_id={} endpoint_id={} key_id={} model={} candidate_index={} local_protocol_error={} error={}",
+                provider.id,
+                getattr(endpoint, "id", None),
+                getattr(key, "id", None),
+                effective_model,
+                candidate_idx,
+                "LocalProtocolError" in str(exc),
+                str(exc)[:300],
+            )
             # has_error 路径已记录带 status_code 的详细 attempt，此处仅补录早期异常
             if not attempt_recorded:
                 attempts.append(
@@ -1540,9 +1626,19 @@ async def test_model_failover(
         data = None
         if result.success and result.attempt_result:
             data = {
-                "stream": True,
+                "stream": False,
                 "response": result.attempt_result.response_body,
             }
+            logger.info(
+                "[admin-test-failover] finish | provider_id={} model={} total_candidates={} total_attempts={} success={} stream={} local_protocol_error={}",
+                provider.id,
+                request.model_name,
+                len(candidates),
+                result.attempt_count,
+                result.success,
+                False,
+                "LocalProtocolError" in str(result.attempt_result.response_body),
+            )
 
         return TestModelFailoverResponse(
             success=result.success,
@@ -1556,7 +1652,14 @@ async def test_model_failover(
         ).model_dump()
 
     except Exception as e:
-        logger.error("[test-model-failover] Error: {}", e)
+        logger.error(
+            "[admin-test-failover] error | provider_id={} model={} total_candidates={} local_protocol_error={} error={}",
+            request.provider_id,
+            request.model_name,
+            len(candidates),
+            "LocalProtocolError" in str(e),
+            str(e)[:500],
+        )
         return TestModelFailoverResponse(
             success=False,
             model=request.model_name,

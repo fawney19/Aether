@@ -687,6 +687,17 @@ class HttpRequestExecutor:
                         return await ErrorHandler.handle_error(http_error, request)
 
         except Exception as e:
+            logger.warning(
+                "[{}] endpoint check exception | provider={} provider_id={} api_key_id={} model={} stream={} local_protocol_error={} error={}",
+                request.api_format,
+                request.provider_name,
+                request.provider_id,
+                request.api_key_id,
+                request.model_name,
+                is_stream,
+                isinstance(e, httpx.LocalProtocolError) or "LocalProtocolError" in type(e).__name__,
+                e,
+            )
             return await ErrorHandler.handle_error(e, request)
 
     async def _execute_stream_request(
@@ -1473,7 +1484,9 @@ class EndpointCheckOrchestrator:
         """执行端点检查的完整流程"""
         logger.info(
             f"[{request.api_format}] Starting endpoint check | "
-            f"provider={request.provider_name}, model={request.model_name}"
+            f"provider={request.provider_name}, model={request.model_name}, "
+            f"api_key_id={request.api_key_id}, provider_id={request.provider_id}, "
+            f"stream={request.is_stream if request.is_stream is not None else request.json_body.get('stream', False)}"
         )
 
         # 1. 执行HTTP请求
