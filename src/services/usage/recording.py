@@ -26,6 +26,18 @@ from src.services.usage._types import UsageCostInfo, UsageRecordParams
 from src.services.wallet import WalletService
 
 
+def _coerce_finalized_at(value: Any, fallback: datetime | None = None) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return fallback
+    return fallback
+
+
 def _extract_manual_proxy_node_id(metadata: dict[str, Any] | None) -> str | None:
     """从 request_metadata 中提取手动代理节点 ID（仅 is_manual 节点）。
 
@@ -131,10 +143,7 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
 
     @staticmethod
     def _is_usage_finalized(usage: Usage) -> bool:
-        return (
-            getattr(usage, "billing_status", None) in {"settled", "void"}
-            and getattr(usage, "finalized_at", None) is not None
-        )
+        return getattr(usage, "billing_status", None) in {"settled", "void"}
 
     @classmethod
     def _finalize_usage_billing(
@@ -157,10 +166,7 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
                 usage.billing_status = "pending"
             return False, False
 
-        if (
-            getattr(usage, "billing_status", None) in {"settled", "void"}
-            and getattr(usage, "finalized_at", None) is not None
-        ):
+        if getattr(usage, "billing_status", None) in {"settled", "void"}:
             return False, False
 
         now = finalized_at or datetime.now(timezone.utc)
@@ -221,6 +227,7 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
         cache_ttl_minutes: int | None = None,
         use_tiered_pricing: bool = True,
         target_model: str | None = None,
+        finalized_at: datetime | None = None,
     ) -> Usage:
         """异步记录使用量（简化版，仅插入新记录）
 
@@ -310,6 +317,7 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
             usage=usage,
             total_cost=total_cost,
             status=status,
+            finalized_at=finalized_at,
         )
 
         dispatch_codex_quota_sync_from_response_headers(
@@ -363,6 +371,7 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
         cache_ttl_minutes: int | None = None,
         use_tiered_pricing: bool = True,
         target_model: str | None = None,
+        finalized_at: datetime | None = None,
     ) -> Usage:
         """记录使用量（完整版，支持更新已存在记录和用户统计）
 
@@ -464,6 +473,7 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
                 usage=usage,
                 total_cost=total_cost,
                 status=status,
+                finalized_at=finalized_at,
             )
 
             if accounted:
@@ -568,6 +578,7 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
         provider_api_key_id: str | None = None,
         status: str = "completed",
         target_model: str | None = None,
+        finalized_at: datetime | None = None,
     ) -> Usage:
         """
         记录"已计算好的"成本（用于 Video/Image/Audio 等异步任务的 FormulaEngine 计费结果）。
@@ -961,7 +972,7 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
         update_results = prepared_results[: len(update_params_list)]
         insert_results = prepared_results[len(update_params_list) :]
 
-        finalized_at = datetime.now(timezone.utc)
+        batch_finalized_at = datetime.now(timezone.utc)
 
         # 1. 处理需要更新的记录
         for i, (record, request_id, params) in enumerate(update_params_list):
@@ -982,7 +993,9 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
                     usage=existing_usage,
                     total_cost=total_cost,
                     status=usage_params.get("status"),
-                    finalized_at=finalized_at,
+                    finalized_at=_coerce_finalized_at(
+                        record.get("finalized_at"), batch_finalized_at
+                    ),
                 )
                 usages.append(existing_usage)
                 updated_count += 1
@@ -1043,7 +1056,9 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
                     usage=usage,
                     total_cost=total_cost,
                     status=usage_params.get("status"),
-                    finalized_at=finalized_at,
+                    finalized_at=_coerce_finalized_at(
+                        record.get("finalized_at"), batch_finalized_at
+                    ),
                 )
                 usages.append(usage)
                 inserted_count += 1

@@ -11,6 +11,7 @@ import json
 import os
 import socket
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -58,6 +59,10 @@ def _event_to_record(event: UsageEvent) -> dict[str, Any]:
     elif event.event_type == UsageEventType.CANCELLED:
         status = "cancelled"
 
+    finalized_at = None
+    if event.timestamp_ms > 0:
+        finalized_at = datetime.fromtimestamp(event.timestamp_ms / 1000, tz=timezone.utc)
+
     return {
         "request_id": event.request_id,
         "user_id": data.get("user_id"),
@@ -95,6 +100,7 @@ def _event_to_record(event: UsageEvent) -> dict[str, Any]:
         "provider_api_key_id": data.get("provider_api_key_id"),
         "status": status,
         "target_model": data.get("target_model"),
+        "finalized_at": finalized_at,
     }
 
 
@@ -491,6 +497,11 @@ class UsageQueueConsumer:
                 provider_api_key_id=data.get("provider_api_key_id"),
                 status=status,
                 target_model=data.get("target_model"),
+                finalized_at=(
+                    datetime.fromtimestamp(event.timestamp_ms / 1000, tz=timezone.utc)
+                    if event.timestamp_ms > 0
+                    else None
+                ),
             )
         finally:
             if own_session:

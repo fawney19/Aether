@@ -260,6 +260,19 @@ class VideoTaskPollerAdapter:
                 logger.warning("Task {} disappeared during poll update", task_id)
                 return
 
+            if task.status in {
+                VideoStatus.COMPLETED.value,
+                VideoStatus.FAILED.value,
+                VideoStatus.CANCELLED.value,
+                VideoStatus.EXPIRED.value,
+            }:
+                logger.debug(
+                    "Skip poll update for terminal task {} with status {}",
+                    task_id,
+                    task.status,
+                )
+                return
+
             if error_exception is not None and ctx is not None:
                 # HTTP 请求失败（需要 ctx 来计算 backoff）
                 self._handle_poll_error(task, error_exception, ctx)
@@ -382,6 +395,15 @@ class VideoTaskPollerAdapter:
         """
         兼容入口：复用三阶段轮询流程，避免维护重复逻辑。
         """
+        if task.status in {
+            VideoStatus.COMPLETED.value,
+            VideoStatus.FAILED.value,
+            VideoStatus.CANCELLED.value,
+            VideoStatus.EXPIRED.value,
+        }:
+            logger.debug("Skip legacy poll for terminal task {} with status {}", task.id, task.status)
+            return
+
         ctx_or_result = await self.prepare_poll_context(db, task)
 
         if isinstance(ctx_or_result, InternalVideoPollResult):

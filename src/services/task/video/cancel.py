@@ -44,6 +44,19 @@ class VideoTaskCancelService:
         from src.services.provider.auth import get_provider_auth
         from src.services.provider.transport import build_provider_url
 
+        current_status = str(getattr(task, "status", "") or "")
+        non_cancellable_statuses = {
+            VideoStatus.COMPLETED.value,
+            VideoStatus.FAILED.value,
+            VideoStatus.CANCELLED.value,
+            VideoStatus.EXPIRED.value,
+        }
+        if current_status in non_cancellable_statuses:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Task cannot be cancelled in status: {current_status}",
+            )
+
         external_task_id = getattr(task, "external_task_id", None)
         if not external_task_id:
             raise HTTPException(status_code=500, detail="Task missing external_task_id")
@@ -122,8 +135,10 @@ class VideoTaskCancelService:
                 detail=f"Cancel not supported for provider format: {provider_format}",
             )
 
+        now = datetime.now(timezone.utc)
         task.status = VideoStatus.CANCELLED.value
-        task.updated_at = datetime.now(timezone.utc)
+        task.completed_at = getattr(task, "completed_at", None) or now
+        task.updated_at = now
 
         # Void Usage (no charge)
         try:
@@ -131,12 +146,13 @@ class VideoTaskCancelService:
                 self.db,
                 request_id=task.request_id,
                 reason="cancelled_by_user",
+                finalized_at=task.completed_at,
             )
             if not voided:
-                UsageService.void_settled(
-                    self.db,
-                    request_id=task.request_id,
-                    reason="cancelled_by_user",
+                logger.warning(
+                    "Skip voiding video usage because billing is already terminal: task_id={} request_id={}",
+                    getattr(task, "id", task_id),
+                    getattr(task, "request_id", None),
                 )
         except Exception as exc:
             logger.warning(

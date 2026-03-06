@@ -413,10 +413,10 @@ class Usage(Base):
     status = Column(String(20), default="completed", nullable=False, index=True)
 
     # 结算状态（与 status 解耦）
-    # - pending: 等待结算（任务未完成 / 流式未结束）
-    # - settled: 已结算（cost 已写入，可能 > 0 或 = 0）
-    # - void: 作废（不收费，如任务未开始就取消）
-    billing_status = Column(String(20), default="settled", nullable=False, index=True)
+    # - pending: 等待结算（请求已创建，但账务尚未进入最终状态）
+    # - settled: 已结算（cost 已写入，且钱包侧结算动作已完成）
+    # - void: 作废（明确不收费）
+    billing_status = Column(String(20), default="pending", nullable=False, index=True)
     finalized_at = Column(DateTime(timezone=True), nullable=True)  # 结算完成时间（可选）
     wallet_balance_before = Column(Numeric(20, 8), nullable=True)  # 结算前可用总余额快照
     wallet_balance_after = Column(Numeric(20, 8), nullable=True)  # 结算后可用总余额快照

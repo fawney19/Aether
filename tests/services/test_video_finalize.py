@@ -54,8 +54,8 @@ def _make_db() -> MagicMock:
     usage_obj = SimpleNamespace(
         id="usage-1",
         request_id="req-1",
-        billing_status="settled",  # finalize_submitted already settled
-        request_metadata=None,  # no billing_updated_at yet
+        billing_status="pending",
+        request_metadata=None,
     )
 
     q_usage = MagicMock()

@@ -492,6 +492,11 @@ class StreamTelemetryRecorder:
 
             usage = db.query(Usage).filter(Usage.request_id == request_id).first()
             if usage:
+                if getattr(usage, "billing_status", None) in {"settled", "void"} and getattr(
+                    usage, "finalized_at", None
+                ) is not None:
+                    logger.debug(f"[{self.request_id}] Usage 已终态，跳过快速状态更新: {status}")
+                    return
                 setattr(usage, "status", status)
                 setattr(usage, "status_code", status_code)
                 setattr(usage, "response_time_ms", response_time_ms)

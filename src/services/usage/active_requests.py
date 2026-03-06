@@ -157,6 +157,13 @@ class UsageActiveRequestsMixin:
                     f"请求超时: 状态 '{old_status}' 超过 {timeout_minutes} 分钟未完成"
                 )
                 usage.status_code = 504
+                if getattr(usage, "billing_status", None) == "pending":
+                    usage.billing_status = "void"
+                    usage.finalized_at = usage.finalized_at or now
+                    usage.total_cost_usd = 0.0
+                    usage.request_cost_usd = 0.0
+                    usage.actual_total_cost_usd = 0.0
+                    usage.actual_request_cost_usd = 0.0
                 failed_count += 1
 
         # 同步更新成功请求的 candidate 状态：streaming -> success

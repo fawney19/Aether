@@ -378,6 +378,7 @@ async def test_event_to_record_body_deserialization(monkeypatch: Any) -> None:
     event = build_usage_event(
         event_type=UsageEventType.COMPLETED,
         request_id="req-body-test",
+        timestamp_ms=1_700_000_000_123,
         data={
             "user_id": "user-1",
             "api_key_id": "key-1",
@@ -396,6 +397,7 @@ async def test_event_to_record_body_deserialization(monkeypatch: Any) -> None:
     assert record["request_body"]["messages"][0]["content"] == "hello"
     assert isinstance(record["response_body"], dict)
     assert record["response_body"]["choices"][0]["message"]["content"] == "hi"
+    assert record["finalized_at"] is not None
 
 
 @pytest.mark.asyncio

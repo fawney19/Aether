@@ -48,3 +48,33 @@ async def test_poll_task_status_routes_gemini_video_to_gemini(
     assert result.status == VideoStatus.PROCESSING
     assert poll_gemini.await_count == 1
     assert poll_openai.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_update_task_after_poll_skips_terminal_cancelled_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    finalize = AsyncMock()
+    adapter = VideoTaskPollerAdapter(finalize_video_task_fn=finalize)
+
+    cancelled_task = SimpleNamespace(
+        id="t1",
+        status=VideoStatus.CANCELLED.value,
+    )
+
+    session = MagicMock()
+    session.__enter__.return_value = session
+    session.__exit__.return_value = None
+    session.get.return_value = cancelled_task
+
+    monkeypatch.setattr("src.services.task.video.poller_adapter.create_session", lambda: session)
+
+    await adapter.update_task_after_poll(
+        task_id="t1",
+        result=InternalVideoPollResult(status=VideoStatus.COMPLETED),
+        ctx=None,
+        redis_client=None,
+    )
+
+    finalize.assert_not_awaited()
+    session.commit.assert_not_called()

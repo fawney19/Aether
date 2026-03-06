@@ -18,6 +18,13 @@ from src.services.wallet import WalletService
 class UsageLifecycleMixin:
     """使用记录生命周期管理方法"""
 
+    @staticmethod
+    def _is_billing_terminal(usage: Usage | None) -> bool:
+        return bool(
+            usage is not None
+            and getattr(usage, "billing_status", None) in {"settled", "void"}
+        )
+
     @classmethod
     def begin_pending_usage(
         cls,
@@ -152,6 +159,7 @@ class UsageLifecycleMixin:
         response_time_ms: int | None = None,
         billing_snapshot: dict[str, Any] | None = None,
         extra_metadata: dict[str, Any] | None = None,
+        finalized_at: datetime | None = None,
     ) -> bool:
         """
         并发安全的幂等 finalize（settled）。
@@ -160,7 +168,7 @@ class UsageLifecycleMixin:
         - 仅当 billing_status='pending' 时才会生效（rowcount==1）
         - 不在本方法内 commit，由调用方决定事务提交时机
         """
-        now = datetime.now(timezone.utc)
+        now = finalized_at or datetime.now(timezone.utc)
         cost = to_money_decimal(total_cost_usd)
         request_cost = to_money_decimal(request_cost_usd) if request_cost_usd is not None else cost
 
@@ -197,6 +205,7 @@ class UsageLifecycleMixin:
         *,
         reason: str | None = None,
         status_code: int = 499,
+        finalized_at: datetime | None = None,
     ) -> bool:
         """
         并发安全的幂等 finalize（void，不收费）。
@@ -205,7 +214,7 @@ class UsageLifecycleMixin:
         - 仅当 billing_status='pending' 时才会生效（rowcount==1）
         - 不在本方法内 commit，由调用方决定事务提交时机
         """
-        now = datetime.now(timezone.utc)
+        now = finalized_at or datetime.now(timezone.utc)
         usage = db.query(Usage).filter(Usage.request_id == request_id).with_for_update().first()
         if not usage or usage.billing_status != "pending":
             return False
@@ -214,6 +223,8 @@ class UsageLifecycleMixin:
         usage.finalized_at = now
         usage.total_cost_usd = to_money_decimal(0)
         usage.request_cost_usd = to_money_decimal(0)
+        usage.actual_total_cost_usd = to_money_decimal(0)
+        usage.actual_request_cost_usd = to_money_decimal(0)
         usage.status = "cancelled"
         usage.status_code = status_code
         usage.error_message = reason
@@ -313,28 +324,24 @@ class UsageLifecycleMixin:
         response_time_ms: int | None = None,
         billing_snapshot: dict[str, Any] | None = None,
         extra_metadata: dict[str, Any] | None = None,
+        finalized_at: datetime | None = None,
     ) -> bool:
         """
         写入异步任务最终账单（轮询完成后调用）。
 
         语义：
-        - 正常路径：pending -> settled / void（首次最终结算）
-        - 补写路径：已写入 0 成本但尚未扣钱包的记录，可补写一次最终值
-        - 已 void 的记录不可再结算
-        - 已扣钱包（wallet_balance_after 已存在）的记录不可重复扣费
+        - 仅允许 pending -> settled / void（首次最终结算）
+        - settled / void 一旦进入即不可再修改
 
         约定：
         - 不在本方法内 commit，由调用方决定事务提交时机
         """
-        now = datetime.now(timezone.utc)
+        now = finalized_at or datetime.now(timezone.utc)
         cost = to_money_decimal(total_cost_usd)
         request_cost = to_money_decimal(request_cost_usd) if request_cost_usd is not None else cost
 
         usage = db.query(Usage).filter(Usage.request_id == request_id).with_for_update().first()
-        if not usage or usage.billing_status == "void":
-            return False
-
-        if usage.billing_status == "settled" and usage.wallet_balance_after is not None:
+        if not usage or usage.billing_status != "pending":
             return False
 
         usage.total_cost_usd = cost
@@ -345,7 +352,7 @@ class UsageLifecycleMixin:
             usage.error_message = error_message
         if response_time_ms is not None:
             usage.response_time_ms = response_time_ms
-        usage.finalized_at = usage.finalized_at or now
+        usage.finalized_at = now
         if cost > 0:
             usage.billing_status = "settled"
             WalletService.apply_usage_charge(db, usage=usage, amount_usd=cost)
@@ -373,32 +380,15 @@ class UsageLifecycleMixin:
         status_code: int = 499,
     ) -> bool:
         """
-        将已结算的记录作废（用于异步任务取消）。
-
-        与 finalize_void 不同：
-        - finalize_void: pending -> void（未结算时作废）
-        - void_settled: settled -> void（已结算后取消，费用归零）
-
-        约定：
-        - 仅当 billing_status='settled' 时才会生效
-        - 不在本方法内 commit，由调用方决定事务提交时机
+        已废弃：settled 为账务终态，不允许再回滚为 void。
         """
-        now = datetime.now(timezone.utc)
-        usage = db.query(Usage).filter(Usage.request_id == request_id).with_for_update().first()
-        if not usage or usage.billing_status != "settled":
-            return False
-        if usage.wallet_balance_after is not None and to_money_decimal(usage.total_cost_usd) > 0:
-            # 已实际扣费的记录当前不做自动回滚，避免 silent inconsistency。
-            return False
-
-        usage.billing_status = "void"
-        usage.finalized_at = now
-        usage.total_cost_usd = to_money_decimal(0)
-        usage.request_cost_usd = to_money_decimal(0)
-        usage.status = "cancelled"
-        usage.status_code = status_code
-        usage.error_message = reason
-        return True
+        logger.warning(
+            "void_settled is deprecated and ignored: request_id={}, reason={}, status_code={}",
+            request_id,
+            reason,
+            status_code,
+        )
+        return False
 
     @classmethod
     def update_usage_status(
@@ -452,6 +442,15 @@ class UsageLifecycleMixin:
         if not usage:
             logger.warning("未找到 request_id={} 的使用记录，无法更新状态", request_id)
             return None
+
+        if cls._is_billing_terminal(usage):
+            logger.debug(
+                "跳过已终态 Usage 状态更新: request_id={}, status={}, billing_status={}",
+                request_id,
+                status,
+                getattr(usage, "billing_status", None),
+            )
+            return usage
 
         # 避免状态回退：streaming 只能从 pending/streaming 进入
         if status == "streaming" and usage.status not in ("pending", "streaming"):
@@ -529,6 +528,10 @@ class UsageLifecycleMixin:
             usage.billing_status = "void"
             if getattr(usage, "finalized_at", None) is None:
                 usage.finalized_at = datetime.now(timezone.utc)
+            usage.total_cost_usd = to_money_decimal(0)
+            usage.request_cost_usd = to_money_decimal(0)
+            usage.actual_total_cost_usd = to_money_decimal(0)
+            usage.actual_request_cost_usd = to_money_decimal(0)
 
         db.commit()
 
