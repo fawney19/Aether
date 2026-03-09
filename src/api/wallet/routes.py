@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field, ValidationError
@@ -18,15 +19,22 @@ from src.api.base.pipeline import ApiRequestPipeline
 from src.api.serializers import (
     safe_gateway_response,
     serialize_payment_order,
+    serialize_wallet_daily_usage,
     serialize_wallet_payload,
     serialize_wallet_refund,
     serialize_wallet_transaction,
 )
 from src.core.exceptions import InvalidRequestException, NotFoundException, translate_pydantic_error
 from src.database import get_db
-from src.models.database import PaymentOrder, RefundRequest, Wallet, WalletTransaction
+from src.models.database import (
+    PaymentOrder,
+    RefundRequest,
+    Wallet,
+    WalletDailyUsageLedger,
+    WalletTransaction,
+)
 from src.services.payment import PaymentService
-from src.services.wallet import WalletService
+from src.services.wallet import WalletDailyUsageLedgerService, WalletService
 
 router = APIRouter(prefix="/api/wallet", tags=["Wallet"])
 pipeline = ApiRequestPipeline()
@@ -61,6 +69,41 @@ def _build_refund_no() -> str:
     return f"rf_{ts}_{uuid4().hex[:8]}"
 
 
+def _resolve_user_wallet(db: Session, user: Any) -> Wallet | None:
+    existing_wallet = WalletService.get_wallet(db, user_id=user.id)
+    wallet = existing_wallet or WalletService.get_or_create_wallet(db, user=user)
+    if wallet is not None and existing_wallet is None:
+        db.commit()
+        db.refresh(wallet)
+    return wallet
+
+
+def _flow_sort_key(item: dict[str, Any], billing_tz: ZoneInfo) -> tuple[date, int, datetime]:
+    item_type = item.get("type")
+    data = item.get("data") or {}
+    if item_type == "daily_usage":
+        raw_date = data.get("date")
+        billing_date = (
+            date.fromisoformat(raw_date) if isinstance(raw_date, str) and raw_date else date.min
+        )
+        sort_dt = data.get("last_finalized_at") or data.get("aggregated_at") or datetime.min.replace(
+            tzinfo=timezone.utc
+        )
+        if isinstance(sort_dt, str):
+            sort_dt = datetime.fromisoformat(sort_dt.replace("Z", "+00:00"))
+        return billing_date, 1, sort_dt
+
+    created_at = data.get("created_at")
+    if isinstance(created_at, str):
+        created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    if not isinstance(created_at, datetime):
+        created_at = datetime.min.replace(tzinfo=timezone.utc)
+    elif created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    local_date = created_at.astimezone(billing_tz).date()
+    return local_date, 0, created_at
+
+
 @router.get("/balance")
 async def get_wallet_balance(request: Request, db: Session = Depends(get_db)) -> Any:
     adapter = WalletBalanceAdapter()
@@ -75,6 +118,23 @@ async def list_wallet_transactions(
     db: Session = Depends(get_db),
 ) -> Any:
     adapter = WalletTransactionsAdapter(limit=limit, offset=offset)
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.get("/flow")
+async def get_wallet_flow(
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=5000),
+    db: Session = Depends(get_db),
+) -> Any:
+    adapter = WalletFlowAdapter(limit=limit, offset=offset)
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.get("/today-cost")
+async def get_wallet_today_cost(request: Request, db: Session = Depends(get_db)) -> Any:
+    adapter = WalletTodayCostAdapter()
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
@@ -135,8 +195,7 @@ class WalletTransactionsAdapter(AuthenticatedApiAdapter):
         if user is None:
             raise InvalidRequestException("未登录")
 
-        existing_wallet = WalletService.get_wallet(db, user_id=user.id)
-        wallet = existing_wallet or WalletService.get_or_create_wallet(db, user=user)
+        wallet = _resolve_user_wallet(db, user)
         if wallet is None:
             return {
                 "items": [],
@@ -145,10 +204,6 @@ class WalletTransactionsAdapter(AuthenticatedApiAdapter):
                 "offset": self.offset,
                 **serialize_wallet_payload(None),
             }
-
-        if existing_wallet is None:
-            db.commit()
-            db.refresh(wallet)
 
         base_query = db.query(WalletTransaction).filter(WalletTransaction.wallet_id == wallet.id)
         total = base_query.count()
@@ -168,6 +223,77 @@ class WalletTransactionsAdapter(AuthenticatedApiAdapter):
         }
 
 
+@dataclass
+class WalletFlowAdapter(AuthenticatedApiAdapter):
+    limit: int
+    offset: int
+
+    async def handle(self, context: ApiRequestContext) -> dict[str, Any]:
+        db = context.db
+        user = context.user
+        if user is None:
+            raise InvalidRequestException("未登录")
+
+        wallet = _resolve_user_wallet(db, user)
+        if wallet is None:
+            return {
+                "today_entry": None,
+                "items": [],
+                "total": 0,
+                "limit": self.limit,
+                "offset": self.offset,
+                **serialize_wallet_payload(None),
+            }
+
+        today_entry = WalletDailyUsageLedgerService.get_today_snapshot(db, wallet.id)
+        billing_tz = ZoneInfo(today_entry.billing_timezone)
+        fetch_size = min(self.offset + self.limit, 5200)
+
+        tx_query = db.query(WalletTransaction).filter(WalletTransaction.wallet_id == wallet.id)
+        tx_total = tx_query.count()
+        tx_items = tx_query.order_by(WalletTransaction.created_at.desc()).limit(fetch_size).all()
+
+        daily_query = db.query(WalletDailyUsageLedger).filter(
+            WalletDailyUsageLedger.wallet_id == wallet.id,
+            WalletDailyUsageLedger.billing_timezone == today_entry.billing_timezone,
+            WalletDailyUsageLedger.billing_date < today_entry.billing_date,
+        )
+        daily_total = daily_query.count()
+        daily_items = daily_query.order_by(WalletDailyUsageLedger.billing_date.desc()).limit(fetch_size).all()
+
+        merged = [
+            {"type": "transaction", "data": serialize_wallet_transaction(item)} for item in tx_items
+        ] + [
+            {"type": "daily_usage", "data": serialize_wallet_daily_usage(item)} for item in daily_items
+        ]
+        merged.sort(key=lambda item: _flow_sort_key(item, billing_tz), reverse=True)
+        paged = merged[self.offset : self.offset + self.limit]
+
+        return {
+            "today_entry": serialize_wallet_daily_usage(today_entry),
+            "items": paged,
+            "total": tx_total + daily_total,
+            "limit": self.limit,
+            "offset": self.offset,
+            **serialize_wallet_payload(wallet),
+        }
+
+
+class WalletTodayCostAdapter(AuthenticatedApiAdapter):
+    async def handle(self, context: ApiRequestContext) -> dict[str, Any]:
+        db = context.db
+        user = context.user
+        if user is None:
+            raise InvalidRequestException("未登录")
+
+        wallet = _resolve_user_wallet(db, user)
+        snapshot = WalletDailyUsageLedgerService.get_today_snapshot(
+            db,
+            wallet.id if wallet is not None else None,
+        )
+        return serialize_wallet_daily_usage(snapshot)
+
+
 class WalletBalanceAdapter(AuthenticatedApiAdapter):
     async def handle(self, context: ApiRequestContext) -> dict[str, Any]:
         db = context.db
@@ -175,14 +301,9 @@ class WalletBalanceAdapter(AuthenticatedApiAdapter):
         if user is None:
             raise InvalidRequestException("未登录")
 
-        existing_wallet = WalletService.get_wallet(db, user_id=user.id)
-        wallet = existing_wallet or WalletService.get_or_create_wallet(db, user=user)
+        wallet = _resolve_user_wallet(db, user)
         if wallet is None:
             return serialize_wallet_payload(None)
-
-        if existing_wallet is None:
-            db.commit()
-            db.refresh(wallet)
 
         pending_refunds = (
             db.query(RefundRequest)

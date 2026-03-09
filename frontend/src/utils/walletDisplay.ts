@@ -35,6 +35,21 @@ export function walletTransactionCategoryLabel(category: string | null | undefin
   return labels[category] || category
 }
 
+export function dailyUsageCategoryLabel(isToday = false): string {
+  return isToday ? '今日消费' : '每日消费'
+}
+
+export function formatTokenCount(value: number | null | undefined): string {
+  const amount = Number(value ?? 0)
+  if (amount >= 1_000_000) {
+    return `${(amount / 1_000_000).toFixed(amount >= 10_000_000 ? 0 : 1)}M`
+  }
+  if (amount >= 1_000) {
+    return `${(amount / 1_000).toFixed(amount >= 10_000 ? 0 : 1)}K`
+  }
+  return `${Math.round(amount)}`
+}
+
 export function walletTransactionReasonLabel(reasonCode: string | null | undefined): string {
   const labels: Record<string, string> = {
     topup_admin_manual: '人工充值',

@@ -7,7 +7,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum as PyEnum
 from typing import Any, ClassVar
 
@@ -18,6 +18,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    Date,
     DateTime,
     Enum,
     Float,
@@ -556,6 +557,9 @@ class Wallet(Base):
     transactions = relationship(
         "WalletTransaction", back_populates="wallet", cascade="all, delete-orphan"
     )
+    daily_usage_ledgers = relationship(
+        "WalletDailyUsageLedger", back_populates="wallet", cascade="all, delete-orphan"
+    )
     payment_orders = relationship("PaymentOrder", back_populates="wallet")
     refund_requests = relationship("RefundRequest", back_populates="wallet")
 
@@ -607,6 +611,50 @@ class WalletTransaction(Base):
 
     wallet = relationship("Wallet", back_populates="transactions")
     operator = relationship("User")
+
+
+class WalletDailyUsageLedger(Base):
+    """钱包按天汇总的消费流水投影。"""
+
+    __tablename__ = "wallet_daily_usage_ledgers"
+    __table_args__ = (
+        UniqueConstraint(
+            "wallet_id",
+            "billing_date",
+            "billing_timezone",
+            name="uq_wallet_daily_usage_ledgers_wallet_date_tz",
+        ),
+        Index("idx_wallet_daily_usage_wallet_date", "wallet_id", "billing_date"),
+        Index("idx_wallet_daily_usage_date", "billing_date"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    wallet_id = Column(String(36), ForeignKey("wallets.id", ondelete="CASCADE"), nullable=False)
+
+    billing_date = Column(Date, nullable=False)
+    billing_timezone = Column(String(64), nullable=False, default="Asia/Shanghai")
+
+    total_cost_usd = Column(Numeric(20, 8), nullable=False, default=0)
+    total_requests = Column(Integer, nullable=False, default=0)
+    input_tokens = Column(BigInteger, nullable=False, default=0)
+    output_tokens = Column(BigInteger, nullable=False, default=0)
+    cache_creation_tokens = Column(BigInteger, nullable=False, default=0)
+    cache_read_tokens = Column(BigInteger, nullable=False, default=0)
+
+    first_finalized_at = Column(DateTime(timezone=True), nullable=True)
+    last_finalized_at = Column(DateTime(timezone=True), nullable=True)
+    aggregated_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    wallet = relationship("Wallet", back_populates="daily_usage_ledgers")
 
 
 class PaymentOrder(Base):

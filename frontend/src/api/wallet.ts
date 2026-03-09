@@ -60,6 +60,36 @@ export interface WalletTransactionsResponse extends WalletBalanceResponse {
   offset: number
 }
 
+export interface DailyUsageRecord {
+  id?: string | null
+  date: string | null
+  timezone?: string | null
+  total_cost: number
+  total_requests: number
+  input_tokens: number
+  output_tokens: number
+  cache_creation_tokens: number
+  cache_read_tokens: number
+  first_finalized_at?: string | null
+  last_finalized_at?: string | null
+  aggregated_at?: string | null
+  is_today: boolean
+}
+
+export type FlowItem =
+  | { type: 'transaction'; data: WalletTransaction }
+  | { type: 'daily_usage'; data: DailyUsageRecord }
+
+export interface WalletFlowResponse extends WalletBalanceResponse {
+  today_entry: DailyUsageRecord | null
+  items: FlowItem[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export type TodayCostResponse = DailyUsageRecord
+
 export interface PaymentOrder {
   id: string
   order_no: string
@@ -128,6 +158,16 @@ export const walletApi = {
 
   async getTransactions(params?: { limit?: number; offset?: number }): Promise<WalletTransactionsResponse> {
     const response = await apiClient.get<WalletTransactionsResponse>('/api/wallet/transactions', { params })
+    return response.data
+  },
+
+  async getFlow(params?: { limit?: number; offset?: number }): Promise<WalletFlowResponse> {
+    const response = await apiClient.get<WalletFlowResponse>('/api/wallet/flow', { params })
+    return response.data
+  },
+
+  async getTodayCost(): Promise<TodayCostResponse> {
+    const response = await apiClient.get<TodayCostResponse>('/api/wallet/today-cost')
     return response.data
   },
 

@@ -31,6 +31,7 @@ from src.services.system.config import SystemConfigService
 from src.services.system.scheduler import get_scheduler
 from src.services.system.stats_aggregator import StatsAggregatorService
 from src.services.user.apikey import ApiKeyService
+from src.services.wallet import WalletDailyUsageLedgerService
 from src.utils.compression import compress_json
 
 
@@ -44,6 +45,7 @@ class MaintenanceScheduler:
         self.running = False
         self._interval_tasks = []
         self._stats_aggregation_lock = asyncio.Lock()
+        self._wallet_daily_usage_lock = asyncio.Lock()
 
     def _get_checkin_time(self) -> tuple[int, int]:
         """获取签到任务的执行时间
@@ -149,6 +151,20 @@ class MaintenanceScheduler:
             minutes=30,
             job_id="stats_aggregation_backfill",
             name="统计数据聚合补偿",
+            backfill=True,
+        )
+        scheduler.add_cron_job(
+            self._scheduled_wallet_daily_usage_aggregation,
+            hour=0,
+            minute=10,
+            job_id="wallet_daily_usage_aggregation",
+            name="钱包每日消费汇总",
+        )
+        scheduler.add_interval_job(
+            self._scheduled_wallet_daily_usage_aggregation,
+            minutes=30,
+            job_id="wallet_daily_usage_backfill",
+            name="钱包每日消费汇总补偿",
             backfill=True,
         )
 
@@ -282,6 +298,10 @@ class MaintenanceScheduler:
     async def _scheduled_stats_aggregation(self, backfill: bool = False) -> None:
         """统计聚合任务（定时调用）"""
         await self._perform_stats_aggregation(backfill=backfill)
+
+    async def _scheduled_wallet_daily_usage_aggregation(self, backfill: bool = False) -> None:
+        """钱包每日消费汇总任务（定时调用）"""
+        await self._perform_wallet_daily_usage_aggregation(backfill=backfill)
 
     async def _scheduled_hourly_stats_aggregation(self) -> None:
         """小时统计聚合任务（定时调用）"""
@@ -506,6 +526,40 @@ class MaintenanceScheduler:
 
             except Exception as e:
                 logger.exception(f"统计聚合任务执行失败: {e}")
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+            finally:
+                db.close()
+
+    async def _perform_wallet_daily_usage_aggregation(self, backfill: bool = False) -> None:
+        if self._wallet_daily_usage_lock.locked():
+            logger.info("钱包每日消费汇总任务正在运行，跳过本次触发")
+            return
+
+        async with self._wallet_daily_usage_lock:
+            db = create_session()
+            try:
+                logger.info("开始执行钱包每日消费汇总...")
+                if backfill:
+                    processed = WalletDailyUsageLedgerService.aggregate_recent_complete_days(
+                        db,
+                        days=7,
+                    )
+                    logger.info(f"钱包每日消费汇总补偿完成，共处理 {processed} 天")
+                    return
+
+                billing_today = WalletDailyUsageLedgerService.get_today_billing_date()
+                billing_yesterday = billing_today - timedelta(days=1)
+                affected = WalletDailyUsageLedgerService.aggregate_day(db, billing_yesterday)
+                logger.info(
+                    "钱包每日消费汇总完成: date={}, wallets={}",
+                    billing_yesterday.isoformat(),
+                    affected,
+                )
+            except Exception as e:
+                logger.exception(f"钱包每日消费汇总任务执行失败: {e}")
                 try:
                     db.rollback()
                 except Exception:

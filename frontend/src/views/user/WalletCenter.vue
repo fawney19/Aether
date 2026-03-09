@@ -270,46 +270,108 @@
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    <TableRow
-                      v-for="tx in transactions"
-                      :key="tx.id"
-                    >
+                    <TableRow v-if="todayUsage">
                       <TableCell class="text-xs text-muted-foreground">
-                        {{ formatDateTime(tx.created_at) }}
+                        {{ todayUsage.date || '-' }}
                       </TableCell>
                       <TableCell>
                         <div class="space-y-1">
-                          <Badge
-                            variant="outline"
-                            class="font-mono"
-                          >
-                            {{ walletTransactionCategoryLabel(tx.category) }}
-                          </Badge>
+                          <div class="flex items-center gap-2">
+                            <Badge
+                              variant="outline"
+                              class="font-mono border-amber-500/40 text-amber-700 dark:text-amber-300"
+                            >
+                              {{ dailyUsageCategoryLabel(true) }}
+                            </Badge>
+                            <span class="inline-flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                            <span class="text-[11px] text-muted-foreground">
+                              Live
+                            </span>
+                          </div>
                           <div class="text-[11px] text-muted-foreground">
-                            {{ walletTransactionReasonLabel(tx.reason_code) }}
+                            {{ todayUsage.timezone || 'UTC' }}
                           </div>
                         </div>
                       </TableCell>
-                      <TableCell
-                        :class="tx.amount >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'"
-                      >
-                        {{ tx.amount >= 0 ? '+' : '' }}{{ tx.amount.toFixed(4) }}
-                      </TableCell>
-                      <TableCell class="text-xs tabular-nums">
-                        {{ tx.balance_before.toFixed(4) }} → {{ tx.balance_after.toFixed(4) }}
+                      <TableCell class="text-rose-600 dark:text-rose-400">
+                        -{{ todayUsage.total_cost.toFixed(4) }}
                       </TableCell>
                       <TableCell class="text-xs text-muted-foreground">
-                        {{ tx.description || '-' }}
+                        按日汇总
+                      </TableCell>
+                      <TableCell class="text-xs text-muted-foreground">
+                        {{ todayUsage.total_requests }} 次请求 · {{ formatTokenCount(todayUsage.input_tokens) }} / {{ formatTokenCount(todayUsage.output_tokens) }} tokens
                       </TableCell>
                     </TableRow>
-                    <TableRow v-if="!loadingTransactions && transactions.length === 0">
+                    <template
+                      v-for="item in flowItems"
+                      :key="item.type === 'transaction' ? item.data.id : `daily-${item.data.id || item.data.date}`"
+                    >
+                      <TableRow v-if="item.type === 'transaction'">
+                        <TableCell class="text-xs text-muted-foreground">
+                          {{ formatDateTime(item.data.created_at) }}
+                        </TableCell>
+                        <TableCell>
+                          <div class="space-y-1">
+                            <Badge
+                              variant="outline"
+                              class="font-mono"
+                            >
+                              {{ walletTransactionCategoryLabel(item.data.category) }}
+                            </Badge>
+                            <div class="text-[11px] text-muted-foreground">
+                              {{ walletTransactionReasonLabel(item.data.reason_code) }}
+                            </div>
+                          </div>
+                        </TableCell>
+                        <TableCell
+                          :class="item.data.amount >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'"
+                        >
+                          {{ item.data.amount >= 0 ? '+' : '' }}{{ item.data.amount.toFixed(4) }}
+                        </TableCell>
+                        <TableCell class="text-xs tabular-nums">
+                          {{ item.data.balance_before.toFixed(4) }} → {{ item.data.balance_after.toFixed(4) }}
+                        </TableCell>
+                        <TableCell class="text-xs text-muted-foreground">
+                          {{ item.data.description || '-' }}
+                        </TableCell>
+                      </TableRow>
+                      <TableRow v-else>
+                        <TableCell class="text-xs text-muted-foreground">
+                          {{ item.data.date || '-' }}
+                        </TableCell>
+                        <TableCell>
+                          <div class="space-y-1">
+                            <Badge
+                              variant="outline"
+                              class="font-mono border-amber-500/40 text-amber-700 dark:text-amber-300"
+                            >
+                              {{ dailyUsageCategoryLabel(false) }}
+                            </Badge>
+                            <div class="text-[11px] text-muted-foreground">
+                              {{ item.data.timezone || '-' }}
+                            </div>
+                          </div>
+                        </TableCell>
+                        <TableCell class="text-rose-600 dark:text-rose-400">
+                          -{{ item.data.total_cost.toFixed(4) }}
+                        </TableCell>
+                        <TableCell class="text-xs text-muted-foreground">
+                          按日汇总
+                        </TableCell>
+                        <TableCell class="text-xs text-muted-foreground">
+                          {{ item.data.total_requests }} 次请求 · {{ formatTokenCount(item.data.input_tokens) }} / {{ formatTokenCount(item.data.output_tokens) }} tokens
+                        </TableCell>
+                      </TableRow>
+                    </template>
+                    <TableRow v-if="!loadingTransactions && flowItems.length === 0">
                       <TableCell
                         colspan="5"
                         class="py-10"
                       >
                         <EmptyState
                           title="暂无资金流水"
-                          description="充值或退款后会在这里显示"
+                          description="充值、退款或消费后会在这里显示"
                         />
                       </TableCell>
                     </TableRow>
@@ -476,7 +538,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import {
   Badge,
   Button,
@@ -505,15 +567,18 @@ import {
 import { EmptyState, LoadingState } from '@/components/common'
 import {
   walletApi,
+  type DailyUsageRecord,
+  type FlowItem,
   type PaymentOrder,
   type RefundRequest,
   type WalletBalanceResponse,
-  type WalletTransaction,
 } from '@/api/wallet'
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
 import {
+  dailyUsageCategoryLabel,
+  formatTokenCount,
   formatWalletCurrency as formatCurrency,
   paymentMethodLabel,
   paymentStatusBadge,
@@ -542,7 +607,8 @@ const submittingRefund = ref(false)
 const walletBalance = ref<WalletBalanceResponse | null>(null)
 const latestRecharge = ref<{ order: PaymentOrder; payment_instructions: Record<string, unknown> } | null>(null)
 
-const transactions = ref<WalletTransaction[]>([])
+const flowItems = ref<FlowItem[]>([])
+const todayUsage = ref<DailyUsageRecord | null>(null)
 const txTotal = ref(0)
 const txPage = ref(1)
 const txPageSize = ref(20)
@@ -558,6 +624,7 @@ const refundPage = ref(1)
 const refundPageSize = ref(20)
 
 const activeTab = ref('transactions')
+let todayCostPollTimer: ReturnType<typeof setInterval> | null = null
 
 const rechargeForm = reactive({
   amount_usd: 10,
@@ -576,16 +643,28 @@ const refundableOrders = computed(() =>
 )
 
 onMounted(async () => {
+  document.addEventListener('visibilitychange', handleVisibilityChange)
   try {
     await Promise.all([
       loadBalance(),
       loadTransactions(),
+      loadTodayCost(),
       loadOrders(),
       loadRefunds(),
     ])
+    syncTodayCostPolling()
   } finally {
     loadingInitial.value = false
   }
+})
+
+onBeforeUnmount(() => {
+  stopTodayCostPolling()
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+})
+
+watch(activeTab, () => {
+  syncTodayCostPolling()
 })
 
 async function loadBalance() {
@@ -596,15 +675,49 @@ async function loadTransactions() {
   loadingTransactions.value = true
   try {
     const offset = (txPage.value - 1) * txPageSize.value
-    const resp = await walletApi.getTransactions({ limit: txPageSize.value, offset })
-    transactions.value = resp.items
+    const resp = await walletApi.getFlow({ limit: txPageSize.value, offset })
+    flowItems.value = resp.items
     txTotal.value = resp.total
+    todayUsage.value = resp.today_entry
   } catch (error) {
     log.error('加载钱包流水失败:', error)
     showError(parseApiError(error, '加载钱包流水失败'))
   } finally {
     loadingTransactions.value = false
   }
+}
+
+async function loadTodayCost() {
+  try {
+    todayUsage.value = await walletApi.getTodayCost()
+  } catch (error) {
+    log.error('加载今日消费失败:', error)
+  }
+}
+
+function syncTodayCostPolling() {
+  if (activeTab.value === 'transactions' && !document.hidden) {
+    startTodayCostPolling()
+  } else {
+    stopTodayCostPolling()
+  }
+}
+
+function startTodayCostPolling() {
+  if (todayCostPollTimer) return
+  todayCostPollTimer = setInterval(() => {
+    void loadTodayCost()
+  }, 20_000)
+}
+
+function stopTodayCostPolling() {
+  if (!todayCostPollTimer) return
+  clearInterval(todayCostPollTimer)
+  todayCostPollTimer = null
+}
+
+function handleVisibilityChange() {
+  syncTodayCostPolling()
 }
 
 async function loadOrders() {
@@ -688,7 +801,7 @@ async function submitRefund() {
     refundForm.amount_usd = 0
     refundForm.payment_order_id = '__none__'
     refundForm.reason = ''
-    await Promise.all([loadRefunds(), loadBalance(), loadOrders(), loadTransactions()])
+    await Promise.all([loadRefunds(), loadBalance(), loadOrders(), loadTransactions(), loadTodayCost()])
     activeTab.value = 'refunds'
   } catch (error) {
     log.error('提交退款申请失败:', error)

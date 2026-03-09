@@ -34,6 +34,7 @@ QUIET_POLLING_PATHS: set[str] = {
     "/api/admin/usage/stats",
     "/api/admin/usage/aggregation/stats",
     "/api/admin/health/status",
+    "/api/wallet/today-cost",
 }
 
 

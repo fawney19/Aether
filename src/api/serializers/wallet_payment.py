@@ -7,9 +7,10 @@ from src.models.database import (
     PaymentOrder,
     RefundRequest,
     Wallet,
+    WalletDailyUsageLedger,
     WalletTransaction,
 )
-from src.services.wallet import WalletService
+from src.services.wallet import WalletDailyUsageSnapshot, WalletService
 
 
 def safe_gateway_response(raw: dict[str, Any] | None) -> dict[str, Any]:
@@ -121,6 +122,27 @@ def serialize_wallet_transaction(tx: WalletTransaction) -> dict[str, Any]:
         "operator_id": tx.operator_id,
         "description": tx.description,
         "created_at": tx.created_at,
+    }
+
+
+def serialize_wallet_daily_usage(
+    ledger: WalletDailyUsageLedger | WalletDailyUsageSnapshot,
+) -> dict[str, Any]:
+    billing_date = getattr(ledger, "billing_date", None)
+    return {
+        "id": getattr(ledger, "id", None),
+        "date": billing_date.isoformat() if billing_date is not None else None,
+        "timezone": getattr(ledger, "billing_timezone", None),
+        "total_cost": float(getattr(ledger, "total_cost_usd", 0) or 0),
+        "total_requests": int(getattr(ledger, "total_requests", 0) or 0),
+        "input_tokens": int(getattr(ledger, "input_tokens", 0) or 0),
+        "output_tokens": int(getattr(ledger, "output_tokens", 0) or 0),
+        "cache_creation_tokens": int(getattr(ledger, "cache_creation_tokens", 0) or 0),
+        "cache_read_tokens": int(getattr(ledger, "cache_read_tokens", 0) or 0),
+        "first_finalized_at": getattr(ledger, "first_finalized_at", None),
+        "last_finalized_at": getattr(ledger, "last_finalized_at", None),
+        "aggregated_at": getattr(ledger, "aggregated_at", None),
+        "is_today": bool(getattr(ledger, "is_today", False)),
     }
 
 
