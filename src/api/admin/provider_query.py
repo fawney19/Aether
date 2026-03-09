@@ -255,6 +255,83 @@ class TestModelFailoverResponse(BaseModel):
     error: str | None = None
 
 
+# ============ Internal helpers ============
+
+
+def _test_check_response_has_error(resp: dict[str, Any]) -> bool:
+    """快速判断 check_endpoint 结果是否失败。"""
+    if resp.get("error"):
+        return True
+    if int(resp.get("status_code", 0) or 0) != 200:
+        return True
+    resp_data = resp.get("response", {})
+    resp_body = resp_data.get("response_body", {})
+    parsed = resp_body
+    if isinstance(resp_body, str):
+        try:
+            parsed = json.loads(resp_body)
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return isinstance(parsed, dict) and bool(parsed.get("error"))
+
+
+def _test_check_extract_error_message(resp: dict[str, Any]) -> str:
+    """从 check_endpoint 结果中提取错误消息。"""
+    resp_data = resp.get("response", {}) if isinstance(resp, dict) else {}
+    body = resp_data.get("response_body", {})
+    parsed = body
+    if isinstance(body, str):
+        try:
+            parsed = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            parsed = body
+
+    if isinstance(parsed, dict):
+        err = parsed.get("error")
+        if isinstance(err, dict):
+            msg = err.get("message")
+            if isinstance(msg, str):
+                return msg
+        if isinstance(err, str):
+            return err
+
+    err_raw = resp.get("error")
+    if isinstance(err_raw, str):
+        return err_raw
+    if isinstance(err_raw, dict):
+        msg = err_raw.get("message")
+        if isinstance(msg, str):
+            return msg
+    return ""
+
+
+def _test_check_should_fallback_to_non_stream(resp: dict[str, Any]) -> bool:
+    """仅在流式特有失败时回退到非流式，避免无意义重试。"""
+    status = int(resp.get("status_code") or 0)
+    if status in {404, 405, 415, 501}:
+        return True
+
+    message = _test_check_extract_error_message(resp).lower()
+    if not message:
+        return False
+
+    stream_markers = ("stream", "sse", "streamgeneratecontent")
+    unsupported_markers = ("not support", "unsupported", "invalid argument")
+    if any(token in message for token in stream_markers) and any(
+        token in message for token in unsupported_markers
+    ):
+        return True
+
+    decode_markers = (
+        "decompress",
+        "incorrect header check",
+        "decoding error",
+        "content decoding",
+        "contentdecodingerror",
+    )
+    return any(token in message for token in decode_markers)
+
+
 # ============ API Endpoints ============
 
 
@@ -1507,31 +1584,46 @@ async def _execute_test_check(
     if not adapter_class:
         raise ValueError(f"Unknown API format: {endpoint.api_format}")
 
-    response = await adapter_class.check_endpoint(
-        None,
-        endpoint.base_url,
-        api_key_value,
-        {
-            **request_payload,
-            "model": effective_model,
-        },
-        extra_headers if extra_headers else None,
-        body_rules=getattr(endpoint, "body_rules", None),
-        header_rules=getattr(endpoint, "header_rules", None),
-        db=db,
-        user=user,
-        provider_name=provider_obj.name,
-        provider_id=str(provider_obj.id),
-        api_key_id=str(key.id),
-        model_name=effective_model,
-        auth_type=auth_type,
-        provider_type=provider_type if provider_type else None,
-        decrypted_auth_config=auth_config if auth_config else None,
-        provider_endpoint=endpoint,
-        provider_api_key=key,
-        proxy_config=effective_proxy,
-        timeout_seconds=request_timeout,
-    )
+    async def _run_check(stream: bool) -> dict[str, Any]:
+        return await adapter_class.check_endpoint(
+            None,
+            endpoint.base_url,
+            api_key_value,
+            {
+                **request_payload,
+                "model": effective_model,
+                "stream": stream,
+            },
+            extra_headers if extra_headers else None,
+            body_rules=getattr(endpoint, "body_rules", None),
+            header_rules=getattr(endpoint, "header_rules", None),
+            db=db,
+            user=user,
+            provider_name=provider_obj.name,
+            provider_id=str(provider_obj.id),
+            api_key_id=str(key.id),
+            model_name=effective_model,
+            auth_type=auth_type,
+            provider_type=provider_type if provider_type else None,
+            decrypted_auth_config=auth_config if auth_config else None,
+            provider_endpoint=endpoint,
+            provider_api_key=key,
+            proxy_config=effective_proxy,
+            timeout_seconds=request_timeout,
+        )
+
+    use_stream = bool(request_payload.get("stream", False))
+    response = await _run_check(use_stream)
+
+    if use_stream and _test_check_response_has_error(response):
+        if _test_check_should_fallback_to_non_stream(response):
+            logger.info(
+                "[test-model-failover] Stream check failed for provider={} model={}, fallback to non-stream",
+                provider_obj.name,
+                effective_model,
+            )
+            response = await _run_check(False)
+
     return response, auth_type
 
 

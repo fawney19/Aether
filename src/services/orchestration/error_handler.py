@@ -23,7 +23,9 @@ from src.core.exceptions import (
     UpstreamClientException,
 )
 from src.core.logger import logger
+from src.core.provider_types import ProviderType, normalize_provider_type
 from src.models.database import Provider, ProviderAPIKey, ProviderEndpoint
+from src.services.model.upstream_fetcher import merge_upstream_metadata
 from src.services.health.monitor import health_monitor
 from src.services.provider.format import normalize_endpoint_signature
 from src.services.provider.pool.config import parse_pool_config
@@ -206,6 +208,13 @@ class ErrorHandlerService:
                 provider_name=str(provider.name),
                 current_rpm=captured_key_concurrent,
                 exception=converted_error,
+                request_id=request_id,
+            )
+            self._sync_gemini_cli_quota_state(
+                key=key,
+                provider=provider,
+                model_name=global_model_id,
+                error_text=error_response_text,
                 request_id=request_id,
             )
 
@@ -455,3 +464,56 @@ class ErrorHandlerService:
                 logger.debug("auto cleanup side effect failed for key {}: {}", key_id[:8], exc)
 
         task.add_done_callback(_log_async_error)
+
+    def _sync_gemini_cli_quota_state(
+        self,
+        *,
+        key: ProviderAPIKey | None,
+        provider: Provider | None,
+        model_name: str | None,
+        error_text: str | None,
+        request_id: str | None,
+    ) -> None:
+        if key is None or provider is None:
+            return
+        provider_type = normalize_provider_type(getattr(provider, "provider_type", None))
+        if provider_type != ProviderType.GEMINI_CLI:
+            return
+
+        normalized_model = str(model_name or "").strip()
+        if not normalized_model:
+            return
+
+        try:
+            from src.services.provider.adapters.gemini_cli.quota import (
+                build_quota_exhausted_metadata,
+                extract_error_model_name,
+            )
+
+            resolved_model = extract_error_model_name(error_text, fallback=normalized_model)
+            if not resolved_model:
+                return
+
+            current_metadata = key.upstream_metadata if isinstance(key.upstream_metadata, dict) else {}
+            current_namespace = current_metadata.get("gemini_cli")
+            namespace_dict = current_namespace if isinstance(current_namespace, dict) else None
+
+            updates = build_quota_exhausted_metadata(
+                model_name=resolved_model,
+                error_text=error_text,
+                current_namespace=namespace_dict,
+            )
+            if not updates:
+                return
+
+            key.upstream_metadata = merge_upstream_metadata(current_metadata, updates)
+            self.db.add(key)
+            self.db.commit()
+            logger.info(
+                "  [{}] Gemini CLI key {} 记录模型冷却: {}",
+                request_id,
+                str(getattr(key, "id", "") or "")[:8],
+                resolved_model,
+            )
+        except Exception as exc:
+            logger.debug("  [{}] Gemini CLI 冷却元数据写入失败: {}", request_id, exc)

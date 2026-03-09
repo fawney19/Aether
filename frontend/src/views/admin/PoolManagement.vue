@@ -1353,6 +1353,7 @@ const poolHeaderMetaText = computed(() => {
 
 const showAccountQuotaColumn = computed(() => {
   return selectedProviderType.value === 'codex'
+    || selectedProviderType.value === 'gemini_cli'
     || selectedProviderType.value === 'kiro'
     || selectedProviderType.value === 'antigravity'
 })

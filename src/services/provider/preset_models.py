@@ -27,6 +27,44 @@ ModelsFetcherFunc = Callable[
 # 格式: provider_type -> list of model dicts
 
 PRESET_MODELS: dict[str, list[dict[str, Any]]] = {
+    # GeminiCLI (Google Cloud Code / Gemini CLI OAuth upstream)
+    "gemini_cli": [
+        {
+            "id": "gemini-2.5-pro",
+            "object": "model",
+            "owned_by": "google",
+            "display_name": "Gemini 2.5 Pro",
+            "api_format": "gemini:cli",
+        },
+        {
+            "id": "gemini-2.5-flash",
+            "object": "model",
+            "owned_by": "google",
+            "display_name": "Gemini 2.5 Flash",
+            "api_format": "gemini:cli",
+        },
+        {
+            "id": "gemini-3-pro-preview",
+            "object": "model",
+            "owned_by": "google",
+            "display_name": "Gemini 3 Pro Preview",
+            "api_format": "gemini:cli",
+        },
+        {
+            "id": "gemini-3-flash-preview",
+            "object": "model",
+            "owned_by": "google",
+            "display_name": "Gemini 3 Flash Preview",
+            "api_format": "gemini:cli",
+        },
+        {
+            "id": "gemini-3.1-pro-preview",
+            "object": "model",
+            "owned_by": "google",
+            "display_name": "Gemini 3.1 Pro Preview",
+            "api_format": "gemini:cli",
+        },
+    ],
     # Kiro (Claude CLI 反代)
     "kiro": [
         {

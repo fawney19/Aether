@@ -360,6 +360,7 @@ class HandlerAdapterBase(ApiAdapter):
         from src.core.provider_types import ProviderType
 
         is_antigravity = provider_type == ProviderType.ANTIGRAVITY
+        is_gemini_cli = provider_type == ProviderType.GEMINI_CLI
         is_vertex = provider_type == ProviderType.VERTEX_AI
         is_kiro = provider_type == ProviderType.KIRO
         is_oauth = auth_type == "oauth"
@@ -389,6 +390,12 @@ class HandlerAdapterBase(ApiAdapter):
 
             ordered_urls = url_availability.get_ordered_urls(prefer_daily=True)
             effective_base_url = ordered_urls[0] if ordered_urls else base_url
+            path = V1INTERNAL_PATH_TEMPLATE.format(action="generateContent")
+            url = f"{str(effective_base_url).rstrip('/')}{path}"
+        elif is_gemini_cli:
+            from src.services.provider.adapters.gemini_cli.constants import V1INTERNAL_PATH_TEMPLATE
+
+            effective_base_url = base_url
             path = V1INTERNAL_PATH_TEMPLATE.format(action="generateContent")
             url = f"{str(effective_base_url).rstrip('/')}{path}"
         elif is_vertex and provider_endpoint is not None and provider_api_key is not None:
@@ -424,6 +431,10 @@ class HandlerAdapterBase(ApiAdapter):
         merged_extra.update(cli_extra)
 
         if is_antigravity:
+            merged_extra.update(get_v1internal_extra_headers())
+        elif is_gemini_cli:
+            from src.services.provider.adapters.gemini_cli.constants import get_v1internal_extra_headers
+
             merged_extra.update(get_v1internal_extra_headers())
 
         if is_kiro:
@@ -476,6 +487,16 @@ class HandlerAdapterBase(ApiAdapter):
             from src.services.provider.adapters.antigravity.envelope import (
                 wrap_v1internal_request,
             )
+
+            project_id = (decrypted_auth_config or {}).get("project_id", "")
+            effective_model = model_name or request_data.get("model", "")
+            body = wrap_v1internal_request(
+                body,
+                project_id=project_id,
+                model=effective_model,
+            )
+        elif is_gemini_cli:
+            from src.services.provider.adapters.gemini_cli.envelope import wrap_v1internal_request
 
             project_id = (decrypted_auth_config or {}).get("project_id", "")
             effective_model = model_name or request_data.get("model", "")

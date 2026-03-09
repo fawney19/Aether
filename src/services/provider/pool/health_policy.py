@@ -107,6 +107,17 @@ def _resolve_transient_cooldown_ttl(
     return config.overload_cooldown_seconds
 
 
+def _parse_google_quota_cooldown(error_body: str | None) -> int | None:
+    if not error_body:
+        return None
+    try:
+        from src.services.provider.adapters.gemini_cli.quota import extract_quota_cooldown_seconds
+
+        return extract_quota_cooldown_seconds(error_body)
+    except Exception:
+        return None
+
+
 async def apply_health_policy(
     *,
     provider_id: str,
@@ -218,6 +229,8 @@ async def _apply(
     # --- 429 Rate Limited ----------------------------------------------------
     if status_code == 429:
         retry_after = _parse_retry_after(response_headers)
+        if retry_after is None:
+            retry_after = _parse_google_quota_cooldown(error_body)
         ttl = _resolve_transient_cooldown_ttl(
             status_code=status_code,
             retry_after_seconds=retry_after,

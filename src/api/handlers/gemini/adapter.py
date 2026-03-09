@@ -260,6 +260,7 @@ class GeminiChatAdapter(ChatAdapterBase):
             }
 
         is_antigravity = provider_type and provider_type.lower() == "antigravity"
+        is_gemini_cli = provider_type and provider_type.lower() == "gemini_cli"
         is_vertex = provider_type and provider_type.lower() == "vertex_ai"
         is_oauth = auth_type == "oauth"
         vertex_auth_info: Any | None = None
@@ -276,6 +277,11 @@ class GeminiChatAdapter(ChatAdapterBase):
             ag_base = ordered_urls[0] if ordered_urls else base_url
             path = V1INTERNAL_PATH_TEMPLATE.format(action="generateContent")
             url = f"{str(ag_base).rstrip('/')}{path}"
+        elif is_gemini_cli:
+            from src.services.provider.adapters.gemini_cli.constants import V1INTERNAL_PATH_TEMPLATE
+
+            path = V1INTERNAL_PATH_TEMPLATE.format(action="generateContent")
+            url = f"{str(base_url).rstrip('/')}{path}"
         elif is_vertex and provider_endpoint is not None and provider_api_key is not None:
             # Vertex AI: test-model 必须走统一 provider transport/auth，
             # 否则会错误命中普通 Gemini URL（导致 404）。
@@ -306,6 +312,10 @@ class GeminiChatAdapter(ChatAdapterBase):
         # Antigravity 需要特定的 User-Agent
         merged_extra = dict(extra_headers) if extra_headers else {}
         if is_antigravity:
+            merged_extra.update(get_v1internal_extra_headers())
+        elif is_gemini_cli:
+            from src.services.provider.adapters.gemini_cli.constants import get_v1internal_extra_headers
+
             merged_extra.update(get_v1internal_extra_headers())
         if is_vertex and provider_endpoint is not None and provider_api_key is not None:
             headers = dict(merged_extra)
@@ -344,6 +354,15 @@ class GeminiChatAdapter(ChatAdapterBase):
                 project_id=project_id,
                 model=effective_model_name,
                 request_type="endpoint_test",
+            )
+        elif is_gemini_cli:
+            from src.services.provider.adapters.gemini_cli.envelope import wrap_v1internal_request
+
+            project_id = (decrypted_auth_config or {}).get("project_id", "")
+            body = wrap_v1internal_request(
+                body,
+                project_id=project_id,
+                model=effective_model_name,
             )
 
         # 应用请求头规则（在请求头构建后应用）

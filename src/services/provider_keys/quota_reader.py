@@ -402,8 +402,112 @@ class AntigravityQuotaReader(PoolQuotaReader):
         return f"最低剩余 {_format_percent(min_remaining)} ({len(remaining_list)} 模型)"
 
 
+class GeminiCliQuotaReader(PoolQuotaReader):
+    namespace = "gemini_cli"
+
+    def _quota_by_model(self) -> dict[str, Any]:
+        quota_by_model = self._data.get("quota_by_model")
+        if not isinstance(quota_by_model, dict):
+            return {}
+        return quota_by_model
+
+    def _reset_at(self, model_info: dict[str, Any]) -> int | None:
+        reset_at = _to_float(model_info.get("reset_at"))
+        if reset_at is None or reset_at <= 0:
+            return None
+        if reset_at > 1_000_000_000_000:
+            reset_at /= 1000
+        return int(reset_at)
+
+    def _is_model_exhausted(self, model_info: dict[str, Any]) -> bool:
+        if _is_truthy_flag(model_info.get("is_exhausted")):
+            return True
+        remaining_fraction = _to_float(model_info.get("remaining_fraction"))
+        if remaining_fraction is not None and remaining_fraction <= 0.0:
+            return True
+        return _pct_is_exhausted(model_info.get("used_percent"))
+
+    def _active_exhausted_models(self) -> list[tuple[str, dict[str, Any], int | None]]:
+        now = int(time.time())
+        active: list[tuple[str, dict[str, Any], int | None]] = []
+        for model_name, raw_info in self._quota_by_model().items():
+            if not isinstance(raw_info, dict):
+                continue
+            if not self._is_model_exhausted(raw_info):
+                continue
+            reset_at = self._reset_at(raw_info)
+            if reset_at is not None and reset_at <= now:
+                continue
+            active.append((str(model_name), raw_info, reset_at))
+        return active
+
+    def is_exhausted(self, model_name: str | None = None) -> QuotaExhaustedResult:
+        if not model_name:
+            return QuotaExhaustedResult(False)
+        model_quota = self._quota_by_model().get(model_name)
+        if not isinstance(model_quota, dict) or not self._is_model_exhausted(model_quota):
+            return QuotaExhaustedResult(False)
+
+        reset_at = self._reset_at(model_quota)
+        if reset_at is not None:
+            now = int(time.time())
+            if reset_at <= now:
+                return QuotaExhaustedResult(False)
+            reset_text = _format_reset_after(reset_at - now)
+            if reset_text:
+                return QuotaExhaustedResult(True, f"Gemini CLI 模型 {model_name} 冷却中（{reset_text}）")
+        return QuotaExhaustedResult(True, f"Gemini CLI 模型 {model_name} 配额已耗尽")
+
+    def usage_ratio(self) -> float | None:
+        active = self._active_exhausted_models()
+        if not active:
+            return None
+        return 1.0
+
+    def plan_type(self) -> str | None:
+        return _normalize_plan(self._data.get("plan_type")) or _normalize_plan(self._data.get("tier"))
+
+    def reset_seconds(self) -> float | None:
+        now = int(time.time())
+        reset_values = [
+            reset_at - now
+            for _, _, reset_at in self._active_exhausted_models()
+            if reset_at is not None and reset_at > now
+        ]
+        if not reset_values:
+            return None
+        return float(min(reset_values))
+
+    def account_block(self) -> AccountBlockResult:
+        return AccountBlockResult(blocked=False)
+
+    def display_summary(self) -> str | None:
+        active = self._active_exhausted_models()
+        if not active:
+            return None
+
+        active_sorted = sorted(
+            active,
+            key=lambda item: item[2] if item[2] is not None else 2**31 - 1,
+        )
+        first_model, _, first_reset_at = active_sorted[0]
+        if len(active_sorted) == 1:
+            if first_reset_at is not None:
+                reset_text = _format_reset_after(first_reset_at - int(time.time()))
+                if reset_text:
+                    return f"{first_model} 冷却中 ({reset_text})"
+            return f"{first_model} 冷却中"
+
+        if first_reset_at is not None:
+            reset_text = _format_reset_after(first_reset_at - int(time.time()))
+            if reset_text:
+                return f"{len(active_sorted)} 个模型冷却中（最早 {reset_text}）"
+        return f"{len(active_sorted)} 个模型冷却中"
+
+
 _READER_CLASSES: dict[str, type[PoolQuotaReader]] = {
     ProviderType.CODEX: CodexQuotaReader,
+    ProviderType.GEMINI_CLI: GeminiCliQuotaReader,
     ProviderType.KIRO: KiroQuotaReader,
     ProviderType.ANTIGRAVITY: AntigravityQuotaReader,
 }
@@ -431,6 +535,7 @@ __all__ = [
     "AccountBlockResult",
     "AntigravityQuotaReader",
     "CodexQuotaReader",
+    "GeminiCliQuotaReader",
     "KiroQuotaReader",
     "NullQuotaReader",
     "PoolQuotaReader",

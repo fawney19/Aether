@@ -269,7 +269,10 @@ class Config:
             "CLAUDE_CLI_USER_AGENT", "claude-code/1.0.1"
         )
         self.internal_user_agent_openai_cli = os.getenv("OPENAI_CLI_USER_AGENT", "openai-codex/1.0")
-        self.internal_user_agent_gemini_cli = os.getenv("GEMINI_CLI_USER_AGENT", "gemini-cli/0.1.0")
+        self.internal_user_agent_gemini_cli = os.getenv(
+            "GEMINI_CLI_USER_AGENT",
+            "GeminiCLI/0.1.5 (Windows; AMD64)",
+        )
 
         # 邮箱验证配置
         # VERIFICATION_CODE_EXPIRE_MINUTES: 验证码有效期（分钟）
