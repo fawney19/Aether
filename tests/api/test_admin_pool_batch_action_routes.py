@@ -22,73 +22,67 @@ def _mock_provider_lookup(db: MagicMock, provider_id: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_batch_delete_uses_single_statement_for_non_sqlite(
+async def test_batch_delete_submits_async_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Delete action now submits an async batch-delete task instead of
+    executing SQL synchronously."""
     db = MagicMock()
     provider_id = "provider-1"
     _mock_provider_lookup(db, provider_id)
-    db.get_bind.return_value = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
-    db.execute.return_value = SimpleNamespace(rowcount=1200)
-    side_effect = AsyncMock()
+
+    mock_submit = AsyncMock(return_value="task-abc-123")
     monkeypatch.setattr(
-        "src.services.provider_keys.key_side_effects.run_delete_key_side_effects",
-        side_effect,
+        "src.services.provider_keys.batch_delete_task.submit_batch_delete",
+        mock_submit,
     )
 
+    key_ids = [f"key-{idx}" for idx in range(1200)]
     adapter = AdminBatchActionKeysAdapter(
         provider_id=provider_id,
         body=BatchActionRequest(
-            key_ids=[f"key-{idx}" for idx in range(1200)],
+            key_ids=key_ids,
             action="delete",
         ),
     )
 
     result = await adapter.handle(_build_context(db))
 
-    assert result.affected == 1200
-    assert db.execute.call_count == 1
-    db.commit.assert_called_once()
-    side_effect.assert_awaited_once_with(
-        db=db,
-        provider_id=provider_id,
-        deleted_key_allowed_models=None,
-    )
+    # Async task returns affected=0 and a task_id
+    assert result.affected == 0
+    assert result.task_id == "task-abc-123"
+    assert "1200" in result.message
+    mock_submit.assert_awaited_once_with(provider_id, list(dict.fromkeys(key_ids)))
 
 
 @pytest.mark.asyncio
-async def test_batch_delete_chunks_sqlite_and_runs_side_effect_once(
+async def test_batch_delete_deduplicates_key_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Duplicate key IDs should be deduplicated before submission."""
     db = MagicMock()
     provider_id = "provider-2"
     _mock_provider_lookup(db, provider_id)
-    db.get_bind.return_value = SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
-    db.execute.side_effect = [
-        SimpleNamespace(rowcount=900),
-        SimpleNamespace(rowcount=300),
-    ]
-    side_effect = AsyncMock()
+
+    mock_submit = AsyncMock(return_value="task-xyz-456")
     monkeypatch.setattr(
-        "src.services.provider_keys.key_side_effects.run_delete_key_side_effects",
-        side_effect,
+        "src.services.provider_keys.batch_delete_task.submit_batch_delete",
+        mock_submit,
     )
 
     adapter = AdminBatchActionKeysAdapter(
         provider_id=provider_id,
         body=BatchActionRequest(
-            key_ids=[f"key-{idx}" for idx in range(1200)],
+            key_ids=["key-1", "key-2", "key-1", "key-3", "key-2"],
             action="delete",
         ),
     )
 
     result = await adapter.handle(_build_context(db))
 
-    assert result.affected == 1200
-    assert db.execute.call_count == 2
-    db.commit.assert_called_once()
-    side_effect.assert_awaited_once_with(
-        db=db,
-        provider_id=provider_id,
-        deleted_key_allowed_models=None,
-    )
+    assert result.affected == 0
+    assert result.task_id == "task-xyz-456"
+    # Deduplicated: 3 unique keys
+    submitted_ids = mock_submit.call_args[0][1]
+    assert len(submitted_ids) == 3
+    assert submitted_ids == ["key-1", "key-2", "key-3"]

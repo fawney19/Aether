@@ -53,7 +53,7 @@ async def test_create_endpoint_injects_default_body_rules_when_missing(
     monkeypatch.setattr(
         routes,
         "get_default_body_rules_for_endpoint",
-        lambda _fmt: [{"action": "drop", "path": "max_output_tokens"}],
+        lambda _fmt, **_kw: [{"action": "drop", "path": "max_output_tokens"}],
     )
 
     db = _FakeDB(
@@ -81,7 +81,7 @@ async def test_create_endpoint_keeps_user_body_rules_when_provided(
     monkeypatch.setattr(
         routes,
         "get_default_body_rules_for_endpoint",
-        lambda _fmt: [{"action": "drop", "path": "max_output_tokens"}],
+        lambda _fmt, **_kw: [{"action": "drop", "path": "max_output_tokens"}],
     )
 
     user_rules = [{"action": "set", "path": "metadata.source", "value": "user"}]

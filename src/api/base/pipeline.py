@@ -5,8 +5,10 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from starlette.requests import ClientDisconnect
 
 from src.config.settings import config
 from src.core.enums import UserRole
@@ -144,6 +146,16 @@ class ApiRequestPipeline:
                     status_code=408,
                     detail=f"Request timeout: body not received within {timeout_sec} seconds",
                 )
+            except ClientDisconnect:
+                logger.warning(
+                    "[Pipeline] 客户端在读取请求体期间断开连接: {} {}",
+                    http_request.method,
+                    http_request.url.path,
+                )
+                return JSONResponse(
+                    status_code=499,
+                    content={"error": "client_disconnected", "message": "Client closed request"},
+                )
         context_start = PerfRecorder.start(force=perf_sampled)
         context = ApiRequestContext.build(
             request=http_request,
@@ -199,6 +211,25 @@ class ApiRequestPipeline:
                 error=err_detail,
             )
             raise
+        except ClientDisconnect:
+            handle_duration = PerfRecorder.stop(handle_start, "pipeline_handle", labels=perf_labels)
+            _record_perf_metric("handle_ms", handle_duration)
+            logger.warning(
+                "[Pipeline] 客户端在处理期间断开连接: {} {}",
+                context.request.method,
+                context.request.url.path,
+            )
+            self._record_audit_event(
+                context,
+                adapter,
+                success=False,
+                status_code=499,
+                error="client_disconnected",
+            )
+            return JSONResponse(
+                status_code=499,
+                content={"error": "client_disconnected", "message": "Client closed request"},
+            )
         except Exception as exc:
             handle_duration = PerfRecorder.stop(handle_start, "pipeline_handle", labels=perf_labels)
             _record_perf_metric("handle_ms", handle_duration)

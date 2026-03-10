@@ -34,6 +34,7 @@ def test_multi_score_prefers_low_latency_when_latency_weight_is_high() -> None:
     strategy = MultiScoreStrategy()
     cfg = PoolConfig(
         scheduling_mode="multi_score",
+        scheduling_presets=(),
         scoring_weights=ScoringWeights(lru=0.0, latency=1.0, health=0.0, cost_remaining=0.0),
     )
     ctx = _context()
@@ -48,6 +49,7 @@ def test_multi_score_combines_health_and_cost() -> None:
     strategy = MultiScoreStrategy()
     cfg = PoolConfig(
         scheduling_mode="multi_score",
+        scheduling_presets=(),
         scoring_weights=ScoringWeights(lru=0.0, latency=0.0, health=0.5, cost_remaining=0.5),
         cost_limit_per_key_tokens=1000,
     )

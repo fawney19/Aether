@@ -43,6 +43,7 @@ from src.models.database import Provider, ProviderAPIKey, User
 from src.services.provider.pool.config import parse_pool_config
 from src.services.provider_keys.auth_type import OAUTH_AUTH_TYPES
 from src.services.scheduling.utils import release_db_connection_before_await
+from src.utils.async_utils import safe_create_task
 from src.utils.auth_utils import require_admin
 
 router = APIRouter(prefix="/api/admin/provider-oauth", tags=["Provider OAuth"])
@@ -1290,7 +1291,7 @@ async def complete_provider_oauth(
             proxy=key_proxy,
         )
 
-    return ProviderCompleteOAuthResponse(
+    response = ProviderCompleteOAuthResponse(
         key_id=str(new_key.id),
         provider_type=provider_type,
         expires_at=expires_at,
@@ -1298,6 +1299,11 @@ async def complete_provider_oauth(
         email=auth_config.get("email"),
         replaced=replaced,
     )
+
+    # 单个导入完成后，后台触发一次配额刷新
+    safe_create_task(_refresh_quota_after_import(provider_id, provider_type, [str(new_key.id)]))
+
+    return response
 
 
 # ==============================================================================
@@ -1755,7 +1761,7 @@ async def import_refresh_token(
                 proxy=key_proxy,
             )
 
-        return ProviderCompleteOAuthResponse(
+        response = ProviderCompleteOAuthResponse(
             key_id=str(new_key.id),
             provider_type=provider_type,
             expires_at=new_cfg.expires_at or None,
@@ -1763,6 +1769,11 @@ async def import_refresh_token(
             email=email,
             replaced=replaced,
         )
+
+        # 单个导入完成后，后台触发一次配额刷新
+        safe_create_task(_refresh_quota_after_import(provider_id, provider_type, [str(new_key.id)]))
+
+        return response
 
     template = _require_oauth_template(provider_type)
 
@@ -1879,7 +1890,7 @@ async def import_refresh_token(
             proxy=key_proxy,
         )
 
-    return ProviderCompleteOAuthResponse(
+    response = ProviderCompleteOAuthResponse(
         key_id=str(new_key.id),
         provider_type=provider_type,
         expires_at=expires_at,
@@ -1887,6 +1898,50 @@ async def import_refresh_token(
         email=auth_config.get("email"),
         replaced=replaced,
     )
+
+    # 单个导入完成后，后台触发一次配额刷新
+    safe_create_task(_refresh_quota_after_import(provider_id, provider_type, [str(new_key.id)]))
+
+    return response
+
+
+# ==============================================================================
+# 导入后配额刷新
+# ==============================================================================
+
+
+def _extract_success_key_ids(result: BatchImportResponse) -> list[str]:
+    """从批量导入结果中提取成功导入的 key_id 列表。"""
+    return [r.key_id for r in result.results if r.status == "success" and r.key_id]
+
+
+async def _refresh_quota_after_import(
+    provider_id: str,
+    provider_type: str,
+    key_ids: list[str],
+) -> None:
+    """导入完成后触发一次配额刷新（使用独立 db session）。"""
+    from src.services.provider_keys.key_quota_service import (
+        CODEX_WHAM_USAGE_URL,
+        QUOTA_REFRESH_PROVIDER_TYPES,
+        refresh_provider_quota_for_provider,
+    )
+
+    if not key_ids or provider_type not in QUOTA_REFRESH_PROVIDER_TYPES:
+        return
+    try:
+        db = create_session()
+        try:
+            await refresh_provider_quota_for_provider(
+                db=db,
+                provider_id=provider_id,
+                codex_wham_usage_url=CODEX_WHAM_USAGE_URL,
+                key_ids=key_ids,
+            )
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("[BATCH_IMPORT] 导入后配额刷新失败 (provider={}): {}", provider_id, exc)
 
 
 # ==============================================================================
@@ -2235,7 +2290,7 @@ async def batch_import_oauth(
     batch_concurrency = (_pool_cfg.batch_concurrency or 8) if _pool_cfg else 8
 
     if provider_type == ProviderType.KIRO.value:
-        return await _batch_import_kiro_internal(
+        result = await _batch_import_kiro_internal(
             provider_id=provider_id,
             provider=provider,
             raw_credentials=payload.credentials,
@@ -2244,17 +2299,24 @@ async def batch_import_oauth(
             key_proxy=key_proxy,
             concurrency=batch_concurrency,
         )
+    else:
+        result = await _batch_import_standard_oauth_internal(
+            provider_id=provider_id,
+            provider_type=provider_type,
+            provider=provider,
+            raw_credentials=payload.credentials,
+            db=db,
+            proxy_config=proxy_config,
+            key_proxy=key_proxy,
+            concurrency=batch_concurrency,
+        )
 
-    return await _batch_import_standard_oauth_internal(
-        provider_id=provider_id,
-        provider_type=provider_type,
-        provider=provider,
-        raw_credentials=payload.credentials,
-        db=db,
-        proxy_config=proxy_config,
-        key_proxy=key_proxy,
-        concurrency=batch_concurrency,
-    )
+    # 导入完成后，后台触发一次配额刷新
+    success_key_ids = _extract_success_key_ids(result)
+    if success_key_ids:
+        safe_create_task(_refresh_quota_after_import(provider_id, provider_type, success_key_ids))
+
+    return result
 
 
 async def _run_batch_import_task(
@@ -2350,6 +2412,11 @@ async def _run_batch_import_task(
         state["finished_at"] = int(time.time())
         state["message"] = f"导入完成：成功 {result.success}，失败 {result.failed}"
         await _save_batch_task_state(task_id, state, redis=redis)
+
+        # 导入完成后触发一次配额刷新
+        success_key_ids = _extract_success_key_ids(result)
+        if success_key_ids:
+            await _refresh_quota_after_import(provider_id, provider_type, success_key_ids)
 
     except Exception as exc:
         try:
@@ -3055,6 +3122,10 @@ async def device_poll(
     session["email"] = email
     session["replaced"] = replaced
     await redis.setex(redis_key, 60, json.dumps(session))
+
+    # 单个导入完成后，后台触发一次配额刷新
+    provider_type = ProviderType.KIRO.value
+    safe_create_task(_refresh_quota_after_import(provider_id, provider_type, [str(new_key.id)]))
 
     return DevicePollResponse(
         status="authorized",

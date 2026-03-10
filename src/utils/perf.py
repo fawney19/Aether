@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import random
 import time
 from typing import Any
@@ -131,8 +130,6 @@ class PerfRecorder:
 
     @staticmethod
     def _create_task(coro: Any) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        loop.create_task(coro)
+        from src.utils.async_utils import safe_create_task
+
+        safe_create_task(coro)

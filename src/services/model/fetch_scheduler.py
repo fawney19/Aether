@@ -15,11 +15,12 @@ import asyncio
 import fnmatch
 import json
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import defer, joinedload, load_only
 
 from src.core.cache_service import CacheService
 from src.core.crypto import crypto_service
@@ -51,6 +52,18 @@ KEY_FETCH_TIMEOUT_SECONDS = 120
 # 模型获取 HTTP 请求超时时间（秒）
 # 使用较短的超时（10秒），避免不支持 /models 端点的提供商长时间阻塞
 MODEL_FETCH_HTTP_TIMEOUT = 10.0
+
+# 启动时首次自动获取开关与延迟
+MODEL_FETCH_STARTUP_ENABLED = (
+    os.getenv("MODEL_FETCH_STARTUP_ENABLED", "true").lower() == "true"
+)
+MODEL_FETCH_STARTUP_DELAY_SECONDS = max(
+    0,
+    int(os.getenv("MODEL_FETCH_STARTUP_DELAY_SECONDS", "10")),
+)
+
+# 单批扫描的 Key 数量（仅拉取 ID，避免一次性扫描整个大号池）
+AUTO_FETCH_KEY_BATCH_SIZE = max(MAX_CONCURRENT_REQUESTS, 100)
 
 # 上游模型缓存 TTL（与定时任务间隔保持一致）
 UPSTREAM_MODELS_CACHE_TTL_SECONDS = MODEL_FETCH_INTERVAL_MINUTES * 60
@@ -155,6 +168,122 @@ async def set_upstream_models_to_cache(
     logger.debug(f"上游模型已缓存: {cache_key}, 数量={len(models)}")
 
 
+def _aggregate_models_for_cache(models: list[dict]) -> list[dict]:
+    """聚合缓存模型，按 model id 合并 api_formats，减少 Redis 占用。"""
+    aggregated: dict[str, dict[str, Any]] = {}
+    ordered_ids: list[str] = []
+
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+
+        model_id = str(model.get("id") or "").strip()
+        if not model_id:
+            continue
+
+        api_format = str(model.get("api_format") or "").strip()
+        existing = aggregated.get(model_id)
+
+        if existing is None:
+            payload = dict(model)
+            payload.pop("api_format", None)
+            payload["api_formats"] = [api_format] if api_format else []
+            aggregated[model_id] = payload
+            ordered_ids.append(model_id)
+            continue
+
+        api_formats = existing.setdefault("api_formats", [])
+        if not isinstance(api_formats, list):
+            api_formats = []
+            existing["api_formats"] = api_formats
+
+        if api_format and api_format not in api_formats:
+            api_formats.append(api_format)
+
+        for key, value in model.items():
+            if key not in existing and key != "api_format":
+                existing[key] = value
+
+    for model_id in ordered_ids:
+        api_formats = aggregated[model_id].get("api_formats")
+        if isinstance(api_formats, list):
+            aggregated[model_id]["api_formats"] = sorted(
+                {str(fmt) for fmt in api_formats if str(fmt).strip()}
+            )
+
+    return [aggregated[model_id] for model_id in ordered_ids]
+
+
+async def _run_key_fetch_workers(
+    key_ids: list[str],
+    *,
+    max_concurrent: int,
+    timeout_seconds: float,
+    running_predicate: Callable[[], bool],
+    fetch_one: Callable[[str], Awaitable[str]],
+    on_timeout: Callable[[str], None],
+    on_error: Callable[[str, str], None],
+) -> tuple[int, int, int]:
+    """用固定 worker 数处理 key，避免一次性创建大量协程导致内存峰值过高。"""
+    if not key_ids:
+        return 0, 0, 0
+
+    worker_count = max(1, min(max_concurrent, len(key_ids)))
+    key_queue: asyncio.Queue[str] = asyncio.Queue()
+    for key_id in key_ids:
+        key_queue.put_nowait(key_id)
+
+    async def _worker() -> tuple[int, int, int]:
+        success_count = 0
+        error_count = 0
+        skip_count = 0
+
+        while True:
+            if not running_predicate():
+                break
+
+            try:
+                key_id = key_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+            result = "error"
+            try:
+                if not running_predicate():
+                    result = "skip"
+                else:
+                    result = await asyncio.wait_for(fetch_one(key_id), timeout=timeout_seconds)
+            except TimeoutError:
+                logger.error(f"处理 Key {key_id} 超时（{timeout_seconds}s）")
+                on_timeout(key_id)
+                result = "error"
+            except Exception as exc:
+                logger.exception(f"处理 Key {key_id} 时出错")
+                on_error(key_id, str(exc))
+                result = "error"
+            finally:
+                key_queue.task_done()
+
+            if result == "success":
+                success_count += 1
+            elif result == "skip":
+                skip_count += 1
+            else:
+                error_count += 1
+
+        return success_count, error_count, skip_count
+
+    results = await asyncio.gather(*[asyncio.create_task(_worker()) for _ in range(worker_count)])
+
+    success_count = sum(success for success, _, _ in results)
+    error_count = sum(error for _, error, _ in results)
+    skip_count = sum(skip for _, _, skip in results)
+
+    # 停止过程中尚未消费的队列项统一计为 skip。
+    skip_count += key_queue.qsize()
+    return success_count, error_count, skip_count
+
+
 class ModelFetchScheduler:
     """模型自动获取调度器"""
 
@@ -200,7 +329,13 @@ class ModelFetchScheduler:
     async def _run_startup_task(self) -> None:
         """启动时执行的初始化任务"""
         try:
-            await asyncio.sleep(10)  # 等待系统完全启动
+            if not MODEL_FETCH_STARTUP_ENABLED:
+                logger.info("启动时模型自动获取已禁用（MODEL_FETCH_STARTUP_ENABLED=false）")
+                return
+
+            if MODEL_FETCH_STARTUP_DELAY_SECONDS > 0:
+                await asyncio.sleep(MODEL_FETCH_STARTUP_DELAY_SECONDS)
+
             if not self._running:
                 return
             logger.info("启动时执行首次模型获取...")
@@ -216,68 +351,96 @@ class ModelFetchScheduler:
         async with self._lock:
             await self._perform_fetch_all_keys()
 
+    def _list_auto_fetch_key_id_batch(
+        self,
+        *,
+        after_id: str | None = None,
+        limit: int = AUTO_FETCH_KEY_BATCH_SIZE,
+    ) -> list[str]:
+        """分批返回启用自动获取模型的 Key ID。"""
+        with create_session() as db:
+            query = db.query(ProviderAPIKey.id).filter(
+                ProviderAPIKey.auto_fetch_models == True,  # noqa: E712
+                ProviderAPIKey.is_active == True,  # noqa: E712
+            )
+            if after_id:
+                query = query.filter(ProviderAPIKey.id > after_id)
+            return [row[0] for row in query.order_by(ProviderAPIKey.id.asc()).limit(limit).all()]
+
     async def _perform_fetch_all_keys(self) -> None:
-        """获取所有启用自动获取的 Key 并拉取模型"""
+        """获取所有启用自动获取的 Key，并以固定批次/并发节奏拉取。"""
         logger.info("开始自动获取模型任务...")
 
-        # 统计信息
         success_count = 0
         error_count = 0
         skip_count = 0
+        total_count = 0
+        last_id: str | None = None
+        batch_index = 0
 
-        with create_session() as db:
-            # 查询所有启用了 auto_fetch_models 的 Key（只获取 ID 列表）
-            key_ids = [
-                row[0]
-                for row in db.query(ProviderAPIKey.id)
-                .filter(
-                    ProviderAPIKey.auto_fetch_models == True,  # noqa: E712
-                    ProviderAPIKey.is_active == True,  # noqa: E712
-                )
-                .all()
-            ]
+        while self._running:
+            key_ids = self._list_auto_fetch_key_id_batch(after_id=last_id)
+            if not key_ids:
+                break
 
-        if not key_ids:
+            batch_index += 1
+            total_count += len(key_ids)
+            last_id = key_ids[-1]
+            logger.info(
+                "自动获取模型任务处理第 {} 批 Key: {} 个",
+                batch_index,
+                len(key_ids),
+            )
+
+            batch_success, batch_error, batch_skip = await _run_key_fetch_workers(
+                key_ids,
+                max_concurrent=MAX_CONCURRENT_REQUESTS,
+                timeout_seconds=KEY_FETCH_TIMEOUT_SECONDS,
+                running_predicate=lambda: self._running,
+                fetch_one=self._fetch_models_for_key_by_id,
+                on_timeout=lambda key_id: self._update_key_error(
+                    key_id, f"Timeout after {KEY_FETCH_TIMEOUT_SECONDS}s"
+                ),
+                on_error=self._update_key_error,
+            )
+            success_count += batch_success
+            error_count += batch_error
+            skip_count += batch_skip
+
+            if len(key_ids) < AUTO_FETCH_KEY_BATCH_SIZE:
+                break
+
+            await asyncio.sleep(0)
+
+        if total_count == 0:
             logger.debug("没有启用自动获取模型的 Key")
             return
 
-        logger.info(f"找到 {len(key_ids)} 个启用自动获取模型的 Key")
-
-        # 逐个处理每个 Key，每个 Key 使用独立的数据库会话
-        for key_id in key_ids:
-            if not self._running:
-                logger.info("调度器已停止，中断模型获取任务")
-                break
-
-            try:
-                # 添加超时保护
-                result = await asyncio.wait_for(
-                    self._fetch_models_for_key_by_id(key_id),
-                    timeout=KEY_FETCH_TIMEOUT_SECONDS,
-                )
-                if result == "success":
-                    success_count += 1
-                elif result == "skip":
-                    skip_count += 1
-                else:
-                    error_count += 1
-            except TimeoutError:
-                logger.error(f"处理 Key {key_id} 超时（{KEY_FETCH_TIMEOUT_SECONDS}s）")
-                self._update_key_error(key_id, f"Timeout after {KEY_FETCH_TIMEOUT_SECONDS}s")
-                error_count += 1
-            except Exception:
-                logger.exception(f"处理 Key {key_id} 时出错")
-                error_count += 1
-
         logger.info(
-            f"自动获取模型任务完成: 成功={success_count}, 失败={error_count}, 跳过={skip_count}"
+            "自动获取模型任务完成: 总数={}, 成功={}, 失败={}, 跳过={}",
+            total_count,
+            success_count,
+            error_count,
+            skip_count,
         )
 
     def _update_key_error(self, key_id: str, error_msg: str) -> None:
         """更新 Key 的错误信息（独立事务）"""
         try:
             with create_session() as db:
-                key = db.query(ProviderAPIKey).filter(ProviderAPIKey.id == key_id).first()
+                key = (
+                    db.query(ProviderAPIKey)
+                    .options(
+                        defer(ProviderAPIKey.adjustment_history),
+                        defer(ProviderAPIKey.utilization_samples),
+                        defer(ProviderAPIKey.health_by_format),
+                        defer(ProviderAPIKey.circuit_breaker_by_format),
+                        defer(ProviderAPIKey.upstream_metadata),
+                        defer(ProviderAPIKey.allowed_models),
+                    )
+                    .filter(ProviderAPIKey.id == key_id)
+                    .first()
+                )
                 if key:
                     key.last_models_fetch_at = datetime.now(timezone.utc)
                     key.last_models_fetch_error = error_msg
@@ -377,7 +540,18 @@ class ModelFetchScheduler:
         with create_session() as db:
             key = (
                 db.query(ProviderAPIKey)
-                .options(joinedload(ProviderAPIKey.provider))
+                .options(
+                    load_only(
+                        ProviderAPIKey.id,
+                        ProviderAPIKey.is_active,
+                        ProviderAPIKey.auto_fetch_models,
+                        ProviderAPIKey.api_key,
+                        ProviderAPIKey.auth_type,
+                        ProviderAPIKey.auth_config,
+                        ProviderAPIKey.provider_id,
+                        ProviderAPIKey.proxy,
+                    ),
+                )
                 .filter(ProviderAPIKey.id == key_id)
                 .first()
             )
@@ -475,7 +649,18 @@ class ModelFetchScheduler:
 
         with create_session() as db:
             # 重新获取 Key（因为之前的连接已关闭）
-            key = db.query(ProviderAPIKey).filter(ProviderAPIKey.id == key_id).first()
+            # defer 不需要的大 JSON 字段，减少内存占用
+            key = (
+                db.query(ProviderAPIKey)
+                .options(
+                    defer(ProviderAPIKey.adjustment_history),
+                    defer(ProviderAPIKey.utilization_samples),
+                    defer(ProviderAPIKey.health_by_format),
+                    defer(ProviderAPIKey.circuit_breaker_by_format),
+                )
+                .filter(ProviderAPIKey.id == key_id)
+                .first()
+            )
             if not key:
                 logger.warning(f"Key {key_id} 在更新时不存在")
                 return "error"
@@ -513,16 +698,8 @@ class ModelFetchScheduler:
                 f"Provider {provider_name} Key {key.id} 获取到 {len(fetched_model_ids)} 个唯一模型"
             )
 
-            # 写入上游模型缓存（按 model id + api_format 去重后的完整模型信息）
-            seen_keys: set[str] = set()
-            unique_models: list[dict] = []
-            for model in all_models:
-                model_id = model.get("id")
-                api_format = model.get("api_format", "")
-                unique_key = f"{model_id}:{api_format}"
-                if model_id and unique_key not in seen_keys:
-                    seen_keys.add(unique_key)
-                    unique_models.append(model)
+            # 写入上游模型缓存（按 model id 聚合 api_formats，减少 Redis 内存占用）
+            unique_models = _aggregate_models_for_cache(all_models)
             await set_upstream_models_to_cache(provider_id, key.id, unique_models)
 
             # 更新 allowed_models（保留 locked_models）

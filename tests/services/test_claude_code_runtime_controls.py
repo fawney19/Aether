@@ -75,7 +75,12 @@ def test_get_ssl_context_for_unknown_profile_falls_back_to_default() -> None:
     assert get_ssl_context_for_profile("unknown_profile") is get_ssl_context()
 
 
-def test_wrap_request_masks_session_id_when_enabled() -> None:
+def test_wrap_request_masks_session_id_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Force local session control mode (avoid interference from Redis initialized by other tests)
+    monkeypatch.setattr(
+        "src.services.provider.adapters.claude_code.envelope._is_distributed_session_control_available",
+        lambda: False,
+    )
     scope_key = f"key:test-mask-{uuid.uuid4()}"
     set_claude_code_request_context(
         ClaudeCodeRequestContext(
@@ -117,7 +122,12 @@ def test_wrap_request_masks_session_id_when_enabled() -> None:
     assert tail1 == tail2
 
 
-def test_wrap_request_enforces_max_sessions() -> None:
+def test_wrap_request_enforces_max_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Force local session control mode (avoid interference from Redis initialized by other tests)
+    monkeypatch.setattr(
+        "src.services.provider.adapters.claude_code.envelope._is_distributed_session_control_available",
+        lambda: False,
+    )
     scope_key = f"key:test-limit-{uuid.uuid4()}"
     set_claude_code_request_context(
         ClaudeCodeRequestContext(
@@ -153,6 +163,11 @@ def test_wrap_request_enforces_max_sessions() -> None:
 
 
 def test_wrap_request_releases_expired_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Force local session control mode
+    monkeypatch.setattr(
+        "src.services.provider.adapters.claude_code.envelope._is_distributed_session_control_available",
+        lambda: False,
+    )
     scope_key = f"key:test-expire-{uuid.uuid4()}"
     set_claude_code_request_context(
         ClaudeCodeRequestContext(

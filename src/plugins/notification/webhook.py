@@ -52,6 +52,7 @@ class WebhookNotificationPlugin(NotificationPlugin):
 
         # 缓冲配置
         self._buffer: list[Notification] = []
+        self._buffer_max_size = config.get("buffer_max_size", 500) if config else 500
         self._lock = asyncio.Lock()
         self._session: aiohttp.ClientSession | None = None
         self._flush_task = None
@@ -199,6 +200,12 @@ class WebhookNotificationPlugin(NotificationPlugin):
         """
         # 添加到缓冲区
         async with self._lock:
+            # 缓冲区溢出保护：丢弃最旧的通知
+            if len(self._buffer) >= self._buffer_max_size:
+                drop_count = len(self._buffer) - self._buffer_max_size + 1
+                del self._buffer[:drop_count]
+                logger.warning("Webhook 通知缓冲区溢出，丢弃 {} 条旧通知", drop_count)
+
             self._buffer.append(notification)
 
             # 如果是严重通知，立即发送
@@ -307,6 +314,8 @@ class WebhookNotificationPlugin(NotificationPlugin):
     def __del__(self) -> None:
         """清理资源"""
         try:
-            asyncio.create_task(self.close())
-        except:
+            from src.utils.async_utils import safe_create_task
+
+            safe_create_task(self.close())
+        except Exception:
             pass

@@ -141,7 +141,7 @@ def test_delete_user_precleans_large_tables_before_final_delete(
         "src.services.user.service.UserCacheService.invalidate_user_cache",
         invalidate_user_cache,
     )
-    monkeypatch.setattr("src.services.user.service.asyncio.create_task", create_task)
+    monkeypatch.setattr("src.services.user.service.safe_create_task", create_task)
 
     assert UserService.delete_user(db, "user-3") is True
 

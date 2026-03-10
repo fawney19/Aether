@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from collections import deque
 from collections.abc import AsyncIterator
 from typing import Any
@@ -103,9 +102,11 @@ class StreamUsageTracker:
         self.cache_read_input_tokens = 0
         self.cache_creation_input_tokens_5m = 0
         self.cache_creation_input_tokens_1h = 0
-        self.accumulated_content = ""
+        self._accumulated_content_len = 0  # 仅记录长度，不存储实际文本
 
         # 完整响应跟踪（仅用于内部统计，不记录到数据库）
+        self._complete_response_content_chars = 0  # content 累计字符数
+        self._COMPLETE_RESPONSE_CONTENT_MAX_CHARS = 64 * 1024  # 64KB 上限
         self.complete_response = {
             "id": None,
             "type": "message",
@@ -173,7 +174,7 @@ class StreamUsageTracker:
         )
 
     def _update_complete_response(self, chunk: dict[str, Any]) -> None:
-        """根据响应块更新完整响应结构"""
+        """根据响应块更新完整响应结构（文本累积受 64KB 上限保护）"""
         try:
             # 更新响应ID
             if chunk.get("id"):
@@ -211,18 +212,26 @@ class StreamUsageTracker:
 
                 current_block = self.complete_response["content"][index]
 
+                # 超过上限后停止累积文本/JSON，仅保留前缀用于调试
+                over_limit = (
+                    self._complete_response_content_chars
+                    >= self._COMPLETE_RESPONSE_CONTENT_MAX_CHARS
+                )
+
                 if delta.get("type") == "text_delta":
                     # 文本增量
-                    if current_block.get("type") == "text":
-                        current_block["text"] = current_block.get("text", "") + delta.get(
-                            "text", ""
-                        )
+                    text = delta.get("text", "")
+                    self._complete_response_content_chars += len(text)
+                    if not over_limit and current_block.get("type") == "text":
+                        current_block["text"] = current_block.get("text", "") + text
                 elif delta.get("type") == "input_json_delta":
                     # 工具调用输入增量
-                    if current_block.get("type") == "tool_use":
+                    partial = delta.get("partial_json", "")
+                    self._complete_response_content_chars += len(partial)
+                    if not over_limit and current_block.get("type") == "tool_use":
                         current_input = current_block.get("input", {})
                         if isinstance(current_input, str):
-                            current_input += delta.get("partial_json", "")
+                            current_input += partial
                         current_block["input"] = current_input
 
             elif event_type == "content_block_stop":
@@ -543,9 +552,9 @@ class StreamUsageTracker:
                 content, usage = self.parse_stream_chunk(chunk)
 
                 if content:
-                    self.accumulated_content += content
+                    self._accumulated_content_len += len(content)
                     # 实时估算输出tokens
-                    self.output_tokens = max(1, len(self.accumulated_content) // 4)
+                    self.output_tokens = max(1, self._accumulated_content_len // 4)
 
                 if usage:
                     # 如果响应中包含准确的usage信息，使用它
@@ -569,7 +578,7 @@ class StreamUsageTracker:
 
             logger.debug(
                 f"ID:{self.request_id} | 流式响应结束 | 共处理{chunk_count}个chunks | "
-                f"累积内容长度:{len(self.accumulated_content)} | 输出tokens:{self.output_tokens}"
+                f"累积内容长度:{self._accumulated_content_len} | 输出tokens:{self.output_tokens}"
             )
 
             # 检查是否收到了有效数据
@@ -643,8 +652,8 @@ class StreamUsageTracker:
                 response_time_ms = None
 
             # 如果没有准确的token计数，使用估算值
-            if self.output_tokens == 0 and self.accumulated_content:
-                self.output_tokens = max(1, len(self.accumulated_content) // 4)
+            if self.output_tokens == 0 and self._accumulated_content_len > 0:
+                self.output_tokens = max(1, self._accumulated_content_len // 4)
 
             # 使用完整的响应体（包含所有信息，包括工具调用）
             # 更新最终的usage信息
@@ -668,7 +677,7 @@ class StreamUsageTracker:
                     "stream": True,
                     "total_chunks": total_chunks,
                     "stored_chunks": stored_chunks,
-                    "content_length": len(self.accumulated_content),
+                    "content_length": self._accumulated_content_len,
                     "response_time_ms": response_time_ms,
                 }
                 if stored_chunks < total_chunks:
@@ -782,7 +791,7 @@ class StreamUsageTracker:
                 response_time_ms=response_time_ms,
                 status_code=self.status_code,  # 使用实际的状态码
                 error_message=self.error_message,  # 使用实际的错误消息
-                metadata={"stream": True, "content_length": len(self.accumulated_content)},
+                metadata={"stream": True, "content_length": self._accumulated_content_len},
                 request_body=self.request_data,
                 request_headers=self.request_headers,
                 provider_request_headers=self.provider_request_headers,
@@ -937,13 +946,14 @@ class EnhancedStreamUsageTracker(StreamUsageTracker):
             except Exception as e:
                 logger.warning(f"Token encoding failed: {e}")
 
-        # 回退到估算方法
-        # 中文字符通常是2个token，英文单词约1.3个token
-        chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", text))
-        english_words = len(re.findall(r"\b\w+\b", text))
+        # 回退到基于长度的估算
+        return self.count_tokens_by_len(len(text))
 
-        estimated_tokens = chinese_chars * 2 + english_words * 1.3
-        return max(1, int(estimated_tokens))
+    @staticmethod
+    def count_tokens_by_len(text_len: int) -> int:
+        """基于文本长度估算 token 数（避免持有完整文本）"""
+        # 混合语言平均约 3 字符/token
+        return max(1, text_len // 3)
 
     def estimate_input_tokens(self, messages: list) -> int:
         """
@@ -1048,9 +1058,9 @@ class EnhancedStreamUsageTracker(StreamUsageTracker):
                 content, usage = self.parse_stream_chunk(chunk)
 
                 if content:
-                    self.accumulated_content += content
+                    self._accumulated_content_len += len(content)
                     # 使用更准确的方法计算输出tokens
-                    self.output_tokens = self.count_tokens(self.accumulated_content)
+                    self.output_tokens = self.count_tokens_by_len(self._accumulated_content_len)
 
                 if usage:
                     # 如果响应中包含准确的usage信息，优先使用
@@ -1069,7 +1079,7 @@ class EnhancedStreamUsageTracker(StreamUsageTracker):
 
             logger.debug(
                 f"ID:{self.request_id} | 流式响应结束 | 共处理{chunk_count}个chunks | "
-                f"累积内容长度:{len(self.accumulated_content)} | 输出tokens:{self.output_tokens}"
+                f"累积内容长度:{self._accumulated_content_len} | 输出tokens:{self.output_tokens}"
             )
 
             # 检查是否收到了有效数据

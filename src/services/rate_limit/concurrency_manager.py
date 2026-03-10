@@ -521,13 +521,12 @@ class ConcurrencyManager:
 
                 # 记录槽位占用时长分布
                 concurrency_slot_duration_seconds.labels(
-                    key_id=key_id[:8] if key_id else "unknown",  # 只记录前8位
                     exception=str(exception_occurred),
                 ).observe(slot_duration)
 
                 # 记录槽位释放计数
                 concurrency_slot_release_total.labels(
-                    key_id=key_id[:8] if key_id else "unknown", exception=str(exception_occurred)
+                    exception=str(exception_occurred),
                 ).inc()
 
                 # 告警：槽位占用时间过长（超过 60 秒）

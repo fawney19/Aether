@@ -26,7 +26,7 @@ class Config:
         self.port = int(os.getenv("PORT", "8084"))
         self.log_level = os.getenv("LOG_LEVEL", "INFO")
         self.worker_processes = int(
-            os.getenv("WEB_CONCURRENCY", os.getenv("GUNICORN_WORKERS", "4"))
+            os.getenv("WEB_CONCURRENCY", os.getenv("GUNICORN_WORKERS", "1"))
         )
 
         # PostgreSQL 连接池计算相关配置
@@ -315,6 +315,12 @@ class Config:
         # 每个用户最多可创建的 Management Token 数量
         self.management_token_max_per_user = int(os.getenv("MANAGEMENT_TOKEN_MAX_PER_USER", "20"))
 
+        # 启动任务开关
+        # MAINTENANCE_STARTUP_TASKS_ENABLED: 是否在启动时执行维护调度器初始化任务（清理、统计回填等）
+        self.maintenance_startup_tasks_enabled = (
+            os.getenv("MAINTENANCE_STARTUP_TASKS_ENABLED", "true").lower() == "true"
+        )
+
         # API 文档配置
         # DOCS_ENABLED: 是否启用 API 文档（/docs, /redoc, /openapi.json）
         #   - 未设置: 开发环境启用，生产环境禁用
@@ -342,7 +348,7 @@ class Config:
         per_worker_total = available_connections // max(self.worker_processes, 1)
         # pool_size 取总数的一半，另一半留给 overflow
         pool_size = max(per_worker_total // 2, 5)  # 最小 5 个连接
-        return min(pool_size, 30)  # 最大 30 个连接
+        return min(pool_size, 15)  # 最大 15 个连接
 
     def _auto_max_overflow(self) -> int:
         """智能计算最大溢出连接数 - 与 pool_size 相同"""
@@ -358,21 +364,17 @@ class Config:
         3. 需要为数据库连接、Redis 连接等预留资源
 
         公式: base_connections / workers
-        - 单 Worker: 200 连接（适合开发/低负载）
+        - 单 Worker: 100 连接
         - 多 Worker: 按比例分配，确保总数不超过系统限制
 
-        范围: 50 - 500
+        范围: 30 - 100
         """
-        # 基础连接数：假设系统可用 socket 约 800 个用于 HTTP
-        # （预留给 DB、Redis、内部服务等）
-        base_connections = 800
+        base_connections = 100
         workers = max(self.worker_processes, 1)
 
-        # 每个 Worker 分配的连接数
         per_worker = base_connections // workers
 
-        # 限制范围：最小 50（保证基本并发），最大 500（避免资源耗尽）
-        return max(50, min(per_worker, 500))
+        return max(30, min(per_worker, 100))
 
     def _auto_http_keepalive_connections(self) -> int:
         """

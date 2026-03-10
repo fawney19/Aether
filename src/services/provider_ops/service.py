@@ -488,7 +488,9 @@ class ProviderOpsService:
             # 有缓存，可选触发后台刷新
             if trigger_refresh:
                 # 后台任务内部已处理异常并记录日志，无需额外回调
-                asyncio.create_task(self._refresh_balance_async(provider_id))
+                from src.utils.async_utils import safe_create_task
+
+                safe_create_task(self._refresh_balance_async(provider_id))
             return cached
 
         # 没有缓存
@@ -499,7 +501,9 @@ class ProviderOpsService:
         else:
             # 仅触发异步刷新，立即返回
             logger.debug("余额缓存未命中，触发异步刷新: provider_id={}", provider_id)
-            asyncio.create_task(self._refresh_balance_async(provider_id))
+            from src.utils.async_utils import safe_create_task
+
+            safe_create_task(self._refresh_balance_async(provider_id))
             return ActionResult(
                 status=ActionStatus.PENDING,
                 action_type=ProviderActionType.QUERY_BALANCE,

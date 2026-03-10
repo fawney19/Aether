@@ -35,6 +35,9 @@ class _FakeQuery:
         self._first_result = first_result
         self._all_result = all_result or []
 
+    def options(self, *args: Any, **kwargs: Any) -> _FakeQuery:
+        return self
+
     def filter(self, *args: Any, **kwargs: Any) -> _FakeQuery:
         return self
 

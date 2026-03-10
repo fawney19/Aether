@@ -12,8 +12,6 @@ def test_export_user_api_key_prefers_plaintext_key() -> None:
         key_encrypted=crypto_service.encrypt(plaintext_key),
         name="Demo Key",
         is_standalone=False,
-        balance_used_usd=1.5,
-        current_balance_usd=8.5,
         is_active=True,
     )
 

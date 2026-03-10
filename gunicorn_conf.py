@@ -1,7 +1,9 @@
 # Gunicorn configuration file
+from __future__ import annotations
 
 import gc
 import os
+from typing import Any
 
 # worker 心跳超时（秒）：异步 worker 在此时间内必须向 arbiter 发送心跳
 # 对于 UvicornWorker，事件循环偶发阻塞（GC、同步 IO）可能延迟心跳
@@ -13,21 +15,31 @@ timeout = int(os.getenv("GUNICORN_TIMEOUT", "300"))
 graceful_timeout = int(os.getenv("GUNICORN_GRACEFUL_TIMEOUT", "120"))
 
 
-def when_ready(server):
-    """
-    Called just after the server is started.
-    Freeze GC before forking workers to optimize Copy-on-Write memory sharing.
-    """
-    gc.freeze()
-    server.log.info("GC frozen for Copy-on-Write optimization")
-    server.log.info(f"Objects in permanent generation: {gc.get_freeze_count()}")
-
-
-def post_fork(server, worker):
+def _log_current_rss(log: Any, message: str) -> None:
     try:
         import resource
 
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        server.log.info(f"Worker {worker.pid} RSS after fork: {rss} KB")
+        log.info(f"{message}: {rss} KB")
     except ImportError:
-        pass  # Windows 不支持 resource 模块
+        pass
+
+
+def when_ready(server: Any) -> None:
+    """
+    Called just after the server is started.
+    Freeze GC before forking workers to optimize Copy-on-Write memory sharing.
+    """
+    collected = gc.collect()
+    gc.freeze()
+    server.log.info(f"GC collected {collected} unreachable objects before freeze")
+    server.log.info("GC frozen for Copy-on-Write optimization")
+    server.log.info(f"Objects in permanent generation: {gc.get_freeze_count()}")
+
+
+def post_fork(server: Any, worker: Any) -> None:
+    _log_current_rss(server.log, f"Worker {worker.pid} RSS after fork")
+
+
+def post_worker_init(worker: Any) -> None:
+    _log_current_rss(worker.log, f"Worker {worker.pid} RSS after app init")

@@ -316,11 +316,10 @@ class CacheAwareScheduler:
                     continue
 
                 logger.debug(
-                    "  └─ 选择 Provider={}, Endpoint={}..., "
-                    "Key=***{}, 缓存命中={}, 并发状态[{}]",
+                    "  └─ 选择 Provider={}, Endpoint={}..., " "Key={}, 缓存命中={}, 并发状态[{}]",
                     provider.name,
                     endpoint.id[:8],
-                    key.api_key[-4:],
+                    key.name,
                     is_cached_user,
                     snapshot.describe(),
                 )
@@ -669,13 +668,13 @@ class CacheAwareScheduler:
                         "检测到缓存亲和性: affinity_key={}..., "
                         "api_format={}, global_model_id={}..., "
                         "provider={}, endpoint={}..., "
-                        "provider_key=***{}, 使用次数={}",
+                        "provider_key={}, 使用次数={}",
                         affinity_key[:8],
                         api_format_str,
                         global_model_id[:8],
                         provider.name,
                         endpoint.id[:8],
-                        key.api_key[-4:],
+                        key.name,
                         affinity.request_count,
                     )
                 else:

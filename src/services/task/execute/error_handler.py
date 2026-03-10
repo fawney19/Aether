@@ -55,7 +55,6 @@ class TaskErrorOperationsService:
         *,
         converted_error: Any,
         provider_type: str | None,
-        model_name: str | None,
         request_id: str | None,
         candidate_record_id: str,
         elapsed_ms: int,
@@ -141,7 +140,6 @@ class TaskErrorOperationsService:
 
                     antigravity_degradation_total.labels(
                         stage=stage_label,
-                        model=str(model_name or "unknown"),
                     ).inc()
                 except Exception:
                     pass
@@ -420,7 +418,6 @@ class TaskErrorOperationsService:
                 action = self.handle_thinking_signature_error(
                     converted_error=converted_error,
                     provider_type=str(getattr(provider, "provider_type", "") or "").lower(),
-                    model_name=str(global_model_id or ""),
                     request_id=request_id,
                     candidate_record_id=candidate_record_id,
                     elapsed_ms=elapsed_ms,

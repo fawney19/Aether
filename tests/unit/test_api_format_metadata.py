@@ -27,8 +27,9 @@ def test_get_default_body_rules_for_endpoint_returns_codex_cli_rules_only() -> N
     assert cli_rules[4]["path"] == "instructions"
     assert cli_rules[4]["condition"]["op"] == "not_exists"
 
+    # openai:compact also has the same default body rules (defined in EndpointDefinition)
     compact_rules = get_default_body_rules_for_endpoint("openai:compact", provider_type="codex")
-    assert compact_rules == []
+    assert len(compact_rules) == 5
 
 
 def test_get_default_body_rules_for_endpoint_returns_deep_copy(

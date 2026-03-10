@@ -996,7 +996,7 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
 
                     provider_id = record.get("provider_id")
                     if charge_applied and provider_id:
-                        actual_cost = usage_params.get("actual_total_cost_usd", 0)
+                        actual_cost = float(usage_params.get("actual_total_cost_usd", 0))
                         provider_costs[provider_id] += actual_cost
 
                     if api_key:
@@ -1057,7 +1057,7 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
 
                     provider_id = record.get("provider_id")
                     if charge_applied and provider_id:
-                        actual_cost = usage_params.get("actual_total_cost_usd", 0)
+                        actual_cost = float(usage_params.get("actual_total_cost_usd", 0))
                         provider_costs[provider_id] += actual_cost
 
                     # API Key 统计

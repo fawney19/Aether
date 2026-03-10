@@ -56,6 +56,19 @@ def _to_decimal(value: object | None) -> Decimal:
     return Decimal(str(value)).quantize(_MONEY_QUANT, rounding=ROUND_HALF_UP)
 
 
+# NUMERIC(20, 8) -> 整数部分最多 12 位 -> 绝对值上限
+_NUMERIC_20_8_CAP = Decimal("999999999999.99999999")
+
+
+def _clamp(value: Decimal) -> Decimal:
+    """Clamp a Decimal to fit NUMERIC(20, 8) range."""
+    if value > _NUMERIC_20_8_CAP:
+        return _NUMERIC_20_8_CAP
+    if value < -_NUMERIC_20_8_CAP:
+        return -_NUMERIC_20_8_CAP
+    return value
+
+
 def _insert_wallet(
     conn: sa.Connection,
     *,
@@ -191,6 +204,11 @@ def _backfill_wallets(conn: sa.Connection) -> None:
         total_adjusted = Decimal("0") if is_unlimited else max(quota, Decimal("0"))
         total_consumed = max(total if total > 0 else used, Decimal("0"))
 
+        recharge_balance = _clamp(recharge_balance)
+        gift_balance = _clamp(gift_balance)
+        total_adjusted = _clamp(total_adjusted)
+        total_consumed = _clamp(total_consumed)
+
         total_balance = recharge_balance + gift_balance
         wallet_id = _insert_wallet(
             conn,
@@ -208,7 +226,7 @@ def _backfill_wallets(conn: sa.Connection) -> None:
         _insert_wallet_migration_tx(
             conn,
             wallet_id=wallet_id,
-            balance=total_balance,
+            balance=_clamp(total_balance),
             recharge_balance=recharge_balance,
             gift_balance=gift_balance,
             created_at=row["created_at"],
@@ -235,7 +253,9 @@ def _backfill_wallets(conn: sa.Connection) -> None:
 
         current_balance = _to_decimal(row["current_balance_usd"])
         used_balance = _to_decimal(row["balance_used_usd"])
-        recharge_balance = current_balance - used_balance
+        recharge_balance = _clamp(current_balance - used_balance)
+        total_recharged = _clamp(max(current_balance, Decimal("0")))
+        total_consumed = _clamp(max(used_balance, Decimal("0")))
 
         wallet_id = _insert_wallet(
             conn,
@@ -244,8 +264,8 @@ def _backfill_wallets(conn: sa.Connection) -> None:
             balance=recharge_balance,
             gift_balance=Decimal("0"),
             limit_mode="finite",
-            total_recharged=max(current_balance, Decimal("0")),
-            total_consumed=max(used_balance, Decimal("0")),
+            total_recharged=total_recharged,
+            total_consumed=total_consumed,
             total_adjusted=Decimal("0"),
             created_at=row["created_at"],
             updated_at=row["updated_at"],

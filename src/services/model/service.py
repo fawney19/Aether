@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-import asyncio
-
 from sqlalchemy import and_, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -17,6 +15,7 @@ from src.models.database import Model, Provider
 from src.services.cache.invalidation import get_cache_invalidation_service
 from src.services.cache.model_cache import ModelCacheService
 from src.services.cache.model_list_cache import invalidate_models_list_cache
+from src.utils.async_utils import safe_create_task
 
 
 class ModelService:
@@ -81,7 +80,7 @@ class ModelService:
             # 清除 Redis 缓存（异步执行，不阻塞返回）
             # 重要：新增模型可能需要清除 resolver 的 NOT_FOUND 负缓存（global_model:resolve:*），
             # 否则请求链路在 TTL 内可能无法立刻解析到新模型。
-            asyncio.create_task(
+            safe_create_task(
                 ModelCacheService.invalidate_model_cache(
                     model_id=model.id,
                     provider_id=model.provider_id,
@@ -97,7 +96,7 @@ class ModelService:
                 cache_service.on_model_changed(model.provider_id, model.global_model_id)
 
             # 清除 /v1/models 列表缓存
-            asyncio.create_task(invalidate_models_list_cache())
+            safe_create_task(invalidate_models_list_cache())
 
             return model
 
@@ -199,7 +198,7 @@ class ModelService:
 
             # 清除 Redis 缓存（异步执行，不阻塞返回）
             # 先清除旧的映射缓存
-            asyncio.create_task(
+            safe_create_task(
                 ModelCacheService.invalidate_model_cache(
                     model_id=model.id,
                     provider_id=model.provider_id,
@@ -214,7 +213,7 @@ class ModelService:
                 or model.provider_model_mappings != old_provider_model_mappings
                 or model.global_model_id != old_global_model_id
             ):
-                asyncio.create_task(
+                safe_create_task(
                     ModelCacheService.invalidate_model_cache(
                         model_id=model.id,
                         provider_id=model.provider_id,
@@ -230,7 +229,7 @@ class ModelService:
                 cache_service.on_model_changed(model.provider_id, model.global_model_id)
 
             # 清除 /v1/models 列表缓存
-            asyncio.create_task(invalidate_models_list_cache())
+            safe_create_task(invalidate_models_list_cache())
 
             logger.info(
                 f"更新模型成功: id={model_id}, 最终 supports_vision: {model.supports_vision}, supports_function_calling: {model.supports_function_calling}, supports_extended_thinking: {model.supports_extended_thinking}"
@@ -286,7 +285,7 @@ class ModelService:
             db.commit()
 
             # 清除 Redis 缓存
-            asyncio.create_task(
+            safe_create_task(
                 ModelCacheService.invalidate_model_cache(
                     model_id=cache_info["model_id"],
                     provider_id=cache_info["provider_id"],
@@ -304,7 +303,7 @@ class ModelService:
                 )
 
             # 清除 /v1/models 列表缓存
-            asyncio.create_task(invalidate_models_list_cache())
+            safe_create_task(invalidate_models_list_cache())
 
             logger.info(
                 f"删除模型成功: id={model_id}, provider_model_name={cache_info['provider_model_name']}, "
@@ -327,7 +326,7 @@ class ModelService:
         db.refresh(model)
 
         # 清除 Redis 缓存
-        asyncio.create_task(
+        safe_create_task(
             ModelCacheService.invalidate_model_cache(
                 model_id=model.id,
                 provider_id=model.provider_id,
@@ -343,7 +342,7 @@ class ModelService:
             cache_service.on_model_changed(model.provider_id, model.global_model_id)
 
         # 清除 /v1/models 列表缓存
-        asyncio.create_task(invalidate_models_list_cache())
+        safe_create_task(invalidate_models_list_cache())
 
         status = "可用" if is_available else "不可用"
         logger.info(f"更新模型可用状态: id={model_id}, status={status}")
@@ -413,7 +412,7 @@ class ModelService:
                 # 清除 Redis 缓存（异步执行，不阻塞返回）
                 # 逐个清除 resolver 的映射缓存，避免 NOT_FOUND 负缓存阻塞新模型生效。
                 for model in created_models:
-                    asyncio.create_task(
+                    safe_create_task(
                         ModelCacheService.invalidate_model_cache(
                             model_id=model.id,
                             provider_id=model.provider_id,
@@ -428,7 +427,7 @@ class ModelService:
                 cache_service.on_model_changed(provider_id, created_models[0].global_model_id)
 
                 # 清除 /v1/models 列表缓存
-                asyncio.create_task(invalidate_models_list_cache())
+                safe_create_task(invalidate_models_list_cache())
             except IntegrityError as e:
                 db.rollback()
                 logger.error(f"批量创建模型失败: {str(e)}")

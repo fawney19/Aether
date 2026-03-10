@@ -39,6 +39,7 @@ class PrometheusPlugin(MonitorPlugin):
 
         # 指标注册表
         self._metrics: dict[str, Any] = {}
+        self._max_dynamic_metrics: int = 100  # 动态创建的指标数上限
         self._buffer: list[Metric] = []
         self._lock = asyncio.Lock()
         self._flush_task: asyncio.Task | None = None  # 跟踪后台任务
@@ -73,21 +74,19 @@ class PrometheusPlugin(MonitorPlugin):
             http_label_names,
         )
 
-        # Token使用指标
+        # Token使用指标（仅按 provider 维度聚合，避免 provider x model 笛卡尔积导致基数爆炸）
         self._metrics["tokens_input_total"] = Counter(
-            "tokens_input_total", "Total input tokens", ["provider", "model"]
+            "tokens_input_total", "Total input tokens", ["provider"]
         )
 
         self._metrics["tokens_output_total"] = Counter(
-            "tokens_output_total", "Total output tokens", ["provider", "model"]
+            "tokens_output_total", "Total output tokens", ["provider"]
         )
 
-        self._metrics["tokens_total"] = Counter(
-            "tokens_total", "Total tokens", ["provider", "model"]
-        )
+        self._metrics["tokens_total"] = Counter("tokens_total", "Total tokens", ["provider"])
 
         self._metrics["usage_cost_total"] = Counter(
-            "usage_cost_total", "Total usage cost in USD", ["provider", "model"]
+            "usage_cost_total", "Total usage cost in USD", ["provider"]
         )
 
         # 系统指标
@@ -111,7 +110,7 @@ class PrometheusPlugin(MonitorPlugin):
         self._metrics["provider_latency_seconds"] = Histogram(
             "provider_latency_seconds",
             "Provider response latency in seconds",
-            ["provider", "model"],
+            ["provider"],
             buckets=(0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30),
         )
 
@@ -140,9 +139,12 @@ class PrometheusPlugin(MonitorPlugin):
 
     def _get_or_create_metric(
         self, name: str, metric_type: MetricType, labels: list[str] | None = None
-    ) -> Any:
-        """获取或创建指标"""
+    ) -> Any | None:
+        """获取或创建指标，超过上限后拒绝创建新指标"""
         if name not in self._metrics:
+            if len(self._metrics) >= self._max_dynamic_metrics:
+                logger.warning("Prometheus dynamic metrics limit reached, dropping: {}", name)
+                return None
             labels = labels or []
             if metric_type == MetricType.COUNTER:
                 self._metrics[name] = Counter(name, f"Auto-created counter {name}", labels)
@@ -153,7 +155,7 @@ class PrometheusPlugin(MonitorPlugin):
             elif metric_type == MetricType.SUMMARY:
                 self._metrics[name] = Summary(name, f"Auto-created summary {name}", labels)
 
-        return self._metrics[name]
+        return self._metrics.get(name)
 
     async def record_metric(self, metric: Metric) -> None:
         """记录单个指标"""
@@ -190,6 +192,8 @@ class PrometheusPlugin(MonitorPlugin):
                 # 创建新的计数器
                 label_names = list(labels.keys()) if labels else []
                 metric = self._get_or_create_metric(name, MetricType.COUNTER, label_names)
+                if metric is None:
+                    return
                 if labels:
                     metric.labels(**labels).inc(value)
                 else:
@@ -212,6 +216,8 @@ class PrometheusPlugin(MonitorPlugin):
                 # 创建新的仪表
                 label_names = list(labels.keys()) if labels else []
                 metric = self._get_or_create_metric(name, MetricType.GAUGE, label_names)
+                if metric is None:
+                    return
                 if labels:
                     metric.labels(**labels).set(value)
                 else:
@@ -239,11 +245,15 @@ class PrometheusPlugin(MonitorPlugin):
                 # 创建新的直方图
                 label_names = list(labels.keys()) if labels else []
                 if buckets:
+                    if len(self._metrics) >= self._max_dynamic_metrics:
+                        return
                     metric = Histogram(
                         name, f"Auto-created histogram {name}", label_names, buckets=buckets
                     )
                 else:
                     metric = self._get_or_create_metric(name, MetricType.HISTOGRAM, label_names)
+                if metric is None:
+                    return
                 self._metrics[name] = metric
 
                 if labels:

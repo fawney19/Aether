@@ -35,6 +35,11 @@ _session_runtime_lock = threading.Lock()
 _active_sessions: dict[str, dict[str, float]] = {}
 # key: scope_key -> (masked_session_uuid, expire_at_monotonic)
 _masked_sessions: dict[str, tuple[str, float]] = {}
+# 上限保护：scope_key 总数超过此值时触发全局清理
+_MAX_SCOPE_KEYS = 5000
+# 全局清理间隔（monotonic 秒），避免高频请求时每次都做全局扫描
+_LAST_GLOBAL_CLEANUP: float = 0.0
+_GLOBAL_CLEANUP_INTERVAL = 300.0  # 5 分钟
 _REDIS_SESSION_KEY_PREFIX = "claude_code:sessions"
 _REDIS_SESSION_RESERVE_LUA = """
 local key = KEYS[1]
@@ -289,6 +294,40 @@ def _apply_cache_ttl_override(request_body: dict[str, Any], target: str) -> None
         logger.debug("Cache TTL override: {} block(s) -> {}", overridden, target)
 
 
+def _cleanup_stale_scope_keys(now: float, idle_seconds: int) -> None:
+    """清理空 bucket 和过期的 _masked_sessions 条目（调用方须持有锁）。"""
+    global _LAST_GLOBAL_CLEANUP
+
+    if now - _LAST_GLOBAL_CLEANUP < _GLOBAL_CLEANUP_INTERVAL:
+        return
+    _LAST_GLOBAL_CLEANUP = now
+
+    # 清理所有 scope_key 下的过期 session，并删除空 bucket
+    stale_keys = []
+    for sk, bucket in _active_sessions.items():
+        expired = [sid for sid, ts in bucket.items() if now - ts > idle_seconds]
+        for sid in expired:
+            bucket.pop(sid, None)
+        if not bucket:
+            stale_keys.append(sk)
+    for sk in stale_keys:
+        _active_sessions.pop(sk, None)
+
+    # 清理过期的 masked session 条目
+    expired_masked = [sk for sk, (_, exp) in _masked_sessions.items() if exp <= now]
+    for sk in expired_masked:
+        _masked_sessions.pop(sk, None)
+
+    total = len(_active_sessions) + len(_masked_sessions)
+    if total > 0 and (stale_keys or expired_masked):
+        logger.debug(
+            "Session 全局清理: 移除 {} 个 active scope + {} 个 masked scope, 剩余 {}",
+            len(stale_keys),
+            len(expired_masked),
+            total,
+        )
+
+
 def _register_or_reject_session(
     *,
     scope_key: str,
@@ -300,9 +339,16 @@ def _register_or_reject_session(
     idle_seconds = max(60, int(idle_timeout_minutes * 60))
 
     with _session_runtime_lock:
+        # scope_key 总数超限或达到清理间隔时，执行全局清理
+        if (
+            len(_active_sessions) + len(_masked_sessions) > _MAX_SCOPE_KEYS
+            or now - _LAST_GLOBAL_CLEANUP >= _GLOBAL_CLEANUP_INTERVAL
+        ):
+            _cleanup_stale_scope_keys(now, idle_seconds)
+
         bucket = _active_sessions.setdefault(scope_key, {})
 
-        # 先清理过期会话，避免误判占用。
+        # 先清理当前 bucket 的过期会话，避免误判占用。
         expired = [sid for sid, last_seen in bucket.items() if now - last_seen > idle_seconds]
         for sid in expired:
             bucket.pop(sid, None)

@@ -92,20 +92,14 @@ class _DeleteKeyResult:
 def _run_async_with_fallback(coro: Any) -> None:
     """在同步上下文中执行异步任务（有事件循环则调度，无则阻塞执行）。"""
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         asyncio.run(coro)
         return
 
-    task = loop.create_task(coro)
+    from src.utils.async_utils import safe_create_task
 
-    def _log_task_error(done_task: asyncio.Task[Any]) -> None:
-        try:
-            done_task.result()
-        except Exception as exc:
-            logger.warning("异步缓存失效任务执行失败: {}", exc)
-
-    task.add_done_callback(_log_task_error)
+    safe_create_task(coro)
 
 
 async def _invalidate_cache_after_clear_oauth_invalid(key_id: str) -> None:

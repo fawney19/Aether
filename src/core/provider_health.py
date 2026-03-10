@@ -110,6 +110,16 @@ class ProviderHealthTracker:
             if all(current_time - t > self.recovery_time for t in self.successes[provider_name]):
                 self.priority_adjustments[provider_name] = 0
 
+        # 清理已无记录且无优先级调整的 key，防止 dict 无限增长
+        if (
+            not self.failures[provider_name]
+            and not self.successes[provider_name]
+            and self.priority_adjustments.get(provider_name, 0) == 0
+        ):
+            self.failures.pop(provider_name, None)
+            self.successes.pop(provider_name, None)
+            self.priority_adjustments.pop(provider_name, None)
+
     def _get_status_label(self, failure_rate: float, recent_failures: int) -> str:
         """根据失败率返回状态标签"""
         if recent_failures >= self.failure_threshold:

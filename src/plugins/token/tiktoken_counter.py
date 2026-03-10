@@ -22,11 +22,12 @@ except ImportError:  # pragma: no cover
     tiktoken = None
 
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=4)
 def _get_encoder_cached(model: str) -> Any:
     """全局编码器缓存。
 
     目的：避免在多实例/多请求场景下重复初始化 tiktoken 编码器。
+    实际只有 cl100k_base / o200k_base / p50k_base 等少数几种编码，4 个足够。
     """
     if not TIKTOKEN_AVAILABLE:
         raise RuntimeError("tiktoken not installed")

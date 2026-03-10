@@ -40,7 +40,7 @@ async def test_trace_attached_to_first_candidate() -> None:
         patch(
             "src.services.provider.pool.redis_ops.batch_get_cooldowns",
             new_callable=AsyncMock,
-            return_value={"key-1": (None, None), "key-2": (None, None)},
+            return_value={"key-1": None, "key-2": None},
         ),
         patch(
             "src.services.provider.pool.redis_ops.get_lru_scores",
@@ -72,7 +72,7 @@ async def test_pool_extra_data_on_selected_candidate() -> None:
         patch(
             "src.services.provider.pool.redis_ops.batch_get_cooldowns",
             new_callable=AsyncMock,
-            return_value={"key-1": (None, None)},
+            return_value={"key-1": None},
         ),
         patch(
             "src.services.provider.pool.redis_ops.get_lru_scores",
@@ -103,8 +103,8 @@ async def test_pool_extra_data_on_skipped_candidate() -> None:
             "src.services.provider.pool.redis_ops.batch_get_cooldowns",
             new_callable=AsyncMock,
             return_value={
-                "key-1": ("rate_limited_429", 120),
-                "key-2": (None, None),
+                "key-1": "rate_limited_429",
+                "key-2": None,
             },
         ),
         patch(
@@ -122,7 +122,8 @@ async def test_pool_extra_data_on_skipped_candidate() -> None:
     assert extra is not None
     assert extra["pool_skip"]["type"] == "cooldown"
     assert extra["pool_skip"]["cooldown_reason"] == "rate_limited_429"
-    assert extra["pool_skip"]["cooldown_ttl"] == 120
+    # TTL is not fetched on the scheduling hot path (include_ttl=False)
+    assert "cooldown_ttl" not in extra["pool_skip"]
 
 
 @pytest.mark.asyncio
@@ -142,9 +143,9 @@ async def test_trace_build_summary_matches() -> None:
             "src.services.provider.pool.redis_ops.batch_get_cooldowns",
             new_callable=AsyncMock,
             return_value={
-                "key-1": ("overloaded_529", 60),
-                "key-2": (None, None),
-                "key-3": (None, None),
+                "key-1": "overloaded_529",
+                "key-2": None,
+                "key-3": None,
             },
         ),
         patch(
@@ -181,7 +182,7 @@ async def test_trace_build_summary_uses_attempted_key_ids_when_provided() -> Non
         patch(
             "src.services.provider.pool.redis_ops.batch_get_cooldowns",
             new_callable=AsyncMock,
-            return_value={"key-1": (None, None), "key-2": (None, None)},
+            return_value={"key-1": None, "key-2": None},
         ),
         patch(
             "src.services.provider.pool.redis_ops.get_lru_scores",
@@ -218,7 +219,7 @@ async def test_sticky_trace_info() -> None:
         patch(
             "src.services.provider.pool.redis_ops.batch_get_cooldowns",
             new_callable=AsyncMock,
-            return_value={"key-1": (None, None), "key-2": (None, None)},
+            return_value={"key-1": None, "key-2": None},
         ),
         patch(
             "src.services.provider.pool.redis_ops.get_lru_scores",

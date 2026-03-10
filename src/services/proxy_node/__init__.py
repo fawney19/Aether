@@ -1,6 +1,10 @@
-"""代理节点服务"""
+"""代理节点服务
 
-from .health_scheduler import ProxyNodeHealthScheduler, get_proxy_node_health_scheduler
+注意: health_scheduler 不在此处导入，避免触发 system.scheduler -> system.__init__
+-> maintenance_scheduler -> ... -> cache_service 的循环依赖。
+使用方应直接 from src.services.proxy_node.health_scheduler import ... 导入。
+"""
+
 from .resolver import (
     build_post_kwargs,
     build_proxy_url,
@@ -21,8 +25,6 @@ from .resolver import (
 from .service import ProxyNodeService, node_to_dict
 
 __all__ = [
-    "ProxyNodeHealthScheduler",
-    "get_proxy_node_health_scheduler",
     "ProxyNodeService",
     "node_to_dict",
     "build_post_kwargs",

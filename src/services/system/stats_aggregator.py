@@ -1096,6 +1096,7 @@ class StatsAggregatorService:
         current_date = start_date
         while current_date < today_utc:
             StatsAggregatorService.aggregate_daily_stats_bundle(db, current_date, user_ids=user_ids)
+            db.expunge_all()  # 释放 Session identity map，防止 ORM 对象累积导致内存暴涨
             count += 1
             current_date += timedelta(days=1)
 
@@ -1114,6 +1115,7 @@ class StatsAggregatorService:
         count = 0
         while current <= end_dt:
             StatsAggregatorService.aggregate_daily_api_key_stats(db, current, commit=True)
+            db.expunge_all()
             count += 1
             current += timedelta(days=1)
         return count
@@ -1145,9 +1147,11 @@ class StatsAggregatorService:
                 processed += 1
             if processed % 30 == 0:
                 db.commit()
+                db.expunge_all()
             current += timedelta(days=1)
 
         db.commit()
+        db.expunge_all()
         return processed
 
     @staticmethod
@@ -1183,6 +1187,7 @@ class StatsAggregatorService:
             db.commit()
             last_id = records[-1].id
             total_processed += len(records)
+            db.expunge_all()
 
         return total_processed
 
@@ -1194,6 +1199,7 @@ class StatsAggregatorService:
         count = 0
         while current <= end_dt:
             StatsAggregatorService.aggregate_daily_error_stats(db, current, commit=True)
+            db.expunge_all()
             count += 1
             current += timedelta(days=1)
         return count

@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+
+from sqlalchemy.orm import load_only
 
 from src.clients.redis_client import get_redis_client
 from src.core.logger import logger
@@ -21,21 +22,18 @@ from src.core.provider_types import ProviderType, normalize_provider_type
 from src.database import create_session
 from src.models.database import Provider, ProviderAPIKey
 from src.services.provider.pool.config import parse_pool_config
-from src.services.provider_keys.key_quota_service import refresh_provider_quota_for_provider
+from src.services.provider_keys.key_quota_service import (
+    CODEX_WHAM_USAGE_URL,
+    QUOTA_REFRESH_PROVIDER_TYPES,
+    refresh_provider_quota_for_provider,
+)
 from src.services.system.scheduler import get_scheduler
 
-# 与 admin 刷新额度 API 保持一致
-_CODEX_WHAM_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 _REDIS_PREFIX = "ap:quota_probe:last"
 _DEFAULT_INTERVAL_MINUTES = 10
 _DEFAULT_SCAN_INTERVAL_SECONDS = 60
 _DEFAULT_MAX_KEYS_PER_PROVIDER = 50
 _MAX_INTERVAL_MINUTES = 1440
-_SUPPORTED_PROVIDER_TYPES = {
-    ProviderType.CODEX.value,
-    ProviderType.KIRO.value,
-    ProviderType.ANTIGRAVITY.value,
-}
 
 
 def _probe_stamp_key(provider_id: str, key_id: str) -> str:
@@ -140,14 +138,6 @@ def _select_probe_key_ids(
     return [key_id for _, key_id in stale]
 
 
-@dataclass(frozen=True, slots=True)
-class _ProviderProbeTask:
-    provider_id: str
-    provider_type: str
-    probe_key_ids: list[str]
-    interval_seconds: int
-
-
 class PoolQuotaProbeScheduler:
     """按号池高级配置执行额度主动探测。"""
 
@@ -186,9 +176,8 @@ class PoolQuotaProbeScheduler:
             job_id="pool_quota_probe_check",
             name="号池额度主动探测检查",
         )
-
-        # 启动时立即执行一次，避免首次等待一个轮询周期
-        await self._run_probe_cycle()
+        # 不在启动时立即探测：大号池场景下会阻塞启动并占用大量内存。
+        # 首次探测由定时调度器在 scan_interval_seconds 后自动触发。
 
     async def stop(self) -> Any:
         if not self.running:
@@ -249,18 +238,15 @@ class PoolQuotaProbeScheduler:
         now_ts = int(time.time())
         redis_client = await get_redis_client(require_redis=False)
 
-        # 第一阶段：用一个短生命周期 session 查出需要探测的 provider / key 信息
-        probe_tasks: list[_ProviderProbeTask] = []
+        # 第一阶段：查出符合条件的 provider 列表（轻量查询）
+        eligible_providers: list[tuple[str, str, int]] = []  # (id, type, interval_seconds)
         db = create_session()
         try:
             providers = db.query(Provider).filter(Provider.is_active == True).all()  # noqa: E712
-
-            # 先筛选出符合条件的 provider，收集其 ID 和配置
-            eligible_providers: list[tuple[str, str, int]] = []  # (id, type, interval_seconds)
             for provider in providers:
                 provider_id = str(getattr(provider, "id", "") or "")
                 provider_type = normalize_provider_type(getattr(provider, "provider_type", ""))
-                if not provider_id or provider_type not in _SUPPORTED_PROVIDER_TYPES:
+                if not provider_id or provider_type not in QUOTA_REFRESH_PROVIDER_TYPES:
                     continue
 
                 pool_cfg = parse_pool_config(getattr(provider, "config", None))
@@ -271,83 +257,50 @@ class PoolQuotaProbeScheduler:
                     pool_cfg.probing_interval_minutes
                 )
                 eligible_providers.append((provider_id, provider_type, interval_minutes * 60))
-
-            # 批量查询所有符合条件的 provider 的活跃 keys，避免 N+1
-            eligible_ids = [p[0] for p in eligible_providers]
-            all_keys: list[ProviderAPIKey] = []
-            if eligible_ids:
-                all_keys = (
-                    db.query(ProviderAPIKey)
-                    .filter(
-                        ProviderAPIKey.provider_id.in_(eligible_ids),
-                        ProviderAPIKey.is_active == True,  # noqa: E712
-                    )
-                    .all()
-                )
-
-            # 按 provider_id 分组
-            keys_by_provider: dict[str, list[ProviderAPIKey]] = {}
-            for key in all_keys:
-                pid = str(key.provider_id)
-                keys_by_provider.setdefault(pid, []).append(key)
-
-            for provider_id, provider_type, interval_seconds in eligible_providers:
-                keys = keys_by_provider.get(provider_id, [])
-                if not keys:
-                    continue
-
-                key_ids = [str(key.id) for key in keys if getattr(key, "id", None)]
-                probe_stamps = await self._load_probe_timestamps(
-                    redis_client=redis_client,
-                    provider_id=provider_id,
-                    key_ids=key_ids,
-                )
-                probe_key_ids = _select_probe_key_ids(
-                    keys=keys,
-                    provider_type=provider_type,
-                    now_ts=now_ts,
-                    interval_seconds=interval_seconds,
-                    last_probe_timestamps=probe_stamps,
-                    limit=self.max_keys_per_provider,
-                )
-                if not probe_key_ids:
-                    continue
-
-                probe_tasks.append(
-                    _ProviderProbeTask(
-                        provider_id=provider_id,
-                        provider_type=provider_type,
-                        probe_key_ids=probe_key_ids,
-                        interval_seconds=interval_seconds,
-                    )
-                )
         finally:
             db.close()
 
-        # 第二阶段：每个 provider 使用独立 session 执行探测
-        for task in probe_tasks:
+        if not eligible_providers:
+            return
+
+        # 第二阶段：逐个 provider 查询 key 并筛选探测目标
+        # 避免一次性加载所有 provider 的全部 key 到内存
+        for provider_id, provider_type, interval_seconds in eligible_providers:
+            if not self.running:
+                break
+
+            probe_key_ids = await self._select_keys_for_provider(
+                provider_id=provider_id,
+                provider_type=provider_type,
+                interval_seconds=interval_seconds,
+                now_ts=now_ts,
+                redis_client=redis_client,
+            )
+            if not probe_key_ids:
+                continue
+
             # 先写探测节流时间戳，避免异常时高频重入
             await self._mark_probe_timestamps(
                 redis_client=redis_client,
-                provider_id=task.provider_id,
-                key_ids=task.probe_key_ids,
+                provider_id=provider_id,
+                key_ids=probe_key_ids,
                 now_ts=now_ts,
-                interval_seconds=task.interval_seconds,
+                interval_seconds=interval_seconds,
             )
 
             probe_db = create_session()
             try:
                 result = await refresh_provider_quota_for_provider(
                     db=probe_db,
-                    provider_id=task.provider_id,
-                    codex_wham_usage_url=_CODEX_WHAM_USAGE_URL,
-                    key_ids=task.probe_key_ids,
+                    provider_id=provider_id,
+                    codex_wham_usage_url=CODEX_WHAM_USAGE_URL,
+                    key_ids=probe_key_ids,
                 )
                 logger.info(
                     "[POOL_PROBE] Provider {} ({}) 静默探测完成: selected={}, success={}, failed={}",
-                    task.provider_id[:8],
-                    task.provider_type,
-                    len(task.probe_key_ids),
+                    provider_id[:8],
+                    provider_type,
+                    len(probe_key_ids),
                     int(result.get("success") or 0),
                     int(result.get("failed") or 0),
                 )
@@ -358,12 +311,60 @@ class PoolQuotaProbeScheduler:
                     pass
                 logger.warning(
                     "[POOL_PROBE] Provider {} ({}) 静默探测失败: {}",
-                    task.provider_id[:8],
-                    task.provider_type,
+                    provider_id[:8],
+                    provider_type,
                     exc,
                 )
             finally:
                 probe_db.close()
+
+    async def _select_keys_for_provider(
+        self,
+        *,
+        provider_id: str,
+        provider_type: str,
+        interval_seconds: int,
+        now_ts: int,
+        redis_client: Any,
+    ) -> list[str]:
+        """为单个 provider 筛选需要探测的 key，使用独立短生命周期 session。"""
+        db = create_session()
+        try:
+            keys = (
+                db.query(ProviderAPIKey)
+                .options(
+                    load_only(
+                        ProviderAPIKey.id,
+                        ProviderAPIKey.provider_id,
+                        ProviderAPIKey.last_used_at,
+                        ProviderAPIKey.upstream_metadata,
+                    )
+                )
+                .filter(
+                    ProviderAPIKey.provider_id == provider_id,
+                    ProviderAPIKey.is_active == True,  # noqa: E712
+                )
+                .all()
+            )
+            if not keys:
+                return []
+
+            key_ids = [str(key.id) for key in keys if getattr(key, "id", None)]
+            probe_stamps = await self._load_probe_timestamps(
+                redis_client=redis_client,
+                provider_id=provider_id,
+                key_ids=key_ids,
+            )
+            return _select_probe_key_ids(
+                keys=keys,
+                provider_type=provider_type,
+                now_ts=now_ts,
+                interval_seconds=interval_seconds,
+                last_probe_timestamps=probe_stamps,
+                limit=self.max_keys_per_provider,
+            )
+        finally:
+            db.close()
 
 
 _pool_quota_probe_scheduler: PoolQuotaProbeScheduler | None = None

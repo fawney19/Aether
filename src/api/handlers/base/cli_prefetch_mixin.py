@@ -91,9 +91,8 @@ class CliPrefetchMixin:
         估算采用 ~4 字符/token 的保守比例。
         """
         # 输出 tokens：从已收集的文本估算
-        collected = ctx.collected_text
-        if collected:
-            ctx.output_tokens = max(1, len(collected) // 4)
+        if ctx.collected_text_length > 0:
+            ctx.output_tokens = max(1, ctx.collected_text_length // 4)
 
         # 输入 tokens：从请求体文本内容估算
         try:

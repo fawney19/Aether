@@ -14,8 +14,6 @@ from alembic import context
 
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-# 添加 alembic 目录，让迁移文件可以 `from helpers import ...`
-sys.path.insert(0, os.path.dirname(__file__))
 
 # 加载 .env 文件（本地开发时需要）
 try:

@@ -437,7 +437,7 @@ function handleProviderUpdated(updated: ProviderWithEndpointsSummary) {
   if (index !== -1) {
     providers.value[index] = updated
     // 刷新该提供商的余额数据
-    loadBalances([updated])
+    loadBalances([updated], false)
   }
 }
 
@@ -449,7 +449,7 @@ async function handleDrawerRefresh() {
     const index = providers.value.findIndex(p => p.id === updated.id)
     if (index !== -1) {
       providers.value[index] = updated
-      loadBalances([updated])
+      loadBalances([updated], false)
     }
   } catch (err) {
     showError(parseApiError(err, '刷新提供商数据失败'), '错误')

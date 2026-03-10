@@ -45,9 +45,10 @@ def test_auto_disassociate_deletes_unmatched_auto_associated_models(
     unlimited_query.filter.return_value.limit.return_value.first.return_value = None
 
     allowed_models_query = MagicMock()
+    # db.query(ProviderAPIKey.allowed_models).all() returns list of tuples
     allowed_models_query.filter.return_value.all.return_value = [
-        SimpleNamespace(allowed_models=["gpt-4o"]),
-        SimpleNamespace(allowed_models=[]),
+        (["gpt-4o"],),
+        ([],),
     ]
 
     model = SimpleNamespace(

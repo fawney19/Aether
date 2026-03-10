@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,6 +15,7 @@ from src.core.validators import EmailValidator, PasswordValidator, UsernameValid
 from src.models.database import ApiKey, GlobalModel, Model, Provider, Usage, User, UserRole
 from src.services.cache.user_cache import UserCacheService
 from src.services.user.bulk_cleanup import batch_nullify_fk, pre_clean_api_key
+from src.utils.async_utils import safe_create_task
 from src.utils.transaction_manager import retry_on_database_error, transactional
 
 
@@ -247,7 +247,7 @@ class UserService:
         db.refresh(user)
 
         # 清除用户缓存
-        asyncio.create_task(UserCacheService.invalidate_user_cache(user.id, user.email))
+        safe_create_task(UserCacheService.invalidate_user_cache(user.id, user.email))
 
         logger.debug(f"更新用户信息: {user.email} (ID: {user_id})")
         return user
@@ -349,7 +349,7 @@ class UserService:
             raise
 
         # 清除用户缓存
-        asyncio.create_task(UserCacheService.invalidate_user_cache(user_id, email))
+        safe_create_task(UserCacheService.invalidate_user_cache(user_id, email))
 
         logger.info(f"删除用户: {email} (ID: {user_id}), 同时删除 {api_key_count} 个API密钥")
         return True
@@ -394,7 +394,7 @@ class UserService:
         user.updated_at = datetime.now(timezone.utc)
 
         # 清除用户缓存
-        asyncio.create_task(UserCacheService.invalidate_user_cache(user.id, user.email))
+        safe_create_task(UserCacheService.invalidate_user_cache(user.id, user.email))
 
         logger.info(f"密码更改成功: 用户ID {user_id}")
         return True, "密码更改成功"

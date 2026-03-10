@@ -552,7 +552,9 @@ class BaseMessageHandler:
                 logger.warning(f"[{target_request_id}] 更新 Usage 状态为 streaming 失败: {e}")
 
         # 创建后台任务，不阻塞当前流
-        asyncio.create_task(_do_update())
+        from src.utils.async_utils import safe_create_task
+
+        safe_create_task(_do_update())
 
     def _update_usage_to_streaming_with_ctx(self, ctx: StreamContext) -> None:
         """更新 Usage 状态为 streaming，同时更新 provider 相关信息
@@ -622,7 +624,9 @@ class BaseMessageHandler:
                 logger.warning(f"[{target_request_id}] 更新 Usage 状态为 streaming 失败: {e}")
 
         # 创建后台任务，不阻塞当前流
-        asyncio.create_task(_do_update())
+        from src.utils.async_utils import safe_create_task
+
+        safe_create_task(_do_update())
 
     def _log_request_error(self, message: str, error: Exception) -> None:
         """记录请求错误日志，对业务异常不打印堆栈

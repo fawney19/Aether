@@ -36,8 +36,8 @@ class MemoryCachePlugin(CachePlugin):
 
         try:
             self._start_cleanup_task()
-        except:
-            pass  # 忽略事件循环错误
+        except Exception:
+            pass  # 事件循环尚未启动，将在首次 set 时延迟启动
 
     def _start_cleanup_task(self) -> None:
         """启动后台清理任务"""
@@ -100,8 +100,17 @@ class MemoryCachePlugin(CachePlugin):
                 self._misses += 1
                 return None
 
+    def _ensure_cleanup_task(self) -> None:
+        """确保清理任务已启动（延迟启动，在事件循环可用后调用）"""
+        if self._cleanup_task is None or self._cleanup_task.done():
+            try:
+                self._start_cleanup_task()
+            except Exception:
+                pass
+
     async def set(self, key: str, value: Any, ttl: int | None = None) -> bool:
         """设置缓存值"""
+        self._ensure_cleanup_task()
         async with self._lock:
             # 检查大小限制
             if key not in self._cache:

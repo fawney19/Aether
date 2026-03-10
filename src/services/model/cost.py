@@ -55,6 +55,7 @@ class ModelCostService:
     _price_cache: dict[str, dict[str, float]] = {}
     _cache_price_cache: dict[str, dict[str, float]] = {}
     _tiered_pricing_cache: dict[str, dict | None] = {}
+    _MAX_CACHE_SIZE: int = 500  # 每层缓存上限，防止无界增长
 
     def __init__(self, db: Session):
         self.db = db
@@ -200,6 +201,7 @@ class ModelCostService:
                             "source": "global",
                         }
 
+        self._evict_if_full(self._tiered_pricing_cache)
         self._tiered_pricing_cache[cache_key] = result
         return result
 
@@ -258,6 +260,7 @@ class ModelCostService:
                             "source": "global",
                         }
 
+        self._evict_if_full(self._tiered_pricing_cache)
         self._tiered_pricing_cache[cache_key] = result
         return result.get("pricing") if result else None
 
@@ -359,6 +362,7 @@ class ModelCostService:
                     f"未找到模型价格配置: {provider_name}/{model}，请在 GlobalModel 中配置价格"
                 )
 
+        self._evict_if_full(self._price_cache)
         self._price_cache[cache_key] = {"input": input_price, "output": output_price}
         return input_price, output_price
 
@@ -440,6 +444,7 @@ class ModelCostService:
                     model,
                 )
 
+        self._evict_if_full(self._price_cache)
         self._price_cache[cache_key] = {"input": input_price, "output": output_price}
         return input_price, output_price
 
@@ -521,6 +526,7 @@ class ModelCostService:
             if cache_read_price is None:
                 cache_read_price = input_price * 0.1
 
+        self._evict_if_full(self._cache_price_cache)
         self._cache_price_cache[cache_key] = {
             "creation": cache_creation_price,
             "read": cache_read_price,
@@ -687,6 +693,7 @@ class ModelCostService:
         if cache_read_price is None:
             cache_read_price = input_price * 0.1
 
+        self._evict_if_full(self._cache_price_cache)
         self._cache_price_cache[cache_key] = {
             "creation": cache_creation_price,
             "read": cache_read_price,
@@ -872,6 +879,12 @@ class ModelCostService:
         cls._price_cache.clear()
         cls._cache_price_cache.clear()
         cls._tiered_pricing_cache.clear()
+
+    @classmethod
+    def _evict_if_full(cls, cache: dict) -> None:
+        """缓存超出上限时清空，防止无界增长。"""
+        if len(cache) >= cls._MAX_CACHE_SIZE:
+            cache.clear()
 
     # ------------------------------------------------------------------
     # 内部辅助

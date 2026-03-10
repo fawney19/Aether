@@ -57,9 +57,10 @@ export function useProviderBalance() {
   }
 
   // 异步加载余额数据（使用批量接口）
-  async function loadBalances(providers: ProviderWithEndpointsSummary[]) {
-    // 清空旧的余额缓存，避免数据累积
-    balanceCache.value = {}
+  async function loadBalances(providers: ProviderWithEndpointsSummary[], fullReload = true) {
+    if (fullReload) {
+      balanceCache.value = {}
+    }
     const currentVersion = ++balanceLoadVersion
     try {
       const opsProviderIds = providers.filter(p => p.ops_configured).map(p => p.id)

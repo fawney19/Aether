@@ -221,16 +221,22 @@ class PoolManager:
                         pass
 
         # --- 3. Classify candidates -----------------------------------
-        # Pre-compute account states to avoid repeated dict parsing inside loop.
+        # Use precomputed account states from CandidateBuilder when available
+        # (upstream_metadata is deferred on pool keys to save memory).
+        # Fall back to on-the-fly resolution for non-pool candidates.
         account_states: dict[str, Any] = {}
         for c in candidates:
             kid = str(c.key.id)
             if kid not in account_states:
-                account_states[kid] = resolve_pool_account_state(
-                    provider_type=provider_type,
-                    upstream_metadata=getattr(c.key, "upstream_metadata", None),
-                    oauth_invalid_reason=getattr(c.key, "oauth_invalid_reason", None),
-                )
+                precomputed = getattr(c.key, "_pool_account_state", None)
+                if precomputed is not None:
+                    account_states[kid] = precomputed
+                else:
+                    account_states[kid] = resolve_pool_account_state(
+                        provider_type=provider_type,
+                        upstream_metadata=getattr(c.key, "upstream_metadata", None),
+                        oauth_invalid_reason=getattr(c.key, "oauth_invalid_reason", None),
+                    )
 
         sticky_candidate: ProviderCandidate | None = None
         available: list[ProviderCandidate] = []
@@ -582,16 +588,20 @@ class PoolManager:
                         pass
 
         # --- 3. Classify keys -------------------------------------------------
-        # Pre-compute account states to avoid repeated dict parsing inside loop.
+        # Use precomputed account states when available.
         account_states_sk: dict[str, Any] = {}
         for k in keys:
             kid = str(k.id)
             if kid not in account_states_sk:
-                account_states_sk[kid] = resolve_pool_account_state(
-                    provider_type=self.provider_type,
-                    upstream_metadata=getattr(k, "upstream_metadata", None),
-                    oauth_invalid_reason=getattr(k, "oauth_invalid_reason", None),
-                )
+                precomputed = getattr(k, "_pool_account_state", None)
+                if precomputed is not None:
+                    account_states_sk[kid] = precomputed
+                else:
+                    account_states_sk[kid] = resolve_pool_account_state(
+                        provider_type=self.provider_type,
+                        upstream_metadata=getattr(k, "upstream_metadata", None),
+                        oauth_invalid_reason=getattr(k, "oauth_invalid_reason", None),
+                    )
 
         sticky_key: ProviderAPIKey | None = None
         available: list[ProviderAPIKey] = []

@@ -22,12 +22,12 @@ def test_parse_pool_config_returns_defaults_for_empty_advanced() -> None:
     assert cfg is not None
     assert cfg.sticky_session_ttl_seconds == 3600
     assert cfg.load_threshold_percent == 80
-    assert cfg.lru_enabled is True
-    assert cfg.scheduling_mode == "lru"
+    assert cfg.lru_enabled is False
+    assert cfg.scheduling_mode == "multi_score"
     assert cfg.scoring_weights == ScoringWeights()
-    # Default: only LRU preset enabled
+    # Default: only cache_affinity preset enabled
     assert len(cfg.scheduling_presets) == 1
-    assert cfg.scheduling_presets[0].preset == "lru"
+    assert cfg.scheduling_presets[0].preset == "cache_affinity"
     assert cfg.scheduling_presets[0].enabled is True
     assert cfg.latency_window_seconds == 3600
     assert cfg.latency_sample_limit == 50
@@ -263,10 +263,11 @@ def test_parse_pool_config_handles_invalid_types_gracefully() -> None:
     assert cfg.cost_limit_per_key_tokens is None  # default for opt_int
 
 
-def test_parse_pool_config_invalid_scheduling_mode_falls_back_to_lru() -> None:
+def test_parse_pool_config_invalid_scheduling_mode_falls_back_to_cache_affinity() -> None:
     cfg = parse_pool_config({"pool_advanced": {"scheduling_mode": "unknown"}})
     assert cfg is not None
-    assert cfg.scheduling_mode == "lru"
+    # Default with no explicit presets: cache_affinity -> multi_score
+    assert cfg.scheduling_mode == "multi_score"
 
 
 def test_parse_pool_config_scoring_weights_invalid_values_are_clamped() -> None:

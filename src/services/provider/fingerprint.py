@@ -305,7 +305,7 @@ def schedule_lazy_fingerprint_persist(key_id: str, fp: dict[str, str]) -> None:
             _clear_pending_persist(key_id)
 
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         try:
             _persist_fingerprint_if_missing_sync(key_id, payload)
@@ -313,15 +313,9 @@ def schedule_lazy_fingerprint_persist(key_id: str, fp: dict[str, str]) -> None:
             _clear_pending_persist(key_id)
         return
 
-    task = loop.create_task(_persist_async())
+    from src.utils.async_utils import safe_create_task
 
-    def _on_done(done_task: asyncio.Task[None]) -> None:
-        try:
-            done_task.result()
-        except Exception as exc:
-            logger.debug("lazy fingerprint background task failed: {}", str(exc))
-
-    task.add_done_callback(_on_done)
+    safe_create_task(_persist_async())
 
 
 def ensure_key_fingerprint(

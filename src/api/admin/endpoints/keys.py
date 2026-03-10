@@ -35,6 +35,9 @@ from src.services.provider_keys import (
     reveal_endpoint_key_payload,
     update_endpoint_key_response,
 )
+from src.services.provider_keys.key_quota_service import (
+    CODEX_WHAM_USAGE_URL as _CODEX_WHAM_USAGE_URL,
+)
 from src.utils.auth_utils import require_admin
 
 router = APIRouter(tags=["Provider Keys"])
@@ -376,13 +379,7 @@ class AdminCreateProviderKeyAdapter(AdminApiAdapter):
         )
 
 
-# ========== Codex Quota Refresh API ==========
-
-# Codex wham/usage API 地址（用于查询限额信息）
-CODEX_WHAM_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
-
-
-# ========== Kiro Quota Refresh API ==========
+# ========== Quota Refresh API ==========
 
 
 class RefreshProviderQuotaRequest(BaseModel):
@@ -432,6 +429,6 @@ class AdminRefreshProviderQuotaAdapter(AdminApiAdapter):
         return await refresh_provider_quota_for_provider(
             db=context.db,
             provider_id=self.provider_id,
-            codex_wham_usage_url=CODEX_WHAM_USAGE_URL,
+            codex_wham_usage_url=_CODEX_WHAM_USAGE_URL,
             key_ids=self.key_ids,
         )

@@ -439,9 +439,13 @@ class PluginMiddleware:
         monitor_plugin = self.plugin_manager.get_plugin("monitor")
         if monitor_plugin and monitor_plugin.enabled:
             try:
+                # 使用路由模板而非实际路径，避免动态段导致 Prometheus 标签基数爆炸
+                route = request.scope.get("route")
+                endpoint_label = route.path if route and hasattr(route, "path") else "unknown"
+
                 monitor_labels = {
                     "method": request.method,
-                    "endpoint": request.url.path,
+                    "endpoint": endpoint_label,
                     "status": str(status_code),
                     "status_class": f"{status_code // 100}xx",
                 }

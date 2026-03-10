@@ -2044,10 +2044,11 @@ class AdminImportConfigAdapter(AdminApiAdapter):
                     import asyncio
 
                     from src.services.model.fetch_scheduler import get_model_fetch_scheduler
+                    from src.utils.async_utils import safe_create_task
 
                     scheduler = get_model_fetch_scheduler()
                     for key_id in keys_to_fetch:
-                        asyncio.create_task(scheduler._fetch_models_for_key_by_id(key_id))
+                        safe_create_task(scheduler._fetch_models_for_key_by_id(key_id))
                 except Exception as e:
                     logger.error(f"触发模型获取失败: {e}")
                     # 不影响导入成功的返回

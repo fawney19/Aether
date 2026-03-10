@@ -34,7 +34,8 @@ def test_empty_pool_advanced_returns_defaults() -> None:
     assert cfg is not None
     defaults = PoolConfig()
     assert cfg.sticky_session_ttl_seconds == defaults.sticky_session_ttl_seconds
-    assert cfg.lru_enabled is True
+    # Default with empty pool_advanced: cache_affinity preset, no LRU
+    assert cfg.lru_enabled is False
 
 
 def test_shim_imports_resolve() -> None:

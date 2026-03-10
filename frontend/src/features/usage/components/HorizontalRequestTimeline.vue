@@ -843,24 +843,15 @@ const AUTH_TYPE_PROVIDER_LABEL_MAP: Record<string, string> = {
   gemini_cli: 'Gemini CLI',
 }
 
-const normalizeProviderName = (value: string): string => {
-  const text = value.trim()
-  if (!text) return '未知'
-  // 管理后台中常见“xx反代”命名，展示时保留提供商品牌名即可
-  return text.replace(/反代$/u, '').trim() || text
-}
-
 const getProviderDisplayName = (
   attempt: CandidateRecord | null | undefined,
   options: { allowAuthTypeFallback?: boolean } = {},
 ): string => {
   const allowAuthTypeFallback = options.allowAuthTypeFallback ?? true
   if (!attempt) return '未知'
-  // 优先使用提供商名称（管理后台设置的名称）
   const providerName = String(attempt.provider_name || '').trim()
-  if (providerName) return normalizeProviderName(providerName)
+  if (providerName) return providerName
   if (allowAuthTypeFallback) {
-    // 回退：根据 auth_type 推断显示名称
     const authType = String(attempt.key_auth_type || '').trim().toLowerCase()
     if (authType && AUTH_TYPE_PROVIDER_LABEL_MAP[authType]) {
       return AUTH_TYPE_PROVIDER_LABEL_MAP[authType]
@@ -871,7 +862,7 @@ const getProviderDisplayName = (
 
 const normalizeProviderIdentity = (value: unknown): string => {
   if (typeof value !== 'string') return ''
-  return normalizeProviderName(value).trim().toLowerCase()
+  return value.trim().toLowerCase()
 }
 
 const buildProviderGroups = (items: CandidateRecord[]): NodeGroup[] => {

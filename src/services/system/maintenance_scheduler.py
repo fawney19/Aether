@@ -23,6 +23,7 @@ from typing import Any
 
 from sqlalchemy import delete, literal_column, text
 
+from src.config.settings import config
 from src.core.logger import logger
 from src.database import create_session
 from src.models.database import AuditLog, Provider, RequestCandidate, Usage
@@ -143,15 +144,6 @@ class MaintenanceScheduler:
             name="统计小时数据聚合",
             timezone="UTC",
         )
-        # 统计聚合补偿任务 - 每 30 分钟检查缺失并回填
-        scheduler.add_interval_job(
-            self._scheduled_stats_aggregation,
-            minutes=30,
-            job_id="stats_aggregation_backfill",
-            name="统计数据聚合补偿",
-            backfill=True,
-        )
-
         # 清理任务 - 凌晨 3 点执行
         scheduler.add_cron_job(
             self._scheduled_cleanup,
@@ -232,7 +224,12 @@ class MaintenanceScheduler:
         )
 
         # 启动时执行一次初始化任务
-        asyncio.create_task(self._run_startup_tasks())
+        if config.maintenance_startup_tasks_enabled:
+            from src.utils.async_utils import safe_create_task
+
+            safe_create_task(self._run_startup_tasks())
+        else:
+            logger.info("维护调度器启动任务已禁用（MAINTENANCE_STARTUP_TASKS_ENABLED=false）")
 
     async def _run_startup_tasks(self) -> None:
         """启动时执行的初始化任务"""
@@ -249,22 +246,10 @@ class MaintenanceScheduler:
             logger.debug("启动时刷新 Antigravity UA 版本失败（不影响运行）: {}", e)
 
         try:
-            logger.info("启动时执行首次清理任务...")
-            await self._perform_cleanup()
-        except Exception as e:
-            logger.exception(f"启动时清理任务执行出错: {e}")
-
-        try:
             logger.info("启动时清理残留的 pending/streaming 请求...")
             await self._perform_pending_cleanup()
         except Exception as e:
             logger.exception(f"启动时 pending 清理执行出错: {e}")
-
-        try:
-            logger.info("启动时检查统计数据...")
-            await self._perform_stats_aggregation(backfill=True)
-        except Exception as e:
-            logger.exception(f"启动时统计聚合任务出错: {e}")
 
     async def stop(self) -> Any:
         """停止调度器"""
@@ -470,6 +455,7 @@ class MaintenanceScheduler:
                                 StatsAggregatorService.aggregate_daily_stats_bundle(
                                     db, current_date_utc, user_ids=user_ids
                                 )
+                                db.expunge_all()
                             except Exception as e:
                                 failed_dates += 1
                                 logger.warning(f"回填日期 {current_date} 失败: {e}")
@@ -545,8 +531,15 @@ class MaintenanceScheduler:
                 timeout_minutes = SystemConfigService.get_config(
                     db, "pending_request_timeout_minutes", 10
                 )
+                # pending 清理涉及 candidate 表关联查询，限制批次大小以控制内存
+                batch_size = min(
+                    max(SystemConfigService.get_config(db, "cleanup_batch_size", 1000), 1),
+                    200,
+                )
                 return UsageService.cleanup_stale_pending_requests(
-                    db, timeout_minutes=timeout_minutes
+                    db,
+                    timeout_minutes=timeout_minutes,
+                    batch_size=batch_size,
                 )
             except Exception as e:
                 logger.exception(f"清理 pending 请求失败: {e}")
@@ -943,7 +936,7 @@ class MaintenanceScheduler:
 
         total_compressed = 0
         no_progress_count = 0
-        processed_ids: set = set()
+        memory_safe_batch_size = max(1, min(batch_size, 100))
 
         while True:
             batch_db = create_session()
@@ -963,7 +956,7 @@ class MaintenanceScheduler:
                         | (Usage.provider_request_body.isnot(None))
                         | (Usage.client_response_body.isnot(None))
                     )
-                    .limit(batch_size)
+                    .limit(memory_safe_batch_size)
                     .all()
                 )
 
@@ -997,15 +990,6 @@ class MaintenanceScheduler:
                     batch_db.commit()
                     continue
 
-                current_ids = {r.id for r in valid_records}
-                repeated_ids = current_ids & processed_ids
-                if repeated_ids:
-                    logger.error(
-                        f"检测到重复处理的记录 ID: {list(repeated_ids)[:5]}...，"
-                        "说明数据库更新未生效，终止循环"
-                    )
-                    break
-
                 batch_success = 0
 
                 for r in valid_records:
@@ -1035,10 +1019,10 @@ class MaintenanceScheduler:
                                     else None
                                 ),
                             )
+                            .execution_options(synchronize_session=False)
                         )
                         if result.rowcount > 0:
                             batch_success += 1
-                            processed_ids.add(r.id)
                     except Exception as e:
                         logger.warning(f"压缩记录 {r.id} 失败: {e}")
                         continue

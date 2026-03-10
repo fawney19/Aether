@@ -78,10 +78,12 @@ class StickyPriorityStrategy(LoadBalancerStrategy):
                 "total_failures": 0,
             }
         )
+        self._max_provider_health_entries: int = 200  # 上限，防止无界增长
 
         # 当前粘性提供商缓存 {cache_key: provider_id}
         # cache_key 可以是 api_key_id 或者其他标识
         self._sticky_providers: dict[str, str] = {}
+        self._max_sticky_entries: int = 2000  # 上限，防止无界增长
 
         # 统计信息
         self._stats = {
@@ -260,6 +262,12 @@ class StickyPriorityStrategy(LoadBalancerStrategy):
 
         # 没有缓存或缓存失效，选择权重最大的
         sticky_candidate = max(candidates, key=lambda c: c.weight)
+        # 超出上限时清理不在当前候选列表中的旧条目
+        if len(self._sticky_providers) >= self._max_sticky_entries:
+            active_ids = {str(c.provider.id) for c in candidates}
+            stale = [k for k, v in self._sticky_providers.items() if v not in active_ids]
+            for k in stale[: len(stale) // 2 or len(stale)]:
+                del self._sticky_providers[k]
         self._sticky_providers[cache_key] = str(sticky_candidate.provider.id)
 
         logger.info(f"Set new sticky provider {sticky_candidate.provider.name}")
@@ -358,6 +366,17 @@ class StickyPriorityStrategy(LoadBalancerStrategy):
             error: 错误信息（如果失败）
         """
         provider_id = str(provider.id)
+        # 超出上限时淘汰健康且请求量最少的条目
+        if (
+            provider_id not in self._provider_health
+            and len(self._provider_health) >= self._max_provider_health_entries
+        ):
+            healthy_keys = [
+                k for k, v in self._provider_health.items() if v["is_healthy"] and k != provider_id
+            ]
+            if healthy_keys:
+                victim = min(healthy_keys, key=lambda k: self._provider_health[k]["total_requests"])
+                del self._provider_health[victim]
         health_info = self._provider_health[provider_id]
 
         health_info["total_requests"] += 1

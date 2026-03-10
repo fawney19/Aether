@@ -5,11 +5,25 @@ from src.api.handlers.base.stream_context import StreamContext
 def test_collected_text_append_and_property() -> None:
     ctx = StreamContext(model="test-model", api_format="openai:chat")
     assert ctx.collected_text == ""
+    assert ctx.collected_text_length == 0
 
     ctx.append_text("hello")
     ctx.append_text(" ")
     ctx.append_text("world")
     assert ctx.collected_text == "hello world"
+    assert ctx.collected_text_length == len("hello world")
+
+
+def test_collected_text_is_capped_but_total_length_is_preserved() -> None:
+    ctx = StreamContext(model="test-model", api_format="openai:chat")
+    cap = stream_context._MAX_COLLECTED_TEXT_CHARS
+
+    ctx.append_text("a" * (cap - 4))
+    ctx.append_text("b" * 10)
+
+    assert len(ctx.collected_text) == cap
+    assert ctx.collected_text == ("a" * (cap - 4)) + ("b" * 4)
+    assert ctx.collected_text_length == cap + 6
 
 
 def test_reset_for_retry_clears_state() -> None:

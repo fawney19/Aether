@@ -46,6 +46,9 @@ def is_format_converted(
     )
 
 
+_MAX_COLLECTED_TEXT_CHARS = 16 * 1024
+
+
 @dataclass
 class StreamContext:
     """
@@ -91,6 +94,8 @@ class StreamContext:
 
     # 响应内容
     _collected_text_parts: list[str] = field(default_factory=list, repr=False)
+    _collected_text_chars: int = field(default=0, repr=False)
+    _stored_collected_text_chars: int = field(default=0, repr=False)
     response_id: str | None = None
     final_usage: dict[str, Any] | None = None
     final_response: dict[str, Any] | None = None
@@ -161,6 +166,8 @@ class StreamContext:
         self.data_count = 0
         self.has_completion = False
         self._collected_text_parts = []
+        self._collected_text_chars = 0
+        self._stored_collected_text_chars = 0
         self.input_tokens = 0
         self.output_tokens = 0
         self.cached_tokens = 0
@@ -192,10 +199,30 @@ class StreamContext:
         """已收集的文本内容（按需拼接，避免在流式过程中频繁做字符串拷贝）"""
         return "".join(self._collected_text_parts)
 
+    @property
+    def collected_text_length(self) -> int:
+        """已收集文本的总字符数（包含未保留到内存的截断部分）"""
+        return self._collected_text_chars
+
     def append_text(self, text: str) -> None:
-        """追加文本内容（仅在需要收集文本时调用）"""
-        if text:
+        """追加文本内容（仅保留有限前缀，避免长流导致内存增长）"""
+        if not text:
+            return
+
+        text_len = len(text)
+        self._collected_text_chars += text_len
+
+        remaining = _MAX_COLLECTED_TEXT_CHARS - self._stored_collected_text_chars
+        if remaining <= 0:
+            return
+
+        if text_len <= remaining:
             self._collected_text_parts.append(text)
+            self._stored_collected_text_chars += text_len
+            return
+
+        self._collected_text_parts.append(text[:remaining])
+        self._stored_collected_text_chars += remaining
 
     def update_provider_info(
         self,

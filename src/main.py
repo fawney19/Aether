@@ -51,40 +51,38 @@ if TYPE_CHECKING:
 
 
 async def initialize_providers() -> None:
-    """从数据库初始化提供商（仅用于日志记录）"""
-    from sqlalchemy.orm import Session, selectinload
+    """从数据库初始化提供商（仅用于日志记录，使用轻量查询）"""
+    from sqlalchemy import func
+    from sqlalchemy.orm import Session
 
     from src.database.database import create_session
-    from src.models.database import Provider
+    from src.models.database import Provider, ProviderEndpoint
 
     try:
-        # 创建数据库会话
         db: Session = create_session()
 
         try:
-            # 从数据库加载所有活跃的提供商（使用 selectinload 预加载 endpoints 避免 N+1 查询）
-            providers = (
-                db.query(Provider)
-                .options(selectinload(Provider.endpoints))
+            # 使用聚合查询代替全量加载 ORM 对象，大幅减少内存占用
+            results = (
+                db.query(
+                    Provider.name,
+                    func.count(ProviderEndpoint.id).label("total"),
+                    func.count(func.nullif(ProviderEndpoint.is_active, False)).label("active"),
+                )
+                .outerjoin(ProviderEndpoint, Provider.id == ProviderEndpoint.provider_id)
                 .filter(Provider.is_active.is_(True))
+                .group_by(Provider.id, Provider.name, Provider.provider_priority)
                 .order_by(Provider.provider_priority.asc())
                 .all()
             )
 
-            if not providers:
+            if not results:
                 logger.warning("数据库中未找到活跃的提供商")
                 return
 
-            # 记录提供商信息
-            logger.info(f"从数据库加载了 {len(providers)} 个活跃提供商")
-            for provider in providers:
-                # 统计端点信息
-                endpoint_count = len(provider.endpoints) if provider.endpoints else 0  # type: ignore[arg-type]
-                active_endpoints = (
-                    sum(1 for ep in provider.endpoints if ep.is_active) if provider.endpoints else 0  # type: ignore[misc,attr-defined]
-                )
-
-                logger.info(f"提供商: {provider.name} (端点: {active_endpoints}/{endpoint_count})")
+            logger.info(f"从数据库加载了 {len(results)} 个活跃提供商")
+            for name, total, active in results:
+                logger.info(f"提供商: {name} (端点: {active}/{total})")
 
         finally:
             db.close()
@@ -317,7 +315,9 @@ async def _start_background_services(state: LifecycleState) -> None:
         state.model_fetch_scheduler = None
 
     # 启动号池额度主动探测调度器
-    pool_quota_probe_scheduler_active = await state.task_coordinator.acquire("pool_quota_probe_scheduler")
+    pool_quota_probe_scheduler_active = await state.task_coordinator.acquire(
+        "pool_quota_probe_scheduler"
+    )
     if pool_quota_probe_scheduler_active:
         logger.info("启动号池额度主动探测调度器...")
         await state.pool_quota_probe_scheduler.start()
@@ -339,11 +339,6 @@ async def _start_background_services(state: LifecycleState) -> None:
 
     state.task_scheduler = get_scheduler()
     state.task_scheduler.start()
-
-    # 启动缓存预热（后台任务，不阻塞启动）
-    from src.services.system.cache_warmup import start_cache_warmup
-
-    await start_cache_warmup()
 
 
 async def _run_startup(app: FastAPI) -> LifecycleState:
@@ -645,12 +640,14 @@ def main() -> Any:
 
     # Start server
     # 根据环境设置热重载
+    is_dev = config.environment == "development"
     uvicorn.run(
         "src.main:app",
         host=config.host,
         port=config.port,
         log_level=log_level,
-        reload=config.environment == "development",  # 只在开发环境启用热重载
+        reload=is_dev,
+        reload_dirs=["src"] if is_dev else None,
         access_log=False,  # 禁用 uvicorn 访问日志，使用自定义中间件
         log_config=uvicorn_log_config,  # 使用自定义日志配置
     )

@@ -189,27 +189,22 @@ class MonitorPlugin(BasePlugin):
             labels["model"] = model
 
         # 异步记录指标
-        import asyncio
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return  # 没有事件循环时跳过
+        from src.utils.async_utils import safe_create_task
 
         # 请求计数
-        loop.create_task(self.increment("http_requests_total", labels=labels))
+        safe_create_task(self.increment("http_requests_total", labels=labels))
 
         # 请求延迟
-        loop.create_task(self.histogram("http_request_duration_seconds", duration, labels=labels))
+        safe_create_task(self.histogram("http_request_duration_seconds", duration, labels=labels))
 
         # 错误计数
         if status_code >= 400:
-            loop.create_task(self.increment("http_errors_total", labels=labels))
+            safe_create_task(self.increment("http_errors_total", labels=labels))
 
     def record_token_usage(
         self,
         provider: str,
-        model: str,
+        model: str,  # noqa: ARG002 - 保留签名兼容性，不再用于 Prometheus 标签
         input_tokens: int,
         output_tokens: int,
         cost: float | None = None,
@@ -219,30 +214,25 @@ class MonitorPlugin(BasePlugin):
 
         Args:
             provider: 提供商名称
-            model: 模型名称
+            model: 模型名称（保留签名兼容性，不再作为 Prometheus 标签）
             input_tokens: 输入token数
             output_tokens: 输出token数
             cost: 费用
         """
-        labels = {"provider": provider, "model": model}
+        labels = {"provider": provider}
 
-        import asyncio
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return  # 没有事件循环时跳过
+        from src.utils.async_utils import safe_create_task
 
         # Token计数
-        loop.create_task(self.increment("tokens_input_total", input_tokens, labels=labels))
-        loop.create_task(self.increment("tokens_output_total", output_tokens, labels=labels))
-        loop.create_task(
+        safe_create_task(self.increment("tokens_input_total", input_tokens, labels=labels))
+        safe_create_task(self.increment("tokens_output_total", output_tokens, labels=labels))
+        safe_create_task(
             self.increment("tokens_total", input_tokens + output_tokens, labels=labels)
         )
 
         # 费用
         if cost is not None:
-            loop.create_task(self.increment("usage_cost_total", cost, labels=labels))
+            safe_create_task(self.increment("usage_cost_total", cost, labels=labels))
 
     def configure(self, config: dict[str, Any]) -> Any:
         """
