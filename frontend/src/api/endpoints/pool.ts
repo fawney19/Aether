@@ -29,7 +29,7 @@ export interface PoolStatusResponse {
  * 获取 Provider 的号池状态
  */
 export async function getPoolStatus(providerId: string): Promise<PoolStatusResponse> {
-  const response = await client.get(`/api/admin/providers/${providerId}/pool-status`)
+  const response = await client.get<PoolStatusResponse>(`/api/admin/providers/${providerId}/pool-status`)
   return response.data
 }
 
@@ -40,7 +40,7 @@ export async function clearPoolCooldown(
   providerId: string,
   keyId: string,
 ): Promise<{ message: string }> {
-  const response = await client.post(
+  const response = await client.post<{ message: string }>(
     `/api/admin/providers/${providerId}/pool/clear-cooldown/${keyId}`,
   )
   return response.data
@@ -53,7 +53,7 @@ export async function resetPoolCost(
   providerId: string,
   keyId: string,
 ): Promise<{ message: string }> {
-  const response = await client.post(
+  const response = await client.post<{ message: string }>(
     `/api/admin/providers/${providerId}/pool/reset-cost/${keyId}`,
   )
   return response.data
@@ -125,6 +125,8 @@ export interface PoolKeyDetail {
   cost_window_usage: number
   cost_limit: number | null
   request_count: number
+  total_tokens: number
+  total_cost_usd: string
   sticky_sessions: number
   lru_score: number | null
   created_at: string | null

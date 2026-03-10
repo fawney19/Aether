@@ -2858,6 +2858,8 @@ def _purge_stats_and_reset_counters(db: Session) -> None:
     db.query(ProviderAPIKey).update(
         {
             ProviderAPIKey.request_count: 0,
+            ProviderAPIKey.total_tokens: 0,
+            ProviderAPIKey.total_cost_usd: 0.0,
             ProviderAPIKey.success_count: 0,
             ProviderAPIKey.error_count: 0,
             ProviderAPIKey.total_response_time_ms: 0,

@@ -543,11 +543,23 @@
                   >-</span>
                 </TableCell>
                 <TableCell class="py-3 px-2 align-middle">
-                  <div class="w-[136px] mx-auto text-[10px] leading-4">
+                  <div class="grid grid-rows-3 gap-0.5 w-[136px] mx-auto text-[10px] leading-4">
                     <div class="flex items-center justify-between gap-2">
                       <span class="text-muted-foreground">请求</span>
                       <span class="tabular-nums text-foreground/90">
                         {{ formatStatInteger(key.request_count) }}
+                      </span>
+                    </div>
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="text-muted-foreground">Token</span>
+                      <span class="tabular-nums text-foreground/90">
+                        {{ formatTokenCount(key.total_tokens) }}
+                      </span>
+                    </div>
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="text-muted-foreground">费用</span>
+                      <span class="tabular-nums text-foreground/90">
+                        {{ formatStatUsd(key.total_cost_usd) }}
                       </span>
                     </div>
                   </div>
@@ -912,10 +924,18 @@
                 <div class="text-muted-foreground mb-0.5">
                   统计
                 </div>
-                <div class="text-[10px]">
+                <div class="space-y-0.5 text-[10px]">
                   <div class="flex items-center justify-between gap-2">
                     <span class="text-muted-foreground">请求</span>
                     <span class="tabular-nums">{{ formatStatInteger(key.request_count) }}</span>
+                  </div>
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="text-muted-foreground">Token</span>
+                    <span class="tabular-nums">{{ formatTokenCount(key.total_tokens) }}</span>
+                  </div>
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="text-muted-foreground">费用</span>
+                    <span class="tabular-nums">{{ formatStatUsd(key.total_cost_usd) }}</span>
                   </div>
                 </div>
               </div>
@@ -1195,6 +1215,7 @@ async function loadOverview() {
         selectedProviderData.value = null
         showAccountBatchDialog.value = false
         closeProviderProxyPopovers()
+        resetKeyPage()
       }
     }
   } catch (err) {
@@ -1381,6 +1402,7 @@ const desktopColumnWidths = computed(() => {
 async function selectProvider(id: string) {
   const requestId = ++selectProviderRequestId
   selectedProviderId.value = id
+  selectedProviderData.value = null
   editingKeyDetail.value = null
   showAccountBatchDialog.value = false
   keyPermissionsDialogOpen.value = false
@@ -1398,6 +1420,7 @@ async function selectProvider(id: string) {
     clearTimeout(keysSearchDebounceTimer)
     keysSearchDebounceTimer = null
   }
+  resetKeyPage(1, pageSize.value)
   const keysTask = loadKeys()
   // Provider summary is non-blocking for key list rendering.
   void loadProviderData(id)
@@ -1422,7 +1445,11 @@ async function refresh() {
 }
 
 // --- Keys ---
-const keyPage = ref<PoolKeysPageResponse>({ total: 0, page: 1, page_size: 50, keys: [] })
+function createEmptyKeyPage(page = 1, pageSizeValue = 50): PoolKeysPageResponse {
+  return { total: 0, page, page_size: pageSizeValue, keys: [] }
+}
+
+const keyPage = ref<PoolKeysPageResponse>(createEmptyKeyPage())
 const keysLoading = ref(false)
 const refreshingCurrentPageQuota = ref(false)
 const searchQuery = ref('')
@@ -1431,7 +1458,6 @@ const currentPage = ref(1)
 const pageSize = ref(50)
 const MANUAL_QUOTA_REFRESH_COOLDOWN_SECONDS = 5 * 60
 const refreshingOAuthKeyId = ref<string | null>(null)
-const revealedKeys = ref<Map<string, string>>(new Map())
 const recoveringHealthKeyId = ref<string | null>(null)
 const savingProxyKeyId = ref<string | null>(null)
 const proxyDesktopPopoverOpenKeyId = ref<string | null>(null)
@@ -1471,6 +1497,14 @@ const quotaRefreshSupported = computed(() => {
 const refreshCurrentPageLoading = computed(() => {
   return keysLoading.value || refreshingCurrentPageQuota.value
 })
+
+function resetKeyPage(page = currentPage.value, pageSizeValue = pageSize.value): void {
+  keyPage.value = createEmptyKeyPage(page, pageSizeValue)
+}
+
+function refreshOverviewInBackground(): void {
+  void loadOverview()
+}
 
 function normalizeQuotaUpdatedAt(raw: number | null | undefined): number | null {
   const value = Number(raw ?? 0)
@@ -1607,6 +1641,7 @@ async function loadKeys() {
     keyPage.value = nextPage
   } catch (err) {
     if (requestId !== keysRequestId || selectedProviderId.value !== providerId) return
+    resetKeyPage(page, pageSizeValue)
     showError(parseApiError(err))
   } finally {
     if (requestId === keysRequestId) {
@@ -1878,6 +1913,7 @@ async function handleDeleteKey(key: PoolKeyDetail) {
     if (keyPage.value.keys.length === 0 && currentPage.value > 1) {
       currentPage.value--
     }
+    refreshOverviewInBackground()
   } catch (err) {
     showError(parseApiError(err, '删除账号失败'))
   } finally {
@@ -1886,12 +1922,6 @@ async function handleDeleteKey(key: PoolKeyDetail) {
 }
 
 async function copyFullKey(key: PoolKeyDetail) {
-  const cached = revealedKeys.value.get(key.key_id)
-  if (cached) {
-    await copyToClipboard(cached)
-    return
-  }
-
   try {
     const result = await revealEndpointKey(key.key_id)
     let textToCopy = ''
@@ -1911,7 +1941,6 @@ async function copyFullKey(key: PoolKeyDetail) {
       return
     }
 
-    revealedKeys.value.set(key.key_id, textToCopy)
     await copyToClipboard(textToCopy)
   } catch (err) {
     showError(parseApiError(err, '获取密钥失败'))
@@ -1968,6 +1997,7 @@ async function clearCooldown(keyId: string) {
     const res = await clearPoolCooldown(selectedProviderId.value, keyId)
     success(res.message)
     await loadKeys()
+    refreshOverviewInBackground()
   } catch (err) {
     showError(parseApiError(err))
   }
@@ -1993,6 +2023,7 @@ async function toggleKeyActive(key: PoolKeyDetail) {
     }
     success(nextStatus ? '账号已启用' : '账号已停用')
     await loadKeys()
+    refreshOverviewInBackground()
   } catch (err) {
     showError(parseApiError(err))
   } finally {
@@ -2493,6 +2524,23 @@ function formatStatInteger(value: number | null | undefined): string {
   const n = Number(value ?? 0)
   if (!Number.isFinite(n) || n <= 0) return '0'
   return Math.round(n).toLocaleString('en-US')
+}
+
+function formatTokenCount(value: number | null | undefined): string {
+  const n = Number(value ?? 0)
+  if (!Number.isFinite(n) || n <= 0) return '0'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
+  return String(Math.round(n))
+}
+
+function formatStatUsd(value: number | string | null | undefined): string {
+  const n = Number(value ?? 0)
+  if (!Number.isFinite(n) || n <= 0) return '$0.00'
+  if (n < 0.01) return `$${n.toFixed(4)}`
+  if (n < 1) return `$${n.toFixed(3)}`
+  if (n < 1000) return `$${n.toFixed(2)}`
+  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
 function formatRelativeTime(isoStr: string): string {

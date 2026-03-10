@@ -30,6 +30,7 @@ from src.core.exceptions import NotFoundException
 from src.core.logger import logger
 from src.database import get_db
 from src.models.database import Provider, ProviderAPIKey
+from src.services.billing.precision import to_money_decimal
 from src.services.provider.fingerprint import generate_fingerprint
 from src.services.provider.pool import redis_ops as pool_redis
 from src.services.provider.pool.account_state import resolve_pool_account_state
@@ -214,6 +215,10 @@ def _to_float(value: Any) -> float | None:
         except ValueError:
             return None
     return None
+
+
+def _serialize_money(value: Any) -> str:
+    return format(to_money_decimal(value), "f")
 
 
 def _is_known_banned_key(key: ProviderAPIKey, provider_type: str) -> bool:
@@ -677,6 +682,8 @@ class AdminListPoolKeysAdapter(AdminApiAdapter):
                     ProviderAPIKey.health_by_format,
                     ProviderAPIKey.circuit_breaker_by_format,
                     ProviderAPIKey.request_count,
+                    ProviderAPIKey.total_tokens,
+                    ProviderAPIKey.total_cost_usd,
                     ProviderAPIKey.last_used_at,
                     ProviderAPIKey.created_at,
                     ProviderAPIKey.upstream_metadata,
@@ -864,6 +871,8 @@ class AdminListPoolKeysAdapter(AdminApiAdapter):
                 else []
             )
             key_request_count = int(getattr(k, "request_count", 0) or 0)
+            key_total_tokens = int(getattr(k, "total_tokens", 0) or 0)
+            key_total_cost_usd = _serialize_money(getattr(k, "total_cost_usd", 0.0))
             key_last_used_at = getattr(k, "last_used_at", None)
             oauth_auth_config = _extract_oauth_auth_config(k)
 
@@ -923,6 +932,8 @@ class AdminListPoolKeysAdapter(AdminApiAdapter):
                     cost_window_usage=cost_usage,
                     cost_limit=cost_limit,
                     request_count=key_request_count,
+                    total_tokens=key_total_tokens,
+                    total_cost_usd=key_total_cost_usd,
                     sticky_sessions=sticky_counts.get(kid, 0),
                     lru_score=lru_scores.get(kid),
                     created_at=(

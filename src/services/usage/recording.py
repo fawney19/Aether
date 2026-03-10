@@ -9,7 +9,15 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from src.core.logger import logger
-from src.models.database import ApiKey, Provider, ProxyNode, Usage, User, UserModelUsageCount
+from src.models.database import (
+    ApiKey,
+    Provider,
+    ProviderAPIKey,
+    ProxyNode,
+    Usage,
+    User,
+    UserModelUsageCount,
+)
 from src.services.billing.precision import to_money_decimal
 from src.services.provider_keys.codex_quota_sync_dispatcher import (
     dispatch_codex_quota_sync_from_response_headers,
@@ -24,6 +32,7 @@ from src.services.usage._recording_helpers import (
 )
 from src.services.usage._types import UsageCostInfo, UsageRecordParams
 from src.services.wallet import WalletService
+from src.utils.perf import PerfRecorder
 
 
 def _extract_manual_proxy_node_id(metadata: dict[str, Any] | None) -> str | None:
@@ -68,6 +77,57 @@ def _increment_proxy_node_requests(
                 .where(ProxyNode.id == node_id, ProxyNode.is_manual == True)  # noqa: E712
                 .values(**values)
             )
+
+
+def _increment_provider_api_key_totals(
+    db: Session,
+    provider_api_key_id: str | None,
+    *,
+    total_tokens: int = 0,
+    total_cost: float = 0.0,
+    source: str = "unknown",
+) -> None:
+    """原子递增 ProviderAPIKey 的累计 Token/成本，并刷新最后使用时间。"""
+    if not provider_api_key_id:
+        return
+
+    from sqlalchemy import func as sql_func
+    from sqlalchemy import update
+
+    values: dict[str, Any] = {
+        "last_used_at": sql_func.now(),
+        "updated_at": sql_func.now(),
+    }
+
+    token_increment = int(total_tokens or 0)
+    if token_increment > 0:
+        values["total_tokens"] = ProviderAPIKey.total_tokens + token_increment
+
+    cost_increment = to_money_decimal(total_cost)
+    if cost_increment > 0:
+        values["total_cost_usd"] = ProviderAPIKey.total_cost_usd + Decimal(str(cost_increment))
+
+    perf_labels = {
+        "source": source,
+        "has_tokens": "true" if token_increment > 0 else "false",
+        "has_cost": "true" if cost_increment > 0 else "false",
+    }
+    PerfRecorder.record_counter("provider_key_totals_update_total", labels=perf_labels)
+    perf_start = PerfRecorder.start()
+
+    db.execute(
+        update(ProviderAPIKey).where(ProviderAPIKey.id == provider_api_key_id).values(**values)
+    )
+    PerfRecorder.stop(
+        perf_start,
+        "provider_key_totals_update",
+        labels=perf_labels,
+        log_hint=f"source={source}",
+    )
+
+
+def _get_actual_total_cost_usd(usage_params: dict[str, Any]) -> float:
+    return float(to_money_decimal(usage_params.get("actual_total_cost_usd") or 0.0))
 
 
 class UsageRecordingMixin(UsageBillingIntegrationMixin):
@@ -305,12 +365,21 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
                 .values(monthly_used_usd=Provider.monthly_used_usd + actual_total_cost)
             )
 
-        cls._finalize_usage_billing(
+        accounted, _charge_applied = cls._finalize_usage_billing(
             db,
             usage=usage,
             total_cost=total_cost,
             status=status,
         )
+
+        if accounted:
+            _increment_provider_api_key_totals(
+                db,
+                provider_api_key_id,
+                total_tokens=int(usage_params.get("total_tokens") or 0),
+                total_cost=_get_actual_total_cost_usd(usage_params),
+                source="record_usage_async",
+            )
 
         dispatch_codex_quota_sync_from_response_headers(
             provider_api_key_id=provider_api_key_id,
@@ -481,6 +550,14 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
                     db.execute(
                         sa_update(ApiKeyModel).where(ApiKeyModel.id == api_key.id).values(**values)
                     )
+
+                _increment_provider_api_key_totals(
+                    db,
+                    provider_api_key_id,
+                    total_tokens=int(usage_params.get("total_tokens") or 0),
+                    total_cost=_get_actual_total_cost_usd(usage_params),
+                    source="record_usage",
+                )
 
                 # 更新 GlobalModel 使用计数
                 db.execute(
@@ -706,6 +783,14 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
                     )
                 db.execute(update(ApiKeyModel).where(ApiKeyModel.id == api_key.id).values(**values))
 
+            _increment_provider_api_key_totals(
+                db,
+                provider_api_key_id,
+                total_tokens=int(usage_params.get("total_tokens") or 0),
+                total_cost=_get_actual_total_cost_usd(usage_params),
+                source="record_usage_with_custom_cost",
+            )
+
             # 更新 GlobalModel 使用计数
             db.execute(
                 update(GlobalModel)
@@ -841,6 +926,9 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
         usages: list[Usage] = []
         apikey_stats: dict[str, dict[str, Any]] = defaultdict(
             lambda: {"requests": 0, "cost": 0.0, "is_standalone": False}
+        )
+        provider_key_stats: dict[str, dict[str, Any]] = defaultdict(
+            lambda: {"tokens": 0, "actual_cost": 0.0}
         )
         model_counts: dict[str, int] = defaultdict(int)  # model -> count
         user_model_counts: dict[tuple[str, str], int] = defaultdict(
@@ -1006,6 +1094,15 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
                             apikey_stats[key_id]["cost"] += total_cost
                         apikey_stats[key_id]["is_standalone"] = api_key.is_standalone
 
+                    provider_api_key_id = record.get("provider_api_key_id")
+                    if isinstance(provider_api_key_id, str) and provider_api_key_id:
+                        provider_key_stats[provider_api_key_id]["tokens"] += int(
+                            usage_params.get("total_tokens") or 0
+                        )
+                        provider_key_stats[provider_api_key_id][
+                            "actual_cost"
+                        ] += _get_actual_total_cost_usd(usage_params)
+
                     manual_nid = _extract_manual_proxy_node_id(record.get("metadata"))
                     if manual_nid:
                         proxy_node_counts[manual_nid] += 1
@@ -1067,6 +1164,15 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
                         if charge_applied:
                             apikey_stats[key_id]["cost"] += total_cost
                         apikey_stats[key_id]["is_standalone"] = api_key.is_standalone
+
+                    provider_api_key_id = record.get("provider_api_key_id")
+                    if isinstance(provider_api_key_id, str) and provider_api_key_id:
+                        provider_key_stats[provider_api_key_id]["tokens"] += int(
+                            usage_params.get("total_tokens") or 0
+                        )
+                        provider_key_stats[provider_api_key_id][
+                            "actual_cost"
+                        ] += _get_actual_total_cost_usd(usage_params)
 
                     manual_nid = _extract_manual_proxy_node_id(record.get("metadata"))
                     if manual_nid:
@@ -1155,6 +1261,27 @@ class UsageRecordingMixin(UsageBillingIntegrationMixin):
                     updated_at=sql_func.now(),
                 )
             )
+
+        provider_key_perf_start = PerfRecorder.start()
+        for provider_key_id, stats in provider_key_stats.items():
+            _increment_provider_api_key_totals(
+                db,
+                provider_key_id,
+                total_tokens=int(stats["tokens"]),
+                total_cost=float(stats["actual_cost"]),
+                source="record_usage_batch",
+            )
+        PerfRecorder.stop(
+            provider_key_perf_start,
+            "provider_key_totals_batch_apply",
+            labels={"source": "record_usage_batch"},
+            log_hint=f"rows={len(provider_key_stats)}",
+        )
+        PerfRecorder.record_counter(
+            "provider_key_totals_batch_rows_total",
+            value=len(provider_key_stats),
+            labels={"source": "record_usage_batch"},
+        )
 
         # 批量更新手动代理节点请求计数
         _increment_proxy_node_requests(db, proxy_node_counts, proxy_node_failed)

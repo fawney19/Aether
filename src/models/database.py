@@ -1760,6 +1760,8 @@ class ProviderAPIKey(ExportMixin, Base):
             "health_by_format",
             "circuit_breaker_by_format",
             "request_count",
+            "total_tokens",
+            "total_cost_usd",
             "success_count",
             "error_count",
             "total_response_time_ms",
@@ -1865,6 +1867,8 @@ class ProviderAPIKey(ExportMixin, Base):
 
     # 使用统计
     request_count = Column(Integer, default=0)  # 请求次数
+    total_tokens = Column(BigInteger, default=0, nullable=False)  # 累计 Token 数
+    total_cost_usd = Column(Numeric(20, 8), default=0.0, nullable=False)  # 累计成本
     success_count = Column(Integer, default=0)  # 成功次数
     error_count = Column(Integer, default=0)  # 错误次数
     total_response_time_ms = Column(Integer, default=0)  # 总响应时间（用于计算平均值）
