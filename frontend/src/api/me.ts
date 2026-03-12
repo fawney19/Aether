@@ -79,6 +79,8 @@ export interface ModelSummary {
   input_tokens: number
   output_tokens: number
   total_tokens: number
+  cache_read_tokens?: number
+  cache_hit_rate?: number
   total_cost_usd: number
   actual_total_cost_usd?: number  // 倍率消耗（仅管理员可见）
 }
@@ -88,6 +90,8 @@ export interface ProviderSummary {
   provider: string
   requests: number
   total_tokens: number
+  cache_read_tokens?: number
+  cache_hit_rate?: number
   total_cost_usd: number
   success_rate: number | null
   avg_response_time_ms: number | null

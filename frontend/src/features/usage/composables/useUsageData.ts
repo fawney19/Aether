@@ -110,6 +110,8 @@ export function useUsageData(options: UseUsageDataOptions) {
             model: item.model,
             request_count: item.request_count || 0,
             total_tokens: item.total_tokens || 0,
+            cache_read_tokens: typeof raw.cache_read_tokens === 'number' ? raw.cache_read_tokens : 0,
+            cache_hit_rate: typeof raw.cache_hit_rate === 'number' ? raw.cache_hit_rate : 0,
             total_cost: item.total_cost || 0,
             actual_cost: typeof raw.actual_cost === 'number' ? raw.actual_cost : undefined
           }
@@ -119,6 +121,8 @@ export function useUsageData(options: UseUsageDataOptions) {
           provider: item.provider,
           requests: item.request_count,
           totalTokens: item.total_tokens || 0,
+          cacheReadTokens: item.cache_read_tokens || 0,
+          cacheHitRate: item.cache_hit_rate || 0,
           totalCost: item.total_cost,
           actualCost: item.actual_cost,
           successRate: item.success_rate,
@@ -131,6 +135,8 @@ export function useUsageData(options: UseUsageDataOptions) {
           api_format: item.api_format,
           request_count: item.request_count || 0,
           total_tokens: item.total_tokens || 0,
+          cache_read_tokens: item.cache_read_tokens || 0,
+          cache_hit_rate: item.cache_hit_rate || 0,
           total_cost: item.total_cost || 0,
           actual_cost: item.actual_cost,
           avgResponseTime: item.avg_response_time_ms > 0
@@ -163,6 +169,8 @@ export function useUsageData(options: UseUsageDataOptions) {
           model: item.model,
           request_count: item.requests || 0,
           total_tokens: item.total_tokens || 0,
+          cache_read_tokens: item.cache_read_tokens || 0,
+          cache_hit_rate: item.cache_hit_rate || 0,
           total_cost: item.total_cost_usd || 0,
           actual_cost: item.actual_total_cost_usd
         }))
@@ -170,7 +178,9 @@ export function useUsageData(options: UseUsageDataOptions) {
         providerStats.value = (userData.summary_by_provider || []).map((item) => ({
           provider: item.provider,
           requests: item.requests || 0,
-          totalTokens: 0,
+          totalTokens: item.total_tokens || 0,
+          cacheReadTokens: item.cache_read_tokens || 0,
+          cacheHitRate: item.cache_hit_rate || 0,
           totalCost: item.total_cost_usd || 0,
           successRate: item.success_rate || 0,
           avgResponseTime: (item.avg_response_time_ms ?? 0) > 0
@@ -190,6 +200,8 @@ export function useUsageData(options: UseUsageDataOptions) {
         const apiFormatMap = new Map<string, {
           count: number
           tokens: number
+          inputTokens: number
+          cacheReadTokens: number
           cost: number
           totalResponseTime: number
           responseTimeCount: number
@@ -202,12 +214,16 @@ export function useUsageData(options: UseUsageDataOptions) {
             const existing = apiFormatMap.get(record.api_format) || {
               count: 0,
               tokens: 0,
+              inputTokens: 0,
+              cacheReadTokens: 0,
               cost: 0,
               totalResponseTime: 0,
               responseTimeCount: 0
             }
             existing.count++
             existing.tokens += record.total_tokens || 0
+            existing.inputTokens += record.input_tokens || 0
+            existing.cacheReadTokens += record.cache_read_input_tokens || 0
             existing.cost += record.cost || 0
             if (record.response_time_ms) {
               existing.totalResponseTime += record.response_time_ms
@@ -230,6 +246,10 @@ export function useUsageData(options: UseUsageDataOptions) {
               api_format: format,
               request_count: data.count,
               total_tokens: data.tokens,
+              cache_read_tokens: data.cacheReadTokens,
+              cache_hit_rate: (data.inputTokens + data.cacheReadTokens) > 0
+                ? (data.cacheReadTokens / (data.inputTokens + data.cacheReadTokens)) * 100
+                : 0,
               total_cost: data.cost,
               avgResponseTime: avgMs > 0 ? `${(avgMs / 1000).toFixed(2)}s` : '-'
             }

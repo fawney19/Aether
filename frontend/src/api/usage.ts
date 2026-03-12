@@ -40,6 +40,8 @@ export interface UsageByModel {
   total_tokens: number
   total_cost: number
   avg_response_time?: number
+  cache_read_tokens?: number
+  cache_hit_rate?: number
 }
 
 export interface UsageByUser {
@@ -61,6 +63,8 @@ export interface UsageByProvider {
   avg_response_time_ms: number
   success_rate: number
   error_count: number
+  cache_read_tokens?: number
+  cache_hit_rate?: number
 }
 
 export interface UsageByApiFormat {
@@ -70,6 +74,8 @@ export interface UsageByApiFormat {
   total_cost: number
   actual_cost: number
   avg_response_time_ms: number
+  cache_read_tokens?: number
+  cache_hit_rate?: number
 }
 
 export interface UsageFilters {

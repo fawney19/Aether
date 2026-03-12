@@ -22,6 +22,12 @@
               费用
             </TableHead>
             <TableHead class="h-8 px-2 text-right">
+              缓存Token
+            </TableHead>
+            <TableHead class="h-8 px-2 text-right">
+              缓存命中率
+            </TableHead>
+            <TableHead class="h-8 px-2 text-right">
               成功率
             </TableHead>
             <TableHead class="h-8 px-2 text-right">
@@ -32,7 +38,7 @@
         <TableBody>
           <TableRow v-if="data.length === 0">
             <TableCell
-              :colspan="6"
+              :colspan="8"
               class="text-center py-6 text-muted-foreground px-2"
             >
               暂无提供商统计数据
@@ -61,6 +67,12 @@
                   {{ formatCurrency(provider.actualCost) }}
                 </span>
               </div>
+            </TableCell>
+            <TableCell class="text-right py-2 px-2">
+              {{ formatTokens(provider.cacheReadTokens || 0) }}
+            </TableCell>
+            <TableCell class="text-right py-2 px-2 text-muted-foreground">
+              {{ formatHitRate(provider.cacheHitRate) }}
             </TableCell>
             <TableCell class="text-right py-2 px-2">
               <span :class="getSuccessRateClass(provider.successRate)">{{ provider.successRate }}%</span>
@@ -95,6 +107,11 @@ defineProps<{
 function getSuccessRateClass(rate: number): string {
   if (rate < 90) return 'text-destructive'
   return ''  // 默认颜色
+}
+
+function formatHitRate(rate: number | undefined): string {
+  if (typeof rate !== 'number' || Number.isNaN(rate)) return '-'
+  return `${rate.toFixed(2)}%`
 }
 
 </script>

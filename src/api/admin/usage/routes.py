@@ -78,6 +78,18 @@ def _build_time_range_params(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _calculate_token_cache_hit_rate(
+    total_input_tokens: int | None,
+    cache_read_tokens: int | None,
+) -> float:
+    input_tokens = int(total_input_tokens or 0)
+    cached_tokens = int(cache_read_tokens or 0)
+    total_context_tokens = input_tokens + cached_tokens
+    if total_context_tokens <= 0:
+        return 0.0
+    return round(cached_tokens / total_context_tokens * 100, 2)
+
+
 # ==================== RESTful Routes ====================
 
 
@@ -107,10 +119,10 @@ async def get_usage_aggregation(
     - `limit`: 返回数量限制，默认 20，最大 100
 
     **返回字段**:
-    - 按模型聚合时：model, request_count, total_tokens, total_cost, actual_cost
+    - 按模型聚合时：model, request_count, total_tokens, total_cost, actual_cost, cache_read_tokens, cache_hit_rate
     - 按用户聚合时：user_id, email, username, request_count, total_tokens, total_cost
-    - 按提供商聚合时：provider_id, provider, request_count, total_tokens, total_cost, actual_cost, avg_response_time_ms, success_rate, error_count
-    - 按 API 格式聚合时：api_format, request_count, total_tokens, total_cost, actual_cost, avg_response_time_ms
+    - 按提供商聚合时：provider_id, provider, request_count, total_tokens, total_cost, actual_cost, avg_response_time_ms, success_rate, error_count, cache_read_tokens, cache_hit_rate
+    - 按 API 格式聚合时：api_format, request_count, total_tokens, total_cost, actual_cost, avg_response_time_ms, cache_read_tokens, cache_hit_rate
     """
     time_range = _apply_admin_default_range(
         _build_time_range_params(start_date, end_date, preset, timezone_name, tz_offset_minutes)
@@ -524,6 +536,8 @@ class AdminUsageByModelAdapter(AdminApiAdapter):
             func.sum(Usage.total_tokens).label("total_tokens"),
             func.sum(Usage.total_cost_usd).label("total_cost"),
             func.sum(Usage.actual_total_cost_usd).label("actual_cost"),
+            func.sum(Usage.cache_read_input_tokens).label("cache_read_tokens"),
+            func.sum(Usage.input_tokens).label("total_input_tokens"),
         )
         # 过滤掉 pending/streaming 状态的请求（尚未完成的请求不应计入统计）
         query = query.filter(Usage.status.notin_(["pending", "streaming"]))
@@ -553,8 +567,13 @@ class AdminUsageByModelAdapter(AdminApiAdapter):
                 "total_tokens": int(tokens or 0),
                 "total_cost": float(cost or 0),
                 "actual_cost": float(actual_cost or 0),
+                "cache_read_tokens": int(cache_read_tokens or 0),
+                "cache_hit_rate": _calculate_token_cache_hit_rate(
+                    total_input_tokens=total_input_tokens,
+                    cache_read_tokens=cache_read_tokens,
+                ),
             }
-            for model, count, tokens, cost, actual_cost in stats
+            for model, count, tokens, cost, actual_cost, cache_read_tokens, total_input_tokens in stats
         ]
 
 
@@ -678,6 +697,8 @@ class AdminUsageByProviderAdapter(AdminApiAdapter):
             func.sum(Usage.total_cost_usd).label("total_cost"),
             func.sum(Usage.actual_total_cost_usd).label("actual_cost"),
             func.avg(Usage.response_time_ms).label("avg_response_time_ms"),
+            func.sum(Usage.cache_read_input_tokens).label("cache_read_tokens"),
+            func.sum(Usage.input_tokens).label("total_input_tokens"),
         ).filter(
             Usage.provider_id.isnot(None),
             # 过滤掉 pending/streaming 状态的请求
@@ -742,6 +763,11 @@ class AdminUsageByProviderAdapter(AdminApiAdapter):
                     "avg_response_time_ms": float(stat.avg_latency_ms or 0),
                     "success_rate": round(success_rate, 2),
                     "error_count": failed_count,
+                    "cache_read_tokens": int(usage_stat.cache_read_tokens or 0) if usage_stat else 0,
+                    "cache_hit_rate": _calculate_token_cache_hit_rate(
+                        total_input_tokens=(usage_stat.total_input_tokens if usage_stat else 0),
+                        cache_read_tokens=(usage_stat.cache_read_tokens if usage_stat else 0),
+                    ),
                 }
             )
 
@@ -773,6 +799,8 @@ class AdminUsageByApiFormatAdapter(AdminApiAdapter):
             func.sum(Usage.total_cost_usd).label("total_cost"),
             func.sum(Usage.actual_total_cost_usd).label("actual_cost"),
             func.avg(Usage.response_time_ms).label("avg_response_time_ms"),
+            func.sum(Usage.cache_read_input_tokens).label("cache_read_tokens"),
+            func.sum(Usage.input_tokens).label("total_input_tokens"),
         )
         # 过滤掉 pending/streaming 状态的请求
         query = query.filter(Usage.status.notin_(["pending", "streaming"]))
@@ -808,8 +836,22 @@ class AdminUsageByApiFormatAdapter(AdminApiAdapter):
                 "total_cost": float(cost or 0),
                 "actual_cost": float(actual_cost or 0),
                 "avg_response_time_ms": float(avg_response_time or 0),
+                "cache_read_tokens": int(cache_read_tokens or 0),
+                "cache_hit_rate": _calculate_token_cache_hit_rate(
+                    total_input_tokens=total_input_tokens,
+                    cache_read_tokens=cache_read_tokens,
+                ),
             }
-            for api_format, count, tokens, cost, actual_cost, avg_response_time in stats
+            for (
+                api_format,
+                count,
+                tokens,
+                cost,
+                actual_cost,
+                avg_response_time,
+                cache_read_tokens,
+                total_input_tokens,
+            ) in stats
         ]
 
 

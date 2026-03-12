@@ -59,6 +59,13 @@ router = APIRouter(prefix="/api/users/me", tags=["User Profile"])
 pipeline = ApiRequestPipeline()
 
 
+def _calculate_token_cache_hit_rate(total_input_tokens: int, cache_read_tokens: int) -> float:
+    total_context_tokens = max(0, int(total_input_tokens)) + max(0, int(cache_read_tokens))
+    if total_context_tokens == 0:
+        return 0.0
+    return round(max(0, int(cache_read_tokens)) / total_context_tokens * 100, 2)
+
+
 def _update_profile_sync(
     user_id: str,
     request: UpdateProfileRequest,
@@ -508,8 +515,8 @@ async def get_my_usage(
     - `total_requests`: 总请求数
     - `total_tokens`: 总 Token 数
     - `total_cost`: 总成本（USD）
-    - `summary_by_model`: 按模型分组统计
-    - `summary_by_provider`: 按提供商分组统计
+    - `summary_by_model`: 按模型分组统计（含 `cache_read_tokens`、`cache_hit_rate`）
+    - `summary_by_provider`: 按提供商分组统计（含 `cache_read_tokens`、`cache_hit_rate`）
     - `records`: 详细使用记录列表
     - `pagination`: 分页信息
     """
@@ -1045,6 +1052,8 @@ class GetUsageAdapter(AuthenticatedApiAdapter):
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "total_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_hit_rate": 0.0,
                 "total_cost_usd": 0.0,
             }
             # 管理员可以看到真实成本
@@ -1056,6 +1065,7 @@ class GetUsageAdapter(AuthenticatedApiAdapter):
             stats["input_tokens"] += item["input_tokens"]
             stats["output_tokens"] += item["output_tokens"]
             stats["total_tokens"] += item["total_tokens"]
+            stats["cache_read_tokens"] += int(item.get("cache_read_tokens", 0) or 0)
             stats["total_cost_usd"] += item["total_cost_usd"]
             # 管理员可以看到真实成本
             if user.role == UserRole.ADMIN:
@@ -1065,7 +1075,9 @@ class GetUsageAdapter(AuthenticatedApiAdapter):
             provider_base_stats = {
                 "provider": provider_name,
                 "requests": 0,
+                "input_tokens": 0,
                 "total_tokens": 0,
+                "cache_read_tokens": 0,
                 "total_cost_usd": 0.0,
                 "success_count": 0,
                 "total_response_time_ms": 0.0,
@@ -1073,7 +1085,9 @@ class GetUsageAdapter(AuthenticatedApiAdapter):
             }
             provider_stats = provider_summary.setdefault(provider_name, provider_base_stats)
             provider_stats["requests"] += item["requests"]
+            provider_stats["input_tokens"] += item["input_tokens"]
             provider_stats["total_tokens"] += item["total_tokens"]
+            provider_stats["cache_read_tokens"] += int(item.get("cache_read_tokens", 0) or 0)
             provider_stats["total_cost_usd"] += item["total_cost_usd"]
             provider_stats["success_count"] += int(item.get("success_count", 0) or 0)
             success_response_time_count = int(item.get("success_response_time_count", 0) or 0)
@@ -1082,6 +1096,12 @@ class GetUsageAdapter(AuthenticatedApiAdapter):
                     item.get("success_response_time_sum_ms", 0.0) or 0.0
                 )
                 provider_stats["response_time_count"] += success_response_time_count
+
+        for model_stats in model_summary.values():
+            model_stats["cache_hit_rate"] = _calculate_token_cache_hit_rate(
+                total_input_tokens=int(model_stats.get("input_tokens", 0) or 0),
+                cache_read_tokens=int(model_stats.get("cache_read_tokens", 0) or 0),
+            )
 
         summary_by_model = sorted(model_summary.values(), key=lambda x: x["requests"], reverse=True)
         summary_by_provider = []
@@ -1101,6 +1121,11 @@ class GetUsageAdapter(AuthenticatedApiAdapter):
                     "provider": provider_stats["provider"],
                     "requests": provider_stats["requests"],
                     "total_tokens": provider_stats["total_tokens"],
+                    "cache_read_tokens": provider_stats["cache_read_tokens"],
+                    "cache_hit_rate": _calculate_token_cache_hit_rate(
+                        total_input_tokens=int(provider_stats.get("input_tokens", 0) or 0),
+                        cache_read_tokens=int(provider_stats.get("cache_read_tokens", 0) or 0),
+                    ),
                     "total_cost_usd": provider_stats["total_cost_usd"],
                     "success_rate": round(success_rate, 2),
                     "avg_response_time_ms": round(avg_response_time_ms, 2),

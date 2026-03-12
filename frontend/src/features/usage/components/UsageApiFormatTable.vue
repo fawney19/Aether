@@ -22,6 +22,12 @@
               费用
             </TableHead>
             <TableHead class="h-8 px-2 text-right">
+              缓存Token
+            </TableHead>
+            <TableHead class="h-8 px-2 text-right">
+              缓存命中率
+            </TableHead>
+            <TableHead class="h-8 px-2 text-right">
               平均响应
             </TableHead>
           </TableRow>
@@ -29,7 +35,7 @@
         <TableBody>
           <TableRow v-if="data.length === 0">
             <TableCell
-              :colspan="5"
+              :colspan="7"
               class="text-center py-6 text-muted-foreground px-2"
             >
               暂无API格式统计数据
@@ -59,6 +65,12 @@
                 </span>
               </div>
             </TableCell>
+            <TableCell class="text-right py-2 px-2">
+              {{ formatTokens(item.cache_read_tokens || 0) }}
+            </TableCell>
+            <TableCell class="text-right py-2 px-2 text-muted-foreground">
+              {{ formatHitRate(item.cache_hit_rate) }}
+            </TableCell>
             <TableCell class="text-right text-muted-foreground py-2 px-2">
               {{ item.avgResponseTime }}
             </TableCell>
@@ -85,5 +97,10 @@ defineProps<{
   data: ApiFormatStatsItem[]
   isAdmin: boolean
 }>()
+
+function formatHitRate(rate: number | undefined): string {
+  if (typeof rate !== 'number' || Number.isNaN(rate)) return '-'
+  return `${rate.toFixed(2)}%`
+}
 
 </script>
