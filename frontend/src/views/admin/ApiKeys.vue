@@ -105,8 +105,8 @@
                 <TableHead class="w-[240px] h-12 font-semibold">
                   钱包
                 </TableHead>
-                <TableHead class="w-[130px] h-12 font-semibold">
-                  使用统计
+                <TableHead class="w-[190px] h-12 font-semibold">
+                  统计/限速
                 </TableHead>
                 <TableHead class="w-[110px] h-12 font-semibold">
                   有效期
@@ -221,7 +221,23 @@
                       请求: <span class="font-medium text-foreground">{{ (apiKey.total_requests || 0).toLocaleString() }}</span>
                     </div>
                     <div class="text-muted-foreground">
-                      速率: <span class="font-medium text-foreground">{{ apiKey.rate_limit ? `${apiKey.rate_limit}/min` : '未设置' }}</span>
+                      Tokens: <span class="font-medium text-foreground">{{ formatTokens(apiKey.total_tokens || 0) }}</span>
+                    </div>
+                    <div class="flex items-center gap-1 text-muted-foreground">
+                      <span>限速:</span>
+                      <Badge
+                        v-if="isStandaloneRateLimitInherited(apiKey.rate_limit) || isStandaloneRateLimitUnlimited(apiKey.rate_limit)"
+                        variant="secondary"
+                        class="h-5 px-1.5 py-0 text-[10px] font-medium"
+                      >
+                        {{ formatStandaloneRateLimit(apiKey.rate_limit) }}
+                      </Badge>
+                      <span
+                        v-else
+                        class="font-medium text-foreground"
+                      >
+                        {{ formatStandaloneRateLimit(apiKey.rate_limit) }}
+                      </span>
                     </div>
                   </div>
                 </TableCell>
@@ -388,6 +404,12 @@
                     {{ walletStatusLabel(getApiKeyWalletStatus(apiKey.id)) }}
                   </Badge>
                   <Badge
+                    variant="secondary"
+                    class="h-5 px-1.5 py-0 text-[10px] font-medium"
+                  >
+                    {{ formatStandaloneRateLimit(apiKey.rate_limit) }}
+                  </Badge>
+                  <Badge
                     v-if="apiKey.auto_delete_on_expiry"
                     variant="secondary"
                     class="h-5 px-1.5 py-0 text-[10px] font-medium"
@@ -431,18 +453,18 @@
                 <div class="grid grid-cols-2 gap-2.5 text-xs">
                   <div class="rounded-lg border border-border/50 bg-background/70 p-2.5">
                     <div class="mb-1 text-muted-foreground">
-                      速率限制
-                    </div>
-                    <div class="font-semibold text-foreground">
-                      {{ apiKey.rate_limit ? `${apiKey.rate_limit}/min` : '未设置' }}
-                    </div>
-                  </div>
-                  <div class="rounded-lg border border-border/50 bg-background/70 p-2.5">
-                    <div class="mb-1 text-muted-foreground">
                       请求次数
                     </div>
                     <div class="font-semibold text-foreground">
                       {{ (apiKey.total_requests || 0).toLocaleString() }}
+                    </div>
+                  </div>
+                  <div class="rounded-lg border border-border/50 bg-background/70 p-2.5">
+                    <div class="mb-1 text-muted-foreground">
+                      Tokens
+                    </div>
+                    <div class="font-semibold text-foreground">
+                      {{ formatTokens(apiKey.total_tokens || 0) }}
                     </div>
                   </div>
                   <div class="col-span-2 rounded-lg border border-border/50 bg-background/70 p-2.5">
@@ -979,6 +1001,34 @@ function formatDate(dateString: string): string {
   })
 }
 
+function formatTokens(tokens: number): string {
+  if (tokens >= 1000000) {
+    return `${(tokens / 1000000).toFixed(1)}M`
+  }
+  if (tokens >= 1000) {
+    return `${(tokens / 1000).toFixed(1)}K`
+  }
+  return tokens.toString()
+}
+
+function isStandaloneRateLimitInherited(rateLimit?: number | null): boolean {
+  return rateLimit == null
+}
+
+function isStandaloneRateLimitUnlimited(rateLimit?: number | null): boolean {
+  return rateLimit === 0
+}
+
+function formatStandaloneRateLimit(rateLimit?: number | null): string {
+  if (isStandaloneRateLimitInherited(rateLimit)) {
+    return '跟随系统'
+  }
+  if (isStandaloneRateLimitUnlimited(rateLimit)) {
+    return '不限速'
+  }
+  return `${rateLimit}/min`
+}
+
 function getRelativeTime(dateString: string): string {
   const date = new Date(dateString)
   const now = new Date()
@@ -1028,7 +1078,7 @@ async function handleKeyFormSubmit(data: StandaloneKeyFormData) {
       const updateData: Partial<CreateStandaloneApiKeyRequest> = {
         name: data.name || undefined,
         unlimited_balance: Boolean(data.unlimited_balance),
-        rate_limit: data.rate_limit ?? null,  // undefined = 无限制，显式传 null
+        rate_limit: data.rate_limit ?? null,  // undefined = 跟随系统默认，显式传 null
         expires_at: data.expires_at || null,  // undefined/空 = 永不过期
         auto_delete_on_expiry: data.auto_delete_on_expiry,
         // 空数组表示清除限制（允许全部），后端会将空数组存为 NULL
@@ -1057,7 +1107,7 @@ async function handleKeyFormSubmit(data: StandaloneKeyFormData) {
       const createData: CreateStandaloneApiKeyRequest = {
         name: data.name || undefined,
         initial_balance_usd: isUnlimited ? null : (data.initial_balance_usd as number),
-        rate_limit: data.rate_limit ?? null,  // undefined = 无限制，显式传 null
+        rate_limit: data.rate_limit ?? null,  // undefined = 跟随系统默认，显式传 null
         expires_at: data.expires_at || null,  // undefined/空 = 永不过期
         auto_delete_on_expiry: data.auto_delete_on_expiry,
         // 空数组表示不设置限制（允许全部），后端会将空数组存为 NULL

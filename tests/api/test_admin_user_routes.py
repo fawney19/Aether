@@ -101,24 +101,14 @@ async def test_create_user_adapter_preserves_empty_restriction_lists(
     db = MagicMock()
     captured: dict[str, Any] = {}
 
-    def _create_user(**kwargs: Any) -> SimpleNamespace:
-        captured.update(kwargs)
-        return SimpleNamespace(
-            id="user-3",
-            email="u3@example.com",
-            username="user3",
-            role=SimpleNamespace(value="user"),
-            is_active=True,
-            allowed_providers=[],
-            allowed_api_formats=[],
-            allowed_models=[],
-        )
+    def _create_user_sync(request: Any, role: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        captured["allowed_providers"] = request.allowed_providers
+        captured["allowed_api_formats"] = request.allowed_api_formats
+        captured["allowed_models"] = request.allowed_models
+        captured["role"] = role
+        return {"id": "user-3"}, {}
 
-    monkeypatch.setattr("src.api.admin.users.routes.UserService.create_user", _create_user)
-    monkeypatch.setattr(
-        "src.api.admin.users.routes._serialize_user",
-        lambda _db, user: {"id": user.id},
-    )
+    monkeypatch.setattr("src.api.admin.users.routes._create_user_sync", _create_user_sync)
 
     context = SimpleNamespace(
         db=db,

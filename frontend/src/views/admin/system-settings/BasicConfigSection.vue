@@ -39,7 +39,7 @@
           for="rate-limit"
           class="block text-sm font-medium"
         >
-          每分钟请求限制
+          默认速率限制 (请求/分钟)
         </Label>
         <Input
           id="rate-limit"
@@ -50,7 +50,7 @@
           @update:model-value="$emit('update:rateLimitPerMinute', Number($event))"
         />
         <p class="mt-1 text-xs text-muted-foreground">
-          0 表示不限制
+          0 表示默认不限制；未单独配置的用户和独立 Key 会跟随这里
         </p>
       </div>
 

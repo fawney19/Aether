@@ -126,6 +126,7 @@ export interface ApiKey {
   created_at: string
   total_requests?: number
   total_cost_usd?: number
+  rate_limit?: number | null
   allowed_providers?: ProviderConfig[]
   force_capabilities?: Record<string, boolean> | null  // 强制能力配置
 }
@@ -165,8 +166,8 @@ export const meApi = {
     return response.data
   },
 
-  async createApiKey(name: string): Promise<ApiKey> {
-    const response = await apiClient.post<ApiKey>('/api/users/me/api-keys', { name })
+  async createApiKey(data: { name: string; rate_limit?: number }): Promise<ApiKey> {
+    const response = await apiClient.post<ApiKey>('/api/users/me/api-keys', data)
     return response.data
   },
 
@@ -193,6 +194,17 @@ export const meApi = {
 
   async toggleApiKey(keyId: string): Promise<ApiKey> {
     const response = await apiClient.patch<ApiKey>(`/api/users/me/api-keys/${keyId}`)
+    return response.data
+  },
+
+  async updateApiKey(
+    keyId: string,
+    data: { name?: string; rate_limit?: number | null }
+  ): Promise<ApiKey & { message: string }> {
+    const response = await apiClient.put<ApiKey & { message: string }>(
+      `/api/users/me/api-keys/${keyId}`,
+      data
+    )
     return response.data
   },
 

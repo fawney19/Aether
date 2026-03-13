@@ -252,6 +252,11 @@ class CreateUserRequest(BaseModel):
     allowed_models: list[str] | None = Field(
         default=None, description="允许使用的模型名称列表，null表示无限制"
     )
+    rate_limit: int | None = Field(
+        default=None,
+        ge=0,
+        description="每分钟请求限制；null 表示继承系统默认，0 表示不限制",
+    )
 
     @field_validator("initial_gift_usd", mode="before")
     @classmethod
@@ -335,6 +340,11 @@ class UpdateUserRequest(BaseModel):
     allowed_providers: list[str] | None = None  # 允许使用的提供商 ID 列表
     allowed_api_formats: list[str] | None = None  # 允许使用的 API 格式列表
     allowed_models: list[str] | None = None  # 允许使用的模型名称列表
+    rate_limit: int | None = Field(
+        default=None,
+        ge=0,
+        description="每分钟请求限制；null 表示继承系统默认，0 表示不限制",
+    )
     is_active: bool | None = None
 
     @field_validator("allowed_api_formats")
@@ -351,7 +361,11 @@ class CreateApiKeyRequest(BaseModel):
     allowed_providers: list[str] | None = None  # 允许使用的提供商 ID 列表
     allowed_api_formats: list[str] | None = None  # 允许使用的 API 格式列表
     allowed_models: list[str] | None = None  # 允许使用的模型名称列表
-    rate_limit: int | None = None  # None = 无限制
+    rate_limit: int | None = Field(
+        None,
+        ge=0,
+        description="每分钟请求限制；独立Key: null=继承系统默认，0=不限制；普通Key: 0=不限制",
+    )
     expire_days: int | None = None  # None = 永不过期，数字 = 多少天后过期
     expires_at: str | None = None  # ISO 日期字符串，如 "2025-12-31"，优先于 expire_days
     initial_balance_usd: float | None = Field(
@@ -382,6 +396,7 @@ class UserResponse(BaseModel):
     allowed_providers: list[str] | None = None  # 允许使用的提供商 ID 列表
     allowed_api_formats: list[str] | None = None  # 允许使用的 API 格式列表
     allowed_models: list[str] | None = None  # 允许使用的模型名称列表
+    rate_limit: int | None = None
     unlimited: bool = False
     is_active: bool
     created_at: datetime
@@ -402,7 +417,7 @@ class ApiKeyResponse(BaseModel):
     total_cost_usd: float
     allowed_providers: list[str] | None
     allowed_models: list[str] | None
-    rate_limit: int
+    rate_limit: int | None
     is_active: bool
     expires_at: datetime | None = None
     is_standalone: bool = False
@@ -772,6 +787,18 @@ class CreateMyApiKeyRequest(BaseModel):
     """创建我的API密钥请求"""
 
     name: str
+    rate_limit: int = Field(0, ge=0, description="该 Key 的每分钟请求限制，0 表示不限制")
+
+
+class UpdateMyApiKeyRequest(BaseModel):
+    """更新我的 API 密钥请求"""
+
+    name: str | None = None
+    rate_limit: int | None = Field(
+        None,
+        ge=0,
+        description="该 Key 的每分钟请求限制；0 表示不限制，null 表示不修改",
+    )
 
 
 class ProviderConfig(BaseModel):

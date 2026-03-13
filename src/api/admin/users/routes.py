@@ -18,7 +18,7 @@ from src.core.exceptions import InvalidRequestException, NotFoundException, tran
 from src.core.logger import logger
 from src.database import get_db, get_db_context
 from src.models.admin_requests import UpdateUserRequest
-from src.models.api import CreateApiKeyRequest, CreateUserRequest
+from src.models.api import CreateApiKeyRequest, CreateUserRequest, UpdateMyApiKeyRequest
 from src.models.database import ApiKey, User, UserRole, Wallet
 from src.services.cache.user_cache import UserCacheService
 from src.services.system.config import SystemConfigService
@@ -57,6 +57,7 @@ def _serialize_user(
         "allowed_providers": user.allowed_providers,
         "allowed_api_formats": user.allowed_api_formats,
         "allowed_models": user.allowed_models,
+        "rate_limit": getattr(user, "rate_limit", None),
         "unlimited": WalletService.is_unlimited_wallet(resolved_wallet),
         "is_active": user.is_active,
         "created_at": user.created_at.isoformat(),
@@ -89,6 +90,7 @@ def _create_user_sync(
             allowed_providers=request.allowed_providers,
             allowed_api_formats=request.allowed_api_formats,
             allowed_models=request.allowed_models,
+            rate_limit=request.rate_limit,
         )
         return _serialize_user(db, user), {
             "action": "create_user",
@@ -253,6 +255,59 @@ def _delete_user_key_sync(user_id: str, key_id: str) -> tuple[dict[str, Any], di
             "target_user_id": user_id,
             "key_id": key_id,
         }
+
+
+def _update_user_key_sync(
+    user_id: str,
+    key_id: str,
+    request: UpdateMyApiKeyRequest,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    with get_db_context() as db:
+        api_key = (
+            db.query(ApiKey)
+            .filter(
+                ApiKey.id == key_id,
+                ApiKey.user_id == user_id,
+                ApiKey.is_standalone == False,
+            )
+            .first()
+        )
+
+        if not api_key:
+            raise NotFoundException("API Key不存在或不属于该用户", "api_key")
+
+        update_data = request.model_dump(exclude_unset=True)
+        if "rate_limit" in update_data and update_data["rate_limit"] is None:
+            update_data["rate_limit"] = 0
+
+        updated_key = ApiKeyService.update_api_key(db, key_id, **update_data)
+        if not updated_key:
+            raise NotFoundException("API Key不存在或不属于该用户", "api_key")
+
+        return (
+            {
+                "id": updated_key.id,
+                "name": updated_key.name,
+                "key_display": updated_key.get_display_key(),
+                "is_active": updated_key.is_active,
+                "is_locked": updated_key.is_locked,
+                "total_requests": updated_key.total_requests,
+                "total_cost_usd": float(updated_key.total_cost_usd or 0),
+                "rate_limit": updated_key.rate_limit,
+                "expires_at": updated_key.expires_at.isoformat() if updated_key.expires_at else None,
+                "last_used_at": (
+                    updated_key.last_used_at.isoformat() if updated_key.last_used_at else None
+                ),
+                "created_at": updated_key.created_at.isoformat(),
+                "message": "API Key更新成功",
+            },
+            {
+                "action": "update_user_api_key",
+                "target_user_id": user_id,
+                "key_id": key_id,
+                "updated_fields": list(update_data.keys()),
+            },
+        )
 
 
 def _toggle_user_key_lock_sync(
@@ -449,6 +504,26 @@ async def delete_user_api_key(
     - `key_id`: 密钥 ID
     """
     adapter = AdminDeleteUserKeyAdapter(user_id=user_id, key_id=key_id)
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.put("/{user_id}/api-keys/{key_id}")
+async def update_user_api_key(
+    user_id: str,
+    key_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    """
+    更新用户的 API 密钥
+
+    更新指定用户的普通 API 密钥基础配置。
+
+    **路径参数**:
+    - `user_id`: 用户 ID (UUID)
+    - `key_id`: 密钥 ID
+    """
+    adapter = AdminUpdateUserKeyAdapter(user_id=user_id, key_id=key_id)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
@@ -695,6 +770,33 @@ class AdminDeleteUserKeyAdapter(AdminApiAdapter):
             _delete_user_key_sync,
             self.user_id,
             self.key_id,
+        )
+        context.add_audit_metadata(**audit_meta)
+        return response
+
+
+class AdminUpdateUserKeyAdapter(AdminApiAdapter):
+    """更新用户的普通 API Key"""
+
+    def __init__(self, user_id: str, key_id: str):
+        self.user_id = user_id
+        self.key_id = key_id
+
+    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
+        payload = context.ensure_json_body()
+        try:
+            request = UpdateMyApiKeyRequest.model_validate(payload)
+        except ValidationError as e:
+            errors = e.errors()
+            if errors:
+                raise InvalidRequestException(translate_pydantic_error(errors[0]))
+            raise InvalidRequestException("请求数据验证失败")
+
+        response, audit_meta = await run_in_threadpool(
+            _update_user_key_sync,
+            self.user_id,
+            self.key_id,
+            request,
         )
         context.add_audit_metadata(**audit_meta)
         return response

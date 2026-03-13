@@ -106,8 +106,6 @@ class Config:
         # 支付回调安全配置（公开回调入口必须携带该共享密钥）
         self.payment_callback_secret = os.getenv("PAYMENT_CALLBACK_SECRET", "").strip()
 
-        # LLM API 速率限制配置（每分钟请求数）
-        self.llm_api_rate_limit = int(os.getenv("LLM_API_RATE_LIMIT", "100"))
         self.public_api_rate_limit = int(os.getenv("PUBLIC_API_RATE_LIMIT", "60"))
 
         # 异常处理配置

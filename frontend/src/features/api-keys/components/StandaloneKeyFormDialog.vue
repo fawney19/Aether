@@ -97,22 +97,6 @@
             </p>
           </div>
 
-          <div class="space-y-2">
-            <Label
-              for="form-rate-limit"
-              class="text-sm font-medium"
-            >速率限制 (请求/分钟)</Label>
-            <Input
-              id="form-rate-limit"
-              :model-value="form.rate_limit ?? ''"
-              type="number"
-              min="1"
-              max="10000"
-              placeholder="留空不限制"
-              class="h-10"
-              @update:model-value="(v) => form.rate_limit = parseNumberInput(v, { min: 1, max: 10000 })"
-            />
-          </div>
         </div>
 
         <!-- 右侧：访问限制 -->
@@ -185,6 +169,36 @@
               </div>
               <Switch
                 v-model="form.model_unrestricted"
+                class="shrink-0"
+              />
+            </div>
+          </div>
+
+          <div class="space-y-2">
+            <Label
+              for="form-rate-limit"
+              class="text-sm font-medium"
+            >速率限制 (请求/分钟)</Label>
+            <div class="flex items-center gap-3">
+              <div class="flex-1 min-w-0">
+                <Input
+                  v-if="!form.rate_limit_inherited"
+                  id="form-rate-limit"
+                  :model-value="form.rate_limit ?? ''"
+                  type="number"
+                  min="0"
+                  max="10000"
+                  placeholder="0 = 不限速"
+                  class="h-10"
+                  @update:model-value="(v) => form.rate_limit = parseNumberInput(v, { min: 0, max: 10000 })"
+                />
+                <span
+                  v-else
+                  class="flex h-10 w-full items-center rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-60"
+                >跟随系统</span>
+              </div>
+              <Switch
+                v-model="form.rate_limit_inherited"
                 class="shrink-0"
               />
             </div>
@@ -267,7 +281,7 @@ export interface StandaloneKeyFormData {
   initial_balance_usd?: number
   unlimited_balance?: boolean
   expires_at?: string  // ISO 日期字符串，如 "2025-12-31"，undefined = 永不过期
-  rate_limit?: number
+  rate_limit?: number | null
   auto_delete_on_expiry: boolean
   allowed_providers?: string[] | null
   allowed_api_formats?: string[] | null
@@ -280,6 +294,7 @@ interface StandaloneKeyFormState {
   initial_balance_usd?: number
   unlimited_balance?: boolean
   expires_at?: string
+  rate_limit_inherited: boolean
   rate_limit?: number
   auto_delete_on_expiry: boolean
   provider_unrestricted: boolean
@@ -333,6 +348,7 @@ const form = ref<StandaloneKeyFormState>({
   initial_balance_usd: 10,
   unlimited_balance: false,
   expires_at: undefined,
+  rate_limit_inherited: true,
   rate_limit: undefined,
   auto_delete_on_expiry: false,
   provider_unrestricted: true,
@@ -356,6 +372,7 @@ function resetForm() {
     initial_balance_usd: 10,
     unlimited_balance: false,
     expires_at: undefined,
+    rate_limit_inherited: true,
     rate_limit: undefined,
     auto_delete_on_expiry: false,
     provider_unrestricted: true,
@@ -375,7 +392,8 @@ function loadKeyData() {
     initial_balance_usd: props.apiKey.initial_balance_usd,
     unlimited_balance: props.apiKey.initial_balance_usd == null,
     expires_at: props.apiKey.expires_at,
-    rate_limit: props.apiKey.rate_limit,
+    rate_limit_inherited: props.apiKey.rate_limit == null,
+    rate_limit: props.apiKey.rate_limit ?? undefined,
     auto_delete_on_expiry: props.apiKey.auto_delete_on_expiry,
     provider_unrestricted: props.apiKey.allowed_providers == null,
     api_format_unrestricted: props.apiKey.allowed_api_formats == null,
@@ -425,7 +443,7 @@ function handleSubmit() {
     initial_balance_usd: form.value.initial_balance_usd,
     unlimited_balance: form.value.unlimited_balance,
     expires_at: form.value.expires_at,
-    rate_limit: form.value.rate_limit,
+    rate_limit: form.value.rate_limit_inherited ? null : (form.value.rate_limit ?? 0),
     auto_delete_on_expiry: form.value.auto_delete_on_expiry,
     allowed_providers: form.value.provider_unrestricted ? null : [...form.value.allowed_providers],
     allowed_api_formats: form.value.api_format_unrestricted ? null : [...form.value.allowed_api_formats],

@@ -86,6 +86,7 @@ export interface UserExport {
   allowed_providers?: string[] | null
   allowed_api_formats?: string[] | null
   allowed_models?: string[] | null
+  rate_limit?: number | null  // null = 跟随系统默认，0 = 不限制
   model_capability_settings?: Record<string, Record<string, boolean>>
   unlimited?: boolean
   wallet?: BillingSummary | null
@@ -102,7 +103,7 @@ export interface UserApiKeyExport {
   allowed_providers?: string[] | null
   allowed_api_formats?: string[] | null
   allowed_models?: string[] | null
-  rate_limit?: number | null  // null = 无限制
+  rate_limit?: number | null  // legacy/null 兼容；1.3+ standalone null = 跟随系统默认
   concurrent_limit?: number | null
   force_capabilities?: Record<string, boolean>
   is_active: boolean
@@ -349,7 +350,7 @@ export interface AdminApiKey {
   total_requests?: number
   total_tokens?: number
   total_cost_usd?: number
-  rate_limit?: number | null  // null = 无限制
+  rate_limit?: number | null  // null = 跟随系统默认，0 = 不限制
   allowed_providers?: string[] | null  // 允许的提供商列表
   allowed_api_formats?: string[] | null  // 允许的 API 格式列表
   allowed_models?: string[] | null  // 允许的模型列表
@@ -365,7 +366,7 @@ export interface CreateStandaloneApiKeyRequest {
   allowed_providers?: string[] | null
   allowed_api_formats?: string[] | null
   allowed_models?: string[] | null
-  rate_limit?: number | null  // null = 无限制
+  rate_limit?: number | null  // null = 跟随系统默认，0 = 不限制
   expires_at?: string | null  // ISO 日期字符串，如 "2025-12-31"，null = 永不过期
   initial_balance_usd: number | null  // 初始余额，null = 无限制
   unlimited_balance?: boolean | null  // 编辑时仅切换额度模式，不调整余额数值

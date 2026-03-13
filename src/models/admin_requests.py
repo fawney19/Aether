@@ -695,6 +695,11 @@ class UpdateUserRequest(BaseModel):
     allowed_providers: list[str] | None = Field(None, description="允许使用的提供商 ID 列表")
     allowed_api_formats: list[str] | None = Field(None, description="允许使用的 API 格式列表")
     allowed_models: list[str] | None = Field(None, description="允许使用的模型名称列表")
+    rate_limit: int | None = Field(
+        None,
+        ge=0,
+        description="每分钟请求限制；null 表示继承系统默认，0 表示不限制",
+    )
 
     @field_validator("username")
     @classmethod

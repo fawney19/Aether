@@ -33,6 +33,7 @@ from src.models.api import (
     PublicGlobalModelListResponse,
     PublicGlobalModelResponse,
     UpdateApiKeyProvidersRequest,
+    UpdateMyApiKeyRequest,
     UpdatePreferencesRequest,
     UpdateProfileRequest,
 )
@@ -131,6 +132,7 @@ def _create_my_api_key_sync(user_id: str, request: CreateMyApiKeyRequest) -> dic
                 db=db,
                 user_id=user_id,
                 name=request.name,
+                rate_limit=request.rate_limit,
             )
         except ValueError as exc:
             raise InvalidRequestException(str(exc)) from exc
@@ -139,6 +141,7 @@ def _create_my_api_key_sync(user_id: str, request: CreateMyApiKeyRequest) -> dic
             "name": api_key.name,
             "key": plain_key,
             "key_display": api_key.get_display_key(),
+            "rate_limit": api_key.rate_limit,
             "message": "API密钥创建成功",
         }
 
@@ -171,6 +174,42 @@ def _toggle_my_api_key_sync(user_id: str, key_id: str) -> dict[str, Any]:
             "id": api_key.id,
             "is_active": api_key.is_active,
             "message": f"API密钥已{'启用' if api_key.is_active else '禁用'}",
+        }
+
+
+def _update_my_api_key_sync(
+    user_id: str,
+    key_id: str,
+    request: UpdateMyApiKeyRequest,
+) -> dict[str, Any]:
+    with get_db_context() as db:
+        api_key = db.query(ApiKey).filter(ApiKey.id == key_id, ApiKey.user_id == user_id).first()
+        if not api_key:
+            raise NotFoundException("API密钥不存在", "api_key")
+        if api_key.is_locked:
+            raise ForbiddenException("该密钥已被管理员锁定，无法修改")
+
+        update_data = request.model_dump(exclude_unset=True)
+        if "rate_limit" in update_data and update_data["rate_limit"] is None:
+            update_data["rate_limit"] = 0
+
+        updated = ApiKeyService.update_api_key(db, key_id, **update_data)
+        if not updated:
+            raise NotFoundException("API密钥不存在", "api_key")
+
+        return {
+            "id": updated.id,
+            "name": updated.name,
+            "key_display": updated.get_display_key(),
+            "is_active": updated.is_active,
+            "is_locked": updated.is_locked,
+            "allowed_providers": updated.allowed_providers,
+            "force_capabilities": updated.force_capabilities,
+            "rate_limit": updated.rate_limit,
+            "last_used_at": updated.last_used_at.isoformat() if updated.last_used_at else None,
+            "expires_at": updated.expires_at.isoformat() if updated.expires_at else None,
+            "created_at": updated.created_at.isoformat(),
+            "message": "API密钥已更新",
         }
 
 
@@ -466,6 +505,20 @@ async def delete_my_api_key(key_id: str, request: Request, db: Session = Depends
     - `key_id`: 密钥 ID
     """
     adapter = DeleteMyApiKeyAdapter(key_id=key_id)
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.put("/api-keys/{key_id}")
+async def update_my_api_key(key_id: str, request: Request, db: Session = Depends(get_db)) -> Any:
+    """
+    更新 API 密钥
+
+    更新指定 API 密钥的基础配置。
+
+    **路径参数**:
+    - `key_id`: 密钥 ID
+    """
+    adapter = UpdateMyApiKeyAdapter(key_id=key_id)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
@@ -862,6 +915,7 @@ class ListMyApiKeysAdapter(AuthenticatedApiAdapter):
                     "created_at": key.created_at.isoformat(),
                     "total_requests": real_stats["total_requests"],
                     "total_cost_usd": real_stats["total_cost_usd"],
+                    "rate_limit": key.rate_limit,
                     "allowed_providers": key.allowed_providers,
                     "force_capabilities": key.force_capabilities,
                 }
@@ -948,6 +1002,25 @@ class GetMyApiKeyDetailAdapter(AuthenticatedApiAdapter):
             "expires_at": api_key.expires_at.isoformat() if api_key.expires_at else None,
             "created_at": api_key.created_at.isoformat(),
         }
+
+
+@dataclass
+class UpdateMyApiKeyAdapter(AuthenticatedApiAdapter):
+    """更新 API 密钥基础配置的适配器"""
+
+    key_id: str
+
+    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
+        payload = context.ensure_json_body()
+        try:
+            request = UpdateMyApiKeyRequest.model_validate(payload)
+        except ValidationError as e:
+            errors = e.errors()
+            if errors:
+                raise InvalidRequestException(translate_pydantic_error(errors[0]))
+            raise InvalidRequestException("请求数据验证失败")
+
+        return await run_in_threadpool(_update_my_api_key_sync, context.user.id, self.key_id, request)
 
 
 @dataclass

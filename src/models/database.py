@@ -110,6 +110,7 @@ class User(Base):
     allowed_providers = Column(JSON, nullable=True)  # 允许使用的提供商 ID 列表
     allowed_api_formats = Column(JSON, nullable=True)  # 允许使用的 API 格式列表
     allowed_models = Column(JSON, nullable=True)  # 允许使用的模型名称列表
+    rate_limit = Column(Integer, nullable=True, default=None)  # 每分钟请求限制，NULL=继承系统默认，0=不限制，N=N RPM
 
     # Key 能力配置
     model_capability_settings = Column(JSON, nullable=True)  # 用户针对特定模型的能力配置
@@ -209,7 +210,7 @@ class ApiKey(Base):
     allowed_providers = Column(JSON, nullable=True)  # 允许使用的提供商 ID 列表
     allowed_api_formats = Column(JSON, nullable=True)  # 允许使用的 API 格式列表
     allowed_models = Column(JSON, nullable=True)  # 允许使用的模型名称列表
-    rate_limit = Column(Integer, default=None, nullable=True)  # 每分钟请求限制，None = 无限制
+    rate_limit = Column(Integer, default=None, nullable=True)  # 每分钟请求限制；独立Key: NULL=继承系统默认，普通Key: 0=不限制
     concurrent_limit = Column(Integer, default=5, nullable=True)  # 并发请求限制
 
     # Key 能力配置

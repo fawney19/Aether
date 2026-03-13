@@ -18,6 +18,7 @@ from src.api.base.adapter import ApiMode
 from src.api.base.pipeline import ApiRequestPipeline
 from src.core.enums import UserRole
 from src.core.modules.hooks import AUTH_TOKEN_PREFIX_AUTHENTICATORS
+from src.services.rate_limit.user_rpm_limiter import RpmCheckResult
 
 
 class TestPipelineBalanceCalculation:
@@ -497,6 +498,166 @@ class TestPipelineAuthentication:
 
         assert exc_info.value.status_code == 403
         assert "锁定" in str(exc_info.value.detail)
+
+
+class TestPipelineUserRateLimit:
+    @pytest.fixture
+    def pipeline(self) -> ApiRequestPipeline:
+        return ApiRequestPipeline()
+
+    @pytest.mark.asyncio
+    async def test_check_user_rate_limit_uses_system_default_for_user_scope(
+        self, pipeline: ApiRequestPipeline, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        request = MagicMock()
+        request.state = MagicMock()
+        db = MagicMock()
+        user = MagicMock(id="user-1", rate_limit=None)
+        api_key = MagicMock(id="key-1", is_standalone=False, rate_limit=0)
+
+        limiter = MagicMock()
+        limiter.get_user_rpm_key.return_value = "rpm:user:user-1:1"
+        limiter.get_key_rpm_key.return_value = "rpm:key:key-1:1"
+        limiter.check_and_consume = AsyncMock(return_value=RpmCheckResult(allowed=True))
+
+        monkeypatch.setattr(
+            "src.api.base.pipeline.get_user_rpm_limiter",
+            AsyncMock(return_value=limiter),
+        )
+        monkeypatch.setattr(
+            "src.api.base.pipeline.SystemConfigService.get_config",
+            lambda *_a, **_k: 60,
+        )
+
+        await pipeline._check_user_rate_limit(request, db, user, api_key)
+
+        limiter.check_and_consume.assert_awaited_once_with(
+            user_rpm_key="rpm:user:user-1:1",
+            user_rpm_limit=60,
+            key_rpm_key="rpm:key:key-1:1",
+            key_rpm_limit=0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_check_user_rate_limit_returns_429_with_scope_header(
+        self, pipeline: ApiRequestPipeline, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        request = MagicMock()
+        request.state = MagicMock()
+        db = MagicMock()
+        user = MagicMock(id="user-1", rate_limit=100)
+        api_key = MagicMock(id="key-1", is_standalone=False, rate_limit=10)
+
+        limiter = MagicMock()
+        limiter.get_user_rpm_key.return_value = "rpm:user:user-1:1"
+        limiter.get_key_rpm_key.return_value = "rpm:key:key-1:1"
+        limiter.get_retry_after.return_value = 17
+        limiter.check_and_consume = AsyncMock(
+            return_value=RpmCheckResult(
+                allowed=False,
+                scope="key",
+                limit=10,
+                remaining=0,
+                retry_after=17,
+            )
+        )
+
+        monkeypatch.setattr(
+            "src.api.base.pipeline.get_user_rpm_limiter",
+            AsyncMock(return_value=limiter),
+        )
+        monkeypatch.setattr(
+            "src.api.base.pipeline.SystemConfigService.get_config",
+            lambda *_a, **_k: 60,
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await pipeline._check_user_rate_limit(request, db, user, api_key)
+
+        assert exc_info.value.status_code == 429
+        assert exc_info.value.headers == {
+            "Retry-After": "17",
+            "X-RateLimit-Limit": "10",
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Scope": "key",
+        }
+
+    @pytest.mark.asyncio
+    async def test_check_user_rate_limit_uses_system_default_for_standalone_key(
+        self, pipeline: ApiRequestPipeline, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        request = MagicMock()
+        request.state = MagicMock()
+        db = MagicMock()
+        user = MagicMock(id="user-1", rate_limit=999)
+        api_key = MagicMock(id="standalone-1", is_standalone=True, rate_limit=None)
+
+        limiter = MagicMock()
+        limiter.get_standalone_rpm_key.return_value = "rpm:ukey:standalone-1:1"
+        limiter.get_key_rpm_key.return_value = "rpm:key:standalone-1:1"
+        limiter.check_and_consume = AsyncMock(return_value=RpmCheckResult(allowed=True))
+
+        monkeypatch.setattr(
+            "src.api.base.pipeline.get_user_rpm_limiter",
+            AsyncMock(return_value=limiter),
+        )
+        monkeypatch.setattr(
+            "src.api.base.pipeline.SystemConfigService.get_config",
+            lambda *_a, **_k: 60,
+        )
+
+        await pipeline._check_user_rate_limit(request, db, user, api_key)
+
+        limiter.check_and_consume.assert_awaited_once_with(
+            user_rpm_key="rpm:ukey:standalone-1:1",
+            user_rpm_limit=60,
+            key_rpm_key="rpm:key:standalone-1:1",
+            key_rpm_limit=0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_check_user_rate_limit_returns_429_with_user_scope_header(
+        self, pipeline: ApiRequestPipeline, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        request = MagicMock()
+        request.state = MagicMock()
+        db = MagicMock()
+        user = MagicMock(id="user-1", rate_limit=3)
+        api_key = MagicMock(id="key-1", is_standalone=False, rate_limit=10)
+
+        limiter = MagicMock()
+        limiter.get_user_rpm_key.return_value = "rpm:user:user-1:1"
+        limiter.get_key_rpm_key.return_value = "rpm:key:key-1:1"
+        limiter.get_retry_after.return_value = 23
+        limiter.check_and_consume = AsyncMock(
+            return_value=RpmCheckResult(
+                allowed=False,
+                scope="user",
+                limit=3,
+                remaining=0,
+                retry_after=23,
+            )
+        )
+
+        monkeypatch.setattr(
+            "src.api.base.pipeline.get_user_rpm_limiter",
+            AsyncMock(return_value=limiter),
+        )
+        monkeypatch.setattr(
+            "src.api.base.pipeline.SystemConfigService.get_config",
+            lambda *_a, **_k: 60,
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await pipeline._check_user_rate_limit(request, db, user, api_key)
+
+        assert exc_info.value.status_code == 429
+        assert exc_info.value.headers == {
+            "Retry-After": "23",
+            "X-RateLimit-Limit": "3",
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Scope": "user",
+        }
 
 
 class TestPipelineTokenPrefixAuth:

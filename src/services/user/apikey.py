@@ -7,12 +7,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.core.crypto import crypto_service
 from src.core.logger import logger
-from src.models.database import ApiKey, Usage
+from src.models.database import ApiKey
 from src.services.user.bulk_cleanup import pre_clean_api_key
 
 
@@ -61,6 +60,10 @@ class ApiKeyService:
         if final_expires_at is None and expire_days:
             final_expires_at = datetime.now(timezone.utc) + timedelta(days=expire_days)
 
+        normalized_rate_limit = rate_limit
+        if not is_standalone and normalized_rate_limit is None:
+            normalized_rate_limit = 0
+
         api_key = ApiKey(
             user_id=user_id,
             key_hash=key_hash,
@@ -69,7 +72,7 @@ class ApiKeyService:
             allowed_providers=allowed_providers,
             allowed_api_formats=allowed_api_formats,
             allowed_models=allowed_models,
-            rate_limit=rate_limit,
+            rate_limit=normalized_rate_limit,
             concurrent_limit=concurrent_limit,
             expires_at=final_expires_at,
             is_standalone=is_standalone,
@@ -144,7 +147,8 @@ class ApiKeyService:
         # 允许显式设置为空数组/None 的字段（NULL=不限制，[]=全部禁用）
         nullable_list_fields = {"allowed_providers", "allowed_api_formats", "allowed_models"}
 
-        # 允许显式设置为 None 的字段（如 expires_at=None 表示永不过期，rate_limit=None 表示无限制）
+        # 允许显式设置为 None 的字段（如 expires_at=None 表示永不过期；
+        # standalone rate_limit=None 表示继承系统默认）
         nullable_fields = {"expires_at", "rate_limit"}
 
         for field, value in kwargs.items():
@@ -154,7 +158,9 @@ class ApiKeyService:
             if field in nullable_list_fields:
                 setattr(api_key, field, value)
             elif field in nullable_fields:
-                # 这些字段允许显式设置为 None
+                if field == "rate_limit" and not api_key.is_standalone and value is None:
+                    setattr(api_key, field, 0)
+                    continue
                 setattr(api_key, field, value)
             elif value is not None:
                 setattr(api_key, field, value)
@@ -179,39 +185,6 @@ class ApiKeyService:
 
         logger.info(f"删除API密钥: ID {key_id}")
         return True
-
-    @staticmethod
-    def check_rate_limit(db: Session, api_key: ApiKey, window_minutes: int = 1) -> tuple[bool, int]:
-        """检查速率限制
-
-        Returns:
-            (is_allowed, remaining): 是否允许请求，剩余可用次数
-            当 rate_limit 为 None 时表示不限制，返回 (True, -1)
-        """
-        # 如果 rate_limit 为 None，表示不限制
-        if api_key.rate_limit is None:
-            return True, -1  # -1 表示无限制
-
-        # 计算时间窗口
-        window_start = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
-
-        # 统计窗口内的请求数
-        request_count = (
-            db.query(func.count(Usage.id))
-            .filter(Usage.api_key_id == api_key.id, Usage.created_at >= window_start)
-            .scalar()
-            or 0
-        )
-
-        # 检查是否超限
-        is_allowed = request_count < api_key.rate_limit
-
-        if not is_allowed:
-            logger.warning(
-                f"API密钥速率限制: Key ID {api_key.id}, 请求数 {request_count}/{api_key.rate_limit}"
-            )
-
-        return is_allowed, api_key.rate_limit - request_count
 
     @staticmethod
     def cleanup_expired_keys(db: Session, auto_delete: bool = False) -> int:

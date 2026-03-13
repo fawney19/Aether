@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from src.services.model.fetch_scheduler import ModelFetchScheduler
     from src.services.provider_keys.pool_quota_probe_scheduler import PoolQuotaProbeScheduler
     from src.services.rate_limit.concurrency_manager import ConcurrencyManager
+    from src.services.rate_limit.user_rpm_limiter import UserRpmLimiter
     from src.services.system.maintenance_scheduler import MaintenanceScheduler
     from src.services.system.scheduler import TaskScheduler
     from src.services.task.polling.task_poller import TaskPollerService
@@ -97,6 +98,7 @@ class LifecycleState:
 
     redis_client: Redis | None = None
     concurrency_manager: ConcurrencyManager | None = None
+    user_rpm_limiter: UserRpmLimiter | None = None
     plugin_manager: PluginManager | None = None
     available_modules: list[ModuleDefinition] = field(default_factory=list)
     task_coordinator: StartupTaskCoordinator | None = None
@@ -178,6 +180,11 @@ async def _initialize_core_infrastructure(state: LifecycleState) -> None:
     from src.services.rate_limit.concurrency_manager import get_concurrency_manager
 
     state.concurrency_manager = await get_concurrency_manager()
+
+    logger.info("初始化用户/API Key RPM 限流器...")
+    from src.services.rate_limit.user_rpm_limiter import get_user_rpm_limiter
+
+    state.user_rpm_limiter = await get_user_rpm_limiter()
 
     # 初始化批量提交器（提升数据库并发能力）
     logger.info("初始化批量提交器...")
@@ -438,6 +445,10 @@ async def _run_shutdown(state: LifecycleState) -> None:
     logger.info("关闭并发管理器...")
     if state.concurrency_manager:
         await state.concurrency_manager.close()
+
+    logger.info("关闭用户/API Key RPM 限流器...")
+    if state.user_rpm_limiter:
+        await state.user_rpm_limiter.close()
 
     # 关闭全局Redis客户端
     logger.info("关闭全局Redis客户端...")

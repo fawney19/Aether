@@ -1,6 +1,13 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { usersApi, type User, type CreateUserRequest, type UpdateUserRequest, type ApiKey } from '@/api/users'
+import {
+  usersApi,
+  type User,
+  type CreateUserRequest,
+  type UpdateUserRequest,
+  type ApiKey,
+  type UpsertUserApiKeyRequest
+} from '@/api/users'
 import { parseApiError } from '@/utils/errorParser'
 
 export const useUsersStore = defineStore('users', () => {
@@ -84,11 +91,24 @@ export const useUsersStore = defineStore('users', () => {
     }
   }
 
-  async function createApiKey(userId: string, name?: string): Promise<ApiKey> {
+  async function createApiKey(userId: string, data: UpsertUserApiKeyRequest): Promise<ApiKey> {
     try {
-      return await usersApi.createApiKey(userId, name)
+      return await usersApi.createApiKey(userId, data)
     } catch (err: unknown) {
       error.value = parseApiError(err, '创建 API Key 失败')
+      throw err
+    }
+  }
+
+  async function updateApiKey(
+    userId: string,
+    keyId: string,
+    data: UpsertUserApiKeyRequest
+  ): Promise<ApiKey> {
+    try {
+      return await usersApi.updateApiKey(userId, keyId, data)
+    } catch (err: unknown) {
+      error.value = parseApiError(err, '更新 API Key 失败')
       throw err
     }
   }
@@ -121,6 +141,7 @@ export const useUsersStore = defineStore('users', () => {
     deleteUser,
     getUserApiKeys,
     createApiKey,
+    updateApiKey,
     deleteApiKey,
     getFullApiKey
   }

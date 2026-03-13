@@ -53,3 +53,29 @@ def test_import_user_api_key_material_keeps_legacy_encrypted_payload() -> None:
 
     assert key_hash == legacy_hash
     assert key_encrypted == legacy_encrypted
+
+
+def test_import_user_rate_limit_defaults_to_none_when_missing() -> None:
+    assert AdminImportUsersAdapter._normalize_imported_user_rate_limit({}) is None
+
+
+def test_import_legacy_standalone_key_null_rate_limit_becomes_unlimited() -> None:
+    assert (
+        AdminImportUsersAdapter._normalize_imported_api_key_rate_limit(
+            {"rate_limit": None},
+            is_standalone=True,
+            legacy_export=True,
+        )
+        == 0
+    )
+
+
+def test_import_new_standalone_key_null_rate_limit_keeps_inherit_semantics() -> None:
+    assert (
+        AdminImportUsersAdapter._normalize_imported_api_key_rate_limit(
+            {"rate_limit": None},
+            is_standalone=True,
+            legacy_export=False,
+        )
+        is None
+    )

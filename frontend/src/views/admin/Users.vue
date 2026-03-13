@@ -180,7 +180,7 @@
                 钱包
               </TableHead>
               <TableHead class="w-[170px] h-12 font-semibold">
-                使用统计
+                统计/限速
               </TableHead>
               <TableHead class="w-[110px] h-12 font-semibold">
                 创建时间
@@ -258,25 +258,41 @@
                 </div>
               </TableCell>
               <TableCell class="py-4">
-                <div
-                  v-if="userStats[user.id]"
-                  class="space-y-1 text-xs"
-                >
-                  <div class="flex items-center text-muted-foreground">
-                    <span class="w-14">请求:</span>
-                    <span class="font-medium text-foreground">{{ formatNumber(userStats[user.id]?.request_count) }}</span>
+                <div class="space-y-1 text-xs">
+                  <template v-if="userStats[user.id]">
+                    <div class="flex items-center text-muted-foreground">
+                      <span class="w-14">请求:</span>
+                      <span class="font-medium text-foreground">{{ formatNumber(userStats[user.id]?.request_count) }}</span>
+                    </div>
+                    <div class="flex items-center text-muted-foreground">
+                      <span class="w-14">Tokens:</span>
+                      <span class="font-medium text-foreground">{{ formatTokens(userStats[user.id]?.total_tokens ?? 0) }}</span>
+                    </div>
+                  </template>
+                  <div
+                    v-else
+                    class="flex items-center text-muted-foreground"
+                  >
+                    <span class="w-14">统计:</span>
+                    <span v-if="loadingStats">加载中...</span>
+                    <span v-else>无数据</span>
                   </div>
                   <div class="flex items-center text-muted-foreground">
-                    <span class="w-14">Tokens:</span>
-                    <span class="font-medium text-foreground">{{ formatTokens(userStats[user.id]?.total_tokens ?? 0) }}</span>
+                    <span class="w-14">限速:</span>
+                    <Badge
+                      v-if="isUserRateLimitInherited(user) || isUserRateLimitUnlimited(user)"
+                      variant="secondary"
+                      class="h-5 px-1.5 py-0 text-[10px] font-medium"
+                    >
+                      {{ formatUserRateLimit(user) }}
+                    </Badge>
+                    <span
+                      v-else
+                      class="font-medium text-foreground"
+                    >
+                      {{ formatUserRateLimit(user) }}
+                    </span>
                   </div>
-                </div>
-                <div
-                  v-else
-                  class="text-xs text-muted-foreground"
-                >
-                  <span v-if="loadingStats">加载中...</span>
-                  <span v-else>无数据</span>
                 </div>
               </TableCell>
               <TableCell class="py-4 text-xs text-muted-foreground">
@@ -435,6 +451,12 @@
                   class="h-5 px-1.5 py-0 text-[10px] font-medium"
                 >
                   {{ walletStatusLabel(getUserWalletStatus(user.id)) }}
+                </Badge>
+                <Badge
+                  variant="secondary"
+                  class="h-5 px-1.5 py-0 text-[10px] font-medium"
+                >
+                  {{ formatUserRateLimit(user) }}
                 </Badge>
               </div>
 
@@ -633,6 +655,12 @@
                     >
                       独立余额
                     </Badge>
+                    <Badge
+                      variant="secondary"
+                      class="text-xs"
+                    >
+                      {{ formatUserApiKeyRateLimit(apiKey.rate_limit) }}
+                    </Badge>
                   </div>
                   <div class="flex items-center gap-1 mt-0.5">
                     <code class="text-xs font-mono text-muted-foreground">
@@ -658,6 +686,15 @@
                     ${{ (apiKey.total_cost_usd || 0).toFixed(4) }}
                   </div>
                 </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="h-8 w-8"
+                  title="编辑"
+                  @click="openEditUserApiKeyDialog(apiKey)"
+                >
+                  <SquarePen class="h-4 w-4" />
+                </Button>
                 <Button
                   variant="ghost"
                   size="icon"
@@ -718,9 +755,83 @@
         <Button
           class="h-10 px-5"
           :disabled="creatingApiKey"
-          @click="createApiKey"
+          @click="openCreateUserApiKeyDialog"
         >
           {{ creatingApiKey ? '创建中...' : '创建' }}
+        </Button>
+      </template>
+    </Dialog>
+
+    <Dialog
+      v-model="showUserApiKeyFormDialog"
+      size="lg"
+    >
+      <template #header>
+        <div class="border-b border-border px-6 py-4">
+          <div class="flex items-center gap-3">
+            <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-kraft/10 flex-shrink-0">
+              <Key class="h-5 w-5 text-kraft" />
+            </div>
+            <div class="flex-1 min-w-0">
+              <h3 class="text-lg font-semibold text-foreground leading-tight">
+                {{ editingUserApiKey ? '编辑 API Key' : '创建 API Key' }}
+              </h3>
+              <p class="text-xs text-muted-foreground">
+                {{ editingUserApiKey ? '更新用户 API Key 的名称和速率限制' : '为用户创建新的 API Key' }}
+              </p>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <div class="space-y-4">
+        <div class="space-y-2">
+          <Label
+            for="admin-user-key-name"
+            class="text-sm font-medium"
+          >密钥名称</Label>
+          <Input
+            id="admin-user-key-name"
+            v-model="userApiKeyForm.name"
+            class="h-10"
+            placeholder="例如：生产环境 Key"
+          />
+        </div>
+        <div class="space-y-2">
+          <Label
+            for="admin-user-key-rate-limit"
+            class="text-sm font-medium"
+          >速率限制 (请求/分钟)</Label>
+          <Input
+            id="admin-user-key-rate-limit"
+            :model-value="userApiKeyForm.rate_limit ?? ''"
+            type="number"
+            min="0"
+            max="10000"
+            class="h-10"
+            placeholder="留空不限"
+            @update:model-value="(v) => userApiKeyForm.rate_limit = parseNumberInput(v, { min: 0, max: 10000 })"
+          />
+          <p class="text-xs text-muted-foreground">
+            留空表示不限制
+          </p>
+        </div>
+      </div>
+
+      <template #footer>
+        <Button
+          variant="outline"
+          class="h-10 px-5"
+          @click="closeUserApiKeyFormDialog"
+        >
+          取消
+        </Button>
+        <Button
+          class="h-10 px-5"
+          :disabled="creatingApiKey"
+          @click="submitUserApiKeyForm"
+        >
+          {{ creatingApiKey ? (editingUserApiKey ? '保存中...' : '创建中...') : (editingUserApiKey ? '保存' : '创建') }}
         </Button>
       </template>
     </Dialog>
@@ -850,6 +961,7 @@ import UserFormDialog, { type UserFormData } from '@/features/users/components/U
 import WalletOpsDrawer from '@/features/wallet/components/WalletOpsDrawer.vue'
 import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
+import { parseNumberInput } from '@/utils/form'
 
 const { success, error } = useToast()
 const { confirmDanger } = useConfirm()
@@ -864,11 +976,17 @@ const userFormDialogRef = ref<InstanceType<typeof UserFormDialog>>()
 // API Keys 对话框状态
 const showApiKeysDialog = ref(false)
 const showNewApiKeyDialog = ref(false)
+const showUserApiKeyFormDialog = ref(false)
 const selectedUser = ref<User | null>(null)
 const userApiKeys = ref<ApiKey[]>([])
 const newApiKey = ref('')
 const creatingApiKey = ref(false)
 const apiKeyInput = ref<HTMLInputElement>()
+const editingUserApiKey = ref<ApiKey | null>(null)
+const userApiKeyForm = ref({
+  name: '',
+  rate_limit: undefined as number | undefined,
+})
 
 // 用户统计
 const userStats = ref<Record<string, UsageByUser>>({})
@@ -1005,6 +1123,24 @@ function isUserUnlimited(user: User): boolean {
   return Boolean(user.unlimited)
 }
 
+function isUserRateLimitInherited(user: User): boolean {
+  return user.rate_limit == null
+}
+
+function isUserRateLimitUnlimited(user: User): boolean {
+  return user.rate_limit === 0
+}
+
+function formatUserRateLimit(user: User): string {
+  if (isUserRateLimitInherited(user)) {
+    return '跟随系统'
+  }
+  if (isUserRateLimitUnlimited(user)) {
+    return '不限速'
+  }
+  return `${user.rate_limit}/min`
+}
+
 function getUserWalletTotalBalance(user: User): number | null {
   if (isUserUnlimited(user)) {
     return null
@@ -1071,7 +1207,8 @@ function editUser(user: User) {
     is_active: user.is_active,
     allowed_providers: user.allowed_providers == null ? null : [...user.allowed_providers],
     allowed_api_formats: user.allowed_api_formats == null ? null : [...user.allowed_api_formats],
-    allowed_models: user.allowed_models == null ? null : [...user.allowed_models]
+    allowed_models: user.allowed_models == null ? null : [...user.allowed_models],
+    rate_limit: user.rate_limit ?? null
   }
   showUserFormDialog.value = true
 }
@@ -1093,7 +1230,8 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string; un
         role: data.role,
         allowed_providers: data.allowed_providers,
         allowed_api_formats: data.allowed_api_formats,
-        allowed_models: data.allowed_models
+        allowed_models: data.allowed_models,
+        rate_limit: data.rate_limit ?? null
       }
       if (data.password) {
         updateData.password = data.password
@@ -1112,7 +1250,8 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string; un
         role: data.role,
         allowed_providers: data.allowed_providers,
         allowed_api_formats: data.allowed_api_formats,
-        allowed_models: data.allowed_models
+        allowed_models: data.allowed_models,
+        rate_limit: data.rate_limit ?? null
       })
       // 如果创建时指定为禁用，则更新状态
       if (data.is_active === false && newUser) {
@@ -1145,20 +1284,61 @@ async function loadUserApiKeys(userId: string) {
   }
 }
 
-async function createApiKey() {
+function openCreateUserApiKeyDialog() {
+  userApiKeyForm.value = {
+    name: `Key-${new Date().toISOString().split('T')[0]}`,
+    rate_limit: undefined,
+  }
+  editingUserApiKey.value = null
+  showUserApiKeyFormDialog.value = true
+}
+
+function openEditUserApiKeyDialog(apiKey: ApiKey) {
+  editingUserApiKey.value = apiKey
+  userApiKeyForm.value = {
+    name: apiKey.name || '',
+    rate_limit: apiKey.rate_limit ?? undefined,
+  }
+  showUserApiKeyFormDialog.value = true
+}
+
+function closeUserApiKeyFormDialog() {
+  showUserApiKeyFormDialog.value = false
+  editingUserApiKey.value = null
+  userApiKeyForm.value = {
+    name: '',
+    rate_limit: undefined,
+  }
+}
+
+async function submitUserApiKeyForm() {
   if (!selectedUser.value) return
+  if (!userApiKeyForm.value.name.trim()) {
+    error('请输入密钥名称', editingUserApiKey.value ? '更新 API Key 失败' : '创建 API Key 失败')
+    return
+  }
 
   creatingApiKey.value = true
   try {
-    const response = await usersStore.createApiKey(
-      selectedUser.value.id,
-      `Key-${new Date().toISOString().split('T')[0]}`
-    )
-    newApiKey.value = response.key || ''
-    showNewApiKeyDialog.value = true
+    if (editingUserApiKey.value) {
+      await usersStore.updateApiKey(selectedUser.value.id, editingUserApiKey.value.id, {
+        name: userApiKeyForm.value.name,
+        rate_limit: userApiKeyForm.value.rate_limit ?? 0,
+      })
+      success('API Key已更新')
+    } else {
+      const response = await usersStore.createApiKey(selectedUser.value.id, {
+        name: userApiKeyForm.value.name,
+        rate_limit: userApiKeyForm.value.rate_limit ?? 0,
+      })
+      newApiKey.value = response.key || ''
+      showNewApiKeyDialog.value = true
+      success('API Key创建成功')
+    }
     await loadUserApiKeys(selectedUser.value.id)
+    closeUserApiKeyFormDialog()
   } catch (err: unknown) {
-    error(parseApiError(err, '未知错误'), '创建 API Key 失败')
+    error(parseApiError(err, '未知错误'), editingUserApiKey.value ? '更新 API Key 失败' : '创建 API Key 失败')
   } finally {
     creatingApiKey.value = false
   }
@@ -1175,6 +1355,13 @@ async function copyApiKey() {
 async function closeNewApiKeyDialog() {
   showNewApiKeyDialog.value = false
   newApiKey.value = ''
+}
+
+function formatUserApiKeyRateLimit(rateLimit?: number | null): string {
+  if (rateLimit == null || rateLimit === 0) {
+    return '不限制'
+  }
+  return `${rateLimit}/min`
 }
 
 async function deleteApiKey(apiKey: ApiKey) {

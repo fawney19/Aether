@@ -2213,6 +2213,7 @@ class AdminExportUsersAdapter(AdminApiAdapter):
                     "allowed_providers": user.allowed_providers,
                     "allowed_api_formats": user.allowed_api_formats,
                     "allowed_models": user.allowed_models,
+                    "rate_limit": getattr(user, "rate_limit", None),
                     "model_capability_settings": user.model_capability_settings,
                     "unlimited": WalletService.is_unlimited_wallet(wallet),
                     "wallet": WalletService.serialize_wallet_summary(wallet) if wallet else None,
@@ -2226,7 +2227,7 @@ class AdminExportUsersAdapter(AdminApiAdapter):
         standalone_keys_data = [self._serialize_api_key(key, db=db) for key in standalone_keys]
 
         return {
-            "version": "1.2",
+            "version": "1.3",
             "exported_at": datetime.now(timezone.utc).isoformat(),
             "users": users_data,
             "standalone_keys": standalone_keys_data,
@@ -2234,6 +2235,17 @@ class AdminExportUsersAdapter(AdminApiAdapter):
 
 
 class AdminImportUsersAdapter(AdminApiAdapter):
+    @staticmethod
+    def _is_legacy_users_export(version: object) -> bool:
+        if version is None:
+            return True
+        normalized = str(version).strip()
+        try:
+            major, minor = normalized.split(".", 1)
+            return (int(major), int(minor)) < (1, 3)
+        except Exception:
+            return normalized != "1.3"
+
     @staticmethod
     def _resolve_api_key_material(key_data: dict[str, Any]) -> tuple[str | None, str | None]:
         """解析用户 API Key 导入材料，优先使用明文 key。"""
@@ -2249,6 +2261,30 @@ class AdminImportUsersAdapter(AdminApiAdapter):
         key_hash = str(key_data.get("key_hash") or "").strip() or None
         key_encrypted = key_data.get("key_encrypted")
         return key_hash, key_encrypted
+
+    @staticmethod
+    def _normalize_imported_user_rate_limit(user_data: dict[str, Any]) -> int | None:
+        if "rate_limit" not in user_data:
+            return None
+        value = user_data.get("rate_limit")
+        return int(value) if value is not None else None
+
+    @staticmethod
+    def _normalize_imported_api_key_rate_limit(
+        key_data: dict[str, Any],
+        *,
+        is_standalone: bool,
+        legacy_export: bool,
+    ) -> int | None:
+        if "rate_limit" not in key_data:
+            return None if is_standalone and not legacy_export else 0
+
+        value = key_data.get("rate_limit")
+        if value is None:
+            if is_standalone and not legacy_export:
+                return None
+            return 0
+        return int(value)
 
     async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
         """导入用户数据"""
@@ -2267,6 +2303,7 @@ class AdminImportUsersAdapter(AdminApiAdapter):
 
         # 获取导入选项
         merge_mode = payload.get("merge_mode", "skip")  # skip, overwrite, error
+        legacy_export = self._is_legacy_users_export(payload.get("version"))
         users_data = payload.get("users", [])
         standalone_keys_data = payload.get("standalone_keys", [])
 
@@ -2319,7 +2356,11 @@ class AdminImportUsersAdapter(AdminApiAdapter):
                     allowed_providers=key_data.get("allowed_providers"),
                     allowed_api_formats=key_data.get("allowed_api_formats"),
                     allowed_models=key_data.get("allowed_models"),
-                    rate_limit=key_data.get("rate_limit"),
+                    rate_limit=self._normalize_imported_api_key_rate_limit(
+                        key_data,
+                        is_standalone=is_standalone or key_data.get("is_standalone", False),
+                        legacy_export=legacy_export,
+                    ),
                     concurrent_limit=key_data.get("concurrent_limit", 5),
                     force_capabilities=key_data.get("force_capabilities"),
                     is_active=key_data.get("is_active", True),
@@ -2357,6 +2398,7 @@ class AdminImportUsersAdapter(AdminApiAdapter):
                     and wallet_payload.get("limit_mode") in {"finite", "unlimited"}
                     else ("unlimited" if user_data.get("unlimited") else "finite")
                 )
+                imported_user_rate_limit = self._normalize_imported_user_rate_limit(user_data)
 
                 if existing_user:
                     user_id = existing_user.id
@@ -2374,6 +2416,7 @@ class AdminImportUsersAdapter(AdminApiAdapter):
                         existing_user.allowed_providers = user_data.get("allowed_providers")
                         existing_user.allowed_api_formats = user_data.get("allowed_api_formats")
                         existing_user.allowed_models = user_data.get("allowed_models")
+                        existing_user.rate_limit = imported_user_rate_limit
                         existing_user.model_capability_settings = user_data.get(
                             "model_capability_settings"
                         )
@@ -2410,6 +2453,7 @@ class AdminImportUsersAdapter(AdminApiAdapter):
                         allowed_providers=user_data.get("allowed_providers"),
                         allowed_api_formats=user_data.get("allowed_api_formats"),
                         allowed_models=user_data.get("allowed_models"),
+                        rate_limit=imported_user_rate_limit,
                         model_capability_settings=user_data.get("model_capability_settings"),
                         is_active=user_data.get("is_active", True),
                     )

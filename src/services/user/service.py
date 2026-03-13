@@ -38,6 +38,7 @@ class UserService:
         allowed_providers: list[str] | None = None,
         allowed_api_formats: list[str] | None = None,
         allowed_models: list[str] | None = None,
+        rate_limit: int | None = None,
     ) -> User:
         """创建新用户。"""
 
@@ -74,6 +75,7 @@ class UserService:
             allowed_providers=allowed_providers,
             allowed_api_formats=allowed_api_formats,
             allowed_models=allowed_models,
+            rate_limit=rate_limit,
         )
         user.set_password(password)
 
@@ -218,6 +220,7 @@ class UserService:
             "allowed_providers",
             "allowed_api_formats",
             "allowed_models",
+            "rate_limit",
         ]
 
         # 允许设置为 None 的字段（表示无限制）
@@ -225,6 +228,7 @@ class UserService:
             "allowed_providers",
             "allowed_api_formats",
             "allowed_models",
+            "rate_limit",
         ]
 
         for field, value in kwargs.items():

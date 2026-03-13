@@ -179,6 +179,7 @@
               </Select>
             </div>
           </div>
+
         </div>
 
         <!-- 右侧：访问限制 -->
@@ -251,6 +252,36 @@
               </div>
               <Switch
                 v-model="form.model_unrestricted"
+                class="shrink-0"
+              />
+            </div>
+          </div>
+
+          <div class="space-y-2">
+            <Label
+              for="form-rate-limit"
+              class="text-sm font-medium"
+            >速率限制 (请求/分钟)</Label>
+            <div class="flex items-center gap-3">
+              <div class="flex-1 min-w-0">
+                <Input
+                  v-if="!form.rate_limit_inherited"
+                  id="form-rate-limit"
+                  :model-value="form.rate_limit ?? ''"
+                  type="number"
+                  min="0"
+                  max="10000"
+                  placeholder="0 = 不限速"
+                  class="h-10"
+                  @update:model-value="(v) => form.rate_limit = parseNumberInput(v, { min: 0, max: 10000 })"
+                />
+                <span
+                  v-else
+                  class="flex h-10 w-full items-center rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-60"
+                >跟随系统默认</span>
+              </div>
+              <Switch
+                v-model="form.rate_limit_inherited"
                 class="shrink-0"
               />
             </div>
@@ -352,6 +383,7 @@ export interface UserFormData {
   allowed_providers?: string[] | null
   allowed_api_formats?: string[] | null
   allowed_models?: string[] | null
+  rate_limit?: number | null
 }
 
 const props = defineProps<{
@@ -406,9 +438,11 @@ const form = ref({
   provider_unrestricted: true,
   api_format_unrestricted: true,
   model_unrestricted: true,
+  rate_limit_inherited: true,
   allowed_providers: [] as string[],
   allowed_api_formats: [] as string[],
   allowed_models: [] as string[],
+  rate_limit: undefined as number | undefined,
 })
 
 function createFieldNonce(): string {
@@ -429,9 +463,11 @@ function resetForm() {
     provider_unrestricted: true,
     api_format_unrestricted: true,
     model_unrestricted: true,
+    rate_limit_inherited: true,
     allowed_providers: [],
     allowed_api_formats: [],
     allowed_models: [],
+    rate_limit: undefined,
   }
 }
 
@@ -451,9 +487,11 @@ function loadUserData() {
     provider_unrestricted: props.user.allowed_providers == null,
     api_format_unrestricted: props.user.allowed_api_formats == null,
     model_unrestricted: props.user.allowed_models == null,
+    rate_limit_inherited: props.user.rate_limit == null,
     allowed_providers: props.user.allowed_providers ? [...props.user.allowed_providers] : [],
     allowed_api_formats: props.user.allowed_api_formats ? [...props.user.allowed_api_formats] : [],
     allowed_models: props.user.allowed_models ? [...props.user.allowed_models] : [],
+    rate_limit: props.user.rate_limit ?? undefined,
   }
 }
 
@@ -543,6 +581,7 @@ async function handleSubmit() {
       allowed_models: form.value.model_unrestricted
         ? null
         : [...form.value.allowed_models],
+      rate_limit: form.value.rate_limit_inherited ? null : (form.value.rate_limit ?? 0),
     }
 
     if (isEditMode.value && props.user?.id) {

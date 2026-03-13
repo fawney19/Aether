@@ -20,7 +20,7 @@
               size="icon"
               class="h-8 w-8"
               title="创建新 API Key"
-              @click="showCreateDialog = true"
+              @click="openCreateApiKeyDialog"
             >
               <Plus class="w-3.5 h-3.5" />
             </Button>
@@ -56,7 +56,7 @@
             <Button
               size="lg"
               class="shadow-lg shadow-primary/20"
-              @click="showCreateDialog = true"
+              @click="openCreateApiKeyDialog"
             >
               <Plus class="mr-2 h-4 w-4" />
               创建新 API Key
@@ -157,16 +157,22 @@
                 <div class="flex flex-col items-center gap-1">
                   <Badge
                     :variant="apiKey.is_active ? 'success' : 'secondary'"
-                    class="font-medium px-3 py-1"
+                    class="h-5 px-2 py-0 text-[10px] font-medium"
                   >
                     {{ apiKey.is_active ? '活跃' : '禁用' }}
                   </Badge>
                   <Badge
                     v-if="apiKey.is_locked"
                     variant="warning"
-                    class="font-medium text-[10px]"
+                    class="h-5 px-2 py-0 text-[10px] font-medium"
                   >
                     已锁定
+                  </Badge>
+                  <Badge
+                    variant="secondary"
+                    class="h-5 px-2 py-0 text-[10px] font-medium"
+                  >
+                    {{ formatKeyRateLimit(apiKey.rate_limit) }}
                   </Badge>
                 </div>
               </TableCell>
@@ -179,6 +185,16 @@
               <!-- 操作按钮 -->
               <TableCell class="py-4">
                 <div class="flex justify-center gap-1">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="h-8 w-8"
+                    :title="apiKey.is_locked ? '已锁定' : '编辑'"
+                    :disabled="apiKey.is_locked"
+                    @click="openEditApiKeyDialog(apiKey)"
+                  >
+                    <SquarePen class="h-4 w-4" />
+                  </Button>
                   <Button
                     variant="ghost"
                     size="icon"
@@ -237,8 +253,24 @@
                 >
                   已锁定
                 </Badge>
+                <Badge
+                  variant="secondary"
+                  class="text-[10px] px-1.5 py-0"
+                >
+                  {{ formatKeyRateLimit(apiKey.rate_limit) }}
+                </Badge>
               </div>
               <div class="flex items-center gap-0.5 flex-shrink-0">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="h-7 w-7"
+                  :title="apiKey.is_locked ? '已锁定' : '编辑'"
+                  :disabled="apiKey.is_locked"
+                  @click="openEditApiKeyDialog(apiKey)"
+                >
+                  <SquarePen class="h-3.5 w-3.5" />
+                </Button>
                 <Button
                   variant="ghost"
                   size="icon"
@@ -288,6 +320,10 @@
                 <span class="text-foreground font-medium">
                   {{ formatNumber(apiKey.total_requests || 0) }} 次
                 </span>
+                <span class="text-muted-foreground">•</span>
+                <span class="text-muted-foreground">
+                  {{ formatKeyRateLimit(apiKey.rate_limit) }}
+                </span>
               </div>
             </div>
           </div>
@@ -316,10 +352,10 @@
             </div>
             <div class="flex-1 min-w-0">
               <h3 class="text-lg font-semibold text-foreground leading-tight">
-                创建 API 密钥
+                {{ editingApiKey ? '编辑 API 密钥' : '创建 API 密钥' }}
               </h3>
               <p class="text-xs text-muted-foreground">
-                创建一个新的密钥用于访问 API 服务
+                {{ editingApiKey ? '更新密钥名称和速率限制' : '创建一个新的密钥用于访问 API 服务' }}
               </p>
             </div>
           </div>
@@ -344,26 +380,46 @@
             给密钥起一个有意义的名称方便识别
           </p>
         </div>
+
+        <div class="space-y-2">
+          <Label
+            for="key-rate-limit"
+            class="text-sm font-semibold"
+          >速率限制 (请求/分钟)</Label>
+          <Input
+            id="key-rate-limit"
+            :model-value="newKeyRateLimit ?? ''"
+            type="number"
+            min="0"
+            max="10000"
+            placeholder="留空不限"
+            class="h-11 border-border/60"
+            @update:model-value="(v) => newKeyRateLimit = parseNumberInput(v, { min: 0, max: 10000 })"
+          />
+          <p class="text-xs text-muted-foreground">
+            留空不限
+          </p>
+        </div>
       </div>
 
       <template #footer>
         <Button
           variant="outline"
           class="h-11 px-6"
-          @click="showCreateDialog = false"
+          @click="closeApiKeyDialog"
         >
           取消
         </Button>
         <Button
           class="h-11 px-6 shadow-lg shadow-primary/20"
           :disabled="creating"
-          @click="createApiKey"
+          @click="saveApiKey"
         >
           <Loader2
             v-if="creating"
             class="animate-spin h-4 w-4 mr-2"
           />
-          {{ creating ? '创建中...' : '创建' }}
+          {{ creating ? (editingApiKey ? '保存中...' : '创建中...') : (editingApiKey ? '保存' : '创建') }}
         </Button>
       </template>
     </Dialog>
@@ -455,11 +511,12 @@ import {
   TableRow
 } from '@/components/ui'
 import RefreshButton from '@/components/ui/refresh-button.vue'
-import { Plus, Key, Copy, Trash2, Loader2, Activity, CheckCircle, Power } from 'lucide-vue-next'
+import { Plus, Key, Copy, Trash2, Loader2, Activity, CheckCircle, Power, SquarePen } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
 import { log } from '@/utils/logger'
 import { parseApiError } from '@/utils/errorParser'
 import { getErrorStatus } from '@/types/api-error'
+import { parseNumberInput } from '@/utils/form'
 import { computed } from 'vue'
 
 const { success, error: showError } = useToast()
@@ -483,8 +540,10 @@ const showKeyDialog = ref(false)
 const showDeleteDialog = ref(false)
 
 const newKeyName = ref('')
+const newKeyRateLimit = ref<number | undefined>(undefined)
 const newKeyValue = ref('')
 const keyToDelete = ref<ApiKey | null>(null)
+const editingApiKey = ref<ApiKey | null>(null)
 
 onMounted(() => {
   loadApiKeys()
@@ -509,7 +568,28 @@ async function loadApiKeys() {
   }
 }
 
-async function createApiKey() {
+function openEditApiKeyDialog(apiKey: ApiKey) {
+  editingApiKey.value = apiKey
+  newKeyName.value = apiKey.name || ''
+  newKeyRateLimit.value = apiKey.rate_limit ?? undefined
+  showCreateDialog.value = true
+}
+
+function openCreateApiKeyDialog() {
+  editingApiKey.value = null
+  newKeyName.value = ''
+  newKeyRateLimit.value = undefined
+  showCreateDialog.value = true
+}
+
+function closeApiKeyDialog() {
+  showCreateDialog.value = false
+  editingApiKey.value = null
+  newKeyName.value = ''
+  newKeyRateLimit.value = undefined
+}
+
+async function saveApiKey() {
   if (!newKeyName.value.trim()) {
     showError('请输入密钥名称')
     return
@@ -517,16 +597,26 @@ async function createApiKey() {
 
   creating.value = true
   try {
-    const newKey = await meApi.createApiKey(newKeyName.value)
-    newKeyValue.value = newKey.key || ''
-    showCreateDialog.value = false
-    showKeyDialog.value = true
-    newKeyName.value = ''
+    if (editingApiKey.value) {
+      await meApi.updateApiKey(editingApiKey.value.id, {
+        name: newKeyName.value,
+        rate_limit: newKeyRateLimit.value ?? 0,
+      })
+      success('API 密钥更新成功')
+    } else {
+      const newKey = await meApi.createApiKey({
+        name: newKeyName.value,
+        rate_limit: newKeyRateLimit.value ?? 0,
+      })
+      newKeyValue.value = newKey.key || ''
+      showKeyDialog.value = true
+      success('API 密钥创建成功')
+    }
+    closeApiKeyDialog()
     await loadApiKeys()
-    success('API 密钥创建成功')
   } catch (error) {
-    log.error('创建 API 密钥失败:', error)
-    showError('创建 API 密钥失败')
+    log.error(editingApiKey.value ? '更新 API 密钥失败:' : '创建 API 密钥失败:', error)
+    showError(editingApiKey.value ? '更新 API 密钥失败' : '创建 API 密钥失败')
   } finally {
     creating.value = false
   }
@@ -618,6 +708,13 @@ function formatNumber(num: number | undefined | null): string {
     return '0'
   }
   return num.toLocaleString('zh-CN')
+}
+
+function formatKeyRateLimit(rateLimit?: number | null): string {
+  if (rateLimit == null || rateLimit === 0) {
+    return '不限速'
+  }
+  return `${rateLimit}/min`
 }
 
 function formatDate(dateString: string): string {

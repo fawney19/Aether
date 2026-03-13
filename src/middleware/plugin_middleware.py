@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import time
 from typing import TYPE_CHECKING
 
@@ -46,7 +45,6 @@ class PluginMiddleware:
         self.plugin_manager = get_plugin_manager()
 
         # 从配置读取速率限制值
-        self.llm_api_rate_limit = config.llm_api_rate_limit
         self.public_api_rate_limit = config.public_api_rate_limit
 
         # 完全跳过限流的路径（静态资源、文档等）
@@ -62,14 +60,6 @@ class PluginMiddleware:
             "/api/auth/",  # 认证端点（由路由层的 IPRateLimiter 处理）
             "/api/users/",  # 用户端点
             "/api/monitoring/",  # 监控端点
-        ]
-
-        # LLM API 端点（需要特殊的速率限制策略）
-        self.llm_api_paths = [
-            "/v1/messages",
-            "/v1/chat/completions",
-            "/v1/responses",
-            "/v1/completions",
         ]
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -286,13 +276,6 @@ class PluginMiddleware:
 
         return "unknown"
 
-    def _is_llm_api_path(self, path: str) -> bool:
-        """检查是否为 LLM API 端点"""
-        for llm_path in self.llm_api_paths:
-            if path.startswith(llm_path):
-                return True
-        return False
-
     async def _get_rate_limit_key_and_config(
         self, request: Request
     ) -> tuple[str | None, int | None]:
@@ -300,7 +283,6 @@ class PluginMiddleware:
         获取速率限制的key和配置
 
         策略说明:
-        - /v1/messages, /v1/chat/completions 等 LLM API: 按 API Key 限流
         - /api/public/* 端点: 使用服务器级别 IP 限制
         - /api/admin/* 端点: 跳过（在 skip_rate_limit_paths 中跳过）
         - /api/auth/* 端点: 跳过（由路由层的 IPRateLimiter 处理）
@@ -309,30 +291,6 @@ class PluginMiddleware:
             (key, rate_limit_value) - key用于标识限制对象，rate_limit_value是限制值
         """
         path = request.url.path
-
-        # LLM API 端点: 按 API Key 或 IP 限流
-        if self._is_llm_api_path(path):
-            # 尝试从请求头获取 API Key
-            auth_header = request.headers.get("authorization", "")
-            api_key = request.headers.get("x-api-key", "")
-
-            if auth_header.lower().startswith("bearer "):
-                api_key = auth_header[7:]
-
-            if api_key:
-                # 使用 API Key 的哈希作为限制 key（避免日志泄露完整 key）
-                key_hash = hashlib.sha256(api_key.encode()).hexdigest()[:16]
-                key = f"llm_api_key:{key_hash}"
-                request.state.rate_limit_key_type = "api_key"
-            else:
-                # 无 API Key 时使用 IP 限制（更严格）
-                client_ip = self._get_client_ip(request)
-                key = f"llm_ip:{client_ip}"
-                request.state.rate_limit_key_type = "ip"
-
-            rate_limit = self.llm_api_rate_limit
-            request.state.rate_limit_value = rate_limit
-            return key, rate_limit
 
         # /api/public/* 端点: 使用服务器级别 IP 地址作为限制 key
         if path.startswith("/api/public/"):

@@ -19,6 +19,8 @@ from src.core.logger import logger
 from src.database.database import create_session
 from src.models.database import ApiKey, AuditEventType, User
 from src.services.auth.service import AuthService
+from src.services.rate_limit.user_rpm_limiter import get_user_rpm_limiter
+from src.services.system.config import SystemConfigService
 from src.services.system.audit import AuditService
 from src.services.usage.service import UsageService
 from src.services.wallet import WalletService
@@ -122,6 +124,9 @@ class ApiRequestPipeline:
         finally:
             auth_duration = PerfRecorder.stop(auth_start, "pipeline_auth", labels=perf_labels)
             _record_perf_metric("auth_ms", auth_duration)
+
+        if mode in {ApiMode.STANDARD, ApiMode.PROXY} and api_key and user:
+            await self._check_user_rate_limit(http_request, db, user, api_key)
 
         raw_body = None
         should_eager_read_body = http_request.method in {"POST", "PUT", "PATCH"} and getattr(
@@ -266,6 +271,55 @@ class ApiRequestPipeline:
     # --------------------------------------------------------------------- #
     # Internal helpers
     # --------------------------------------------------------------------- #
+
+    async def _check_user_rate_limit(
+        self,
+        request: Request,
+        db: Session,
+        user: User,
+        api_key: ApiKey,
+    ) -> None:
+        limiter = await get_user_rpm_limiter()
+        system_default_raw = SystemConfigService.get_config(db, "rate_limit_per_minute", default=0)
+        system_default = max(int(system_default_raw or 0), 0)
+
+        if api_key.is_standalone:
+            effective_user_limit = (
+                max(int(api_key.rate_limit or 0), 0)
+                if api_key.rate_limit is not None
+                else system_default
+            )
+            user_rpm_key = limiter.get_standalone_rpm_key(api_key.id)
+            key_rpm_limit = 0
+        else:
+            effective_user_limit = (
+                max(int(user.rate_limit or 0), 0) if user.rate_limit is not None else system_default
+            )
+            user_rpm_key = limiter.get_user_rpm_key(user.id)
+            key_rpm_limit = max(int(api_key.rate_limit or 0), 0)
+
+        result = await limiter.check_and_consume(
+            user_rpm_key=user_rpm_key,
+            user_rpm_limit=effective_user_limit,
+            key_rpm_key=limiter.get_key_rpm_key(api_key.id),
+            key_rpm_limit=key_rpm_limit,
+        )
+
+        if result.allowed:
+            return
+
+        scope = result.scope or "user"
+        limit = result.limit or (effective_user_limit if scope == "user" else key_rpm_limit)
+        retry_after = result.retry_after or limiter.get_retry_after()
+
+        headers = {
+            "Retry-After": str(retry_after),
+            "X-RateLimit-Limit": str(limit),
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Scope": scope,
+        }
+        request.state.rate_limit_scope = scope
+        raise HTTPException(status_code=429, detail="请求过于频繁，请稍后重试", headers=headers)
 
     async def _authenticate_client(
         self, request: Request, db: Session, adapter: ApiAdapter, **_kw: object
