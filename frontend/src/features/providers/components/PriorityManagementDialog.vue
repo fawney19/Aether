@@ -537,6 +537,12 @@ const dragOverKey = ref<Record<string, string | null>>({})
 const loadingKeys = ref(false)
 const saving = ref(false)
 
+const SAVE_CONCURRENCY = 6
+
+let originalProviderPriorityById = new Map<string, number>()
+let originalPoolPriorityByProviderId = new Map<string, number | null>()
+let originalKeyPriorityById = new Map<string, Record<string, number>>()
+
 // Key 优先级编辑状态
 const editingKeyPriority = ref<Record<string, string | null>>({})  // format -> keyId
 
@@ -642,6 +648,77 @@ function normalizePriorityMap(
   return normalized
 }
 
+function normalizeOptionalPriority(value: unknown): number | null {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return null
+  return Math.trunc(num)
+}
+
+function normalizeRequiredPriority(value: unknown, fallback: number): number {
+  return normalizeOptionalPriority(value) ?? fallback
+}
+
+function normalizeProvidersForEditing(
+  providers: ProviderWithEndpointsSummary[]
+): ProviderWithEndpointsSummary[] {
+  const normalized = providers.map((provider, index) => ({
+    ...provider,
+    provider_priority: normalizeRequiredPriority(provider.provider_priority, 100 + index),
+    pool_advanced: provider.pool_advanced
+      ? {
+          ...provider.pool_advanced,
+          global_priority: normalizeOptionalPriority(provider.pool_advanced.global_priority),
+        }
+      : provider.pool_advanced,
+  }))
+
+  const minProviderPriority = normalized.reduce(
+    (min, provider) => Math.min(min, provider.provider_priority),
+    Number.POSITIVE_INFINITY,
+  )
+  const providerOffset = Number.isFinite(minProviderPriority) && minProviderPriority < 1
+    ? 1 - minProviderPriority
+    : 0
+
+  const explicitPoolPriorities = normalized
+    .map((provider) => normalizeOptionalPriority(provider.pool_advanced?.global_priority))
+    .filter((priority): priority is number => priority != null)
+  const minPoolPriority = explicitPoolPriorities.length > 0
+    ? Math.min(...explicitPoolPriorities)
+    : null
+  const poolOffset = minPoolPriority != null && minPoolPriority < 1
+    ? 1 - minPoolPriority
+    : 0
+
+  return normalized.map((provider) => ({
+    ...provider,
+    provider_priority: provider.provider_priority + providerOffset,
+    pool_advanced: provider.pool_advanced
+      ? {
+          ...provider.pool_advanced,
+          global_priority: provider.pool_advanced.global_priority == null
+            ? null
+            : provider.pool_advanced.global_priority + poolOffset,
+        }
+      : provider.pool_advanced,
+  }))
+}
+
+function snapshotProviderBaseline(providers: ProviderWithEndpointsSummary[]) {
+  originalProviderPriorityById = new Map(
+    providers.map((provider, index) => [
+      provider.id,
+      normalizeRequiredPriority(provider.provider_priority, 100 + index),
+    ])
+  )
+  originalPoolPriorityByProviderId = new Map(
+    providers.map((provider) => [
+      provider.id,
+      normalizeOptionalPriority(provider.pool_advanced?.global_priority),
+    ])
+  )
+}
+
 function normalizeRateMultipliers(
   value: Record<string, unknown> | null | undefined
 ): Record<string, number> | null {
@@ -655,6 +732,69 @@ function normalizeRateMultipliers(
     normalized[format] = num
   }
   return Object.keys(normalized).length > 0 ? normalized : null
+}
+
+function buildEditableKeyPriorityMap(): Map<string, Record<string, number>> {
+  const priorityMapByKeyId = new Map<string, Record<string, number>>()
+
+  for (const format of Object.keys(keysByFormat.value)) {
+    const normalizedFormat = normalizeApiFormatKey(format)
+    if (!normalizedFormat) continue
+
+    const keys = keysByFormat.value[format].filter((key) => !isPoolManagedKey(key))
+    keys.forEach((key) => {
+      const existing = priorityMapByKeyId.get(key.id) || normalizePriorityMap(key.global_priority_by_format)
+      existing[normalizedFormat] = Math.max(0, Math.trunc(key.priority))
+      priorityMapByKeyId.set(key.id, existing)
+    })
+  }
+
+  return priorityMapByKeyId
+}
+
+function snapshotKeyBaseline() {
+  originalKeyPriorityById = new Map(
+    Array.from(buildEditableKeyPriorityMap().entries()).map(([keyId, priorityMap]) => [
+      keyId,
+      { ...priorityMap },
+    ])
+  )
+}
+
+function arePriorityMapsEqual(
+  left: Record<string, number> | undefined,
+  right: Record<string, number> | undefined,
+): boolean {
+  const leftEntries = Object.entries(left || {}).sort(([a], [b]) => a.localeCompare(b))
+  const rightEntries = Object.entries(right || {}).sort(([a], [b]) => a.localeCompare(b))
+
+  if (leftEntries.length !== rightEntries.length) return false
+
+  return leftEntries.every(([format, priority], index) => {
+    const [rightFormat, rightPriority] = rightEntries[index] || []
+    return format === rightFormat && priority === rightPriority
+  })
+}
+
+async function runTasksWithConcurrency(
+  tasks: Array<() => Promise<unknown>>,
+  concurrency: number = SAVE_CONCURRENCY,
+) {
+  if (tasks.length === 0) return
+
+  let cursor = 0
+  const runNext = async (): Promise<void> => {
+    while (cursor < tasks.length) {
+      const index = cursor++
+      await tasks[index]()
+    }
+  }
+
+  const workers = Array.from(
+    { length: Math.min(concurrency, tasks.length) },
+    () => runNext(),
+  )
+  await Promise.all(workers)
 }
 
 const providerById = computed(() => {
@@ -857,8 +997,13 @@ watch(internalOpen, async (open) => {
 async function loadAllProviders() {
   try {
     const response = await getProvidersSummary({ page: 1, page_size: 9999 })
-    sortedProviders.value = sortProvidersByActiveAndPriority(response.items)
+    snapshotProviderBaseline(response.items)
+    sortedProviders.value = sortProvidersByActiveAndPriority(
+      normalizeProvidersForEditing(response.items)
+    )
   } catch {
+    originalProviderPriorityById = new Map()
+    originalPoolPriorityByProviderId = new Map()
     sortedProviders.value = []
   }
 }
@@ -995,12 +1140,14 @@ async function loadKeysByFormat() {
       data[format] = sortKeysByActiveAndPriority(data[format])
     }
     keysByFormat.value = data
+    snapshotKeyBaseline()
 
     const formats = sortApiFormats(Object.keys(data))
     if (formats.length > 0 && !formats.includes(activeFormatTab.value)) {
       activeFormatTab.value = formats[0]
     }
   } catch (err: unknown) {
+    originalKeyPriorityById = new Map()
     showError(parseApiError(err, '加载 Key 列表失败'), '错误')
   } finally {
     loadingKeys.value = false
@@ -1307,35 +1454,43 @@ async function save() {
 
     // 第一步：先保存所有 Provider 和 Key 的优先级数据
     // 确保优先级数据全部到位后，再切换调度模式，避免瞬态不一致
-    const providerUpdates = sortedProviders.value.map((provider) => {
-      const payload: Parameters<typeof updateProvider>[1] = {
-        provider_priority: provider.provider_priority,
+    const providerTasks: Array<() => Promise<unknown>> = []
+    sortedProviders.value.forEach((provider) => {
+      const payload: Parameters<typeof updateProvider>[1] = {}
+      const currentProviderPriority = Math.max(0, Math.trunc(provider.provider_priority))
+      const originalProviderPriority = originalProviderPriorityById.get(provider.id)
+      if (originalProviderPriority == null || originalProviderPriority !== currentProviderPriority) {
+        payload.provider_priority = currentProviderPriority
       }
-      // 号池 provider 同时保存 pool_advanced（含 global_priority）
-      if (provider.pool_advanced) {
+
+      const currentPoolPriority = normalizeOptionalPriority(provider.pool_advanced?.global_priority)
+      const originalPoolPriority = originalPoolPriorityByProviderId.get(provider.id) ?? null
+      if (currentPoolPriority !== originalPoolPriority) {
         payload.pool_advanced = provider.pool_advanced
+          ? {
+              ...provider.pool_advanced,
+              global_priority: currentPoolPriority,
+            }
+          : null
       }
-      return updateProvider(provider.id, payload)
+
+      if (Object.keys(payload).length > 0) {
+        providerTasks.push(() => updateProvider(provider.id, payload))
+      }
     })
 
     // 收集每个 Key 的按格式优先级（保留原有其他格式的配置）
-    const keyPriorityByFormatMap = new Map<string, Record<string, number>>()
-    for (const format of Object.keys(keysByFormat.value)) {
-      const keys = keysByFormat.value[format].filter((key) => !isPoolManagedKey(key))
-      keys.forEach((key) => {
-        // 合并原有配置，避免丢失未显示格式的优先级
-        const existing = keyPriorityByFormatMap.get(key.id)
-          || normalizePriorityMap(key.global_priority_by_format)
-        existing[normalizeApiFormatKey(format)] = key.priority
-        keyPriorityByFormatMap.set(key.id, existing)
-      })
-    }
+    const keyPriorityByFormatMap = buildEditableKeyPriorityMap()
+    const keyTasks = Array.from(keyPriorityByFormatMap.entries())
+      .filter(([keyId, priorityByFormat]) => !arePriorityMapsEqual(
+        originalKeyPriorityById.get(keyId),
+        priorityByFormat,
+      ))
+      .map(([keyId, priorityByFormat]) => () =>
+        updateProviderKey(keyId, { global_priority_by_format: priorityByFormat })
+      )
 
-    const keyUpdates = Array.from(keyPriorityByFormatMap.entries()).map(([keyId, priorityByFormat]) =>
-      updateProviderKey(keyId, { global_priority_by_format: priorityByFormat })
-    )
-
-    await Promise.all([...providerUpdates, ...keyUpdates])
+    await runTasksWithConcurrency([...providerTasks, ...keyTasks])
 
     // 第二步：优先级数据全部就绪后，顺序保存调度配置
     // 先保存优先级模式，再保存调度模式，确保 Scheduler 状态完整切换
@@ -1350,6 +1505,7 @@ async function save() {
       '调度模式：cache_affinity(缓存亲和模式) 或 load_balance(负载均衡模式) 或 fixed_order(固定顺序模式)'
     )
 
+    await loadAllProviders()
     await loadKeysByFormat()
 
     success('优先级已保存')

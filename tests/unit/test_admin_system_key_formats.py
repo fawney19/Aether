@@ -1,4 +1,7 @@
+import pytest
+
 from src.api.admin.system import AdminExportConfigAdapter, AdminImportConfigAdapter
+from src.core.exceptions import InvalidRequestException
 from src.services.provider_ops.types import SENSITIVE_CREDENTIAL_FIELDS
 
 
@@ -114,3 +117,27 @@ def test_import_provider_config_encrypts_refresh_token() -> None:
     assert result["provider_ops"]["connector"]["credentials"]["refresh_token"] == "enc:rt-1"
     assert result["provider_ops"]["connector"]["credentials"]["api_key"] == "enc:key-1"
     assert config["provider_ops"]["connector"]["credentials"]["refresh_token"] == "rt-1"
+
+
+def test_import_endpoint_payload_rejects_dict_base_url() -> None:
+    with pytest.raises(InvalidRequestException, match="导入 Endpoint 失败"):
+        AdminImportConfigAdapter._normalize_import_endpoint_payload(
+            "provider-1",
+            {
+                "api_format": "claude:chat",
+                "base_url": {"url": "https://api.anthropic.com"},
+            },
+        )
+
+
+def test_import_endpoint_payload_normalizes_base_url() -> None:
+    result = AdminImportConfigAdapter._normalize_import_endpoint_payload(
+        "provider-1",
+        {
+            "api_format": "claude:chat",
+            "base_url": "https://api.anthropic.com/",
+        },
+    )
+
+    assert result["base_url"] == "https://api.anthropic.com"
+    assert result["api_format"] == "claude:chat"

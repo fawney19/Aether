@@ -83,6 +83,25 @@ def _get_adapter_for_format(api_format: str) -> Any:
     return get_adapter_class(api_format) or get_cli_adapter_class(api_format)
 
 
+def _require_test_endpoint_base_url(endpoint: Any) -> str:
+    """校验测试链路里的 endpoint.base_url。"""
+    base_url = getattr(endpoint, "base_url", None)
+    if not isinstance(base_url, str):
+        endpoint_id = str(getattr(endpoint, "id", "") or "unknown")
+        api_format = str(getattr(endpoint, "api_format", "") or "unknown")
+        raise ValueError(
+            f"Endpoint {endpoint_id} ({api_format}) has invalid base_url type: "
+            f"expected str, got {type(base_url).__name__}"
+        )
+
+    normalized = base_url.strip()
+    if not normalized:
+        endpoint_id = str(getattr(endpoint, "id", "") or "unknown")
+        api_format = str(getattr(endpoint, "api_format", "") or "unknown")
+        raise ValueError(f"Endpoint {endpoint_id} ({api_format}) has empty base_url")
+    return normalized
+
+
 def _antigravity_sort_keys(api_keys: list[Any]) -> list[Any]:
     """按 tier/可用性对 Antigravity Key 降序排列。
 
@@ -917,7 +936,7 @@ async def test_model(
     endpoint_config = {
         "api_key": api_key_value,
         "api_key_id": api_key.id,  # 添加API Key ID用于用量记录
-        "base_url": endpoint.base_url,
+        "base_url": _require_test_endpoint_base_url(endpoint),
         "api_format": endpoint.api_format,
         "extra_headers": extra_headers if extra_headers else None,
         "timeout": TimeoutDefaults.HTTP_REQUEST,
@@ -1601,7 +1620,7 @@ async def _execute_test_check(
     async def _run_check(stream: bool) -> dict[str, Any]:
         return await adapter_class.check_endpoint(
             None,
-            endpoint.base_url,
+            _require_test_endpoint_base_url(endpoint),
             api_key_value,
             {
                 **request_payload,

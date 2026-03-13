@@ -98,12 +98,21 @@ class ConcurrencySnapshot:
     reservation_phase: str = "unknown"
     reservation_confidence: float = 0.0
     load_factor: float = 0.0
+    # 用户级别 RPM 信息
+    user_current: int | None = None
+    user_limit: int | None = None
+    user_reservation_ratio: float | None = None
 
     def describe(self) -> str:
         key_limit_text = str(self.key_limit) if self.key_limit is not None else "inf"
         reservation_text = f"{self.reservation_ratio:.0%}" if self.reservation_ratio > 0 else "N/A"
+        user_text = ""
+        if self.user_limit is not None:
+            user_current = self.user_current or 0
+            user_text = f", user={user_current}/{self.user_limit}"
         return (
             f"key={self.key_current}/{key_limit_text}, "
             f"cached={self.is_cached_user}, "
             f"reserve={reservation_text}({self.reservation_phase})"
+            f"{user_text}"
         )

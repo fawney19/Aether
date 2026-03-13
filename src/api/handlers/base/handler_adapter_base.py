@@ -321,6 +321,17 @@ class HandlerAdapterBase(ApiAdapter):
         _ = base_url, provider_type
         return build_test_request_body(cls.FORMAT_ID, request_data)
 
+    @staticmethod
+    def _validate_test_base_url(base_url: Any) -> str:
+        """校验 test-model 场景传入的 base_url。"""
+        if not isinstance(base_url, str):
+            raise TypeError(f"base_url must be a non-empty string, got {type(base_url).__name__}")
+
+        normalized = base_url.strip()
+        if not normalized:
+            raise ValueError("base_url must be a non-empty string")
+        return normalized
+
     @classmethod
     async def check_endpoint(
         cls,
@@ -359,6 +370,7 @@ class HandlerAdapterBase(ApiAdapter):
         from src.core.api_format.headers import HeaderBuilder
         from src.core.provider_types import ProviderType
 
+        validated_base_url = cls._validate_test_base_url(base_url)
         is_antigravity = provider_type == ProviderType.ANTIGRAVITY
         is_gemini_cli = provider_type == ProviderType.GEMINI_CLI
         is_vertex = provider_type == ProviderType.VERTEX_AI
@@ -376,7 +388,9 @@ class HandlerAdapterBase(ApiAdapter):
             _kiro_cfg = KiroAuthConfig.from_dict(decrypted_auth_config or {})
             region = _kiro_cfg.effective_api_region()
             effective_base_url = (
-                base_url.replace("{region}", region) if "{region}" in base_url else base_url
+                validated_base_url.replace("{region}", region)
+                if "{region}" in validated_base_url
+                else validated_base_url
             )
             url = f"{str(effective_base_url).rstrip('/')}{KIRO_GENERATE_ASSISTANT_PATH}"
         elif is_antigravity:
@@ -389,13 +403,13 @@ class HandlerAdapterBase(ApiAdapter):
             )
 
             ordered_urls = url_availability.get_ordered_urls(prefer_daily=True)
-            effective_base_url = ordered_urls[0] if ordered_urls else base_url
+            effective_base_url = ordered_urls[0] if ordered_urls else validated_base_url
             path = V1INTERNAL_PATH_TEMPLATE.format(action="generateContent")
             url = f"{str(effective_base_url).rstrip('/')}{path}"
         elif is_gemini_cli:
             from src.services.provider.adapters.gemini_cli.constants import V1INTERNAL_PATH_TEMPLATE
 
-            effective_base_url = base_url
+            effective_base_url = validated_base_url
             path = V1INTERNAL_PATH_TEMPLATE.format(action="generateContent")
             url = f"{str(effective_base_url).rstrip('/')}{path}"
         elif is_vertex and provider_endpoint is not None and provider_api_key is not None:
@@ -422,11 +436,17 @@ class HandlerAdapterBase(ApiAdapter):
             )
         else:
             url = cls.build_endpoint_url(
-                base_url, request_data, model_name, provider_type=provider_type
+                validated_base_url,
+                request_data,
+                model_name,
+                provider_type=provider_type,
             )
 
         # ---- Headers ----
-        cli_extra = cls.get_cli_extra_headers(base_url=base_url, provider_type=provider_type)
+        cli_extra = cls.get_cli_extra_headers(
+            base_url=validated_base_url,
+            provider_type=provider_type,
+        )
         merged_extra = dict(extra_headers) if extra_headers else {}
         merged_extra.update(cli_extra)
 
@@ -480,7 +500,11 @@ class HandlerAdapterBase(ApiAdapter):
                 headers[auth_header_name] = f"Bearer {api_key}"
 
         # ---- Body ----
-        body = cls.build_request_body(request_data, base_url=base_url, provider_type=provider_type)
+        body = cls.build_request_body(
+            request_data,
+            base_url=validated_base_url,
+            provider_type=provider_type,
+        )
 
         if body_rules:
             body = apply_body_rules(body, body_rules)

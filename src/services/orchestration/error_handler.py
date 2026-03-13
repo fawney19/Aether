@@ -156,7 +156,8 @@ class ErrorHandlerService:
                     affinity_key, client_format_str, global_model_id, endpoint, key
                 )
             if key:
-                health_monitor.record_failure(
+                await asyncio.to_thread(
+                    health_monitor.record_failure,
                     db=self.db,
                     key_id=str(key.id),
                     api_format=provider_format_str,
@@ -224,7 +225,8 @@ class ErrorHandlerService:
 
         # 记录健康失败
         if key:
-            health_monitor.record_failure(
+            await asyncio.to_thread(
+                health_monitor.record_failure,
                 db=self.db,
                 key_id=str(key.id),
                 api_format=provider_format_str,
@@ -268,7 +270,8 @@ class ErrorHandlerService:
 
         # 记录健康失败
         if key:
-            health_monitor.record_failure(
+            await asyncio.to_thread(
+                health_monitor.record_failure,
                 db=self.db,
                 key_id=str(key.id),
                 api_format=provider_format_str,

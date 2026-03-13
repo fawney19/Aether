@@ -1,11 +1,12 @@
 """
-RPM 限制管理器 - 支持 Redis 或内存的 Key 级别 RPM 限制
+RPM 限制管理器 - 支持 Redis 或内存的 Key 级别和 User 级别 RPM 限制
 
 功能：
 1. ProviderAPIKey 级别的 RPM 限制（按分钟窗口计数）
-2. 分布式环境下优先使用 Redis，多实例共享
-3. 在开发/单实例场景下自动降级为内存计数
-4. 支持缓存用户优先级（预留槽位机制）
+2. User 级别的 RPM 限制（按分钟窗口计数，优先检查）
+3. 分布式环境下优先使用 Redis，多实例共享
+4. 在开发/单实例场景下自动降级为内存计数
+5. 支持缓存用户优先级（预留槽位机制）
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from src.core.logger import logger
 
 
 class ConcurrencyManager:
-    """Key RPM 限制管理器"""
+    """Key 和 User RPM 限制管理器"""
 
     _instance: ConcurrencyManager | None = None
     _redis: aioredis.Redis | None = None
@@ -48,6 +49,8 @@ class ConcurrencyManager:
         self._memory_lock: asyncio.Lock = asyncio.Lock()
         # Key RPM 计数器：{key_id: (bucket, count)}，bucket = floor(now / 60)
         self._memory_key_rpm_counts: dict[str, tuple[int, int]] = {}
+        # User RPM 计数器：{user_id: (bucket, count)}，bucket = floor(now / 60)
+        self._memory_user_rpm_counts: dict[str, tuple[int, int]] = {}
         self._owns_redis: bool = False
         self._last_cleanup_bucket: int = 0  # 上次清理时的 bucket，用于定期清理过期数据
         self._last_cleanup_time: float = 0  # 上次清理的时间戳，用于强制定期清理
@@ -143,6 +146,27 @@ class ConcurrencyManager:
         b = bucket if bucket is not None else self._get_rpm_bucket()
         return f"rpm:key:{key_id}:{b}"
 
+    def _get_user_key(self, user_id: str, bucket: int | None = None) -> str:
+        """获取 User RPM 计数的 Redis Key（按分钟桶）"""
+        b = bucket if bucket is not None else self._get_rpm_bucket()
+        return f"rpm:user:{user_id}:{b}"
+
+    def _get_memory_user_rpm_count(self, user_id: str, bucket: int) -> int:
+        """获取内存模式下 User 在指定 bucket 的 RPM 计数"""
+        stored = self._memory_user_rpm_counts.get(user_id)
+        if not stored:
+            return 0
+        stored_bucket, count = stored
+        if stored_bucket != bucket:
+            # 旧桶数据已过期，删除以防止内存泄漏
+            del self._memory_user_rpm_counts[user_id]
+            return 0
+        return count
+
+    def _set_memory_user_rpm_count(self, user_id: str, bucket: int, count: int) -> None:
+        """设置内存模式下 User 在指定 bucket 的 RPM 计数"""
+        self._memory_user_rpm_counts[user_id] = (bucket, count)
+
     def _get_memory_key_rpm_count(self, key_id: str, bucket: int) -> int:
         """获取内存模式下 Key 在指定 bucket 的 RPM 计数"""
         stored = self._memory_key_rpm_counts.get(key_id)
@@ -237,8 +261,21 @@ class ConcurrencyManager:
         for key_id in expired_keys:
             del self._memory_key_rpm_counts[key_id]
 
-        if expired_keys:
-            logger.debug("[CLEANUP] 清理了 {} 个过期的内存 RPM 计数", len(expired_keys))
+        # 同时清理过期的 User RPM 计数
+        expired_user_keys = []
+        for user_id, (stored_bucket, _count) in self._memory_user_rpm_counts.items():
+            if stored_bucket < current_bucket:
+                expired_user_keys.append(user_id)
+
+        for user_id in expired_user_keys:
+            del self._memory_user_rpm_counts[user_id]
+
+        if expired_keys or expired_user_keys:
+            logger.debug(
+                "[CLEANUP] 清理了 {} 个过期的内存 Key RPM 计数，{} 个过期的内存 User RPM 计数",
+                len(expired_keys),
+                len(expired_user_keys),
+            )
 
     async def get_key_rpm_count(self, key_id: str) -> int:
         """
@@ -522,11 +559,13 @@ class ConcurrencyManager:
                 # 记录槽位占用时长分布
                 concurrency_slot_duration_seconds.labels(
                     exception=str(exception_occurred),
+                    guard="key",
                 ).observe(slot_duration)
 
                 # 记录槽位释放计数
                 concurrency_slot_release_total.labels(
                     exception=str(exception_occurred),
+                    guard="key",
                 ).inc()
 
                 # 告警：槽位占用时间过长（超过 60 秒）
@@ -562,6 +601,262 @@ class ConcurrencyManager:
             logger.info("[RESET] 重置 Key RPM 计数: {}, 删除 {} 个键", key_id, deleted_count)
         except Exception as e:
             logger.error("重置 Key RPM 计数失败: {}", e)
+
+    async def get_user_rpm_count(self, user_id: str) -> int:
+        """
+        获取 User 当前 RPM 计数
+
+        Args:
+            user_id: User ID
+
+        Returns:
+            当前分钟窗口内的请求数
+        """
+        if self._redis is None:
+            async with self._memory_lock:
+                bucket = self._get_rpm_bucket()
+                self._cleanup_expired_memory_rpm_counts(bucket)
+                return self._get_memory_user_rpm_count(user_id, bucket)
+
+        try:
+            user_key = self._get_user_key(user_id)
+            result = await self._redis.get(user_key)
+            return int(result) if result else 0
+        except Exception as e:
+            logger.error("获取 User RPM 计数失败: {}", e)
+            return 0
+
+    async def acquire_user_rpm_slot(
+        self,
+        user_id: str,
+        user_rpm_limit: int | None,
+        is_cached_user: bool = False,
+        cache_reservation_ratio: float | None = None,
+    ) -> bool:
+        """
+        尝试获取 User RPM 槽位（支持缓存用户优先级）
+
+        Args:
+            user_id: User ID
+            user_rpm_limit: User RPM 限制（每分钟最大请求数，None 表示不限制）
+            is_cached_user: 是否是缓存用户（缓存用户可使用全部槽位）
+            cache_reservation_ratio: 缓存预留比例，None 时从配置读取
+
+        Returns:
+            是否成功获取（True/False）
+
+        缓存预留机制说明:
+        - 假设 user_rpm_limit = 100, cache_reservation_ratio = 0.3
+        - 新用户最多使用: 70 RPM (100 * (1 - 0.3))
+        - 缓存用户最多使用: 100 RPM（全部）
+        """
+        from src.config.settings import config
+
+        if cache_reservation_ratio is None:
+            cache_reservation_ratio = config.cache_reservation_ratio
+
+        if self._redis is None:
+            async with self._memory_lock:
+                bucket = self._get_rpm_bucket()
+                self._cleanup_expired_memory_rpm_counts(bucket)
+
+                user_count = self._get_memory_user_rpm_count(user_id, bucket)
+
+                if user_rpm_limit is not None:
+                    if is_cached_user:
+                        if user_count >= user_rpm_limit:
+                            return False
+                    else:
+                        available_for_new = max(
+                            1, math.floor(user_rpm_limit * (1 - cache_reservation_ratio))
+                        )
+                        if user_count >= available_for_new:
+                            return False
+
+                self._set_memory_user_rpm_count(user_id, bucket, user_count + 1)
+                return True
+
+        bucket = self._get_rpm_bucket()
+        user_key = self._get_user_key(user_id, bucket=bucket)
+
+        try:
+            lua_script = """
+            local user_key = KEYS[1]
+            local user_max = tonumber(ARGV[1])
+            local user_ttl = tonumber(ARGV[2])
+            local is_cached = tonumber(ARGV[3])
+            local cache_ratio = tonumber(ARGV[4])
+
+            local user_count = tonumber(redis.call('GET', user_key) or '0')
+
+            if user_max >= 0 then
+                if is_cached == 0 then
+                    local available_for_new = math.max(1, math.floor(user_max * (1 - cache_ratio)))
+                    if user_count >= available_for_new then
+                        return 0
+                    end
+                else
+                    if user_count >= user_max then
+                        return 0
+                    end
+                end
+            end
+
+            redis.call('INCR', user_key)
+            redis.call('EXPIRE', user_key, user_ttl)
+
+            return 1
+            """
+
+            result = await self._redis.eval(
+                lua_script,
+                1,
+                user_key,
+                user_rpm_limit if user_rpm_limit is not None else -1,
+                self._key_rpm_key_ttl_seconds,
+                1 if is_cached_user else 0,
+                cache_reservation_ratio,
+            )
+
+            success = result == 1
+
+            if success:
+                user_type = "缓存用户" if is_cached_user else "新用户"
+                logger.debug(
+                    "[OK] 获取 User RPM 槽位成功: user={}..., 类型={}", user_id[:8], user_type
+                )
+            else:
+                user_count = await self.get_user_rpm_count(user_id)
+                if user_rpm_limit and not is_cached_user:
+                    available_for_new = int(user_rpm_limit * (1 - cache_reservation_ratio))
+                    user_info = f"新用户配额={available_for_new}, 当前={user_count}"
+                else:
+                    user_info = f"缓存用户, 当前={user_count}/{user_rpm_limit}"
+                logger.warning(
+                    "[WARN] User RPM 限制已达上限: user={}...({})", user_id[:8], user_info
+                )
+
+            return success
+
+        except Exception as e:
+            logger.error("获取 User RPM 槽位失败，降级到内存模式: {}", e)
+            async with self._memory_lock:
+                bucket = self._get_rpm_bucket()
+                self._cleanup_expired_memory_rpm_counts(bucket)
+
+                user_count = self._get_memory_user_rpm_count(user_id, bucket)
+
+                fallback_rpm_limit = (
+                    max(1, user_rpm_limit // 2) if user_rpm_limit is not None else None
+                )
+
+                if fallback_rpm_limit is not None and user_count >= fallback_rpm_limit:
+                    logger.warning(
+                        "[FALLBACK] User RPM 达到降级限制: {}/{}",
+                        user_count,
+                        fallback_rpm_limit,
+                    )
+                    return False
+
+                self._set_memory_user_rpm_count(user_id, bucket, user_count + 1)
+                logger.debug("[FALLBACK] 使用内存模式获取 User RPM 槽位: user={}...", user_id[:8])
+                return True
+
+    @asynccontextmanager
+    async def user_rpm_guard(
+        self,
+        user_id: str,
+        user_rpm_limit: int | None,
+        is_cached_user: bool = False,
+        cache_reservation_ratio: float | None = None,
+    ) -> Any:
+        """
+        User RPM 限制上下文管理器（支持缓存用户优先级）
+
+        用法：
+            async with manager.user_rpm_guard(user_id, user_rpm_limit, is_cached_user=True):
+                # 执行请求
+                response = await send_request(...)
+
+        如果获取失败，会抛出 ConcurrencyLimitError 异常
+
+        注意：RPM 是按分钟窗口计数，不需要在请求结束后释放
+        """
+        from src.config.settings import config
+
+        if cache_reservation_ratio is None:
+            cache_reservation_ratio = config.cache_reservation_ratio
+
+        acquired = await self.acquire_user_rpm_slot(
+            user_id,
+            user_rpm_limit,
+            is_cached_user,
+            cache_reservation_ratio,
+        )
+
+        if not acquired:
+            from src.core.exceptions import ConcurrencyLimitError
+
+            raise ConcurrencyLimitError("服务暂时繁忙，请稍后重试")
+
+        import time
+
+        slot_acquired_at = time.time()
+        exception_occurred = False
+
+        try:
+            yield
+        except Exception:
+            exception_occurred = True
+            raise
+        finally:
+            slot_duration = time.time() - slot_acquired_at
+
+            try:
+                from src.core.metrics import (
+                    concurrency_slot_duration_seconds,
+                    concurrency_slot_release_total,
+                )
+
+                concurrency_slot_duration_seconds.labels(
+                    exception=str(exception_occurred),
+                    guard="user",
+                ).observe(slot_duration)
+
+                concurrency_slot_release_total.labels(
+                    exception=str(exception_occurred),
+                    guard="user",
+                ).inc()
+
+                if slot_duration > 60:
+                    logger.warning(
+                        "[WARN] User 请求耗时过长: user_id={}..., duration={:.1f}s, exception={}",
+                        user_id[:8] if user_id else "unknown",
+                        slot_duration,
+                        exception_occurred,
+                    )
+
+            except Exception as metric_error:
+                logger.debug("记录指标失败: {}", metric_error)
+
+    async def reset_user_rpm(self, user_id: str) -> None:
+        """
+        重置 User RPM 计数（管理功能，慎用）
+
+        Args:
+            user_id: User ID
+        """
+        if self._redis is None:
+            async with self._memory_lock:
+                self._memory_user_rpm_counts.pop(user_id, None)
+                logger.info("[RESET] 重置 User RPM 计数(内存): {}", user_id)
+            return
+
+        try:
+            deleted_count = await self._scan_and_delete(f"rpm:user:{user_id}:*")
+            logger.info("[RESET] 重置 User RPM 计数: {}, 删除 {} 个键", user_id, deleted_count)
+        except Exception as e:
+            logger.error("重置 User RPM 计数失败: {}", e)
 
     async def reset_all_rpm(self) -> None:
         """重置所有 Key RPM 计数（管理功能，慎用）"""

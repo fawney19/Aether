@@ -4,11 +4,11 @@ Prometheus metrics for monitoring
 
 from prometheus_client import Counter, Gauge, Histogram
 
-# 并发槽位占用时长分布（按异常类型聚合，不按 key_id 拆分）
+# 并发槽位占用时长分布（guard="key" 为 key 级，guard="user" 为用户级）
 concurrency_slot_duration_seconds = Histogram(
     "concurrency_slot_duration_seconds",
     "Duration of concurrency slot occupation in seconds",
-    ["exception"],
+    ["exception", "guard"],
     buckets=[0.1, 0.5, 1, 5, 10, 30, 60, 120, 300, 600],  # 0.1s 到 10 分钟
 )
 
@@ -16,7 +16,7 @@ concurrency_slot_duration_seconds = Histogram(
 concurrency_slot_release_total = Counter(
     "concurrency_slot_release_total",
     "Total number of concurrency slot releases",
-    ["exception"],
+    ["exception", "guard"],
 )
 
 # 请求总数（按类型）

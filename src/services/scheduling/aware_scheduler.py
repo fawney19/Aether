@@ -223,6 +223,7 @@ class CacheAwareScheduler:
         excluded_keys: list[str] | None = None,
         provider_batch_size: int = 20,
         max_candidates_per_batch: int | None = None,
+        user_id: str | None = None,
     ) -> tuple[Provider, ProviderEndpoint, ProviderAPIKey]:
         """
         缓存感知选择 - 核心方法
@@ -239,11 +240,22 @@ class CacheAwareScheduler:
             excluded_keys: 排除的Provider Key ID列表
             provider_batch_size: Provider批量大小
             max_candidates_per_batch: 每批最大候选数
+            user_id: 用户 ID（用于检查用户级别 RPM 限制，可选）
         """
         await self._ensure_initialized()
 
         excluded_endpoints_set = set(excluded_endpoints or [])
         excluded_keys_set = set(excluded_keys or [])
+
+        # 预先加载 User 对象（用于用户级 RPM 检查），避免在循环内重复查询
+        user = None
+        if user_id:
+            try:
+                from src.models.database import User
+
+                user = db.query(User).filter(User.id == user_id).first()
+            except Exception as e:
+                logger.debug("获取 User 对象失败（用于 RPM 预检查）: {}", e)
 
         normalized_format = normalize_endpoint_signature(api_format)
 
@@ -304,6 +316,7 @@ class CacheAwareScheduler:
                 can_use, snapshot = await self._concurrency_checker.check_available(
                     key,
                     is_cached_user=is_cached_user,
+                    user=user,
                 )
 
                 # 更新预留指标

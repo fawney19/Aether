@@ -4,9 +4,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import time
 from collections.abc import Callable
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
 
@@ -42,6 +44,10 @@ class ExecutionContext:
     reservation_phase: str | None = None
     reservation_confidence: float | None = None
     reservation_load_factor: float | None = None
+    # 用户级别 RPM 跟踪
+    user_rpm_current: int | None = None
+    user_rpm_limit: int | None = None
+    user_rpm_available_for_new: int | None = None
 
 
 @dataclass
@@ -100,6 +106,19 @@ class RequestExecutor:
         )
 
         try:
+            # 获取 User 对象（用于用户级 RPM 限制检查）
+            user = None
+            effective_user_id = context.user_id
+            if effective_user_id:
+                try:
+                    from src.models.database import User
+
+                    user = (
+                        self.db.query(User).filter(User.id == effective_user_id).first()
+                    )
+                except Exception as e:
+                    logger.debug("获取 User 对象失败（用于 RPM 检查）: {}", e)
+
             # 计算动态预留比例
             reservation_manager = get_adaptive_reservation_manager()
             # 获取当前 RPM 计数用于计算负载
@@ -145,12 +164,44 @@ class RequestExecutor:
                 reservation_result.confidence,
             )
 
-            async with self.concurrency_manager.rpm_guard(
-                key_id=key.id,
-                key_rpm_limit=effective_key_limit,
-                is_cached_user=is_cached_user,
-                cache_reservation_ratio=dynamic_reservation_ratio,
-            ):
+            async with AsyncExitStack() as stack:
+                # ---- 用户级别 RPM guard（如果用户配置了 rpm_limit）----
+                if user is not None and getattr(user, "rpm_limit", None) is not None:
+                    await stack.enter_async_context(
+                        self.concurrency_manager.user_rpm_guard(
+                            user_id=str(user.id),
+                            user_rpm_limit=int(user.rpm_limit),
+                            is_cached_user=is_cached_user,
+                            cache_reservation_ratio=dynamic_reservation_ratio,
+                        )
+                    )
+                    # 记录用户 RPM 统计
+                    try:
+                        user_rpm_count = await self.concurrency_manager.get_user_rpm_count(
+                            user_id=str(user.id),
+                        )
+                        context.user_rpm_current = user_rpm_count
+                        context.user_rpm_limit = int(user.rpm_limit)
+                        if not is_cached_user:
+                            context.user_rpm_available_for_new = max(
+                                1,
+                                math.floor(
+                                    int(user.rpm_limit) * (1 - dynamic_reservation_ratio)
+                                ),
+                            )
+                    except Exception as e:
+                        logger.debug("获取 User RPM 计数失败（guard 内）: {}", e)
+
+                # ---- Key RPM guard（始终执行，已有逻辑）----
+                await stack.enter_async_context(
+                    self.concurrency_manager.rpm_guard(
+                        key_id=key.id,
+                        key_rpm_limit=effective_key_limit,
+                        is_cached_user=is_cached_user,
+                        cache_reservation_ratio=dynamic_reservation_ratio,
+                    )
+                )
+
                 # 获取当前 RPM 计数（guard 内再次获取以获得最新值）
                 try:
                     key_rpm_count = await self.concurrency_manager.get_key_rpm_count(
@@ -174,7 +225,8 @@ class RequestExecutor:
                 client_format_str = normalize_endpoint_signature(api_format)
                 health_format = provider_format_str or client_format_str
 
-                health_monitor.record_success(
+                await asyncio.to_thread(
+                    health_monitor.record_success,
                     db=self.db,
                     key_id=key.id,
                     api_format=health_format,

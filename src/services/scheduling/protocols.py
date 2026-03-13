@@ -111,6 +111,7 @@ class ConcurrencyCheckerProtocol(Protocol):
         self,
         key: ProviderAPIKey,
         is_cached_user: bool = False,
+        user: Any | None = None,
     ) -> tuple[bool, ConcurrencySnapshot]: ...
 
     def get_reservation_stats(self) -> dict[str, Any]: ...

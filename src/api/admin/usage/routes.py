@@ -9,7 +9,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import case, func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from src.api.base.admin_adapter import AdminApiAdapter
 from src.api.base.context import ApiRequestContext
@@ -886,8 +886,8 @@ class AdminUsageRecordsAdapter(AdminApiAdapter):
             count_query = count_query.outerjoin(ApiKey, Usage.api_key_id == ApiKey.id)
 
         # -- 构建数据查询（完整 JOIN） --
-        usage_model_version = Usage.request_metadata["model_version"].as_string().label(
-            "model_version"
+        usage_model_version = (
+            Usage.request_metadata["model_version"].as_string().label("model_version")
         )
 
         query = (
@@ -1246,15 +1246,76 @@ class AdminUsageDetailAdapter(AdminApiAdapter):
     usage_id: str
     include_bodies: bool = True
 
+    def _build_usage_detail_query(self, db: Session) -> Any:
+        query = db.query(
+            Usage,
+            case(
+                (
+                    (Usage.request_body.isnot(None)) | (Usage.request_body_compressed.isnot(None)),
+                    True,
+                ),
+                else_=False,
+            ).label("has_request_body"),
+            case(
+                (
+                    (Usage.provider_request_body.isnot(None))
+                    | (Usage.provider_request_body_compressed.isnot(None)),
+                    True,
+                ),
+                else_=False,
+            ).label("has_provider_request_body"),
+            case(
+                (
+                    (Usage.response_body.isnot(None))
+                    | (Usage.response_body_compressed.isnot(None)),
+                    True,
+                ),
+                else_=False,
+            ).label("has_response_body"),
+            case(
+                (
+                    (Usage.client_response_body.isnot(None))
+                    | (Usage.client_response_body_compressed.isnot(None)),
+                    True,
+                ),
+                else_=False,
+            ).label("has_client_response_body"),
+        )
+
+        if not self.include_bodies:
+            query = query.options(
+                defer(Usage.request_body),
+                defer(Usage.provider_request_body),
+                defer(Usage.response_body),
+                defer(Usage.client_response_body),
+                defer(Usage.request_body_compressed),
+                defer(Usage.provider_request_body_compressed),
+                defer(Usage.response_body_compressed),
+                defer(Usage.client_response_body_compressed),
+            )
+
+        return query
+
+    def _load_usage_detail_row(self, db: Session) -> Any:
+        usage_row = self._build_usage_detail_query(db).filter(Usage.id == self.usage_id).first()
+        if usage_row:
+            return usage_row
+        return self._build_usage_detail_query(db).filter(Usage.request_id == self.usage_id).first()
+
     async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
         db = context.db
         # 先通过主键 id 查找，如果找不到再尝试通过 request_id 查找
-        usage_record = db.query(Usage).filter(Usage.id == self.usage_id).first()
-        if not usage_record:
-            # 兼容通过 request_id 查找（用于异步任务等场景）
-            usage_record = db.query(Usage).filter(Usage.request_id == self.usage_id).first()
-        if not usage_record:
+        usage_row = self._load_usage_detail_row(db)
+        if not usage_row:
             raise HTTPException(status_code=404, detail="Usage record not found")
+
+        (
+            usage_record,
+            has_request_body,
+            has_provider_request_body,
+            has_response_body,
+            has_client_response_body,
+        ) = usage_row
 
         user = db.query(User).filter(User.id == usage_record.user_id).first()
         api_key = db.query(ApiKey).filter(ApiKey.id == usage_record.api_key_id).first()
@@ -1269,23 +1330,6 @@ class AdminUsageDetailAdapter(AdminApiAdapter):
 
         # 提取视频/图像/音频计费信息
         video_billing_info = self._extract_video_billing_info(usage_record)
-
-        has_request_body = bool(
-            usage_record.request_body is not None
-            or usage_record.request_body_compressed is not None
-        )
-        has_provider_request_body = bool(
-            usage_record.provider_request_body is not None
-            or usage_record.provider_request_body_compressed is not None
-        )
-        has_response_body = bool(
-            usage_record.response_body is not None
-            or usage_record.response_body_compressed is not None
-        )
-        has_client_response_body = bool(
-            usage_record.client_response_body is not None
-            or usage_record.client_response_body_compressed is not None
-        )
 
         request_body = usage_record.get_request_body() if self.include_bodies else None
         provider_request_body = (

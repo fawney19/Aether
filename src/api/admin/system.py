@@ -1255,6 +1255,41 @@ class AdminImportConfigAdapter(AdminApiAdapter):
             return sorted(endpoint_formats)
         return []
 
+    @staticmethod
+    def _normalize_import_endpoint_payload(
+        provider_id: str,
+        ep_data: dict[str, Any],
+        existing_ep: Any | None = None,
+    ) -> dict[str, Any]:
+        """校验并规范化导入的 Endpoint 数据。"""
+        from src.models.endpoint_models import ProviderEndpointCreate
+
+        payload = {
+            "provider_id": provider_id,
+            "api_format": ep_data.get("api_format", getattr(existing_ep, "api_format", None)),
+            "base_url": ep_data.get("base_url", getattr(existing_ep, "base_url", None)),
+            "custom_path": ep_data.get("custom_path", getattr(existing_ep, "custom_path", None)),
+            "header_rules": ep_data.get("header_rules", getattr(existing_ep, "header_rules", None)),
+            "body_rules": ep_data.get("body_rules", getattr(existing_ep, "body_rules", None)),
+            "max_retries": ep_data.get("max_retries", getattr(existing_ep, "max_retries", 2)),
+            "config": ep_data.get("config", getattr(existing_ep, "config", None)),
+            "proxy": ep_data.get("proxy", getattr(existing_ep, "proxy", None)),
+            "format_acceptance_config": ep_data.get(
+                "format_acceptance_config",
+                getattr(existing_ep, "format_acceptance_config", None),
+            ),
+        }
+
+        try:
+            validated = ProviderEndpointCreate.model_validate(payload)
+        except Exception as exc:
+            api_format = payload.get("api_format") or "unknown"
+            raise InvalidRequestException(
+                f"导入 Endpoint 失败: provider_id={provider_id}, api_format={api_format}, error={exc}"
+            ) from exc
+
+        return validated.model_dump(mode="python")
+
     def _encrypt_provider_config(self, config: dict, crypto_service: Any) -> dict:
         """加密 Provider config 中的 provider_ops credentials"""
         if not config:
@@ -1579,18 +1614,23 @@ class AdminImportConfigAdapter(AdminApiAdapter):
                                 f"Endpoint '{ep_format}' 已存在于 Provider '{prov_data['name']}'"
                             )
                         elif merge_mode == "overwrite":
-                            existing_ep.base_url = ep_data.get("base_url", existing_ep.base_url)
-                            existing_ep.header_rules = ep_data.get("header_rules")
-                            existing_ep.body_rules = ep_data.get("body_rules")
-                            existing_ep.max_retries = ep_data.get("max_retries", 2)
+                            normalized_ep = self._normalize_import_endpoint_payload(
+                                provider_id,
+                                {**ep_data, "api_format": ep_format},
+                                existing_ep=existing_ep,
+                            )
+                            existing_ep.base_url = normalized_ep["base_url"]
+                            existing_ep.header_rules = normalized_ep.get("header_rules")
+                            existing_ep.body_rules = normalized_ep.get("body_rules")
+                            existing_ep.max_retries = normalized_ep.get("max_retries", 2)
                             existing_ep.is_active = ep_data.get("is_active", True)
-                            existing_ep.custom_path = ep_data.get("custom_path")
-                            existing_ep.config = ep_data.get("config")
-                            existing_ep.format_acceptance_config = ep_data.get(
+                            existing_ep.custom_path = normalized_ep.get("custom_path")
+                            existing_ep.config = normalized_ep.get("config")
+                            existing_ep.format_acceptance_config = normalized_ep.get(
                                 "format_acceptance_config"
                             )
                             existing_ep.proxy = self._remap_proxy_node_id(
-                                ep_data.get("proxy"), proxy_node_id_map
+                                normalized_ep.get("proxy"), proxy_node_id_map
                             )
                             sig = parse_signature_key(ep_format)
                             existing_ep.api_format = sig.key  # 使用归一化后的格式
@@ -1599,6 +1639,10 @@ class AdminImportConfigAdapter(AdminApiAdapter):
                             existing_ep.updated_at = datetime.now(timezone.utc)
                             stats["endpoints"]["updated"] += 1
                     else:
+                        normalized_ep = self._normalize_import_endpoint_payload(
+                            provider_id,
+                            {**ep_data, "api_format": ep_format},
+                        )
                         sig = parse_signature_key(ep_format)
                         api_family = sig.api_family.value
                         endpoint_kind = sig.endpoint_kind.value
@@ -1608,16 +1652,16 @@ class AdminImportConfigAdapter(AdminApiAdapter):
                             api_format=sig.key,  # 使用归一化后的格式
                             api_family=api_family,
                             endpoint_kind=endpoint_kind,
-                            base_url=ep_data["base_url"],
-                            header_rules=ep_data.get("header_rules"),
-                            body_rules=ep_data.get("body_rules"),
-                            max_retries=ep_data.get("max_retries", 2),
+                            base_url=normalized_ep["base_url"],
+                            header_rules=normalized_ep.get("header_rules"),
+                            body_rules=normalized_ep.get("body_rules"),
+                            max_retries=normalized_ep.get("max_retries", 2),
                             is_active=ep_data.get("is_active", True),
-                            custom_path=ep_data.get("custom_path"),
-                            config=ep_data.get("config"),
-                            format_acceptance_config=ep_data.get("format_acceptance_config"),
+                            custom_path=normalized_ep.get("custom_path"),
+                            config=normalized_ep.get("config"),
+                            format_acceptance_config=normalized_ep.get("format_acceptance_config"),
                             proxy=self._remap_proxy_node_id(
-                                ep_data.get("proxy"), proxy_node_id_map
+                                normalized_ep.get("proxy"), proxy_node_id_map
                             ),
                         )
                         db.add(new_ep)

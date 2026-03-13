@@ -111,6 +111,9 @@ class User(Base):
     allowed_api_formats = Column(JSON, nullable=True)  # 允许使用的 API 格式列表
     allowed_models = Column(JSON, nullable=True)  # 允许使用的模型名称列表
 
+    # 速率限制（NULL 表示不限制）
+    rpm_limit = Column(Integer, nullable=True)  # 用户级别 RPM 限制（每分钟最大请求数，NULL = 不限制）
+
     # Key 能力配置
     model_capability_settings = Column(JSON, nullable=True)  # 用户针对特定模型的能力配置
     # 示例: {"claude-sonnet-4-20250514": {"cache_1h": true}}

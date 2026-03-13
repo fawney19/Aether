@@ -48,6 +48,14 @@ def test_new_provider_priority_defaults_to_current_top() -> None:
     assert needs_shift is False
 
 
+def test_new_provider_priority_clamps_at_zero_when_already_topmost() -> None:
+    priority, needs_shift = _resolve_new_provider_priority(
+        current_min_priority=0, requested_priority=None
+    )
+    assert priority == 0
+    assert needs_shift is True
+
+
 def test_new_provider_priority_defaults_to_100_when_empty() -> None:
     priority, needs_shift = _resolve_new_provider_priority(
         current_min_priority=None, requested_priority=None

@@ -36,9 +36,15 @@ class ConcurrencyChecker:
         self,
         key: ProviderAPIKey,
         is_cached_user: bool = False,
+        user: Any | None = None,
     ) -> tuple[bool, ConcurrencySnapshot]:
         """
-        检查 RPM 限制是否可用（使用动态预留机制）
+        检查 RPM 限制是否可用（先检查 User 级别，再检查 Key 级别）
+
+        核心逻辑 - 双重限制机制:
+        - User 级别：先检查用户整体 RPM 限制（NULL = 不限制）
+        - Key 级别：再检查 ProviderAPIKey RPM 限制（动态预留机制）
+        - 两者取最小：均需满足才能通过
 
         核心逻辑 - 动态缓存预留机制:
         - 总槽位: 有效 RPM 限制（固定值或学习到的值）
@@ -49,19 +55,80 @@ class ConcurrencyChecker:
         Args:
             key: ProviderAPIKey对象
             is_cached_user: 是否是缓存用户
+            user: User对象（可选），用于检查用户级别 RPM 限制
 
         Returns:
             (是否可用, 并发快照)
         """
-        # 获取有效的并发限制
+        # ---- 第一步：检查 User 级别 RPM ----
+        user_count: int | None = None
+        user_limit: int | None = None
+        user_reservation_ratio: float | None = None
+
+        if user is not None and self._concurrency_manager:
+            user_rpm_limit = getattr(user, "rpm_limit", None)
+            if user_rpm_limit is not None:
+                user_limit = int(user_rpm_limit)
+                user_count = await self._concurrency_manager.get_user_rpm_count(
+                    user_id=str(user.id),
+                )
+
+                # 使用默认缓存预留比例
+                from src.config.settings import config
+
+                user_reservation_ratio = config.cache_reservation_ratio
+
+                # 检查用户限制（含缓存预留）
+                if is_cached_user:
+                    if user_count >= user_limit:
+                        logger.debug(
+                            "User {}... RPM 限制已满 (缓存用户, {}/{})",
+                            str(user.id)[:8],
+                            user_count,
+                            user_limit,
+                        )
+                        snapshot = ConcurrencySnapshot(
+                            key_current=0,
+                            key_limit=None,
+                            is_cached_user=is_cached_user,
+                            user_current=user_count,
+                            user_limit=user_limit,
+                            user_reservation_ratio=user_reservation_ratio,
+                        )
+                        return False, snapshot
+                else:
+                    available_for_new = max(
+                        1, math.floor(user_limit * (1 - user_reservation_ratio))
+                    )
+                    if user_count >= available_for_new:
+                        logger.debug(
+                            "User {}... 新用户配额已满 ({}/{}, 总{}, 预留{:.0%})",
+                            str(user.id)[:8],
+                            user_count,
+                            available_for_new,
+                            user_limit,
+                            user_reservation_ratio,
+                        )
+                        snapshot = ConcurrencySnapshot(
+                            key_current=0,
+                            key_limit=None,
+                            is_cached_user=is_cached_user,
+                            user_current=user_count,
+                            user_limit=available_for_new,
+                            user_reservation_ratio=user_reservation_ratio,
+                        )
+                        return False, snapshot
+
+        # ---- 第二步：检查 Key 级别 RPM ----
         effective_key_limit = self.get_effective_rpm_limit(key)
 
         logger.debug(
             "            -> 并发检查: _concurrency_manager={}, "
-            "is_cached_user={}, effective_limit={}",
+            "is_cached_user={}, effective_limit={}, user_limit={}",
             self._concurrency_manager is not None,
             is_cached_user,
             effective_key_limit,
+            user_limit,
         )
 
         if not self._concurrency_manager:
@@ -71,6 +138,9 @@ class ConcurrencyChecker:
                 key_current=0,
                 key_limit=effective_key_limit,
                 is_cached_user=is_cached_user,
+                user_current=user_count,
+                user_limit=user_limit,
+                user_reservation_ratio=user_reservation_ratio,
             )
             return True, snapshot
 
@@ -135,6 +205,9 @@ class ConcurrencyChecker:
             reservation_phase=reservation_result.phase,
             reservation_confidence=reservation_result.confidence,
             load_factor=reservation_result.load_factor,
+            user_current=user_count,
+            user_limit=user_limit,
+            user_reservation_ratio=user_reservation_ratio,
         )
 
         return can_use, snapshot

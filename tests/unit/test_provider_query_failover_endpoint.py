@@ -9,6 +9,7 @@ from src.api.admin.provider_query import (
     _build_test_attempts_from_candidate_keys,
     _filter_test_candidates_by_endpoint,
     _flatten_test_candidates_for_concurrency,
+    _require_test_endpoint_base_url,
     _resolve_test_effective_model,
 )
 from src.services.scheduling.schemas import PoolCandidate
@@ -148,3 +149,18 @@ def test_test_model_failover_request_validates_concurrency_range() -> None:
             model_name="gpt-4o-mini",
             concurrency=0,
         )
+
+
+def test_require_test_endpoint_base_url_rejects_non_string() -> None:
+    endpoint = SimpleNamespace(id="ep-bad", api_format="claude:chat", base_url={"url": "https://x"})
+
+    with pytest.raises(ValueError, match="invalid base_url type"):
+        _require_test_endpoint_base_url(endpoint)
+
+
+def test_require_test_endpoint_base_url_trims_whitespace() -> None:
+    endpoint = SimpleNamespace(
+        id="ep-ok", api_format="claude:chat", base_url="  https://api.anthropic.com  "
+    )
+
+    assert _require_test_endpoint_base_url(endpoint) == "https://api.anthropic.com"
