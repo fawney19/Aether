@@ -17,7 +17,6 @@ from src.api.base.context import ApiRequestContext
 from src.api.base.pipeline import ApiRequestPipeline
 from src.core.exceptions import InvalidRequestException
 from src.core.logger import logger
-from src.core.validators import PasswordValidator
 from src.database import get_db
 from src.models.api import (
     LoginRequest,
@@ -172,18 +171,6 @@ async def get_current_user_info(request: Request, db: Session = Depends(get_db))
     需要 Bearer Token 认证。
     """
     adapter = AuthCurrentUserAdapter()
-    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
-
-
-@router.patch("/password")
-async def change_password(request: Request, db: Session = Depends(get_db)) -> Any:
-    """
-    修改密码
-
-    修改当前用户的登录密码，需提供旧密码验证。
-    密码长度至少 6 位。
-    """
-    adapter = AuthChangePasswordAdapter()
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
@@ -609,27 +596,6 @@ class AuthCurrentUserAdapter(AuthenticatedApiAdapter):
             "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
             "auth_source": user.auth_source.value,
         }
-
-
-class AuthChangePasswordAdapter(AuthenticatedApiAdapter):
-    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
-        payload = context.ensure_json_body()
-        old_password = payload.get("old_password")
-        new_password = payload.get("new_password")
-        if not old_password or not new_password:
-            raise HTTPException(status_code=400, detail="必须提供旧密码和新密码")
-        user = context.user
-        if not user.verify_password(old_password):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="旧密码错误")
-        policy_level = SystemConfigService.get_password_policy_level(context.db)
-        valid, error_msg = PasswordValidator.validate(new_password, policy=policy_level)
-        if not valid:
-            raise InvalidRequestException(error_msg or "密码格式无效")
-        user.set_password(new_password)
-        context.db.commit()
-        context.request.state.tx_committed_by_route = True
-        logger.info(f"用户修改密码: {user.email}")
-        return {"message": "密码修改成功"}
 
 
 class AuthLogoutAdapter(AuthenticatedApiAdapter):

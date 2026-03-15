@@ -23,7 +23,12 @@ class PasswordValidator:
     MIN_LENGTH = 6
     MEDIUM_MIN_LENGTH = 8
     STRONG_MIN_LENGTH = 8
-    MAX_LENGTH = 128
+    MAX_BYTES = 72
+
+    @classmethod
+    def get_byte_length(cls, password: str) -> int:
+        """返回密码的 UTF-8 字节长度。"""
+        return len(password.encode("utf-8"))
 
     @classmethod
     def normalize_policy(cls, policy: PasswordPolicyLevel | str | None) -> PasswordPolicyLevel:
@@ -39,6 +44,22 @@ class PasswordValidator:
         return PasswordPolicyLevel.WEAK
 
     @classmethod
+    def validate_basic_input(cls, password: str) -> tuple[bool, str | None]:
+        """验证密码输入的基础约束，不修改原始内容。"""
+        if password == "":
+            return False, "密码不能为空"
+
+        if cls.get_byte_length(password) > cls.MAX_BYTES:
+            return False, f"密码长度不能超过{cls.MAX_BYTES}字节"
+
+        return True, None
+
+    @classmethod
+    def validate_login_input(cls, password: str) -> tuple[bool, str | None]:
+        """验证登录时的密码输入，不修改原始内容。"""
+        return cls.validate_basic_input(password)
+
+    @classmethod
     def validate(
         cls,
         password: str,
@@ -48,24 +69,26 @@ class PasswordValidator:
         if not password:
             return False, "密码不能为空"
 
-        if len(password) < cls.MIN_LENGTH:
-            return False, f"密码长度至少为{cls.MIN_LENGTH}个字符"
-
-        if len(password) > cls.MAX_LENGTH:
-            return False, f"密码长度不能超过{cls.MAX_LENGTH}个字符"
+        if cls.get_byte_length(password) > cls.MAX_BYTES:
+            return False, f"密码长度不能超过{cls.MAX_BYTES}字节"
 
         policy_level = cls.normalize_policy(policy)
 
+        # 根据策略级别确定最小长度，避免分两次报长度错误
+        if policy_level in (PasswordPolicyLevel.MEDIUM, PasswordPolicyLevel.STRONG):
+            min_len = cls.MEDIUM_MIN_LENGTH
+        else:
+            min_len = cls.MIN_LENGTH
+
+        if len(password) < min_len:
+            return False, f"密码长度至少为{min_len}个字符"
+
         if policy_level == PasswordPolicyLevel.MEDIUM:
-            if len(password) < cls.MEDIUM_MIN_LENGTH:
-                return False, f"密码长度至少为{cls.MEDIUM_MIN_LENGTH}个字符"
             if not re.search(r"[A-Za-z]", password):
                 return False, "密码必须包含至少一个字母"
             if not re.search(r"\d", password):
                 return False, "密码必须包含至少一个数字"
         elif policy_level == PasswordPolicyLevel.STRONG:
-            if len(password) < cls.STRONG_MIN_LENGTH:
-                return False, f"密码长度至少为{cls.STRONG_MIN_LENGTH}个字符"
             if not re.search(r"[A-Z]", password):
                 return False, "密码必须包含至少一个大写字母"
             if not re.search(r"[a-z]", password):
@@ -76,53 +99,6 @@ class PasswordValidator:
                 return False, "密码必须包含至少一个特殊字符"
 
         return True, None
-
-    @classmethod
-    def get_password_strength(cls, password: str) -> str:
-        """
-        获取密码强度评级
-
-        Args:
-            password: 密码
-
-        Returns:
-            强度评级: 弱、中、强、非常强
-        """
-        if not password:
-            return "无效"
-
-        score = 0
-
-        # 长度评分
-        if len(password) >= 8:
-            score += 1
-        if len(password) >= 12:
-            score += 1
-        if len(password) >= 16:
-            score += 1
-
-        # 字符类型评分
-        if re.search(r"[a-z]", password):
-            score += 1
-        if re.search(r"[A-Z]", password):
-            score += 1
-        if re.search(r"\d", password):
-            score += 1
-        if re.search(r"[!@#$%^&*()_+\-=\[\]{};:\'\",.<>?/\\|`~]", password):
-            score += 2
-
-        # 额外复杂度评分
-        if re.search(r"[^\w\s]", password):  # 非字母数字字符
-            score += 1
-
-        if score < 3:
-            return "弱"
-        elif score < 5:
-            return "中"
-        elif score < 7:
-            return "强"
-        else:
-            return "非常强"
 
 
 class EmailValidator:

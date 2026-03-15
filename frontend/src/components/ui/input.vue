@@ -69,24 +69,6 @@ const emit = defineEmits<{
   'update:modelValue': [value: string]
 }>()
 
-// 开发环境警告：type="password" 已被弃用
-const warnPasswordType = import.meta.env.DEV
-  ? (() => {
-      let warned = false
-      return () => {
-        if (!warned) {
-          warned = true
-          // eslint-disable-next-line no-console
-          console.warn(
-            '[Input] type="password" 已被弃用，请使用 masked 属性代替。\n' +
-              '示例：<Input v-model="apiKey" masked />\n' +
-              'masked 属性使用 CSS 遮蔽而非 password 类型，不会触发浏览器密码管理器。'
-          )
-        }
-      }
-    })()
-  : () => {}
-
 interface Props {
   modelValue?: string | number
   class?: string
@@ -99,9 +81,8 @@ interface Props {
   size?: 'default' | 'sm'
   /**
    * 遮蔽显示内容（用于 API Key 等敏感信息）
-   * 使用 CSS -webkit-text-security 实现，不会触发浏览器密码管理器
+   * 隐藏态使用真正的 password 输入框，显示态切换为 text
    * 同时会显示一个小眼睛按钮用于切换显示/隐藏
-   * 注意：Firefox 不支持 -webkit-text-security，会显示明文（但仍可通过按钮切换）
    */
   masked?: boolean
   /**
@@ -134,13 +115,10 @@ const shouldDisableAutofill = computed(() => {
   return props.disableAutofill ?? false
 })
 
-// 始终使用 text 类型，永远不用 password
 const effectiveType = computed(() => {
-  const attrType = attrs.type as string | undefined
-  // 如果传入 password，强制转为 text（配合 masked 使用）
-  if (attrType === 'password') {
-    warnPasswordType()
-    return 'text'
+  const attrType = (attrs.type as string | undefined) ?? 'text'
+  if (props.masked) {
+    return isVisible.value ? 'text' : 'password'
   }
   return attrType
 })
@@ -182,13 +160,7 @@ const inputClass = computed(() =>
   )
 )
 
-// 当 masked 为 true 且未显示时，用 CSS 遮蔽文字
 const inputStyle = computed(() => {
-  if (props.masked && !isVisible.value) {
-    // 使用 -webkit-text-security（Chrome, Safari, Edge 支持）
-    // Firefox 不支持此属性，会显示明文，但仍可通过小眼睛按钮切换
-    return { '-webkit-text-security': 'disc' }
-  }
   return undefined
 })
 

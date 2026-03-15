@@ -166,15 +166,21 @@ class User(Base):
 
     def set_password(self, password: str) -> None:
         """设置密码"""
-        self.password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode(
-            "utf-8"
-        )
+        try:
+            self.password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode(
+                "utf-8"
+            )
+        except ValueError as exc:
+            raise ValueError("密码长度不能超过72字节") from exc
 
     def verify_password(self, password: str) -> bool:
         """验证密码"""
         if not self.password_hash:
             return False
-        return bcrypt.checkpw(password.encode("utf-8"), self.password_hash.encode("utf-8"))
+        try:
+            return bcrypt.checkpw(password.encode("utf-8"), self.password_hash.encode("utf-8"))
+        except ValueError:
+            return False
 
 
 class ApiKey(Base):

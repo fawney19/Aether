@@ -112,6 +112,8 @@ def _change_password_sync(
                 raise InvalidRequestException("请输入当前密码")
             if not user.verify_password(request.old_password):
                 raise InvalidRequestException("旧密码错误")
+            if user.verify_password(request.new_password):
+                raise InvalidRequestException("新密码不能与当前密码相同")
 
         policy_level = SystemConfigService.get_password_policy_level(db)
         valid, error_msg = PasswordValidator.validate(request.new_password, policy=policy_level)

@@ -358,52 +358,6 @@ class UserService:
         return True
 
     @staticmethod
-    @transactional()
-    def change_password(
-        db: Session, user_id: str, old_password: str, new_password: str
-    ) -> tuple[bool, str]:
-        """
-        更改用户密码
-
-        Args:
-            db: 数据库会话
-            user_id: 用户ID
-            old_password: 旧密码
-            new_password: 新密码
-
-        Returns:
-            (是否成功, 消息)
-        """
-        user = db.query(User).filter(User.id == user_id).first()
-        if not user:
-            return False, "用户不存在"
-
-        # 验证旧密码
-        if not user.verify_password(old_password):
-            logger.warning(f"密码更改失败 - 旧密码错误: 用户ID {user_id}")
-            return False, "旧密码错误"
-
-        # 验证新密码复杂度
-        policy_level = SystemConfigService.get_password_policy_level(db)
-        valid, error_msg = PasswordValidator.validate(new_password, policy=policy_level)
-        if not valid:
-            return False, error_msg
-
-        # 检查新密码不能与旧密码相同
-        if old_password == new_password:
-            return False, "新密码不能与旧密码相同"
-
-        # 设置新密码
-        user.set_password(new_password)
-        user.updated_at = datetime.now(timezone.utc)
-
-        # 清除用户缓存
-        safe_create_task(UserCacheService.invalidate_user_cache(user.id, user.email))
-
-        logger.info(f"密码更改成功: 用户ID {user_id}")
-        return True, "密码更改成功"
-
-    @staticmethod
     def get_user_usage_stats(
         db: Session,
         user_id: str,

@@ -117,6 +117,7 @@
                 id="new-password"
                 v-model="passwordForm.new_password"
                 type="password"
+                :placeholder="getPasswordPolicyPlaceholder(passwordPolicyLevel)"
                 class="mt-1"
               />
               <p
@@ -138,8 +139,15 @@
                 id="confirm-password"
                 v-model="passwordForm.confirm_password"
                 type="password"
+                placeholder="再次输入密码"
                 class="mt-1"
               />
+              <p
+                v-if="passwordForm.confirm_password && passwordForm.new_password !== passwordForm.confirm_password"
+                class="mt-1 text-xs text-destructive"
+              >
+                两次输入的密码不一致
+              </p>
             </div>
           </form>
         </Card>
@@ -479,6 +487,7 @@ import { getOAuthIcon } from '@/utils/oauth-icons'
 import { useDarkMode, type ThemeMode } from '@/composables/useDarkMode'
 import {
   getPasswordPolicyHint,
+  getPasswordPolicyPlaceholder,
   normalizePasswordPolicyLevel,
   validatePasswordByPolicy,
   type PasswordPolicyLevel,

@@ -151,15 +151,12 @@
           <Input
             :id="`pwd-${formNonce}`"
             v-model="formData.password"
-            type="text"
-            autocomplete="one-time-code"
-            data-form-type="other"
-            data-lpignore="true"
-            data-1p-ignore="true"
+            masked
+            autocomplete="new-password"
+            disable-autofill
             :name="`pwd-${formNonce}`"
             :placeholder="getPasswordPolicyPlaceholder(props.passwordPolicyLevel)"
             required
-            class="-webkit-text-security-disc"
             :disabled="isLoading"
           />
           <p
@@ -182,17 +179,20 @@
           <Input
             :id="`pwd-confirm-${formNonce}`"
             v-model="formData.confirmPassword"
-            type="text"
-            autocomplete="one-time-code"
-            data-form-type="other"
-            data-lpignore="true"
-            data-1p-ignore="true"
+            masked
+            autocomplete="new-password"
+            disable-autofill
             :name="`pwd-confirm-${formNonce}`"
             placeholder="再次输入密码"
             required
-            class="-webkit-text-security-disc"
             :disabled="isLoading"
           />
+          <p
+            v-if="formData.confirmPassword && formData.password !== formData.confirmPassword"
+            class="text-xs text-destructive"
+          >
+            两次输入的密码不一致
+          </p>
         </div>
       </form>
 
