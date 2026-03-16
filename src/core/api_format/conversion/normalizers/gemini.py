@@ -518,6 +518,11 @@ class GeminiNormalizer(FormatNormalizer):
             ):
                 generation_config["responseMimeType"] = "application/json"
                 schema = dict(internal.response_format.json_schema)
+                # OpenAI response_format.json_schema may wrap the actual schema
+                # under {"name", "schema", "strict"}; Gemini only wants the schema body.
+                wrapped_schema = schema.get("schema")
+                if isinstance(wrapped_schema, dict):
+                    schema = dict(wrapped_schema)
                 _clean_gemini_schema(schema)
                 generation_config["responseSchema"] = schema
             elif internal.response_format.type == "json_object":
@@ -550,6 +555,19 @@ class GeminiNormalizer(FormatNormalizer):
             response_modalities = google_extra.get("response_modalities")
             if response_modalities:
                 generation_config["responseModalities"] = response_modalities
+
+        # OpenAI web_search_options 语义上最接近 Gemini 的 googleSearch 内置工具。
+        web_search_opts = internal.extra.get("web_search_options") if internal.extra else None
+        if isinstance(web_search_opts, dict):
+            has_google_search = any(
+                isinstance(tool, dict)
+                and any(key in tool for key in ("googleSearch", "google_search"))
+                for tool in (tools or [])
+            )
+            if not has_google_search:
+                if tools is None:
+                    tools = []
+                tools.append({"googleSearch": {}})
 
         # 从 internal.extra["gemini"] 读取原生 Gemini 配置（Gemini -> Gemini 场景）
         gemini_extra = internal.extra.get("gemini", {})

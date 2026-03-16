@@ -15,6 +15,19 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from src.core.api_format.conversion.constants import OPENAI_HANDLED_KEYS as _HANDLED_KEYS
+from src.core.api_format.conversion.constants import (
+    OPENAI_RESPONSES_PASSTHROUGH_KEYS as _RESPONSES_PASSTHROUGH_KEYS,
+)
+from src.core.api_format.conversion.constants import (
+    chat_tool_choice_to_responses as _chat_tool_choice_to_responses,
+)
+from src.core.api_format.conversion.constants import (
+    chat_tool_to_responses_tool as _chat_tool_to_responses_tool,
+)
+from src.core.api_format.conversion.constants import (
+    chat_web_search_options_to_responses_tools as _chat_web_search_options_to_responses_tools,
+)
 from src.core.api_format.conversion.field_mappings import (
     ERROR_TYPE_MAPPINGS,
     REASONING_EFFORT_TO_THINKING_BUDGET,
@@ -33,6 +46,7 @@ from src.core.api_format.conversion.internal import (
     InternalMessage,
     InternalRequest,
     InternalResponse,
+    ResponseFormatConfig,
     Role,
     StopReason,
     TextBlock,
@@ -141,6 +155,7 @@ class OpenAICliNormalizer(FormatNormalizer):
         tool_choice = self._tool_choice_to_internal(request.get("tool_choice"))
 
         max_tokens = self._optional_int(request.get("max_output_tokens", request.get("max_tokens")))
+        top_logprobs = self._optional_int(request.get("top_logprobs"))
 
         # parallel_tool_calls
         parallel_tool_calls: bool | None = None
@@ -160,6 +175,46 @@ class OpenAICliNormalizer(FormatNormalizer):
                     extra={"reasoning_effort": effort, "reasoning": reasoning},
                 )
 
+        text_config = request.get("text")
+        response_format: ResponseFormatConfig | None = None
+        extra: dict[str, Any] = {
+            "openai_cli": self._extract_extra(
+                request,
+                {
+                    "model",
+                    "input",
+                    "instructions",
+                    "max_output_tokens",
+                    "max_tokens",
+                    "temperature",
+                    "top_p",
+                    "top_logprobs",
+                    "stop",
+                    "stream",
+                    "tools",
+                    "tool_choice",
+                    "parallel_tool_calls",
+                    "reasoning",
+                },
+            )
+        }
+        if isinstance(text_config, dict):
+            fmt = text_config.get("format")
+            if isinstance(fmt, dict):
+                fmt_type = str(fmt.get("type") or "text")
+                fmt_schema = (
+                    fmt.get("json_schema") if isinstance(fmt.get("json_schema"), dict) else None
+                )
+                if fmt_type != "text":
+                    response_format = ResponseFormatConfig(
+                        type=fmt_type,
+                        json_schema=fmt_schema,
+                        extra=self._extract_extra(fmt, {"type", "json_schema"}),
+                    )
+            verbosity = text_config.get("verbosity")
+            if isinstance(verbosity, str) and verbosity:
+                extra["verbosity"] = verbosity
+
         internal = InternalRequest(
             model=model,
             messages=messages,
@@ -174,26 +229,9 @@ class OpenAICliNormalizer(FormatNormalizer):
             tool_choice=tool_choice,
             thinking=thinking,
             parallel_tool_calls=parallel_tool_calls,
-            extra={
-                "openai_cli": self._extract_extra(
-                    request,
-                    {
-                        "model",
-                        "input",
-                        "instructions",
-                        "max_output_tokens",
-                        "max_tokens",
-                        "temperature",
-                        "top_p",
-                        "stop",
-                        "stream",
-                        "tools",
-                        "tool_choice",
-                        "parallel_tool_calls",
-                        "reasoning",
-                    },
-                )
-            },
+            top_logprobs=top_logprobs,
+            response_format=response_format,
+            extra=extra,
         )
 
         # reasoning_effort 同步存入 extra (支持独立于 thinking 的跨格式转换)
@@ -209,6 +247,7 @@ class OpenAICliNormalizer(FormatNormalizer):
         target_variant: str | None = None,
     ) -> dict[str, Any]:
         _ = target_variant
+        openai_extra = internal.extra.get("openai", {})
         openai_cli_extra = internal.extra.get("openai_cli", {})
 
         result: dict[str, Any] = {
@@ -247,6 +286,10 @@ class OpenAICliNormalizer(FormatNormalizer):
                 raw_tool = t.extra.get("openai_cli_raw_tool")
                 if isinstance(raw_tool, dict):
                     rebuilt_tools.append(raw_tool)
+                elif isinstance(t.extra.get("openai_chat_raw_tool"), dict):
+                    chat_tool = t.extra["openai_chat_raw_tool"]
+                    if translated_tool := _chat_tool_to_responses_tool(chat_tool):
+                        rebuilt_tools.append(translated_tool)
                 else:
                     rebuilt_tools.append(
                         {
@@ -257,7 +300,8 @@ class OpenAICliNormalizer(FormatNormalizer):
                             **(t.extra.get("openai_tool") or {}),
                         }
                     )
-            result["tools"] = rebuilt_tools
+            if rebuilt_tools:
+                result["tools"] = rebuilt_tools
 
         if internal.tool_choice:
             result["tool_choice"] = self._tool_choice_to_openai(internal.tool_choice)
@@ -272,14 +316,20 @@ class OpenAICliNormalizer(FormatNormalizer):
                 effort = None  # 已还原，不需要再构造
             else:
                 effort = internal.thinking.extra.get("reasoning_effort")
-                if not effort and internal.thinking.budget_tokens is not None:
-                    for threshold, level in THINKING_BUDGET_TO_REASONING_EFFORT:
-                        if internal.thinking.budget_tokens <= threshold:
-                            effort = level
-                            break
-        # 兜底: 从 internal.extra 读取
+        # 显式 reasoning_effort 应优先于 budget 反推，避免覆盖 Claude output_config.effort
         if not effort and internal.extra and "reasoning" not in result:
             effort = internal.extra.get("reasoning_effort")
+        if (
+            not effort
+            and "reasoning" not in result
+            and internal.thinking
+            and internal.thinking.enabled
+            and internal.thinking.budget_tokens is not None
+        ):
+            for threshold, level in THINKING_BUDGET_TO_REASONING_EFFORT:
+                if internal.thinking.budget_tokens <= threshold:
+                    effort = level
+                    break
         if effort:
             # xhigh 降级为 high (Responses API 也仅支持 low/medium/high)
             if effort == "xhigh":
@@ -290,25 +340,47 @@ class OpenAICliNormalizer(FormatNormalizer):
         if internal.parallel_tool_calls is not None:
             result["parallel_tool_calls"] = internal.parallel_tool_calls
 
-        # 还原 OpenAI Responses API 的其他字段（黑名单：已单独处理的字段不还原）
-        handled_keys = {
-            "model",
-            "input",
-            "instructions",
-            "max_output_tokens",
-            "max_tokens",
-            "temperature",
-            "top_p",
-            "stop",
-            "stream",
-            "tools",
-            "tool_choice",
-            "parallel_tool_calls",
-            "reasoning",
-        }
-        for key, value in openai_cli_extra.items():
-            if key not in handled_keys and key not in result:
-                result[key] = value
+        text_config: dict[str, Any] = {}
+        if internal.response_format:
+            text_config["format"] = {"type": internal.response_format.type}
+            if internal.response_format.json_schema:
+                text_config["format"]["json_schema"] = internal.response_format.json_schema
+        verbosity = internal.extra.get("verbosity") if internal.extra else None
+        if isinstance(verbosity, str) and verbosity:
+            text_config["verbosity"] = verbosity
+        if text_config:
+            result["text"] = text_config
+
+        if internal.top_logprobs is not None:
+            result["top_logprobs"] = internal.top_logprobs
+
+        if isinstance(openai_extra, dict):
+            mapped_tools = _chat_web_search_options_to_responses_tools(
+                openai_extra.get("web_search_options")
+            )
+            if mapped_tools:
+                existing_tools = result.setdefault("tools", [])
+                if isinstance(existing_tools, list) and not any(
+                    isinstance(tool, dict) and str(tool.get("type") or "").startswith("web_search")
+                    for tool in existing_tools
+                ):
+                    existing_tools.extend(mapped_tools)
+
+            for key, value in openai_extra.items():
+                if (
+                    key in _RESPONSES_PASSTHROUGH_KEYS
+                    and key not in result
+                    and key not in _HANDLED_KEYS
+                ):
+                    result[key] = value
+        if isinstance(openai_cli_extra, dict):
+            for key, value in openai_cli_extra.items():
+                if (
+                    key in _RESPONSES_PASSTHROUGH_KEYS
+                    and key not in result
+                    and key not in _HANDLED_KEYS
+                ):
+                    result[key] = value
 
         # 标准 Responses API 默认设置 store=false
         if "store" not in result:
@@ -1794,13 +1866,19 @@ class OpenAICliNormalizer(FormatNormalizer):
 
             # 非 function 类型（如 type: "custom", "web_search" 等）：保留原始 dict 以便透传还原
             if tool_type and tool_type != "function":
-                if not tool.get("name"):
+                name = str(tool.get("name") or "")
+                if tool_type == "custom" and not name:
+                    custom_raw = tool.get("custom")
+                    if isinstance(custom_raw, dict):
+                        name = str(custom_raw.get("name") or "")
+                if not name and isinstance(tool_type, str) and tool_type:
+                    name = tool_type
+                if not name:
                     logger.debug(
                         "[OpenAICliNormalizer] 跳过无 name 的非 function tool: type={}",
                         tool_type,
                     )
                     continue
-                name = str(tool["name"])
                 out.append(
                     ToolDefinition(
                         name=name,
@@ -1864,11 +1942,24 @@ class OpenAICliNormalizer(FormatNormalizer):
                 return ToolChoice(
                     type=ToolChoiceType.TOOL, tool_name=name, extra={"openai_cli": tool_choice}
                 )
+            if tool_choice.get("type") == "custom":
+                name = str(tool_choice.get("name") or "")
+                return ToolChoice(
+                    type=ToolChoiceType.TOOL, tool_name=name, extra={"openai_cli": tool_choice}
+                )
             return ToolChoice(type=ToolChoiceType.AUTO, extra={"openai_cli": tool_choice})
 
         return ToolChoice(type=ToolChoiceType.AUTO, extra={"raw": tool_choice})
 
     def _tool_choice_to_openai(self, tool_choice: ToolChoice) -> str | dict[str, Any]:
+        raw_responses_choice = tool_choice.extra.get("openai_cli")
+        if isinstance(raw_responses_choice, dict) and "type" in raw_responses_choice:
+            return raw_responses_choice
+        raw_chat_choice = tool_choice.extra.get("openai")
+        if isinstance(raw_chat_choice, dict):
+            converted = _chat_tool_choice_to_responses(raw_chat_choice)
+            if converted is not None:
+                return converted
         if tool_choice.type == ToolChoiceType.NONE:
             return "none"
         if tool_choice.type == ToolChoiceType.AUTO:

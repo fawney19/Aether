@@ -16,6 +16,8 @@ from src.core.api_format.conversion.normalizers.openai import OpenAINormalizer
 from src.core.api_format.conversion.registry import FormatConversionRegistry
 from src.core.api_format.conversion.stream_state import StreamState
 
+from .fixtures.schema_validators import get_request_validator
+
 
 def _make_registry() -> FormatConversionRegistry:
     reg = FormatConversionRegistry()
@@ -105,3 +107,114 @@ def test_registry_canonical_stream_openai_to_claude() -> None:
 
     types = [cast(dict[str, Any], e).get("type") for e in cast(list[dict[str, Any]], out_events)]
     assert types[:3] == ["message_start", "content_block_start", "content_block_delta"]
+
+
+def test_registry_canonical_request_openai_to_claude_preserves_supported_fields() -> None:
+    reg = _make_registry()
+
+    openai_req = {
+        "model": "gpt-5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoning_effort": "xhigh",
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer_schema",
+                "schema": {"type": "object", "properties": {"answer": {"type": "string"}}},
+                "strict": True,
+            },
+        },
+        "verbosity": "high",
+        "web_search_options": {
+            "search_context_size": "high",
+            "user_location": {"type": "approximate", "city": "Shanghai"},
+        },
+        "prompt_cache_key": "cache-key-123",
+        "service_tier": "priority",
+        "safety_identifier": "user-123",
+    }
+
+    out = reg.convert_request(openai_req, "openai:chat", "claude:chat")
+
+    assert out["output_config"] == {"effort": "max"}
+    assert "tools" in out
+    assert out["tools"][-1] == {
+        "type": "web_search_20250305",
+        "name": "web_search",
+        "max_uses": 10,
+        "user_location": {"type": "approximate", "city": "Shanghai"},
+    }
+
+    for dropped_field in (
+        "response_format",
+        "verbosity",
+        "reasoning_effort",
+        "web_search_options",
+        "prompt_cache_key",
+        "service_tier",
+        "safety_identifier",
+    ):
+        assert dropped_field not in out
+
+    validator = get_request_validator("claude:chat")
+    assert validator is not None
+    assert validator(out) == []
+
+
+def test_registry_canonical_request_openai_to_gemini_preserves_supported_fields() -> None:
+    reg = _make_registry()
+
+    openai_req = {
+        "model": "gpt-5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoning_effort": "medium",
+        "n": 3,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                },
+                "strict": True,
+            },
+        },
+        "verbosity": "low",
+        "web_search_options": {"search_context_size": "high"},
+        "prompt_cache_key": "cache-key-456",
+        "service_tier": "flex",
+        "safety_identifier": "user-456",
+    }
+
+    out = reg.convert_request(openai_req, "openai:chat", "gemini:chat")
+
+    generation_config = cast(dict[str, Any], out.get("generation_config") or {})
+    assert generation_config["thinkingConfig"] == {
+        "includeThoughts": True,
+        "thinkingBudget": 2048,
+    }
+    assert generation_config["candidateCount"] == 3
+    assert generation_config["responseMimeType"] == "application/json"
+    assert generation_config["responseSchema"] == {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+    }
+    assert out["tools"] == [{"googleSearch": {}}]
+
+    for dropped_field in (
+        "verbosity",
+        "reasoning_effort",
+        "response_format",
+        "web_search_options",
+        "prompt_cache_key",
+        "service_tier",
+        "safety_identifier",
+    ):
+        assert dropped_field not in out
+
+    validator = get_request_validator("gemini:chat")
+    assert validator is not None
+    assert validator(out) == []

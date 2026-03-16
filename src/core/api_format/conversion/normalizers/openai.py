@@ -12,6 +12,19 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from src.core.api_format.conversion.constants import (
+    OPENAI_CHAT_PASSTHROUGH_KEYS as _CHAT_PASSTHROUGH_KEYS,
+)
+from src.core.api_format.conversion.constants import OPENAI_HANDLED_KEYS as _HANDLED_KEYS
+from src.core.api_format.conversion.constants import (
+    responses_tool_choice_to_chat as _responses_tool_choice_to_chat,
+)
+from src.core.api_format.conversion.constants import (
+    responses_tool_to_chat_tool as _responses_tool_to_chat_tool,
+)
+from src.core.api_format.conversion.constants import (
+    responses_web_search_tool_to_chat_options as _responses_web_search_tool_to_chat_options,
+)
 from src.core.api_format.conversion.field_mappings import (
     ERROR_TYPE_MAPPINGS,
     REASONING_EFFORT_TO_THINKING_BUDGET,
@@ -197,6 +210,10 @@ class OpenAINormalizer(FormatNormalizer):
         # 构建 extra，保留未识别字段
         extra: dict[str, Any] = {"openai": self._extract_extra(request, {"messages"})}
 
+        verbosity = request.get("verbosity")
+        if isinstance(verbosity, str) and verbosity:
+            extra["verbosity"] = verbosity
+
         # 处理 extra_body.google (用于 Gemini 特定功能透传，如 thinkingConfig, responseModalities)
         extra_body = request.get("extra_body")
         if isinstance(extra_body, dict):
@@ -324,6 +341,19 @@ class OpenAINormalizer(FormatNormalizer):
                 # 跳过 Gemini 内置工具（在 OpenAI 中无对应物）
                 if t.extra.get("gemini_builtin_tool"):
                     continue
+                raw_chat_tool = t.extra.get("openai_chat_raw_tool")
+                if isinstance(raw_chat_tool, dict):
+                    openai_tools.append(raw_chat_tool)
+                    continue
+                raw_responses_tool = t.extra.get("openai_cli_raw_tool")
+                if isinstance(raw_responses_tool, dict):
+                    if web_search_options := _responses_web_search_tool_to_chat_options(
+                        raw_responses_tool
+                    ):
+                        result["web_search_options"] = web_search_options
+                    if chat_tool := _responses_tool_to_chat_tool(raw_responses_tool):
+                        openai_tools.append(chat_tool)
+                    continue
                 func: dict[str, Any] = {
                     "name": t.name,
                     "parameters": t.parameters or {},
@@ -348,14 +378,19 @@ class OpenAINormalizer(FormatNormalizer):
         effort: str | None = None
         if internal.thinking and internal.thinking.enabled:
             effort = internal.thinking.extra.get("reasoning_effort")
-            if not effort and internal.thinking.budget_tokens is not None:
-                for threshold, level in THINKING_BUDGET_TO_REASONING_EFFORT:
-                    if internal.thinking.budget_tokens <= threshold:
-                        effort = level
-                        break
-        # 兜底: 从 internal.extra 读取 (支持 output_config.effort 独立于 thinking 的场景)
+        # 显式 reasoning_effort 应优先于 budget 反推，避免覆盖 Claude output_config.effort
         if not effort and internal.extra:
             effort = internal.extra.get("reasoning_effort")
+        if (
+            not effort
+            and internal.thinking
+            and internal.thinking.enabled
+            and internal.thinking.budget_tokens is not None
+        ):
+            for threshold, level in THINKING_BUDGET_TO_REASONING_EFFORT:
+                if internal.thinking.budget_tokens <= threshold:
+                    effort = level
+                    break
         if effort:
             # OpenAI Chat Completions 仅支持 low/medium/high，xhigh 降级为 high
             if effort == "xhigh":
@@ -386,6 +421,35 @@ class OpenAINormalizer(FormatNormalizer):
             if internal.response_format.json_schema:
                 rf["json_schema"] = internal.response_format.json_schema
             result["response_format"] = rf
+
+        verbosity = internal.extra.get("verbosity") if internal.extra else None
+        if isinstance(verbosity, str) and verbosity:
+            result["verbosity"] = verbosity
+
+        openai_extra = internal.extra.get("openai", {}) if internal.extra else {}
+        openai_cli_extra = internal.extra.get("openai_cli", {}) if internal.extra else {}
+
+        if isinstance(openai_cli_extra, dict):
+            text_config = openai_cli_extra.get("text")
+            if isinstance(text_config, dict):
+                if "response_format" not in result:
+                    text_format = text_config.get("format")
+                    if isinstance(text_format, dict) and text_format.get("type"):
+                        result["response_format"] = text_format
+                if "verbosity" not in result:
+                    text_verbosity = text_config.get("verbosity")
+                    if isinstance(text_verbosity, str) and text_verbosity:
+                        result["verbosity"] = text_verbosity
+
+        # 还原 OpenAI Chat 特有的透传字段（先到先得，与 openai_cli 一致）
+        if isinstance(openai_extra, dict):
+            for key, value in openai_extra.items():
+                if key in _CHAT_PASSTHROUGH_KEYS and key not in result and key not in _HANDLED_KEYS:
+                    result[key] = value
+        if isinstance(openai_cli_extra, dict):
+            for key, value in openai_cli_extra.items():
+                if key in _CHAT_PASSTHROUGH_KEYS and key not in result and key not in _HANDLED_KEYS:
+                    result[key] = value
 
         return result
 
@@ -1344,6 +1408,22 @@ class OpenAINormalizer(FormatNormalizer):
             if not isinstance(tool, dict):
                 continue
             if tool.get("type") != "function":
+                if tool.get("type") == "custom" and isinstance(tool.get("custom"), dict):
+                    custom = tool["custom"]
+                    name = str(custom.get("name") or "")
+                    if not name:
+                        continue
+                    out.append(
+                        ToolDefinition(
+                            name=name,
+                            description=custom.get("description"),
+                            parameters=None,
+                            extra={
+                                "openai_chat_raw_tool": tool,
+                                "openai_tool_kind": "custom",
+                            },
+                        )
+                    )
                 continue
 
             function_raw = tool.get("function")
@@ -1390,10 +1470,24 @@ class OpenAINormalizer(FormatNormalizer):
             return ToolChoice(
                 type=ToolChoiceType.TOOL, tool_name=name, extra={"openai": tool_choice}
             )
+        if isinstance(tool_choice, dict) and tool_choice.get("type") == "custom":
+            custom_raw = tool_choice.get("custom")
+            custom: dict[str, Any] = custom_raw if isinstance(custom_raw, dict) else {}
+            name = str(custom.get("name") or "")
+            return ToolChoice(
+                type=ToolChoiceType.TOOL, tool_name=name, extra={"openai": tool_choice}
+            )
 
         return ToolChoice(type=ToolChoiceType.AUTO, extra={"openai": tool_choice})
 
     def _tool_choice_to_openai(self, tool_choice: ToolChoice) -> str | dict[str, Any]:
+        raw_chat_choice = tool_choice.extra.get("openai")
+        if isinstance(raw_chat_choice, dict):
+            return raw_chat_choice
+        raw_responses_choice = tool_choice.extra.get("openai_cli")
+        if isinstance(raw_responses_choice, dict) and "type" in raw_responses_choice:
+            if chat_choice := _responses_tool_choice_to_chat(raw_responses_choice):
+                return chat_choice
         if tool_choice.type == ToolChoiceType.NONE:
             return "none"
         if tool_choice.type == ToolChoiceType.AUTO:

@@ -1023,6 +1023,16 @@ def _validate_claude_tool_def(tool: Any, index: int) -> list[str]:
 
     if "name" not in tool:
         errors.append(f"{prefix}: tool missing 'name'")
+    tool_type = tool.get("type")
+    if isinstance(tool_type, str) and tool_type.startswith("web_search_"):
+        max_uses = tool.get("max_uses")
+        if max_uses is not None and not isinstance(max_uses, int):
+            errors.append(f"{prefix}: web_search 'max_uses' must be int")
+        user_location = tool.get("user_location")
+        if user_location is not None and not isinstance(user_location, dict):
+            errors.append(f"{prefix}: web_search 'user_location' must be dict")
+        return errors
+
     if "input_schema" not in tool:
         errors.append(f"{prefix}: tool missing 'input_schema'")
 

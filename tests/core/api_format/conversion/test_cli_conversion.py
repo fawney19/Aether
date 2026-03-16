@@ -261,6 +261,253 @@ def test_openai_chat_empty_tool_call_id_repaired_when_convert_to_openai_cli() ->
     assert function_call_output.get("call_id") == generated_id
 
 
+def test_openai_chat_prompt_cache_key_preserved_when_convert_to_openai_cli() -> None:
+    reg = _make_registry_with_cli()
+
+    openai_chat_req = {
+        "model": "gpt-5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "prompt_cache_key": "cache-key-123",
+    }
+
+    out = reg.convert_request(openai_chat_req, "openai:chat", "openai:cli")
+
+    assert out["prompt_cache_key"] == "cache-key-123"
+
+
+def test_openai_chat_text_config_maps_to_openai_cli_text_block() -> None:
+    reg = _make_registry_with_cli()
+
+    openai_chat_req = {
+        "model": "gpt-5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "answer", "schema": {"type": "object"}},
+        },
+        "verbosity": "low",
+        "logit_bias": {"42": 3},
+    }
+
+    out = reg.convert_request(openai_chat_req, "openai:chat", "openai:cli")
+
+    assert out["text"] == {
+        "format": {
+            "type": "json_schema",
+            "json_schema": {"name": "answer", "schema": {"type": "object"}},
+        },
+        "verbosity": "low",
+    }
+    assert "response_format" not in out
+    assert "verbosity" not in out
+    assert "logit_bias" not in out
+
+
+def test_openai_cli_text_config_maps_to_openai_chat_fields() -> None:
+    reg = _make_registry_with_cli()
+
+    openai_cli_req = {
+        "model": "gpt-5",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "json_schema": {"name": "answer", "schema": {"type": "object"}},
+            },
+            "verbosity": "high",
+        },
+        "prompt_cache_key": "cache-key-456",
+        "service_tier": "flex",
+        "top_logprobs": 4,
+    }
+
+    out = reg.convert_request(openai_cli_req, "openai:cli", "openai:chat")
+
+    assert out["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "answer", "schema": {"type": "object"}},
+    }
+    assert out["verbosity"] == "high"
+    assert out["prompt_cache_key"] == "cache-key-456"
+    assert out["service_tier"] == "flex"
+    assert out["top_logprobs"] == 4
+    assert "text" not in out
+
+
+def test_openai_chat_custom_tool_and_choice_convert_to_openai_cli() -> None:
+    reg = _make_registry_with_cli()
+
+    openai_chat_req = {
+        "model": "gpt-5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [
+            {
+                "type": "custom",
+                "custom": {
+                    "name": "grep_repo",
+                    "description": "Search repository text",
+                    "format": {"type": "text"},
+                },
+            }
+        ],
+        "tool_choice": {"type": "custom", "custom": {"name": "grep_repo"}},
+    }
+
+    out = reg.convert_request(openai_chat_req, "openai:chat", "openai:cli")
+
+    assert out["tools"] == [
+        {
+            "type": "custom",
+            "name": "grep_repo",
+            "description": "Search repository text",
+            "format": {"type": "text"},
+        }
+    ]
+    assert out["tool_choice"] == {"type": "custom", "name": "grep_repo"}
+
+
+def test_openai_cli_custom_tool_and_choice_convert_to_openai_chat() -> None:
+    reg = _make_registry_with_cli()
+
+    openai_cli_req = {
+        "model": "gpt-5",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "tools": [
+            {
+                "type": "custom",
+                "name": "grep_repo",
+                "description": "Search repository text",
+                "format": {"type": "text"},
+            }
+        ],
+        "tool_choice": {"type": "custom", "name": "grep_repo"},
+    }
+
+    out = reg.convert_request(openai_cli_req, "openai:cli", "openai:chat")
+
+    assert out["tools"] == [
+        {
+            "type": "custom",
+            "custom": {
+                "name": "grep_repo",
+                "description": "Search repository text",
+                "format": {"type": "text"},
+            },
+        }
+    ]
+    assert out["tool_choice"] == {"type": "custom", "custom": {"name": "grep_repo"}}
+
+
+def test_openai_chat_allowed_tools_choice_convert_to_openai_cli() -> None:
+    reg = _make_registry_with_cli()
+
+    openai_chat_req = {
+        "model": "gpt-5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tool_choice": {
+            "type": "allowed_tools",
+            "allowed_tools": {
+                "mode": "required",
+                "tools": [{"type": "function", "function": {"name": "grep_repo"}}],
+            },
+        },
+    }
+
+    out = reg.convert_request(openai_chat_req, "openai:chat", "openai:cli")
+
+    assert out["tool_choice"] == {
+        "type": "allowed_tools",
+        "mode": "required",
+        "tools": [{"type": "function", "function": {"name": "grep_repo"}}],
+    }
+
+
+def test_openai_cli_allowed_tools_choice_convert_to_openai_chat() -> None:
+    reg = _make_registry_with_cli()
+
+    openai_cli_req = {
+        "model": "gpt-5",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "tool_choice": {
+            "type": "allowed_tools",
+            "mode": "required",
+            "tools": [{"type": "function", "name": "grep_repo"}],
+        },
+    }
+
+    out = reg.convert_request(openai_cli_req, "openai:cli", "openai:chat")
+
+    assert out["tool_choice"] == {
+        "type": "allowed_tools",
+        "allowed_tools": {
+            "mode": "required",
+            "tools": [{"type": "function", "name": "grep_repo"}],
+        },
+    }
+
+
+def test_openai_chat_web_search_options_convert_to_openai_cli_tools() -> None:
+    reg = _make_registry_with_cli()
+
+    openai_chat_req = {
+        "model": "gpt-5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "web_search_options": {
+            "user_location": {
+                "type": "approximate",
+                "approximate": {"country": "US", "city": "San Francisco"},
+            },
+            "search_context_size": "high",
+        },
+    }
+
+    out = reg.convert_request(openai_chat_req, "openai:chat", "openai:cli")
+
+    assert out["tools"] == [
+        {
+            "type": "web_search",
+            "user_location": {
+                "type": "approximate",
+                "country": "US",
+                "city": "San Francisco",
+            },
+            "search_context_size": "high",
+        }
+    ]
+    assert "web_search_options" not in out
+
+
+def test_openai_cli_web_search_tool_convert_to_openai_chat_options() -> None:
+    reg = _make_registry_with_cli()
+
+    openai_cli_req = {
+        "model": "gpt-5",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "tools": [
+            {
+                "type": "web_search",
+                "user_location": {
+                    "type": "approximate",
+                    "country": "US",
+                    "city": "San Francisco",
+                },
+                "search_context_size": "high",
+            }
+        ],
+    }
+
+    out = reg.convert_request(openai_cli_req, "openai:cli", "openai:chat")
+
+    assert out["web_search_options"] == {
+        "user_location": {
+            "type": "approximate",
+            "approximate": {"country": "US", "city": "San Francisco"},
+        },
+        "search_context_size": "high",
+    }
+    assert "tools" not in out
+
+
 def test_openai_cli_reasoning_preserved_in_roundtrip() -> None:
     """测试 OpenAI CLI 的 reasoning block 在 roundtrip 中被保留"""
     reg = _make_registry_with_cli()
@@ -352,6 +599,36 @@ def test_claude_tool_use_to_openai_cli() -> None:
     assert len(fco_items) == 1
     assert fco_items[0]["call_id"] == "tool_123"
     assert fco_items[0]["output"] == "Hello World"
+
+
+def test_claude_explicit_effort_preserved_in_openai_cli() -> None:
+    reg = _make_registry_with_cli()
+
+    claude_req = {
+        "model": "gpt-5.4",
+        "messages": [{"role": "user", "content": "hi"}],
+        "thinking": {"type": "enabled", "budget_tokens": 31999},
+        "output_config": {"effort": "medium"},
+    }
+
+    out = reg.convert_request(claude_req, "claude:chat", "openai:cli")
+
+    assert out["reasoning"] == {"effort": "medium"}
+
+
+def test_claude_explicit_effort_preserved_in_openai_chat() -> None:
+    reg = _make_registry_with_cli()
+
+    claude_req = {
+        "model": "gpt-5.4",
+        "messages": [{"role": "user", "content": "hi"}],
+        "thinking": {"type": "enabled", "budget_tokens": 31999},
+        "output_config": {"effort": "medium"},
+    }
+
+    out = reg.convert_request(claude_req, "claude:chat", "openai:chat")
+
+    assert out["reasoning_effort"] == "medium"
 
 
 def test_stream_openai_cli_in_progress_event() -> None:
