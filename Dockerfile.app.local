@@ -210,7 +210,7 @@ RUN printf '%s\n' \
     'stdout_logfile_maxbytes=0' \
     'stderr_logfile=/dev/stderr' \
     'stderr_logfile_maxbytes=0' \
-    'environment=PYTHONUNBUFFERED=1,PYTHONIOENCODING=utf-8,LANG=C.UTF-8,LC_ALL=C.UTF-8,DOCKER_CONTAINER=true' \
+    'environment=PYTHONUNBUFFERED=1,PYTHONIOENCODING=utf-8,LANG=C.UTF-8,LC_ALL=C.UTF-8,DOCKER_CONTAINER=true,MALLOC_ARENA_MAX=2' \
     '' \
     '[program:tunnel-hub]' \
     'command=/usr/local/bin/aether-hub --bind 0.0.0.0:8085' \
@@ -234,6 +234,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
+    MALLOC_ARENA_MAX=2 \
     PORT=8084 \
     GUNICORN_WORKERS=2 \
     MAX_REQUESTS=4000
