@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from sqlalchemy import or_ as db_or
 from sqlalchemy.orm import Session, defer
 
 from src.core.exceptions import InvalidRequestException, NotFoundException
@@ -114,7 +115,16 @@ async def refresh_provider_quota_for_provider(
         )
     )
     if selected_key_ids is None:
-        keys_query = keys_query.filter(ProviderAPIKey.is_active.is_(True))
+        # 全量刷新：活跃 key + 被系统自动标记 ACCOUNT_BLOCK 的 key。
+        # 后者使 ACCOUNT_BLOCK 标记的 key 也参与刷新，账号恢复后可自动解除。
+        # 注意：不能用宽泛的 oauth_invalid_reason IS NOT NULL，否则会纳入
+        # 用户手动停用 (is_active=False) 但恰好也有 reason 的历史 key。
+        keys_query = keys_query.filter(
+            db_or(
+                ProviderAPIKey.is_active.is_(True),
+                ProviderAPIKey.oauth_invalid_reason.startswith("[ACCOUNT_BLOCK]"),
+            )
+        )
     else:
         if not selected_key_ids:
             return {

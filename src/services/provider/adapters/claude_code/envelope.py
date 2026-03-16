@@ -629,6 +629,7 @@ class ClaudeCodeEnvelope:
         *,
         provider_config: Any,
         key_id: str,
+        user_api_key_id: str | None = None,  # noqa: ARG002
         is_stream: bool,
         provider_id: str | None = None,
         key: Any = None,

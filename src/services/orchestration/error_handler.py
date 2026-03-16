@@ -407,7 +407,8 @@ class ErrorHandlerService:
 
             key.oauth_invalid_at = datetime.now(timezone.utc)
             key.oauth_invalid_reason = f"{OAUTH_ACCOUNT_BLOCK_PREFIX}{reason}"
-            key.is_active = False
+            # 不设 is_active=False：oauth_invalid 标记已足够阻止调度，
+            # 保持 is_active=True 使配额刷新仍能覆盖该 key，账号恢复后可自动解除。
 
             pool_cfg = parse_pool_config(getattr(provider, "config", None))
             auto_remove_enabled = bool(pool_cfg and pool_cfg.auto_remove_banned_keys)

@@ -596,6 +596,8 @@ class OpenAICliNormalizer(FormatNormalizer):
                 ss["message_started"] = True
                 ss.setdefault("text_block_started", False)
                 ss.setdefault("text_block_stopped", False)
+                ss.setdefault("text_block_index", None)
+                ss.setdefault("next_block_index", 0)
                 events.append(MessageStartEvent(message_id=msg_id, model=model))
 
         handler = self._CHUNK_HANDLERS.get(etype)
@@ -626,10 +628,16 @@ class OpenAICliNormalizer(FormatNormalizer):
             delta_text = str(delta.get("text") or "")
 
         if delta_text:
+            text_block_index = self._ensure_text_block_index(ss)
             if not ss.get("text_block_started"):
                 ss["text_block_started"] = True
-                events.append(ContentBlockStartEvent(block_index=0, block_type=ContentType.TEXT))
-            events.append(ContentDeltaEvent(block_index=0, text_delta=delta_text))
+                events.append(
+                    ContentBlockStartEvent(
+                        block_index=text_block_index,
+                        block_type=ContentType.TEXT,
+                    )
+                )
+            events.append(ContentDeltaEvent(block_index=text_block_index, text_delta=delta_text))
         return events
 
     def _handle_output_text_done(
@@ -638,7 +646,7 @@ class OpenAICliNormalizer(FormatNormalizer):
         events: list[InternalStreamEvent] = []
         if ss.get("text_block_started") and not ss.get("text_block_stopped"):
             ss["text_block_stopped"] = True
-            events.append(ContentBlockStopEvent(block_index=0))
+            events.append(ContentBlockStopEvent(block_index=self._ensure_text_block_index(ss)))
         return events
 
     def _handle_response_completed(
@@ -651,7 +659,7 @@ class OpenAICliNormalizer(FormatNormalizer):
 
         if ss.get("text_block_started") and not ss.get("text_block_stopped"):
             ss["text_block_stopped"] = True
-            events.append(ContentBlockStopEvent(block_index=0))
+            events.append(ContentBlockStopEvent(block_index=self._ensure_text_block_index(ss)))
 
         # 补齐所有已开始但未结束的 tool_call block
         active_tools = ss.get("active_tool_blocks")
@@ -701,7 +709,7 @@ class OpenAICliNormalizer(FormatNormalizer):
                 item_id = str(item.get("id") or "")
                 tool_id = str(item.get("call_id") or item.get("id") or "")
                 tool_name = str(item.get("name") or "")
-                block_index = int(ss.get("block_index", 0))
+                block_index = self._allocate_block_index(ss)
 
                 # 先注册别名，再 resolve，确保后续 delta 能正确映射
                 self._register_tool_alias(
@@ -736,7 +744,6 @@ class OpenAICliNormalizer(FormatNormalizer):
                         ss=ss,
                     )
                 )
-                ss["block_index"] = block_index + 1
         return events
 
     def _handle_output_item_done(
@@ -754,7 +761,7 @@ class OpenAICliNormalizer(FormatNormalizer):
                     ss=ss,
                 )
                 active_tools = ss.get("active_tool_blocks", {})
-                block_index = active_tools.pop(tool_id, ss.get("block_index", 1) - 1)
+                block_index = active_tools.pop(tool_id, self._last_block_index(ss))
                 events.extend(
                     self._sync_tool_arguments_snapshot(
                         tool_id=tool_id,
@@ -778,7 +785,7 @@ class OpenAICliNormalizer(FormatNormalizer):
                 ss,
             )
             active_tools = ss.get("active_tool_blocks", {})
-            block_index = active_tools.get(tool_id, ss.get("block_index", 1) - 1)
+            block_index = active_tools.get(tool_id, self._last_block_index(ss))
 
             # 累积参数
             tool_calls = ss.setdefault("tool_calls", {})
@@ -802,7 +809,7 @@ class OpenAICliNormalizer(FormatNormalizer):
             ss,
         )
         active_tools = ss.get("active_tool_blocks", {})
-        block_index = int(active_tools.get(tool_id, ss.get("block_index", 1) - 1))
+        block_index = int(active_tools.get(tool_id, self._last_block_index(ss)))
         return self._sync_tool_arguments_snapshot(
             tool_id=tool_id,
             block_index=block_index,
@@ -1417,6 +1424,25 @@ class OpenAICliNormalizer(FormatNormalizer):
         seq = int(ss.get("seq") or 0) + 1
         ss["seq"] = seq
         return seq
+
+    @staticmethod
+    def _allocate_block_index(ss: dict[str, Any]) -> int:
+        idx = ss.get("next_block_index", 0)
+        ss["next_block_index"] = idx + 1
+        return idx
+
+    @classmethod
+    def _ensure_text_block_index(cls, ss: dict[str, Any]) -> int:
+        idx = ss.get("text_block_index")
+        if idx is not None:
+            return idx
+        idx = cls._allocate_block_index(ss)
+        ss["text_block_index"] = idx
+        return idx
+
+    @staticmethod
+    def _last_block_index(ss: dict[str, Any]) -> int:
+        return max(ss.get("next_block_index", 1) - 1, 0)
 
     def _unwrap_response_object(self, response: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(response, dict):

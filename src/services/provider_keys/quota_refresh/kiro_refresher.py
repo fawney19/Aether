@@ -137,6 +137,7 @@ async def refresh_kiro_key_quota(
         state_updates[key.id] = {
             "oauth_invalid_at": None,
             "oauth_invalid_reason": None,
+            "is_active": True,
         }
 
         # 如果 auth_config 有更新（例如 token 刷新），也需要更新

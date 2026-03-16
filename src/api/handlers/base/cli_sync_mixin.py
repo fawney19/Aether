@@ -167,6 +167,7 @@ class CliSyncMixin:
                 envelope_tls_profile = envelope.prepare_context(
                     provider_config=getattr(provider, "config", None),
                     key_id=str(getattr(key, "id", "") or ""),
+                    user_api_key_id=str(getattr(self.api_key, "id", "") or ""),
                     is_stream=upstream_is_stream,
                     provider_id=str(getattr(provider, "id", "") or ""),
                     key=key,

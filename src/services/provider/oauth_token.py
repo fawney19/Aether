@@ -135,12 +135,13 @@ async def resolve_oauth_access_token(
                 if row is not None:
                     row.api_key = key_obj.api_key
                     row.auth_config = key_obj.auth_config
-                    # Refresh succeeded => clear token-level invalid markers.
-                    # Preserve account-level blocks (刷新 token 无法修复).
-                    if not is_account_level_block(getattr(row, "oauth_invalid_reason", None)):
+                    # Refresh succeeded => clear all invalid markers (including
+                    # account-level blocks). A successful token refresh proves the
+                    # account is usable; stale block marks should not persist.
+                    if row.oauth_invalid_at is not None:
                         row.oauth_invalid_at = None
                         row.oauth_invalid_reason = None
-                        row.is_active = True
+                    row.is_active = True
                     db.commit()
         except Exception as e:
             # Don't fail caller path; token is still usable for this request.

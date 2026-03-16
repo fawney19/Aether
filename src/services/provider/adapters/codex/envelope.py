@@ -21,6 +21,7 @@ from src.services.provider.adapters.codex.context import (
     get_codex_request_context,
     set_codex_request_context,
 )
+from src.services.provider.adapters.codex.request_patching import patch_openai_cli_request_for_codex
 from src.services.provider.request_context import get_selected_base_url
 
 
@@ -33,6 +34,26 @@ class CodexOAuthEnvelope:
         # Codex desktop clients already send the protocol-specific headers they need.
         # Preserve the original request headers as much as possible and avoid injecting
         # synthetic CLI identity headers here.
+        return None
+
+    def prepare_context(
+        self,
+        *,
+        provider_config: Any,  # noqa: ARG002
+        key_id: str,  # noqa: ARG002
+        user_api_key_id: str | None = None,
+        is_stream: bool,  # noqa: ARG002
+        provider_id: str | None = None,  # noqa: ARG002
+        key: Any = None,  # noqa: ARG002
+    ) -> str | None:
+        existing_ctx = get_codex_request_context()
+        set_codex_request_context(
+            CodexRequestContext(
+                account_id=existing_ctx.account_id if existing_ctx else None,
+                user_api_key_id=str(user_api_key_id or "").strip() or None,
+                is_compact=existing_ctx.is_compact if existing_ctx else False,
+            )
+        )
         return None
 
     def wrap_request(
@@ -48,19 +69,25 @@ class CodexOAuthEnvelope:
         # Compact sentinel may have been popped earlier by finalize_provider_request;
         # prefer the pre-set context var (set by adapter), fall back to request body.
         existing_ctx = get_codex_request_context()
+        user_api_key_id = existing_ctx.user_api_key_id if existing_ctx else None
         is_compact = (existing_ctx.is_compact if existing_ctx else False) or bool(
-            request_body.pop("_aether_compact", False)
+            request_body.get("_aether_compact", False)
+        )
+        patched_request_body = patch_openai_cli_request_for_codex(
+            request_body,
+            user_api_key_id=user_api_key_id,
         )
         set_codex_request_context(
             CodexRequestContext(
                 account_id=str(account_id) if account_id else None,
+                user_api_key_id=user_api_key_id,
                 is_compact=is_compact,
             )
         )
         # Context 不需要手动清理: FastAPI 每个请求运行在独立的 asyncio Task 中,
         # contextvars 天然隔离, Task 结束后自动回收。
         # No wire envelope for Codex; keep request body as-is.
-        return request_body, url_model
+        return patched_request_body, url_model
 
     def unwrap_response(self, data: Any) -> Any:
         # No response envelope for Codex.

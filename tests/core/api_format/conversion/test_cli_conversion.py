@@ -753,6 +753,93 @@ def test_stream_openai_cli_function_call_events() -> None:
     assert events3[-1].get("type") == "content_block_stop"
 
 
+def test_stream_openai_cli_tool_then_text_uses_distinct_claude_block_indices() -> None:
+    """Responses 工具调用后再输出文本时，Claude block index 不能复用。"""
+    reg = _make_registry_with_cli()
+    state = StreamState()
+
+    cli_chunks: list[dict[str, Any]] = [
+        {
+            "type": "response.created",
+            "response": {
+                "id": "resp_tool_then_text",
+                "object": "response",
+                "model": "gpt-5.4",
+                "status": "in_progress",
+                "output": [],
+            },
+        },
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "call_id": "call_tool_then_text",
+                "id": "fc_tool_then_text",
+                "name": "read_file",
+                "status": "in_progress",
+                "arguments": "",
+            },
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "output_index": 0,
+            "item_id": "fc_tool_then_text",
+            "delta": '{"path":"README.md"}',
+        },
+        {
+            "type": "response.output_text.delta",
+            "output_index": 1,
+            "item_id": "msg_tool_then_text",
+            "content_index": 0,
+            "delta": "done",
+        },
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "call_id": "call_tool_then_text",
+                "id": "fc_tool_then_text",
+                "name": "read_file",
+                "status": "completed",
+                "arguments": '{"path":"README.md"}',
+            },
+        },
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_tool_then_text",
+                "object": "response",
+                "model": "gpt-5.4",
+                "status": "completed",
+                "output": [],
+                "usage": {"input_tokens": 8, "output_tokens": 4, "total_tokens": 12},
+            },
+        },
+    ]
+
+    all_events: list[dict[str, Any]] = []
+    for chunk in cli_chunks:
+        all_events.extend(reg.convert_stream_chunk(chunk, "openai:cli", "claude:cli", state=state))
+
+    starts = [e for e in all_events if e.get("type") == "content_block_start"]
+    assert len(starts) >= 2
+
+    tool_start = next(e for e in starts if (e.get("content_block") or {}).get("type") == "tool_use")
+    text_start = next(e for e in starts if (e.get("content_block") or {}).get("type") == "text")
+    assert tool_start["index"] != text_start["index"]
+
+    text_delta = next(
+        e
+        for e in all_events
+        if e.get("type") == "content_block_delta"
+        and (e.get("delta") or {}).get("type") == "text_delta"
+    )
+    assert text_delta["index"] == text_start["index"]
+    assert text_delta["index"] != tool_start["index"]
+
+
 def test_stream_openai_cli_function_call_done_without_delta_emits_full_args() -> None:
     """无 arguments.delta 时，done 快照也应补出完整 tool arguments。"""
     reg = _make_registry_with_cli()

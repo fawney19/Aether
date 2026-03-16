@@ -4,7 +4,7 @@ Maps upstream HTTP status codes to pool-level actions:
 
 | Code         | Action                                                     |
 |--------------|------------------------------------------------------------|
-| 401          | Invalidate OAuth token cache; permanent (deactivated) 1h, else 60s |
+| 401          | Invalidate OAuth token cache; permanent (deactivated) 1h, else no cooldown |
 | 402          | Long cooldown (payment issue)                              |
 | 403          | Graded cooldown: severe (suspended/banned) 1h, else 300s+  |
 | 400          | Check body for "organization has been disabled" -> cooldown |
@@ -183,10 +183,11 @@ async def _apply(
                 key_id[:8],
             )
         else:
-            # Transient auth failure (e.g. expired token) — short cooldown.
-            await redis_ops.set_cooldown(provider_id, key_id, "auth_failed_401", ttl=60)
+            # Transient auth failure (e.g. expired token) — token cache already
+            # invalidated above; the next request will trigger a token refresh.
+            # No cooldown needed: the key should be retried immediately after refresh.
             logger.info(
-                "Pool[{}]: key {} got 401, token cache invalidated + 60s cooldown",
+                "Pool[{}]: key {} got 401, token cache invalidated (no cooldown)",
                 provider_id[:8],
                 key_id[:8],
             )

@@ -79,8 +79,6 @@ def _store_refreshed_oauth_sync(
     access_token: str,
     parsed_auth_config: dict[str, Any],
 ) -> None:
-    from src.services.provider.oauth_token import is_account_level_block
-
     with get_db_context() as db:
         key = db.query(ProviderAPIKey).filter(ProviderAPIKey.id == key_id).first()
         if not key:
@@ -88,10 +86,12 @@ def _store_refreshed_oauth_sync(
 
         key.api_key = crypto_service.encrypt(access_token)
         key.auth_config = crypto_service.encrypt(json.dumps(parsed_auth_config))
-        if not is_account_level_block(getattr(key, "oauth_invalid_reason", None)):
+        # 刷新成功 => 清除所有 oauth_invalid 标记（包括 [ACCOUNT_BLOCK]）。
+        # Token 能成功刷新说明账号可用，之前的 block 标记应视为过时。
+        if getattr(key, "oauth_invalid_at", None) is not None:
             key.oauth_invalid_at = None
             key.oauth_invalid_reason = None
-            key.is_active = True
+        key.is_active = True
 
 
 # ==============================================================================

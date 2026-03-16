@@ -20,6 +20,7 @@ class CodexRequestContext:
     """
 
     account_id: str | None = None
+    user_api_key_id: str | None = None
     is_compact: bool = False
 
 

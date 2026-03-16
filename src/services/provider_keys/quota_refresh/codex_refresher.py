@@ -280,6 +280,7 @@ async def refresh_codex_key_quota(
             state_updates[key.id] = {
                 "oauth_invalid_at": None,
                 "oauth_invalid_reason": None,
+                "is_active": True,
             }
             return {
                 "key_id": key.id,
@@ -351,6 +352,7 @@ async def refresh_codex_key_quota(
         state_updates[key.id] = {
             "oauth_invalid_at": None,
             "oauth_invalid_reason": None,
+            "is_active": True,
         }
         return {
             "key_id": key.id,
