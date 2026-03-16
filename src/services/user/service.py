@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, contains_eager
 from src.core.logger import logger
 from src.core.validators import EmailValidator, PasswordValidator, UsernameValidator
 from src.models.database import ApiKey, GlobalModel, Model, Provider, Usage, User, UserRole
+from src.services.auth.session_service import SessionService
 from src.services.cache.user_cache import UserCacheService
 from src.services.system.config import SystemConfigService
 from src.services.user.bulk_cleanup import batch_nullify_fk, pre_clean_api_key
@@ -244,6 +245,11 @@ class UserService:
             if not valid:
                 raise ValueError(error_msg)
             user.set_password(kwargs["password"])
+            SessionService.revoke_all_user_sessions(
+                db,
+                user_id=user.id,
+                reason="admin_password_reset",
+            )
 
         user.updated_at = datetime.now(timezone.utc)
         db.commit()  # 立即提交事务,释放数据库锁

@@ -70,7 +70,13 @@ export const useAuthStore = defineStore('auth', () => {
   async function logout() {
     user.value = null
     token.value = null
-    authApi.logout()
+    await authApi.logout()
+  }
+
+  function applyExternalLogout() {
+    user.value = null
+    token.value = null
+    error.value = null
   }
 
   async function fetchCurrentUser() {
@@ -80,6 +86,10 @@ export const useAuthStore = defineStore('auth', () => {
       return userInfo
     } catch (err: unknown) {
       log.error('Failed to fetch user info', err)
+      syncToken()
+      if (!token.value) {
+        user.value = null
+      }
       // 根据用户要求,不管什么错误都不清除状态
       // 保持登录状态,除非用户手动退出
       log.info('Keeping session despite error, as per user requirement')
@@ -106,6 +116,7 @@ export const useAuthStore = defineStore('auth', () => {
     isAdmin,
     login,
     logout,
+    applyExternalLogout,
     fetchCurrentUser,
     checkAuth,
     syncToken

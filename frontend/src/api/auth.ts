@@ -9,7 +9,6 @@ export interface LoginRequest {
 
 export interface LoginResponse {
   access_token: string
-  refresh_token?: string
   token_type?: string
   expires_in?: number
   user_id?: string // UUID
@@ -127,10 +126,6 @@ export const authApi = {
   async login(credentials: LoginRequest): Promise<LoginResponse> {
     const response = await apiClient.post<LoginResponse>('/api/auth/login', credentials)
     apiClient.setToken(response.data.access_token)
-    // 后端暂时没有返回 refresh_token
-    if (response.data.refresh_token) {
-      localStorage.setItem('refresh_token', response.data.refresh_token)
-    }
     return response.data
   },
 
@@ -152,14 +147,9 @@ export const authApi = {
     return response.data
   },
 
-  async refreshToken(refreshToken: string): Promise<LoginResponse> {
-    const response = await apiClient.post<LoginResponse>('/api/auth/refresh', {
-      refresh_token: refreshToken
-    })
+  async refreshToken(): Promise<LoginResponse> {
+    const response = await apiClient.post<LoginResponse>('/api/auth/refresh', {})
     apiClient.setToken(response.data.access_token)
-    if (response.data.refresh_token) {
-      localStorage.setItem('refresh_token', response.data.refresh_token)
-    }
     return response.data
   },
 

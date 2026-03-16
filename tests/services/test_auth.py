@@ -268,10 +268,10 @@ class TestUserAuthentication:
         assert isinstance(result, AuthenticatedUserSnapshot)
         assert result.user_id == "user-123"
         assert result.username == "tester"
-        thread_db.commit.assert_called_once()
+        thread_db.commit.assert_not_called()
         thread_db.close.assert_called_once()
         route_db.commit.assert_not_called()
-        invalidate_cache.assert_awaited_once_with("user-123", "test@example.com")
+        invalidate_cache.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_load_user_for_pipeline_threadsafe_prefetches_balance(self) -> None:

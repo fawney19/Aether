@@ -54,6 +54,23 @@ export interface ApiKey {
   total_cost_usd?: number  // 总费用
 }
 
+export interface UserSession {
+  id: string
+  device_label: string
+  device_type: string
+  browser_name?: string | null
+  browser_version?: string | null
+  os_name?: string | null
+  os_version?: string | null
+  device_model?: string | null
+  ip_address?: string | null
+  last_seen_at?: string | null
+  created_at: string
+  is_current: boolean
+  revoked_at?: string | null
+  revoke_reason?: string | null
+}
+
 export const usersApi = {
   async getAllUsers(): Promise<User[]> {
     const response = await apiClient.get<User[]>('/api/admin/users')
@@ -82,6 +99,21 @@ export const usersApi = {
   async getUserApiKeys(userId: string): Promise<ApiKey[]> {
     const response = await apiClient.get<{ api_keys: ApiKey[] }>(`/api/admin/users/${userId}/api-keys`)
     return response.data.api_keys
+  },
+
+  async getUserSessions(userId: string): Promise<UserSession[]> {
+    const response = await apiClient.get<UserSession[]>(`/api/admin/users/${userId}/sessions`)
+    return response.data
+  },
+
+  async revokeUserSession(userId: string, sessionId: string): Promise<{ message: string }> {
+    const response = await apiClient.delete(`/api/admin/users/${userId}/sessions/${sessionId}`)
+    return response.data
+  },
+
+  async revokeAllUserSessions(userId: string): Promise<{ message: string; revoked_count: number }> {
+    const response = await apiClient.delete(`/api/admin/users/${userId}/sessions`)
+    return response.data
   },
 
   async createApiKey(userId: string, name?: string): Promise<ApiKey & { key: string }> {

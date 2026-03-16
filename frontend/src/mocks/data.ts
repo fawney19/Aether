@@ -76,7 +76,6 @@ export const MOCK_NORMAL_USER: User = {
 
 export const MOCK_LOGIN_RESPONSE_ADMIN: LoginResponse = {
   access_token: 'demo-access-token-admin',
-  refresh_token: 'demo-refresh-token-admin',
   token_type: 'bearer',
   expires_in: 3600,
   user_id: MOCK_ADMIN_USER.id,
@@ -87,7 +86,6 @@ export const MOCK_LOGIN_RESPONSE_ADMIN: LoginResponse = {
 
 export const MOCK_LOGIN_RESPONSE_USER: LoginResponse = {
   access_token: 'demo-access-token-user',
-  refresh_token: 'demo-refresh-token-user',
   token_type: 'bearer',
   expires_in: 3600,
   user_id: MOCK_NORMAL_USER.id,

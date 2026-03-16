@@ -32,9 +32,11 @@ from src.models.api import (
     CreateMyApiKeyRequest,
     PublicGlobalModelListResponse,
     PublicGlobalModelResponse,
+    UpdateSessionLabelRequest,
     UpdateApiKeyProvidersRequest,
     UpdatePreferencesRequest,
     UpdateProfileRequest,
+    UserSessionResponse,
 )
 from src.models.database import (
     ApiKey,
@@ -46,6 +48,7 @@ from src.models.database import (
     UserModelUsageCount,
 )
 from src.services.cache.user_cache import UserCacheService
+from src.services.auth.session_service import SessionService
 from src.services.system.config import SystemConfigService
 from src.services.system.time_range import TimeRangeParams
 from src.services.usage.service import UsageService
@@ -121,9 +124,84 @@ def _change_password_sync(
             raise InvalidRequestException(error_msg or "密码格式无效")
 
         user.set_password(request.new_password)
+        SessionService.revoke_all_user_sessions(
+            db,
+            user_id=user.id,
+            reason="password_changed",
+        )
         user.updated_at = datetime.now(timezone.utc)
         action = "修改" if has_password else "设置"
         return {"message": f"密码{action}成功"}, user.email, action
+
+
+def _serialize_user_session(session: Any, current_session_id: str | None) -> dict[str, Any]:
+    return UserSessionResponse(
+        id=session.id,
+        device_label=session.device_label or "未知设备",
+        device_type=session.device_type or "unknown",
+        browser_name=session.browser_name,
+        browser_version=session.browser_version,
+        os_name=session.os_name,
+        os_version=session.os_version,
+        device_model=session.device_model,
+        ip_address=session.ip_address,
+        last_seen_at=session.last_seen_at.isoformat() if session.last_seen_at else None,
+        created_at=session.created_at.isoformat(),
+        is_current=bool(current_session_id and session.id == current_session_id),
+        revoked_at=session.revoked_at.isoformat() if session.revoked_at else None,
+        revoke_reason=session.revoke_reason,
+    ).model_dump()
+
+
+def _list_user_sessions_sync(user_id: str, current_session_id: str | None) -> list[dict[str, Any]]:
+    with get_db_context() as db:
+        sessions = SessionService.list_user_sessions(db, user_id=user_id)
+        return [_serialize_user_session(session, current_session_id) for session in sessions]
+
+
+def _update_session_label_sync(
+    user_id: str,
+    session_id: str,
+    request: UpdateSessionLabelRequest,
+    current_session_id: str | None,
+) -> dict[str, Any]:
+    with get_db_context() as db:
+        session = SessionService.get_session_for_user(db, user_id=user_id, session_id=session_id)
+        if not session:
+            raise NotFoundException("会话不存在", "session")
+        SessionService.update_session_label(session, request.device_label)
+        return _serialize_user_session(session, current_session_id)
+
+
+def _revoke_session_sync(
+    user_id: str,
+    session_id: str,
+) -> dict[str, Any]:
+    with get_db_context() as db:
+        session = SessionService.get_session_for_user(db, user_id=user_id, session_id=session_id)
+        if not session:
+            raise NotFoundException("会话不存在", "session")
+        SessionService.revoke_session(
+            db,
+            session=session,
+            reason="user_session_revoked",
+            audit_user_id=user_id,
+        )
+        return {"message": "设备已退出登录"}
+
+
+def _revoke_other_sessions_sync(
+    user_id: str,
+    current_session_id: str | None,
+) -> dict[str, Any]:
+    with get_db_context() as db:
+        revoked_count = SessionService.revoke_all_user_sessions(
+            db,
+            user_id=user_id,
+            reason="logout_other_sessions",
+            exclude_session_id=current_session_id,
+        )
+        return {"message": "其他设备已退出登录", "revoked_count": revoked_count}
 
 
 def _create_my_api_key_sync(user_id: str, request: CreateMyApiKeyRequest) -> dict[str, Any]:
@@ -396,6 +474,42 @@ async def change_my_password(request: Request, db: Session = Depends(get_db)) ->
     - `new_password`: 新密码（至少 6 位）
     """
     adapter = ChangePasswordAdapter()
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.get("/sessions")
+async def list_my_sessions(request: Request, db: Session = Depends(get_db)) -> Any:
+    """列出当前用户的登录会话。"""
+    adapter = ListMySessionsAdapter()
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.delete("/sessions/others")
+async def revoke_other_sessions(request: Request, db: Session = Depends(get_db)) -> Any:
+    """退出当前设备之外的所有登录会话。"""
+    adapter = RevokeOtherSessionsAdapter()
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.patch("/sessions/{session_id}")
+async def update_my_session_label(
+    session_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    """修改某个登录设备的显示名称。"""
+    adapter = UpdateMySessionLabelAdapter(session_id=session_id)
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.delete("/sessions/{session_id}")
+async def revoke_my_session(
+    session_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    """退出指定登录会话。"""
+    adapter = RevokeMySessionAdapter(session_id=session_id)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
@@ -797,6 +911,62 @@ class ChangePasswordAdapter(AuthenticatedApiAdapter):
         )
         logger.info(f"用户{action}密码: {email}")
         return result
+
+
+class ListMySessionsAdapter(AuthenticatedApiAdapter):
+    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
+        current_session_id = getattr(context.request.state, "user_session_id", None)
+        return await run_in_threadpool(
+            _list_user_sessions_sync,
+            context.user.id,
+            current_session_id,
+        )
+
+
+class UpdateMySessionLabelAdapter(AuthenticatedApiAdapter):
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+
+    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
+        payload = context.ensure_json_body()
+        try:
+            request = UpdateSessionLabelRequest.model_validate(payload)
+        except ValidationError as e:
+            errors = e.errors()
+            if errors:
+                raise InvalidRequestException(translate_pydantic_error(errors[0]))
+            raise InvalidRequestException("请求数据验证失败")
+
+        current_session_id = getattr(context.request.state, "user_session_id", None)
+        return await run_in_threadpool(
+            _update_session_label_sync,
+            context.user.id,
+            self.session_id,
+            request,
+            current_session_id,
+        )
+
+
+class RevokeMySessionAdapter(AuthenticatedApiAdapter):
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+
+    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
+        return await run_in_threadpool(
+            _revoke_session_sync,
+            context.user.id,
+            self.session_id,
+        )
+
+
+class RevokeOtherSessionsAdapter(AuthenticatedApiAdapter):
+    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
+        current_session_id = getattr(context.request.state, "user_session_id", None)
+        return await run_in_threadpool(
+            _revoke_other_sessions_sync,
+            context.user.id,
+            current_session_id,
+        )
 
 
 class ListMyApiKeysAdapter(AuthenticatedApiAdapter):

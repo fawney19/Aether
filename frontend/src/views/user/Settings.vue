@@ -152,6 +152,118 @@
           </form>
         </Card>
 
+        <Card class="p-6">
+          <div class="flex items-center justify-between mb-4">
+            <div>
+              <h3 class="text-lg font-medium text-foreground">
+                登录设备
+              </h3>
+              <p class="text-sm text-muted-foreground mt-1">
+                管理当前账号在各设备上的登录状态
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              :disabled="sessionsLoading || otherSessionCount === 0 || sessionActionLoading === 'others'"
+              @click="handleRevokeOtherSessions"
+            >
+              {{ sessionActionLoading === 'others' ? '处理中...' : '退出其他设备' }}
+            </Button>
+          </div>
+
+          <div
+            v-if="sessionsLoading"
+            class="text-sm text-muted-foreground"
+          >
+            正在加载设备列表...
+          </div>
+          <div
+            v-else-if="userSessions.length === 0"
+            class="text-sm text-muted-foreground"
+          >
+            暂无登录设备记录
+          </div>
+          <div
+            v-else
+            class="space-y-3"
+          >
+            <div
+              v-for="session in userSessions"
+              :key="session.id"
+              class="flex items-start justify-between gap-4 rounded-lg border border-border/60 bg-muted/20 p-4"
+            >
+              <div class="min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <template v-if="editingSessionId === session.id">
+                    <Input
+                      v-model="sessionLabelDraft"
+                      size="sm"
+                      class="h-8 w-56"
+                      maxlength="120"
+                      @keyup.enter="saveSessionLabel(session.id)"
+                    />
+                  </template>
+                  <span
+                    v-else
+                    class="font-medium text-foreground"
+                  >{{ session.device_label }}</span>
+                  <Badge
+                    v-if="session.is_current"
+                    variant="secondary"
+                  >
+                    当前设备
+                  </Badge>
+                </div>
+                <p class="mt-1 text-xs text-muted-foreground">
+                  {{ formatSessionMeta(session) }}
+                </p>
+                <p class="mt-1 text-xs text-muted-foreground">
+                  最近活跃 {{ formatDate(session.last_seen_at || session.created_at) }}
+                  <span v-if="session.ip_address"> · IP {{ session.ip_address }}</span>
+                </p>
+              </div>
+              <div class="flex items-center gap-2">
+                <template v-if="editingSessionId === session.id">
+                  <Button
+                    size="sm"
+                    :disabled="sessionActionLoading === session.id || !sessionLabelDraft.trim()"
+                    @click="saveSessionLabel(session.id)"
+                  >
+                    {{ sessionActionLoading === session.id ? '保存中...' : '保存' }}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    :disabled="sessionActionLoading === session.id"
+                    @click="cancelSessionLabelEdit"
+                  >
+                    取消
+                  </Button>
+                </template>
+                <template v-else>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    :disabled="sessionActionLoading !== null"
+                    @click="startSessionLabelEdit(session)"
+                  >
+                    重命名
+                  </Button>
+                  <Button
+                    v-if="!session.is_current"
+                    variant="outline"
+                    size="sm"
+                    :disabled="sessionActionLoading === session.id"
+                    @click="handleRevokeSession(session.id)"
+                  >
+                    {{ sessionActionLoading === session.id ? '处理中...' : '退出' }}
+                  </Button>
+                </template>
+              </div>
+            </div>
+          </div>
+        </Card>
+
         <!-- OAuth 绑定 -->
         <Card class="p-6">
           <h3 class="text-lg font-medium text-foreground mb-4">
@@ -478,11 +590,12 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
-import { meApi, type Profile } from '@/api/me'
+import { meApi, type Profile, type UserSession } from '@/api/me'
 import { authApi } from '@/api/auth'
 import { oauthApi, type OAuthLinkInfo, type OAuthProviderInfo } from '@/api/oauth'
+import { getClientDeviceId } from '@/utils/deviceId'
 import { getOAuthIcon } from '@/utils/oauth-icons'
 import { useDarkMode, type ThemeMode } from '@/composables/useDarkMode'
 import {
@@ -512,10 +625,12 @@ import { getErrorMessage, getErrorStatus } from '@/types/api-error'
 
 const authStore = useAuthStore()
 const route = useRoute()
+const router = useRouter()
 const { success, error: showError } = useToast()
 const { setThemeMode } = useDarkMode()
 
 const profile = ref<Profile | null>(null)
+const userSessions = ref<UserSession[]>([])
 
 const profileForm = ref({
   email: '',
@@ -543,6 +658,10 @@ const preferencesForm = ref({
 
 const savingProfile = ref(false)
 const changingPassword = ref(false)
+const sessionsLoading = ref(false)
+const sessionActionLoading = ref<string | null>(null)
+const editingSessionId = ref<string | null>(null)
+const sessionLabelDraft = ref('')
 const passwordPolicyLevel = ref<PasswordPolicyLevel>('weak')
 const themeSelectOpen = ref(false)
 const languageSelectOpen = ref(false)
@@ -584,6 +703,8 @@ const hasPasswordChanges = computed(() => {
   }
 })
 
+const otherSessionCount = computed(() => userSessions.value.filter((session) => !session.is_current).length)
+
 function handleThemeChange(value: string) {
   preferencesForm.value.theme = value
   themeSelectOpen.value = false
@@ -602,6 +723,7 @@ function handleLanguageChange(value: string) {
 onMounted(async () => {
   await loadProfile()
   await loadPreferences()
+  await loadSessions()
   await loadOAuthBindings()
   await loadEmailConfigured()
 })
@@ -629,6 +751,23 @@ async function loadProfile() {
   } catch (error) {
     log.error('加载个人信息失败:', error)
     showError('加载个人信息失败')
+  }
+}
+
+async function loadSessions() {
+  sessionsLoading.value = true
+  try {
+    userSessions.value = await meApi.listSessions()
+    if (editingSessionId.value) {
+      const currentEditing = userSessions.value.find((session) => session.id === editingSessionId.value)
+      if (!currentEditing) {
+        cancelSessionLabelEdit()
+      }
+    }
+  } catch (error) {
+    log.error('加载登录设备失败:', error)
+  } finally {
+    sessionsLoading.value = false
   }
 }
 
@@ -679,6 +818,7 @@ function handleBind(providerType: string) {
         ? new URL(basePath)
         : new URL(basePath, window.location.origin)
       bindUrl.searchParams.set('bind_token', bindToken)
+      bindUrl.searchParams.set('client_device_id', getClientDeviceId())
 
       // 新标签页打开 OAuth 流程
       const newTab = window.open(bindUrl.toString(), '_blank')
@@ -813,16 +953,9 @@ async function changePassword() {
       old_password: isSettingPassword ? undefined : passwordForm.value.old_password,
       new_password: passwordForm.value.new_password
     })
-    success(isSettingPassword ? '密码设置成功' : '密码修改成功')
-    passwordForm.value = {
-      old_password: '',
-      new_password: '',
-      confirm_password: ''
-    }
-    // 刷新 profile 以更新 has_password 状态
-    if (isSettingPassword) {
-      await loadProfile()
-    }
+    success(isSettingPassword ? '密码设置成功，请重新登录' : '密码修改成功，请重新登录')
+    await authStore.logout()
+    await router.replace('/')
   } catch (err) {
     log.error('修改密码失败:', err)
     const title = isSettingPassword ? '密码设置失败' : '密码修改失败'
@@ -830,6 +963,83 @@ async function changePassword() {
     showError(getErrorMessage(err, defaultMsg), title)
   } finally {
     changingPassword.value = false
+  }
+}
+
+function formatSessionMeta(session: UserSession): string {
+  const parts = [
+    session.browser_name && session.browser_version
+      ? `${session.browser_name} ${session.browser_version}`
+      : session.browser_name || null,
+    session.os_name && session.os_version
+      ? `${session.os_name} ${session.os_version}`
+      : session.os_name || null,
+    session.device_model || null,
+  ].filter(Boolean)
+  return parts.length > 0 ? parts.join(' · ') : '设备信息未知'
+}
+
+function startSessionLabelEdit(session: UserSession) {
+  editingSessionId.value = session.id
+  sessionLabelDraft.value = session.device_label
+}
+
+function cancelSessionLabelEdit() {
+  editingSessionId.value = null
+  sessionLabelDraft.value = ''
+}
+
+async function saveSessionLabel(sessionId: string) {
+  const nextLabel = sessionLabelDraft.value.trim()
+  if (!nextLabel) {
+    showError('设备名称不能为空')
+    return
+  }
+
+  sessionActionLoading.value = sessionId
+  try {
+    const updated = await meApi.updateSessionLabel(sessionId, nextLabel)
+    userSessions.value = userSessions.value.map((session) =>
+      session.id === sessionId ? updated : session
+    )
+    cancelSessionLabelEdit()
+    success('设备名称已更新')
+  } catch (error) {
+    log.error('更新设备名称失败:', error)
+    showError(getErrorMessage(error, '更新设备名称失败'))
+  } finally {
+    sessionActionLoading.value = null
+  }
+}
+
+async function handleRevokeSession(sessionId: string) {
+  sessionActionLoading.value = sessionId
+  try {
+    await meApi.revokeSession(sessionId)
+    if (editingSessionId.value === sessionId) {
+      cancelSessionLabelEdit()
+    }
+    success('设备已退出登录')
+    await loadSessions()
+  } catch (error) {
+    log.error('退出设备失败:', error)
+    showError(getErrorMessage(error, '退出设备失败'))
+  } finally {
+    sessionActionLoading.value = null
+  }
+}
+
+async function handleRevokeOtherSessions() {
+  sessionActionLoading.value = 'others'
+  try {
+    const result = await meApi.revokeOtherSessions()
+    success(result.revoked_count > 0 ? `已退出 ${result.revoked_count} 个其他设备` : '没有其他在线设备')
+    await loadSessions()
+  } catch (error) {
+    log.error('退出其他设备失败:', error)
+    showError(getErrorMessage(error, '退出其他设备失败'))
+  } finally {
+    sessionActionLoading.value = null
   }
 }
 

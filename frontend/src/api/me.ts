@@ -137,6 +137,23 @@ export interface ChangePasswordRequest {
   new_password: string
 }
 
+export interface UserSession {
+  id: string
+  device_label: string
+  device_type: string
+  browser_name?: string | null
+  browser_version?: string | null
+  os_name?: string | null
+  os_version?: string | null
+  device_model?: string | null
+  ip_address?: string | null
+  last_seen_at?: string | null
+  created_at: string
+  is_current: boolean
+  revoked_at?: string | null
+  revoke_reason?: string | null
+}
+
 export const meApi = {
   // 获取个人信息
   async getProfile(): Promise<Profile> {
@@ -156,6 +173,28 @@ export const meApi = {
   // 修改密码
   async changePassword(data: ChangePasswordRequest): Promise<{ message: string }> {
     const response = await apiClient.patch('/api/users/me/password', data)
+    return response.data
+  },
+
+  async listSessions(): Promise<UserSession[]> {
+    const response = await apiClient.get<UserSession[]>('/api/users/me/sessions')
+    return response.data
+  },
+
+  async updateSessionLabel(sessionId: string, deviceLabel: string): Promise<UserSession> {
+    const response = await apiClient.patch<UserSession>(`/api/users/me/sessions/${sessionId}`, {
+      device_label: deviceLabel,
+    })
+    return response.data
+  },
+
+  async revokeSession(sessionId: string): Promise<{ message: string }> {
+    const response = await apiClient.delete(`/api/users/me/sessions/${sessionId}`)
+    return response.data
+  },
+
+  async revokeOtherSessions(): Promise<{ message: string; revoked_count: number }> {
+    const response = await apiClient.delete('/api/users/me/sessions/others')
     return response.data
   },
 

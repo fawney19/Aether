@@ -33,6 +33,7 @@ class OAuthStateData:
     provider_type: str
     action: str  # "login" | "bind"
     user_id: str | None
+    client_device_id: str | None
     created_at: int
 
     @classmethod
@@ -42,6 +43,7 @@ class OAuthStateData:
             provider_type=str(data.get("provider_type") or ""),
             action=str(data.get("action") or ""),
             user_id=data.get("user_id"),
+            client_device_id=data.get("client_device_id"),
             created_at=int(data.get("created_at") or 0),
         )
 
@@ -51,7 +53,12 @@ def _state_key(nonce: str) -> str:
 
 
 async def create_oauth_state(
-    redis: Redis, *, provider_type: str, action: str, user_id: str | None = None
+    redis: Redis,
+    *,
+    provider_type: str,
+    action: str,
+    user_id: str | None = None,
+    client_device_id: str | None = None,
 ) -> str:
     nonce = secrets.token_urlsafe(24)
     data = {
@@ -59,6 +66,7 @@ async def create_oauth_state(
         "provider_type": provider_type,
         "action": action,
         "user_id": user_id,
+        "client_device_id": client_device_id,
         "created_at": int(time.time()),
     }
     await redis.setex(_state_key(nonce), OAUTH_STATE_TTL_SECONDS, json.dumps(data))

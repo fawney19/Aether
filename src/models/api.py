@@ -54,7 +54,6 @@ class LoginResponse(BaseModel):
     """登录响应"""
 
     access_token: str
-    refresh_token: str  # 刷新令牌
     token_type: str = "bearer"
     expires_in: int = 86400  # Token有效期（秒），默认24小时
     user_id: str
@@ -63,17 +62,10 @@ class LoginResponse(BaseModel):
     role: str
 
 
-class RefreshTokenRequest(BaseModel):
-    """刷新令牌请求"""
-
-    refresh_token: str = Field(..., description="刷新令牌")
-
-
 class RefreshTokenResponse(BaseModel):
     """刷新令牌响应"""
 
     access_token: str
-    refresh_token: str  # 返回新的刷新令牌
     token_type: str = "bearer"
     expires_in: int = 86400  # Token有效期（秒），默认24小时
 
@@ -782,6 +774,39 @@ class ChangePasswordRequest(BaseModel):
         if not valid:
             raise ValueError(error_msg or "密码格式无效")
         return v
+
+
+class UserSessionResponse(BaseModel):
+    """用户会话响应"""
+
+    id: str
+    device_label: str
+    device_type: str
+    browser_name: str | None = None
+    browser_version: str | None = None
+    os_name: str | None = None
+    os_version: str | None = None
+    device_model: str | None = None
+    ip_address: str | None = None
+    last_seen_at: str | None = None
+    created_at: str
+    is_current: bool = False
+    revoked_at: str | None = None
+    revoke_reason: str | None = None
+
+
+class UpdateSessionLabelRequest(BaseModel):
+    """更新会话显示名称"""
+
+    device_label: str = Field(..., min_length=1, max_length=120, description="设备名称")
+
+    @field_validator("device_label")
+    @classmethod
+    def validate_device_label(cls, v: Any) -> Any:
+        normalized = str(v).strip()
+        if not normalized:
+            raise ValueError("设备名称不能为空")
+        return normalized
 
 
 class CreateMyApiKeyRequest(BaseModel):

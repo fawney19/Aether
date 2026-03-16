@@ -3,10 +3,13 @@ import type { AxiosInstance, AxiosRequestConfig, AxiosResponse, InternalAxiosReq
 import { NETWORK_CONFIG, AUTH_CONFIG } from '@/config/constants'
 import { isDemoMode } from '@/config/demo'
 import { handleMockRequest, setMockUserToken } from '@/mocks'
+import { getClientDeviceId } from '@/utils/deviceId'
+import { CrossTabRefreshCoordinator } from '@/utils/crossTabRefresh'
 import { log } from '@/utils/logger'
 
 // 在开发环境下使用代理,生产环境使用环境变量
 const API_BASE_URL = import.meta.env.VITE_API_URL || ''
+export const AUTH_STATE_CHANGE_EVENT = 'aether-auth-state-change'
 
 /**
  * 判断请求是否为公共端点
@@ -83,12 +86,21 @@ class ApiClient {
   private client: AxiosInstance
   private token: string | null = null
   private isRefreshing = false
-  private refreshPromise: Promise<AxiosResponse> | null = null
+  private refreshPromise: Promise<string> | null = null
+  private readonly refreshCoordinator = new CrossTabRefreshCoordinator()
+
+  private readonly onStorageSync = (event: StorageEvent): void => {
+    if (event.key !== 'access_token') {
+      return
+    }
+    this.syncTokenState(event.newValue)
+  }
 
   constructor() {
     this.client = axios.create({
       baseURL: API_BASE_URL,
       timeout: NETWORK_CONFIG.API_TIMEOUT,
+      withCredentials: true,
       headers: {
         'Content-Type': 'application/json',
       },
@@ -99,6 +111,7 @@ class ApiClient {
     this.client.defaults.adapter = createDemoAdapter(defaultAdapter)
 
     this.setupInterceptors()
+    this.setupCrossTabAuthSync()
   }
 
   /**
@@ -108,6 +121,10 @@ class ApiClient {
     // 请求拦截器 - 仅处理认证
     this.client.interceptors.request.use(
       (config) => {
+        if (config.url?.includes('/api/')) {
+          config.headers['X-Client-Device-Id'] = getClientDeviceId()
+        }
+
         const requiresAuth = !isPublicEndpoint(config.url, config.method) &&
                            config.url?.includes('/api/')
 
@@ -126,6 +143,23 @@ class ApiClient {
     this.client.interceptors.response.use(
       (response) => response,
       async (error) => this.handleResponseError(error)
+    )
+  }
+
+  private setupCrossTabAuthSync(): void {
+    if (typeof window !== 'undefined') {
+      window.addEventListener('storage', this.onStorageSync)
+    }
+  }
+
+  private emitAuthStateChange(token: string | null): void {
+    if (typeof window === 'undefined') {
+      return
+    }
+    window.dispatchEvent(
+      new CustomEvent<{ token: string | null }>(AUTH_STATE_CHANGE_EVENT, {
+        detail: { token },
+      })
     )
   }
 
@@ -189,14 +223,6 @@ class ApiClient {
       return Promise.reject(error)
     }
 
-    // 获取refresh token
-    const refreshToken = localStorage.getItem('refresh_token')
-    if (!refreshToken) {
-      log.info('No refresh token available, clearing invalid token')
-      this.clearAuth()
-      return Promise.reject(error)
-    }
-
     // 标记为已重试
     originalRequest._retry = true
     originalRequest._retryCount = (originalRequest._retryCount || 0) + 1
@@ -210,8 +236,8 @@ class ApiClient {
     // 如果正在刷新,等待刷新完成
     if (this.isRefreshing) {
       try {
-        await this.refreshPromise
-        originalRequest.headers.Authorization = `Bearer ${this.getToken()}`
+        const accessToken = await this.refreshPromise
+        originalRequest.headers.Authorization = `Bearer ${accessToken}`
         return this.client.request(originalRequest)
       } catch {
         return Promise.reject(error)
@@ -219,29 +245,27 @@ class ApiClient {
     }
 
     // 开始刷新token
-    return this.refreshTokenAndRetry(refreshToken, originalRequest, error)
+    return this.refreshTokenAndRetry(originalRequest, error)
   }
 
   /**
    * 刷新token并重试原始请求
    */
   private async refreshTokenAndRetry(
-    refreshToken: string,
     originalRequest: InternalAxiosRequestConfig,
     originalError: import('axios').AxiosError
   ): Promise<AxiosResponse> {
     this.isRefreshing = true
-    this.refreshPromise = this.refreshToken(refreshToken)
+    this.refreshPromise = this.coordinatedRefresh()
 
     try {
-      const response = await this.refreshPromise
-      this.setToken(response.data.access_token)
-      localStorage.setItem('refresh_token', response.data.refresh_token)
+      const accessToken = await this.refreshPromise
+      this.setToken(accessToken)
       this.isRefreshing = false
       this.refreshPromise = null
 
       // 重试原始请求
-      originalRequest.headers.Authorization = `Bearer ${response.data.access_token}`
+      originalRequest.headers.Authorization = `Bearer ${accessToken}`
       return this.client.request(originalRequest)
     } catch (refreshError: unknown) {
       log.error('Token refresh failed', refreshError instanceof Error ? refreshError.message : String(refreshError))
@@ -252,13 +276,33 @@ class ApiClient {
     }
   }
 
-  setToken(token: string): void {
+  private async coordinatedRefresh(): Promise<string> {
+    const latestStoredToken = localStorage.getItem('access_token')
+    if (latestStoredToken && latestStoredToken !== this.token) {
+      this.syncTokenState(latestStoredToken)
+      return latestStoredToken
+    }
+
+    return this.refreshCoordinator.run(async () => {
+      const response = await this.refreshToken()
+      const accessToken = response.data.access_token
+      if (!accessToken) {
+        throw new Error('Refresh response missing access token')
+      }
+      return accessToken
+    })
+  }
+
+  private syncTokenState(token: string | null): void {
     this.token = token
-    localStorage.setItem('access_token', token)
-    // 同步到 mock handler
     if (isDemoMode()) {
       setMockUserToken(token)
     }
+  }
+
+  setToken(token: string): void {
+    this.syncTokenState(token)
+    localStorage.setItem('access_token', token)
   }
 
   getToken(): string | null {
@@ -273,18 +317,17 @@ class ApiClient {
   }
 
   clearAuth(): void {
-    this.token = null
+    const hadAuth = this.token !== null || localStorage.getItem('access_token') !== null
+    this.syncTokenState(null)
     localStorage.removeItem('access_token')
-    localStorage.removeItem('refresh_token')
-    // 同步清除 mock token
-    if (isDemoMode()) {
-      setMockUserToken(null)
+    // 同标签页内清理认证状态时不会触发 storage 事件，这里主动广播一次。
+    if (hadAuth) {
+      this.emitAuthStateChange(null)
     }
   }
 
-  async refreshToken(refreshToken: string): Promise<AxiosResponse> {
-    // refreshToken 会通过 adapter 处理 Demo 模式
-    return this.client.post('/api/auth/refresh', { refresh_token: refreshToken })
+  async refreshToken(): Promise<AxiosResponse> {
+    return this.client.post('/api/auth/refresh', {})
   }
 
   // 以下方法直接委托给 axios client，Demo 模式由 adapter 统一处理

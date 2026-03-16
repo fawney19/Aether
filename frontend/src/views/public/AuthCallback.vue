@@ -89,7 +89,6 @@ onMounted(async () => {
   const hash = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : window.location.hash
   const params = new URLSearchParams(hash)
   const accessToken = params.get('access_token')
-  const refreshToken = params.get('refresh_token')
 
   clearUrlState()
 
@@ -101,9 +100,6 @@ onMounted(async () => {
 
   hint.value = '正在写入登录态...'
   apiClient.setToken(accessToken)
-  if (refreshToken) {
-    localStorage.setItem('refresh_token', refreshToken)
-  }
 
   authStore.syncToken()
 

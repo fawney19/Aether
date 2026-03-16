@@ -28,7 +28,7 @@ export async function ensureUserLoaded(
         })
       } else if (err.response?.status === 401) {
         log.info('Authentication failed, clearing session')
-        authStore.logout()
+        await authStore.logout()
       } else {
         log.warn('Failed to fetch user info, but keeping session', { error: err?.message })
       }
