@@ -23,7 +23,7 @@ class _DummySyncHandler(CliSyncMixin):
     ) -> str:
         return str(request_body.get("model") or "unknown")
 
-    def _create_pending_usage(self, **kwargs: object) -> None:
+    def _create_pending_usage(self, **kwargs: object) -> bool:
         self.pending_calls.append(kwargs)
         raise _StopExecution()
 
@@ -41,7 +41,7 @@ class _DummyStreamHandler(CliStreamMixin):
     ) -> str:
         return str(request_body.get("model") or "unknown")
 
-    def _create_pending_usage(self, **kwargs: object) -> None:
+    def _create_pending_usage(self, **kwargs: object) -> bool:
         self.pending_calls.append(kwargs)
         raise _StopExecution()
 

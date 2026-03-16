@@ -560,6 +560,9 @@ class CliMonitorMixin:
 
         except Exception as e:
             logger.exception("记录流式统计信息时出错")
+        finally:
+            # 遥测写入完成后主动释放大对象列表，降低高并发长流的内存滞留。
+            ctx.release_recorded_chunks()
 
     async def _record_stream_failure(
         self,
@@ -595,26 +598,30 @@ class CliMonitorMixin:
             pool_summary=ctx.pool_summary,
             fallback_from_request=True,
         )
-        await self.telemetry.record_failure(
-            provider=ctx.provider_name or "unknown",
-            model=ctx.model,
-            response_time_ms=response_time_ms,
-            status_code=status_code,
-            error_message=extract_client_error_message(error),
-            request_headers=original_headers,
-            request_body=original_request_body,
-            is_stream=True,
-            api_format=ctx.api_format,
-            api_family=self.api_family,
-            endpoint_kind=self.endpoint_kind,
-            provider_request_headers=ctx.provider_request_headers,
-            provider_request_body=ctx.provider_request_body,
-            response_headers=ctx.response_headers,
-            client_response_headers=client_response_headers,
-            # 格式转换追踪
-            endpoint_api_format=ctx.provider_api_format or None,
-            has_format_conversion=ctx.has_format_conversion,
-            # 模型映射信息
-            target_model=ctx.mapped_model,
-            request_metadata=request_metadata,
-        )
+        try:
+            await self.telemetry.record_failure(
+                provider=ctx.provider_name or "unknown",
+                model=ctx.model,
+                response_time_ms=response_time_ms,
+                status_code=status_code,
+                error_message=extract_client_error_message(error),
+                request_headers=original_headers,
+                request_body=original_request_body,
+                is_stream=True,
+                api_format=ctx.api_format,
+                api_family=self.api_family,
+                endpoint_kind=self.endpoint_kind,
+                provider_request_headers=ctx.provider_request_headers,
+                provider_request_body=ctx.provider_request_body,
+                response_headers=ctx.response_headers,
+                client_response_headers=client_response_headers,
+                # 格式转换追踪
+                endpoint_api_format=ctx.provider_api_format or None,
+                has_format_conversion=ctx.has_format_conversion,
+                # 模型映射信息
+                target_model=ctx.mapped_model,
+                request_metadata=request_metadata,
+            )
+        finally:
+            # 失败路径同样可能持有 chunk 审计数据，及时释放。
+            ctx.release_recorded_chunks()

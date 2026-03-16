@@ -99,7 +99,7 @@ class CliStreamMixin:
         client_api_format = self.primary_api_format
 
         # 提前创建 pending 记录，让前端可以立即看到"处理中"
-        self._create_pending_usage(
+        pending_usage_created = self._create_pending_usage(
             model=model,
             is_stream=True,
             request_type="chat",
@@ -175,6 +175,8 @@ class CliStreamMixin:
                 request_body_ref=request_body_ref,
                 request_headers=original_headers,
                 request_body=original_request_body,
+                # 预创建失败时，回退到 TaskService 侧创建，避免丢失 pending 状态。
+                create_pending_usage=not pending_usage_created,
             )
             stream_generator = exec_result.response
             provider_name = exec_result.provider_name or "unknown"
@@ -267,8 +269,7 @@ class CliStreamMixin:
     ) -> AsyncGenerator[bytes]:
         """执行流式请求并返回流生成器"""
         # 重置上下文状态（重试时清除之前的数据，避免累积）
-        ctx.parsed_chunks = []
-        ctx.provider_parsed_chunks = []
+        ctx.release_recorded_chunks()
         ctx.chunk_count = 0
         ctx.data_count = 0
         ctx.has_completion = False

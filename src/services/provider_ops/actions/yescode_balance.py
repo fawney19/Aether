@@ -4,7 +4,7 @@ YesCode 余额查询操作
 
 import asyncio
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -37,8 +37,9 @@ async def fetch_yescode_combined_data(
     balance_task = client.get(f"{base_url}/api/v1/user/balance")
     profile_task = client.get(f"{base_url}/api/v1/auth/profile")
 
-    balance_resp, profile_resp = await asyncio.gather(
-        balance_task, profile_task, return_exceptions=True
+    balance_resp, profile_resp = cast(
+        tuple[httpx.Response | BaseException, httpx.Response | BaseException],
+        await asyncio.gather(balance_task, profile_task, return_exceptions=True),
     )
 
     # 解析 balance 接口

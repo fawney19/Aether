@@ -479,7 +479,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
         model = getattr(converted_request, "model", original_request_body.get("model", "unknown"))
 
         # 提前创建 pending 记录，让前端可以立即看到"处理中"
-        self._create_pending_usage(
+        pending_usage_created = self._create_pending_usage(
             model=model,
             is_stream=True,
             request_type="chat",
@@ -573,6 +573,8 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 request_body_ref=request_body_ref,
                 request_headers=original_headers,
                 request_body=original_request_body,
+                # 预创建失败时，回退到 TaskService 侧创建，避免丢失 pending 状态。
+                create_pending_usage=not pending_usage_created,
             )
             stream_generator = exec_result.response
             provider_name = exec_result.provider_name or "unknown"

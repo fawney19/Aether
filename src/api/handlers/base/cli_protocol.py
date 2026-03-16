@@ -80,7 +80,7 @@ class CliHandlerProtocol(Protocol):
         api_format: str | None = ...,
         request_headers: dict[str, Any] | None = ...,
         request_body: dict[str, Any] | None = ...,
-    ) -> None: ...
+    ) -> bool: ...
 
     def _build_request_metadata(
         self,

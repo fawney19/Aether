@@ -4,7 +4,7 @@ Sub2API 余额查询操作
 
 import asyncio
 import time
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -40,10 +40,13 @@ class Sub2ApiBalanceAction(BalanceAction):
         sub_endpoint = self.config.get("subscription_endpoint", "/api/v1/subscriptions/summary")
 
         try:
-            me_resp, sub_resp = await asyncio.gather(
-                client.get(me_endpoint),
-                client.get(sub_endpoint),
-                return_exceptions=True,
+            me_resp, sub_resp = cast(
+                tuple[httpx.Response | BaseException, httpx.Response | BaseException],
+                await asyncio.gather(
+                    client.get(me_endpoint),
+                    client.get(sub_endpoint),
+                    return_exceptions=True,
+                ),
             )
             response_time_ms = int((time.time() - start_time) * 1000)
 

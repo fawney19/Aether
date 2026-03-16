@@ -485,7 +485,7 @@ class BaseMessageHandler:
         api_format: str | None = None,
         request_headers: dict[str, Any] | None = None,
         request_body: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         """在请求开始时创建 pending 状态的 Usage 记录
 
         让前端可以立即看到"处理中"的请求，提升用户体验。
@@ -498,6 +498,8 @@ class BaseMessageHandler:
             api_format: API 格式
             request_headers: 原始请求头
             request_body: 原始请求体
+        Returns:
+            bool: True 表示已成功创建；False 表示创建失败（调用方可按需回退处理）。
         """
         try:
             UsageService.create_pending_usage(
@@ -512,9 +514,11 @@ class BaseMessageHandler:
                 request_headers=request_headers,
                 request_body=request_body,
             )
+            return True
         except Exception as exc:
             # 创建失败不影响主流程
             logger.warning(f"[{self.request_id}] Failed to create pending usage: {exc}")
+            return False
 
     def _update_usage_to_streaming(self, request_id: str | None = None) -> None:
         """更新 Usage 状态为 streaming（流式传输开始时调用）

@@ -68,6 +68,7 @@ class SyncTaskExecutionService:
         request_body_ref: dict[str, Any] | None,
         request_headers: dict[str, Any] | None,
         request_body: dict[str, Any] | None,
+        create_pending_usage: bool = True,
     ) -> ExecutionResult:
         """
         Unified candidate traversal loop for SYNC.
@@ -142,26 +143,32 @@ class SyncTaskExecutionService:
             affinity_key = str(user_api_key.id)
             user_id = str(user_api_key.user_id)
             api_format_norm = normalize_endpoint_signature(api_format)
+            user: User | None = None
             username_snapshot = None
             api_key_name_snapshot = getattr(user_api_key, "name", None)
-
-            # Keep pending usage creation behavior consistent with previous behavior
             try:
                 user = self.db.query(User).filter(User.id == user_api_key.user_id).first()
                 username_snapshot = getattr(user, "username", None) if user else None
-                UsageService.create_pending_usage(
-                    db=self.db,
-                    request_id=request_id,
-                    user=user,
-                    api_key=user_api_key,
-                    model=model_name,
-                    is_stream=is_stream,
-                    api_format=api_format_norm,
-                    request_headers=request_headers,
-                    request_body=request_body,
-                )
             except Exception as exc:
-                logger.warning("创建 pending 使用记录失败: {}", str(exc))
+                # username 仅用于审计快照，不应阻塞主请求链路。
+                logger.warning("查询用户快照失败: {}", str(exc))
+
+            # 默认由 TaskService 创建 pending 使用记录；已预创建的调用方可关闭。
+            if create_pending_usage:
+                try:
+                    UsageService.create_pending_usage(
+                        db=self.db,
+                        request_id=request_id,
+                        user=user,
+                        api_key=user_api_key,
+                        model=model_name,
+                        is_stream=is_stream,
+                        api_format=api_format_norm,
+                        request_headers=request_headers,
+                        request_body=request_body,
+                    )
+                except Exception as exc:
+                    logger.warning("创建 pending 使用记录失败: {}", str(exc))
 
             all_candidates, global_model_id = await candidate_resolver.fetch_candidates(
                 api_format=api_format_norm,

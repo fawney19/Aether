@@ -182,6 +182,9 @@ class StreamTelemetryRecorder:
                 response_time_ms=response_time_ms,
                 error_message=f"记录统计信息失败: {str(e)[:200]}",
             )
+        finally:
+            # 遥测写入后主动释放大列表，避免长流式请求对象滞留在 worker 堆中。
+            ctx.release_recorded_chunks()
 
     async def _record_success(
         self,

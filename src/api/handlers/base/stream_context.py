@@ -194,6 +194,15 @@ class StreamContext:
         self.needs_conversion = False
         self.selected_base_url = None
 
+    def release_recorded_chunks(self) -> None:
+        """
+        主动释放流式记录的 chunk 列表，降低长连接后对象滞留导致的内存占用。
+
+        仅清理用于审计/遥测的缓存，不影响已计算完成的统计字段。
+        """
+        self.parsed_chunks = []
+        self.provider_parsed_chunks = []
+
     @property
     def collected_text(self) -> str:
         """已收集的文本内容（按需拼接，避免在流式过程中频繁做字符串拷贝）"""
