@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
@@ -29,12 +30,23 @@ if TYPE_CHECKING:
     from src.api.handlers.base.cli_protocol import CliHandlerProtocol
 
 
+def _read_stream_idle_timeout_seconds() -> float:
+    raw_value = os.getenv("STREAM_IDLE_TIMEOUT_SECONDS", "30")
+    try:
+        parsed = float(raw_value)
+    except (TypeError, ValueError):
+        return 30.0
+    return parsed if parsed > 0 else 30.0
+
+
 class CliMonitorMixin:
     """监控和统计相关方法的 Mixin"""
 
     # CancelledError 归因时，断连检查参数（秒）
     CANCEL_DISCONNECT_CHECK_TIMEOUT_SECONDS = 0.5
     CANCEL_DISCONNECT_RETRY_DELAYS_SECONDS = (0.1, 0.2)
+    # 流式传输过程中若长时间没有任何 chunk，提前判定为 idle timeout，避免一直等到 worker 超时
+    STREAM_IDLE_TIMEOUT_SECONDS = _read_stream_idle_timeout_seconds()
 
     async def _probe_client_disconnect(
         self,
@@ -115,8 +127,26 @@ class CliMonitorMixin:
 
         last_chunk_time = time_module.time()
         chunk_count = 0
+        idle_timeout_triggered = False
+        idle_timeout = self.STREAM_IDLE_TIMEOUT_SECONDS
+        parent_task = asyncio.current_task()
+        idle_watch_task: asyncio.Task[None] | None = None
+
+        async def watch_stream_idle_timeout() -> None:
+            nonlocal idle_timeout_triggered
+            if parent_task is None:
+                return
+            poll_interval = min(1.0, max(0.1, idle_timeout / 5))
+            while not ctx.has_completion:
+                await asyncio.sleep(poll_interval)
+                if (time_module.time() - last_chunk_time) <= idle_timeout:
+                    continue
+                idle_timeout_triggered = True
+                parent_task.cancel()
+                return
 
         try:
+            idle_watch_task = asyncio.create_task(watch_stream_idle_timeout())
             if http_request is not None:
                 # 使用后台任务检测断连，完全不阻塞流式传输
                 disconnected = False
@@ -158,12 +188,26 @@ class CliMonitorMixin:
                         await check_task
                     except asyncio.CancelledError:
                         pass
+                    if idle_watch_task is not None:
+                        idle_watch_task.cancel()
+                        try:
+                            await idle_watch_task
+                        except asyncio.CancelledError:
+                            pass
             else:
                 # 无 http_request，仅被动监控
-                async for chunk in stream_generator:
-                    last_chunk_time = time_module.time()
-                    chunk_count += 1
-                    yield chunk
+                try:
+                    async for chunk in stream_generator:
+                        last_chunk_time = time_module.time()
+                        chunk_count += 1
+                        yield chunk
+                finally:
+                    if idle_watch_task is not None:
+                        idle_watch_task.cancel()
+                        try:
+                            await idle_watch_task
+                        except asyncio.CancelledError:
+                            pass
 
         except asyncio.CancelledError:
             # 注意：CancelledError 不等于"用户手动取消"，它既可能是客户端断连触发，
@@ -172,6 +216,28 @@ class CliMonitorMixin:
             time_since_last_chunk = time_module.time() - last_chunk_time
             if not ctx.has_completion:
                 ctx.ensure_estimated_output_tokens()
+
+            if not ctx.has_completion and idle_timeout_triggered:
+                ctx.status_code = 504
+                ctx.error_message = "stream_idle_timeout"
+                cancel_origin = "stream_idle_timeout"
+                logger.warning(
+                    f"ID:{ctx.request_id} | Stream idle timeout: "
+                    f"idle_timeout={idle_timeout:.0f}s, "
+                    f"chunks={chunk_count}, "
+                    f"has_completion={ctx.has_completion}, "
+                    f"time_since_last_chunk={time_since_last_chunk:.2f}s, "
+                    f"output_tokens={ctx.output_tokens}"
+                )
+                ctx.upstream_response = (
+                    f"cancel_origin={cancel_origin}, "
+                    f"chunks={chunk_count}, "
+                    f"has_completion={ctx.has_completion}, "
+                    f"time_since_last_chunk={time_since_last_chunk:.2f}s, "
+                    f"output_tokens={ctx.output_tokens}, "
+                    f"idle_timeout={idle_timeout:.0f}s"
+                )
+                raise
 
             is_client_disconnected = False
             disconnect_check_uncertain = False
