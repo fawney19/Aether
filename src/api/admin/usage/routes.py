@@ -1946,19 +1946,19 @@ async def _resolve_replay_model_name(
         )
         return mapped_name, "model_mapping"
 
-    if same_provider and same_endpoint:
-        return source_model, "none"
+    if not (same_provider and same_endpoint):
+        logger.debug(
+            "[replay] No explicit model mapping for '{}' on provider '{}' (endpoint={}, api_format={}); "
+            "forwarding original source model",
+            source_model,
+            target_provider.name or str(target_provider.id),
+            str(getattr(target_endpoint, "id", "") or "unknown"),
+            target_api_format or "unknown",
+        )
 
-    provider_name = target_provider.name or str(target_provider.id)
-    endpoint_id = str(getattr(target_endpoint, "id", "") or "unknown")
-    api_format = target_api_format or "unknown"
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            f"Target provider '{provider_name}' does not support model '{source_model}' "
-            f"(endpoint={endpoint_id}, api_format={api_format})"
-        ),
-    )
+    # Keep replay aligned with the normal request path: if no global-model mapping exists,
+    # forward the original source model name and let the target provider validate it.
+    return source_model, "none"
 
 
 def _apply_replay_model_to_body(
