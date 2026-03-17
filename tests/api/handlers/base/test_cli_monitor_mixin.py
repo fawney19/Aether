@@ -39,6 +39,12 @@ async def _yield_once_then_cancel(ctx: StreamContext) -> AsyncGenerator[bytes, N
     raise asyncio.CancelledError()
 
 
+async def _yield_once_then_hang(ctx: StreamContext) -> AsyncGenerator[bytes, None]:
+    ctx.append_text("partial output")
+    yield b"data: chunk\n\n"
+    await asyncio.sleep(3600)
+
+
 @pytest.mark.asyncio
 async def test_create_monitored_stream_marks_client_disconnected_when_confirmed() -> None:
     monitor = _DummyMonitor()
@@ -113,3 +119,23 @@ async def test_create_monitored_stream_estimates_output_tokens_before_unknown_ca
     assert ctx.error_message == "cancelled_unknown"
     assert ctx.output_tokens == expected_output_tokens
     assert f"output_tokens={expected_output_tokens}" in (ctx.upstream_response or "")
+
+
+@pytest.mark.asyncio
+async def test_create_monitored_stream_marks_idle_timeout_before_worker_timeout() -> None:
+    monitor = _DummyMonitor()
+    monitor.CANCEL_DISCONNECT_RETRY_DELAYS_SECONDS = ()
+    monitor.STREAM_IDLE_TIMEOUT_SECONDS = 1.0
+    ctx = StreamContext(model="test-model", api_format="openai:cli", request_id="req-idle-timeout")
+
+    monitored = monitor._create_monitored_stream(ctx, _yield_once_then_hang(ctx), None)
+
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in monitored:
+            pass
+
+    expected_output_tokens = max(1, len("partial output") // 4)
+    assert ctx.status_code == 504
+    assert ctx.error_message == "stream_idle_timeout"
+    assert ctx.output_tokens == expected_output_tokens
+    assert "cancel_origin=stream_idle_timeout" in (ctx.upstream_response or "")
