@@ -25,7 +25,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     nginx \
     supervisor \
     libpq5 \
-    curl
+    curl \
+    libjemalloc2
+RUN set -eux; \
+    jemalloc_path="$(find /usr/lib -type f -name 'libjemalloc.so.2' | head -n1)"; \
+    [ -n "$jemalloc_path" ]; \
+    ln -sf "$jemalloc_path" /usr/local/lib/libjemalloc.so.2
 # 从 base 镜像复制 Python 包
 COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 # 只复制需要的 Python 可执行文件
@@ -199,7 +204,7 @@ RUN printf '%s\n' \
     'stdout_logfile_maxbytes=0' \
     'stderr_logfile=/dev/stderr' \
     'stderr_logfile_maxbytes=0' \
-    'environment=PYTHONUNBUFFERED=1,PYTHONIOENCODING=utf-8,LANG=C.UTF-8,LC_ALL=C.UTF-8,DOCKER_CONTAINER=true,MALLOC_ARENA_MAX=2' \
+    'environment=PYTHONUNBUFFERED=1,PYTHONIOENCODING=utf-8,LANG=C.UTF-8,LC_ALL=C.UTF-8,DOCKER_CONTAINER=true,LD_PRELOAD=/usr/local/lib/libjemalloc.so.2,MALLOC_CONF="background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000"' \
     '' \
     '[program:tunnel-hub]' \
     'command=/usr/local/bin/aether-hub --bind 0.0.0.0:8085' \
@@ -220,7 +225,8 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
-    MALLOC_ARENA_MAX=2 \
+    LD_PRELOAD=/usr/local/lib/libjemalloc.so.2 \
+    MALLOC_CONF=background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000 \
     PORT=8084 \
     GUNICORN_WORKERS=2 \
     MAX_REQUESTS=4000
