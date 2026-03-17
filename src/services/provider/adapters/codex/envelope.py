@@ -69,18 +69,14 @@ class CodexOAuthEnvelope:
         # Compact sentinel may have been popped earlier by finalize_provider_request;
         # prefer the pre-set context var (set by adapter), fall back to request body.
         existing_ctx = get_codex_request_context()
-        user_api_key_id = existing_ctx.user_api_key_id if existing_ctx else None
         is_compact = (existing_ctx.is_compact if existing_ctx else False) or bool(
             request_body.get("_aether_compact", False)
         )
-        patched_request_body = patch_openai_cli_request_for_codex(
-            request_body,
-            user_api_key_id=user_api_key_id,
-        )
+        patched_request_body = patch_openai_cli_request_for_codex(request_body)
         set_codex_request_context(
             CodexRequestContext(
                 account_id=str(account_id) if account_id else None,
-                user_api_key_id=user_api_key_id,
+                user_api_key_id=existing_ctx.user_api_key_id if existing_ctx else None,
                 is_compact=is_compact,
             )
         )

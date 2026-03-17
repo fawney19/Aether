@@ -15,7 +15,6 @@ import json
 from typing import Any, cast
 
 from src.core.api_format.conversion.internal import (
-    ContentType,
     ErrorType,
     ImageBlock,
     StopReason,
@@ -182,6 +181,60 @@ def test_openai_request_tool_calls_and_tool_role_roundtrip() -> None:
     assert tool_out["role"] == "tool"
     assert tool_out["tool_call_id"] == "call_1"
     assert json.loads(tool_out["content"]) == {"temp_c": 20, "unit": "C"}
+
+
+def test_openai_request_preserves_empty_string_tool_call_arguments() -> None:
+    n = OpenAINormalizer()
+
+    req = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "user", "content": "ping"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_empty",
+                        "type": "function",
+                        "function": {"name": "noop", "arguments": ""},
+                    }
+                ],
+            },
+        ],
+    }
+
+    internal = n.request_to_internal(req)
+    tool_use = next(b for b in internal.messages[1].content if isinstance(b, ToolUseBlock))
+    assert tool_use.tool_input == {}
+    assert tool_use.extra["raw"]["arguments"] == ""
+
+    out = n.request_from_internal(internal)
+    assert out["messages"][1]["tool_calls"][0]["function"]["arguments"] == ""
+
+
+def test_openai_request_preserves_empty_string_legacy_function_call_arguments() -> None:
+    n = OpenAINormalizer()
+
+    req = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "user", "content": "ping"},
+            {
+                "role": "assistant",
+                "content": "",
+                "function_call": {"name": "noop", "arguments": ""},
+            },
+        ],
+    }
+
+    internal = n.request_to_internal(req)
+    tool_use = next(b for b in internal.messages[1].content if isinstance(b, ToolUseBlock))
+    assert tool_use.tool_input == {}
+    assert tool_use.extra["raw"]["arguments"] == ""
+
+    out = n.request_from_internal(internal)
+    assert out["messages"][1]["tool_calls"][0]["function"]["arguments"] == ""
 
 
 def test_openai_request_content_image_and_unknown_drop() -> None:

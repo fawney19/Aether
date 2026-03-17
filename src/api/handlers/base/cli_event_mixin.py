@@ -11,6 +11,7 @@ from src.api.handlers.base.parsers import get_parser_for_format
 from src.api.handlers.base.stream_context import StreamContext
 from src.api.handlers.base.utils import get_format_converter_registry
 from src.core.logger import logger
+from src.core.usage_tokens import extract_cache_creation_tokens, extract_cache_read_tokens
 from src.services.provider.behavior import get_provider_behavior
 from src.utils.sse_parser import SSEEventParser
 
@@ -261,12 +262,10 @@ class CliEventMixin:
                 }
 
         if usage and isinstance(usage, dict):
-            new_input = usage.get("input_tokens", 0) or 0
-            new_output = usage.get("output_tokens", 0) or 0
-            new_cached = usage.get("cache_read_tokens") or usage.get("cache_read_input_tokens") or 0
-            new_cache_creation = (
-                usage.get("cache_creation_tokens") or usage.get("cache_creation_input_tokens") or 0
-            )
+            new_input = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
+            new_output = usage.get("output_tokens") or usage.get("completion_tokens") or 0
+            new_cached = extract_cache_read_tokens(usage)
+            new_cache_creation = extract_cache_creation_tokens(usage)
 
             # 取最大值更新（与 _process_event_data 相同的策略）
             if new_input > ctx.input_tokens:

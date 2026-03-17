@@ -44,6 +44,7 @@ from src.core.exceptions import (
     ProviderTimeoutException,
 )
 from src.core.logger import logger
+from src.core.usage_tokens import extract_cache_creation_tokens, extract_cache_read_tokens
 from src.models.database import Provider, ProviderEndpoint
 from src.services.provider.behavior import get_provider_behavior
 from src.utils.perf import PerfRecorder
@@ -327,12 +328,10 @@ class StreamProcessor:
                 }
 
         if usage and isinstance(usage, dict):
-            new_input = usage.get("input_tokens", 0) or 0
-            new_output = usage.get("output_tokens", 0) or 0
-            new_cached = usage.get("cache_read_tokens") or usage.get("cache_read_input_tokens") or 0
-            new_cache_creation = (
-                usage.get("cache_creation_tokens") or usage.get("cache_creation_input_tokens") or 0
-            )
+            new_input = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
+            new_output = usage.get("output_tokens") or usage.get("completion_tokens") or 0
+            new_cached = extract_cache_read_tokens(usage)
+            new_cache_creation = extract_cache_creation_tokens(usage)
 
             if new_input > ctx.input_tokens:
                 ctx.input_tokens = new_input

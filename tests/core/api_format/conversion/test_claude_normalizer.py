@@ -15,16 +15,19 @@ from typing import Any, cast
 
 from src.core.api_format.conversion.internal import (
     ErrorType,
-    ImageBlock,
+    InternalMessage,
+    InternalRequest,
+    Role,
     StopReason,
     TextBlock,
+    ToolChoice,
+    ToolChoiceType,
     ToolResultBlock,
     ToolUseBlock,
     UnknownBlock,
 )
 from src.core.api_format.conversion.normalizers.claude import ClaudeNormalizer
 from src.core.api_format.conversion.stream_events import (
-    ContentBlockStartEvent,
     ContentDeltaEvent,
     MessageStartEvent,
     MessageStopEvent,
@@ -389,3 +392,117 @@ def test_claude_system_array_format() -> None:
     assert "You are Claude Code" in internal.system
     assert "Extract file paths" in internal.system
     assert "\n\n" in internal.system
+
+
+def test_claude_request_reuses_raw_tool_choice_and_stabilizes_message_sequence() -> None:
+    n = ClaudeNormalizer()
+    internal = n.request_to_internal(
+        {
+            "model": "claude-3-sonnet",
+            "messages": [{"role": "assistant", "content": [{"type": "text", "text": "hi"}]}],
+            "tool_choice": {"type": "tool", "name": "read_file", "disable_parallel_tool_use": True},
+            "max_tokens": 16,
+        }
+    )
+
+    internal.messages = [
+        InternalMessage(role=Role.ASSISTANT, content=internal.messages[0].content),
+        InternalMessage(role=Role.ASSISTANT, content=[TextBlock(text="again")]),
+    ]
+    internal.tool_choice = ToolChoice(
+        type=ToolChoiceType.TOOL,
+        tool_name="read_file",
+        extra={"claude": {"type": "tool", "name": "read_file", "disable_parallel_tool_use": True}},
+    )
+
+    out = n.request_from_internal(internal)
+    assert out["tool_choice"] == {
+        "type": "tool",
+        "name": "read_file",
+        "disable_parallel_tool_use": True,
+    }
+    assert [m["role"] for m in out["messages"]] == ["user", "assistant"]
+    assert out["messages"][0]["content"] == []
+    assert isinstance(out["messages"][1]["content"], str)
+    assert out["messages"][1]["content"] == "hi\nagain"
+
+
+def test_claude_request_preserves_tool_and_text_order_when_merging_adjacent_roles() -> None:
+    n = ClaudeNormalizer()
+    internal = InternalRequest(
+        model="claude-3-sonnet",
+        messages=[
+            InternalMessage(role=Role.USER, content=[TextBlock(text="weather?")]),
+            InternalMessage(
+                role=Role.ASSISTANT,
+                content=[
+                    ToolUseBlock(
+                        tool_id="toolu_1",
+                        tool_name="get_weather",
+                        tool_input={"city": "SF"},
+                    )
+                ],
+            ),
+            InternalMessage(role=Role.ASSISTANT, content=[TextBlock(text="Use this result.")]),
+            InternalMessage(
+                role=Role.USER,
+                content=[ToolResultBlock(tool_use_id="toolu_1", output={"temp_c": 20})],
+            ),
+            InternalMessage(role=Role.USER, content=[TextBlock(text="Received.")]),
+        ],
+        max_tokens=16,
+    )
+
+    out = n.request_from_internal(internal)
+    out_messages: list[dict[str, Any]] = out["messages"]
+
+    assert [m["role"] for m in out_messages] == ["user", "assistant", "user"]
+    assistant_blocks = cast(list[dict[str, Any]], out_messages[1]["content"])
+    assert [block["type"] for block in assistant_blocks] == ["tool_use", "text"]
+    assert assistant_blocks[1]["text"] == "Use this result."
+
+    user_blocks = cast(list[dict[str, Any]], out_messages[2]["content"])
+    assert [block["type"] for block in user_blocks] == ["tool_result", "text"]
+    assert user_blocks[0]["content"] == {"temp_c": 20}
+    assert user_blocks[1]["text"] == "Received."
+
+
+def test_claude_request_preserves_cache_control_system_block_shape() -> None:
+    n = ClaudeNormalizer()
+    internal = n.request_to_internal(
+        {
+            "model": "claude-3-sonnet",
+            "messages": [{"role": "user", "content": "hello"}],
+            "system": [
+                {"type": "text", "text": "one", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "two"},
+            ],
+            "max_tokens": 16,
+        }
+    )
+
+    out = n.request_from_internal(internal)
+    assert isinstance(out["system"], list)
+    assert out["system"] == [
+        {"type": "text", "text": "one", "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "two"},
+    ]
+
+
+def test_claude_request_string_system_stays_string_without_cache_control() -> None:
+    n = ClaudeNormalizer()
+    internal = n.request_to_internal(
+        {
+            "model": "claude-3-sonnet",
+            "messages": [{"role": "user", "content": "hello"}],
+            "system": [
+                {"type": "text", "text": "one"},
+                {"type": "text", "text": "two"},
+            ],
+            "max_tokens": 16,
+        }
+    )
+
+    out = n.request_from_internal(internal)
+    assert out["system"] == "one\n\ntwo"
+    assert isinstance(out["system"], str)

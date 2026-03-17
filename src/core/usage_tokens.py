@@ -107,7 +107,39 @@ def extract_cache_creation_tokens_detail(usage: dict[str, Any]) -> tuple[int, in
     return old, 0, 0
 
 
+def extract_cache_read_tokens(usage: dict[str, Any]) -> int:
+    """
+    提取缓存读取 tokens（兼容多种 OpenAI / Claude / Gemini 字段命名）。
+
+    优先级：
+    1. 直接字段：cache_read_input_tokens / cache_read_tokens
+    2. OpenAI Responses: input_tokens_details.cached_tokens
+    3. OpenAI Chat: prompt_tokens_details.cached_tokens
+    4. 通用回退：cached_tokens
+
+    说明：
+    - 只要检测到更高优先级字段存在，即便值为 0 也不继续回退，
+      避免被较低优先级字段覆盖。
+    """
+    if "cache_read_input_tokens" in usage:
+        return int(usage.get("cache_read_input_tokens", 0) or 0)
+
+    if "cache_read_tokens" in usage:
+        return int(usage.get("cache_read_tokens", 0) or 0)
+
+    input_details = usage.get("input_tokens_details")
+    if isinstance(input_details, dict) and "cached_tokens" in input_details:
+        return int(input_details.get("cached_tokens", 0) or 0)
+
+    prompt_details = usage.get("prompt_tokens_details")
+    if isinstance(prompt_details, dict) and "cached_tokens" in prompt_details:
+        return int(prompt_details.get("cached_tokens", 0) or 0)
+
+    return int(usage.get("cached_tokens", 0) or 0)
+
+
 __all__ = [
     "extract_cache_creation_tokens",
     "extract_cache_creation_tokens_detail",
+    "extract_cache_read_tokens",
 ]

@@ -27,9 +27,69 @@ from src.core.api_format import (
     resolve_header_name_case,
 )
 from src.core.crypto import crypto_service
+from src.core.logger import logger
 from src.models.endpoint_models import _CONDITION_OPS, _TYPE_IS_VALUES, parse_re_flags
 from src.services.provider.auth import get_provider_auth  # noqa: F401
 from src.services.provider.envelope import ProviderEnvelope
+
+
+def _payload_item_count(value: Any) -> int | None:
+    """统计顶层 prompt-bearing 容器项数量；标量按 1 处理。"""
+    if isinstance(value, list):
+        return len(value)
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)):
+        return 1 if value else 0
+    if isinstance(value, dict):
+        return 1 if value else 0
+    return 1
+
+
+def summarize_request_payload_shape(
+    payload: dict[str, Any],
+    *,
+    provider_api_format: str | None,
+    protected_body_keys: frozenset[str] | None,
+    body_rules: Any,
+) -> dict[str, Any]:
+    """生成最终出站 payload 的结构化摘要，避免记录正文。"""
+    tools = payload.get("tools")
+    tool_count = len(tools) if isinstance(tools, list) else None
+
+    function_declaration_count = 0
+    if isinstance(tools, list):
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            decls = tool.get("function_declarations") or tool.get("functionDeclarations")
+            if isinstance(decls, list):
+                function_declaration_count += len(decls)
+
+    return {
+        "format": str(provider_api_format or "").strip().lower() or None,
+        "top_level_keys": sorted(payload.keys()),
+        "message_count": _payload_item_count(payload.get("messages")),
+        "input_count": _payload_item_count(payload.get("input")),
+        "contents_count": _payload_item_count(payload.get("contents")),
+        "tool_count": tool_count,
+        "function_declaration_count": function_declaration_count,
+        "has_system": any(
+            k in payload for k in ("system", "system_instruction", "systemInstruction")
+        ),
+        "has_instructions": "instructions" in payload,
+        "has_tool_choice": any(
+            k in payload for k in ("tool_choice", "toolChoice", "tool_config", "toolConfig")
+        ),
+        "has_generation_config": any(
+            k in payload for k in ("generation_config", "generationConfig")
+        ),
+        "has_prompt_cache_key": bool(str(payload.get("prompt_cache_key") or "").strip()),
+        "protected_body_keys_enabled": bool(protected_body_keys),
+        "protected_body_keys": sorted(protected_body_keys or ()),
+        "body_rule_count": len(body_rules) if isinstance(body_rules, list) else 0,
+    }
+
 
 # ==============================================================================
 # 统一的头部配置常量
@@ -45,6 +105,38 @@ PROTECTED_BODY_FIELDS: frozenset[str] = frozenset(
         "stream",  # 流式标志由系统管理
     }
 )
+
+# cache-sensitive 顶层字段：用于阻止 endpoint body_rules 在最终出站前
+# 二次改写 prompt-bearing 结构，破坏上游 prompt cache 一致性。
+_CACHE_SENSITIVE_BODY_FIELDS_BY_FORMAT: dict[str, frozenset[str]] = {
+    "openai:chat": frozenset({"messages", "tools", "tool_choice"}),
+    "openai:cli": frozenset({"input", "instructions", "tools", "tool_choice", "prompt_cache_key"}),
+    "openai:compact": frozenset(
+        {"input", "instructions", "tools", "tool_choice", "prompt_cache_key"}
+    ),
+    "claude:chat": frozenset({"messages", "system", "tools", "tool_choice"}),
+    "gemini:chat": frozenset(
+        {
+            "contents",
+            "system_instruction",
+            "systemInstruction",
+            "tools",
+            "tool_config",
+            "toolConfig",
+            "generation_config",
+            "generationConfig",
+        }
+    ),
+}
+
+
+def get_cache_sensitive_protected_body_keys(provider_api_format: str | None) -> frozenset[str]:
+    """根据目标 Provider API 格式返回需要保护的顶层请求字段。"""
+    fmt = str(provider_api_format or "").strip().lower()
+    extra = _CACHE_SENSITIVE_BODY_FIELDS_BY_FORMAT.get(fmt, frozenset())
+    if not extra:
+        return PROTECTED_BODY_FIELDS
+    return frozenset({*PROTECTED_BODY_FIELDS, *extra})
 
 
 # ==============================================================================
@@ -1129,6 +1221,8 @@ class RequestBuilder(ABC):
         extra_headers: dict[str, str] | None = None,
         pre_computed_auth: tuple[str, str] | None = None,
         envelope: ProviderEnvelope | None = None,
+        protected_body_keys: frozenset[str] | None = None,
+        provider_api_format: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, str]]:
         """
         构建完整的请求（请求体 + 请求头）
@@ -1142,6 +1236,8 @@ class RequestBuilder(ABC):
             is_stream: 是否为流式请求
             extra_headers: 额外请求头
             pre_computed_auth: 预先计算的认证信息 (auth_header, auth_value)
+            protected_body_keys: body_rules 不允许修改的顶层请求字段
+            provider_api_format: 运行时实际生效的 Provider API 格式，用于准确记录摘要日志
 
         Returns:
             Tuple[payload, headers]
@@ -1155,7 +1251,23 @@ class RequestBuilder(ABC):
         # 应用请求体规则（如果 endpoint 配置了 body_rules）
         body_rules = getattr(endpoint, "body_rules", None)
         if body_rules:
-            payload = apply_body_rules(payload, body_rules, original_body=original_body)
+            payload = apply_body_rules(
+                payload,
+                body_rules,
+                protected_keys=protected_body_keys,
+                original_body=original_body,
+            )
+
+        effective_provider_api_format = provider_api_format or getattr(endpoint, "api_format", None)
+        logger.debug(
+            "[RequestBuilder] outbound payload summary: {}",
+            summarize_request_payload_shape(
+                payload,
+                provider_api_format=effective_provider_api_format,
+                protected_body_keys=protected_body_keys,
+                body_rules=body_rules,
+            ),
+        )
 
         headers = self.build_headers(
             original_headers,
@@ -1183,8 +1295,8 @@ class PassthroughRequestBuilder(RequestBuilder):
         self,
         original_body: dict[str, Any],
         *,
-        mapped_model: str | None = None,  # noqa: ARG002 - 由 apply_mapped_model 处理
-        is_stream: bool = False,  # noqa: ARG002 - 保留原始值，不自动添加
+        mapped_model: str | None = None,
+        is_stream: bool = False,
     ) -> dict[str, Any]:
         """
         透传请求体 - 原样复制，不做任何修改
@@ -1193,6 +1305,7 @@ class PassthroughRequestBuilder(RequestBuilder):
         - model: 由各 handler 的 apply_mapped_model 方法处理
         - stream: 保留客户端原始值（不同 API 处理方式不同）
         """
+        del mapped_model, is_stream
         return dict(original_body)
 
     @staticmethod

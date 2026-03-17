@@ -340,6 +340,29 @@ class StreamContext:
         """检查是否因客户端断开连接而结束"""
         return self.status_code == 499
 
+    def has_partial_response(self) -> bool:
+        """是否已收到部分流式响应数据。"""
+        return self.data_count > 0 or self.chunk_count > 0 or self.collected_text_length > 0
+
+    def ensure_estimated_output_tokens(self) -> bool:
+        """在缺少 usage 时，基于已收集文本补充输出 tokens。"""
+        if self.output_tokens > 0 or self.collected_text_length <= 0:
+            return False
+        self.output_tokens = max(1, self.collected_text_length // 4)
+        return True
+
+    def should_estimate_incomplete_tokens(self) -> bool:
+        """流异常结束且尚无 usage 时，是否应做兜底 token 估算。
+
+        使用 or 而非 and：CancelledError 路径中 ensure_estimated_output_tokens
+        可能已补了 output_tokens，但 input_tokens 仍为 0，此时仍需估算。
+        """
+        return (
+            not self.has_completion
+            and (self.input_tokens == 0 or self.output_tokens == 0)
+            and self.has_partial_response()
+        )
+
     def set_ttfb_ms(self, ms: int) -> None:
         """将首字节响应耗时（TTFB）注入到 proxy_info 中"""
         if self.proxy_info is not None:

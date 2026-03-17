@@ -23,7 +23,10 @@ from src.core.api_format.conversion.internal import (
     ToolUseBlock,
     UnknownBlock,
 )
-from src.core.api_format.conversion.normalizers.gemini import GeminiNormalizer
+from src.core.api_format.conversion.normalizers.gemini import (
+    GeminiNormalizer,
+    compact_gemini_contents,
+)
 from src.core.api_format.conversion.stream_events import (
     ContentDeltaEvent,
     MessageStartEvent,
@@ -31,6 +34,7 @@ from src.core.api_format.conversion.stream_events import (
     ToolCallDeltaEvent,
 )
 from src.core.api_format.conversion.stream_state import StreamState
+from src.core.api_format.schema_utils import clean_gemini_schema
 
 
 def test_gemini_request_system_and_generation_config_roundtrip() -> None:
@@ -85,7 +89,7 @@ def test_gemini_request_system_and_generation_config_roundtrip() -> None:
     assert out["generation_config"]["max_output_tokens"] == 10
     assert out["generation_config"]["stop_sequences"] == ["A", "B"]
     assert out["tools"][0]["function_declarations"][0]["name"] == "get_weather"
-    assert out["tool_config"]["function_calling_config"]["mode"] == "ANY"
+    assert out["tool_config"] == {"functionCallingConfig": {"mode": "ANY"}}
 
 
 def test_gemini_request_parts_image_tool_and_unknown_drop() -> None:
@@ -279,3 +283,81 @@ def test_gemini_error_conversion() -> None:
     out = n.error_from_internal(internal)
     assert out["error"]["status"] == "RESOURCE_EXHAUSTED"
     assert out["error"]["message"] == "slow down"
+
+
+def test_gemini_compact_contents_drops_invalid_and_merges_same_role() -> None:
+    contents: list[dict[str, Any]] = [
+        {"role": "user", "parts": [{"text": "hi"}, {"invalid": True}]},
+        {"role": "user", "parts": [{"text": "again"}]},
+        {"role": "model", "parts": [{"bad": 1}]},
+        {"role": "model", "parts": [{"text": "ok"}]},
+        {"role": "user", "parts": "bad"},
+    ]
+
+    compacted = compact_gemini_contents(contents)
+    assert compacted == [
+        {"role": "user", "parts": [{"text": "hi"}, {"text": "again"}]},
+        {"role": "model", "parts": [{"text": "ok"}]},
+    ]
+
+
+def test_gemini_request_reuses_raw_tool_config_and_cleans_schema_deterministically() -> None:
+    n = GeminiNormalizer()
+    req = {
+        "model": "gemini-1.5",
+        "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+        "tools": [
+            {
+                "functionDeclarations": [
+                    {
+                        "name": "read_file",
+                        "description": "Read file",
+                        "parameters": {
+                            "allOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {"b": {"type": "string"}},
+                                    "required": ["b", "a"],
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {"a": {"type": "string"}},
+                                    "required": ["a", "c"],
+                                },
+                            ]
+                        },
+                    }
+                ]
+            }
+        ],
+        "toolConfig": {
+            "functionCallingConfig": {
+                "mode": "ANY",
+                "allowedFunctionNames": ["read_file"],
+            }
+        },
+    }
+
+    internal = n.request_to_internal(req)
+    out = n.request_from_internal(internal)
+
+    assert out["tool_config"] == {
+        "functionCallingConfig": {
+            "mode": "ANY",
+            "allowedFunctionNames": ["read_file"],
+        }
+    }
+    params = out["tools"][0]["function_declarations"][0]["parameters"]
+    assert params["required"] == ["b", "a"]
+    assert list(params["properties"].keys()) == ["b", "a"]
+
+
+def test_clean_gemini_schema_allof_required_order_is_deterministic() -> None:
+    schema = {
+        "allOf": [
+            {"type": "object", "properties": {"z": {"type": "string"}}, "required": ["z", "a"]},
+            {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a", "m"]},
+        ]
+    }
+    clean_gemini_schema(schema)
+    assert schema["required"] == ["z", "a"]

@@ -1,6 +1,9 @@
 from typing import Any
 
-from src.api.handlers.base.request_builder import apply_body_rules
+from src.api.handlers.base.request_builder import (
+    apply_body_rules,
+    get_cache_sensitive_protected_body_keys,
+)
 
 
 class TestApplyBodyRulesNestedPaths:
@@ -47,7 +50,7 @@ class TestApplyBodyRulesNestedPaths:
         assert result["extra"]["model"] == "y"  # extra 不受保护
 
     def test_escaped_dot(self) -> None:
-        body = {}
+        body: dict[str, Any] = {}
         result = apply_body_rules(
             body,
             [
@@ -80,7 +83,7 @@ class TestApplyBodyRulesNestedPaths:
         assert result == {"a": {"b": 2}}
 
     def test_set_complex_value(self) -> None:
-        body = {}
+        body: dict[str, Any] = {}
         result = apply_body_rules(
             body,
             [
@@ -976,7 +979,7 @@ class TestConditionalBodyRules:
         assert result["feature"] is True
 
     def test_condition_on_missing_nested_path(self) -> None:
-        body = {"config": {}}
+        body: dict[str, Any] = {"config": {}}
         result = apply_body_rules(
             body,
             [
@@ -1511,3 +1514,117 @@ class TestItemCondition:
             original_body=original_body,
         )
         assert result["matched"] is True
+
+
+class TestProtectedBodyKeys:
+    def test_get_cache_sensitive_protected_body_keys_by_format(self) -> None:
+        assert get_cache_sensitive_protected_body_keys("openai:chat") == frozenset(
+            {"model", "stream", "messages", "tools", "tool_choice"}
+        )
+        assert get_cache_sensitive_protected_body_keys("openai:cli") == frozenset(
+            {
+                "model",
+                "stream",
+                "input",
+                "instructions",
+                "tools",
+                "tool_choice",
+                "prompt_cache_key",
+            }
+        )
+        assert get_cache_sensitive_protected_body_keys("claude:chat") == frozenset(
+            {"model", "stream", "messages", "system", "tools", "tool_choice"}
+        )
+        assert get_cache_sensitive_protected_body_keys("gemini:chat") == frozenset(
+            {
+                "model",
+                "stream",
+                "contents",
+                "system_instruction",
+                "systemInstruction",
+                "tools",
+                "tool_config",
+                "toolConfig",
+                "generation_config",
+                "generationConfig",
+            }
+        )
+
+    def test_gemini_camelcase_alias_prompt_fields_are_protected(self) -> None:
+        body = {
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "systemInstruction": {"parts": [{"text": "system"}]},
+            "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}},
+            "generationConfig": {"temperature": 0.1},
+            "metadata": {"safe": True},
+        }
+        protected_keys = get_cache_sensitive_protected_body_keys("gemini:chat")
+
+        result = apply_body_rules(
+            body,
+            [
+                {"action": "set", "path": "systemInstruction.parts[0].text", "value": "mutated"},
+                {"action": "drop", "path": "toolConfig"},
+                {"action": "rename", "from": "generationConfig", "to": "generation_config"},
+                {"action": "append", "path": "contents", "value": {"role": "model", "parts": []}},
+                {
+                    "action": "insert",
+                    "path": "contents",
+                    "index": 0,
+                    "value": {"role": "user", "parts": [{"text": "preface"}]},
+                },
+                {"action": "set", "path": "metadata.safe", "value": False},
+            ],
+            protected_keys=protected_keys,
+        )
+
+        assert result["contents"] == [{"role": "user", "parts": [{"text": "hi"}]}]
+        assert result["systemInstruction"] == {"parts": [{"text": "system"}]}
+        assert result["toolConfig"] == {"functionCallingConfig": {"mode": "AUTO"}}
+        assert result["generationConfig"] == {"temperature": 0.1}
+        assert "generation_config" not in result
+        assert result["metadata"]["safe"] is False
+
+    def test_protected_prompt_fields_block_all_mutating_actions(self) -> None:
+        body = {
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"name": "ReadFile"}],
+            "tool_choice": {"type": "function", "function": {"name": "ReadFile"}},
+            "metadata": {"safe": True},
+        }
+        protected_keys = get_cache_sensitive_protected_body_keys("openai:chat")
+
+        result = apply_body_rules(
+            body,
+            [
+                {"action": "set", "path": "messages", "value": []},
+                {"action": "drop", "path": "tools"},
+                {"action": "rename", "from": "tool_choice", "to": "choice"},
+                {
+                    "action": "append",
+                    "path": "messages",
+                    "value": {"role": "assistant", "content": "x"},
+                },
+                {
+                    "action": "insert",
+                    "path": "messages",
+                    "index": 0,
+                    "value": {"role": "system", "content": "x"},
+                },
+                {
+                    "action": "regex_replace",
+                    "path": "tools[0].name",
+                    "pattern": "Read",
+                    "replacement": "Write",
+                },
+                {"action": "name_style", "path": "tools[*].name", "style": "snake_case"},
+                {"action": "set", "path": "metadata.safe", "value": False},
+            ],
+            protected_keys=protected_keys,
+        )
+
+        assert result["messages"] == [{"role": "user", "content": "hi"}]
+        assert result["tools"] == [{"name": "ReadFile"}]
+        assert result["tool_choice"] == {"type": "function", "function": {"name": "ReadFile"}}
+        assert "choice" not in result
+        assert result["metadata"]["safe"] is False

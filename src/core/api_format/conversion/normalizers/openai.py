@@ -25,6 +25,7 @@ from src.core.api_format.conversion.constants import (
 from src.core.api_format.conversion.constants import (
     responses_web_search_tool_to_chat_options as _responses_web_search_tool_to_chat_options,
 )
+from src.core.api_format.conversion.constants import stable_json_dumps as _stable_json_dumps
 from src.core.api_format.conversion.field_mappings import (
     ERROR_TYPE_MAPPINGS,
     REASONING_EFFORT_TO_THINKING_BUDGET,
@@ -355,12 +356,13 @@ class OpenAINormalizer(FormatNormalizer):
                         openai_tools.append(chat_tool)
                     continue
                 func: dict[str, Any] = {
-                    "name": t.name,
-                    "parameters": t.parameters or {},
                     **(t.extra.get("openai_function") or {}),
+                    "name": t.name,
                 }
                 if t.description is not None:
                     func["description"] = t.description
+                if t.parameters is not None:
+                    func["parameters"] = t.parameters
                 openai_tools.append(
                     {
                         "type": "function",
@@ -1439,6 +1441,7 @@ class OpenAINormalizer(FormatNormalizer):
                     description=function.get("description"),
                     parameters=params_raw if isinstance(params_raw, dict) else None,
                     extra={
+                        "openai_chat_raw_tool": tool,
                         "openai_tool": self._extract_extra(tool, {"type", "function"}),
                         "openai_function": self._extract_extra(
                             function, {"name", "description", "parameters"}
@@ -1514,25 +1517,32 @@ class OpenAINormalizer(FormatNormalizer):
         fn_raw = tool_call.get("function")
         fn: dict[str, Any] = fn_raw if isinstance(fn_raw, dict) else {}
         name = str(fn.get("name") or "")
-        args_str = str(fn.get("arguments") or "")
+        args_raw = fn.get("arguments") if isinstance(fn, dict) else None
         tool_id = str(tool_call.get("id") or "")
 
         tool_input: dict[str, Any]
-        if args_str:
-            try:
-                parsed = json.loads(args_str)
-                tool_input = parsed if isinstance(parsed, dict) else {"raw": parsed}
-            except json.JSONDecodeError:
-                tool_input = {"raw": args_str}
+        if isinstance(args_raw, str):
+            if args_raw:
+                try:
+                    parsed = json.loads(args_raw)
+                    tool_input = parsed if isinstance(parsed, dict) else {"raw": parsed}
+                except json.JSONDecodeError:
+                    tool_input = {"raw": args_raw}
+            else:
+                tool_input = {}
         else:
             tool_input = {}
+
+        extra: dict[str, Any] = {"openai": tool_call}
+        if isinstance(args_raw, str):
+            extra["raw"] = {"arguments": args_raw}
 
         return (
             ToolUseBlock(
                 tool_id=tool_id,
                 tool_name=name,
                 tool_input=tool_input,
-                extra={"openai": tool_call},
+                extra=extra,
             ),
             dropped,
         )
@@ -1542,7 +1552,7 @@ class OpenAINormalizer(FormatNormalizer):
     ) -> tuple[ToolUseBlock | None, dict[str, int]]:
         dropped: dict[str, int] = {}
         name = str(func_call.get("name") or "")
-        args_str = str(func_call.get("arguments") or "")
+        args_raw = func_call.get("arguments")
         if not name:
             dropped["openai_function_call_missing_name"] = (
                 dropped.get("openai_function_call_missing_name", 0) + 1
@@ -1550,21 +1560,28 @@ class OpenAINormalizer(FormatNormalizer):
             return None, dropped
 
         tool_input: dict[str, Any]
-        if args_str:
-            try:
-                parsed = json.loads(args_str)
-                tool_input = parsed if isinstance(parsed, dict) else {"raw": parsed}
-            except json.JSONDecodeError:
-                tool_input = {"raw": args_str}
+        if isinstance(args_raw, str):
+            if args_raw:
+                try:
+                    parsed = json.loads(args_raw)
+                    tool_input = parsed if isinstance(parsed, dict) else {"raw": parsed}
+                except json.JSONDecodeError:
+                    tool_input = {"raw": args_raw}
+            else:
+                tool_input = {}
         else:
             tool_input = {}
+
+        extra: dict[str, Any] = {"openai": {"function_call": func_call}}
+        if isinstance(args_raw, str):
+            extra["raw"] = {"arguments": args_raw}
 
         return (
             ToolUseBlock(
                 tool_id="call_0",
                 tool_name=name,
                 tool_input=tool_input,
-                extra={"openai": {"function_call": func_call}},
+                extra=extra,
             ),
             dropped,
         )
@@ -1591,13 +1608,14 @@ class OpenAINormalizer(FormatNormalizer):
             except json.JSONDecodeError:
                 parsed = None
 
+            raw_extra = {"raw": {"content": content}, "openai": msg}
             if parsed is not None:
                 return (
                     ToolResultBlock(
                         tool_use_id=tool_call_id,
                         output=parsed,
                         content_text=None,
-                        extra={"raw": {"content": content}, "openai": msg},
+                        extra=raw_extra,
                     ),
                     dropped,
                 )
@@ -1607,11 +1625,10 @@ class OpenAINormalizer(FormatNormalizer):
                     tool_use_id=tool_call_id,
                     output=None,
                     content_text=content,
-                    extra={"openai": msg},
+                    extra=raw_extra,
                 ),
                 dropped,
             )
-
         # 非字符串：尽量保留为 output
         return (
             ToolResultBlock(
@@ -1858,14 +1875,18 @@ class OpenAINormalizer(FormatNormalizer):
 
     def _tool_result_block_to_openai_message(self, block: ToolResultBlock) -> dict[str, Any]:
         content: str
-        if block.content_text is not None:
+        raw = block.extra.get("raw") if isinstance(block.extra, dict) else None
+        raw_content = raw.get("content") if isinstance(raw, dict) else None
+        if isinstance(raw_content, str):
+            content = raw_content
+        elif block.content_text is not None:
             content = block.content_text
         elif block.output is None:
             content = ""
         elif isinstance(block.output, str):
             content = block.output
         else:
-            content = json.dumps(block.output, ensure_ascii=False)
+            content = _stable_json_dumps(block.output)
 
         return {
             "role": "tool",
@@ -1875,12 +1896,19 @@ class OpenAINormalizer(FormatNormalizer):
 
     def _tool_use_block_to_openai_call(self, block: ToolUseBlock, index: int) -> dict[str, Any]:
         # index 参数仅用于 fallback id 生成；非流式响应的 tool_calls 数组不应包含 index 字段
+        raw = block.extra.get("raw") if isinstance(block.extra, dict) else None
+        raw_arguments = raw.get("arguments") if isinstance(raw, dict) else None
+        arguments = (
+            raw_arguments
+            if isinstance(raw_arguments, str)
+            else _stable_json_dumps(block.tool_input or {})
+        )
         return {
             "id": block.tool_id or f"call_{index}",
             "type": "function",
             "function": {
                 "name": block.tool_name,
-                "arguments": json.dumps(block.tool_input or {}, ensure_ascii=False),
+                "arguments": arguments,
             },
         }
 

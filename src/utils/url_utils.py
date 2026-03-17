@@ -6,6 +6,19 @@ URL 处理工具函数
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
+
+def is_official_openai_api_url(base_url: str | None) -> bool:
+    """判断是否为 OpenAI 官方 API 端点。"""
+    value = str(base_url or "").strip()
+    if not value:
+        return False
+
+    parsed = urlparse(value if "://" in value else f"https://{value}")
+    host = str(parsed.hostname or "").strip().lower()
+    return host == "api.openai.com"
+
 
 def is_codex_url(base_url: str) -> bool:
     """判断是否是 Codex OAuth 端点。

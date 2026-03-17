@@ -7,6 +7,7 @@ Claude Messages API Normalizer
 - 可选：Claude error <-> InternalError
 """
 
+import copy
 import json
 from typing import Any
 
@@ -60,6 +61,7 @@ from src.core.api_format.conversion.stream_events import (
     ToolCallDeltaEvent,
 )
 from src.core.api_format.conversion.stream_state import StreamState
+from src.core.logger import logger
 
 
 class ClaudeNormalizer(FormatNormalizer):
@@ -213,6 +215,9 @@ class ClaudeNormalizer(FormatNormalizer):
         *,
         target_variant: str | None = None,
     ) -> dict[str, Any]:
+        target_variant_norm = str(target_variant or "").strip().lower()
+        system_shape = "none"
+
         # system: 如果任一 InstructionSegment 有 cache_control，输出数组格式
         has_cache_control = any(seg.extra.get("cache_control") for seg in internal.instructions)
         if has_cache_control and internal.instructions:
@@ -231,15 +236,42 @@ class ClaudeNormalizer(FormatNormalizer):
             ]
             if not system_value:
                 system_value = None
+            else:
+                system_shape = "blocks"
         else:
             system_value = internal.system or self._join_instructions(internal.instructions)
+            if system_value:
+                system_shape = "string"
 
         # Claude Messages API: messages[] 仅允许 user/assistant，且需要交替；这里做最小修复
-        fixed_messages = self._coerce_claude_message_sequence(internal.messages)
+        fixed_messages, coerce_diagnostics = self._coerce_claude_message_sequence(internal.messages)
 
         out_messages: list[dict[str, Any]] = [
             self._internal_message_to_claude(m) for m in fixed_messages
         ]
+
+        if coerce_diagnostics["changed"]:
+            logger.debug(
+                "[ClaudeNormalizer] normalized message sequence: variant={}, input_count={}, output_count={}, prepended_empty_user={}, merged_adjacent={}, coerced_roles={}",
+                target_variant_norm or "default",
+                len(internal.messages),
+                len(fixed_messages),
+                coerce_diagnostics["prepended_empty_user"],
+                coerce_diagnostics["merged_adjacent"],
+                coerce_diagnostics["coerced_roles"],
+            )
+        if system_shape == "blocks":
+            logger.debug(
+                "[ClaudeNormalizer] emitted block system payload for cache_control instructions: variant={}, segment_count={}",
+                target_variant_norm or "default",
+                len(internal.instructions),
+            )
+        elif system_shape == "string" and internal.instructions:
+            logger.debug(
+                "[ClaudeNormalizer] emitted string system payload: variant={}, segment_count={}",
+                target_variant_norm or "default",
+                len(internal.instructions),
+            )
 
         # max_tokens: 优先使用请求中的值, 其次 GlobalModel.output_limit, 最后硬编码默认值
         effective_max_tokens: int
@@ -288,11 +320,18 @@ class ClaudeNormalizer(FormatNormalizer):
                 result["tools"] = claude_tools
 
         if internal.tool_choice:
+            reused_raw_tool_choice = isinstance(internal.tool_choice.extra.get("claude"), dict)
             tc = self._tool_choice_to_claude(internal.tool_choice)
             # parallel_tool_calls=False -> disable_parallel_tool_use=True
             if internal.parallel_tool_calls is False and tc.get("type") != "none":
                 tc["disable_parallel_tool_use"] = True
             result["tool_choice"] = tc
+            logger.debug(
+                "[ClaudeNormalizer] {} Claude tool_choice: variant={}, type={}",
+                "reused raw" if reused_raw_tool_choice else "rebuilt",
+                target_variant_norm or "default",
+                tc.get("type"),
+            )
 
         # thinking 配置
         if internal.thinking and internal.thinking.enabled:
@@ -1180,6 +1219,11 @@ class ClaudeNormalizer(FormatNormalizer):
         return ToolChoice(type=ToolChoiceType.AUTO, extra={"claude": tool_choice})
 
     def _tool_choice_to_claude(self, tool_choice: ToolChoice) -> dict[str, Any]:
+        raw_choice = (
+            tool_choice.extra.get("claude") if isinstance(tool_choice.extra, dict) else None
+        )
+        if isinstance(raw_choice, dict):
+            return copy.deepcopy(raw_choice)
         if tool_choice.type == ToolChoiceType.NONE:
             return {"type": "none"}
         if tool_choice.type == ToolChoiceType.AUTO:
@@ -1201,6 +1245,13 @@ class ClaudeNormalizer(FormatNormalizer):
         blocks: list[dict[str, Any]] = []
         text_parts: list[str] = []
 
+        def flush_text_parts() -> None:
+            nonlocal text_parts
+            if not text_parts:
+                return
+            blocks.append({"type": "text", "text": "\n".join(text_parts)})
+            text_parts = []
+
         for b in msg.content:
             if isinstance(b, UnknownBlock):
                 continue
@@ -1208,6 +1259,7 @@ class ClaudeNormalizer(FormatNormalizer):
             if isinstance(b, TextBlock):
                 if b.text:
                     if force_structured_text:
+                        flush_text_parts()
                         text_block: dict[str, Any] = {"type": "text", "text": b.text}
                         cc = b.extra.get("cache_control") if b.extra else None
                         if isinstance(cc, dict):
@@ -1225,6 +1277,7 @@ class ClaudeNormalizer(FormatNormalizer):
                         text_parts.append("[Image]")
                     continue
 
+                flush_text_parts()
                 if b.data and b.media_type:
                     blocks.append(
                         {
@@ -1247,6 +1300,7 @@ class ClaudeNormalizer(FormatNormalizer):
 
             if isinstance(b, FileBlock):
                 if b.data and b.media_type:
+                    flush_text_parts()
                     blocks.append(
                         {
                             "type": "document",
@@ -1258,6 +1312,7 @@ class ClaudeNormalizer(FormatNormalizer):
                         }
                     )
                 elif b.file_url:
+                    flush_text_parts()
                     blocks.append(
                         {
                             "type": "document",
@@ -1273,6 +1328,7 @@ class ClaudeNormalizer(FormatNormalizer):
 
             if isinstance(b, AudioBlock):
                 if b.data and b.media_type:
+                    flush_text_parts()
                     blocks.append(
                         {
                             "type": "document",
@@ -1286,6 +1342,7 @@ class ClaudeNormalizer(FormatNormalizer):
                 continue
 
             if isinstance(b, ToolUseBlock) and role == "assistant":
+                flush_text_parts()
                 blocks.append(
                     {
                         "type": "tool_use",
@@ -1297,6 +1354,7 @@ class ClaudeNormalizer(FormatNormalizer):
                 continue
 
             if isinstance(b, ToolResultBlock) and role == "user":
+                flush_text_parts()
                 if b.content_text is not None:
                     content: Any = b.content_text
                 elif b.output is None:
@@ -1316,38 +1374,50 @@ class ClaudeNormalizer(FormatNormalizer):
                 )
                 continue
 
-        if text_parts:
-            if blocks:
-                blocks = [{"type": "text", "text": "\n".join(text_parts)}] + blocks
-            else:
-                return {"role": role, "content": "\n".join(text_parts)}
+        if text_parts and not blocks:
+            return {"role": role, "content": "\n".join(text_parts)}
 
+        flush_text_parts()
         return {"role": role, "content": blocks}
 
     def _coerce_claude_message_sequence(
         self, messages: list[InternalMessage]
-    ) -> list[InternalMessage]:
+    ) -> tuple[list[InternalMessage], dict[str, Any]]:
+        diagnostics: dict[str, Any] = {
+            "changed": False,
+            "prepended_empty_user": False,
+            "merged_adjacent": 0,
+            "coerced_roles": 0,
+        }
         normalized: list[InternalMessage] = []
         for m in messages:
             role = m.role
             if role not in (Role.USER, Role.ASSISTANT):
+                diagnostics["coerced_roles"] += 1
                 role = Role.USER
-            normalized.append(InternalMessage(role=role, content=m.content, extra=m.extra))
+            normalized.append(InternalMessage(role=role, content=list(m.content), extra=m.extra))
 
         if not normalized:
-            return []
+            return [], diagnostics
 
         if normalized[0].role != Role.USER:
             normalized = [InternalMessage(role=Role.USER, content=[])] + normalized
+            diagnostics["prepended_empty_user"] = True
 
         merged: list[InternalMessage] = []
         for m in normalized:
             if merged and merged[-1].role == m.role:
                 merged[-1].content.extend(m.content)
+                diagnostics["merged_adjacent"] += 1
                 continue
             merged.append(m)
 
-        return merged
+        diagnostics["changed"] = bool(
+            diagnostics["prepended_empty_user"]
+            or diagnostics["merged_adjacent"]
+            or diagnostics["coerced_roles"]
+        )
+        return merged, diagnostics
 
     def _claude_usage_to_internal(self, usage: Any) -> UsageInfo | None:
         if not isinstance(usage, dict):

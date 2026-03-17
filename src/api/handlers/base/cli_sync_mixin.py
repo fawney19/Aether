@@ -10,7 +10,10 @@ import httpx
 from fastapi.responses import JSONResponse
 
 from src.api.handlers.base.parsers import get_parser_for_format
-from src.api.handlers.base.request_builder import get_provider_auth
+from src.api.handlers.base.request_builder import (
+    get_cache_sensitive_protected_body_keys,
+    get_provider_auth,
+)
 from src.api.handlers.base.stream_context import extract_proxy_timing, is_format_converted
 from src.api.handlers.base.upstream_stream_bridge import (
     aggregate_upstream_stream_to_internal_response,
@@ -33,6 +36,9 @@ from src.core.exceptions import (
 )
 from src.core.logger import logger
 from src.services.provider.behavior import get_provider_behavior
+from src.services.provider.prompt_cache import (
+    maybe_patch_request_with_prompt_cache_key,
+)
 from src.services.provider.stream_policy import (
     enforce_stream_mode_for_upstream,
     get_upstream_stream_policy,
@@ -216,6 +222,15 @@ class CliSyncMixin:
                     upstream_is_stream=upstream_is_stream,
                 )
 
+            request_body = maybe_patch_request_with_prompt_cache_key(
+                request_body,
+                provider_api_format=provider_api_format,
+                provider_type=provider_type,
+                base_url=getattr(endpoint, "base_url", None),
+                user_api_key_id=str(getattr(self.api_key, "id", "") or ""),
+                request_headers=original_headers,
+            )
+
             # 获取认证信息（处理 Service Account 等异步认证场景）
             auth_info = await get_provider_auth(endpoint, key)
 
@@ -248,6 +263,8 @@ class CliSyncMixin:
                 extra_headers=extra_headers if extra_headers else None,
                 pre_computed_auth=auth_info.as_tuple() if auth_info else None,
                 envelope=envelope,
+                protected_body_keys=get_cache_sensitive_protected_body_keys(provider_api_format),
+                provider_api_format=provider_api_format,
             )
             if upstream_is_stream:
                 from src.core.api_format.headers import set_accept_if_absent

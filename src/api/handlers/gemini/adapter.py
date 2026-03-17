@@ -248,7 +248,11 @@ class GeminiChatAdapter(ChatAdapterBase):
     ) -> dict[str, Any]:
         """测试 Gemini API 模型连接性（非流式）"""
         from src.api.handlers.base.endpoint_checker import run_endpoint_check
-        from src.api.handlers.base.request_builder import apply_body_rules, evaluate_condition
+        from src.api.handlers.base.request_builder import (
+            apply_body_rules,
+            evaluate_condition,
+            get_cache_sensitive_protected_body_keys,
+        )
         from src.core.api_format.headers import HeaderBuilder
 
         # Gemini需要从request_data或model_name参数获取model名称
@@ -344,7 +348,12 @@ class GeminiChatAdapter(ChatAdapterBase):
 
         # 应用请求体规则（在格式转换后应用，确保规则效果不被覆盖）
         if body_rules:
-            body = apply_body_rules(body, body_rules, original_body=body)
+            body = apply_body_rules(
+                body,
+                body_rules,
+                protected_keys=get_cache_sensitive_protected_body_keys(cls.FORMAT_ID),
+                original_body=body,
+            )
 
         # Antigravity 需要将请求体包装为 v1internal 信封格式
         if is_antigravity:

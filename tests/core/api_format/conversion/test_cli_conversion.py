@@ -275,6 +275,47 @@ def test_openai_chat_prompt_cache_key_preserved_when_convert_to_openai_cli() -> 
     assert out["prompt_cache_key"] == "cache-key-123"
 
 
+def test_openai_chat_tool_payload_preserves_raw_strings_when_convert_to_openai_cli() -> None:
+    reg = _make_registry_with_cli()
+
+    openai_chat_req = {
+        "model": "gpt-5",
+        "messages": [
+            {"role": "user", "content": "帮我读取 README"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": '{"b":2,"a":1}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": '{"z":1,"a":2}',
+            },
+        ],
+    }
+
+    out = reg.convert_request(openai_chat_req, "openai:chat", "openai:cli")
+    input_items = cast(list[dict[str, Any]], out.get("input") or [])
+
+    function_call = next((i for i in input_items if i.get("type") == "function_call"), {})
+    function_call_output = next(
+        (i for i in input_items if i.get("type") == "function_call_output"), {}
+    )
+
+    assert function_call["arguments"] == '{"b":2,"a":1}'
+    assert function_call_output["output"] == '{"z":1,"a":2}'
+
+
 def test_openai_chat_text_config_maps_to_openai_cli_text_block() -> None:
     reg = _make_registry_with_cli()
 
@@ -599,6 +640,44 @@ def test_claude_tool_use_to_openai_cli() -> None:
     assert len(fco_items) == 1
     assert fco_items[0]["call_id"] == "tool_123"
     assert fco_items[0]["output"] == "Hello World"
+
+
+def test_openai_cli_request_omits_implicit_empty_defaults_for_standard_responses() -> None:
+    normalizer = OpenAICliNormalizer()
+    internal = normalizer.request_to_internal({"model": "gpt-test", "input": []})
+
+    out = normalizer.request_from_internal(internal)
+
+    assert "instructions" not in out
+    assert "stream" not in out
+    assert "store" not in out
+
+
+def test_openai_cli_request_preserves_explicit_empty_instructions_and_stream_false() -> None:
+    normalizer = OpenAICliNormalizer()
+    internal = normalizer.request_to_internal(
+        {"model": "gpt-test", "input": [], "instructions": "", "stream": False}
+    )
+
+    out = normalizer.request_from_internal(internal)
+
+    assert out["instructions"] == ""
+    assert out["stream"] is False
+    assert "store" not in out
+
+
+def test_openai_cli_request_tool_choice_flat_function_roundtrip_preserved() -> None:
+    normalizer = OpenAICliNormalizer()
+    request = {
+        "model": "gpt-test",
+        "input": [],
+        "tool_choice": {"type": "function", "name": "read_file"},
+    }
+
+    internal = normalizer.request_to_internal(request)
+    out = normalizer.request_from_internal(internal)
+
+    assert out["tool_choice"] == {"type": "function", "name": "read_file"}
 
 
 def test_claude_explicit_effort_preserved_in_openai_cli() -> None:

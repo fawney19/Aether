@@ -7,7 +7,14 @@ OpenAI Chat <-> Responses API 的工具 / tool_choice / web_search 双向转换
 
 from __future__ import annotations
 
+import json
 from typing import Any
+
+
+def stable_json_dumps(value: Any) -> str:
+    """Serialize JSON deterministically for cache-sensitive fallback generation."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
 
 # Thinking 签名验证的跳过标记
 # 当无法获取真实签名时，使用此值作为占位符

@@ -393,7 +393,8 @@ def _merge_all_of(obj: dict[str, Any]) -> None:
         return
 
     merged_props: dict[str, Any] = {}
-    merged_required: set[str] = set()
+    merged_required: list[str] = []
+    merged_required_seen: set[str] = set()
     other_fields: dict[str, Any] = {}
 
     for sub in all_of:
@@ -407,8 +408,9 @@ def _merge_all_of(obj: dict[str, Any]) -> None:
         r = sub.get("required")
         if isinstance(r, list):
             for item in r:
-                if isinstance(item, str):
-                    merged_required.add(item)
+                if isinstance(item, str) and item not in merged_required_seen:
+                    merged_required_seen.add(item)
+                    merged_required.append(item)
         # 合并其余字段
         for k, v in sub.items():
             if k not in ("properties", "required", "allOf") and k not in other_fields:

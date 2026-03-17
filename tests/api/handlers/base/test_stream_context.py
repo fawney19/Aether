@@ -129,3 +129,34 @@ def test_get_log_summary_without_first_byte_time() -> None:
     assert "TTFB:" not in summary
     assert "Total: 456ms" in summary
     assert "in:100 out:50" in summary
+
+
+def test_ensure_estimated_output_tokens_uses_collected_text() -> None:
+    ctx = StreamContext(model="test-model", api_format="openai:chat")
+    ctx.append_text("partial output")
+
+    changed = ctx.ensure_estimated_output_tokens()
+
+    assert changed is True
+    assert ctx.output_tokens == max(1, len("partial output") // 4)
+
+
+def test_should_estimate_incomplete_tokens_for_interrupted_partial_stream() -> None:
+    ctx = StreamContext(model="test-model", api_format="openai:chat")
+    ctx.status_code = 503
+    ctx.chunk_count = 3
+
+    assert ctx.should_estimate_incomplete_tokens() is True
+
+
+def test_should_estimate_incomplete_tokens_when_output_already_estimated() -> None:
+    """ensure_estimated_output_tokens 已补了 output，但 input 仍为 0 时仍需估算。"""
+    ctx = StreamContext(model="test-model", api_format="openai:chat")
+    ctx.status_code = 503
+    ctx.chunk_count = 3
+    ctx.append_text("partial")
+    ctx.ensure_estimated_output_tokens()
+
+    assert ctx.output_tokens > 0
+    assert ctx.input_tokens == 0
+    assert ctx.should_estimate_incomplete_tokens() is True

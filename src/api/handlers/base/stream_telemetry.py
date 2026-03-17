@@ -100,16 +100,9 @@ class StreamTelemetryRecorder:
                 writer = await self._get_telemetry_writer(bg_db, ctx, response_time_ms)
                 if writer is None:
                     return
-                # 兜底估算：流未正常完成且 token 均为 0 时，从请求体粗略估算
-                # 覆盖 Chat Handler 路径（CLI Handler 在更早的位置已做估算，
-                # 若已估算过则 token > 0，此处条件不会触发）
-                if (
-                    ctx.is_success()
-                    and not ctx.has_completion
-                    and ctx.data_count > 0
-                    and ctx.input_tokens == 0
-                    and ctx.output_tokens == 0
-                ):
+                # 兜底估算：流未正常完成且 token 均为 0 时，从请求体粗略估算。
+                # 覆盖成功但缺少 completion，以及已传出部分数据后被中断的场景。
+                if ctx.should_estimate_incomplete_tokens():
                     # 用实际发给 Provider 的请求体估算 token（格式转换时与客户端请求体不同）
                     self._estimate_tokens_for_incomplete_stream(
                         ctx, ctx.provider_request_body or original_request_body

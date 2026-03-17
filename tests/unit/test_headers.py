@@ -1,6 +1,9 @@
 import json
 
-from src.api.handlers.base.request_builder import evaluate_condition
+from src.api.handlers.base.request_builder import (
+    evaluate_condition,
+    summarize_request_payload_shape,
+)
 from src.core.api_format import (
     CORE_REDACT_HEADERS,
     HeaderBuilder,
@@ -284,3 +287,54 @@ class TestAuthHeaderCasePreservation:
         assert "authorization" in headers
         assert "Authorization" not in headers
         assert headers["authorization"] == "Bearer provider-token"
+
+
+class TestRequestPayloadSummary:
+    def test_prefers_runtime_provider_api_format_over_endpoint_static_format(self) -> None:
+        payload = {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]}
+
+        summary = summarize_request_payload_shape(
+            payload,
+            provider_api_format="gemini:chat",
+            protected_body_keys=frozenset({"contents", "toolConfig"}),
+            body_rules=[{"action": "drop", "path": "toolConfig"}],
+        )
+
+        assert summary["format"] == "gemini:chat"
+        assert summary["contents_count"] == 1
+        assert summary["message_count"] is None
+        assert summary["protected_body_keys_enabled"] is True
+        assert summary["protected_body_keys"] == ["contents", "toolConfig"]
+        assert summary["body_rule_count"] == 1
+        assert summary["top_level_keys"] == ["contents"]
+
+    def test_detects_gemini_camelcase_prompt_bearing_fields(self) -> None:
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "systemInstruction": {"parts": [{"text": "system"}]},
+            "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}},
+            "generationConfig": {"temperature": 0.1},
+        }
+
+        summary = summarize_request_payload_shape(
+            payload,
+            provider_api_format="gemini:chat",
+            protected_body_keys=None,
+            body_rules=None,
+        )
+
+        assert summary["has_system"] is True
+        assert summary["has_tool_choice"] is True
+        assert summary["has_generation_config"] is True
+        assert summary["function_declaration_count"] == 0
+        assert summary["tool_count"] is None
+        assert summary["format"] == "gemini:chat"
+        assert summary["contents_count"] == 1
+        assert summary["protected_body_keys_enabled"] is False
+        assert summary["body_rule_count"] == 0
+        assert summary["top_level_keys"] == [
+            "contents",
+            "generationConfig",
+            "systemInstruction",
+            "toolConfig",
+        ]

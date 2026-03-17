@@ -195,11 +195,13 @@ class FormatConversionRegistry:
         tgt = self.get_normalizer(target_format)
         return src is not None and src is tgt
 
-    def _repair_internal_tool_call_ids(self, internal: InternalRequest) -> None:
+    def _repair_internal_tool_call_ids(self, internal: InternalRequest) -> dict[str, int]:
         """修复 InternalRequest 中空的 tool id/tool_use_id，避免上游校验报错。"""
 
         pending_tool_ids: list[str] = []
         auto_counter = 0
+        generated_tool_use_ids = 0
+        filled_tool_result_ids = 0
 
         def next_tool_id() -> str:
             nonlocal auto_counter
@@ -213,6 +215,7 @@ class FormatConversionRegistry:
                     if not tool_id:
                         tool_id = next_tool_id()
                         block.tool_id = tool_id
+                        generated_tool_use_ids += 1
                     pending_tool_ids.append(tool_id)
                     continue
 
@@ -224,10 +227,16 @@ class FormatConversionRegistry:
                             pending_tool_ids.remove(tool_use_id)
                         continue
 
+                    filled_tool_result_ids += 1
                     if pending_tool_ids:
                         block.tool_use_id = pending_tool_ids.pop(0)
                     else:
                         block.tool_use_id = next_tool_id()
+
+        return {
+            "generated_tool_use_ids": generated_tool_use_ids,
+            "filled_tool_result_ids": filled_tool_result_ids,
+        }
 
     # ==================== 请求/响应转换（严格） ====================
 
@@ -262,7 +271,15 @@ class FormatConversionRegistry:
             try:
                 internal = src.request_to_internal(request)
                 internal.output_limit = output_limit
-                self._repair_internal_tool_call_ids(internal)
+                repair_stats = self._repair_internal_tool_call_ids(internal)
+                if repair_stats["generated_tool_use_ids"] or repair_stats["filled_tool_result_ids"]:
+                    logger.debug(
+                        "[FormatConversionRegistry] repaired internal tool call ids: source={}, target={}, generated_tool_use_ids={}, filled_tool_result_ids={}",
+                        str(source_format).upper(),
+                        str(target_format).upper(),
+                        repair_stats["generated_tool_use_ids"],
+                        repair_stats["filled_tool_result_ids"],
+                    )
                 return tgt.request_from_internal(internal, target_variant=target_variant)
             except Exception as e:
                 raise FormatConversionError(source_format, target_format, str(e)) from e
@@ -299,7 +316,15 @@ class FormatConversionRegistry:
             try:
                 internal = src.request_to_internal(request)
                 internal.output_limit = output_limit
-                self._repair_internal_tool_call_ids(internal)
+                repair_stats = self._repair_internal_tool_call_ids(internal)
+                if repair_stats["generated_tool_use_ids"] or repair_stats["filled_tool_result_ids"]:
+                    logger.debug(
+                        "[FormatConversionRegistry] repaired internal tool call ids: source={}, target={}, generated_tool_use_ids={}, filled_tool_result_ids={}",
+                        str(source_format).upper(),
+                        str(target_format).upper(),
+                        repair_stats["generated_tool_use_ids"],
+                        repair_stats["filled_tool_result_ids"],
+                    )
 
                 # 异步阶段：解析图片 URL -> base64（仅在目标格式需要时）
                 await resolve_image_urls(internal, str(target_format).upper())

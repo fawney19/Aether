@@ -17,7 +17,7 @@ from src.api.handlers.base.response_parser import (
 
 # is_cli_format 权威定义在 core 层
 from src.core.api_format import is_cli_format
-from src.core.usage_tokens import extract_cache_creation_tokens
+from src.core.usage_tokens import extract_cache_creation_tokens, extract_cache_read_tokens
 
 
 def _check_nested_error(response: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
@@ -208,6 +208,7 @@ class OpenAIResponseParser(ResponseParser):
         usage = response.get("usage") or {}
         result.input_tokens = usage.get("prompt_tokens", 0)
         result.output_tokens = usage.get("completion_tokens", 0)
+        result.cache_read_tokens = extract_cache_read_tokens(usage)
 
         # 检查错误（支持嵌套错误格式）
         is_error, error_info = _check_nested_error(response)
@@ -225,7 +226,7 @@ class OpenAIResponseParser(ResponseParser):
             "input_tokens": usage.get("prompt_tokens", 0),
             "output_tokens": usage.get("completion_tokens", 0),
             "cache_creation_tokens": 0,
-            "cache_read_tokens": 0,
+            "cache_read_tokens": extract_cache_read_tokens(usage),
         }
 
     def extract_text_content(self, response: dict[str, Any]) -> str:
@@ -331,12 +332,8 @@ class OpenAICliResponseParser(OpenAIResponseParser):
         return {
             "input_tokens": int(input_tokens),
             "output_tokens": int(output_tokens),
-            "cache_creation_tokens": int(
-                usage.get("cache_creation_input_tokens") or usage.get("cache_creation_tokens") or 0
-            ),
-            "cache_read_tokens": int(
-                usage.get("cache_read_input_tokens") or usage.get("cache_read_tokens") or 0
-            ),
+            "cache_creation_tokens": extract_cache_creation_tokens(usage),
+            "cache_read_tokens": extract_cache_read_tokens(usage),
         }
 
     @staticmethod

@@ -11,6 +11,7 @@ Gemini (GenerateContent / streamGenerateContent) Normalizer
 - 响应/流式通常为 camelCase（candidates/finishReason/usageMetadata/modelVersion）。
 """
 
+import copy
 import json
 import re
 from typing import Any
@@ -67,6 +68,7 @@ from src.core.api_format.conversion.stream_events import (
 )
 from src.core.api_format.conversion.stream_state import StreamState
 from src.core.api_format.schema_utils import clean_gemini_schema as _clean_gemini_schema
+from src.core.logger import logger
 
 # Valid Gemini Part data-oneof field names (camelCase + snake_case).
 _VALID_PART_DATA_FIELDS = frozenset(
@@ -106,20 +108,37 @@ def compact_gemini_contents(contents: list[dict[str, Any]]) -> list[dict[str, An
     contents with no Gemini-compatible parts, or consecutive same-role entries
     after filtering.
     """
+    dropped_non_list_parts = 0
+    dropped_invalid_parts = 0
+    dropped_empty_contents = 0
+    merged_same_role = 0
+
     # 1. Strip invalid parts, then drop contents with no valid parts remaining.
     #    Use shallow copy to avoid mutating the caller's original dicts.
     non_empty: list[dict[str, Any]] = []
     for c in contents:
         parts = c.get("parts")
         if not isinstance(parts, list):
+            dropped_non_list_parts += 1
             continue
         valid_parts = [p for p in parts if _is_valid_gemini_part(p)]
+        dropped_invalid_parts += max(0, len(parts) - len(valid_parts))
         if valid_parts:
             c = {**c, "parts": valid_parts}
             non_empty.append(c)
+        else:
+            dropped_empty_contents += 1
 
     # 2. Merge consecutive same-role entries.
     if not non_empty:
+        if dropped_non_list_parts or dropped_invalid_parts or dropped_empty_contents:
+            logger.debug(
+                "[GeminiNormalizer] compact_gemini_contents dropped all contents: input_count={}, dropped_non_list_parts={}, dropped_invalid_parts={}, dropped_empty_contents={}",
+                len(contents),
+                dropped_non_list_parts,
+                dropped_invalid_parts,
+                dropped_empty_contents,
+            )
         return non_empty
 
     merged: list[dict[str, Any]] = [non_empty[0]]
@@ -130,8 +149,25 @@ def compact_gemini_contents(contents: list[dict[str, Any]]) -> list[dict[str, An
                 prev_parts.extend(c.get("parts") or [])
             else:
                 merged[-1]["parts"] = list(c.get("parts") or [])
+            merged_same_role += 1
         else:
             merged.append(c)
+
+    if (
+        dropped_non_list_parts
+        or dropped_invalid_parts
+        or dropped_empty_contents
+        or merged_same_role
+    ):
+        logger.debug(
+            "[GeminiNormalizer] compacted contents: input_count={}, output_count={}, dropped_non_list_parts={}, dropped_invalid_parts={}, dropped_empty_contents={}, merged_same_role={}",
+            len(contents),
+            len(merged),
+            dropped_non_list_parts,
+            dropped_invalid_parts,
+            dropped_empty_contents,
+            merged_same_role,
+        )
 
     return merged
 
@@ -453,6 +489,12 @@ class GeminiNormalizer(FormatNormalizer):
 
         # tools/tool_choice — clean unsupported JSON Schema fields from parameters
         # Gemini 特殊内置工具名称需要单独处理
+        emitted_cleaned_schemas = 0
+        reused_raw_tool_choice = (
+            isinstance(internal.tool_choice.extra.get("gemini"), dict)
+            if internal.tool_choice
+            else False
+        )
         tools = None
         if internal.tools:
             func_decls: list[dict[str, Any]] = []
@@ -467,6 +509,7 @@ class GeminiNormalizer(FormatNormalizer):
                 params = dict(t.parameters) if t.parameters else {}
                 if params:
                     _clean_gemini_schema(params)
+                    emitted_cleaned_schemas += 1
                 decl: dict[str, Any] = {
                     "name": t.name,
                     "parameters": params,
@@ -486,6 +529,26 @@ class GeminiNormalizer(FormatNormalizer):
         tool_config = None
         if internal.tool_choice:
             tool_config = self._tool_choice_to_gemini_tool_config(internal.tool_choice)
+            logger.debug(
+                "[GeminiNormalizer] {} tool_config: variant={}, mode={}",
+                "reused raw" if reused_raw_tool_choice else "rebuilt",
+                target_variant_norm or "default",
+                (
+                    (
+                        tool_config.get("function_calling_config")
+                        or tool_config.get("functionCallingConfig")
+                        or {}
+                    ).get("mode")
+                    if isinstance(tool_config, dict)
+                    else None
+                ),
+            )
+        if emitted_cleaned_schemas:
+            logger.debug(
+                "[GeminiNormalizer] cleaned Gemini schemas: variant={}, count={}",
+                target_variant_norm or "default",
+                emitted_cleaned_schemas,
+            )
 
         generation_config: dict[str, Any] = {}
         if internal.max_tokens is not None:
@@ -524,6 +587,7 @@ class GeminiNormalizer(FormatNormalizer):
                 if isinstance(wrapped_schema, dict):
                     schema = dict(wrapped_schema)
                 _clean_gemini_schema(schema)
+                emitted_cleaned_schemas += 1
                 generation_config["responseSchema"] = schema
             elif internal.response_format.type == "json_object":
                 generation_config["responseMimeType"] = "application/json"
@@ -648,6 +712,13 @@ class GeminiNormalizer(FormatNormalizer):
         result: dict[str, Any] = {
             "contents": contents,
         }
+        if len(contents) != len(raw_contents):
+            logger.debug(
+                "[GeminiNormalizer] contents count changed after compaction: variant={}, before={}, after={}",
+                target_variant_norm or "default",
+                len(raw_contents),
+                len(contents),
+            )
 
         # Gemini Chat 模式 model 可能在 URL 路径中；这里仅在 internal.model 存在时回写
         if internal.model:
@@ -2113,6 +2184,12 @@ class GeminiNormalizer(FormatNormalizer):
         return ToolChoice(type=ToolChoiceType.AUTO, extra={"gemini": tool_config})
 
     def _tool_choice_to_gemini_tool_config(self, tool_choice: ToolChoice) -> dict[str, Any]:
+        raw_tool_config = (
+            tool_choice.extra.get("gemini") if isinstance(tool_choice.extra, dict) else None
+        )
+        if isinstance(raw_tool_config, dict):
+            return copy.deepcopy(raw_tool_config)
+
         mode = "AUTO"
         cfg: dict[str, Any] = {}
 

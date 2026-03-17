@@ -170,6 +170,8 @@ class CliMonitorMixin:
             # 也可能是服务端（重载/关停/内部取消）导致的协程取消。
             # 这里尽量做一次"断连归因"：仅当能确认客户端已断开时才记为 499 cancelled。
             time_since_last_chunk = time_module.time() - last_chunk_time
+            if not ctx.has_completion:
+                ctx.ensure_estimated_output_tokens()
 
             is_client_disconnected = False
             disconnect_check_uncertain = False
@@ -287,6 +289,11 @@ class CliMonitorMixin:
                     bg_db, user, api_key, ctx.request_id, self.client_ip
                 )
 
+                if ctx.should_estimate_incomplete_tokens():
+                    self._estimate_tokens_for_incomplete_stream(
+                        ctx, ctx.provider_request_body or original_request_body
+                    )
+
                 response_body = ctx.build_response_body(response_time_ms)
                 client_response_body = ctx.build_client_response_body(response_time_ms)
 
@@ -398,17 +405,6 @@ class CliMonitorMixin:
 
                     # 流未正常完成（如上游截断/连接中断）且无 token 数据时，
                     # 从已收集的文本和请求体估算 tokens，避免 usage 记录为 0
-                    if (
-                        not ctx.has_completion
-                        and ctx.data_count > 0
-                        and ctx.input_tokens == 0
-                        and ctx.output_tokens == 0
-                    ):
-                        # 用实际发给 Provider 的请求体估算 token（格式转换时与客户端请求体不同）
-                        self._estimate_tokens_for_incomplete_stream(
-                            ctx, ctx.provider_request_body or original_request_body
-                        )
-
                     # 流式成功时，返回给客户端的是提供商响应头 + SSE 必需头
                     client_response_headers = filter_proxy_response_headers(ctx.response_headers)
                     client_response_headers.update(

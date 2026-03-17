@@ -28,6 +28,7 @@ from src.core.api_format.conversion.constants import (
 from src.core.api_format.conversion.constants import (
     chat_web_search_options_to_responses_tools as _chat_web_search_options_to_responses_tools,
 )
+from src.core.api_format.conversion.constants import stable_json_dumps as _stable_json_dumps
 from src.core.api_format.conversion.field_mappings import (
     ERROR_TYPE_MAPPINGS,
     REASONING_EFFORT_TO_THINKING_BUDGET,
@@ -196,7 +197,11 @@ class OpenAICliNormalizer(FormatNormalizer):
                     "parallel_tool_calls",
                     "reasoning",
                 },
-            )
+            ),
+            "openai_cli_request_flags": {
+                "has_instructions": "instructions" in request,
+                "has_stream": "stream" in request,
+            },
         }
         if isinstance(text_config, dict):
             fmt = text_config.get("format")
@@ -246,24 +251,32 @@ class OpenAICliNormalizer(FormatNormalizer):
         *,
         target_variant: str | None = None,
     ) -> dict[str, Any]:
-        _ = target_variant
         openai_extra = internal.extra.get("openai", {})
         openai_cli_extra = internal.extra.get("openai_cli", {})
+        request_flags = internal.extra.get("openai_cli_request_flags", {}) if internal.extra else {}
+        is_codex_variant = (target_variant or "").lower() == "codex"
+        has_explicit_instructions = bool(
+            isinstance(request_flags, dict) and request_flags.get("has_instructions")
+        )
+        has_explicit_stream = bool(
+            isinstance(request_flags, dict) and request_flags.get("has_stream")
+        )
 
         result: dict[str, Any] = {
             "model": internal.model,
             "input": self._internal_messages_to_input(internal.messages, system_to_developer=False),
         }
 
-        # 合并 instructions，如果没有则使用 system
+        # 合并 instructions，如果没有则使用 system。
+        # 仅在 internal 中确有内容或原请求显式提供过时输出，
+        # 让 Codex 默认 body_rules 仍可在字段缺失时注入默认 instructions。
         instructions_text = (
             self._join_instructions(internal.instructions)
             if internal.instructions
             else internal.system
         )
-        # Responses API 兼容 instructions 字段，Codex 强制要求
-        # 统一添加该字段以确保兼容性
-        result["instructions"] = instructions_text or ""
+        if instructions_text or has_explicit_instructions:
+            result["instructions"] = instructions_text or ""
 
         if internal.max_tokens is not None:
             # Responses API 使用 max_output_tokens
@@ -275,7 +288,8 @@ class OpenAICliNormalizer(FormatNormalizer):
 
         if internal.stop_sequences:
             result["stop"] = list(internal.stop_sequences)
-        result["stream"] = bool(internal.stream)
+        if internal.stream or has_explicit_stream:
+            result["stream"] = bool(internal.stream)
 
         if internal.tools:
             # Responses API 使用扁平结构: {type, name, description, parameters}
@@ -291,15 +305,18 @@ class OpenAICliNormalizer(FormatNormalizer):
                     if translated_tool := _chat_tool_to_responses_tool(chat_tool):
                         rebuilt_tools.append(translated_tool)
                 else:
-                    rebuilt_tools.append(
-                        {
-                            "type": "function",
-                            "name": t.name,
-                            "description": t.description or "",
-                            "parameters": t.parameters or {},
-                            **(t.extra.get("openai_tool") or {}),
-                        }
-                    )
+                    rebuilt_tool: dict[str, Any] = {
+                        "type": "function",
+                        **(t.extra.get("openai_cli") or {}),
+                        **(t.extra.get("openai_tool") or {}),
+                        **(t.extra.get("openai_function") or {}),
+                        "name": t.name,
+                    }
+                    if t.description is not None:
+                        rebuilt_tool["description"] = t.description
+                    if t.parameters is not None:
+                        rebuilt_tool["parameters"] = t.parameters
+                    rebuilt_tools.append(rebuilt_tool)
             if rebuilt_tools:
                 result["tools"] = rebuilt_tools
 
@@ -382,8 +399,7 @@ class OpenAICliNormalizer(FormatNormalizer):
                 ):
                     result[key] = value
 
-        # 标准 Responses API 默认设置 store=false
-        if "store" not in result:
+        if is_codex_variant and "store" not in result:
             result["store"] = False
 
         return result
@@ -465,17 +481,20 @@ class OpenAICliNormalizer(FormatNormalizer):
 
         for block in internal.content:
             if isinstance(block, ToolUseBlock):
+                raw = block.extra.get("raw") if isinstance(block.extra, dict) else None
+                raw_arguments = raw.get("arguments") if isinstance(raw, dict) else None
+                arguments = (
+                    raw_arguments
+                    if isinstance(raw_arguments, str)
+                    else _stable_json_dumps(block.tool_input or {})
+                )
                 output_items.append(
                     {
                         "type": "function_call",
                         "call_id": block.tool_id,
                         "id": block.tool_id,
                         "name": block.tool_name,
-                        "arguments": (
-                            json.dumps(block.tool_input, ensure_ascii=False)
-                            if block.tool_input
-                            else "{}"
-                        ),
+                        "arguments": arguments,
                         "status": "completed",
                     }
                 )
@@ -1491,7 +1510,9 @@ class OpenAICliNormalizer(FormatNormalizer):
                     has_tool_use = True
                     tool_id = str(item.get("call_id") or item.get("id") or "")
                     tool_name = str(item.get("name") or "")
-                    args_raw = item.get("arguments") or "{}"
+                    args_raw = item.get("arguments")
+                    if args_raw is None:
+                        args_raw = "{}"
                     try:
                         tool_input = (
                             json.loads(args_raw)
@@ -1500,11 +1521,19 @@ class OpenAICliNormalizer(FormatNormalizer):
                         )
                     except (json.JSONDecodeError, TypeError):
                         tool_input = {"_raw": args_raw}
+                    extra: dict[str, Any] = {
+                        "openai_cli": self._extract_extra(
+                            item, {"type", "call_id", "id", "name", "arguments", "status"}
+                        )
+                    }
+                    if isinstance(args_raw, str):
+                        extra["raw"] = {"arguments": args_raw}
                     blocks.append(
                         ToolUseBlock(
                             tool_id=tool_id,
                             tool_name=tool_name,
                             tool_input=tool_input,
+                            extra=extra,
                         )
                     )
                     continue
@@ -1631,36 +1660,65 @@ class OpenAICliNormalizer(FormatNormalizer):
     def _parse_function_call_item(self, item: dict[str, Any]) -> InternalMessage:
         tool_id = str(item.get("call_id") or item.get("id") or "")
         tool_name = str(item.get("name") or "")
-        args_raw = item.get("arguments") or "{}"
-        try:
-            tool_input = (
-                json.loads(args_raw)
-                if isinstance(args_raw, str)
-                else (args_raw if isinstance(args_raw, dict) else {})
-            )
-        except (json.JSONDecodeError, TypeError):
-            tool_input = {"_raw": args_raw}
+        args_raw = item.get("arguments")
+        if args_raw is None:
+            args_raw = "{}"
+
+        if isinstance(args_raw, str):
+            if args_raw:
+                try:
+                    parsed = json.loads(args_raw)
+                    tool_input = parsed if isinstance(parsed, dict) else {"_raw": parsed}
+                except (json.JSONDecodeError, TypeError):
+                    tool_input = {"_raw": args_raw}
+            else:
+                tool_input = {}
+        elif isinstance(args_raw, dict):
+            tool_input = args_raw
+        else:
+            tool_input = {}
+
+        extra: dict[str, Any] = {
+            "openai_cli": self._extract_extra(item, {"type", "call_id", "id", "name", "arguments"})
+        }
+        if isinstance(args_raw, str):
+            extra["raw"] = {"arguments": args_raw}
+
         tool_block = ToolUseBlock(
             tool_id=tool_id,
             tool_name=tool_name,
             tool_input=tool_input,
-            extra={
-                "openai_cli": self._extract_extra(
-                    item, {"type", "call_id", "id", "name", "arguments"}
-                )
-            },
+            extra=extra,
         )
         return InternalMessage(role=Role.ASSISTANT, content=[tool_block])
 
     def _parse_function_call_output_item(self, item: dict[str, Any]) -> InternalMessage:
         tool_use_id = str(item.get("call_id") or item.get("id") or "")
         output = item.get("output")
-        content_text = output if isinstance(output, str) else None
+
+        extra: dict[str, Any] = {
+            "openai_cli": self._extract_extra(item, {"type", "call_id", "id", "output"})
+        }
+        if isinstance(output, str):
+            extra["raw"] = {"content": output, "output": output}
+            try:
+                parsed = json.loads(output)
+            except (json.JSONDecodeError, TypeError):
+                parsed = None
+
+            result_block = ToolResultBlock(
+                tool_use_id=tool_use_id,
+                output=parsed,
+                content_text=None if parsed is not None else output,
+                extra=extra,
+            )
+            return InternalMessage(role=Role.USER, content=[result_block])
+
         result_block = ToolResultBlock(
             tool_use_id=tool_use_id,
             output=output,
-            content_text=content_text,
-            extra={"openai_cli": self._extract_extra(item, {"type", "call_id", "id", "output"})},
+            content_text=None,
+            extra=extra,
         )
         return InternalMessage(role=Role.USER, content=[result_block])
 
@@ -1760,28 +1818,38 @@ class OpenAICliNormalizer(FormatNormalizer):
             # ToolUseBlock -> function_call
             for block in msg.content:
                 if isinstance(block, ToolUseBlock):
+                    raw = block.extra.get("raw") if isinstance(block.extra, dict) else None
+                    raw_arguments = raw.get("arguments") if isinstance(raw, dict) else None
+                    arguments = (
+                        raw_arguments
+                        if isinstance(raw_arguments, str)
+                        else _stable_json_dumps(block.tool_input or {})
+                    )
                     out.append(
                         {
                             "type": "function_call",
                             "call_id": block.tool_id,
                             "name": block.tool_name,
-                            "arguments": (
-                                json.dumps(block.tool_input, ensure_ascii=False)
-                                if block.tool_input
-                                else "{}"
-                            ),
+                            "arguments": arguments,
                         }
                     )
                     continue
 
                 if isinstance(block, ToolResultBlock):
                     # Responses API function_call_output.output 必须是字符串
-                    if block.content_text is not None:
+                    raw = block.extra.get("raw") if isinstance(block.extra, dict) else None
+                    raw_output = raw.get("output") if isinstance(raw, dict) else None
+                    raw_content = raw.get("content") if isinstance(raw, dict) else None
+                    if isinstance(raw_output, str):
+                        output_str = raw_output
+                    elif isinstance(raw_content, str):
+                        output_str = raw_content
+                    elif block.content_text is not None:
                         output_str = block.content_text
                     elif isinstance(block.output, str):
                         output_str = block.output
                     elif block.output is not None:
-                        output_str = json.dumps(block.output, ensure_ascii=False)
+                        output_str = _stable_json_dumps(block.output)
                     else:
                         output_str = ""
                     out.append(
@@ -1881,6 +1949,7 @@ class OpenAICliNormalizer(FormatNormalizer):
                             fn.get("parameters") if isinstance(fn.get("parameters"), dict) else None
                         ),
                         extra={
+                            "openai_cli_raw_tool": tool,
                             "openai_tool": self._extract_extra(tool, {"type", "function"}),
                             "openai_function": self._extract_extra(
                                 fn, {"name", "description", "parameters"}
@@ -1932,9 +2001,10 @@ class OpenAICliNormalizer(FormatNormalizer):
                             else None
                         ),
                         extra={
+                            "openai_cli_raw_tool": tool,
                             "openai_cli": self._extract_extra(
                                 tool, {"name", "description", "parameters"}
-                            )
+                            ),
                         },
                     )
                 )
@@ -1961,15 +2031,24 @@ class OpenAICliNormalizer(FormatNormalizer):
 
         if isinstance(tool_choice, dict):
             # OpenAI 兼容结构：{"type":"function","function":{"name":"..."}}
-            if tool_choice.get("type") == "function" and isinstance(
-                tool_choice.get("function"), dict
-            ):
-                name = str(tool_choice["function"].get("name") or "")
+            if tool_choice.get("type") == "function":
+                if isinstance(tool_choice.get("function"), dict):
+                    name = str(tool_choice["function"].get("name") or "")
+                else:
+                    name = str(tool_choice.get("name") or "")
                 return ToolChoice(
                     type=ToolChoiceType.TOOL, tool_name=name, extra={"openai_cli": tool_choice}
                 )
             if tool_choice.get("type") == "custom":
-                name = str(tool_choice.get("name") or "")
+                name = str(
+                    tool_choice.get("name")
+                    or (
+                        (tool_choice.get("custom") or {}).get("name")
+                        if isinstance(tool_choice.get("custom"), dict)
+                        else ""
+                    )
+                    or ""
+                )
                 return ToolChoice(
                     type=ToolChoiceType.TOOL, tool_name=name, extra={"openai_cli": tool_choice}
                 )

@@ -44,7 +44,11 @@ from src.api.handlers.base.chat_error_utils import (
     _resolve_dynamic_format,
 )
 from src.api.handlers.base.parsers import get_parser_for_format
-from src.api.handlers.base.request_builder import PassthroughRequestBuilder, get_provider_auth
+from src.api.handlers.base.request_builder import (
+    PassthroughRequestBuilder,
+    get_cache_sensitive_protected_body_keys,
+    get_provider_auth,
+)
 from src.api.handlers.base.response_parser import ResponseParser
 from src.api.handlers.base.stream_context import (
     StreamContext,
@@ -77,6 +81,9 @@ from src.models.database import (
     User,
 )
 from src.services.provider.behavior import get_provider_behavior
+from src.services.provider.prompt_cache import (
+    maybe_patch_request_with_prompt_cache_key,
+)
 from src.services.provider.stream_policy import (
     enforce_stream_mode_for_upstream,
     get_upstream_stream_policy,
@@ -98,6 +105,7 @@ class ProviderRequestResult:
     mapped_model: str | None
     envelope: Any  # ProviderEnvelope | None
     extra_headers: dict[str, str] = field(default_factory=dict)
+    protected_body_keys: frozenset[str] = field(default_factory=frozenset)
     upstream_is_stream: bool = True
     needs_conversion: bool = False
     provider_api_format: str = ""
@@ -688,6 +696,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
         endpoint: ProviderEndpoint,
         key: ProviderAPIKey,
         original_request_body: dict[str, Any],
+        original_headers: dict[str, str],
         client_api_format: str,
         provider_api_format: str,
         candidate: ProviderCandidate | None,
@@ -804,6 +813,15 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 upstream_is_stream=upstream_is_stream,
             )
 
+        request_body = maybe_patch_request_with_prompt_cache_key(
+            request_body,
+            provider_api_format=str(provider_api_format) if provider_api_format else None,
+            provider_type=provider_type,
+            base_url=getattr(endpoint, "base_url", None),
+            user_api_key_id=str(getattr(self.api_key, "id", "") or ""),
+            request_headers=original_headers,
+        )
+
         # 获取 URL 模型名
         url_model = self.get_model_for_url(request_body, mapped_model) or model
 
@@ -830,6 +848,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             mapped_model=mapped_model,
             envelope=envelope,
             extra_headers=extra_headers,
+            protected_body_keys=get_cache_sensitive_protected_body_keys(provider_api_format),
             upstream_is_stream=upstream_is_stream,
             needs_conversion=needs_conversion,
             provider_api_format=provider_api_format,
@@ -880,6 +899,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             endpoint=endpoint,
             key=key,
             original_request_body=original_request_body,
+            original_headers=original_headers,
             client_api_format=client_api_format,
             provider_api_format=provider_api_format,
             candidate=candidate,
@@ -909,6 +929,8 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             extra_headers=prep.extra_headers if prep.extra_headers else None,
             pre_computed_auth=auth_info.as_tuple() if auth_info else None,
             envelope=envelope,
+            protected_body_keys=prep.protected_body_keys,
+            provider_api_format=prep.provider_api_format,
         )
         if upstream_is_stream:
             from src.core.api_format.headers import set_accept_if_absent
