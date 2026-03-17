@@ -160,6 +160,21 @@ class FormatNormalizer(ABC):
     def _extract_extra(self, payload: dict[str, Any], known_keys: set[str]) -> dict[str, Any]:
         return {k: v for k, v in payload.items() if k not in known_keys}
 
+    @staticmethod
+    def _reorder_request_keys(
+        payload: dict[str, Any],
+        prefix_keys: tuple[str, ...],
+    ) -> dict[str, Any]:
+        """将指定字段前置，其余保持原序，用于稳定请求体前缀以提升 prompt cache 命中率。"""
+        ordered: dict[str, Any] = {}
+        for key in prefix_keys:
+            if key in payload:
+                ordered[key] = payload[key]
+        for key, value in payload.items():
+            if key not in ordered:
+                ordered[key] = value
+        return ordered
+
     def _merge_dropped(self, target: dict[str, int], source: dict[str, int]) -> None:
         for k, v in source.items():
             target[k] = target.get(k, 0) + int(v)

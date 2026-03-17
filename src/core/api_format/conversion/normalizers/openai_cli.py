@@ -262,11 +262,6 @@ class OpenAICliNormalizer(FormatNormalizer):
             isinstance(request_flags, dict) and request_flags.get("has_stream")
         )
 
-        result: dict[str, Any] = {
-            "model": internal.model,
-            "input": self._internal_messages_to_input(internal.messages, system_to_developer=False),
-        }
-
         # 合并 instructions，如果没有则使用 system。
         # 仅在 internal 中确有内容或原请求显式提供过时输出，
         # 让 Codex 默认 body_rules 仍可在字段缺失时注入默认 instructions。
@@ -275,8 +270,14 @@ class OpenAICliNormalizer(FormatNormalizer):
             if internal.instructions
             else internal.system
         )
+        result: dict[str, Any] = {"model": internal.model}
         if instructions_text or has_explicit_instructions:
             result["instructions"] = instructions_text or ""
+        # Keep the stable system prefix ahead of the typically dynamic input payload.
+        result["input"] = self._internal_messages_to_input(
+            internal.messages,
+            system_to_developer=False,
+        )
 
         if internal.max_tokens is not None:
             # Responses API 使用 max_output_tokens
@@ -402,7 +403,7 @@ class OpenAICliNormalizer(FormatNormalizer):
         if is_codex_variant and "store" not in result:
             result["store"] = False
 
-        return result
+        return self._reorder_request_prefix_keys(result)
 
     # =========================
     # Responses
@@ -2127,6 +2128,11 @@ class OpenAICliNormalizer(FormatNormalizer):
         parts = [seg.text for seg in instructions if seg.text]
         joined = "\n\n".join(parts)
         return joined or None
+
+    _REQUEST_PREFIX_KEYS = ("model", "instructions", "tools", "input")
+
+    def _reorder_request_prefix_keys(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._reorder_request_keys(payload, self._REQUEST_PREFIX_KEYS)
 
     def _error_type_from_value(self, value: str) -> ErrorType:
         for t in ErrorType:

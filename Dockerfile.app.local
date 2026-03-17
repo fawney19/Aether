@@ -139,6 +139,25 @@ RUN printf '%s\n' \
     '        proxy_set_header X-Forwarded-Proto $scheme;' \
     '        proxy_set_header Upgrade $http_upgrade;' \
     '        proxy_set_header Connection "upgrade";' \
+    '        # 剥离 CF 头，防止泄露给上游或返回给客户端' \
+    '        proxy_hide_header CF-Connecting-IP;' \
+    '        proxy_hide_header CF-IPCountry;' \
+    '        proxy_hide_header CF-Ray;' \
+    '        proxy_hide_header CF-Visitor;' \
+    '        proxy_hide_header CDN-Loop;' \
+    '        proxy_hide_header True-Client-IP;' \
+    '        proxy_hide_header CF-Worker;' \
+    '        proxy_hide_header CF-EW-Via;' \
+    '        proxy_hide_header CF-Warp-Tag-ID;' \
+    '        proxy_set_header CF-Connecting-IP "";' \
+    '        proxy_set_header CF-IPCountry "";' \
+    '        proxy_set_header CF-Ray "";' \
+    '        proxy_set_header CF-Visitor "";' \
+    '        proxy_set_header CDN-Loop "";' \
+    '        proxy_set_header True-Client-IP "";' \
+    '        proxy_set_header CF-Worker "";' \
+    '        proxy_set_header CF-EW-Via "";' \
+    '        proxy_set_header CF-Warp-Tag-ID "";' \
     '        proxy_read_timeout 86400s;' \
     '        proxy_send_timeout 86400s;' \
     '    }' \
@@ -156,7 +175,16 @@ RUN printf '%s\n' \
     '        proxy_set_header Content-Type $content_type;' \
     '        proxy_set_header Authorization $http_authorization;' \
     '        proxy_set_header X-Api-Key $http_x_api_key;' \
-    '        # 剥离 CF 头，防止泄露给上游 AI 提供商' \
+    '        # 剥离 CF 头，防止泄露给上游或返回给客户端' \
+    '        proxy_hide_header CF-Connecting-IP;' \
+    '        proxy_hide_header CF-IPCountry;' \
+    '        proxy_hide_header CF-Ray;' \
+    '        proxy_hide_header CF-Visitor;' \
+    '        proxy_hide_header CDN-Loop;' \
+    '        proxy_hide_header True-Client-IP;' \
+    '        proxy_hide_header CF-Worker;' \
+    '        proxy_hide_header CF-EW-Via;' \
+    '        proxy_hide_header CF-Warp-Tag-ID;' \
     '        proxy_set_header CF-Connecting-IP "";' \
     '        proxy_set_header CF-IPCountry "";' \
     '        proxy_set_header CF-Ray "";' \
@@ -165,6 +193,7 @@ RUN printf '%s\n' \
     '        proxy_set_header True-Client-IP "";' \
     '        proxy_set_header CF-Worker "";' \
     '        proxy_set_header CF-EW-Via "";' \
+    '        proxy_set_header CF-Warp-Tag-ID "";' \
     '        proxy_buffering off;' \
     '        proxy_cache off;' \
     '        proxy_request_buffering off;' \
@@ -184,6 +213,25 @@ RUN printf '%s\n' \
     '        proxy_set_header X-Real-IP $real_ip;' \
     '        proxy_set_header X-Forwarded-For $forwarded_for;' \
     '        proxy_set_header X-Forwarded-Proto $scheme;' \
+    '        # 剥离 CF 头，防止泄露给上游或返回给客户端' \
+    '        proxy_hide_header CF-Connecting-IP;' \
+    '        proxy_hide_header CF-IPCountry;' \
+    '        proxy_hide_header CF-Ray;' \
+    '        proxy_hide_header CF-Visitor;' \
+    '        proxy_hide_header CDN-Loop;' \
+    '        proxy_hide_header True-Client-IP;' \
+    '        proxy_hide_header CF-Worker;' \
+    '        proxy_hide_header CF-EW-Via;' \
+    '        proxy_hide_header CF-Warp-Tag-ID;' \
+    '        proxy_set_header CF-Connecting-IP "";' \
+    '        proxy_set_header CF-IPCountry "";' \
+    '        proxy_set_header CF-Ray "";' \
+    '        proxy_set_header CF-Visitor "";' \
+    '        proxy_set_header CDN-Loop "";' \
+    '        proxy_set_header True-Client-IP "";' \
+    '        proxy_set_header CF-Worker "";' \
+    '        proxy_set_header CF-EW-Via "";' \
+    '        proxy_set_header CF-Warp-Tag-ID "";' \
     '    }' \
     '' \
     '    # 所有其他路由 → 前端 SPA（先尝试静态文件，再回退到 index.html）' \

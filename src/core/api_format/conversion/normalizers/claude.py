@@ -66,6 +66,7 @@ from src.core.logger import logger
 
 class ClaudeNormalizer(FormatNormalizer):
     FORMAT_ID = "claude:chat"
+    _ANTHROPIC_BILLING_HEADER_PREFIX = "x-anthropic-billing-header:"
     capabilities = FormatCapabilities(
         supports_stream=True,
         supports_error_conversion=True,
@@ -1128,7 +1129,12 @@ class ClaudeNormalizer(FormatNormalizer):
         if system_value is None:
             return None, dropped, None
         if isinstance(system_value, str):
-            return (system_value or None), dropped, None
+            sanitized_text, removed_header_count = self._strip_anthropic_billing_headers(
+                system_value
+            )
+            if removed_header_count:
+                dropped["claude_system_billing_header_removed"] = removed_header_count
+            return sanitized_text, dropped, None
 
         if isinstance(system_value, list):
             texts: list[str] = []
@@ -1143,14 +1149,26 @@ class ClaudeNormalizer(FormatNormalizer):
                 if item.get("type") == "text":
                     text = item.get("text")
                     if text:
-                        texts.append(str(text))
+                        normalized_text, removed_header_count = (
+                            self._strip_anthropic_billing_headers(text)
+                        )
+                        if removed_header_count:
+                            dropped["claude_system_billing_header_removed"] = (
+                                dropped.get("claude_system_billing_header_removed", 0)
+                                + removed_header_count
+                            )
+                        if not normalized_text:
+                            continue
+                        texts.append(normalized_text)
                         seg_extra: dict[str, Any] = {}
                         cc = item.get("cache_control")
                         if isinstance(cc, dict):
                             seg_extra["cache_control"] = cc
                             has_cache_control = True
                         segments.append(
-                            InstructionSegment(role=Role.SYSTEM, text=str(text), extra=seg_extra)
+                            InstructionSegment(
+                                role=Role.SYSTEM, text=normalized_text, extra=seg_extra
+                            )
                         )
                 else:
                     dropped_key = f"claude_system_item:{item.get('type')}"
@@ -1164,6 +1182,28 @@ class ClaudeNormalizer(FormatNormalizer):
 
         dropped["claude_system_unsupported"] = dropped.get("claude_system_unsupported", 0) + 1
         return None, dropped, None
+
+    def _strip_anthropic_billing_headers(self, text: Any) -> tuple[str | None, int]:
+        normalized_text = str(text)
+        stripped_leading = normalized_text.lstrip()
+        if not stripped_leading.lower().startswith(self._ANTHROPIC_BILLING_HEADER_PREFIX):
+            return normalized_text, 0
+
+        lines = stripped_leading.splitlines(keepends=True)
+        idx = 0
+        removed_header_count = 0
+        while idx < len(lines) and lines[idx].strip().lower().startswith(
+            self._ANTHROPIC_BILLING_HEADER_PREFIX
+        ):
+            removed_header_count += 1
+            idx += 1
+        while idx < len(lines) and not lines[idx].strip():
+            idx += 1
+
+        sanitized_text = "".join(lines[idx:])
+        if not sanitized_text.strip():
+            return None, removed_header_count
+        return sanitized_text, removed_header_count
 
     def _join_instructions(self, instructions: list[InstructionSegment]) -> str | None:
         parts = [seg.text for seg in instructions if seg.text]

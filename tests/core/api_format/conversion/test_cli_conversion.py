@@ -54,6 +54,84 @@ def test_openai_cli_request_to_claude() -> None:
     assert claude_req["messages"][0]["content"] == "hi"
 
 
+def test_claude_request_to_openai_cli_places_instructions_before_input() -> None:
+    reg = _make_registry_with_cli()
+
+    claude_req = {
+        "model": "claude-3-5-sonnet-latest",
+        "system": "You are precise.",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 12,
+    }
+
+    openai_cli_req = reg.convert_request(claude_req, "claude:chat", "openai:cli")
+
+    assert openai_cli_req["instructions"] == "You are precise."
+    assert list(openai_cli_req.keys())[:3] == ["model", "instructions", "input"]
+    assert openai_cli_req["input"][0]["role"] == "user"
+
+
+def test_claude_request_to_openai_cli_drops_anthropic_billing_header() -> None:
+    reg = _make_registry_with_cli()
+
+    claude_req = {
+        "model": "claude-3-5-sonnet-latest",
+        "system": [
+            {
+                "type": "text",
+                "text": "x-anthropic-billing-header: cc_version=2.1.74.705; cc_entrypoint=claude-vscode; cch=4fb9f;",
+            },
+            {"type": "text", "text": "You are Claude Code."},
+            {"type": "text", "text": "Keep answers terse."},
+        ],
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 12,
+    }
+
+    openai_cli_req = reg.convert_request(claude_req, "claude:chat", "openai:cli")
+
+    assert openai_cli_req["instructions"] == "You are Claude Code.\n\nKeep answers terse."
+    assert "x-anthropic-billing-header" not in openai_cli_req["instructions"]
+
+
+def test_claude_request_to_openai_cli_keeps_prompt_after_billing_header_prefix() -> None:
+    reg = _make_registry_with_cli()
+
+    claude_req = {
+        "model": "claude-3-5-sonnet-latest",
+        "system": [
+            {
+                "type": "text",
+                "text": "x-anthropic-billing-header: cc_version=2.1.74.705\n\nYou are Claude Code.",
+            },
+            {"type": "text", "text": "Keep answers terse."},
+        ],
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 12,
+    }
+
+    openai_cli_req = reg.convert_request(claude_req, "claude:chat", "openai:cli")
+
+    assert openai_cli_req["instructions"] == "You are Claude Code.\n\nKeep answers terse."
+    assert "x-anthropic-billing-header" not in openai_cli_req["instructions"]
+
+
+def test_claude_request_to_openai_cli_strips_billing_header_from_string_system() -> None:
+    reg = _make_registry_with_cli()
+
+    claude_req = {
+        "model": "claude-3-5-sonnet-latest",
+        "system": "x-anthropic-billing-header: cc_version=2.1.74.705\n\nYou are Claude Code.\nKeep answers terse.",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 12,
+    }
+
+    openai_cli_req = reg.convert_request(claude_req, "claude:chat", "openai:cli")
+
+    assert openai_cli_req["instructions"] == "You are Claude Code.\nKeep answers terse."
+    assert "x-anthropic-billing-header" not in openai_cli_req["instructions"]
+
+
 def test_claude_response_to_openai_cli() -> None:
     reg = _make_registry_with_cli()
 
@@ -426,6 +504,7 @@ def test_openai_cli_custom_tool_and_choice_convert_to_openai_chat() -> None:
 
     out = reg.convert_request(openai_cli_req, "openai:cli", "openai:chat")
 
+    assert list(out.keys())[:3] == ["model", "tools", "messages"]
     assert out["tools"] == [
         {
             "type": "custom",
@@ -504,6 +583,7 @@ def test_openai_chat_web_search_options_convert_to_openai_cli_tools() -> None:
 
     out = reg.convert_request(openai_chat_req, "openai:chat", "openai:cli")
 
+    assert list(out.keys())[:3] == ["model", "tools", "input"]
     assert out["tools"] == [
         {
             "type": "web_search",
