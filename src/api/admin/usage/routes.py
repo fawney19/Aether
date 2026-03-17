@@ -1908,6 +1908,77 @@ class AdminUsageCurlAdapter(AdminApiAdapter):
         }
 
 
+def _resolve_replay_mode(same_provider: bool, same_endpoint: bool) -> str:
+    if same_provider and same_endpoint:
+        return "same_endpoint_reuse"
+    if same_provider:
+        return "same_provider_remap"
+    return "cross_provider_remap"
+
+
+async def _resolve_replay_model_name(
+    db: Session,
+    *,
+    source_model: str,
+    original_target_model: str | None,
+    target_provider: Provider,
+    target_endpoint: ProviderEndpoint,
+    target_api_key: ProviderAPIKey | None,
+    same_provider: bool,
+    same_endpoint: bool,
+    force_remap: bool,
+) -> tuple[str, str]:
+    """解析 replay 的最终模型名，并返回 mapping_source。"""
+    from src.services.model.mapper import ModelMapperMiddleware
+
+    target_api_format = (getattr(target_endpoint, "api_format", "") or "").strip().lower()
+
+    if same_provider and same_endpoint and original_target_model and not force_remap:
+        return original_target_model, "original_target_model"
+
+    mapper = ModelMapperMiddleware(db)
+    mapping = await mapper.get_mapping(source_model, str(target_provider.id))
+
+    if mapping and mapping.model:
+        affinity_key = target_api_key.id if target_api_key else None
+        mapped_name = mapping.model.select_provider_model_name(
+            affinity_key, api_format=target_api_format
+        )
+        return mapped_name, "model_mapping"
+
+    if same_provider and same_endpoint:
+        return source_model, "none"
+
+    provider_name = target_provider.name or str(target_provider.id)
+    endpoint_id = str(getattr(target_endpoint, "id", "") or "unknown")
+    api_format = target_api_format or "unknown"
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Target provider '{provider_name}' does not support model '{source_model}' "
+            f"(endpoint={endpoint_id}, api_format={api_format})"
+        ),
+    )
+
+
+def _apply_replay_model_to_body(
+    body: dict[str, Any],
+    resolved_model: str,
+    target_api_format: str | None,
+) -> None:
+    """根据目标格式决定是否写入 body.model。"""
+    from src.core.api_format.metadata import resolve_endpoint_definition
+
+    target_meta = (
+        resolve_endpoint_definition(target_api_format) if target_api_format else None
+    )
+    if target_meta is not None and not target_meta.model_in_body:
+        body.pop("model", None)
+        return
+
+    body["model"] = resolved_model
+
+
 @dataclass
 class AdminUsageReplayAdapter(AdminApiAdapter):
     """Replay a usage record request to the same or a different provider."""
@@ -1933,8 +2004,28 @@ class AdminUsageReplayAdapter(AdminApiAdapter):
         original_api_family = (
             original_api_format.split(":")[0] if ":" in original_api_format else ""
         )
+        original_request_body = usage_record.get_request_body()
+        body_override_payload = (
+            self.body_override if isinstance(self.body_override, dict) else None
+        )
+        override_model: str | None = None
+        if isinstance(body_override_payload, dict):
+            override_val = body_override_payload.get("model")
+            if isinstance(override_val, str) and override_val.strip():
+                override_model = override_val.strip()
 
-        # 确定目标端点和密钥
+        # 解析源模型名：优先 request_body.model，缺失时回退 usage_record.model
+        source_model = usage_record.model
+        if override_model:
+            source_model = override_model
+        elif isinstance(original_request_body, dict):
+            raw_model = original_request_body.get("model")
+            if isinstance(raw_model, str) and raw_model.strip():
+                source_model = raw_model.strip()
+
+        original_target_model = usage_record.target_model
+
+        # 确定目标端点
         target_pid = self.target_provider_id
         target_provider_obj: Provider | None = None
         if self.target_endpoint_id:
@@ -1994,6 +2085,16 @@ class AdminUsageReplayAdapter(AdminApiAdapter):
                     detail="Original endpoint not found, specify target_endpoint_id",
                 )
 
+        if not target_provider_obj:
+            target_provider_obj = (
+                db.query(Provider).filter(Provider.id == endpoint.provider_id).first()
+            )
+            if not target_provider_obj:
+                raise HTTPException(status_code=404, detail="Target provider not found")
+
+        if not target_pid:
+            target_pid = str(target_provider_obj.id)
+
         # 确定 API Key
         target_ep_format = (getattr(endpoint, "api_format", "") or "").strip().lower()
         provider_key = None
@@ -2036,6 +2137,53 @@ class AdminUsageReplayAdapter(AdminApiAdapter):
         if not provider_key:
             raise HTTPException(status_code=404, detail="No API key available for replay")
 
+        # 判定 replay 模式
+        original_provider_id = usage_record.provider_id
+        if not original_provider_id and usage_record.provider_endpoint_id:
+            original_endpoint = (
+                db.query(ProviderEndpoint)
+                .filter(ProviderEndpoint.id == usage_record.provider_endpoint_id)
+                .first()
+            )
+            if original_endpoint:
+                original_provider_id = str(original_endpoint.provider_id)
+
+        same_provider = bool(
+            original_provider_id and target_pid and str(original_provider_id) == str(target_pid)
+        )
+        same_endpoint = bool(
+            usage_record.provider_endpoint_id
+            and str(usage_record.provider_endpoint_id) == str(endpoint.id)
+        )
+        replay_mode = _resolve_replay_mode(same_provider, same_endpoint)
+
+        # 解析目标模型
+        resolved_model_name, mapping_source = await _resolve_replay_model_name(
+            db,
+            source_model=source_model,
+            original_target_model=original_target_model,
+            target_provider=target_provider_obj,
+            target_endpoint=endpoint,
+            target_api_key=provider_key,
+            same_provider=same_provider,
+            same_endpoint=same_endpoint,
+            force_remap=bool(override_model),
+        )
+        mapping_applied = mapping_source != "none"
+
+        mapping_info = {
+            "source_model": source_model,
+            "original_target_model": original_target_model,
+            "resolved_model": resolved_model_name,
+            "target_provider_id": str(target_provider_obj.id),
+            "target_provider": target_provider_obj.name,
+            "target_endpoint_id": str(endpoint.id),
+            "target_api_format": target_ep_format,
+            "replay_mode": replay_mode,
+            "mapping_applied": mapping_applied,
+            "mapping_source": mapping_source,
+        }
+
         # 根据 auth_type 正确解析认证（支持 OAuth / Vertex AI / API Key）
         try:
             auth_headers, decrypted_auth_config = await _resolve_provider_auth(
@@ -2046,16 +2194,15 @@ class AdminUsageReplayAdapter(AdminApiAdapter):
             raise HTTPException(status_code=500, detail="Failed to resolve provider authentication")
 
         # 构建 URL
-        model_name = usage_record.target_model or usage_record.model
         url = _build_provider_url_safe(
-            endpoint, model_name, False, provider_key, decrypted_auth_config
+            endpoint, resolved_model_name, False, provider_key, decrypted_auth_config
         )
 
         # 构建请求头（Content-Type + 认证头 + 端点额外头）
         headers = _build_fresh_headers(auth_headers, endpoint)
 
         # 使用覆盖体或原始请求体
-        body = self.body_override or usage_record.get_request_body() or {}
+        body = body_override_payload or original_request_body or {}
 
         # 格式转换：如果存储的请求体格式与目标端点格式不同，需要转换
         if isinstance(body, dict):
@@ -2078,6 +2225,8 @@ class AdminUsageReplayAdapter(AdminApiAdapter):
                         conv_err,
                     )
                     # 转换失败仍发送原始体，让用户看到上游的实际报错
+
+            _apply_replay_model_to_body(body, resolved_model_name, target_format)
 
         # 强制非流式以获取完整响应
         # Gemini 格式通过 URL 控制流式（streamGenerateContent vs generateContent），
@@ -2112,8 +2261,8 @@ class AdminUsageReplayAdapter(AdminApiAdapter):
                 if envelope:
                     body, _ = envelope.wrap_request(
                         body,
-                        model=model_name or "",
-                        url_model=model_name,
+                        model=resolved_model_name or "",
+                        url_model=resolved_model_name,
                         decrypted_auth_config=decrypted_auth_config,
                     )
                     # envelope 可能注入额外请求头（如 Kiro 的 AWS 签名头、Codex 的 OAuth 头）
@@ -2125,9 +2274,7 @@ class AdminUsageReplayAdapter(AdminApiAdapter):
                 # envelope 失败仍发送原始体
 
         # 获取提供商名称
-        provider_name = usage_record.provider_name
-        if target_provider_obj:
-            provider_name = target_provider_obj.name
+        provider_name = target_provider_obj.name if target_provider_obj else usage_record.provider_name
 
         # 发送请求
         try:
@@ -2172,6 +2319,15 @@ class AdminUsageReplayAdapter(AdminApiAdapter):
             usage_id=self.usage_id,
             target_provider=provider_name,
             target_url=url,
+            source_model=source_model,
+            original_target_model=original_target_model,
+            resolved_model=resolved_model_name,
+            target_provider_id=str(target_provider_obj.id),
+            target_endpoint_id=str(endpoint.id),
+            target_api_format=target_ep_format,
+            replay_mode=replay_mode,
+            mapping_applied=mapping_applied,
+            mapping_source=mapping_source,
         )
 
         return {
@@ -2181,6 +2337,7 @@ class AdminUsageReplayAdapter(AdminApiAdapter):
             "response_headers": response_headers,
             "response_body": response_body,
             "response_time_ms": elapsed_ms,
+            "mapping": mapping_info,
         }
 
 

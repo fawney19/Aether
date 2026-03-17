@@ -239,6 +239,35 @@
 
                 <!-- 响应结果 -->
                 <template v-if="replayResult">
+                  <div
+                    v-if="replayResult.mapping"
+                    class="border-b"
+                  >
+                    <div class="px-4 py-2 text-[11px] text-muted-foreground flex flex-col gap-1">
+                      <div class="flex flex-wrap items-center gap-2">
+                        <span class="font-mono truncate">{{ replayResult.mapping.source_model }}</span>
+                        <span class="text-muted-foreground/50">→</span>
+                        <span class="font-mono truncate">{{ replayResult.mapping.resolved_model }}</span>
+                        <Badge
+                          variant="outline"
+                          class="text-[10px] px-1.5 py-0 h-4"
+                        >
+                          {{ formatReplayMode(replayResult.mapping.replay_mode) }}
+                        </Badge>
+                      </div>
+                      <div class="flex flex-wrap gap-2 text-muted-foreground/60">
+                        <span>Provider: {{ replayResult.mapping.target_provider }}</span>
+                        <span>Endpoint: {{ replayResult.mapping.target_endpoint_id }}</span>
+                        <span>Format: {{ replayResult.mapping.target_api_format || '-' }}</span>
+                      </div>
+                      <div
+                        v-if="replayResult.mapping.mapping_source && replayResult.mapping.mapping_source !== 'none'"
+                        class="text-muted-foreground/50"
+                      >
+                        {{ formatMappingSource(replayResult.mapping.mapping_source) }}
+                      </div>
+                    </div>
+                  </div>
                   <!-- 响应头（可折叠） -->
                   <div class="border-b">
                     <button
@@ -375,6 +404,32 @@ const responseHeaderCount = computed(() => {
   if (!replayResult.value?.response_headers) return 0
   return Object.keys(replayResult.value.response_headers).length
 })
+
+function formatReplayMode(mode?: string) {
+  switch (mode) {
+    case 'same_endpoint_reuse':
+      return '同端点复用'
+    case 'same_provider_remap':
+      return '同 Provider 重映射'
+    case 'cross_provider_remap':
+      return '跨 Provider 重映射'
+    default:
+      return mode || '-'
+  }
+}
+
+function formatMappingSource(source?: string) {
+  switch (source) {
+    case 'original_target_model':
+      return '映射来源: 复用原目标模型'
+    case 'model_mapping':
+      return '映射来源: 模型映射'
+    case 'none':
+      return '映射来源: 未映射'
+    default:
+      return source ? `映射来源: ${source}` : ''
+  }
+}
 
 // ---- 生命周期 ----
 

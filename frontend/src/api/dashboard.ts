@@ -238,6 +238,18 @@ export interface ReplayResponse {
   response_headers: Record<string, string>
   response_body: Record<string, unknown>
   response_time_ms: number
+  mapping?: {
+    source_model: string
+    original_target_model?: string | null
+    resolved_model: string
+    target_provider_id: string
+    target_provider: string
+    target_endpoint_id: string
+    target_api_format: string
+    replay_mode: string
+    mapping_applied: boolean
+    mapping_source: string
+  }
 }
 
 export interface ModelBreakdown {
