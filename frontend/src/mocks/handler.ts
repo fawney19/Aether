@@ -531,6 +531,76 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     return createMockResponse({ message: '密码修改成功（演示模式）' })
   },
 
+  'GET /api/users/me/sessions': async () => {
+    await delay()
+    return createMockResponse([
+      {
+        id: 'session-current',
+        device_label: 'Chrome / macOS',
+        device_type: 'desktop',
+        browser_name: 'Chrome',
+        browser_version: '134.0',
+        os_name: 'macOS',
+        os_version: '15.3',
+        device_model: null,
+        ip_address: '192.168.1.100',
+        last_seen_at: new Date().toISOString(),
+        created_at: new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString(),
+        is_current: true,
+        revoked_at: null,
+        revoke_reason: null
+      },
+      {
+        id: 'session-other',
+        device_label: 'Safari / iPhone',
+        device_type: 'mobile',
+        browser_name: 'Safari',
+        browser_version: '18.0',
+        os_name: 'iOS',
+        os_version: '18.3',
+        device_model: 'iPhone',
+        ip_address: '10.0.0.12',
+        last_seen_at: new Date(Date.now() - 3 * 3600 * 1000).toISOString(),
+        created_at: new Date(Date.now() - 5 * 24 * 3600 * 1000).toISOString(),
+        is_current: false,
+        revoked_at: null,
+        revoke_reason: null
+      }
+    ])
+  },
+
+  'DELETE /api/users/me/sessions/others': async () => {
+    await delay()
+    return createMockResponse({ message: '其他设备已退出登录（演示模式）', revoked_count: 1 })
+  },
+
+  'PATCH /api/users/me/sessions/:sessionId': async (config) => {
+    await delay()
+    const sessionId = config.url?.split('/').pop() || 'session'
+    const body = JSON.parse(config.data || '{}')
+    return createMockResponse({
+      id: sessionId,
+      device_label: body.device_label || '已重命名设备',
+      device_type: 'desktop',
+      browser_name: 'Chrome',
+      browser_version: '134.0',
+      os_name: 'macOS',
+      os_version: '15.3',
+      device_model: null,
+      ip_address: '192.168.1.100',
+      last_seen_at: new Date().toISOString(),
+      created_at: new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString(),
+      is_current: sessionId === 'session-current',
+      revoked_at: null,
+      revoke_reason: null
+    })
+  },
+
+  'DELETE /api/users/me/sessions/:sessionId': async () => {
+    await delay()
+    return createMockResponse({ message: '设备已退出登录（演示模式）' })
+  },
+
   'GET /api/users/me/api-keys': async () => {
     await delay()
     return createMockResponse(MOCK_USER_API_KEYS)
@@ -2084,6 +2154,44 @@ registerDynamicRoute('GET', '/api/admin/users/:userId/api-keys', async (_config,
   await delay()
   requireAdmin()
   return createMockResponse(MOCK_USER_API_KEYS)
+})
+
+// 管理员 - 用户会话列表
+registerDynamicRoute('GET', '/api/admin/users/:userId/sessions', async (_config, _params) => {
+  await delay()
+  requireAdmin()
+  return createMockResponse([
+    {
+      id: 'admin-session-1',
+      device_label: 'Chrome / macOS',
+      device_type: 'desktop',
+      browser_name: 'Chrome',
+      browser_version: '134.0',
+      os_name: 'macOS',
+      os_version: '15.3',
+      device_model: null,
+      ip_address: '192.168.1.100',
+      last_seen_at: new Date().toISOString(),
+      created_at: new Date(Date.now() - 2 * 24 * 3600 * 1000).toISOString(),
+      is_current: false,
+      revoked_at: null,
+      revoke_reason: null
+    }
+  ])
+})
+
+// 管理员 - 撤销用户单个会话
+registerDynamicRoute('DELETE', '/api/admin/users/:userId/sessions/:sessionId', async (_config, _params) => {
+  await delay()
+  requireAdmin()
+  return createMockResponse({ message: '会话已撤销（演示模式）' })
+})
+
+// 管理员 - 撤销用户全部会话
+registerDynamicRoute('DELETE', '/api/admin/users/:userId/sessions', async (_config, _params) => {
+  await delay()
+  requireAdmin()
+  return createMockResponse({ message: '全部会话已撤销（演示模式）', revoked_count: 1 })
 })
 
 // API Key 详情

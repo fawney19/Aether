@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from src.core.enums import ProviderBillingType
+from src.core.validators import PasswordValidator
 
 
 class ProxyConfig(BaseModel):
@@ -683,9 +684,7 @@ class UpdateUserRequest(BaseModel):
 
     username: str | None = Field(None, min_length=1, max_length=50)
     email: str | None = Field(None, max_length=100)
-    password: str | None = Field(
-        None, min_length=6, max_length=128, description="新密码（留空保持不变）"
-    )
+    password: str | None = Field(None, description="新密码（留空保持不变）")
     unlimited: bool | None = Field(None, description="是否无限制（true=无限制，false=有限制）")
     is_active: bool | None = None
     role: str | None = None
@@ -723,6 +722,19 @@ class UpdateUserRequest(BaseModel):
             raise ValueError("邮箱格式不正确")
 
         return v.lower()
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, v: str | None) -> str | None:
+        """验证密码"""
+        if v is None:
+            return v
+
+        valid, error_msg = PasswordValidator.validate_basic_input(v)
+        if not valid:
+            raise ValueError(error_msg or "密码格式无效")
+
+        return v
 
     @field_validator("role")
     @classmethod

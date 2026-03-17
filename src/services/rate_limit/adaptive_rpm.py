@@ -93,6 +93,16 @@ class AdaptiveRPMManager:
         """
         self.strategy = strategy
 
+    @staticmethod
+    def _persist_metadata_update(db: Session) -> None:
+        """
+        延后持久化自适应学习元数据，避免在请求热路径上同步 flush。
+
+        这些更新只修改既有 ProviderAPIKey 行上的统计/学习字段，不依赖数据库生成值。
+        请求级事务会在中间件统一 commit，后台会话则由 BatchCommitter 负责后续提交。
+        """
+        get_batch_committer().mark_dirty(db)
+
     # ==================== 429 处理 ====================
 
     def handle_429_error(
@@ -209,8 +219,7 @@ class AdaptiveRPMManager:
                 )
                 key.learned_rpm_limit = new_limit  # type: ignore[assignment]
 
-        db.flush()
-        get_batch_committer().mark_dirty(db)
+        self._persist_metadata_update(db)
 
         return key.learned_rpm_limit if key.learned_rpm_limit is not None else None
 
@@ -462,15 +471,13 @@ class AdaptiveRPMManager:
             # 扩容后清空采样窗口，重新开始收集
             key.utilization_samples = []  # type: ignore[assignment]
 
-            db.flush()
-            get_batch_committer().mark_dirty(db)
+            self._persist_metadata_update(db)
 
             return new_limit
 
         # 定期持久化采样数据（每5个采样保存一次）
         if len(samples) % 5 == 0:
-            db.flush()
-            get_batch_committer().mark_dirty(db)
+            self._persist_metadata_update(db)
 
         return None
 
@@ -728,8 +735,7 @@ class AdaptiveRPMManager:
         key.utilization_samples = []  # type: ignore[assignment]
         key.last_probe_increase_at = None  # type: ignore[assignment]
 
-        db.flush()
-        get_batch_committer().mark_dirty(db)
+        self._persist_metadata_update(db)
 
 
 # 全局单例

@@ -139,6 +139,7 @@ class User(Base):
     management_tokens = relationship(
         "ManagementToken", back_populates="user", cascade="all, delete-orphan"
     )
+    sessions = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
     preferences = relationship(
         "UserPreference", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
@@ -169,15 +170,132 @@ class User(Base):
 
     def set_password(self, password: str) -> None:
         """设置密码"""
-        self.password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode(
-            "utf-8"
-        )
+        try:
+            self.password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode(
+                "utf-8"
+            )
+        except ValueError as exc:
+            raise ValueError("密码长度不能超过72字节") from exc
 
     def verify_password(self, password: str) -> bool:
         """验证密码"""
         if not self.password_hash:
             return False
-        return bcrypt.checkpw(password.encode("utf-8"), self.password_hash.encode("utf-8"))
+        try:
+            return bcrypt.checkpw(password.encode("utf-8"), self.password_hash.encode("utf-8"))
+        except ValueError:
+            return False
+
+
+class UserSession(Base):
+    """用户登录会话（设备级）。"""
+
+    __tablename__ = "user_sessions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    # 客户端标识
+    client_device_id = Column(String(128), nullable=False, index=True)
+    device_label = Column(String(120), nullable=True)
+    device_type = Column(String(20), nullable=False, default="unknown")
+    browser_name = Column(String(50), nullable=True)
+    browser_version = Column(String(50), nullable=True)
+    os_name = Column(String(50), nullable=True)
+    os_version = Column(String(50), nullable=True)
+    device_model = Column(String(100), nullable=True)
+
+    # 请求上下文
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(String(1000), nullable=True)
+    client_hints = Column(JSON, nullable=True)
+
+    # Refresh Token 仅存储哈希，不保存明文
+    refresh_token_hash = Column(String(64), nullable=False)
+    # 上一个 refresh token 的哈希，用于并发刷新的宽限窗口
+    prev_refresh_token_hash = Column(String(64), nullable=True)
+    rotated_at = Column(DateTime(timezone=True), nullable=True)
+
+    # 状态
+    last_seen_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    revoke_reason = Column(String(100), nullable=True)
+
+    # 时间戳
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    # 关系
+    user = relationship("User", back_populates="sessions")
+
+    __table_args__ = (
+        Index("idx_user_sessions_user_active", "user_id", "revoked_at", "expires_at"),
+        Index("idx_user_sessions_user_device", "user_id", "client_device_id"),
+    )
+
+    @staticmethod
+    def hash_refresh_token(token: str) -> str:
+        """对 refresh token 做 SHA256 哈希。"""
+        return hashlib.sha256(token.encode()).hexdigest()
+
+    def set_refresh_token(self, token: str) -> None:
+        """设置 refresh token 哈希，同时保存上一个哈希用于并发宽限。"""
+        self.prev_refresh_token_hash = self.refresh_token_hash
+        self.rotated_at = datetime.now(timezone.utc)
+        self.refresh_token_hash = self.hash_refresh_token(token)
+
+    # 并发刷新宽限窗口（秒）
+    REFRESH_GRACE_SECONDS = 10
+
+    def verify_refresh_token(self, token: str) -> tuple[bool, bool]:
+        """校验 refresh token 是否匹配（常量时间比较）。
+
+        Returns:
+            (is_valid, is_prev): is_valid 表示 token 是否通过校验，
+            is_prev 表示匹配的是上一个（宽限窗口内的旧）token。
+        """
+        import hmac
+
+        token_hash = self.hash_refresh_token(token)
+        current_hash: str | None = self.refresh_token_hash
+        if current_hash and hmac.compare_digest(current_hash, token_hash):
+            return True, False
+        # 检查宽限窗口内的上一个 token
+        prev_hash: str | None = self.prev_refresh_token_hash
+        rotated_at: datetime | None = self.rotated_at
+        if prev_hash and rotated_at:
+            if rotated_at.tzinfo is None:
+                rotated_at = rotated_at.replace(tzinfo=timezone.utc)
+            elapsed = (datetime.now(timezone.utc) - rotated_at).total_seconds()
+            if elapsed <= self.REFRESH_GRACE_SECONDS:
+                if hmac.compare_digest(prev_hash, token_hash):
+                    return True, True
+        return False, False
+
+    @property
+    def is_revoked(self) -> bool:
+        return self.revoked_at is not None
+
+    @property
+    def is_expired(self) -> bool:
+        expires_at: datetime | None = self.expires_at
+        if expires_at is None:
+            return True
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        return expires_at <= datetime.now(timezone.utc)
 
 
 class ApiKey(Base):

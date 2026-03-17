@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import time
 from typing import TYPE_CHECKING, Any
@@ -115,7 +116,7 @@ class CliSyncMixin:
 
         # 可变请求体容器：允许 TaskService 在遇到 Thinking 签名错误时整流请求体后重试
         # 结构: {"body": 实际请求体, "_rectified": 是否已整流, "_rectified_this_turn": 本轮是否整流}
-        request_body_ref: dict[str, Any] = {"body": original_request_body}
+        request_body_ref: dict[str, Any] = {"body": copy.deepcopy(original_request_body)}
 
         async def sync_request_func(
             provider: "Provider",
@@ -136,11 +137,10 @@ class CliSyncMixin:
                 )
 
             # 应用模型映射到请求体（子类可覆盖此方法处理不同格式）
+            request_body = copy.deepcopy(request_body_ref["body"])
             if mapped_model:
                 mapped_model_result = mapped_model  # 保存映射后的模型名，用于 Usage 记录
-                request_body = self.apply_mapped_model(request_body_ref["body"], mapped_model)
-            else:
-                request_body = dict(request_body_ref["body"])
+                request_body = self.apply_mapped_model(request_body, mapped_model)
 
             client_api_format = (
                 api_format.value if hasattr(api_format, "value") else str(api_format)
@@ -263,7 +263,10 @@ class CliSyncMixin:
                 extra_headers=extra_headers if extra_headers else None,
                 pre_computed_auth=auth_info.as_tuple() if auth_info else None,
                 envelope=envelope,
-                protected_body_keys=get_cache_sensitive_protected_body_keys(provider_api_format),
+                protected_body_keys=get_cache_sensitive_protected_body_keys(
+                    provider_api_format,
+                    provider_type=provider_type,
+                ),
                 provider_api_format=provider_api_format,
             )
             if upstream_is_stream:

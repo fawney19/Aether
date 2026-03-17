@@ -96,6 +96,69 @@ def test_list_users_uses_wallet_batch_lookup(monkeypatch: pytest.MonkeyPatch) ->
     assert batch_getter.call_args.args[1] == ["user-1", "user-2"]
 
 
+def test_list_user_sessions_route_returns_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = MagicMock()
+    client = _build_admin_users_app(db, monkeypatch)
+    sessions = [
+        {
+            "id": "session-1",
+            "device_label": "Chrome / macOS",
+            "device_type": "desktop",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "is_current": False,
+        }
+    ]
+
+    monkeypatch.setattr(
+        "src.api.admin.users.routes._list_user_sessions_sync",
+        lambda user_id: (
+            sessions,
+            {"action": "list_user_sessions", "target_user_id": user_id},
+        ),
+    )
+
+    response = client.get("/api/admin/users/user-1/sessions")
+
+    assert response.status_code == 200
+    assert response.json() == sessions
+
+
+def test_revoke_user_session_route_returns_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = MagicMock()
+    client = _build_admin_users_app(db, monkeypatch)
+
+    monkeypatch.setattr(
+        "src.api.admin.users.routes._revoke_user_session_sync",
+        lambda user_id, session_id, admin_user_id: (
+            {"message": f"{user_id}:{session_id}:revoked"},
+            {"action": "revoke_user_session", "target_user_id": user_id, "session_id": session_id},
+        ),
+    )
+
+    response = client.delete("/api/admin/users/user-1/sessions/session-1")
+
+    assert response.status_code == 200
+    assert response.json() == {"message": "user-1:session-1:revoked"}
+
+
+def test_revoke_all_user_sessions_route_returns_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = MagicMock()
+    client = _build_admin_users_app(db, monkeypatch)
+
+    monkeypatch.setattr(
+        "src.api.admin.users.routes._revoke_all_user_sessions_sync",
+        lambda user_id, admin_user_id: (
+            {"message": "done", "revoked_count": 2},
+            {"action": "revoke_all_user_sessions", "target_user_id": user_id, "revoked_count": 2},
+        ),
+    )
+
+    response = client.delete("/api/admin/users/user-1/sessions")
+
+    assert response.status_code == 200
+    assert response.json() == {"message": "done", "revoked_count": 2}
+
+
 @pytest.mark.asyncio
 async def test_create_user_adapter_preserves_empty_restriction_lists(
     monkeypatch: pytest.MonkeyPatch,
@@ -103,14 +166,12 @@ async def test_create_user_adapter_preserves_empty_restriction_lists(
     db = MagicMock()
     captured: dict[str, Any] = {}
 
-    def _create_user_sync(request: Any, role: Any) -> tuple[dict[str, Any], dict[str, Any]]:
-        captured["allowed_providers"] = request.allowed_providers
-        captured["allowed_api_formats"] = request.allowed_api_formats
-        captured["allowed_models"] = request.allowed_models
+    def _fake_create_user_sync(request: Any, role: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        captured["request"] = request
         captured["role"] = role
-        return {"id": "user-3"}, {}
+        return {"id": "user-3"}, {"action": "create_user", "target_user_id": "user-3"}
 
-    monkeypatch.setattr("src.api.admin.users.routes._create_user_sync", _create_user_sync)
+    monkeypatch.setattr("src.api.admin.users.routes._create_user_sync", _fake_create_user_sync)
 
     context = SimpleNamespace(
         db=db,
@@ -131,6 +192,6 @@ async def test_create_user_adapter_preserves_empty_restriction_lists(
     result = await AdminCreateUserAdapter().handle(context)
 
     assert result == {"id": "user-3"}
-    assert captured["allowed_providers"] == []
-    assert captured["allowed_api_formats"] == []
-    assert captured["allowed_models"] == []
+    assert captured["request"].allowed_providers == []
+    assert captured["request"].allowed_api_formats == []
+    assert captured["request"].allowed_models == []

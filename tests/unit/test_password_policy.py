@@ -1,6 +1,8 @@
 import pytest
+from pydantic import ValidationError
 
 from src.core.validators import PasswordPolicyLevel, PasswordValidator
+from src.models.api import LoginRequest
 
 
 class TestPasswordPolicy:
@@ -52,3 +54,28 @@ class TestPasswordPolicy:
 
         assert valid is True
         assert error is None
+
+    def test_rejects_password_longer_than_72_bytes(self) -> None:
+        valid, error = PasswordValidator.validate("a" * 80)
+
+        assert valid is False
+        assert error == "密码长度不能超过72字节"
+
+    def test_rejects_multibyte_password_longer_than_72_bytes(self) -> None:
+        valid, error = PasswordValidator.validate("中" * 25)
+
+        assert valid is False
+        assert error == "密码长度不能超过72字节"
+
+    def test_login_request_preserves_leading_and_trailing_spaces(self) -> None:
+        request = LoginRequest.model_validate(
+            {"email": "tester", "password": "  pass word  ", "auth_type": "local"}
+        )
+
+        assert request.password == "  pass word  "
+
+    def test_login_request_rejects_password_longer_than_72_bytes(self) -> None:
+        with pytest.raises(ValidationError, match="密码长度不能超过72字节"):
+            LoginRequest.model_validate(
+                {"email": "tester", "password": "a" * 80, "auth_type": "local"}
+            )

@@ -490,16 +490,15 @@ onUnmounted(() => {
   document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 
-function handleRelogin() {
+async function handleRelogin() {
   showAuthError.value = false
-  router.push('/').then(() => {
-    authStore.logout()
-  })
+  await authStore.logout()
+  await router.push('/')
 }
 
-function handleLogout() {
-  authStore.logout()
-  router.push('/')
+async function handleLogout() {
+  await authStore.logout()
+  await router.push('/')
 }
 
 function isNavActive(href: string) {

@@ -19,16 +19,16 @@ class LoginRequest(BaseModel):
     """登录请求"""
 
     email: str = Field(..., min_length=1, max_length=255, description="邮箱/用户名")
-    password: str = Field(..., min_length=1, max_length=128, description="密码")
+    password: str = Field(..., description="密码")
     auth_type: Literal["local", "ldap"] = Field(default="local", description="认证类型")
 
-    @classmethod
     @field_validator("password")
+    @classmethod
     def validate_password(cls, v: Any) -> Any:
-        """验证密码不为空且去除前后空格"""
-        v = v.strip()
-        if not v:
-            raise ValueError("密码不能为空")
+        """验证密码输入合法，保留原始内容。"""
+        valid, error_msg = PasswordValidator.validate_login_input(v)
+        if not valid:
+            raise ValueError(error_msg or "密码格式无效")
         return v
 
     @model_validator(mode="after")
@@ -54,7 +54,6 @@ class LoginResponse(BaseModel):
     """登录响应"""
 
     access_token: str
-    refresh_token: str  # 刷新令牌
     token_type: str = "bearer"
     expires_in: int = 86400  # Token有效期（秒），默认24小时
     user_id: str
@@ -63,17 +62,10 @@ class LoginResponse(BaseModel):
     role: str
 
 
-class RefreshTokenRequest(BaseModel):
-    """刷新令牌请求"""
-
-    refresh_token: str = Field(..., description="刷新令牌")
-
-
 class RefreshTokenResponse(BaseModel):
     """刷新令牌响应"""
 
     access_token: str
-    refresh_token: str  # 返回新的刷新令牌
     token_type: str = "bearer"
     expires_in: int = 86400  # Token有效期（秒），默认24小时
 
@@ -82,8 +74,8 @@ class RegisterRequest(BaseModel):
     """注册请求"""
 
     email: str | None = Field(None, max_length=255, description="邮箱地址（可选）")
-    username: str = Field(..., min_length=2, max_length=50, description="用户名")
-    password: str = Field(..., min_length=6, max_length=128, description="密码")
+    username: str = Field(..., min_length=3, max_length=50, description="用户名")
+    password: str = Field(..., description="密码")
 
     @field_validator("email")
     @classmethod
@@ -110,11 +102,11 @@ class RegisterRequest(BaseModel):
             raise ValueError("用户名只能包含字母、数字、下划线、连字符和点号")
         return v
 
-    @classmethod
     @field_validator("password")
+    @classmethod
     def validate_password(cls, v: Any) -> Any:
-        """基础校验（长度上下限），策略级别校验在服务层按系统配置执行。"""
-        valid, error_msg = PasswordValidator.validate(v)
+        """基础校验（非空和算法限制），策略级别校验在服务层按系统配置执行。"""
+        valid, error_msg = PasswordValidator.validate_basic_input(v)
         if not valid:
             raise ValueError(error_msg or "密码格式无效")
         return v
@@ -234,8 +226,8 @@ class RegistrationSettingsResponse(BaseModel):
 class CreateUserRequest(BaseModel):
     """创建用户请求"""
 
-    username: str = Field(..., min_length=2, max_length=50, description="用户名")
-    password: str = Field(..., min_length=6, max_length=128, description="密码")
+    username: str = Field(..., min_length=3, max_length=50, description="用户名")
+    password: str = Field(..., description="密码")
     email: str | None = Field(None, max_length=255, description="邮箱地址（可选）")
     role: UserRole | None = Field(UserRole.USER, description="用户角色")
     initial_gift_usd: float | None = Field(
@@ -319,11 +311,11 @@ class CreateUserRequest(BaseModel):
             out.append(norm)
         return out
 
-    @classmethod
     @field_validator("password")
+    @classmethod
     def validate_password(cls, v: Any) -> Any:
-        """基础校验（长度上下限），策略级别校验在服务层按系统配置执行。"""
-        valid, error_msg = PasswordValidator.validate(v)
+        """基础校验（非空和算法限制），策略级别校验在服务层按系统配置执行。"""
+        valid, error_msg = PasswordValidator.validate_basic_input(v)
         if not valid:
             raise ValueError(error_msg or "密码格式无效")
         return v
@@ -334,7 +326,7 @@ class UpdateUserRequest(BaseModel):
 
     email: str | None = None
     username: str | None = None
-    password: str | None = None
+    password: str | None = Field(None, description="新密码（留空保持不变）")
     role: UserRole | None = None
     unlimited: bool | None = None
     allowed_providers: list[str] | None = None  # 允许使用的提供商 ID 列表
@@ -352,6 +344,13 @@ class UpdateUserRequest(BaseModel):
     def validate_allowed_api_formats(cls, v: list[str] | None) -> list[str] | None:
         # 与 CreateUserRequest 保持一致
         return CreateUserRequest.validate_allowed_api_formats(v)
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        return CreateUserRequest.validate_password(v)
 
 
 class CreateApiKeyRequest(BaseModel):
@@ -780,7 +779,68 @@ class ChangePasswordRequest(BaseModel):
     """修改密码请求"""
 
     old_password: str | None = None  # 可选：首次设置密码时不需要
-    new_password: str
+    new_password: str = Field(..., description="新密码")
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, v: Any) -> Any:
+        """基础校验（非空和算法限制），策略级别校验在服务层按系统配置执行。"""
+        valid, error_msg = PasswordValidator.validate_basic_input(v)
+        if not valid:
+            raise ValueError(error_msg or "密码格式无效")
+        return v
+
+
+class UserSessionResponse(BaseModel):
+    """用户会话响应"""
+
+    id: str
+    device_label: str
+    device_type: str
+    browser_name: str | None = None
+    browser_version: str | None = None
+    os_name: str | None = None
+    os_version: str | None = None
+    device_model: str | None = None
+    ip_address: str | None = None
+    last_seen_at: str | None = None
+    created_at: str
+    is_current: bool = False
+    revoked_at: str | None = None
+    revoke_reason: str | None = None
+
+    @classmethod
+    def from_db(cls, session: Any, *, current_session_id: str | None = None) -> dict[str, Any]:
+        return cls(
+            id=session.id,
+            device_label=session.device_label or "未知设备",
+            device_type=session.device_type or "unknown",
+            browser_name=session.browser_name,
+            browser_version=session.browser_version,
+            os_name=session.os_name,
+            os_version=session.os_version,
+            device_model=session.device_model,
+            ip_address=session.ip_address,
+            last_seen_at=session.last_seen_at.isoformat() if session.last_seen_at else None,
+            created_at=session.created_at.isoformat(),
+            is_current=bool(current_session_id and session.id == current_session_id),
+            revoked_at=session.revoked_at.isoformat() if session.revoked_at else None,
+            revoke_reason=session.revoke_reason,
+        ).model_dump()
+
+
+class UpdateSessionLabelRequest(BaseModel):
+    """更新会话显示名称"""
+
+    device_label: str = Field(..., min_length=1, max_length=120, description="设备名称")
+
+    @field_validator("device_label")
+    @classmethod
+    def validate_device_label(cls, v: Any) -> Any:
+        normalized = str(v).strip()
+        if not normalized:
+            raise ValueError("设备名称不能为空")
+        return normalized
 
 
 class CreateMyApiKeyRequest(BaseModel):

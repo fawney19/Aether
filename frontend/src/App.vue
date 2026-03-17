@@ -5,12 +5,14 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onErrorCaptured } from 'vue'
+import { onMounted, onErrorCaptured, onUnmounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import ToastContainer from '@/components/ToastContainer.vue'
 import ConfirmContainer from '@/components/ConfirmContainer.vue'
-import apiClient from '@/api/client'
+import apiClient, { AUTH_STATE_CHANGE_EVENT } from '@/api/client'
 import { NETWORK_CONFIG, AUTH_CONFIG } from '@/config/constants'
+import router from '@/router'
+import { hasAuthIdentityChanged } from '@/utils/authToken'
 import { log } from '@/utils/logger'
 
 const authStore = useAuthStore()
@@ -86,7 +88,59 @@ if (typeof window !== 'undefined') {
   })
 }
 
+async function syncExternalAuthState(nextToken: string | null): Promise<void> {
+  const previousToken = authStore.token
+  const previousUser = authStore.user
+    ? {
+        id: authStore.user.id,
+        role: authStore.user.role,
+      }
+    : null
+
+  authStore.syncToken()
+
+  if (!nextToken) {
+    if (previousToken || previousUser) {
+      authStore.applyExternalLogout()
+      await router.replace('/')
+    }
+    return
+  }
+
+  const identityChanged = hasAuthIdentityChanged(previousToken, nextToken, previousUser)
+  if (!identityChanged && previousUser) {
+    return
+  }
+
+  const user = await authStore.fetchCurrentUser()
+  if (!user) {
+    return
+  }
+
+  if (router.currentRoute.value.path.startsWith('/admin') && user.role !== 'admin') {
+    await router.replace('/dashboard')
+  }
+}
+
+function handleAuthStorageChange(event: StorageEvent): void {
+  if (event.key !== 'access_token') {
+    return
+  }
+
+  syncExternalAuthState(event.newValue).catch((err) => log.error('syncExternalAuthState failed', err))
+}
+
+function handleLocalAuthStateChange(event: Event): void {
+  const authEvent = event as CustomEvent<{ token: string | null }>
+  syncExternalAuthState(authEvent.detail?.token ?? apiClient.getToken()).catch((err) => log.error('syncExternalAuthState failed', err))
+}
+
 onMounted(async () => {
+  if (typeof window !== 'undefined') {
+    window.addEventListener('storage', handleAuthStorageChange)
+    window.addEventListener(AUTH_STATE_CHANGE_EVENT, handleLocalAuthStateChange as (event: Event) => void)
+  }
+
   // 延迟检查认证状态,让页面先加载
   setTimeout(async () => {
     try {
@@ -96,5 +150,15 @@ onMounted(async () => {
       log.warn('Auth check failed, but keeping session', error)
     }
   }, AUTH_CONFIG.TOKEN_REFRESH_INTERVAL)
+})
+
+onUnmounted(() => {
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('storage', handleAuthStorageChange)
+    window.removeEventListener(
+      AUTH_STATE_CHANGE_EVENT,
+      handleLocalAuthStateChange as (event: Event) => void,
+    )
+  }
 })
 </script>

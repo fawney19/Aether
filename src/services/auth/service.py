@@ -117,6 +117,14 @@ class AuthService:
     """认证服务"""
 
     @staticmethod
+    def get_access_token_expiry() -> datetime:
+        return datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRATION_HOURS)
+
+    @staticmethod
+    def get_refresh_token_expiry() -> datetime:
+        return datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRATION_DAYS)
+
+    @staticmethod
     def token_identity_matches_user(payload: dict[str, Any], user: User) -> bool:
         """
         校验 token 的身份字段是否与用户一致。
@@ -157,7 +165,7 @@ class AuthService:
     def create_access_token(data: dict) -> str:
         """创建JWT访问令牌"""
         to_encode = data.copy()
-        expire = datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRATION_HOURS)
+        expire = AuthService.get_access_token_expiry()
         to_encode.update({"exp": expire, "type": "access"})
         encoded_jwt = jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
         return encoded_jwt
@@ -166,7 +174,7 @@ class AuthService:
     def create_refresh_token(data: dict) -> str:
         """创建JWT刷新令牌"""
         to_encode = data.copy()
-        expire = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRATION_DAYS)
+        expire = AuthService.get_refresh_token_expiry()
         to_encode.update({"exp": expire, "type": "refresh"})
         encoded_jwt = jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
         return encoded_jwt
@@ -362,7 +370,12 @@ class AuthService:
     async def authenticate_user_threadsafe(
         db: Session, email: str, password: str, auth_type: str = "local"
     ) -> AuthenticatedUserSnapshot | None:
-        """为异步登录路由提供线程池隔离的本地认证入口。"""
+        """为异步登录路由提供线程池隔离的认证入口。
+
+        这里仅负责校验凭证并返回用户快照，不提前持久化登录成功状态。
+        登录成功相关的审计、会话创建和 last_login_at 统一由路由层在同一事务里提交，
+        避免后续会话创建失败时留下错误的成功痕迹。
+        """
         if auth_type != "local":
             user = await AuthService.authenticate_user(db, email, password, auth_type)
             if not user:
@@ -376,8 +389,6 @@ class AuthService:
                 if not user:
                     return None
 
-                user.last_login_at = datetime.now(timezone.utc)
-                thread_db.commit()
                 return AuthService._build_authenticated_snapshot(user)
             finally:
                 thread_db.close()
@@ -386,8 +397,6 @@ class AuthService:
         if not snapshot:
             return None
 
-        await UserCacheService.invalidate_user_cache(snapshot.user_id, snapshot.email or "")
-        logger.info("用户登录成功: {} (ID: {})", email, snapshot.user_id)
         return snapshot
 
     @staticmethod
@@ -497,10 +506,6 @@ class AuthService:
             if ldap_username and user.ldap_username != ldap_username:
                 user.ldap_username = ldap_username
 
-            user.last_login_at = datetime.now(timezone.utc)
-            db.commit()
-            await UserCacheService.invalidate_user_cache(user.id, user.email)
-            logger.info(f"LDAP 用户登录成功: {ldap_user['email']} (ID: {user.id})")
             return user
 
         # 检查 username 是否已被占用，使用时间戳+随机数确保唯一性
@@ -532,7 +537,7 @@ class AuthService:
                 ldap_username=ldap_username,
                 role=UserRole.USER,
                 is_active=True,
-                last_login_at=datetime.now(timezone.utc),
+                last_login_at=None,
             )
 
             try:
@@ -549,9 +554,6 @@ class AuthService:
                     description="LDAP 注册初始赠款",
                 )
 
-                db.commit()
-                db.refresh(user)
-                logger.info(f"LDAP 用户创建成功: {ldap_user['email']} (ID: {user.id})")
                 return user
             except IntegrityError as e:
                 db.rollback()

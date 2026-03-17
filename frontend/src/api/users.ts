@@ -62,6 +62,8 @@ export interface UpsertUserApiKeyRequest {
   rate_limit?: number | null
 }
 
+export type { UserSession } from '@/types/session'
+
 export const usersApi = {
   async getAllUsers(): Promise<User[]> {
     const response = await apiClient.get<User[]>('/api/admin/users')
@@ -90,6 +92,21 @@ export const usersApi = {
   async getUserApiKeys(userId: string): Promise<ApiKey[]> {
     const response = await apiClient.get<{ api_keys: ApiKey[] }>(`/api/admin/users/${userId}/api-keys`)
     return response.data.api_keys
+  },
+
+  async getUserSessions(userId: string): Promise<UserSession[]> {
+    const response = await apiClient.get<UserSession[]>(`/api/admin/users/${userId}/sessions`)
+    return response.data
+  },
+
+  async revokeUserSession(userId: string, sessionId: string): Promise<{ message: string }> {
+    const response = await apiClient.delete(`/api/admin/users/${userId}/sessions/${sessionId}`)
+    return response.data
+  },
+
+  async revokeAllUserSessions(userId: string): Promise<{ message: string; revoked_count: number }> {
+    const response = await apiClient.delete(`/api/admin/users/${userId}/sessions`)
+    return response.data
   },
 
   async createApiKey(

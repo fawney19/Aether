@@ -514,7 +514,10 @@ class HandlerAdapterBase(ApiAdapter):
             body = apply_body_rules(
                 body,
                 body_rules,
-                protected_keys=get_cache_sensitive_protected_body_keys(cls.FORMAT_ID),
+                protected_keys=get_cache_sensitive_protected_body_keys(
+                    cls.FORMAT_ID,
+                    provider_type=provider_type,
+                ),
                 original_body=body,
             )
 

@@ -3,6 +3,9 @@ import type { ActivityHeatmap } from '@/types/activity'
 import type { TieredPricingConfig } from './endpoints/types'
 import { cachedRequest, buildCacheKey } from '@/utils/cache'
 import type { BillingSummary } from './auth'
+import type { UserSession } from '@/types/session'
+
+export type { UserSession }
 
 export interface Profile {
   id: string // UUID
@@ -173,6 +176,28 @@ export const meApi = {
   // 修改密码
   async changePassword(data: ChangePasswordRequest): Promise<{ message: string }> {
     const response = await apiClient.patch('/api/users/me/password', data)
+    return response.data
+  },
+
+  async listSessions(): Promise<UserSession[]> {
+    const response = await apiClient.get<UserSession[]>('/api/users/me/sessions')
+    return response.data
+  },
+
+  async updateSessionLabel(sessionId: string, deviceLabel: string): Promise<UserSession> {
+    const response = await apiClient.patch<UserSession>(`/api/users/me/sessions/${sessionId}`, {
+      device_label: deviceLabel,
+    })
+    return response.data
+  },
+
+  async revokeSession(sessionId: string): Promise<{ message: string }> {
+    const response = await apiClient.delete(`/api/users/me/sessions/${sessionId}`)
+    return response.data
+  },
+
+  async revokeOtherSessions(): Promise<{ message: string; revoked_count: number }> {
+    const response = await apiClient.delete('/api/users/me/sessions/others')
     return response.data
   },
 

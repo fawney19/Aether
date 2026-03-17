@@ -1532,6 +1532,14 @@ class TestProtectedBodyKeys:
                 "prompt_cache_key",
             }
         )
+        assert get_cache_sensitive_protected_body_keys(
+            "openai:cli",
+            provider_type="codex",
+        ) == frozenset({"model", "stream", "prompt_cache_key"})
+        assert get_cache_sensitive_protected_body_keys(
+            "openai:compact",
+            provider_type="codex",
+        ) == frozenset({"model", "stream", "prompt_cache_key"})
         assert get_cache_sensitive_protected_body_keys("claude:chat") == frozenset(
             {"model", "stream", "messages", "system", "tools", "tool_choice"}
         )
@@ -1549,6 +1557,30 @@ class TestProtectedBodyKeys:
                 "generationConfig",
             }
         )
+
+    def test_codex_openai_cli_allows_body_rules_on_prompt_fields(self) -> None:
+        body = {
+            "model": "gpt-5-codex",
+            "input": [{"role": "user", "content": "hi"}],
+        }
+        protected_keys = get_cache_sensitive_protected_body_keys(
+            "openai:cli",
+            provider_type="codex",
+        )
+
+        result = apply_body_rules(
+            body,
+            [
+                {"action": "set", "path": "instructions", "value": "You are GPT-5."},
+                {"action": "set", "path": "input[0].content", "value": "patched"},
+                {"action": "set", "path": "prompt_cache_key", "value": "blocked"},
+            ],
+            protected_keys=protected_keys,
+        )
+
+        assert result["instructions"] == "You are GPT-5."
+        assert result["input"][0]["content"] == "patched"
+        assert "prompt_cache_key" not in result
 
     def test_gemini_camelcase_alias_prompt_fields_are_protected(self) -> None:
         body = {

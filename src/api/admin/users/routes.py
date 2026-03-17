@@ -18,8 +18,14 @@ from src.core.exceptions import InvalidRequestException, NotFoundException, tran
 from src.core.logger import logger
 from src.database import get_db, get_db_context
 from src.models.admin_requests import UpdateUserRequest
-from src.models.api import CreateApiKeyRequest, CreateUserRequest, UpdateMyApiKeyRequest
+from src.models.api import (
+    CreateApiKeyRequest,
+    CreateUserRequest,
+    UpdateMyApiKeyRequest,
+    UserSessionResponse,
+)
 from src.models.database import ApiKey, User, UserRole, Wallet
+from src.services.auth.session_service import SessionService
 from src.services.cache.user_cache import UserCacheService
 from src.services.system.config import SystemConfigService
 from src.services.user.apikey import ApiKeyService
@@ -189,6 +195,73 @@ def _delete_user_sync(user_id: str) -> tuple[dict[str, Any], dict[str, Any], str
                 "target_role": user.role.value,
             },
             user.email,
+        )
+
+
+def _list_user_sessions_sync(user_id: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    with get_db_context() as db:
+        user = UserService.get_user(db, user_id)
+        if not user:
+            raise NotFoundException("用户不存在", "user")
+        sessions = SessionService.list_user_sessions(db, user_id=user_id)
+        return (
+            [UserSessionResponse.from_db(s) for s in sessions],
+            {
+                "action": "list_user_sessions",
+                "target_user_id": user_id,
+                "session_count": len(sessions),
+            },
+        )
+
+
+def _revoke_user_session_sync(
+    user_id: str,
+    session_id: str,
+    admin_user_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    with get_db_context() as db:
+        user = UserService.get_user(db, user_id)
+        if not user:
+            raise NotFoundException("用户不存在", "user")
+        session = SessionService.get_session_for_user(db, user_id=user_id, session_id=session_id)
+        if not session:
+            raise NotFoundException("会话不存在", "session")
+        SessionService.revoke_session(
+            db,
+            session=session,
+            reason="admin_session_revoked",
+            audit_user_id=admin_user_id,
+        )
+        return (
+            {"message": "用户设备已强制下线"},
+            {
+                "action": "revoke_user_session",
+                "target_user_id": user_id,
+                "session_id": session_id,
+            },
+        )
+
+
+def _revoke_all_user_sessions_sync(
+    user_id: str, admin_user_id: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    with get_db_context() as db:
+        user = UserService.get_user(db, user_id)
+        if not user:
+            raise NotFoundException("用户不存在", "user")
+        revoked_count = SessionService.revoke_all_user_sessions(
+            db,
+            user_id=user_id,
+            reason="admin_revoke_all_sessions",
+        )
+        return (
+            {"message": "已强制下线该用户所有设备", "revoked_count": revoked_count},
+            {
+                "action": "revoke_all_user_sessions",
+                "target_user_id": user_id,
+                "admin_user_id": admin_user_id,
+                "revoked_count": revoked_count,
+            },
         )
 
 
@@ -399,6 +472,36 @@ async def get_user(user_id: str, request: Request, db: Session = Depends(get_db)
     - `user_id`: 用户 ID (UUID)
     """
     adapter = AdminGetUserAdapter(user_id=user_id)
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.get("/{user_id}/sessions")
+async def list_user_sessions(user_id: str, request: Request, db: Session = Depends(get_db)) -> Any:
+    """获取用户登录设备列表。"""
+    adapter = AdminListUserSessionsAdapter(user_id=user_id)
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.delete("/{user_id}/sessions/{session_id}")
+async def revoke_user_session(
+    user_id: str,
+    session_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    """强制下线用户的单个设备会话。"""
+    adapter = AdminRevokeUserSessionAdapter(user_id=user_id, session_id=session_id)
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.delete("/{user_id}/sessions")
+async def revoke_all_user_sessions(
+    user_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    """强制下线用户的全部设备会话。"""
+    adapter = AdminRevokeAllUserSessionsAdapter(user_id=user_id)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
@@ -639,6 +742,43 @@ class AdminGetUserAdapter(AdminApiAdapter):
         )
 
         return _serialize_user(db, user)
+
+
+class AdminListUserSessionsAdapter(AdminApiAdapter):
+    def __init__(self, user_id: str):
+        self.user_id = user_id
+
+    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
+        response, audit_meta = await run_in_threadpool(_list_user_sessions_sync, self.user_id)
+        context.add_audit_metadata(**audit_meta)
+        return response
+
+
+class AdminRevokeUserSessionAdapter(AdminApiAdapter):
+    def __init__(self, user_id: str, session_id: str):
+        self.user_id = user_id
+        self.session_id = session_id
+
+    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
+        admin_user_id = context.user.id if context.user else ""
+        response, audit_meta = await run_in_threadpool(
+            _revoke_user_session_sync, self.user_id, self.session_id, admin_user_id
+        )
+        context.add_audit_metadata(**audit_meta)
+        return response
+
+
+class AdminRevokeAllUserSessionsAdapter(AdminApiAdapter):
+    def __init__(self, user_id: str):
+        self.user_id = user_id
+
+    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
+        admin_user_id = context.user.id if context.user else ""
+        response, audit_meta = await run_in_threadpool(
+            _revoke_all_user_sessions_sync, self.user_id, admin_user_id
+        )
+        context.add_audit_metadata(**audit_meta)
+        return response
 
 
 class AdminUpdateUserAdapter(AdminApiAdapter):

@@ -129,11 +129,27 @@ _CACHE_SENSITIVE_BODY_FIELDS_BY_FORMAT: dict[str, frozenset[str]] = {
     ),
 }
 
+# Provider 维度可覆盖默认 prompt-bearing 保护集合。
+# Codex OpenAI CLI/Compact 允许 endpoint body_rules 调整 instructions/input/tools/tool_choice，
+# 仅继续保护系统字段与 prompt_cache_key，避免"已保存但规则不生效"。
+_CODEX_PROTECTED: frozenset[str] = frozenset({"prompt_cache_key"})
+_CACHE_SENSITIVE_BODY_FIELDS_BY_PROVIDER_AND_FORMAT: dict[tuple[str, str], frozenset[str]] = {
+    ("codex", "openai:cli"): _CODEX_PROTECTED,
+    ("codex", "openai:compact"): _CODEX_PROTECTED,
+}
 
-def get_cache_sensitive_protected_body_keys(provider_api_format: str | None) -> frozenset[str]:
-    """根据目标 Provider API 格式返回需要保护的顶层请求字段。"""
+
+def get_cache_sensitive_protected_body_keys(
+    provider_api_format: str | None,
+    *,
+    provider_type: str | None = None,
+) -> frozenset[str]:
+    """根据目标 Provider API 格式和 provider_type 返回需要保护的顶层请求字段。"""
     fmt = str(provider_api_format or "").strip().lower()
-    extra = _CACHE_SENSITIVE_BODY_FIELDS_BY_FORMAT.get(fmt, frozenset())
+    pt = str(provider_type or "").strip().lower()
+    extra = _CACHE_SENSITIVE_BODY_FIELDS_BY_PROVIDER_AND_FORMAT.get((pt, fmt))
+    if extra is None:
+        extra = _CACHE_SENSITIVE_BODY_FIELDS_BY_FORMAT.get(fmt, frozenset())
     if not extra:
         return PROTECTED_BODY_FIELDS
     return frozenset({*PROTECTED_BODY_FIELDS, *extra})

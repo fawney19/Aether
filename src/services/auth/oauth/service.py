@@ -1,5 +1,6 @@
 import re
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -23,6 +24,7 @@ from src.services.auth.oauth.models import OAuthFlowError, OAuthUserInfo
 from src.services.auth.oauth.registry import get_oauth_provider_registry
 from src.services.auth.oauth.state import consume_oauth_state, create_oauth_state
 from src.services.auth.service import AuthService
+from src.services.auth.session_service import SessionService
 from src.services.cache.user_cache import UserCacheService
 from src.services.system.config import SystemConfigService
 
@@ -36,6 +38,12 @@ def _build_oauth_client_kwargs(
     return build_proxy_client_kwargs(
         timeout=httpx.Timeout(timeout_seconds), follow_redirects=follow_redirects
     )
+
+
+@dataclass(frozen=True)
+class OAuthCallbackResult:
+    redirect_url: str
+    refresh_token: str | None = field(default=None, repr=False)
 
 
 class OAuthService:
@@ -406,13 +414,12 @@ class OAuthService:
 
     @staticmethod
     def _build_frontend_login_success_redirect(
-        frontend_callback_url: str, *, access_token: str, refresh_token: str
+        frontend_callback_url: str, *, access_token: str
     ) -> str:
         parsed = urlparse(frontend_callback_url)
         fragment = urlencode(
             {
                 "access_token": access_token,
-                "refresh_token": refresh_token,
                 "token_type": "bearer",
                 "expires_in": 86400,
             }
@@ -449,8 +456,15 @@ class OAuthService:
         return result
 
     @staticmethod
-    async def build_login_authorize_url(db: Session, provider_type: str) -> str:
+    async def build_login_authorize_url(
+        db: Session, provider_type: str, client_device_id: str | None = None
+    ) -> str:
         OAuthService._require_module_active(db)
+        normalized_device_id = (
+            SessionService._normalize_device_id(client_device_id) if client_device_id else None
+        )
+        if not normalized_device_id:
+            raise HTTPException(status_code=400, detail="缺少或无效的设备标识")
 
         provider = OAuthService._get_provider_impl(provider_type)
         if not provider:
@@ -468,17 +482,32 @@ class OAuthService:
             raise HTTPException(status_code=503, detail="Redis 不可用")
 
         state = await create_oauth_state(
-            redis, provider_type=provider_type, action="login", user_id=None
+            redis,
+            provider_type=provider_type,
+            action="login",
+            user_id=None,
+            client_device_id=normalized_device_id,
         )
         return provider.get_authorization_url(config, state)
 
     @staticmethod
-    async def build_bind_authorize_url(db: Session, user: User, provider_type: str) -> str:
+    async def build_bind_authorize_url(
+        db: Session,
+        user: User,
+        provider_type: str,
+        client_device_id: str | None = None,
+    ) -> str:
         OAuthService._require_module_active(db)
 
         if user.auth_source == AuthSource.LDAP:
             raise HTTPException(status_code=403, detail="LDAP 用户不允许绑定 OAuth")
 
+        normalized_device_id: str | None = None
+        if client_device_id is not None:
+            normalized_device_id = SessionService._normalize_device_id(client_device_id)
+            if not normalized_device_id:
+                raise HTTPException(status_code=400, detail="缺少或无效的设备标识")
+
         provider = OAuthService._get_provider_impl(provider_type)
         if not provider:
             raise HTTPException(status_code=404, detail="不支持的 OAuth provider")
@@ -495,7 +524,11 @@ class OAuthService:
             raise HTTPException(status_code=503, detail="Redis 不可用")
 
         state = await create_oauth_state(
-            redis, provider_type=provider_type, action="bind", user_id=user.id
+            redis,
+            provider_type=provider_type,
+            action="bind",
+            user_id=user.id,
+            client_device_id=normalized_device_id,
         )
         return provider.get_authorization_url(config, state)
 
@@ -570,7 +603,10 @@ class OAuthService:
         code: str | None,
         error: str | None,
         error_description: str | None,
-    ) -> str:
+        client_ip: str | None,
+        user_agent: str,
+        headers: dict[str, str],
+    ) -> OAuthCallbackResult:
         OAuthService._require_module_active(db)
 
         provider = OAuthService._get_provider_impl(provider_type)
@@ -589,22 +625,28 @@ class OAuthService:
 
         # provider 被禁用时仍引导回前端（给出明确提示）
         if not config.is_enabled:
-            return OAuthService._build_frontend_error_redirect(
-                frontend_callback_url, error_code="provider_disabled"
+            return OAuthCallbackResult(
+                redirect_url=OAuthService._build_frontend_error_redirect(
+                    frontend_callback_url, error_code="provider_disabled"
+                )
             )
 
         # provider 侧 error
         if error:
             code_map = "authorization_denied" if error == "access_denied" else "provider_error"
-            return OAuthService._build_frontend_error_redirect(
-                frontend_callback_url,
-                error_code=code_map,
-                error_detail=error_description or error,
+            return OAuthCallbackResult(
+                redirect_url=OAuthService._build_frontend_error_redirect(
+                    frontend_callback_url,
+                    error_code=code_map,
+                    error_detail=error_description or error,
+                )
             )
 
         if not code or not state:
-            return OAuthService._build_frontend_error_redirect(
-                frontend_callback_url, error_code="invalid_callback"
+            return OAuthCallbackResult(
+                redirect_url=OAuthService._build_frontend_error_redirect(
+                    frontend_callback_url, error_code="invalid_callback"
+                )
             )
 
         # 一次性消费 state
@@ -618,36 +660,63 @@ class OAuthService:
             state_data = None
 
         if not state_data:
-            return OAuthService._build_frontend_error_redirect(
-                frontend_callback_url, error_code="invalid_state"
+            return OAuthCallbackResult(
+                redirect_url=OAuthService._build_frontend_error_redirect(
+                    frontend_callback_url, error_code="invalid_state"
+                )
+            )
+        normalized_device_id = None
+        if state_data.client_device_id:
+            normalized_device_id = SessionService._normalize_device_id(state_data.client_device_id)
+            if not normalized_device_id:
+                return OAuthCallbackResult(
+                    redirect_url=OAuthService._build_frontend_error_redirect(
+                        frontend_callback_url, error_code="invalid_state"
+                    )
+                )
+        if state_data.action == "login" and not normalized_device_id:
+            return OAuthCallbackResult(
+                redirect_url=OAuthService._build_frontend_error_redirect(
+                    frontend_callback_url, error_code="invalid_state"
+                )
             )
 
         if state_data.provider_type != provider_type:
-            return OAuthService._build_frontend_error_redirect(
-                frontend_callback_url, error_code="invalid_state"
+            return OAuthCallbackResult(
+                redirect_url=OAuthService._build_frontend_error_redirect(
+                    frontend_callback_url, error_code="invalid_state"
+                )
             )
 
         if state_data.action not in ("login", "bind"):
-            return OAuthService._build_frontend_error_redirect(
-                frontend_callback_url, error_code="invalid_state"
+            return OAuthCallbackResult(
+                redirect_url=OAuthService._build_frontend_error_redirect(
+                    frontend_callback_url, error_code="invalid_state"
+                )
             )
 
         if state_data.action == "bind" and not state_data.user_id:
-            return OAuthService._build_frontend_error_redirect(
-                frontend_callback_url, error_code="invalid_bind_state"
+            return OAuthCallbackResult(
+                redirect_url=OAuthService._build_frontend_error_redirect(
+                    frontend_callback_url, error_code="invalid_bind_state"
+                )
             )
 
         try:
             token = await provider.exchange_code(config, code)
             oauth_user = await provider.get_user_info(config, token.access_token)
         except OAuthFlowError as exc:
-            return OAuthService._build_frontend_error_redirect(
-                frontend_callback_url, error_code=exc.error_code, error_detail=exc.detail
+            return OAuthCallbackResult(
+                redirect_url=OAuthService._build_frontend_error_redirect(
+                    frontend_callback_url, error_code=exc.error_code, error_detail=exc.detail
+                )
             )
         except Exception as exc:
             logger.warning("OAuth callback 处理失败: {}", exc)
-            return OAuthService._build_frontend_error_redirect(
-                frontend_callback_url, error_code="provider_error"
+            return OAuthCallbackResult(
+                redirect_url=OAuthService._build_frontend_error_redirect(
+                    frontend_callback_url, error_code="provider_error"
+                )
             )
 
         if state_data.action == "bind":
@@ -656,41 +725,69 @@ class OAuthService:
                     db, user_id=state_data.user_id or "", config=config, oauth_user=oauth_user
                 )
             except OAuthFlowError as exc:
-                return OAuthService._build_frontend_error_redirect(
-                    frontend_callback_url, error_code=exc.error_code, error_detail=exc.detail
+                return OAuthCallbackResult(
+                    redirect_url=OAuthService._build_frontend_error_redirect(
+                        frontend_callback_url, error_code=exc.error_code, error_detail=exc.detail
+                    )
                 )
 
-            return OAuthService._build_frontend_bind_success_redirect(
-                frontend_callback_url, display_name
+            return OAuthCallbackResult(
+                redirect_url=OAuthService._build_frontend_bind_success_redirect(
+                    frontend_callback_url, display_name
+                )
             )
 
         # login
         try:
             user = await OAuthService._handle_login(db, config=config, oauth_user=oauth_user)
         except OAuthFlowError as exc:
-            return OAuthService._build_frontend_error_redirect(
-                frontend_callback_url, error_code=exc.error_code, error_detail=exc.detail
+            return OAuthCallbackResult(
+                redirect_url=OAuthService._build_frontend_error_redirect(
+                    frontend_callback_url, error_code=exc.error_code, error_detail=exc.detail
+                )
             )
 
         assert user.id is not None
         assert user.role is not None
 
+        session_id = str(uuid.uuid4())
         access_token = AuthService.create_access_token(
             data={
                 "user_id": user.id,
                 "role": user.role.value,
                 "created_at": user.created_at.isoformat() if user.created_at else None,
+                "session_id": session_id,
             }
         )
         refresh_token = AuthService.create_refresh_token(
             data={
                 "user_id": user.id,
                 "created_at": user.created_at.isoformat() if user.created_at else None,
+                "session_id": session_id,
+                "jti": str(uuid.uuid4()),
             }
         )
+        client_context = SessionService.build_client_context(
+            client_device_id=normalized_device_id,
+            client_ip=client_ip,
+            user_agent=user_agent,
+            headers=headers,
+        )
+        SessionService.create_session(
+            db,
+            user=user,
+            session_id=session_id,
+            refresh_token=refresh_token,
+            expires_at=AuthService.get_refresh_token_expiry(),
+            client=client_context,
+        )
+        db.commit()
 
-        return OAuthService._build_frontend_login_success_redirect(
-            frontend_callback_url, access_token=access_token, refresh_token=refresh_token
+        return OAuthCallbackResult(
+            redirect_url=OAuthService._build_frontend_login_success_redirect(
+                frontend_callback_url, access_token=access_token
+            ),
+            refresh_token=refresh_token,
         )
 
     @staticmethod

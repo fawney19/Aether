@@ -279,6 +279,37 @@ def test_codex_passthrough_builder_preserves_real_codex_headers() -> None:
     assert "x-forwarded-scheme" not in headers
 
 
+def test_codex_passthrough_builder_applies_prompt_body_rules() -> None:
+    from src.api.handlers.base.request_builder import get_cache_sensitive_protected_body_keys
+    from src.core.api_format.metadata import CODEX_DEFAULT_BODY_RULES
+
+    builder = PassthroughRequestBuilder()
+    endpoint = SimpleNamespace(
+        api_family="openai",
+        endpoint_kind="cli",
+        header_rules=None,
+        body_rules=list(CODEX_DEFAULT_BODY_RULES),
+    )
+    key = SimpleNamespace(api_key="unused")
+
+    payload, _headers = builder.build(
+        {"model": "gpt-test", "input": []},
+        {"content-type": "application/json"},
+        endpoint,
+        key,
+        pre_computed_auth=("Authorization", "Bearer upstream-token"),
+        protected_body_keys=get_cache_sensitive_protected_body_keys(
+            "openai:cli",
+            provider_type="codex",
+        ),
+        provider_api_format="openai:cli",
+    )
+
+    assert payload["instructions"] == "You are GPT-5."
+    assert payload["store"] is False
+    assert "max_output_tokens" not in payload
+
+
 def _encode_unsigned_jwt(payload: dict[str, object]) -> str:
     token = jwt.encode(payload, key="", algorithm="none")
     return token.decode("utf-8") if isinstance(token, bytes) else token

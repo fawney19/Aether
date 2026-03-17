@@ -1236,10 +1236,4 @@ body[theme-mode='dark'] .literary-annotation {
     background-color: rgb(var(--color-primary-rgb) / 0.1) !important;
   }
 
-  /* Password masking without type="password" to prevent browser autofill */
-  .-webkit-text-security-disc {
-    -webkit-text-security: disc;
-    -moz-text-security: disc;
-    text-security: disc;
-  }
 }

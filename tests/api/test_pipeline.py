@@ -8,6 +8,7 @@ API Pipeline 测试
 """
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -226,6 +227,35 @@ class TestPipelineAuditLogging:
             call_kwargs = mock_log.call_args[1]
             assert call_kwargs["status_code"] == 500
             assert call_kwargs["error_message"] == "Internal error"
+
+    def test_record_audit_event_commits_when_route_already_committed(
+        self, pipeline: ApiRequestPipeline
+    ) -> None:
+        mock_context = MagicMock()
+        mock_context.db = MagicMock()
+        mock_context.user = MagicMock()
+        mock_context.user.id = "user-123"
+        mock_context.api_key = None
+        mock_context.request_id = "req-123"
+        mock_context.client_ip = "127.0.0.1"
+        mock_context.user_agent = "test-agent"
+        mock_context.request = MagicMock()
+        mock_context.request.method = "POST"
+        mock_context.request.url.path = "/api/auth/refresh"
+        mock_context.request.state = SimpleNamespace(tx_committed_by_route=True)
+        mock_context.start_time = 1000.0
+
+        mock_adapter = MagicMock()
+        mock_adapter.name = "test-adapter"
+        mock_adapter.audit_log_enabled = True
+        mock_adapter.audit_success_event = None
+        mock_adapter.audit_failure_event = None
+
+        with patch.object(pipeline.audit_service, "log_event") as mock_log:
+            pipeline._record_audit_event(mock_context, mock_adapter, success=True, status_code=200)
+
+        mock_log.assert_called_once()
+        mock_context.db.commit.assert_called_once()
 
     def test_record_audit_event_no_db(self, pipeline: ApiRequestPipeline) -> None:
         """测试没有数据库会话时跳过审计"""
@@ -755,6 +785,8 @@ class TestPipelineAdminAuth:
     async def test_authenticate_admin_success(self, pipeline: ApiRequestPipeline) -> None:
         """测试管理员认证成功"""
         created_at = datetime.now(timezone.utc)
+        mock_session = MagicMock()
+        mock_session.id = "session-123"
 
         mock_user = MagicMock()
         mock_user.id = "admin-123"
@@ -765,28 +797,46 @@ class TestPipelineAdminAuth:
         mock_user.created_at = created_at
 
         mock_request = MagicMock()
-        mock_request.headers = {"authorization": "Bearer valid-token"}
+        mock_request.headers = {
+            "authorization": "Bearer valid-token",
+            "X-Client-Device-Id": "device-admin-123",
+        }
         mock_request.state = MagicMock()
 
         mock_db = MagicMock()
         mock_db.query.return_value.filter.return_value.first.return_value = mock_user
 
-        with patch.object(
-            pipeline.auth_service,
-            "verify_token",
-            new_callable=AsyncMock,
-            return_value={"user_id": "admin-123", "created_at": created_at.isoformat()},
+        with (
+            patch.object(
+                pipeline.auth_service,
+                "verify_token",
+                new_callable=AsyncMock,
+                return_value={
+                    "user_id": "admin-123",
+                    "created_at": created_at.isoformat(),
+                    "session_id": "session-123",
+                },
+            ),
+            patch(
+                "src.api.base.pipeline.SessionService.get_active_session",
+                return_value=mock_session,
+            ),
+            patch("src.api.base.pipeline.SessionService.touch_session"),
+            patch("src.api.base.pipeline.SessionService.assert_session_device_matches"),
         ):
             user, management_token = await pipeline._authenticate_admin(mock_request, mock_db)
 
         assert user == mock_user
         assert management_token is None
         assert mock_request.state.user_id == "admin-123"
+        assert mock_request.state.user_session_id == "session-123"
 
     @pytest.mark.asyncio
     async def test_authenticate_admin_lowercase_bearer(self, pipeline: ApiRequestPipeline) -> None:
         """测试 bearer (小写) 前缀也能正确解析"""
         created_at = datetime.now(timezone.utc)
+        mock_session = MagicMock()
+        mock_session.id = "session-123"
 
         mock_user = MagicMock()
         mock_user.id = "admin-123"
@@ -797,23 +847,78 @@ class TestPipelineAdminAuth:
         mock_user.created_at = created_at
 
         mock_request = MagicMock()
-        mock_request.headers = {"authorization": "bearer valid-token"}
+        mock_request.headers = {
+            "authorization": "bearer valid-token",
+            "X-Client-Device-Id": "device-admin-123",
+        }
         mock_request.state = MagicMock()
 
         mock_db = MagicMock()
         mock_db.query.return_value.filter.return_value.first.return_value = mock_user
 
-        with patch.object(
-            pipeline.auth_service,
-            "verify_token",
-            new_callable=AsyncMock,
-            return_value={"user_id": "admin-123", "created_at": created_at.isoformat()},
-        ) as mock_verify:
+        with (
+            patch.object(
+                pipeline.auth_service,
+                "verify_token",
+                new_callable=AsyncMock,
+                return_value={
+                    "user_id": "admin-123",
+                    "created_at": created_at.isoformat(),
+                    "session_id": "session-123",
+                },
+            ) as mock_verify,
+            patch(
+                "src.api.base.pipeline.SessionService.get_active_session",
+                return_value=mock_session,
+            ),
+            patch("src.api.base.pipeline.SessionService.touch_session"),
+            patch("src.api.base.pipeline.SessionService.assert_session_device_matches"),
+        ):
             user, management_token = await pipeline._authenticate_admin(mock_request, mock_db)
 
         mock_verify.assert_awaited_once_with("valid-token", token_type="access")
         assert user == mock_user
         assert management_token is None
+
+    @pytest.mark.asyncio
+    async def test_authenticate_admin_rejects_legacy_token_without_session_id(
+        self, pipeline: ApiRequestPipeline
+    ) -> None:
+        created_at = datetime.now(timezone.utc)
+
+        mock_request = MagicMock()
+        mock_request.headers = {
+            "authorization": "Bearer valid-token",
+            "X-Client-Device-Id": "device-admin-legacy",
+        }
+        mock_request.state = MagicMock()
+
+        mock_user = MagicMock()
+        mock_user.id = "admin-123"
+        mock_user.is_active = True
+        mock_user.is_deleted = False
+        mock_user.role = UserRole.ADMIN
+        mock_user.email = "admin@example.com"
+        mock_user.created_at = created_at
+
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = mock_user
+
+        with (
+            patch.object(
+                pipeline.auth_service,
+                "verify_token",
+                new_callable=AsyncMock,
+                return_value={"user_id": "admin-123", "created_at": created_at.isoformat()},
+            ),
+            patch.object(
+                pipeline.auth_service,
+                "token_identity_matches_user",
+                return_value=True,
+            ),
+        ):
+            with pytest.raises(HTTPException, match="登录会话已失效，请重新登录"):
+                await pipeline._authenticate_admin(mock_request, mock_db)
 
 
 class TestPipelineUserAuth:
@@ -827,6 +932,8 @@ class TestPipelineUserAuth:
     async def test_authenticate_user_lowercase_bearer(self, pipeline: ApiRequestPipeline) -> None:
         """测试 bearer (小写) 前缀也能正确解析"""
         created_at = datetime.now(timezone.utc)
+        mock_session = MagicMock()
+        mock_session.id = "session-456"
 
         mock_user = MagicMock()
         mock_user.id = "user-123"
@@ -836,20 +943,119 @@ class TestPipelineUserAuth:
         mock_user.created_at = created_at
 
         mock_request = MagicMock()
-        mock_request.headers = {"authorization": "bearer valid-token"}
+        mock_request.headers = {
+            "authorization": "bearer valid-token",
+            "X-Client-Device-Id": "device-user-456",
+        }
         mock_request.state = MagicMock()
 
         mock_db = MagicMock()
         mock_db.query.return_value.filter.return_value.first.return_value = mock_user
 
-        with patch.object(
-            pipeline.auth_service,
-            "verify_token",
-            new_callable=AsyncMock,
-            return_value={"user_id": "user-123", "created_at": created_at.isoformat()},
-        ) as mock_verify:
+        with (
+            patch.object(
+                pipeline.auth_service,
+                "verify_token",
+                new_callable=AsyncMock,
+                return_value={
+                    "user_id": "user-123",
+                    "created_at": created_at.isoformat(),
+                    "session_id": "session-456",
+                },
+            ) as mock_verify,
+            patch(
+                "src.api.base.pipeline.SessionService.get_active_session",
+                return_value=mock_session,
+            ),
+            patch("src.api.base.pipeline.SessionService.touch_session"),
+            patch("src.api.base.pipeline.SessionService.assert_session_device_matches"),
+        ):
             user, management_token = await pipeline._authenticate_user(mock_request, mock_db)
 
         mock_verify.assert_awaited_once_with("valid-token", token_type="access")
         assert user == mock_user
         assert management_token is None
+        assert mock_request.state.user_session_id == "session-456"
+
+    @pytest.mark.asyncio
+    async def test_authenticate_user_rejects_legacy_token_without_session_id(
+        self, pipeline: ApiRequestPipeline
+    ) -> None:
+        """历史 JWT 无 session_id 时应拒绝。"""
+        created_at = datetime.now(timezone.utc)
+
+        mock_request = MagicMock()
+        mock_request.headers = {
+            "authorization": "Bearer valid-token",
+            "X-Client-Device-Id": "device-user-legacy",
+        }
+        mock_request.state = MagicMock()
+
+        mock_user = MagicMock()
+        mock_user.id = "user-123"
+        mock_user.is_active = True
+        mock_user.is_deleted = False
+
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = mock_user
+
+        with (
+            patch.object(
+                pipeline.auth_service,
+                "verify_token",
+                new_callable=AsyncMock,
+                return_value={"user_id": "user-123", "created_at": created_at.isoformat()},
+            ),
+            patch.object(
+                pipeline.auth_service,
+                "token_identity_matches_user",
+                return_value=True,
+            ),
+        ):
+            with pytest.raises(HTTPException, match="登录会话已失效，请重新登录"):
+                await pipeline._authenticate_user(mock_request, mock_db)
+
+    @pytest.mark.asyncio
+    async def test_authenticate_user_requires_device_id(self, pipeline: ApiRequestPipeline) -> None:
+        created_at = datetime.now(timezone.utc)
+
+        mock_request = MagicMock()
+        mock_request.headers = {"authorization": "Bearer valid-token"}
+        mock_request.query_params = {}
+        mock_request.state = MagicMock()
+
+        mock_user = MagicMock()
+        mock_user.id = "user-123"
+        mock_user.is_active = True
+        mock_user.is_deleted = False
+        mock_user.created_at = created_at
+
+        mock_session = MagicMock()
+        mock_session.id = "session-456"
+
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = mock_user
+
+        with (
+            patch.object(
+                pipeline.auth_service,
+                "verify_token",
+                new_callable=AsyncMock,
+                return_value={
+                    "user_id": "user-123",
+                    "created_at": created_at.isoformat(),
+                    "session_id": "session-456",
+                },
+            ),
+            patch(
+                "src.api.base.pipeline.SessionService.get_active_session",
+                return_value=mock_session,
+            ),
+            patch.object(
+                pipeline.auth_service,
+                "token_identity_matches_user",
+                return_value=True,
+            ),
+        ):
+            with pytest.raises(HTTPException, match="缺少或无效的设备标识"):
+                await pipeline._authenticate_user(mock_request, mock_db)

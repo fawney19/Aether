@@ -15,6 +15,7 @@ from src.database import get_db
 from src.models.database import User
 from src.services.auth.oauth.service import OAuthService
 from src.services.auth.oauth.state import consume_oauth_bind_token, create_oauth_bind_token
+from src.services.auth.session_service import CLIENT_DEVICE_ID_HEADER, SessionService
 
 router = APIRouter(prefix="/api/user/oauth", tags=["User - OAuth"])
 pipeline = get_pipeline()
@@ -156,7 +157,17 @@ class BindOAuthProviderAdapter(AuthenticatedApiAdapter):
                 raise HTTPException(status_code=403, detail="用户不存在或已禁用")
 
         assert user is not None
-        url = await OAuthService.build_bind_authorize_url(context.db, user, self.provider_type)
+        client_device_id: str | None = None
+        if context.request.headers.get(CLIENT_DEVICE_ID_HEADER) or context.request.query_params.get(
+            "client_device_id"
+        ):
+            client_device_id = SessionService.extract_client_device_id(context.request)
+        url = await OAuthService.build_bind_authorize_url(
+            context.db,
+            user,
+            self.provider_type,
+            client_device_id=client_device_id,
+        )
         return RedirectResponse(url=url, status_code=status.HTTP_302_FOUND)
 
 

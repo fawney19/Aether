@@ -1,4 +1,11 @@
 export type PasswordPolicyLevel = 'weak' | 'medium' | 'strong'
+export const PASSWORD_MAX_BYTES = 72
+
+const textEncoder = new TextEncoder()
+
+function getPasswordByteLength(password: string): number {
+  return textEncoder.encode(password).length
+}
 
 export const PASSWORD_POLICY_OPTIONS: Array<{
   value: PasswordPolicyLevel
@@ -53,46 +60,51 @@ export function getPasswordPolicyPlaceholder(level: unknown): string {
   }
 }
 
-export function validatePasswordByPolicy(password: string, level: unknown): string {
-  if (!password) {
-    return ''
-  }
+/**
+ * 返回所有未满足的密码策略条件。
+ * 空数组 = 密码合规。
+ */
+export function getPasswordPolicyErrors(password: string, level: unknown): string[] {
+  if (!password) return []
 
   const normalized = normalizePasswordPolicyLevel(level)
+  const errors: string[] = []
 
-  if (password.length < 6) {
-    return '密码长度至少为6个字符'
+  const byteLength = getPasswordByteLength(password)
+  if (byteLength > PASSWORD_MAX_BYTES) {
+    errors.push(`长度不能超过${PASSWORD_MAX_BYTES}字节`)
+  }
+
+  // 根据策略确定最小长度，不做两段式报错
+  const minLen = normalized === 'weak' ? 6 : 8
+  if (password.length < minLen) {
+    errors.push(`至少 ${minLen} 个字符`)
   }
 
   if (normalized === 'medium') {
-    if (password.length < 8) {
-      return '密码长度至少为8个字符'
-    }
-    if (!/[A-Za-z]/.test(password)) {
-      return '密码必须包含至少一个字母'
-    }
-    if (!/[0-9]/.test(password)) {
-      return '密码必须包含至少一个数字'
-    }
+    if (!/[A-Za-z]/.test(password)) errors.push('包含字母')
+    if (!/[0-9]/.test(password)) errors.push('包含数字')
   }
 
   if (normalized === 'strong') {
-    if (password.length < 8) {
-      return '密码长度至少为8个字符'
-    }
-    if (!/[A-Z]/.test(password)) {
-      return '密码必须包含至少一个大写字母'
-    }
-    if (!/[a-z]/.test(password)) {
-      return '密码必须包含至少一个小写字母'
-    }
-    if (!/[0-9]/.test(password)) {
-      return '密码必须包含至少一个数字'
-    }
-    if (!/[!@#$%^&*()_+\-=[\]{};:'",.<>?/\\|`~]/.test(password)) {
-      return '密码必须包含至少一个特殊字符'
-    }
+    if (!/[A-Z]/.test(password)) errors.push('包含大写字母')
+    if (!/[a-z]/.test(password)) errors.push('包含小写字母')
+    if (!/[0-9]/.test(password)) errors.push('包含数字')
+    if (!/[!@#$%^&*()_+\-=[\]{};:'",.<>?/\\|`~]/.test(password)) errors.push('包含特殊字符')
   }
 
-  return ''
+  return errors
+}
+
+/**
+ * 兼容旧接口：返回单条错误字符串，空字符串表示通过。
+ * 多条未满足条件时用顿号连接。
+ */
+export function validatePasswordByPolicy(password: string, level: unknown): string {
+  const errors = getPasswordPolicyErrors(password, level)
+  if (errors.length === 0) return ''
+  if (errors.length === 1 && errors[0].startsWith('长度不能超过')) {
+    return `密码${  errors[0]}`
+  }
+  return `密码需要：${  errors.join('、')}`
 }

@@ -20,6 +20,8 @@ except ImportError:
 
 
 class Config:
+    _VALID_COOKIE_SAMESITE = {"lax", "strict", "none"}
+
     def __init__(self) -> None:
         # 服务器配置
         self.host = os.getenv("HOST", "0.0.0.0")
@@ -89,6 +91,33 @@ class Config:
 
         # 应用时区配置（用于定时任务、账单日期等业务逻辑）
         self.app_timezone = os.getenv("APP_TIMEZONE", "Asia/Shanghai")
+
+        self.auth_refresh_cookie_name = os.getenv(
+            "AUTH_REFRESH_COOKIE_NAME", "aether_refresh_token"
+        )
+        raw_refresh_cookie_samesite = os.getenv("AUTH_REFRESH_COOKIE_SAMESITE")
+        normalized_refresh_cookie_samesite = self._normalize_cookie_samesite(
+            raw_refresh_cookie_samesite
+        )
+        self._invalid_auth_refresh_cookie_samesite = (
+            raw_refresh_cookie_samesite
+            if raw_refresh_cookie_samesite is not None
+            and normalized_refresh_cookie_samesite is None
+            else None
+        )
+        # 生产默认使用 SameSite=None，兼容前后端跨站点部署下的 refresh cookie。
+        self.auth_refresh_cookie_samesite = (
+            normalized_refresh_cookie_samesite
+            if normalized_refresh_cookie_samesite is not None
+            else ("none" if self.environment == "production" else "lax")
+        )
+        self.auth_refresh_cookie_secure = (
+            os.getenv(
+                "AUTH_REFRESH_COOKIE_SECURE",
+                "true" if self.environment == "production" else "false",
+            ).lower()
+            == "true"
+        )
 
         # 管理员账户配置（用于初始化）
         self.admin_email = os.getenv("ADMIN_EMAIL", "admin@localhost")
@@ -502,6 +531,13 @@ class Config:
         """
         errors: list[str] = []
 
+        if self._invalid_auth_refresh_cookie_samesite:
+            errors.append("AUTH_REFRESH_COOKIE_SAMESITE must be one of: lax, strict, none.")
+        if self.auth_refresh_cookie_samesite == "none" and not self.auth_refresh_cookie_secure:
+            errors.append(
+                "AUTH_REFRESH_COOKIE_SECURE must be true when AUTH_REFRESH_COOKIE_SAMESITE=none."
+            )
+
         if self.environment == "production":
             # 生产环境必须设置 JWT 密钥
             if not self.jwt_secret_key:
@@ -520,6 +556,15 @@ class Config:
                 )
 
         return errors
+
+    @classmethod
+    def _normalize_cookie_samesite(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if normalized in cls._VALID_COOKIE_SAMESITE:
+            return normalized
+        return None
 
     def __repr__(self) -> None:
         """配置信息字符串表示"""

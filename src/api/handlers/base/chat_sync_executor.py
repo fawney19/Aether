@@ -11,6 +11,7 @@ ChatSyncExecutor - 非流式请求执行器
 
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -123,7 +124,7 @@ class ChatSyncExecutor:
 
         # 可变请求体容器：允许 TaskService 在遇到 Thinking 签名错误时整流请求体后重试
         # 结构: {"body": 实际请求体, "_rectified": 是否已整流, "_rectified_this_turn": 本轮是否整流}
-        request_body_ref: dict[str, Any] = {"body": original_request_body}
+        request_body_ref: dict[str, Any] = {"body": copy.deepcopy(original_request_body)}
 
         # 捕获的上下文变量
         ctx = self._ctx

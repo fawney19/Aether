@@ -348,6 +348,15 @@
                     variant="ghost"
                     size="icon"
                     class="h-8 w-8"
+                    title="登录设备"
+                    @click="manageUserSessions(user)"
+                  >
+                    <MonitorSmartphone class="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="h-8 w-8"
                     :title="user.is_active ? '禁用用户' : '启用用户'"
                     @click="toggleUserStatus(user)"
                   >
@@ -545,6 +554,15 @@
                 >
                   <Key class="mr-1.5 h-3.5 w-3.5" />
                   API Keys
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="h-8 text-xs"
+                  @click="manageUserSessions(user)"
+                >
+                  <MonitorSmartphone class="mr-1.5 h-3.5 w-3.5" />
+                  设备
                 </Button>
                 <Button
                   variant="outline"
@@ -836,6 +854,94 @@
       </template>
     </Dialog>
 
+    <Dialog
+      v-model="showUserSessionsDialog"
+      size="xl"
+    >
+      <template #header>
+        <div class="border-b border-border px-6 py-4">
+          <div class="flex items-center gap-3">
+            <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 flex-shrink-0">
+              <MonitorSmartphone class="h-5 w-5 text-primary" />
+            </div>
+            <div class="flex-1 min-w-0">
+              <h3 class="text-lg font-semibold text-foreground leading-tight">
+                登录设备
+              </h3>
+              <p class="text-xs text-muted-foreground">
+                查看并强制下线该用户的设备会话
+              </p>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <div class="max-h-[60vh] overflow-y-auto space-y-3">
+        <div
+          v-if="loadingUserSessions"
+          class="rounded-lg border border-dashed border-border/60 bg-muted/20 px-4 py-10 text-center text-sm text-muted-foreground"
+        >
+          正在加载设备会话...
+        </div>
+        <div
+          v-else-if="userSessions.length === 0"
+          class="rounded-lg border border-dashed border-border/60 bg-muted/20 px-4 py-10 text-center text-sm text-muted-foreground"
+        >
+          暂无在线设备
+        </div>
+        <div
+          v-else
+          class="space-y-3"
+        >
+          <div
+            v-for="session in userSessions"
+            :key="session.id"
+            class="rounded-lg border border-border bg-card p-4 hover:border-primary/30 transition-colors"
+          >
+            <div class="flex items-center justify-between gap-3">
+              <div class="min-w-0 flex-1">
+                <div class="font-semibold text-foreground">
+                  {{ session.device_label }}
+                </div>
+                <div class="mt-1 text-xs text-muted-foreground">
+                  {{ formatSessionMeta(session) }}
+                </div>
+                <div class="mt-1 text-xs text-muted-foreground">
+                  最近活跃 {{ formatDate(session.last_seen_at || session.created_at) }}
+                  <span v-if="session.ip_address"> · IP {{ session.ip_address }}</span>
+                </div>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                :disabled="sessionDialogActionLoading === session.id"
+                @click="revokeSelectedUserSession(session.id)"
+              >
+                {{ sessionDialogActionLoading === session.id ? '处理中...' : '强制下线' }}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <template #footer>
+        <Button
+          variant="outline"
+          class="h-10 px-5"
+          @click="showUserSessionsDialog = false"
+        >
+          关闭
+        </Button>
+        <Button
+          class="h-10 px-5"
+          :disabled="loadingUserSessions || userSessions.length === 0 || sessionDialogActionLoading === 'all'"
+          @click="revokeAllSelectedUserSessions"
+        >
+          {{ sessionDialogActionLoading === 'all' ? '处理中...' : '全部下线' }}
+        </Button>
+      </template>
+    </Dialog>
+
     <WalletOpsDrawer
       :open="showWalletActionDialogState"
       :wallet="walletActionTarget?.wallet || null"
@@ -907,7 +1013,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { useUsersStore } from '@/stores/users'
-import type { User, ApiKey } from '@/api/users'
+import type { User, ApiKey, UserSession } from '@/api/users'
+import { formatSessionMeta } from '@/types/session'
 import { adminWalletApi, type AdminWallet } from '@/api/admin-wallets'
 import { useToast } from '@/composables/useToast'
 import { useConfirm } from '@/composables/useConfirm'
@@ -953,7 +1060,8 @@ import {
   Search,
   CheckCircle,
   Lock,
-  LockOpen
+  LockOpen,
+  MonitorSmartphone
 } from 'lucide-vue-next'
 
 // 功能组件
@@ -976,12 +1084,16 @@ const userFormDialogRef = ref<InstanceType<typeof UserFormDialog>>()
 
 // API Keys 对话框状态
 const showApiKeysDialog = ref(false)
+const showUserSessionsDialog = ref(false)
 const showNewApiKeyDialog = ref(false)
 const showUserApiKeyFormDialog = ref(false)
 const selectedUser = ref<User | null>(null)
 const userApiKeys = ref<ApiKey[]>([])
+const userSessions = ref<UserSession[]>([])
 const newApiKey = ref('')
 const creatingApiKey = ref(false)
+const loadingUserSessions = ref(false)
+const sessionDialogActionLoading = ref<string | null>(null)
 const apiKeyInput = ref<HTMLInputElement>()
 const editingUserApiKey = ref<ApiKey | null>(null)
 const userApiKeyForm = ref({
@@ -1249,6 +1361,19 @@ async function manageApiKeys(user: User) {
   await loadUserApiKeys(user.id)
 }
 
+async function manageUserSessions(user: User) {
+  selectedUser.value = user
+  showUserSessionsDialog.value = true
+  loadingUserSessions.value = true
+  try {
+    userSessions.value = await usersStore.getUserSessions(user.id)
+  } catch (err) {
+    error(parseApiError(err, '加载用户设备会话失败'))
+  } finally {
+    loadingUserSessions.value = false
+  }
+}
+
 async function loadUserApiKeys(userId: string) {
   try {
     userApiKeys.value = await usersStore.getUserApiKeys(userId)
@@ -1315,6 +1440,34 @@ async function submitUserApiKeyForm() {
     error(parseApiError(err, '未知错误'), editingUserApiKey.value ? '更新 API Key 失败' : '创建 API Key 失败')
   } finally {
     creatingApiKey.value = false
+  }
+}
+
+async function revokeSelectedUserSession(sessionId: string) {
+  if (!selectedUser.value) return
+  sessionDialogActionLoading.value = sessionId
+  try {
+    await usersStore.revokeUserSession(selectedUser.value.id, sessionId)
+    userSessions.value = userSessions.value.filter((session) => session.id !== sessionId)
+    success('设备已强制下线')
+  } catch (err) {
+    error(parseApiError(err, '强制下线失败'))
+  } finally {
+    sessionDialogActionLoading.value = null
+  }
+}
+
+async function revokeAllSelectedUserSessions() {
+  if (!selectedUser.value) return
+  sessionDialogActionLoading.value = 'all'
+  try {
+    const result = await usersStore.revokeAllUserSessions(selectedUser.value.id)
+    userSessions.value = []
+    success(result.revoked_count > 0 ? `已强制下线 ${result.revoked_count} 个设备` : '没有可下线的设备')
+  } catch (err) {
+    error(parseApiError(err, '强制下线全部设备失败'))
+  } finally {
+    sessionDialogActionLoading.value = null
   }
 }
 

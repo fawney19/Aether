@@ -19,6 +19,7 @@ from src.core.logger import logger
 from src.database.database import create_session
 from src.models.database import ApiKey, AuditEventType, User
 from src.services.auth.service import AuthService
+from src.services.auth.session_service import SessionService
 from src.services.rate_limit.user_rpm_limiter import SYSTEM_RPM_CONFIG_KEY, get_user_rpm_limiter
 from src.services.system.audit import AuditService
 from src.services.system.config import SystemConfigService
@@ -455,6 +456,7 @@ class ApiRequestPipeline:
 
             request.state.user_id = user.id
             request.state.management_token_id = management_token.id if management_token else None
+            request.state.user_session_id = None
             return user, management_token
 
         try:
@@ -466,8 +468,11 @@ class ApiRequestPipeline:
             raise HTTPException(status_code=401, detail="无效的管理员令牌")
 
         user_id = payload.get("user_id")
+        session_id = payload.get("session_id")
         if not user_id:
             raise HTTPException(status_code=401, detail="无效的管理员令牌")
+        if not session_id:
+            raise HTTPException(status_code=401, detail="登录会话已失效，请重新登录")
 
         db_user = db.query(User).filter(User.id == user_id).first()
         if not db_user or not db_user.is_active or db_user.is_deleted:
@@ -479,6 +484,20 @@ class ApiRequestPipeline:
         if db_user.role != UserRole.ADMIN:
             logger.warning("非管理员尝试通过 JWT 访问管理端点: {}", db_user.email)
             raise HTTPException(status_code=403, detail="需要管理员权限")
+
+        from src.utils.request_utils import get_client_ip
+
+        client_device_id = SessionService.extract_client_device_id(request)
+        session = SessionService.get_active_session(db, str(session_id), str(user_id))
+        if not session:
+            raise HTTPException(status_code=401, detail="登录会话已失效，请重新登录")
+        SessionService.assert_session_device_matches(session, client_device_id)
+        SessionService.touch_session(
+            session,
+            client_ip=get_client_ip(request),
+            user_agent=request.headers.get("user-agent", "unknown"),
+        )
+        request.state.user_session_id = session.id
 
         request.state.user_id = db_user.id
         return db_user, None
@@ -498,6 +517,7 @@ class ApiRequestPipeline:
             user, management_token = self._reattach_token_auth_result(db, token_auth_result)
             request.state.user_id = user.id
             request.state.management_token_id = management_token.id if management_token else None
+            request.state.user_session_id = None
             return user, management_token
 
         try:
@@ -509,8 +529,11 @@ class ApiRequestPipeline:
             raise HTTPException(status_code=401, detail="无效的用户令牌")
 
         user_id = payload.get("user_id")
+        session_id = payload.get("session_id")
         if not user_id:
             raise HTTPException(status_code=401, detail="无效的用户令牌")
+        if not session_id:
+            raise HTTPException(status_code=401, detail="登录会话已失效，请重新登录")
 
         db_user = db.query(User).filter(User.id == user_id).first()
         if not db_user or not db_user.is_active or db_user.is_deleted:
@@ -519,6 +542,19 @@ class ApiRequestPipeline:
         if not self.auth_service.token_identity_matches_user(payload, db_user):
             raise HTTPException(status_code=403, detail="无效的用户令牌")
 
+        from src.utils.request_utils import get_client_ip
+
+        client_device_id = SessionService.extract_client_device_id(request)
+        session = SessionService.get_active_session(db, str(session_id), str(user_id))
+        if not session:
+            raise HTTPException(status_code=401, detail="登录会话已失效，请重新登录")
+        SessionService.assert_session_device_matches(session, client_device_id)
+        SessionService.touch_session(
+            session,
+            client_ip=get_client_ip(request),
+            user_agent=request.headers.get("user-agent", "unknown"),
+        )
+        request.state.user_session_id = session.id
         request.state.user_id = db_user.id
         return db_user, None
 
@@ -541,6 +577,7 @@ class ApiRequestPipeline:
             # 存储到 request.state
             request.state.user_id = user.id
             request.state.management_token_id = management_token.id if management_token else None
+            request.state.user_session_id = None
 
             return user, management_token
 
@@ -592,8 +629,10 @@ class ApiRequestPipeline:
     ) -> None:
         """记录审计事件
 
-        事务策略：复用请求级 Session，不单独提交。
-        审计记录随主事务一起提交，由中间件统一管理。
+        事务策略：
+        - 默认复用请求级 Session，由中间件在请求结束时统一提交。
+        - 若路由已显式提交主事务（tx_committed_by_route=True），则审计日志会落在新的事务中，
+          这里需要立即提交，否则中间件会跳过二次提交，导致审计记录丢失。
         """
         if not getattr(adapter, "audit_log_enabled", True):
             return
@@ -618,6 +657,9 @@ class ApiRequestPipeline:
             error=error,
         )
 
+        request_state = getattr(context.request, "state", None)
+        tx_committed_by_route = getattr(request_state, "tx_committed_by_route", False) is True
+
         try:
             # 复用请求级 Session，不创建新的连接
             # 审计记录随主事务一起提交，由中间件统一管理
@@ -634,6 +676,12 @@ class ApiRequestPipeline:
                 error_message=error,
                 metadata=metadata,
             )
+            if tx_committed_by_route:
+                try:
+                    context.db.commit()
+                except Exception:
+                    context.db.rollback()
+                    raise
         except Exception as exc:
             # 审计失败不应影响主请求，仅记录警告
             logger.warning("[Audit] Failed to record event for adapter={}: {}", adapter.name, exc)

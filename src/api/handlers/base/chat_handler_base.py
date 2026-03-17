@@ -22,6 +22,7 @@ Chat Handler Base - Chat API 格式的通用基类
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -499,7 +500,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
 
         # 可变请求体容器：允许 TaskService 在遇到 Thinking 签名错误时整流请求体后重试
         # 结构: {"body": 实际请求体, "_rectified": 是否已整流, "_rectified_this_turn": 本轮是否整流}
-        request_body_ref: dict[str, Any] = {"body": original_request_body}
+        request_body_ref: dict[str, Any] = {"body": copy.deepcopy(original_request_body)}
 
         # 创建类型安全的流式上下文
         ctx = StreamContext(
@@ -725,10 +726,9 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             )
 
         # 应用模型映射到请求体
+        request_body = copy.deepcopy(original_request_body)
         if mapped_model:
-            request_body = self.apply_mapped_model(original_request_body, mapped_model)
-        else:
-            request_body = dict(original_request_body)
+            request_body = self.apply_mapped_model(request_body, mapped_model)
 
         provider_type = str(getattr(provider, "provider_type", "") or "").lower()
         behavior = get_provider_behavior(
@@ -848,7 +848,10 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             mapped_model=mapped_model,
             envelope=envelope,
             extra_headers=extra_headers,
-            protected_body_keys=get_cache_sensitive_protected_body_keys(provider_api_format),
+            protected_body_keys=get_cache_sensitive_protected_body_keys(
+                provider_api_format,
+                provider_type=provider_type,
+            ),
             upstream_is_stream=upstream_is_stream,
             needs_conversion=needs_conversion,
             provider_api_format=provider_api_format,

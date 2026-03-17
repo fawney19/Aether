@@ -2,12 +2,14 @@
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.orm import Session
 from starlette.responses import RedirectResponse
 
 from src.database import get_db
 from src.services.auth.oauth.service import OAuthService
+from src.services.auth.refresh_cookie import set_refresh_token_cookie
+from src.utils.request_utils import get_client_ip, get_user_agent
 
 router = APIRouter(prefix="/api/oauth", tags=["OAuth"])
 
@@ -24,17 +26,24 @@ async def list_oauth_providers(db: Session = Depends(get_db)) -> dict[str, Any]:
 
 
 @router.get("/{provider_type}/authorize")
-async def oauth_authorize(provider_type: str, db: Session = Depends(get_db)) -> RedirectResponse:
+async def oauth_authorize(
+    provider_type: str,
+    client_device_id: str = Query(..., min_length=1, max_length=128),
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
     """
     发起 OAuth 登录（login flow）。
     """
-    url = await OAuthService.build_login_authorize_url(db, provider_type)
+    url = await OAuthService.build_login_authorize_url(
+        db, provider_type, client_device_id=client_device_id
+    )
     return RedirectResponse(url=url, status_code=status.HTTP_302_FOUND)
 
 
 @router.get("/{provider_type}/callback")
 async def oauth_callback(
     provider_type: str,
+    request: Request,
     db: Session = Depends(get_db),
     code: str | None = Query(None),
     state: str | None = Query(None),
@@ -46,12 +55,18 @@ async def oauth_callback(
 
     成功/失败都会重定向到前端回调页。
     """
-    redirect_url = await OAuthService.handle_callback(
+    callback_result = await OAuthService.handle_callback(
         db=db,
         provider_type=provider_type,
         state=state or "",
         code=code,
         error=error,
         error_description=error_description,
+        client_ip=get_client_ip(request),
+        user_agent=get_user_agent(request),
+        headers=dict(request.headers),
     )
-    return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
+    response = RedirectResponse(url=callback_result.redirect_url, status_code=status.HTTP_302_FOUND)
+    if callback_result.refresh_token:
+        set_refresh_token_cookie(response, callback_result.refresh_token)
+    return response

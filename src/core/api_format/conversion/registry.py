@@ -10,6 +10,7 @@ source -> internal -> target
 """
 
 import ast
+import copy
 import importlib
 import inspect
 import threading
@@ -250,7 +251,7 @@ class FormatConversionRegistry:
         output_limit: int | None = None,
     ) -> dict[str, Any]:
         if self._same_normalizer(source_format, target_format) and not target_variant:
-            return request
+            return copy.deepcopy(request)
 
         # 同 normalizer + variant: 优先尝试轻量补丁（跳过 internal 转换）
         if self._same_normalizer(source_format, target_format) and target_variant:
@@ -258,7 +259,7 @@ class FormatConversionRegistry:
             with _track_conversion_metrics(
                 "request_patch", str(source_format).upper(), str(target_format).upper()
             ):
-                patched = normalizer.patch_for_variant(request, target_variant)
+                patched = normalizer.patch_for_variant(copy.deepcopy(request), target_variant)
             if patched is not None:
                 return patched
 
@@ -269,7 +270,7 @@ class FormatConversionRegistry:
             "request", str(source_format).upper(), str(target_format).upper()
         ):
             try:
-                internal = src.request_to_internal(request)
+                internal = src.request_to_internal(copy.deepcopy(request))
                 internal.output_limit = output_limit
                 repair_stats = self._repair_internal_tool_call_ids(internal)
                 if repair_stats["generated_tool_use_ids"] or repair_stats["filled_tool_result_ids"]:
@@ -295,7 +296,7 @@ class FormatConversionRegistry:
     ) -> dict[str, Any]:
         """异步版本的 convert_request，在 internal 阶段执行图片 URL 下载等异步操作。"""
         if self._same_normalizer(source_format, target_format) and not target_variant:
-            return request
+            return copy.deepcopy(request)
 
         # 同 normalizer + variant: 优先尝试轻量补丁（跳过 internal 转换）
         if self._same_normalizer(source_format, target_format) and target_variant:
@@ -303,7 +304,7 @@ class FormatConversionRegistry:
             with _track_conversion_metrics(
                 "request_patch", str(source_format).upper(), str(target_format).upper()
             ):
-                patched = normalizer.patch_for_variant(request, target_variant)
+                patched = normalizer.patch_for_variant(copy.deepcopy(request), target_variant)
             if patched is not None:
                 return patched
 
@@ -314,7 +315,7 @@ class FormatConversionRegistry:
             "request", str(source_format).upper(), str(target_format).upper()
         ):
             try:
-                internal = src.request_to_internal(request)
+                internal = src.request_to_internal(copy.deepcopy(request))
                 internal.output_limit = output_limit
                 repair_stats = self._repair_internal_tool_call_ids(internal)
                 if repair_stats["generated_tool_use_ids"] or repair_stats["filled_tool_result_ids"]:
@@ -352,15 +353,15 @@ class FormatConversionRegistry:
                             而不是上游返回的映射后模型名。
         """
         if self._same_normalizer(source_format, target_format):
+            response_copy = copy.deepcopy(response)
             # 即使格式相同，也需要替换 model 字段
-            if requested_model and isinstance(response, dict):
-                response = dict(response)  # 避免修改原始响应
+            if requested_model and isinstance(response_copy, dict):
                 # 支持不同格式的 model 字段名
-                if "model" in response:
-                    response["model"] = requested_model
-                elif "modelVersion" in response:
-                    response["modelVersion"] = requested_model
-            return response
+                if "model" in response_copy:
+                    response_copy["model"] = requested_model
+                elif "modelVersion" in response_copy:
+                    response_copy["modelVersion"] = requested_model
+            return response_copy
 
         src = self._require_normalizer(source_format)
         tgt = self._require_normalizer(target_format)
@@ -369,7 +370,7 @@ class FormatConversionRegistry:
             "response", str(source_format).upper(), str(target_format).upper()
         ):
             try:
-                internal = src.response_to_internal(response)
+                internal = src.response_to_internal(copy.deepcopy(response))
                 return tgt.response_from_internal(internal, requested_model=requested_model)
             except Exception as e:
                 raise FormatConversionError(source_format, target_format, str(e)) from e
@@ -381,7 +382,7 @@ class FormatConversionRegistry:
         target_format: str,
     ) -> dict[str, Any]:
         if self._same_normalizer(source_format, target_format):
-            return error_response
+            return copy.deepcopy(error_response)
 
         src = self._require_normalizer(source_format)
         tgt = self._require_normalizer(target_format)
@@ -400,7 +401,7 @@ class FormatConversionRegistry:
             "error", str(source_format).upper(), str(target_format).upper()
         ):
             try:
-                internal = src.error_to_internal(error_response)
+                internal = src.error_to_internal(copy.deepcopy(error_response))
                 return tgt.error_from_internal(internal)
             except Exception as e:
                 raise FormatConversionError(source_format, target_format, str(e)) from e
@@ -428,7 +429,7 @@ class FormatConversionRegistry:
         tgt_base = self._video_format_to_base(target_format)
 
         if src_base == tgt_base:
-            return request
+            return copy.deepcopy(request)
 
         src = self._require_normalizer(src_base)
         tgt = self._require_normalizer(tgt_base)
@@ -437,7 +438,7 @@ class FormatConversionRegistry:
             "video_request", str(source_format).upper(), str(target_format).upper()
         ):
             try:
-                internal = src.video_request_to_internal(request)
+                internal = src.video_request_to_internal(copy.deepcopy(request))
                 return tgt.video_request_from_internal(internal)
             except Exception as e:
                 raise FormatConversionError(source_format, target_format, str(e)) from e
@@ -462,7 +463,7 @@ class FormatConversionRegistry:
         tgt_base = self._video_format_to_base(target_format)
 
         if src_base == tgt_base:
-            return task_response
+            return copy.deepcopy(task_response)
 
         src = self._require_normalizer(src_base)
         tgt = self._require_normalizer(tgt_base)
@@ -471,7 +472,7 @@ class FormatConversionRegistry:
             "video_task", str(source_format).upper(), str(target_format).upper()
         ):
             try:
-                internal = src.video_task_to_internal(task_response)
+                internal = src.video_task_to_internal(copy.deepcopy(task_response))
                 return tgt.video_task_from_internal(internal)
             except Exception as e:
                 raise FormatConversionError(source_format, target_format, str(e)) from e
