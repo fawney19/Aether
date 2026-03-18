@@ -288,6 +288,7 @@ export interface EndpointAPIKey {
   oauth_plan_type?: string | null  // Codex 订阅类型: plus/free/team/enterprise
   oauth_account_id?: string | null  // Codex ChatGPT 账号 ID
   oauth_account_user_id?: string | null  // Codex ChatGPT account-user 联合 ID
+  oauth_account_name?: string | null
   oauth_organizations?: OAuthOrganizationInfo[] | null  // OAuth 关联组织/工作区摘要
   oauth_invalid_at?: number | null  // OAuth Token 失效时间（Unix 时间戳）
   oauth_invalid_reason?: string | null  // OAuth Token 失效原因

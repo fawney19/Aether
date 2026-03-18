@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import jwt
 import pytest
@@ -15,7 +16,9 @@ from src.services.provider.adapters.codex.request_patching import (
 from src.services.provider.envelope import ProviderEnvelope
 
 
-def test_patch_openai_cli_request_for_codex_is_passthrough_except_internal_sentinel() -> None:
+def test_patch_openai_cli_request_for_codex_is_passthrough_except_internal_sentinel() -> (
+    None
+):
     req = {
         "model": "gpt-test",
         "input": [
@@ -50,7 +53,9 @@ def test_patch_openai_cli_request_for_codex_is_passthrough_except_internal_senti
     assert out["input"][0]["role"] == "system"
 
 
-def test_patch_openai_cli_request_for_codex_preserves_existing_prompt_cache_key() -> None:
+def test_patch_openai_cli_request_for_codex_preserves_existing_prompt_cache_key() -> (
+    None
+):
     req = {"model": "gpt-test", "input": [], "prompt_cache_key": "client-cache-key"}
 
     out = patch_openai_cli_request_for_codex(req)
@@ -141,18 +146,28 @@ def test_maybe_patch_request_for_codex_patches_for_codex_openai_compact() -> Non
     assert "prompt_cache_key" not in out
 
 
-def test_openai_cli_normalizer_request_from_internal_codex_variant_preserves_store() -> None:
-    from src.core.api_format.conversion.normalizers.openai_cli import OpenAICliNormalizer
+def test_openai_cli_normalizer_request_from_internal_codex_variant_preserves_store() -> (
+    None
+):
+    from src.core.api_format.conversion.normalizers.openai_cli import (
+        OpenAICliNormalizer,
+    )
 
     normalizer = OpenAICliNormalizer()
-    internal = normalizer.request_to_internal({"model": "gpt-test", "input": [], "store": True})
+    internal = normalizer.request_to_internal(
+        {"model": "gpt-test", "input": [], "store": True}
+    )
     out = normalizer.request_from_internal(internal, target_variant="codex")
 
     assert out["store"] is True
 
 
-def test_openai_cli_normalizer_request_from_internal_codex_variant_defaults_store_false() -> None:
-    from src.core.api_format.conversion.normalizers.openai_cli import OpenAICliNormalizer
+def test_openai_cli_normalizer_request_from_internal_codex_variant_defaults_store_false() -> (
+    None
+):
+    from src.core.api_format.conversion.normalizers.openai_cli import (
+        OpenAICliNormalizer,
+    )
 
     normalizer = OpenAICliNormalizer()
     internal = normalizer.request_to_internal({"model": "gpt-test", "input": []})
@@ -161,9 +176,13 @@ def test_openai_cli_normalizer_request_from_internal_codex_variant_defaults_stor
     assert out["store"] is False
 
 
-def test_openai_cli_normalizer_codex_variant_keeps_instructions_missing_for_default_rule() -> None:
+def test_openai_cli_normalizer_codex_variant_keeps_instructions_missing_for_default_rule() -> (
+    None
+):
     from src.api.handlers.base.request_builder import apply_body_rules
-    from src.core.api_format.conversion.normalizers.openai_cli import OpenAICliNormalizer
+    from src.core.api_format.conversion.normalizers.openai_cli import (
+        OpenAICliNormalizer,
+    )
     from src.core.api_format.metadata import CODEX_DEFAULT_BODY_RULES
 
     normalizer = OpenAICliNormalizer()
@@ -177,7 +196,9 @@ def test_openai_cli_normalizer_codex_variant_keeps_instructions_missing_for_defa
 
 
 def test_openai_cli_normalizer_patch_for_codex_reorders_stable_prefix_keys() -> None:
-    from src.core.api_format.conversion.normalizers.openai_cli import OpenAICliNormalizer
+    from src.core.api_format.conversion.normalizers.openai_cli import (
+        OpenAICliNormalizer,
+    )
 
     normalizer = OpenAICliNormalizer()
     out = normalizer.patch_for_variant(
@@ -210,7 +231,9 @@ def test_codex_envelope_extra_headers_does_not_inject_synthetic_headers() -> Non
     assert codex_oauth_envelope.extra_headers() is None
 
 
-def test_codex_envelope_wrap_request_injects_stable_prompt_cache_key_from_user_api_key() -> None:
+def test_codex_envelope_wrap_request_injects_stable_prompt_cache_key_from_user_api_key() -> (
+    None
+):
     from src.services.provider.adapters.codex.envelope import codex_oauth_envelope
 
     try:
@@ -297,7 +320,9 @@ def test_codex_passthrough_builder_preserves_real_codex_headers() -> None:
     from src.services.provider.adapters.codex.envelope import codex_oauth_envelope
 
     builder = PassthroughRequestBuilder()
-    endpoint = SimpleNamespace(api_family="openai", endpoint_kind="cli", header_rules=None)
+    endpoint = SimpleNamespace(
+        api_family="openai", endpoint_kind="cli", header_rules=None
+    )
     key = SimpleNamespace(api_key="unused")
 
     headers = builder.build_headers(
@@ -333,7 +358,9 @@ def test_codex_passthrough_builder_preserves_real_codex_headers() -> None:
 
 
 def test_codex_passthrough_builder_applies_prompt_body_rules() -> None:
-    from src.api.handlers.base.request_builder import get_cache_sensitive_protected_body_keys
+    from src.api.handlers.base.request_builder import (
+        get_cache_sensitive_protected_body_keys,
+    )
     from src.core.api_format.metadata import CODEX_DEFAULT_BODY_RULES
 
     builder = PassthroughRequestBuilder()
@@ -369,7 +396,9 @@ def _encode_unsigned_jwt(payload: dict[str, object]) -> str:
 
 
 @pytest.mark.asyncio
-async def test_enrich_codex_uses_access_token_when_id_token_missing() -> None:
+async def test_enrich_codex_uses_access_token_when_id_token_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from src.services.provider.adapters.codex.plugin import enrich_codex
 
     access_token = _encode_unsigned_jwt(
@@ -384,6 +413,10 @@ async def test_enrich_codex_uses_access_token_when_id_token_missing() -> None:
     )
 
     auth_config: dict[str, object] = {}
+    monkeypatch.setattr(
+        "src.core.provider_oauth_utils.fetch_openai_account_name",
+        AsyncMock(return_value="Workspace Alpha"),
+    )
     out = await enrich_codex(
         auth_config=auth_config,
         token_response={"access_token": access_token},
@@ -393,5 +426,6 @@ async def test_enrich_codex_uses_access_token_when_id_token_missing() -> None:
 
     assert out["email"] == "u@example.com"
     assert out["account_id"] == "acc-access"
+    assert out["account_name"] == "Workspace Alpha"
     assert out["plan_type"] == "team"
     assert out["user_id"] == "user-access"

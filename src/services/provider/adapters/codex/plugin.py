@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlencode
 
 from src.core.logger import logger
@@ -50,7 +50,9 @@ def build_codex_url(
 
     ctx = get_codex_request_context()
     endpoint_sig = str(getattr(endpoint, "api_format", "") or "").strip().lower()
-    is_compact = bool((ctx.is_compact if ctx else False) or endpoint_sig == "openai:compact")
+    is_compact = bool(
+        (ctx.is_compact if ctx else False) or endpoint_sig == "openai:compact"
+    )
 
     base = str(endpoint.base_url).rstrip("/")
     # 如果用户已在 base_url 中包含了 /responses，不要重复追加
@@ -76,11 +78,14 @@ def build_codex_url(
 async def enrich_codex(
     auth_config: dict[str, Any],
     token_response: dict[str, Any],
-    access_token: str,  # noqa: ARG001
-    proxy_config: dict[str, Any] | None,  # noqa: ARG001
+    access_token: str,
+    proxy_config: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Codex auth_config enrichment: parse token claims -> account/team identity metadata."""
-    from src.core.provider_oauth_utils import parse_codex_id_token
+    from src.core.provider_oauth_utils import (
+        fetch_openai_account_name,
+        parse_codex_id_token,
+    )
 
     def _read_non_empty_str(*values: Any) -> str | None:
         for value in values:
@@ -153,6 +158,17 @@ async def enrich_codex(
             if not auth_config.get(key):
                 auth_config[key] = value
 
+    account_id = _read_non_empty_str(auth_config.get("account_id"))
+    if account_id:
+        account_name = await fetch_openai_account_name(
+            access_token,
+            account_id,
+            proxy_config=proxy_config,
+            timeout_seconds=10.0,
+        )
+        if account_name:
+            auth_config["account_name"] = account_name
+
     return auth_config
 
 
@@ -170,13 +186,15 @@ def register_all() -> None:
     from src.core.provider_oauth_utils import register_auth_enricher
     from src.services.model.upstream_fetcher import UpstreamModelsFetcherRegistry
     from src.services.provider.adapters.codex.envelope import codex_oauth_envelope
-    from src.services.provider.envelope import register_envelope
+    from src.services.provider.envelope import ProviderEnvelope, register_envelope
     from src.services.provider.transport import register_transport_hook
 
+    codex_envelope = cast(ProviderEnvelope, cast(object, codex_oauth_envelope))
+
     # Envelope
-    register_envelope("codex", "openai:cli", codex_oauth_envelope)
-    register_envelope("codex", "openai:compact", codex_oauth_envelope)
-    register_envelope("codex", "", codex_oauth_envelope)
+    register_envelope("codex", "openai:cli", codex_envelope)
+    register_envelope("codex", "openai:compact", codex_envelope)
+    register_envelope("codex", "", codex_envelope)
 
     # Transport
     register_transport_hook("codex", "openai:cli", build_codex_url)
@@ -189,7 +207,9 @@ def register_all() -> None:
     from src.core.api_format.metadata import CODEX_DEFAULT_BODY_RULES
 
     register_provider_behavior_variant("codex", same_format=True, cross_format=True)
-    register_provider_default_body_rules("codex", "openai:cli", CODEX_DEFAULT_BODY_RULES)
+    register_provider_default_body_rules(
+        "codex", "openai:cli", CODEX_DEFAULT_BODY_RULES
+    )
 
     # Export: Codex uses the default export builder (strip null + temp fields)
     # No need to register a custom one — the default in export.py suffices.

@@ -68,6 +68,7 @@ async def test_standard_batch_import_commits_successes_in_chunks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     key_ids = count(1)
+    created_auth_configs: list[dict[str, object]] = []
 
     monkeypatch.setattr(
         oauthmod,
@@ -91,7 +92,9 @@ async def test_standard_batch_import_commits_successes_in_chunks(
         "_parse_standard_oauth_import_entries",
         lambda _raw: [{"refresh_token": f"r-{idx}" + ("x" * 120)} for idx in range(3)],
     )
-    monkeypatch.setattr(oauthmod, "_get_provider_api_formats", lambda _provider: ["responses"])
+    monkeypatch.setattr(
+        oauthmod, "_get_provider_api_formats", lambda _provider: ["responses"]
+    )
     monkeypatch.setattr(
         oauthmod,
         "_release_batch_import_db_connection_before_await",
@@ -113,16 +116,24 @@ async def test_standard_batch_import_commits_successes_in_chunks(
     async def _fake_enrich_auth_config(**kwargs: object) -> dict[str, object]:
         auth_config = dict(kwargs["auth_config"])  # type: ignore[call-overload]
         auth_config["email"] = f"user-{next(key_ids)}@example.com"
+        auth_config["account_name"] = "Workspace Alpha"
         return auth_config
 
     created_ids = count(1)
     monkeypatch.setattr(oauthmod, "post_oauth_token", _fake_post_oauth_token)
     monkeypatch.setattr(oauthmod, "enrich_auth_config", _fake_enrich_auth_config)
-    monkeypatch.setattr(oauthmod, "_check_duplicate_oauth_account", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        oauthmod, "_check_duplicate_oauth_account", lambda *_args, **_kwargs: None
+    )
+
+    def _fake_create_oauth_key(*_args: object, **kwargs: object) -> SimpleNamespace:
+        created_auth_configs.append(dict(kwargs["auth_config"]))
+        return SimpleNamespace(id=f"key-{next(created_ids)}")
+
     monkeypatch.setattr(
         oauthmod,
         "_create_oauth_key",
-        lambda *_args, **_kwargs: SimpleNamespace(id=f"key-{next(created_ids)}"),
+        _fake_create_oauth_key,
     )
 
     db = MagicMock()
@@ -140,6 +151,7 @@ async def test_standard_batch_import_commits_successes_in_chunks(
     assert result.success == 3
     assert result.failed == 0
     assert db.commit.call_count == 2
+    assert created_auth_configs[0]["account_name"] == "Workspace Alpha"
 
 
 @pytest.mark.asyncio
@@ -152,14 +164,20 @@ async def test_kiro_batch_import_releases_db_connection_before_refresh(
         def __init__(self, data: dict[str, object]) -> None:
             self._data = dict(data)
             self.provider_type = str(data.get("provider_type") or "")
-            self.email = data.get("email") if isinstance(data.get("email"), str) else None
+            self.email = (
+                data.get("email") if isinstance(data.get("email"), str) else None
+            )
             self.auth_method = (
-                data.get("auth_method") if isinstance(data.get("auth_method"), str) else "social"
+                data.get("auth_method")
+                if isinstance(data.get("auth_method"), str)
+                else "social"
             )
             self.refresh_token = str(data.get("refresh_token") or "")
 
         @staticmethod
-        def validate_required_fields(_cred: dict[str, object]) -> tuple[bool, str | None]:
+        def validate_required_fields(
+            _cred: dict[str, object],
+        ) -> tuple[bool, str | None]:
             return True, None
 
         @classmethod
@@ -185,7 +203,9 @@ async def test_kiro_batch_import_releases_db_connection_before_refresh(
         FakeKiroAuthConfig,
     )
 
-    async def _fake_refresh_access_token(*_args: object, **_kwargs: object) -> tuple[str, object]:
+    async def _fake_refresh_access_token(
+        *_args: object, **_kwargs: object
+    ) -> tuple[str, object]:
         raise RuntimeError("refresh token reused")
 
     monkeypatch.setattr(

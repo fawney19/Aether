@@ -18,7 +18,7 @@ def test_build_key_response_includes_codex_identity_metadata(
         api_formats=["openai:chat"],
         auth_type="oauth",
         api_key="enc-access-token",
-        auth_config='{"email":"u@example.com","plan_type":"team","account_id":"acc-1","account_user_id":"user-1__acc-1","organizations":[{"id":"org-1","title":"Personal","is_default":true,"role":"owner"}],"expires_at":123456}',
+        auth_config='{"email":"u@example.com","plan_type":"team","account_id":"acc-1","account_name":"Workspace Alpha","account_user_id":"user-1__acc-1","organizations":[{"id":"org-1","title":"Personal","is_default":true,"role":"owner"}],"expires_at":123456}',
         name="codex-user",
     )
     now = datetime.now(timezone.utc)
@@ -49,6 +49,7 @@ def test_build_key_response_includes_codex_identity_metadata(
     assert result.oauth_email == "u@example.com"
     assert result.oauth_plan_type == "team"
     assert result.oauth_account_id == "acc-1"
+    assert result.oauth_account_name == "Workspace Alpha"
     assert result.oauth_account_user_id == "user-1__acc-1"
     assert len(result.oauth_organizations) == 1
     assert result.oauth_organizations[0].title == "Personal"
