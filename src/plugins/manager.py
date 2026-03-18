@@ -49,7 +49,8 @@ class PluginManager:
     # notification 默认不加载，避免未配置插件（如 email）在启动时初始化失败并占用内存。
     DEFAULT_ENABLED_PLUGIN_MODULES: dict[str, tuple[str, ...]] = {
         "auth": ("api_key",),
-        "rate_limit": ("sliding_window",),
+        # 默认切到 token_bucket；全局 Redis 就绪时会自动切到分布式后端。
+        "rate_limit": ("token_bucket",),
         "cache": ("memory",),
         "monitor": ("prometheus",),
         "token": ("claude",),

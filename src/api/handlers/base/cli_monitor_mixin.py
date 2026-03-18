@@ -360,59 +360,149 @@ class CliMonitorMixin:
                         ctx, ctx.provider_request_body or original_request_body
                     )
 
-                response_body = ctx.build_response_body(response_time_ms)
-                client_response_body = ctx.build_client_response_body(response_time_ms)
+                with ctx.managed_recorded_bodies(response_time_ms) as recorded_bodies:
+                    # 根据状态码决定记录成功还是失败
+                    # 499 = 客户端取消（不算系统失败）；其他 4xx/5xx 视为失败
+                    if ctx.status_code and ctx.status_code >= 400:
+                        client_response_headers = ctx.client_response_headers or {
+                            "content-type": "application/json"
+                        }
 
-                # 根据状态码决定记录成功还是失败
-                # 499 = 客户端取消（不算系统失败）；其他 4xx/5xx 视为失败
-                if ctx.status_code and ctx.status_code >= 400:
-                    client_response_headers = ctx.client_response_headers or {
-                        "content-type": "application/json"
-                    }
-
-                    if ctx.is_client_disconnected():
-                        # 客户端取消：记录为 cancelled（不算系统失败）
-                        request_metadata = self._merge_scheduling_metadata(
-                            {"perf": ctx.perf_metrics} if ctx.perf_metrics else None,
-                            selected_key_id=ctx.key_id,
-                            candidate_keys=ctx.candidate_keys,
-                            pool_summary=ctx.pool_summary,
-                            fallback_from_request=True,
-                        )
-                        await bg_telemetry.record_cancelled(
-                            provider=ctx.provider_name or "unknown",
-                            model=ctx.model,
-                            response_time_ms=response_time_ms,
-                            first_byte_time_ms=ctx.first_byte_time_ms,
-                            status_code=ctx.status_code,
-                            request_headers=original_headers,
-                            request_body=original_request_body,
-                            is_stream=True,
-                            api_format=ctx.api_format,
-                            api_family=self.api_family,
-                            endpoint_kind=self.endpoint_kind,
-                            provider_request_headers=ctx.provider_request_headers,
-                            provider_request_body=ctx.provider_request_body,
-                            input_tokens=ctx.input_tokens,
-                            output_tokens=ctx.output_tokens,
-                            cache_creation_tokens=ctx.cache_creation_tokens,
-                            cache_read_tokens=ctx.cached_tokens,
-                            response_body=response_body,
-                            client_response_body=client_response_body,
-                            response_headers=ctx.response_headers,
-                            client_response_headers=client_response_headers,
-                            endpoint_api_format=ctx.provider_api_format or None,
-                            has_format_conversion=ctx.has_format_conversion,
-                            target_model=ctx.mapped_model,
-                            request_metadata=request_metadata,
-                        )
-                        logger.debug("{} 流式响应被客户端取消", self.FORMAT_ID)
-                        logger.info(
-                            f"[CANCEL] {self.request_id[:8]} | {ctx.model} | {ctx.provider_name} | {response_time_ms}ms | "
-                            f"{ctx.status_code} | in:{ctx.input_tokens} out:{ctx.output_tokens} cache:{ctx.cached_tokens}"
-                        )
+                        if ctx.is_client_disconnected():
+                            # 客户端取消：记录为 cancelled（不算系统失败）
+                            request_metadata = self._merge_scheduling_metadata(
+                                {"perf": ctx.perf_metrics} if ctx.perf_metrics else None,
+                                selected_key_id=ctx.key_id,
+                                candidate_keys=ctx.candidate_keys,
+                                pool_summary=ctx.pool_summary,
+                                fallback_from_request=True,
+                            )
+                            await bg_telemetry.record_cancelled(
+                                provider=ctx.provider_name or "unknown",
+                                model=ctx.model,
+                                response_time_ms=response_time_ms,
+                                first_byte_time_ms=ctx.first_byte_time_ms,
+                                status_code=ctx.status_code,
+                                request_headers=original_headers,
+                                request_body=original_request_body,
+                                is_stream=True,
+                                api_format=ctx.api_format,
+                                api_family=self.api_family,
+                                endpoint_kind=self.endpoint_kind,
+                                provider_request_headers=ctx.provider_request_headers,
+                                provider_request_body=ctx.provider_request_body,
+                                input_tokens=ctx.input_tokens,
+                                output_tokens=ctx.output_tokens,
+                                cache_creation_tokens=ctx.cache_creation_tokens,
+                                cache_read_tokens=ctx.cached_tokens,
+                                response_body=recorded_bodies.response_body,
+                                client_response_body=recorded_bodies.client_response_body,
+                                response_headers=ctx.response_headers,
+                                client_response_headers=client_response_headers,
+                                endpoint_api_format=ctx.provider_api_format or None,
+                                has_format_conversion=ctx.has_format_conversion,
+                                target_model=ctx.mapped_model,
+                                request_metadata=request_metadata,
+                            )
+                            logger.debug("{} 流式响应被客户端取消", self.FORMAT_ID)
+                            logger.info(
+                                "[CANCEL] {} | {} | {} | {}ms | {} | in:{} out:{} cache:{}",
+                                self.request_id[:8],
+                                ctx.model,
+                                ctx.provider_name,
+                                response_time_ms,
+                                ctx.status_code,
+                                ctx.input_tokens,
+                                ctx.output_tokens,
+                                ctx.cached_tokens,
+                            )
+                        else:
+                            # 服务端/上游异常：记录为失败
+                            request_metadata = self._merge_scheduling_metadata(
+                                {"perf": ctx.perf_metrics} if ctx.perf_metrics else None,
+                                selected_key_id=ctx.key_id,
+                                candidate_keys=ctx.candidate_keys,
+                                pool_summary=ctx.pool_summary,
+                                fallback_from_request=True,
+                            )
+                            await bg_telemetry.record_failure(
+                                provider=ctx.provider_name or "unknown",
+                                model=ctx.model,
+                                response_time_ms=response_time_ms,
+                                status_code=ctx.status_code,
+                                error_message=ctx.error_message or f"HTTP {ctx.status_code}",
+                                request_headers=original_headers,
+                                request_body=original_request_body,
+                                is_stream=True,
+                                api_format=ctx.api_format,
+                                api_family=self.api_family,
+                                endpoint_kind=self.endpoint_kind,
+                                provider_request_headers=ctx.provider_request_headers,
+                                provider_request_body=ctx.provider_request_body,
+                                # 预估 token 信息（来自 message_start 事件）
+                                input_tokens=ctx.input_tokens,
+                                output_tokens=ctx.output_tokens,
+                                cache_creation_tokens=ctx.cache_creation_tokens,
+                                cache_read_tokens=ctx.cached_tokens,
+                                response_body=recorded_bodies.response_body,
+                                client_response_body=recorded_bodies.client_response_body,
+                                response_headers=ctx.response_headers,
+                                client_response_headers=client_response_headers,
+                                # 格式转换追踪
+                                endpoint_api_format=ctx.provider_api_format or None,
+                                has_format_conversion=ctx.has_format_conversion,
+                                # 模型映射信息
+                                target_model=ctx.mapped_model,
+                                request_metadata=request_metadata,
+                            )
+                            logger.debug("{} 流式响应中断", self.FORMAT_ID)
+                            logger.info(
+                                "[FAIL] {} | {} | {} | {}ms | {} | in:{} out:{} cache:{}",
+                                self.request_id[:8],
+                                ctx.model,
+                                ctx.provider_name,
+                                response_time_ms,
+                                ctx.status_code,
+                                ctx.input_tokens,
+                                ctx.output_tokens,
+                                ctx.cached_tokens,
+                            )
                     else:
-                        # 服务端/上游异常：记录为失败
+                        # 在记录统计前，允许子类从 parsed_chunks 中提取额外的元数据
+                        self._finalize_stream_metadata(ctx)
+
+                        # 流式格式转换汇总日志
+                        if ctx.stream_conversion_event_count > 0:
+                            logger.debug(
+                                "[{}] 流式转换完成: {}->{}, total_events={}",
+                                self.request_id[:8],
+                                ctx.provider_api_format,
+                                ctx.client_api_format,
+                                ctx.stream_conversion_event_count,
+                            )
+
+                        # 流未正常完成（如上游截断/连接中断）且无 token 数据时，
+                        # 从已收集的文本和请求体估算 tokens，避免 usage 记录为 0
+                        # 流式成功时，返回给客户端的是提供商响应头 + SSE 必需头
+                        client_response_headers = filter_proxy_response_headers(
+                            ctx.response_headers
+                        )
+                        client_response_headers.update(
+                            {
+                                "Cache-Control": "no-cache, no-transform",
+                                "X-Accel-Buffering": "no",
+                                "content-type": "text/event-stream",
+                            }
+                        )
+
+                        logger.debug(
+                            "[{}] 开始记录 Usage: provider={}, model={}, in={}, out={}",
+                            ctx.request_id,
+                            ctx.provider_name,
+                            ctx.model,
+                            ctx.input_tokens,
+                            ctx.output_tokens,
+                        )
                         request_metadata = self._merge_scheduling_metadata(
                             {"perf": ctx.perf_metrics} if ctx.perf_metrics else None,
                             selected_key_id=ctx.key_id,
@@ -420,129 +510,60 @@ class CliMonitorMixin:
                             pool_summary=ctx.pool_summary,
                             fallback_from_request=True,
                         )
-                        await bg_telemetry.record_failure(
-                            provider=ctx.provider_name or "unknown",
+                        total_cost = await bg_telemetry.record_success(
+                            provider=ctx.provider_name,
                             model=ctx.model,
+                            input_tokens=ctx.input_tokens,
+                            output_tokens=ctx.output_tokens,
                             response_time_ms=response_time_ms,
+                            first_byte_time_ms=ctx.first_byte_time_ms,  # 传递首字时间
                             status_code=ctx.status_code,
-                            error_message=ctx.error_message or f"HTTP {ctx.status_code}",
                             request_headers=original_headers,
                             request_body=original_request_body,
+                            response_headers=ctx.response_headers,
+                            client_response_headers=client_response_headers,
+                            response_body=recorded_bodies.response_body,
+                            client_response_body=recorded_bodies.client_response_body,
+                            provider_request_body=ctx.provider_request_body,
+                            cache_creation_tokens=ctx.cache_creation_tokens,
+                            cache_read_tokens=ctx.cached_tokens,
                             is_stream=True,
+                            provider_request_headers=ctx.provider_request_headers,
                             api_format=ctx.api_format,
                             api_family=self.api_family,
                             endpoint_kind=self.endpoint_kind,
-                            provider_request_headers=ctx.provider_request_headers,
-                            provider_request_body=ctx.provider_request_body,
-                            # 预估 token 信息（来自 message_start 事件）
-                            input_tokens=ctx.input_tokens,
-                            output_tokens=ctx.output_tokens,
-                            cache_creation_tokens=ctx.cache_creation_tokens,
-                            cache_read_tokens=ctx.cached_tokens,
-                            response_body=response_body,
-                            client_response_body=client_response_body,
-                            response_headers=ctx.response_headers,
-                            client_response_headers=client_response_headers,
                             # 格式转换追踪
                             endpoint_api_format=ctx.provider_api_format or None,
                             has_format_conversion=ctx.has_format_conversion,
+                            # Provider 侧追踪信息（用于记录真实成本）
+                            provider_id=ctx.provider_id,
+                            provider_endpoint_id=ctx.endpoint_id,
+                            provider_api_key_id=ctx.key_id,
                             # 模型映射信息
                             target_model=ctx.mapped_model,
+                            # Provider 响应元数据（如 Gemini 的 modelVersion）
+                            response_metadata=(
+                                ctx.response_metadata if ctx.response_metadata else None
+                            ),
                             request_metadata=request_metadata,
                         )
-                        logger.debug("{} 流式响应中断", self.FORMAT_ID)
-                        logger.info(
-                            f"[FAIL] {self.request_id[:8]} | {ctx.model} | {ctx.provider_name} | {response_time_ms}ms | "
-                            f"{ctx.status_code} | in:{ctx.input_tokens} out:{ctx.output_tokens} cache:{ctx.cached_tokens}"
-                        )
-                else:
-                    # 在记录统计前，允许子类从 parsed_chunks 中提取额外的元数据
-                    self._finalize_stream_metadata(ctx)
-
-                    # 流式格式转换汇总日志
-                    if ctx.stream_conversion_event_count > 0:
                         logger.debug(
-                            "[{}] 流式转换完成: {}->{}, total_events={}",
-                            self.request_id[:8],
-                            ctx.provider_api_format,
-                            ctx.client_api_format,
-                            ctx.stream_conversion_event_count,
+                            "[{}] Usage 记录完成: cost=${:.6f}", ctx.request_id, total_cost
                         )
-
-                    # 流未正常完成（如上游截断/连接中断）且无 token 数据时，
-                    # 从已收集的文本和请求体估算 tokens，避免 usage 记录为 0
-                    # 流式成功时，返回给客户端的是提供商响应头 + SSE 必需头
-                    client_response_headers = filter_proxy_response_headers(ctx.response_headers)
-                    client_response_headers.update(
-                        {
-                            "Cache-Control": "no-cache, no-transform",
-                            "X-Accel-Buffering": "no",
-                            "content-type": "text/event-stream",
-                        }
-                    )
-
-                    logger.debug(
-                        f"[{ctx.request_id}] 开始记录 Usage: "
-                        f"provider={ctx.provider_name}, model={ctx.model}, "
-                        f"in={ctx.input_tokens}, out={ctx.output_tokens}"
-                    )
-                    request_metadata = self._merge_scheduling_metadata(
-                        {"perf": ctx.perf_metrics} if ctx.perf_metrics else None,
-                        selected_key_id=ctx.key_id,
-                        candidate_keys=ctx.candidate_keys,
-                        pool_summary=ctx.pool_summary,
-                        fallback_from_request=True,
-                    )
-                    total_cost = await bg_telemetry.record_success(
-                        provider=ctx.provider_name,
-                        model=ctx.model,
-                        input_tokens=ctx.input_tokens,
-                        output_tokens=ctx.output_tokens,
-                        response_time_ms=response_time_ms,
-                        first_byte_time_ms=ctx.first_byte_time_ms,  # 传递首字时间
-                        status_code=ctx.status_code,
-                        request_headers=original_headers,
-                        request_body=original_request_body,
-                        response_headers=ctx.response_headers,
-                        client_response_headers=client_response_headers,
-                        response_body=response_body,
-                        client_response_body=client_response_body,
-                        provider_request_body=ctx.provider_request_body,
-                        cache_creation_tokens=ctx.cache_creation_tokens,
-                        cache_read_tokens=ctx.cached_tokens,
-                        is_stream=True,
-                        provider_request_headers=ctx.provider_request_headers,
-                        api_format=ctx.api_format,
-                        api_family=self.api_family,
-                        endpoint_kind=self.endpoint_kind,
-                        # 格式转换追踪
-                        endpoint_api_format=ctx.provider_api_format or None,
-                        has_format_conversion=ctx.has_format_conversion,
-                        # Provider 侧追踪信息（用于记录真实成本）
-                        provider_id=ctx.provider_id,
-                        provider_endpoint_id=ctx.endpoint_id,
-                        provider_api_key_id=ctx.key_id,
-                        # 模型映射信息
-                        target_model=ctx.mapped_model,
-                        # Provider 响应元数据（如 Gemini 的 modelVersion）
-                        response_metadata=ctx.response_metadata if ctx.response_metadata else None,
-                        request_metadata=request_metadata,
-                    )
-                    logger.debug("[{}] Usage 记录完成: cost=${:.6f}", ctx.request_id, total_cost)
-                    # 简洁的请求完成摘要（两行格式）
-                    ttfb_part = (
-                        f" | TTFB: {ctx.first_byte_time_ms}ms" if ctx.first_byte_time_ms else ""
-                    )
-                    logger.info(
-                        "[OK] {} | {} | {}{}\n      Total: {}ms | in:{} out:{}",
-                        self.request_id[:8],
-                        ctx.model,
-                        ctx.provider_name,
-                        ttfb_part,
-                        response_time_ms,
-                        ctx.input_tokens or 0,
-                        ctx.output_tokens or 0,
-                    )
+                        # 简洁的请求完成摘要（两行格式）
+                        ttfb_part = (
+                            f" | TTFB: {ctx.first_byte_time_ms}ms" if ctx.first_byte_time_ms else ""
+                        )
+                        logger.info(
+                            "[OK] {} | {} | {}{}\n      Total: {}ms | in:{} out:{}",
+                            self.request_id[:8],
+                            ctx.model,
+                            ctx.provider_name,
+                            ttfb_part,
+                            response_time_ms,
+                            ctx.input_tokens or 0,
+                            ctx.output_tokens or 0,
+                        )
 
                 # 更新候选记录的最终状态和延迟时间
                 # 注意：RequestExecutor 会在流开始时过早地标记成功（只记录了连接建立的时间）

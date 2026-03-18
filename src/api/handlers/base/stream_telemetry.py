@@ -99,6 +99,7 @@ class StreamTelemetryRecorder:
             try:
                 writer = await self._get_telemetry_writer(bg_db, ctx, response_time_ms)
                 if writer is None:
+                    ctx.release_recorded_chunks()
                     return
                 # 兜底估算：流未正常完成且 token 均为 0 时，从请求体粗略估算。
                 # 覆盖成功但缺少 completion，以及已传出部分数据后被中断的场景。
@@ -114,53 +115,47 @@ class StreamTelemetryRecorder:
                     if isinstance(writer, QueueTelemetryWriter)
                     else should_log_body
                 )
-                response_body = (
-                    ctx.build_response_body(response_time_ms) if include_bodies else None
-                )
-                client_response_body = (
-                    ctx.build_client_response_body(response_time_ms) if include_bodies else None
-                )
-
-                try:
-                    await self._dispatch_record(
-                        bg_db,
-                        writer,
-                        ctx,
-                        original_headers,
-                        original_request_body,
-                        response_body,
-                        response_time_ms,
-                        client_response_body=client_response_body,
-                    )
-                except Exception as writer_error:
-                    if not isinstance(writer, QueueTelemetryWriter):
-                        raise
-                    logger.warning(
-                        f"[{self.request_id}] Queue writer failed, falling back to DB: {writer_error}"
-                    )
-                    db_writer = self._build_db_writer(bg_db)
-                    if db_writer is None:
-                        await self._update_usage_status_directly(
+                with ctx.managed_recorded_bodies(
+                    response_time_ms, include_bodies=include_bodies
+                ) as recorded_bodies:
+                    try:
+                        await self._dispatch_record(
                             bg_db,
-                            status=self._get_status_from_ctx(ctx),
-                            response_time_ms=response_time_ms,
-                            status_code=ctx.status_code,
+                            writer,
+                            ctx,
+                            original_headers,
+                            original_request_body,
+                            recorded_bodies.response_body,
+                            response_time_ms,
+                            client_response_body=recorded_bodies.client_response_body,
                         )
-                        return
-                    if response_body is None and should_log_body:
-                        response_body = ctx.build_response_body(response_time_ms)
-                    if client_response_body is None and should_log_body:
-                        client_response_body = ctx.build_client_response_body(response_time_ms)
-                    await self._dispatch_record(
-                        bg_db,
-                        db_writer,
-                        ctx,
-                        original_headers,
-                        original_request_body,
-                        response_body,
-                        response_time_ms,
-                        client_response_body=client_response_body,
-                    )
+                    except Exception as writer_error:
+                        if not isinstance(writer, QueueTelemetryWriter):
+                            raise
+                        logger.warning(
+                            f"[{self.request_id}] Queue writer failed, falling back to DB: {writer_error}"
+                        )
+                        db_writer = self._build_db_writer(bg_db)
+                        if db_writer is None:
+                            await self._update_usage_status_directly(
+                                bg_db,
+                                status=self._get_status_from_ctx(ctx),
+                                response_time_ms=response_time_ms,
+                                status_code=ctx.status_code,
+                            )
+                            return
+                        if should_log_body:
+                            recorded_bodies.ensure_populated(ctx, response_time_ms)
+                        await self._dispatch_record(
+                            bg_db,
+                            db_writer,
+                            ctx,
+                            original_headers,
+                            original_request_body,
+                            recorded_bodies.response_body,
+                            response_time_ms,
+                            client_response_body=recorded_bodies.client_response_body,
+                        )
 
                 # 更新候选记录状态
                 await self._update_candidate_status(bg_db, ctx, response_time_ms, start_time)

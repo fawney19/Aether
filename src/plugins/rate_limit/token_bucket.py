@@ -29,6 +29,7 @@ class TokenBucket:
         self.refill_rate = refill_rate
         self.tokens = capacity
         self.last_refill = time.time()
+        self.last_access_time = self.last_refill
 
     def _refill(self) -> None:
         """补充令牌"""
@@ -36,6 +37,7 @@ class TokenBucket:
         time_passed = now - self.last_refill
         tokens_to_add = time_passed * self.refill_rate
 
+        self.last_access_time = now
         if tokens_to_add > 0:
             self.tokens = min(self.capacity, self.tokens + tokens_to_add)
             self.last_refill = now
@@ -82,6 +84,9 @@ class TokenBucketStrategy(RateLimitStrategy):
     - 适合处理不均匀的流量模式
     """
 
+    DEFAULT_MAX_BUCKETS = 10000
+    DEFAULT_BUCKET_EXPIRY = 3600
+
     def __init__(self) -> None:
         super().__init__("token_bucket")
         self.buckets: dict[str, TokenBucket] = {}
@@ -90,11 +95,31 @@ class TokenBucketStrategy(RateLimitStrategy):
         # 默认配置
         self.default_capacity = 100  # 默认桶容量
         self.default_refill_rate = 10  # 默认每秒补充10个令牌
+        self.max_buckets = self.DEFAULT_MAX_BUCKETS
+        self.bucket_expiry = self.DEFAULT_BUCKET_EXPIRY
+        self._last_cleanup_time: float = time.time()
+        self._cleanup_interval = 300  # 每 5 分钟检查一次清理
 
         # 可选的 Redis 后端
         self._redis_backend: RedisTokenBucketBackend | None = None
         self._redis_checked = False
         self._backend_mode = os.getenv("RATE_LIMIT_BACKEND", "auto").lower()
+
+    def _resolve_bucket_config(self, key: str, rate_limit: int | None = None) -> tuple[int, float]:
+        """解析指定 key 当前应使用的桶容量和补充速率。"""
+        if rate_limit is not None:
+            return rate_limit, rate_limit / 60.0
+        if key.startswith("api_key:"):
+            return (
+                self.config.get("api_key_capacity", self.default_capacity),
+                self.config.get("api_key_refill_rate", self.default_refill_rate),
+            )
+        if key.startswith("user:"):
+            return (
+                self.config.get("user_capacity", self.default_capacity * 2),
+                self.config.get("user_refill_rate", self.default_refill_rate * 2),
+            )
+        return self.default_capacity, self.default_refill_rate
 
     def _get_bucket(self, key: str, rate_limit: int | None = None) -> TokenBucket:
         """
@@ -107,26 +132,64 @@ class TokenBucketStrategy(RateLimitStrategy):
         Returns:
             令牌桶实例
         """
-        if key not in self.buckets:
-            # 如果提供了rate_limit参数（来自数据库），优先使用
-            if rate_limit is not None:
-                # rate_limit 是每分钟请求数，转换为令牌桶参数
-                capacity = rate_limit  # 桶容量等于每分钟限制
-                refill_rate = rate_limit / 60.0  # 每秒补充的令牌数
-            # 否则根据key的不同前缀使用不同的配置
-            elif key.startswith("api_key:"):
-                capacity = self.config.get("api_key_capacity", self.default_capacity)
-                refill_rate = self.config.get("api_key_refill_rate", self.default_refill_rate)
-            elif key.startswith("user:"):
-                capacity = self.config.get("user_capacity", self.default_capacity * 2)
-                refill_rate = self.config.get("user_refill_rate", self.default_refill_rate * 2)
-            else:
-                capacity = self.default_capacity
-                refill_rate = self.default_refill_rate
+        capacity, refill_rate = self._resolve_bucket_config(key, rate_limit)
+        bucket = self.buckets.get(key)
+        if bucket is None:
+            bucket = TokenBucket(capacity, refill_rate)
+            self.buckets[key] = bucket
+            return bucket
 
-            self.buckets[key] = TokenBucket(capacity, refill_rate)
+        if bucket.capacity != capacity or bucket.refill_rate != refill_rate:
+            bucket._refill()
+            bucket.capacity = capacity
+            bucket.refill_rate = refill_rate
+            bucket.tokens = min(bucket.tokens, capacity)
 
-        return self.buckets[key]
+        return bucket
+
+    def _cleanup_expired_buckets(self) -> int:
+        """清理长时间未访问的桶，避免 key 集合无限增长。"""
+        current_time = time.time()
+        expired_keys = [
+            key
+            for key, bucket in self.buckets.items()
+            if current_time - bucket.last_access_time > self.bucket_expiry
+        ]
+
+        for key in expired_keys:
+            del self.buckets[key]
+
+        if expired_keys:
+            logger.info("清理了 {} 个过期的令牌桶", len(expired_keys))
+
+        return len(expired_keys)
+
+    def _evict_lru_buckets(self, count: int) -> int:
+        """达到容量上限时淘汰最久未使用的桶。"""
+        if not self.buckets or count <= 0:
+            return 0
+
+        sorted_keys = sorted(self.buckets, key=lambda key: self.buckets[key].last_access_time)
+        evicted = 0
+        for key in sorted_keys[:count]:
+            del self.buckets[key]
+            evicted += 1
+
+        if evicted:
+            logger.warning("LRU 淘汰了 {} 个令牌桶（达到容量上限）", evicted)
+
+        return evicted
+
+    async def _maybe_cleanup(self) -> None:
+        """定期清理或淘汰桶，控制进程内桶数量。"""
+        current_time = time.time()
+        if current_time - self._last_cleanup_time > self._cleanup_interval:
+            self._cleanup_expired_buckets()
+            self._last_cleanup_time = current_time
+
+        if len(self.buckets) >= self.max_buckets:
+            evict_count = max(1, self.max_buckets // 10)
+            self._evict_lru_buckets(evict_count)
 
     def _want_redis_backend(self) -> bool:
         return self._backend_mode in {"auto", "redis"}
@@ -169,6 +232,7 @@ class TokenBucketStrategy(RateLimitStrategy):
             )
 
         async with self._lock:
+            await self._maybe_cleanup()
             bucket = self._get_bucket(key, rate_limit)
             remaining = bucket.get_remaining()
             reset_at = bucket.get_reset_time()
@@ -219,7 +283,8 @@ class TokenBucketStrategy(RateLimitStrategy):
             return success
 
         async with self._lock:
-            bucket = self._get_bucket(key)
+            await self._maybe_cleanup()
+            bucket = self._get_bucket(key, kwargs.get("rate_limit"))
             success = bucket.consume(amount)
 
             if success:
@@ -270,6 +335,7 @@ class TokenBucketStrategy(RateLimitStrategy):
             )
 
         async with self._lock:
+            await self._maybe_cleanup()
             bucket = self._get_bucket(key)
             return {
                 "strategy": "token_bucket",
@@ -293,24 +359,17 @@ class TokenBucketStrategy(RateLimitStrategy):
         super().configure(config)
         self.default_capacity = config.get("default_capacity", self.default_capacity)
         self.default_refill_rate = config.get("default_refill_rate", self.default_refill_rate)
+        self.max_buckets = int(config.get("max_buckets", self.max_buckets))
+        self.bucket_expiry = int(config.get("bucket_expiry", self.bucket_expiry))
+        self._cleanup_interval = int(config.get("cleanup_interval", self._cleanup_interval))
 
     def _resolve_capacity(self, key: str, rate_limit: int | None = None) -> int:
-        if rate_limit is not None:
-            return rate_limit
-        if key.startswith("api_key:"):
-            return self.config.get("api_key_capacity", self.default_capacity)
-        if key.startswith("user:"):
-            return self.config.get("user_capacity", self.default_capacity * 2)
-        return self.default_capacity
+        capacity, _ = self._resolve_bucket_config(key, rate_limit)
+        return capacity
 
     def _resolve_refill_rate(self, key: str, rate_limit: int | None = None) -> float:
-        if rate_limit is not None:
-            return rate_limit / 60.0
-        if key.startswith("api_key:"):
-            return self.config.get("api_key_refill_rate", self.default_refill_rate)
-        if key.startswith("user:"):
-            return self.config.get("user_refill_rate", self.default_refill_rate * 2)
-        return self.default_refill_rate
+        _, refill_rate = self._resolve_bucket_config(key, rate_limit)
+        return refill_rate
 
 
 class RedisTokenBucketBackend:

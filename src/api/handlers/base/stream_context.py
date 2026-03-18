@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterator
 
 if TYPE_CHECKING:
     from src.core.api_format.conversion.stream_state import StreamState
@@ -47,6 +48,21 @@ def is_format_converted(
 
 
 _MAX_COLLECTED_TEXT_CHARS = 16 * 1024
+
+
+@dataclass
+class RecordedStreamBodies:
+    """统一封装 telemetry/usage 使用的流式响应体引用。"""
+
+    response_body: dict[str, Any] | None
+    client_response_body: dict[str, Any] | None
+
+    def ensure_populated(self, ctx: StreamContext, response_time_ms: int) -> None:
+        """在 fallback 到需要 body 的路径时按需补建响应体。"""
+        if self.response_body is None:
+            self.response_body = ctx.build_response_body(response_time_ms)
+        if self.client_response_body is None:
+            self.client_response_body = ctx.build_client_response_body(response_time_ms)
 
 
 @dataclass
@@ -160,8 +176,7 @@ class StreamContext:
         在故障转移重试时调用，清除之前的数据避免累积。
         保留 model 和 api_format，重置其他所有状态。
         """
-        self.parsed_chunks = []
-        self.provider_parsed_chunks = []
+        self.release_recorded_chunks()
         self.chunk_count = 0
         self.data_count = 0
         self.has_completion = False
@@ -195,13 +210,30 @@ class StreamContext:
         self.selected_base_url = None
 
     def release_recorded_chunks(self) -> None:
-        """
-        主动释放流式记录的 chunk 列表，降低长连接后对象滞留导致的内存占用。
-
-        仅清理用于审计/遥测的缓存，不影响已计算完成的统计字段。
-        """
+        """释放 telemetry/usage 已消费完的 chunk 列表，避免后台任务继续持有大对象。"""
         self.parsed_chunks = []
         self.provider_parsed_chunks = []
+
+    @contextmanager
+    def managed_recorded_bodies(
+        self,
+        response_time_ms: int,
+        *,
+        include_bodies: bool = True,
+    ) -> Iterator[RecordedStreamBodies]:
+        """统一管理响应体构建与 chunk 释放，避免 telemetry 路径重复写 finally。"""
+        recorded_bodies = RecordedStreamBodies(
+            response_body=self.build_response_body(response_time_ms) if include_bodies else None,
+            client_response_body=(
+                self.build_client_response_body(response_time_ms) if include_bodies else None
+            ),
+        )
+        try:
+            yield recorded_bodies
+        finally:
+            self.release_recorded_chunks()
+            recorded_bodies.response_body = None
+            recorded_bodies.client_response_body = None
 
     @property
     def collected_text(self) -> str:
