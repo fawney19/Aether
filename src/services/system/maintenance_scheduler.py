@@ -975,21 +975,23 @@ class MaintenanceScheduler:
             try:
                 now = datetime.now(timezone.utc)
 
-                # 1. 压缩详细日志 (body 字段 -> 压缩字段)
                 detail_cutoff = now - timedelta(days=detail_retention)
-                body_compressed = self._cleanup_body_fields(detail_cutoff, batch_size)
-
-                # 2. 清理压缩字段
                 compressed_cutoff = now - timedelta(days=compressed_retention)
-                compressed_cleaned = self._cleanup_compressed_fields(compressed_cutoff, batch_size)
-
-                # 3. 清理请求头
                 header_cutoff = now - timedelta(days=header_retention)
-                header_cleaned = self._cleanup_header_fields(header_cutoff, batch_size)
-
-                # 4. 删除过期记录
                 log_cutoff = now - timedelta(days=log_retention)
+
+                # 先删最老的整行，再按窗口处理剩余记录，避免同一行在一轮里被重复改写。
                 records_deleted = self._delete_old_records(log_cutoff, batch_size)
+                header_cleaned = self._cleanup_header_fields(
+                    header_cutoff, batch_size, newer_than=log_cutoff
+                )
+                body_cleaned = self._cleanup_stale_body_fields(
+                    compressed_cutoff, batch_size, newer_than=log_cutoff
+                )
+                # 仅压缩 7-30 天窗口内的 body；更老记录直接清空 body，不再先压缩再清理。
+                body_compressed = self._cleanup_body_fields(
+                    detail_cutoff, batch_size, newer_than=compressed_cutoff
+                )
 
                 # 5. 清理过期的API Keys
                 keys_db = create_session()
@@ -1005,7 +1007,7 @@ class MaintenanceScheduler:
 
                 logger.info(
                     f"清理完成: 压缩 {body_compressed} 条, "
-                    f"清理压缩字段 {compressed_cleaned} 条, "
+                    f"清理body {body_cleaned} 条, "
                     f"清理header {header_cleaned} 条, "
                     f"删除记录 {records_deleted} 条, "
                     f"清理过期Keys {keys_cleaned} 条"
@@ -1016,10 +1018,16 @@ class MaintenanceScheduler:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, _do_cleanup)
 
-    def _cleanup_body_fields(self, cutoff_time: datetime, batch_size: int) -> int:
+    def _cleanup_body_fields(
+        self,
+        cutoff_time: datetime,
+        batch_size: int,
+        *,
+        newer_than: datetime | None = None,
+    ) -> int:
         """压缩 request_body 和 response_body 字段到压缩字段
 
-        逐条处理，确保每条记录都正确更新（同步方法，在线程池中调用）
+        仅处理指定时间窗口内仍保留原始 body 的记录，避免对更老记录重复写放大。
         """
         from sqlalchemy import null, update
 
@@ -1027,84 +1035,45 @@ class MaintenanceScheduler:
         no_progress_count = 0
         memory_safe_batch_size = max(1, min(batch_size, 25))
 
+        if newer_than is not None and newer_than >= cutoff_time:
+            logger.warning(
+                "压缩 body 字段跳过: 无效时间窗口 newer_than={} cutoff_time={}",
+                newer_than,
+                cutoff_time,
+            )
+            return 0
+
         while True:
             batch_db = create_session()
             try:
-                record_ids = [
-                    row.id
-                    for row in (
-                        batch_db.query(Usage.id)
-                        .filter(Usage.created_at < cutoff_time)
-                        .filter(
-                            (Usage.request_body.isnot(None))
-                            | (Usage.response_body.isnot(None))
-                            | (Usage.provider_request_body.isnot(None))
-                            | (Usage.client_response_body.isnot(None))
-                        )
-                        .order_by(Usage.created_at.asc(), Usage.id.asc())
-                        .limit(memory_safe_batch_size)
-                        .all()
+                query = batch_db.query(
+                    Usage.id,
+                    Usage.request_body,
+                    Usage.response_body,
+                    Usage.provider_request_body,
+                    Usage.client_response_body,
+                ).filter(Usage.created_at < cutoff_time)
+                if newer_than is not None:
+                    query = query.filter(Usage.created_at >= newer_than)
+                records = (
+                    query.filter(
+                        (Usage.request_body.isnot(None))
+                        | (Usage.response_body.isnot(None))
+                        | (Usage.provider_request_body.isnot(None))
+                        | (Usage.client_response_body.isnot(None))
                     )
-                ]
-            except Exception as e:
-                logger.exception("加载待压缩 body 记录 ID 失败: {}", e)
-                try:
-                    batch_db.rollback()
-                except Exception:
-                    pass
-                break
-            finally:
-                batch_db.close()
+                    .order_by(Usage.created_at.asc(), Usage.id.asc())
+                    .limit(memory_safe_batch_size)
+                    .all()
+                )
 
-            if not record_ids:
-                break
+                if not records:
+                    break
 
-            batch_success = 0
-            batch_progress = False
-
-            for record_id in record_ids:
-                record_db = create_session()
-                try:
-                    record = (
-                        record_db.query(
-                            Usage.id,
-                            Usage.request_body,
-                            Usage.response_body,
-                            Usage.provider_request_body,
-                            Usage.client_response_body,
-                        )
-                        .filter(Usage.id == record_id)
-                        .first()
-                    )
-
-                    if record is None:
-                        continue
-
-                    has_body_payload = (
-                        record.request_body is not None
-                        or record.response_body is not None
-                        or record.provider_request_body is not None
-                        or record.client_response_body is not None
-                    )
-
-                    if not has_body_payload:
-                        result = record_db.execute(
-                            update(Usage)
-                            .where(Usage.id == record.id)
-                            .values(
-                                request_body=null(),
-                                response_body=null(),
-                                provider_request_body=null(),
-                                client_response_body=null(),
-                            )
-                            .execution_options(synchronize_session=False)
-                        )
-                        record_db.commit()
-                        if result.rowcount > 0:
-                            batch_progress = True
-                        continue
-
-                    result = record_db.execute(
+                batch_success = 0
+                batch_progress = False
+                for record in records:
+                    result = batch_db.execute(
                         update(Usage)
                         .where(Usage.id == record.id)
                         .values(
@@ -1133,20 +1102,20 @@ class MaintenanceScheduler:
                         )
                         .execution_options(synchronize_session=False)
                     )
-                    record_db.commit()
-
                     if result.rowcount > 0:
                         batch_success += 1
                         batch_progress = True
-                except Exception as e:
-                    logger.warning("压缩记录 {} 失败: {}", record_id, e)
-                    try:
-                        record_db.rollback()
-                    except Exception:
-                        pass
-                    continue
-                finally:
-                    record_db.close()
+
+                batch_db.commit()
+            except Exception as e:
+                logger.warning("压缩 body 批次失败: {}", e)
+                try:
+                    batch_db.rollback()
+                except Exception:
+                    pass
+                break
+            finally:
+                batch_db.close()
 
             if not batch_progress:
                 no_progress_count += 1
@@ -1166,27 +1135,47 @@ class MaintenanceScheduler:
 
         return total_compressed
 
-    def _cleanup_compressed_fields(self, cutoff_time: datetime, batch_size: int) -> int:
-        """清理压缩字段（删除压缩的body）
+    def _cleanup_stale_body_fields(
+        self,
+        cutoff_time: datetime,
+        batch_size: int,
+        *,
+        newer_than: datetime | None = None,
+    ) -> int:
+        """清理已超过压缩保留期的 body 字段
 
-        每批使用短生命周期 session（同步方法，在线程池中调用）
+        直接清空 raw/compressed body，避免更老记录先压缩再马上被清掉。
         """
         from sqlalchemy import null, update
 
         total_cleaned = 0
 
+        if newer_than is not None and newer_than >= cutoff_time:
+            logger.warning(
+                "清理 body 字段跳过: 无效时间窗口 newer_than={} cutoff_time={}",
+                newer_than,
+                cutoff_time,
+            )
+            return 0
+
         while True:
             batch_db = create_session()
             try:
+                query = batch_db.query(Usage.id).filter(Usage.created_at < cutoff_time)
+                if newer_than is not None:
+                    query = query.filter(Usage.created_at >= newer_than)
                 records_to_clean = (
-                    batch_db.query(Usage.id)
-                    .filter(Usage.created_at < cutoff_time)
-                    .filter(
-                        (Usage.request_body_compressed.isnot(None))
+                    query.filter(
+                        (Usage.request_body.isnot(None))
+                        | (Usage.response_body.isnot(None))
+                        | (Usage.provider_request_body.isnot(None))
+                        | (Usage.client_response_body.isnot(None))
+                        | (Usage.request_body_compressed.isnot(None))
                         | (Usage.response_body_compressed.isnot(None))
                         | (Usage.provider_request_body_compressed.isnot(None))
                         | (Usage.client_response_body_compressed.isnot(None))
                     )
+                    .order_by(Usage.created_at.asc(), Usage.id.asc())
                     .limit(batch_size)
                     .all()
                 )
@@ -1200,6 +1189,10 @@ class MaintenanceScheduler:
                     update(Usage)
                     .where(Usage.id.in_(record_ids))
                     .values(
+                        request_body=null(),
+                        response_body=null(),
+                        provider_request_body=null(),
+                        client_response_body=null(),
                         request_body_compressed=null(),
                         response_body_compressed=null(),
                         provider_request_body_compressed=null(),
@@ -1211,14 +1204,14 @@ class MaintenanceScheduler:
                 batch_db.commit()
 
                 if rows_updated == 0:
-                    logger.warning("清理压缩字段: rowcount=0，可能存在问题")
+                    logger.warning("清理 body 字段: rowcount=0，可能存在问题")
                     break
 
                 total_cleaned += rows_updated
-                logger.debug(f"已清理 {rows_updated} 条记录的压缩字段，累计 {total_cleaned} 条")
+                logger.debug(f"已清理 {rows_updated} 条记录的 body 字段，累计 {total_cleaned} 条")
 
             except Exception as e:
-                logger.exception(f"清理压缩字段失败: {e}")
+                logger.exception(f"清理 body 字段失败: {e}")
                 try:
                     batch_db.rollback()
                 except Exception:
@@ -1229,7 +1222,13 @@ class MaintenanceScheduler:
 
         return total_cleaned
 
-    def _cleanup_header_fields(self, cutoff_time: datetime, batch_size: int) -> int:
+    def _cleanup_header_fields(
+        self,
+        cutoff_time: datetime,
+        batch_size: int,
+        *,
+        newer_than: datetime | None = None,
+    ) -> int:
         """清理 request_headers, response_headers 和 provider_request_headers 字段
 
         每批使用短生命周期 session（同步方法，在线程池中调用）
@@ -1238,17 +1237,27 @@ class MaintenanceScheduler:
 
         total_cleaned = 0
 
+        if newer_than is not None and newer_than >= cutoff_time:
+            logger.warning(
+                "清理 header 字段跳过: 无效时间窗口 newer_than={} cutoff_time={}",
+                newer_than,
+                cutoff_time,
+            )
+            return 0
+
         while True:
             batch_db = create_session()
             try:
+                query = batch_db.query(Usage.id).filter(Usage.created_at < cutoff_time)
+                if newer_than is not None:
+                    query = query.filter(Usage.created_at >= newer_than)
                 records_to_clean = (
-                    batch_db.query(Usage.id)
-                    .filter(Usage.created_at < cutoff_time)
-                    .filter(
+                    query.filter(
                         (Usage.request_headers.isnot(None))
                         | (Usage.response_headers.isnot(None))
                         | (Usage.provider_request_headers.isnot(None))
                     )
+                    .order_by(Usage.created_at.asc(), Usage.id.asc())
                     .limit(batch_size)
                     .all()
                 )
@@ -1300,6 +1309,7 @@ class MaintenanceScheduler:
                 records_to_delete = (
                     batch_db.query(Usage.id)
                     .filter(Usage.created_at < cutoff_time)
+                    .order_by(Usage.created_at.asc(), Usage.id.asc())
                     .limit(batch_size)
                     .all()
                 )
