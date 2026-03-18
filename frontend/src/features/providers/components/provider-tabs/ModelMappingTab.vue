@@ -317,7 +317,10 @@
     :testing="modelTest.testing.value"
     :trace="modelTest.testTrace.value"
     :request-id="modelTest.requestId.value"
+    :message-draft="testMessageDraft"
     @close="handleTestDialogClose"
+    @start="handleStartMappingTest"
+    @update:message-draft="testMessageDraft = $event"
   />
 </template>
 
@@ -390,8 +393,10 @@ const deleteConfirmOpen = ref(false)
 const editingGroup = ref<AliasGroup | null>(null)
 const deletingGroup = ref<AliasGroup | null>(null)
 const testingMapping = ref<string | null>(null)
+const pendingMappingKey = ref<string | null>(null)
 const testingModelName = ref<string | null>(null)
 const preselectedModelId = ref<string | null>(null)
+const testMessageDraft = ref('')
 
 // 使用 props 传入的数据
 const models = computed(() => props.models ?? [])
@@ -626,22 +631,38 @@ async function onDialogSaved() {
 
 function handleTestDialogClose() {
   modelTest.resetState()
+  pendingMappingKey.value = null
   testingModelName.value = null
+  testingMapping.value = null
 }
 
 // 测试映射（直连测试，带故障转移和实时进度）
-async function runMappingTest(testingKey: string, modelName: string) {
-  testingMapping.value = testingKey
+function runMappingTest(testingKey: string, modelName: string) {
+  pendingMappingKey.value = testingKey
+  modelTest.testResult.value = null
+  modelTest.dialogOpen.value = true
+  testingMapping.value = null
   testingModelName.value = modelName
+}
+
+async function handleStartMappingTest() {
+  if (modelTest.testing.value || !testingModelName.value || !pendingMappingKey.value) return
+
+  const currentMappingKey = pendingMappingKey.value
+  testingMapping.value = currentMappingKey
   await modelTest.startTest({
     mode: 'direct',
-    modelName,
-    displayLabel: `映射 "${modelName}"`,
-    message: 'hello',
+    modelName: testingModelName.value,
+    displayLabel: `映射 "${testingModelName.value}"`,
+    message: testMessageDraft.value,
     onSuccess: () => {
+      pendingMappingKey.value = null
       testingModelName.value = null
     },
   })
+  if (pendingMappingKey.value === currentMappingKey) {
+    pendingMappingKey.value = null
+  }
   testingMapping.value = null
 }
 

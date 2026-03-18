@@ -7,35 +7,91 @@
     @update:open="(val: boolean) => { if (!val) emit('close') }"
   >
     <div
-      v-if="showSelection"
-      class="space-y-2"
+      v-if="showSetup"
+      class="space-y-4"
     >
-      <button
-        v-for="endpoint in endpoints"
-        :key="endpoint.id"
-        type="button"
-        class="w-full rounded-lg border border-border/60 px-3 py-3 text-left transition-colors hover:bg-muted/40"
-        @click="emit('select-endpoint', endpoint.id)"
-      >
+      <div class="space-y-2">
         <div class="flex items-center justify-between gap-3">
-          <div class="min-w-0">
-            <div class="text-sm font-medium">
-              {{ formatApiFormat(endpoint.api_format) }}
-            </div>
-            <div class="mt-1 text-xs text-muted-foreground truncate">
-              {{ endpoint.base_url }}
-            </div>
+          <div class="text-sm font-medium">
+            测试内容
           </div>
-          <Badge variant="outline">
-            {{ endpoint.is_active ? '已启用' : '已禁用' }}
-          </Badge>
+          <div class="text-[11px] text-muted-foreground">
+            留空时使用默认提示词
+          </div>
         </div>
-      </button>
+        <Textarea
+          :model-value="messageDraft"
+          class="min-h-[132px]"
+          placeholder="输入自定义测试内容；留空时使用系统默认测试提示词"
+          @update:model-value="emit('update:messageDraft', $event)"
+        />
+      </div>
+
       <div
-        v-if="endpoints.length === 0"
-        class="rounded-lg border border-dashed border-border/60 px-3 py-6 text-center text-sm text-muted-foreground"
+        v-if="showEndpointChoices"
+        class="space-y-2"
       >
-        暂无可用于测试的活跃端点
+        <div class="text-sm font-medium">
+          选择测试端点
+        </div>
+        <button
+          v-for="endpoint in endpoints"
+          :key="endpoint.id"
+          type="button"
+          class="w-full rounded-lg border border-border/60 px-3 py-3 text-left transition-colors hover:bg-muted/40"
+          @click="emit('selectEndpoint', endpoint.id)"
+        >
+          <div class="flex items-center justify-between gap-3">
+            <div class="min-w-0">
+              <div class="text-sm font-medium">
+                {{ formatApiFormat(endpoint.api_format) }}
+              </div>
+              <div class="mt-1 text-xs text-muted-foreground truncate">
+                {{ endpoint.base_url }}
+              </div>
+            </div>
+            <Badge variant="outline">
+              {{ endpoint.is_active ? '已启用' : '已禁用' }}
+            </Badge>
+          </div>
+        </button>
+        <div class="text-[11px] text-muted-foreground">
+          选择端点后会立即开始测试
+        </div>
+      </div>
+
+      <div
+        v-else
+        class="space-y-4"
+      >
+        <div
+          v-if="setupEndpoint"
+          class="rounded-lg border border-border/60 bg-muted/20 p-4 space-y-2"
+        >
+          <div class="text-xs text-muted-foreground">
+            本次测试端点
+          </div>
+          <div class="text-sm font-medium">
+            {{ formatApiFormat(setupEndpoint.api_format) }}
+          </div>
+          <div class="text-xs text-muted-foreground break-all">
+            {{ setupEndpoint.base_url }}
+          </div>
+        </div>
+
+        <div
+          v-else-if="mode === 'direct'"
+          class="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground"
+        >
+          该测试会直接在当前 Provider 内执行故障转移，并使用上方内容作为测试消息。
+        </div>
+
+        <Button
+          class="w-full"
+          @click="emit('start')"
+        >
+          开始测试
+        </Button>
       </div>
     </div>
 
@@ -453,7 +509,7 @@
         size="sm"
         @click="emit('close')"
       >
-        {{ showSelection ? '取消' : '关闭' }}
+        {{ showSetup ? '取消' : '关闭' }}
       </Button>
     </template>
   </Dialog>
@@ -464,6 +520,7 @@ import { computed, ref, watch } from 'vue'
 import { Loader2 } from 'lucide-vue-next'
 import { Dialog, Badge } from '@/components/ui'
 import Button from '@/components/ui/button.vue'
+import Textarea from '@/components/ui/textarea.vue'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import type { TestModelFailoverResponse, TestAttemptDetail } from '@/api/endpoints/providers'
 import type { CandidateRecord, RequestTrace } from '@/api/requestTrace'
@@ -486,19 +543,29 @@ const props = defineProps<{
   trace?: RequestTrace | null
   requestId?: string | null
   showEndpointSelector?: boolean
+  messageDraft?: string
 }>()
 
 const emit = defineEmits<{
   close: []
   back: []
-  'select-endpoint': [endpointId: string]
+  start: []
+  selectEndpoint: [endpointId: string]
+  'update:messageDraft': [value: string]
 }>()
 
 const endpoints = computed(() => props.endpoints ?? [])
 const traceCandidates = computed(() => props.trace?.candidates ?? [])
-const showSelection = computed(() => props.open && !!props.showEndpointSelector && !props.testing && !props.result)
+const messageDraft = computed(() => props.messageDraft ?? '')
+const showSetup = computed(() => props.open && !props.testing && !props.result)
+const showEndpointChoices = computed(() => showSetup.value && !!props.showEndpointSelector && endpoints.value.length > 1)
 const showResult = computed(() => !!props.result)
 const canReselect = computed(() => !!props.showEndpointSelector && endpoints.value.length > 1)
+const setupEndpoint = computed(() => {
+  if (props.selectedEndpoint) return props.selectedEndpoint
+  if (endpoints.value.length === 1) return endpoints.value[0]
+  return null
+})
 
 const dialogTitle = computed(() => {
   if (props.result) return '模型测试结果'
@@ -506,8 +573,11 @@ const dialogTitle = computed(() => {
 })
 
 const dialogDescription = computed(() => {
-  if (showSelection.value && props.selectingModelName) {
+  if (showEndpointChoices.value && props.selectingModelName) {
     return `为 ${props.selectingModelName} 选择端点`
+  }
+  if (showSetup.value && props.selectingModelName) {
+    return `为 ${props.selectingModelName} 设置测试内容`
   }
   if (props.testing && props.selectedEndpoint) {
     return `正在通过 ${formatApiFormat(props.selectedEndpoint.api_format)} 测试 ${props.selectingModelName || '模型'}`

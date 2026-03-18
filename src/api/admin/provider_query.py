@@ -226,7 +226,7 @@ class TestModelRequest(BaseModel):
     api_key_id: str | None = None
     endpoint_id: str | None = None  # 指定使用的端点ID
     stream: bool = False
-    message: str | None = "你好"
+    message: str | None = None
     api_format: str | None = None  # 指定使用的API格式，如果不指定则使用端点的默认格式
 
 
@@ -238,7 +238,7 @@ class TestModelFailoverRequest(BaseModel):
     model_name: str  # global 模式传 global_model_name, direct 模式传 provider_model_name
     api_format: str | None = None  # 指定 API 格式（endpoint signature）
     endpoint_id: str | None = None  # 指定仅使用该端点测试
-    message: str | None = "Hello"
+    message: str | None = None
     request_id: str | None = None
     concurrency: int = Field(default=1, ge=1, le=20)
 
@@ -275,6 +275,14 @@ class TestModelFailoverResponse(BaseModel):
 
 
 # ============ Internal helpers ============
+
+
+DEFAULT_MODEL_TEST_MESSAGE = "Hello! This is a test message."
+
+
+def _resolve_test_message(message: str | None) -> str:
+    normalized = str(message or "").strip()
+    return normalized or DEFAULT_MODEL_TEST_MESSAGE
 
 
 def _test_check_response_has_error(resp: dict[str, Any]) -> bool:
@@ -984,9 +992,7 @@ async def test_model(
         # 准备测试请求数据（优先使用流式）
         check_request = {
             "model": request.model_name,
-            "messages": [
-                {"role": "user", "content": request.message or "Hello! This is a test message."}
-            ],
+            "messages": [{"role": "user", "content": _resolve_test_message(request.message)}],
             "max_tokens": 30,
             "temperature": 0.7,
             "stream": True,
@@ -2281,7 +2287,7 @@ async def test_model_failover(
 
     request_payload = {
         "model": request.model_name,
-        "messages": [{"role": "user", "content": request.message or "Hello"}],
+        "messages": [{"role": "user", "content": _resolve_test_message(request.message)}],
         "max_tokens": 30,
         "temperature": 0.7,
         "stream": True,

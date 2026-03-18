@@ -5,11 +5,13 @@ from pydantic import ValidationError
 
 from src.api.admin.provider_query import TestModelFailoverRequest as FailoverRequestModel
 from src.api.admin.provider_query import (
+    DEFAULT_MODEL_TEST_MESSAGE,
     _build_direct_test_candidates,
     _build_test_attempts_from_candidate_keys,
     _filter_test_candidates_by_endpoint,
     _flatten_test_candidates_for_concurrency,
     _require_test_endpoint_base_url,
+    _resolve_test_message,
     _resolve_test_effective_model,
 )
 from src.services.scheduling.schemas import PoolCandidate
@@ -149,6 +151,16 @@ def test_test_model_failover_request_validates_concurrency_range() -> None:
             model_name="gpt-4o-mini",
             concurrency=0,
         )
+
+
+def test_resolve_test_message_uses_default_for_blank_input() -> None:
+    assert _resolve_test_message(None) == DEFAULT_MODEL_TEST_MESSAGE
+    assert _resolve_test_message("") == DEFAULT_MODEL_TEST_MESSAGE
+    assert _resolve_test_message("   ") == DEFAULT_MODEL_TEST_MESSAGE
+
+
+def test_resolve_test_message_preserves_custom_input() -> None:
+    assert _resolve_test_message("  custom prompt  ") == "custom prompt"
 
 
 def test_require_test_endpoint_base_url_rejects_non_string() -> None:

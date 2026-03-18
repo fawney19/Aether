@@ -391,7 +391,6 @@ async function testMapping(group: AliasGroup, mapping: ProviderModelAlias) {
     const result = await testModel({
       provider_id: props.provider.id,
       model_name: mapping.name,  // 使用映射名称进行测试
-      message: "hello",
       api_format: apiFormat
     })
 

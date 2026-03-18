@@ -222,9 +222,12 @@
     :trace="modelTest.testTrace.value"
     :request-id="modelTest.requestId.value"
     :show-endpoint-selector="activeEndpoints.length > 1"
+    :message-draft="testMessageDraft"
     @close="handleTestDialogClose"
     @back="handleTestDialogBack"
+    @start="handleStartPendingTest"
     @select-endpoint="handleSelectTestEndpoint"
+    @update:message-draft="testMessageDraft = $event"
   />
 </template>
 
@@ -272,6 +275,7 @@ const localModels = ref<Model[]>([])
 const togglingModelId = ref<string | null>(null)
 const pendingTestModel = ref<Model | null>(null)
 const selectedTestEndpoint = ref<ProviderEndpoint | null>(null)
+const testMessageDraft = ref('')
 const activeEndpoints = computed(() => (props.endpoints ?? []).filter(endpoint => endpoint.is_active))
 const models = computed(() => props.models ?? localModels.value)
 // 按名称排序的模型列表
@@ -460,7 +464,7 @@ async function handleSelectTestEndpoint(endpointId: string) {
     displayLabel: `${endpointPrefix}${modelName}`,
     apiFormat: endpoint.api_format,
     endpointId: endpoint.id,
-    message: 'hello',
+    message: testMessageDraft.value,
     concurrency: 5,
     onSuccess: () => {
       pendingTestModel.value = null
@@ -475,6 +479,13 @@ async function handleSelectTestEndpoint(endpointId: string) {
   })
 }
 
+async function handleStartPendingTest() {
+  if (modelTest.testing.value) return
+  const endpoint = activeEndpoints.value[0]
+  if (!endpoint) return
+  await handleSelectTestEndpoint(endpoint.id)
+}
+
 async function testModelConnection(model: Model) {
   if (modelTest.testing.value) return
 
@@ -487,10 +498,6 @@ async function testModelConnection(model: Model) {
   selectedTestEndpoint.value = null
   modelTest.testResult.value = null
   modelTest.dialogOpen.value = true
-
-  if (activeEndpoints.value.length === 1) {
-    await handleSelectTestEndpoint(activeEndpoints.value[0].id)
-  }
 }
 
 // 暴露给父组件

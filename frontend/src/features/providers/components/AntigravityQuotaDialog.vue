@@ -192,7 +192,6 @@ async function handleTestModel(modelName: string) {
       model_name: modelName,
       api_key_id: props.keyId,
       api_format: 'gemini:chat',
-      message: 'hello',
     })
 
     if (result.success) {

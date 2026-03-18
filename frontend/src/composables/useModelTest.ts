@@ -117,13 +117,17 @@ export function useModelTest(options: UseModelTestOptions) {
     startPolling(reqId)
 
     try {
+      const normalizedMessage = typeof params.message === 'string' && params.message.trim()
+        ? params.message.trim()
+        : undefined
+
       const result = await testModelFailover({
         provider_id: providerId(),
         mode: params.mode,
         model_name: params.modelName,
         api_format: params.apiFormat,
         endpoint_id: params.endpointId,
-        message: params.message ?? 'hello',
+        ...(normalizedMessage ? { message: normalizedMessage } : {}),
         request_id: reqId,
         concurrency: params.concurrency,
       }, {
