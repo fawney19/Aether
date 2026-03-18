@@ -1256,6 +1256,7 @@ class MaintenanceScheduler:
                         (Usage.request_headers.isnot(None))
                         | (Usage.response_headers.isnot(None))
                         | (Usage.provider_request_headers.isnot(None))
+                        | (Usage.client_response_headers.isnot(None))
                     )
                     .order_by(Usage.created_at.asc(), Usage.id.asc())
                     .limit(batch_size)
@@ -1274,6 +1275,7 @@ class MaintenanceScheduler:
                         request_headers=null(),
                         response_headers=null(),
                         provider_request_headers=null(),
+                        client_response_headers=null(),
                     )
                 )
 

@@ -204,6 +204,69 @@ def test_cleanup_body_fields_batches_records_with_single_commit(
     assert batch_two.closed is True
 
 
+def test_cleanup_header_fields_clears_client_response_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler = MaintenanceScheduler()
+
+    class _BatchSession:
+        def __init__(self, ids: list[str]) -> None:
+            self.ids = ids
+            self.closed = False
+            self.committed = False
+            self.query_obj = MagicMock()
+            self.filtered_by_time = MagicMock()
+            self.filtered_by_headers = MagicMock()
+            self.query_obj.filter.return_value = self.filtered_by_time
+            self.filtered_by_time.filter.return_value = self.filtered_by_headers
+            self.filtered_by_headers.order_by.return_value.limit.return_value.all.return_value = [
+                SimpleNamespace(id=value) for value in ids
+            ]
+            self.executed_statements: list[str] = []
+
+        def query(self, *args):  # type: ignore[no-untyped-def]
+            self.query_args = args
+            return self.query_obj
+
+        def execute(self, statement):  # type: ignore[no-untyped-def]
+            self.executed_statements.append(str(statement))
+            return SimpleNamespace(rowcount=len(self.ids))
+
+        def commit(self) -> None:
+            self.committed = True
+
+        def rollback(self) -> None:
+            raise AssertionError("rollback should not be called")
+
+        def close(self) -> None:
+            self.closed = True
+
+    batch_one = _BatchSession(["usage-1"])
+    batch_two = _BatchSession([])
+    sessions = iter([batch_one, batch_two])
+
+    monkeypatch.setattr(
+        maintenance_scheduler_module,
+        "create_session",
+        lambda: next(sessions),
+    )
+
+    cleaned = scheduler._cleanup_header_fields(
+        cutoff_time=SimpleNamespace(),  # type: ignore[arg-type]
+        batch_size=1000,
+    )
+
+    header_filter = str(batch_one.filtered_by_time.filter.call_args.args[0])
+
+    assert cleaned == 1
+    assert batch_one.query_args == (maintenance_scheduler_module.Usage.id,)
+    assert "client_response_headers" in header_filter
+    assert "client_response_headers" in batch_one.executed_statements[0]
+    assert batch_one.committed is True
+    assert batch_one.closed is True
+    assert batch_two.closed is True
+
+
 @pytest.mark.asyncio
 async def test_perform_cleanup_deletes_first_and_uses_non_overlapping_windows(
     monkeypatch: pytest.MonkeyPatch,
