@@ -379,7 +379,10 @@ class AdminApiFormatHealthMonitorAdapter(AdminApiAdapter):
                 func.count(RequestCandidate.id).label("count"),
             )
             .join(RequestCandidate, ProviderEndpoint.id == RequestCandidate.endpoint_id)
+            .join(Provider, ProviderEndpoint.provider_id == Provider.id)
             .filter(
+                ProviderEndpoint.is_active.is_(True),
+                Provider.is_active.is_(True),
                 RequestCandidate.created_at >= since,
                 RequestCandidate.status.in_(final_statuses),
             )
@@ -405,7 +408,10 @@ class AdminApiFormatHealthMonitorAdapter(AdminApiAdapter):
                 ProviderEndpoint.provider_id,
             )
             .join(ProviderEndpoint, RequestCandidate.endpoint_id == ProviderEndpoint.id)
+            .join(Provider, ProviderEndpoint.provider_id == Provider.id)
             .filter(
+                ProviderEndpoint.is_active.is_(True),
+                Provider.is_active.is_(True),
                 RequestCandidate.created_at >= since,
                 RequestCandidate.status.in_(final_statuses),
             )

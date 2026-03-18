@@ -640,9 +640,36 @@ class PublicApiFormatHealthMonitorAdapter(PublicApiAdapter):
             )
             endpoint_map[api_format].append(endpoint_id)
 
-        # 2. 获取最近一段时间的 RequestCandidate（限制数量）
-        # 只查询最终状态的记录：success, failed, skipped
+        # 2. 统计窗口内每个 API 格式的真实状态分布
         final_statuses = ["success", "failed", "skipped"]
+        status_counts_query = (
+            db.query(
+                ProviderEndpoint.api_format,
+                RequestCandidate.status,
+                func.count(RequestCandidate.id).label("count"),
+            )
+            .join(RequestCandidate, ProviderEndpoint.id == RequestCandidate.endpoint_id)
+            .join(Provider, ProviderEndpoint.provider_id == Provider.id)
+            .filter(
+                ProviderEndpoint.is_active.is_(True),
+                Provider.is_active.is_(True),
+                RequestCandidate.created_at >= since,
+                RequestCandidate.status.in_(final_statuses),
+            )
+            .group_by(ProviderEndpoint.api_format, RequestCandidate.status)
+            .all()
+        )
+
+        status_counts: dict[str, dict[str, int]] = {}
+        for api_format_enum, status, count in status_counts_query:
+            api_format = (
+                api_format_enum.value if hasattr(api_format_enum, "value") else str(api_format_enum)
+            )
+            if api_format not in status_counts:
+                status_counts[api_format] = {"success": 0, "failed": 0, "skipped": 0}
+            status_counts[api_format][status] = count
+
+        # 3. 获取最近一段时间的 RequestCandidate（仅用于事件展示）
         limit_rows = max(500, self.per_format_limit * 10)
         rows = (
             db.query(
@@ -650,7 +677,10 @@ class PublicApiFormatHealthMonitorAdapter(PublicApiAdapter):
                 ProviderEndpoint.api_format,
             )
             .join(ProviderEndpoint, RequestCandidate.endpoint_id == ProviderEndpoint.id)
+            .join(Provider, ProviderEndpoint.provider_id == Provider.id)
             .filter(
+                ProviderEndpoint.is_active.is_(True),
+                Provider.is_active.is_(True),
                 RequestCandidate.created_at >= since,
                 RequestCandidate.status.in_(final_statuses),
             )
@@ -671,16 +701,17 @@ class PublicApiFormatHealthMonitorAdapter(PublicApiAdapter):
             if len(grouped_candidates[api_format]) < self.per_format_limit:
                 grouped_candidates[api_format].append(candidate)
 
-        # 3. 为所有活跃格式生成监控数据
+        # 4. 为所有活跃格式生成监控数据
         monitors: list[PublicApiFormatHealthMonitor] = []
         for api_format in all_formats:
             candidates = grouped_candidates.get(api_format, [])
 
-            # 统计
-            success_count = sum(1 for c in candidates if c.status == "success")
-            failed_count = sum(1 for c in candidates if c.status == "failed")
-            skipped_count = sum(1 for c in candidates if c.status == "skipped")
-            total_attempts = len(candidates)
+            # 统计使用窗口内真实总数，events 仅保留最近样本用于展示。
+            format_stats = status_counts.get(api_format, {"success": 0, "failed": 0, "skipped": 0})
+            success_count = format_stats.get("success", 0)
+            failed_count = format_stats.get("failed", 0)
+            skipped_count = format_stats.get("skipped", 0)
+            total_attempts = success_count + failed_count + skipped_count
 
             # 计算成功率 = success / (success + failed)
             actual_completed = success_count + failed_count

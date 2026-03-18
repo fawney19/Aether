@@ -69,7 +69,13 @@ class EndpointHealthService:
 
         # 查询所有活跃的端点（一次性获取所有需要的数据）
         endpoints = (
-            db.query(ProviderEndpoint).join(Provider).filter(Provider.is_active.is_(True)).all()
+            db.query(ProviderEndpoint)
+            .join(Provider)
+            .filter(
+                ProviderEndpoint.is_active.is_(True),
+                Provider.is_active.is_(True),
+            )
+            .all()
         )
 
         # 收集所有 provider_ids
@@ -155,16 +161,13 @@ class EndpointHealthService:
                     format_stats[api_format]["health_scores"].append(health_score)
 
         # 批量生成所有格式的时间线数据
-        all_key_ids = []
-        format_key_mapping: dict[str, list[str]] = {}
+        format_endpoint_mapping: dict[str, list[str]] = {}
         for api_format, stats in format_stats.items():
-            key_ids = stats["key_ids"]
-            format_key_mapping[api_format] = key_ids
-            all_key_ids.extend(key_ids)
+            format_endpoint_mapping[api_format] = stats["endpoint_ids"]
 
         # 一次性查询所有时间线数据
         timeline_data_map = EndpointHealthService._generate_timeline_batch(
-            db, format_key_mapping, now, lookback_hours
+            db, format_endpoint_mapping, now, lookback_hours
         )
 
         # 生成结果
@@ -234,7 +237,7 @@ class EndpointHealthService:
     @staticmethod
     def _generate_timeline_batch(
         db: Session,
-        format_key_mapping: dict[str, list[str]],
+        format_endpoint_mapping: dict[str, list[str]],
         now: datetime,
         lookback_hours: int,
         segments: int = 100,
@@ -249,7 +252,7 @@ class EndpointHealthService:
 
         Args:
             db: 数据库会话
-            format_key_mapping: API格式 -> key_ids 的映射
+            format_endpoint_mapping: API格式 -> endpoint_ids 的映射
             now: 当前时间
             lookback_hours: 回溯小时数
             segments: 时间段数量
@@ -257,19 +260,19 @@ class EndpointHealthService:
         Returns:
             API格式 -> 时间线数据的映射
         """
-        # 收集所有 key_ids
-        all_key_ids = []
-        for key_ids in format_key_mapping.values():
-            all_key_ids.extend(key_ids)
+        # 收集所有 endpoint_ids
+        all_endpoint_ids = []
+        for endpoint_ids in format_endpoint_mapping.values():
+            all_endpoint_ids.extend(endpoint_ids)
 
-        if not all_key_ids:
+        if not all_endpoint_ids:
             return {
                 api_format: {
                     "timeline": ["unknown"] * 100,
                     "time_range_start": None,
                     "time_range_end": None,
                 }
-                for api_format in format_key_mapping.keys()
+                for api_format in format_endpoint_mapping.keys()
             }
 
         # 参数校验（API 层已通过 Query(ge=1) 保证，这里做防御性检查）
@@ -293,7 +296,7 @@ class EndpointHealthService:
 
         candidate_stats = (
             db.query(
-                RequestCandidate.key_id,
+                RequestCandidate.endpoint_id,
                 segment_expr,
                 func.count(RequestCandidate.id).label("total_count"),
                 func.sum(case((RequestCandidate.status == "success", 1), else_=0)).label(
@@ -306,20 +309,20 @@ class EndpointHealthService:
                 func.max(RequestCandidate.created_at).label("max_time"),
             )
             .filter(
-                RequestCandidate.key_id.in_(all_key_ids),
+                RequestCandidate.endpoint_id.in_(all_endpoint_ids),
                 RequestCandidate.created_at >= start_time,
                 RequestCandidate.created_at <= now,
                 RequestCandidate.status.in_(final_statuses),
             )
-            .group_by(RequestCandidate.key_id, segment_expr)
+            .group_by(RequestCandidate.endpoint_id, segment_expr)
             .all()
         )
 
-        # 构建 key_id -> api_format 的反向映射
-        key_to_format: dict[str, str] = {}
-        for api_format, key_ids in format_key_mapping.items():
-            for key_id in key_ids:
-                key_to_format[key_id] = api_format
+        # 构建 endpoint_id -> api_format 的反向映射
+        endpoint_to_format: dict[str, str] = {}
+        for api_format, endpoint_ids in format_endpoint_mapping.items():
+            for endpoint_id in endpoint_ids:
+                endpoint_to_format[endpoint_id] = api_format
 
         # 按 api_format 和 segment 聚合数据
         format_segment_data: dict[str, dict[int, dict]] = defaultdict(
@@ -335,9 +338,9 @@ class EndpointHealthService:
         )
 
         for row in candidate_stats:
-            key_id = row.key_id
+            endpoint_id = row.endpoint_id
             segment_idx = int(row.segment_idx) if row.segment_idx is not None else 0
-            api_format = key_to_format.get(key_id)
+            api_format = endpoint_to_format.get(endpoint_id)
 
             if api_format and 0 <= segment_idx < segments:
                 seg_data = format_segment_data[api_format][segment_idx]
@@ -355,7 +358,7 @@ class EndpointHealthService:
         # 生成各格式的时间线
         result: dict[str, dict[str, Any]] = {}
 
-        for api_format in format_key_mapping.keys():
+        for api_format in format_endpoint_mapping.keys():
             timeline = []
             earliest_time = None
             latest_time = None
@@ -427,46 +430,10 @@ class EndpointHealthService:
                 "time_range_end": None,
             }
 
-        # 基于 endpoint_ids 反推 provider_ids 与 api_format，再选出支持该格式的 keys
-        endpoint_rows = (
-            db.query(ProviderEndpoint.provider_id, ProviderEndpoint.api_format)
-            .filter(ProviderEndpoint.id.in_(endpoint_ids))
-            .all()
-        )
-
-        if not endpoint_rows:
-            return {
-                "timeline": ["unknown"] * 100,
-                "time_range_start": None,
-                "time_range_end": None,
-            }
-
-        provider_ids = {str(pid) for pid, _fmt in endpoint_rows}
-        # 同一调用中 endpoint_ids 来自同一 api_format（上层已按格式分组）
-        api_format = (
-            endpoint_rows[0][1].value
-            if hasattr(endpoint_rows[0][1], "value")
-            else str(endpoint_rows[0][1])
-        )
-
-        keys = (
-            db.query(ProviderAPIKey.id, ProviderAPIKey.api_formats)
-            .filter(ProviderAPIKey.provider_id.in_(provider_ids))
-            .all()
-        )
-        key_ids = [str(key_id) for key_id, formats in keys if api_format in (formats or [])]
-
-        if not key_ids:
-            return {
-                "timeline": ["unknown"] * 100,
-                "time_range_start": None,
-                "time_range_end": None,
-            }
-
-        # 使用批量查询
-        format_key_mapping = {"_single": key_ids}
+        # 直接按 endpoint_id 聚合，避免共享 Key 时把不同 API 格式串桶。
+        format_endpoint_mapping = {"_single": endpoint_ids}
         result = EndpointHealthService._generate_timeline_batch(
-            db, format_key_mapping, now, lookback_hours, segments
+            db, format_endpoint_mapping, now, lookback_hours, segments
         )
 
         return result.get(
