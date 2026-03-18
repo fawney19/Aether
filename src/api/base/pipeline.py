@@ -57,6 +57,30 @@ class ApiRequestPipeline:
         self.usage_service = usage_service
         self.audit_service = audit_service
 
+    def _commit_session_touch(self, db: Session, *, scope: str) -> None:
+        """Persist session last_seen updates immediately to avoid holding row locks.
+
+        Admin usage views can execute heavy read queries after authentication.
+        If the request later stalls, leaving the session touch inside the request
+        transaction can block all subsequent requests that update the same
+        `user_sessions` row. Commit the touch in its own short transaction so
+        later long-running reads cannot keep the session row locked.
+        """
+        original_expire_on_commit = getattr(db, "expire_on_commit", None)
+        try:
+            if original_expire_on_commit is not None:
+                db.expire_on_commit = False
+            db.commit()
+        except Exception as exc:
+            try:
+                db.rollback()
+            except Exception as rollback_exc:
+                logger.debug("[Pipeline] {} session touch rollback failed: {}", scope, rollback_exc)
+            logger.warning("[Pipeline] failed to persist {} session touch: {}", scope, exc)
+        finally:
+            if original_expire_on_commit is not None:
+                db.expire_on_commit = original_expire_on_commit
+
     async def run(
         self,
         adapter: ApiAdapter,
@@ -492,11 +516,13 @@ class ApiRequestPipeline:
         if not session:
             raise HTTPException(status_code=401, detail="登录会话已失效，请重新登录")
         SessionService.assert_session_device_matches(session, client_device_id)
-        SessionService.touch_session(
+        session_touched = SessionService.touch_session(
             session,
             client_ip=get_client_ip(request),
             user_agent=request.headers.get("user-agent", "unknown"),
         )
+        if session_touched:
+            self._commit_session_touch(db, scope="admin")
         request.state.user_session_id = session.id
 
         request.state.user_id = db_user.id
@@ -549,11 +575,13 @@ class ApiRequestPipeline:
         if not session:
             raise HTTPException(status_code=401, detail="登录会话已失效，请重新登录")
         SessionService.assert_session_device_matches(session, client_device_id)
-        SessionService.touch_session(
+        session_touched = SessionService.touch_session(
             session,
             client_ip=get_client_ip(request),
             user_agent=request.headers.get("user-agent", "unknown"),
         )
+        if session_touched:
+            self._commit_session_touch(db, scope="user")
         request.state.user_session_id = session.id
         request.state.user_id = db_user.id
         return db_user, None

@@ -18,7 +18,14 @@ from sqlalchemy import func, update
 from sqlalchemy.orm import Session
 
 from src.core.exceptions import InvalidRequestException, NotFoundException
-from src.models.database import Provider, ProviderEndpoint, ProxyNode, ProxyNodeStatus, SystemConfig
+from src.models.database import (
+    Provider,
+    ProviderEndpoint,
+    ProxyNode,
+    ProxyNodeEvent,
+    ProxyNodeStatus,
+    SystemConfig,
+)
 
 from .resolver import (
     inject_auth_into_proxy_url,
@@ -117,7 +124,7 @@ def _normalize_proxy_metadata(
 
 
 def build_heartbeat_ack(node: ProxyNode) -> dict[str, Any]:
-    """从心跳后的节点构建 ACK 响应 payload（供 hub_transport / tunnel_manager 使用）。"""
+    """从心跳后的节点构建 ACK 响应 payload（供 hub 控制面回调使用）。"""
     result: dict[str, Any] = {}
     if not node.remote_config:
         return result
@@ -422,6 +429,60 @@ class ProxyNodeService:
         if not refreshed:
             raise NotFoundException(f"ProxyNode {node_id} 不存在", "proxy_node")
         return refreshed
+
+    @staticmethod
+    def update_tunnel_status(
+        db: Session,
+        *,
+        node_id: str,
+        connected: bool,
+        conn_count: int = 0,
+        detail: str | None = None,
+        observed_at: datetime | None = None,
+    ) -> ProxyNode | None:
+        """根据 Hub 连接池状态更新 tunnel 连接状态并记录事件。"""
+        node = db.query(ProxyNode).filter(ProxyNode.id == node_id).first()
+        if not node:
+            return None
+
+        event_time = observed_at or datetime.now(timezone.utc)
+        last_transition = node.tunnel_connected_at
+        if last_transition and last_transition.tzinfo is None:
+            last_transition = last_transition.replace(tzinfo=timezone.utc)
+
+        event_type = "connected" if connected else "disconnected"
+        event_detail = detail or f"[hub_node_status] conn_count={max(int(conn_count), 0)}"
+
+        if last_transition and event_time < last_transition:
+            db.add(
+                ProxyNodeEvent(
+                    node_id=node_id,
+                    event_type=event_type,
+                    detail=f"[stale_ignored] {event_detail}",
+                )
+            )
+            db.commit()
+            return node
+
+        node.tunnel_connected = connected
+        node.tunnel_connected_at = event_time
+        node.status = ProxyNodeStatus.ONLINE if connected else ProxyNodeStatus.OFFLINE
+        node.updated_at = event_time
+
+        db.add(
+            ProxyNodeEvent(
+                node_id=node_id,
+                event_type=event_type,
+                detail=event_detail,
+            )
+        )
+        db.commit()
+        db.refresh(node)
+
+        from .resolver import invalidate_proxy_node_cache
+
+        invalidate_proxy_node_cache(node_id)
+        return node
 
     @staticmethod
     def unregister_node(db: Session, *, node_id: str) -> ProxyNode:

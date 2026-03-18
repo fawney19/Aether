@@ -328,19 +328,20 @@ class SessionService:
         *,
         client_ip: str | None,
         user_agent: str,
-    ) -> None:
+    ) -> bool:
         now = datetime.now(timezone.utc)
         last_seen_at = session.last_seen_at
         if last_seen_at.tzinfo is None:
             last_seen_at = last_seen_at.replace(tzinfo=timezone.utc)
         if (now - last_seen_at).total_seconds() < SESSION_TOUCH_INTERVAL_SECONDS:
-            return
+            return False
 
         session.last_seen_at = now
         if client_ip:
             session.ip_address = client_ip
         if user_agent:
             session.user_agent = user_agent[:1000]
+        return True
 
     @staticmethod
     def revoke_session(

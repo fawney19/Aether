@@ -20,6 +20,11 @@ ARG HUB_RELEASE_REPO=fawney19/Aether
 ARG HUB_TAG
 ARG TARGETARCH
 ARG GITHUB_TOKEN
+# GitHub 下载镜像前缀，国内构建时传入可用的镜像加速地址
+# 用法: --build-arg GITHUB_MIRROR=https://ghfast.top
+#   或: --build-arg GITHUB_MIRROR=https://gh-proxy.com
+#   或: --build-arg GITHUB_MIRROR=https://mirror.ghproxy.com
+ARG GITHUB_MIRROR
 
 # 运行时依赖（使用清华镜像源 + BuildKit 缓存加速）
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -44,9 +49,20 @@ COPY --from=builder /usr/local/bin/gunicorn /usr/local/bin/
 COPY --from=builder /usr/local/bin/uvicorn /usr/local/bin/
 COPY --from=builder /usr/local/bin/alembic /usr/local/bin/
 
-# Hub 预编译二进制（构建时从 GitHub Release 下载）
+# Hub 预编译二进制
+# 国内构建: --build-arg GITHUB_MIRROR=https://ghfast.top 即可走镜像下载
 # GITHUB_TOKEN 可选：未认证 API 限流 60 次/小时，认证后 5000 次/小时
 RUN set -eux; \
+    arch="${TARGETARCH:-}"; \
+    if [ -z "$arch" ]; then \
+        arch="$(dpkg --print-architecture)"; \
+    fi; \
+    case "$arch" in \
+        amd64|arm64) ;; \
+        x86_64) arch="amd64" ;; \
+        aarch64) arch="arm64" ;; \
+        *) echo "Unsupported architecture: $arch"; exit 1 ;; \
+    esac; \
     auth_header=""; \
     if [ -n "${GITHUB_TOKEN:-}" ]; then \
         auth_header="Authorization: token ${GITHUB_TOKEN}"; \
@@ -59,18 +75,14 @@ RUN set -eux; \
         echo "Failed to resolve hub release tag"; \
         exit 1; \
     fi; \
-    arch="${TARGETARCH:-}"; \
-    if [ -z "$arch" ]; then \
-        arch="$(dpkg --print-architecture)"; \
-    fi; \
-    case "$arch" in \
-        amd64|arm64) ;; \
-        x86_64) arch="amd64" ;; \
-        aarch64) arch="arm64" ;; \
-        *) echo "Unsupported architecture: $arch"; exit 1 ;; \
-    esac; \
     echo "Using Hub release tag: $tag"; \
-    url="https://github.com/${HUB_RELEASE_REPO}/releases/download/${tag}/aether-hub-linux-${arch}.tar.gz"; \
+    origin_url="https://github.com/${HUB_RELEASE_REPO}/releases/download/${tag}/aether-hub-linux-${arch}.tar.gz"; \
+    if [ -n "${GITHUB_MIRROR:-}" ]; then \
+        url="${GITHUB_MIRROR}/https://github.com/${HUB_RELEASE_REPO}/releases/download/${tag}/aether-hub-linux-${arch}.tar.gz"; \
+        echo "Using mirror: ${GITHUB_MIRROR}"; \
+    else \
+        url="$origin_url"; \
+    fi; \
     curl -L --fail -o /tmp/aether-hub.tar.gz "$url"; \
     tar xzf /tmp/aether-hub.tar.gz -C /usr/local/bin; \
     chmod +x /usr/local/bin/aether-hub; \

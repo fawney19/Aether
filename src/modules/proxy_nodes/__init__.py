@@ -101,33 +101,19 @@ async def _on_startup() -> None:
     else:
         logger.info("检测到其他 worker 已运行 ProxyNode 心跳检测，本实例跳过")
 
-    # 在可能的状态重置之后再建立 /worker 长连接，避免“先同步在线，再被重置离线”的竞态。
-    from src.services.proxy_node.hub_transport import get_hub_connection_manager
-
-    try:
-        await get_hub_connection_manager().ensure_connected()
-        logger.info("Hub worker channel initialized on startup")
-    except Exception as e:
-        # ensure_connected 失败时内部会启动重连循环，这里仅记录告警不阻塞启动
-        logger.warning("Hub worker channel init failed, reconnecting in background: %s", e)
-
     if active:
         logger.info("启动 ProxyNode 心跳检测调度器...")
         await proxy_node_health_scheduler.start()
 
 
 async def _on_shutdown() -> None:
-    """优雅关闭 tunnel 连接并停止心跳检测调度器"""
+    """停止心跳检测调度器"""
     import logging
 
     from src.services.proxy_node.health_scheduler import get_proxy_node_health_scheduler
     from src.utils.task_coordinator import StartupTaskCoordinator
 
     logger = logging.getLogger("aether.modules.proxy_nodes")
-
-    from src.services.proxy_node.hub_transport import shutdown_hub_connection_manager
-
-    await shutdown_hub_connection_manager()
 
     from src.clients import get_redis_client
 

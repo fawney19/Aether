@@ -77,13 +77,8 @@ export function useUsageData(options: UseUsageDataOptions) {
 
     try {
       if (isAdminPage.value) {
-        // 管理员页面，并行加载统计数据
-        const [statsData, modelData, providerData, apiFormatData] = await Promise.all([
-          usageApi.getUsageStats(dateRange),
-          usageApi.getUsageByModel(dateRange),
-          usageApi.getUsageByProvider(dateRange),
-          usageApi.getUsageByApiFormat(dateRange)
-        ])
+        // 管理员页面顺序加载统计数据，避免刷新使用记录时瞬时打满后端 worker。
+        const statsData = await usageApi.getUsageStats(dateRange)
 
         if (requestId !== loadStatsRequestId) {
           return
@@ -104,6 +99,11 @@ export function useUsageData(options: UseUsageDataOptions) {
           period_end: '',
         }
 
+        const modelData = await usageApi.getUsageByModel(dateRange)
+        if (requestId !== loadStatsRequestId) {
+          return
+        }
+
         modelStats.value = modelData.map(item => {
           const raw = item as Record<string, unknown>
           return {
@@ -119,6 +119,11 @@ export function useUsageData(options: UseUsageDataOptions) {
             actual_cost: typeof raw.actual_cost === 'number' ? raw.actual_cost : undefined
           }
         })
+
+        const providerData = await usageApi.getUsageByProvider(dateRange)
+        if (requestId !== loadStatsRequestId) {
+          return
+        }
 
         providerStats.value = providerData.map(item => ({
           provider: item.provider,
@@ -136,6 +141,11 @@ export function useUsageData(options: UseUsageDataOptions) {
             ? `${(item.avg_response_time_ms / 1000).toFixed(2)}s`
             : '-'
         }))
+
+        const apiFormatData = await usageApi.getUsageByApiFormat(dateRange)
+        if (requestId !== loadStatsRequestId) {
+          return
+        }
 
         apiFormatStats.value = apiFormatData.map(item => ({
           api_format: item.api_format,
@@ -255,19 +265,24 @@ export function useUsageData(options: UseUsageDataOptions) {
   // 加载记录（真正的后端分页）
   async function loadRecords(
     pagination: PaginationParams,
-    filters?: FilterParams
+    filters?: FilterParams,
+    dateRange?: DateRangeParams
   ): Promise<void> {
     const requestId = ++loadRecordsRequestId
     isLoadingRecords.value = true
 
     try {
       const offset = (pagination.page - 1) * pagination.pageSize
+      const effectiveDateRange = dateRange ?? currentDateRange.value
+      if (dateRange) {
+        currentDateRange.value = dateRange
+      }
 
       // 构建请求参数
       const params: Record<string, unknown> = {
         limit: pagination.pageSize,
         offset,
-        ...currentDateRange.value
+        ...effectiveDateRange
       }
 
       // 添加筛选条件

@@ -7,7 +7,10 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-use http_body_util::Full;
+use futures_util::Stream;
+use http_body_util::combinators::UnsyncBoxBody;
+use http_body_util::{BodyExt, StreamBody};
+use hyper::body::Frame;
 use hyper::rt;
 use hyper::Response;
 use hyper::Uri;
@@ -30,8 +33,15 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type PlainStream = TokioIo<TcpStream>;
 type TlsStream = TokioIo<tokio_rustls::client::TlsStream<TcpStream>>;
 
-pub type UpstreamRequestBody = Full<Bytes>;
+pub type UpstreamRequestBody = UnsyncBoxBody<Bytes, io::Error>;
 pub type UpstreamClient = Client<InstrumentedConnector, UpstreamRequestBody>;
+
+pub fn stream_request_body<S>(stream: S) -> UpstreamRequestBody
+where
+    S: Stream<Item = Result<Frame<Bytes>, io::Error>> + Send + 'static,
+{
+    StreamBody::new(stream).boxed_unsync()
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ConnectTiming {

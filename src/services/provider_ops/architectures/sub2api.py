@@ -479,9 +479,9 @@ class Sub2ApiArchitecture(ProviderArchitecture):
         """
         base_url = base_url.rstrip("/")
 
-        from src.services.proxy_node.resolver import resolve_ops_proxy_config
+        from src.services.proxy_node.resolver import resolve_ops_proxy_config_async
 
-        proxy, tunnel_node_id = resolve_ops_proxy_config(config)
+        proxy, tunnel_node_id = await resolve_ops_proxy_config_async(config)
         client_kwargs: dict[str, Any] = {
             "base_url": base_url,
             "timeout": 30.0,

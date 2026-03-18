@@ -182,7 +182,9 @@ where
 
             MsgType::StreamEnd | MsgType::StreamError => {
                 // Client-side cancellation or end
-                streams.remove(&frame.stream_id);
+                if let Some(tx) = streams.remove(&frame.stream_id) {
+                    let _ = tx.send(frame).await;
+                }
             }
 
             MsgType::Ping => {

@@ -27,7 +27,7 @@ from src.core.logger import logger
 # ---------------------------------------------------------------------------
 _proxy_node_cache: dict[str, tuple[dict[str, Any] | None, float]] = {}
 _proxy_node_cache_lock = threading.Lock()
-_PROXY_NODE_CACHE_TTL_SECONDS = 15.0
+_PROXY_NODE_CACHE_TTL_SECONDS = 3.0
 _PROXY_NODE_CACHE_NEGATIVE_TTL_SECONDS = 5.0  # 不可用节点使用更短的 TTL，加速恢复感知
 _PROXY_NODE_CACHE_MAX_SIZE = 256
 
@@ -298,6 +298,13 @@ def resolve_ops_proxy_config(
             return proxy, None
 
     return None, None
+
+
+async def resolve_ops_proxy_config_async(
+    connector_config: dict[str, Any] | None,
+) -> tuple[str | httpx.Proxy | None, str | None]:
+    """异步解析 ops connector 代理配置，避免同步 DB 查询阻塞事件循环。"""
+    return await asyncio.to_thread(resolve_ops_proxy_config, connector_config)
 
 
 def resolve_ops_proxy(

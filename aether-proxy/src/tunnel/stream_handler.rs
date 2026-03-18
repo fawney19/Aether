@@ -3,22 +3,27 @@
 //! Receives request frames, executes the upstream HTTP request,
 //! and sends response frames back through the writer channel.
 
+use std::io;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use futures_util::stream;
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
+use hyper::body::Frame as BodyFrame;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::state::{AppState, ServerContext};
 use crate::target_filter;
-use crate::upstream_client::{self, UpstreamRequestBody};
+use crate::upstream_client;
 
 use super::protocol::{
-    compress_payload, decompress_if_gzip, flags, Frame, MsgType, RequestMeta, ResponseMeta,
+    compress_payload, decompress_if_gzip, flags, Frame as TunnelFrame, MsgType, RequestMeta,
+    ResponseMeta,
 };
 use super::writer::FrameSender;
 
@@ -64,13 +69,13 @@ pub async fn handle_stream(
     server: Arc<ServerContext>,
     stream_id: u32,
     meta: RequestMeta,
-    mut body_rx: mpsc::Receiver<Frame>,
+    body_rx: mpsc::Receiver<TunnelFrame>,
     frame_tx: FrameSender,
 ) {
     server.active_connections.fetch_add(1, Ordering::Release);
 
     let connect_elapsed =
-        handle_stream_inner(&state, &server, stream_id, meta, &mut body_rx, &frame_tx).await;
+        handle_stream_inner(&state, &server, stream_id, meta, body_rx, &frame_tx).await;
 
     server.active_connections.fetch_sub(1, Ordering::Release);
     if let Some(d) = connect_elapsed {
@@ -79,7 +84,7 @@ pub async fn handle_stream(
 }
 
 /// Send a frame to the writer with a timeout. Returns false if send failed.
-async fn send_frame(tx: &FrameSender, frame: Frame) -> bool {
+async fn send_frame(tx: &FrameSender, frame: TunnelFrame) -> bool {
     match tokio::time::timeout(FRAME_SEND_TIMEOUT, tx.send(frame)).await {
         Ok(Ok(())) => true,
         Ok(Err(_)) => {
@@ -102,62 +107,9 @@ async fn handle_stream_inner(
     server: &ServerContext,
     stream_id: u32,
     meta: RequestMeta,
-    body_rx: &mut mpsc::Receiver<Frame>,
+    body_rx: mpsc::Receiver<TunnelFrame>,
     frame_tx: &FrameSender,
 ) -> Option<Duration> {
-    // Collect request body
-    let mut body_parts: Vec<Bytes> = Vec::new();
-    let mut body_done = false;
-
-    // Drain body frames
-    while !body_done {
-        match body_rx.recv().await {
-            Some(frame) => {
-                if frame.msg_type == MsgType::RequestBody {
-                    let payload = match decompress_if_gzip(&frame) {
-                        Ok(d) => d,
-                        Err(e) => {
-                            send_error(
-                                frame_tx,
-                                stream_id,
-                                &format!("gzip decompress failed: {e}"),
-                            )
-                            .await;
-                            return None;
-                        }
-                    };
-                    if !payload.is_empty() {
-                        body_parts.push(payload);
-                    }
-                    if frame.is_end_stream() {
-                        body_done = true;
-                    }
-                } else if frame.msg_type == MsgType::StreamEnd
-                    || frame.msg_type == MsgType::StreamError
-                {
-                    body_done = true;
-                    if frame.msg_type == MsgType::StreamError {
-                        return None; // Client cancelled
-                    }
-                }
-            }
-            None => return None, // Channel closed
-        }
-    }
-
-    let body: Bytes = if body_parts.is_empty() {
-        Bytes::new()
-    } else if body_parts.len() == 1 {
-        body_parts.into_iter().next().unwrap()
-    } else {
-        let total: usize = body_parts.iter().map(|b| b.len()).sum();
-        let mut combined = Vec::with_capacity(total);
-        for part in &body_parts {
-            combined.extend_from_slice(part);
-        }
-        Bytes::from(combined)
-    };
-
     // Validate target
     let target_url = match url::Url::parse(&meta.url) {
         Ok(u) => u,
@@ -207,12 +159,14 @@ async fn handle_stream_inner(
     // Execute upstream request
     let client = &state.upstream_client;
     let timeout = Duration::from_secs(meta.timeout.clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS));
+    let request_body_size = Arc::new(AtomicUsize::new(0));
+    let request_body = build_streaming_request_body(body_rx, Arc::clone(&request_body_size));
 
     let method: hyper::Method = meta.method.parse().unwrap_or(hyper::Method::GET);
     let mut request = match hyper::Request::builder()
         .method(method)
         .uri(meta.url.as_str())
-        .body(UpstreamRequestBody::new(body.clone()))
+        .body(request_body)
     {
         Ok(request) => request,
         Err(e) => {
@@ -240,7 +194,6 @@ async fn handle_stream_inner(
         }
     }
 
-    let body_size = body.len();
     let mut captured_connection = upstream_client::capture_connection(&mut request);
     let connection_start = Instant::now();
     let connection_capture = tokio::spawn(async move {
@@ -313,7 +266,7 @@ async fn handle_stream_inner(
         "upstream_processing_ms": request_timing.response_wait_ms,
         "timing_source": "instrumented_connector",
         "total_ms": connect_elapsed.as_millis() as u64,
-        "body_size": body_size,
+        "body_size": request_body_size.load(Ordering::Relaxed),
         "mode": "tunnel",
     });
     resp_headers.push(("x-proxy-timing".to_string(), timing.to_string()));
@@ -325,7 +278,7 @@ async fn handle_stream_inner(
     let (meta_payload, meta_flags) = compress_payload(meta_json);
     if !send_frame(
         frame_tx,
-        Frame::new(
+        TunnelFrame::new(
             stream_id,
             MsgType::ResponseHeaders,
             meta_flags,
@@ -350,7 +303,7 @@ async fn handle_stream_inner(
                     let (payload, extra_flags) = compress_payload(chunk);
                     if !send_frame(
                         frame_tx,
-                        Frame::new(stream_id, MsgType::ResponseBody, extra_flags, payload),
+                        TunnelFrame::new(stream_id, MsgType::ResponseBody, extra_flags, payload),
                     )
                     .await
                     {
@@ -365,7 +318,12 @@ async fn handle_stream_inner(
                         let (payload, extra_flags) = compress_payload(slice);
                         if !send_frame(
                             frame_tx,
-                            Frame::new(stream_id, MsgType::ResponseBody, extra_flags, payload),
+                            TunnelFrame::new(
+                                stream_id,
+                                MsgType::ResponseBody,
+                                extra_flags,
+                                payload,
+                            ),
                         )
                         .await
                         {
@@ -387,7 +345,7 @@ async fn handle_stream_inner(
     // Send STREAM_END
     let _ = send_frame(
         frame_tx,
-        Frame::new(
+        TunnelFrame::new(
             stream_id,
             MsgType::StreamEnd,
             flags::END_STREAM,
@@ -404,7 +362,7 @@ async fn send_error(tx: &FrameSender, stream_id: u32, msg: &str) {
     // Error frames use best-effort delivery — don't block if writer is congested
     let _ = send_frame(
         tx,
-        Frame::new(
+        TunnelFrame::new(
             stream_id,
             MsgType::StreamError,
             0,
@@ -412,4 +370,137 @@ async fn send_error(tx: &FrameSender, stream_id: u32, msg: &str) {
         ),
     )
     .await;
+}
+
+fn build_streaming_request_body(
+    body_rx: mpsc::Receiver<TunnelFrame>,
+    body_size: Arc<AtomicUsize>,
+) -> upstream_client::UpstreamRequestBody {
+    let body_stream = stream::unfold(
+        (body_rx, body_size, false),
+        |(mut body_rx, body_size, finished)| async move {
+            if finished {
+                return None;
+            }
+
+            loop {
+                let frame = match body_rx.recv().await {
+                    Some(frame) => frame,
+                    None => return None,
+                };
+
+                match frame.msg_type {
+                    MsgType::RequestBody => {
+                        let end_stream = frame.is_end_stream();
+                        let payload = match decompress_if_gzip(&frame) {
+                            Ok(payload) => payload,
+                            Err(error) => {
+                                let err =
+                                    io::Error::other(format!("gzip decompress failed: {error}"));
+                                return Some((Err(err), (body_rx, body_size, true)));
+                            }
+                        };
+
+                        if payload.is_empty() {
+                            if end_stream {
+                                return None;
+                            }
+                            continue;
+                        }
+
+                        body_size.fetch_add(payload.len(), Ordering::Relaxed);
+                        return Some((
+                            Ok(BodyFrame::data(payload)),
+                            (body_rx, body_size, end_stream),
+                        ));
+                    }
+                    MsgType::StreamError => {
+                        let message = String::from_utf8(frame.payload.to_vec())
+                            .unwrap_or_else(|_| "client cancelled request body".to_string());
+                        return Some((Err(io::Error::other(message)), (body_rx, body_size, true)));
+                    }
+                    MsgType::StreamEnd => return None,
+                    _ => continue,
+                }
+            }
+        },
+    );
+
+    upstream_client::stream_request_body(body_stream)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn streaming_request_body_yields_chunks_and_tracks_size() {
+        let (tx, rx) = mpsc::channel(4);
+        let body_size = Arc::new(AtomicUsize::new(0));
+        let mut body = build_streaming_request_body(rx, Arc::clone(&body_size));
+
+        tx.send(TunnelFrame::new(
+            1,
+            MsgType::RequestBody,
+            0,
+            Bytes::from_static(b"abc"),
+        ))
+        .await
+        .expect("send first chunk");
+        tx.send(TunnelFrame::new(
+            1,
+            MsgType::RequestBody,
+            flags::END_STREAM,
+            Bytes::from_static(b"def"),
+        ))
+        .await
+        .expect("send final chunk");
+        drop(tx);
+
+        let first = body
+            .frame()
+            .await
+            .expect("first frame")
+            .expect("first frame ok")
+            .into_data()
+            .expect("first data frame");
+        let second = body
+            .frame()
+            .await
+            .expect("second frame")
+            .expect("second frame ok")
+            .into_data()
+            .expect("second data frame");
+
+        assert_eq!(first, Bytes::from_static(b"abc"));
+        assert_eq!(second, Bytes::from_static(b"def"));
+        assert!(body.frame().await.is_none());
+        assert_eq!(body_size.load(Ordering::Relaxed), 6);
+    }
+
+    #[tokio::test]
+    async fn streaming_request_body_surfaces_client_cancel_as_error() {
+        let (tx, rx) = mpsc::channel(4);
+        let body_size = Arc::new(AtomicUsize::new(0));
+        let mut body = build_streaming_request_body(rx, Arc::clone(&body_size));
+
+        tx.send(TunnelFrame::new(
+            1,
+            MsgType::StreamError,
+            0,
+            Bytes::from_static(b"client cancelled"),
+        ))
+        .await
+        .expect("send cancel frame");
+        drop(tx);
+
+        let err = body
+            .frame()
+            .await
+            .expect("error frame present")
+            .expect_err("body should surface cancellation error");
+        assert!(err.to_string().contains("client cancelled"));
+        assert!(body.frame().await.is_none());
+        assert_eq!(body_size.load(Ordering::Relaxed), 0);
+    }
 }

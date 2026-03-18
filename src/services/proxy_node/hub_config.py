@@ -12,13 +12,10 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from urllib.parse import quote
 
-_DOCKER_HUB_URL = "ws://127.0.0.1:8085"
+_DOCKER_HUB_URL = "http://127.0.0.1:8085"
 _DOCKER_HUB_CONNECT_TIMEOUT_SECONDS = 5.0
-_DOCKER_HUB_PING_INTERVAL_SECONDS = 15.0
-_DOCKER_HUB_SEND_TIMEOUT_SECONDS = 10.0
-_DOCKER_HUB_MAX_STREAMS = 2048
-_DOCKER_HUB_MAX_FRAME_SIZE = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -26,14 +23,13 @@ class HubConfig:
     enabled: bool
     url: str
     connect_timeout_seconds: float
-    ping_interval_seconds: float
-    send_timeout_seconds: float
-    max_streams: int
-    max_frame_size: int
 
     @property
-    def worker_ws_url(self) -> str:
-        return f"{self.url.rstrip('/')}/worker"
+    def local_relay_base_url(self) -> str:
+        return f"{self.url.rstrip('/')}/local/relay"
+
+    def local_relay_url(self, node_id: str) -> str:
+        return f"{self.local_relay_base_url}/{quote(node_id, safe='')}"
 
 
 _hub_config: HubConfig | None = None
@@ -56,10 +52,6 @@ def get_hub_config() -> HubConfig:
         enabled=docker_runtime,
         url=_DOCKER_HUB_URL,
         connect_timeout_seconds=_DOCKER_HUB_CONNECT_TIMEOUT_SECONDS,
-        ping_interval_seconds=_DOCKER_HUB_PING_INTERVAL_SECONDS,
-        send_timeout_seconds=_DOCKER_HUB_SEND_TIMEOUT_SECONDS,
-        max_streams=_DOCKER_HUB_MAX_STREAMS,
-        max_frame_size=_DOCKER_HUB_MAX_FRAME_SIZE,
     )
     return _hub_config
 

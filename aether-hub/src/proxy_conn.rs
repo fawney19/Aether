@@ -140,7 +140,7 @@ async fn run_proxy_reader(
                     continue;
                 }
 
-                hub.handle_proxy_frame(conn.id, &mut data);
+                hub.handle_proxy_frame(conn.id, &mut data).await;
             }
             Some(Ok(Message::Close(_))) | None => {
                 info!(conn_id = conn.id, node_id = %conn.node_id, "proxy WebSocket closed");

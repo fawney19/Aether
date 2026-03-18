@@ -1,6 +1,6 @@
 [package]
 name = "aether-hub"
-version = "0.1.7"
+version = "0.2.0"
 edition = "2021"
 description = "Tunnel Hub for Aether - frame router between workers and proxies"
 
@@ -16,6 +16,10 @@ dashmap = "6"
 parking_lot = "0.12"
 flate2 = "1"
 futures-util = "0.3"
+bytes = "1"
+async-stream = "0.3"
+http-body-util = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [profile.release]
 lto = true

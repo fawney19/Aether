@@ -10,6 +10,7 @@ from src.services.proxy_node.resolver import (
     build_post_kwargs_async,
     build_stream_kwargs,
     build_stream_kwargs_async,
+    resolve_ops_proxy_config_async,
     resolve_proxy_info_async,
 )
 
@@ -97,3 +98,19 @@ class TestProxyResolverCompression:
             "url": "socks5://proxy.example.com:1080",
             "source": "provider",
         }
+
+    @pytest.mark.asyncio
+    async def test_resolve_ops_proxy_config_async_preserves_legacy_proxy(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "src.services.proxy_node.resolver.get_system_proxy_config",
+            lambda: None,
+        )
+        proxy, tunnel_node_id = await resolve_ops_proxy_config_async(
+            {"proxy": "http://proxy.example.com:8080"}
+        )
+
+        assert proxy == "http://proxy.example.com:8080"
+        assert tunnel_node_id is None

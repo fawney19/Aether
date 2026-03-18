@@ -21,6 +21,7 @@ from src.api.announcements import router as announcement_router
 # API路由
 from src.api.auth import router as auth_router
 from src.api.dashboard import router as dashboard_router
+from src.api.internal import router as internal_router
 from src.api.monitoring import router as monitoring_router
 from src.api.payment import router as payment_router
 from src.api.public import router as public_router
@@ -715,6 +716,7 @@ app.include_router(announcement_router)  # 公告系统
 app.include_router(dashboard_router)  # 仪表盘端点
 app.include_router(public_router)  # 公开API端点（用户可查看提供商和模型）
 app.include_router(monitoring_router)  # 监控端点
+app.include_router(internal_router)  # Hub 本地控制面端点
 
 
 @app.get("/readyz", include_in_schema=False)

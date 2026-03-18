@@ -5,6 +5,7 @@
 #   部署/更新:     ./deploy.sh                    (自动检测所有变化)
 #   指定 Hub 版本: ./deploy.sh --hub-tag hub-v0.1.0
 #   更新 Hub:      ./deploy.sh --update-hub
+#   GitHub 镜像:   ./deploy.sh --mirror https://ghfast.top
 #   强制重建:      ./deploy.sh --rebuild-base
 #   强制全部重建:  ./deploy.sh --force
 
@@ -44,6 +45,7 @@ Usage: ./deploy.sh [options]
 Options:
   --hub-tag <hub-vX.Y.Z>  指定 Hub Release tag（例如 hub-v0.1.0）
   --update-hub            强制刷新 Hub 版本标记（下次构建会重新下载）
+  --mirror <url>          GitHub 下载镜像（例如 https://ghfast.top）
   --rebuild-base, -r      仅重建 base 镜像
   --force, -f             强制重建全部（hub/base/app）并重启
   -h, --help              显示帮助
@@ -54,6 +56,7 @@ FORCE_REBUILD_ALL=false
 REBUILD_BASE_ONLY=false
 FORCE_UPDATE_HUB=false
 HUB_TAG="${HUB_TAG:-}"
+GITHUB_MIRROR="${GITHUB_MIRROR:-}"
 RESOLVED_HUB_TAG=""
 
 while [ $# -gt 0 ]; do
@@ -69,6 +72,14 @@ while [ $# -gt 0 ]; do
         --update-hub)
             FORCE_UPDATE_HUB=true
             shift
+            ;;
+        --mirror)
+            if [ $# -lt 2 ]; then
+                echo "ERROR: --mirror needs a URL, e.g. https://ghfast.top"
+                exit 1
+            fi
+            GITHUB_MIRROR="$2"
+            shift 2
             ;;
         --rebuild-base|-r)
             REBUILD_BASE_ONLY=true
@@ -286,10 +297,15 @@ build_app() {
     if [ -n "${GITHUB_TOKEN:-}" ]; then
         token_args=(--build-arg "GITHUB_TOKEN=${GITHUB_TOKEN}")
     fi
+    local mirror_args=()
+    if [ -n "${GITHUB_MIRROR:-}" ]; then
+        mirror_args=(--build-arg "GITHUB_MIRROR=${GITHUB_MIRROR}")
+    fi
     docker build --pull=false \
         --build-arg HUB_RELEASE_REPO="$GITHUB_REPO" \
         --build-arg HUB_TAG="$RESOLVED_HUB_TAG" \
         "${token_args[@]}" \
+        "${mirror_args[@]}" \
         -f Dockerfile.app.local \
         -t aether-app:latest .
     save_code_hash

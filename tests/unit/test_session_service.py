@@ -42,7 +42,18 @@ def _make_db_session() -> Session:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine, tables=[User.__table__, UserSession.__table__])
     session_factory = sessionmaker(bind=engine)
-    return session_factory()
+    db = session_factory()
+    db.info["test_engine"] = engine
+    return db
+
+
+def _close_db_session(db: Session) -> None:
+    engine = db.info.pop("test_engine", None)
+    try:
+        db.close()
+    finally:
+        if engine is not None:
+            engine.dispose()
 
 
 def _make_user(db: Session, *, user_id: str = "user-1") -> User:
@@ -224,6 +235,55 @@ def test_set_refresh_token_stores_previous_hash() -> None:
     assert session.refresh_token_hash != original_hash
 
 
+def test_touch_session_skips_recent_activity() -> None:
+    now = datetime.now(timezone.utc)
+    session = UserSession(
+        user_id="user-1",
+        client_device_id="device-1",
+        refresh_token_hash="",
+        expires_at=now + timedelta(days=7),
+        last_seen_at=now,
+        ip_address="127.0.0.1",
+        user_agent="old-agent",
+    )
+
+    touched = SessionService.touch_session(
+        session,
+        client_ip="192.168.0.1",
+        user_agent="new-agent",
+    )
+
+    assert touched is False
+    assert session.last_seen_at == now
+    assert session.ip_address == "127.0.0.1"
+    assert session.user_agent == "old-agent"
+
+
+def test_touch_session_updates_stale_session() -> None:
+    now = datetime.now(timezone.utc)
+    last_seen_at = now - timedelta(minutes=10)
+    session = UserSession(
+        user_id="user-1",
+        client_device_id="device-1",
+        refresh_token_hash="",
+        expires_at=now + timedelta(days=7),
+        last_seen_at=last_seen_at,
+        ip_address="127.0.0.1",
+        user_agent="old-agent",
+    )
+
+    touched = SessionService.touch_session(
+        session,
+        client_ip="192.168.0.1",
+        user_agent="new-agent",
+    )
+
+    assert touched is True
+    assert session.last_seen_at is not None and session.last_seen_at > last_seen_at
+    assert session.ip_address == "192.168.0.1"
+    assert session.user_agent == "new-agent"
+
+
 def test_get_session_for_user_can_lock_for_update() -> None:
     expected = object()
 
@@ -299,7 +359,7 @@ def test_create_session_session_limit_ignores_expired_sessions() -> None:
         assert len(active_sessions) == MAX_SESSIONS_PER_USER
         assert all(session.revoke_reason != "session_limit_exceeded" for session in active_sessions)
     finally:
-        db.close()
+        _close_db_session(db)
 
 
 def test_revoke_all_user_sessions_skips_expired_sessions() -> None:
@@ -343,7 +403,7 @@ def test_revoke_all_user_sessions_skips_expired_sessions() -> None:
         assert active.revoked_at is not None
         assert expired.revoked_at is None
     finally:
-        db.close()
+        _close_db_session(db)
 
 
 def test_list_user_sessions_prunes_old_terminal_sessions() -> None:
@@ -405,4 +465,4 @@ def test_list_user_sessions_prunes_old_terminal_sessions() -> None:
         assert "revoked-old" not in remaining_ids
         assert "expired-recent" in remaining_ids
     finally:
-        db.close()
+        _close_db_session(db)

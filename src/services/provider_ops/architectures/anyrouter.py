@@ -417,9 +417,9 @@ class AnyrouterArchitecture(ProviderArchitecture):
             包含 acw_cookie 的配置
         """
         # 从 config 获取代理配置（支持 proxy_node_id、tunnel 和旧的 proxy URL）
-        from src.services.proxy_node.resolver import resolve_ops_proxy_config
+        from src.services.proxy_node.resolver import resolve_ops_proxy_config_async
 
-        proxy, tunnel_node_id = resolve_ops_proxy_config(config)
+        proxy, tunnel_node_id = await resolve_ops_proxy_config_async(config)
         acw_cookie = await _get_acw_cookie(base_url, proxy=proxy, tunnel_node_id=tunnel_node_id)
         if acw_cookie:
             return {"acw_cookie": acw_cookie}

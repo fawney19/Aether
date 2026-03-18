@@ -76,6 +76,8 @@ from src.core.api_format.conversion.stream_events import (
 from src.core.api_format.conversion.stream_state import StreamState
 from src.core.logger import logger
 
+_OPENAI_CLI_REQUEST_PREFIX_KEYS = ("model", "instructions", "tools", "input")
+
 
 def _is_chat_completions_response(data: dict[str, Any]) -> bool:
     """检测数据是否为 OpenAI Chat Completions 格式（而非 Responses API 格式）。
@@ -99,6 +101,18 @@ def _get_openai_chat_normalizer() -> "FormatNormalizer | None":
     from src.core.api_format.conversion.registry import format_conversion_registry
 
     return format_conversion_registry.get_normalizer("openai:chat")
+
+
+def reorder_openai_cli_request_prefix_keys(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep the stable OpenAI Responses prefix ahead of the typically dynamic tail."""
+    ordered: dict[str, Any] = {}
+    for key in _OPENAI_CLI_REQUEST_PREFIX_KEYS:
+        if key in payload:
+            ordered[key] = payload[key]
+    for key, value in payload.items():
+        if key not in ordered:
+            ordered[key] = value
+    return ordered
 
 
 class OpenAICliNormalizer(FormatNormalizer):
@@ -132,13 +146,13 @@ class OpenAICliNormalizer(FormatNormalizer):
         request: dict[str, Any],
         variant: str,
     ) -> dict[str, Any] | None:
-        """Codex 同格式透传：直接在原始请求体上做最小补丁，跳过 internal 转换。"""
+        """Codex 同格式透传：做最小补丁并保持稳定的请求前缀顺序。"""
         if variant.lower() != "codex":
             return None
         out: dict[str, Any] = dict(request)
         # 内部路由标记：绝不能透传到上游。
         out.pop("_aether_compact", None)
-        return out
+        return reorder_openai_cli_request_prefix_keys(out)
 
     def request_to_internal(self, request: dict[str, Any]) -> InternalRequest:
         model = str(request.get("model") or "")
@@ -2129,10 +2143,8 @@ class OpenAICliNormalizer(FormatNormalizer):
         joined = "\n\n".join(parts)
         return joined or None
 
-    _REQUEST_PREFIX_KEYS = ("model", "instructions", "tools", "input")
-
     def _reorder_request_prefix_keys(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._reorder_request_keys(payload, self._REQUEST_PREFIX_KEYS)
+        return reorder_openai_cli_request_prefix_keys(payload)
 
     def _error_type_from_value(self, value: str) -> ErrorType:
         for t in ErrorType:

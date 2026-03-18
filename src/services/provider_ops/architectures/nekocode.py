@@ -193,9 +193,9 @@ class NekoCodeArchitecture(ProviderArchitecture):
                 "timeout": 10,
                 "verify": get_ssl_context(),
             }
-            from src.services.proxy_node.resolver import resolve_ops_proxy_config
+            from src.services.proxy_node.resolver import resolve_ops_proxy_config_async
 
-            proxy, tunnel_node_id = resolve_ops_proxy_config(config)
+            proxy, tunnel_node_id = await resolve_ops_proxy_config_async(config)
             if tunnel_node_id:
                 from src.services.proxy_node.tunnel_transport import create_tunnel_transport
 
@@ -215,7 +215,7 @@ class NekoCodeArchitecture(ProviderArchitecture):
                         return {"_usage_summary": data.get("data", {})}
 
         except Exception as e:
-            logger.debug(f"获取 NekoCode usage summary 失败: {e}")
+            logger.debug("获取 NekoCode usage summary 失败: {}", e)
 
         return {}
 

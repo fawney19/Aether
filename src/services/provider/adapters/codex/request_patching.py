@@ -9,6 +9,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.core.api_format.conversion.normalizers.openai_cli import (
+    reorder_openai_cli_request_prefix_keys,
+)
 from src.core.provider_types import ProviderType
 
 
@@ -23,7 +26,8 @@ def patch_openai_cli_request_for_codex(
     out: dict[str, Any] = dict(request_body)
     # Internal routing marker; never send upstream.
     out.pop("_aether_compact", None)
-    return out
+    # Match the normalizer's stable prefix ordering even on same-format passthrough.
+    return reorder_openai_cli_request_prefix_keys(out)
 
 
 def maybe_patch_request_for_codex(

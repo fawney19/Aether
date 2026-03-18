@@ -2,46 +2,40 @@ from __future__ import annotations
 
 import pytest
 
-from src.services.proxy_node.hub_transport import HubResponseStream
-from src.services.proxy_node.tunnel_manager import _StreamState
+from src.services.proxy_node.hub_transport import HubRelayResponseStream
 
 
-class _Manager:
-    def __init__(self) -> None:
-        self.removed: list[int] = []
+class _FakeResponse:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+        self.closed = False
 
-    def remove_stream(self, stream_id: int) -> None:
-        self.removed.append(stream_id)
+    async def aiter_raw(self):  # type: ignore[override]
+        for chunk in self._chunks:
+            yield chunk
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 @pytest.mark.asyncio
-async def test_hub_response_stream_removes_stream_after_normal_iteration() -> None:
-    manager = _Manager()
-    state = _StreamState(7)
-    state.set_response_headers(200, {})
-    state.push_body_chunk(b"hello")
-    state.set_done()
+async def test_hub_relay_response_stream_closes_after_iteration() -> None:
+    response = _FakeResponse([b"hello", b"world"])
+    stream = HubRelayResponseStream(response)  # type: ignore[arg-type]
 
-    stream = HubResponseStream(manager, state, timeout=0.1)
     chunks = []
     async for chunk in stream:
         chunks.append(chunk)
 
-    assert chunks == [b"hello"]
-    assert manager.removed == [7]
+    assert chunks == [b"hello", b"world"]
+    assert response.closed is True
 
 
 @pytest.mark.asyncio
-async def test_hub_response_stream_removes_stream_after_body_error() -> None:
-    manager = _Manager()
-    state = _StreamState(9)
-    state.set_response_headers(200, {})
-    state.set_error("boom")
+async def test_hub_relay_response_stream_aclose_closes_response() -> None:
+    response = _FakeResponse([])
+    stream = HubRelayResponseStream(response)  # type: ignore[arg-type]
 
-    stream = HubResponseStream(manager, state, timeout=0.1)
+    await stream.aclose()
 
-    with pytest.raises(Exception):
-        async for _chunk in stream:
-            pass
-
-    assert manager.removed == [9]
+    assert response.closed is True

@@ -821,7 +821,7 @@ class TestPipelineAdminAuth:
                 "src.api.base.pipeline.SessionService.get_active_session",
                 return_value=mock_session,
             ),
-            patch("src.api.base.pipeline.SessionService.touch_session"),
+            patch("src.api.base.pipeline.SessionService.touch_session", return_value=True),
             patch("src.api.base.pipeline.SessionService.assert_session_device_matches"),
         ):
             user, management_token = await pipeline._authenticate_admin(mock_request, mock_db)
@@ -830,6 +830,7 @@ class TestPipelineAdminAuth:
         assert management_token is None
         assert mock_request.state.user_id == "admin-123"
         assert mock_request.state.user_session_id == "session-123"
+        mock_db.commit.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_authenticate_admin_lowercase_bearer(self, pipeline: ApiRequestPipeline) -> None:
@@ -871,7 +872,7 @@ class TestPipelineAdminAuth:
                 "src.api.base.pipeline.SessionService.get_active_session",
                 return_value=mock_session,
             ),
-            patch("src.api.base.pipeline.SessionService.touch_session"),
+            patch("src.api.base.pipeline.SessionService.touch_session", return_value=True),
             patch("src.api.base.pipeline.SessionService.assert_session_device_matches"),
         ):
             user, management_token = await pipeline._authenticate_admin(mock_request, mock_db)
@@ -920,6 +921,110 @@ class TestPipelineAdminAuth:
             with pytest.raises(HTTPException, match="登录会话已失效，请重新登录"):
                 await pipeline._authenticate_admin(mock_request, mock_db)
 
+    @pytest.mark.asyncio
+    async def test_authenticate_admin_rollback_on_session_touch_commit_failure(
+        self, pipeline: ApiRequestPipeline
+    ) -> None:
+        created_at = datetime.now(timezone.utc)
+        mock_session = MagicMock()
+        mock_session.id = "session-123"
+
+        mock_user = MagicMock()
+        mock_user.id = "admin-123"
+        mock_user.is_active = True
+        mock_user.is_deleted = False
+        mock_user.role = UserRole.ADMIN
+        mock_user.email = "admin@example.com"
+        mock_user.created_at = created_at
+
+        mock_request = MagicMock()
+        mock_request.headers = {
+            "authorization": "Bearer valid-token",
+            "X-Client-Device-Id": "device-admin-123",
+        }
+        mock_request.state = MagicMock()
+
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = mock_user
+        mock_db.commit.side_effect = RuntimeError("lock timeout")
+
+        with (
+            patch.object(
+                pipeline.auth_service,
+                "verify_token",
+                new_callable=AsyncMock,
+                return_value={
+                    "user_id": "admin-123",
+                    "created_at": created_at.isoformat(),
+                    "session_id": "session-123",
+                },
+            ),
+            patch(
+                "src.api.base.pipeline.SessionService.get_active_session",
+                return_value=mock_session,
+            ),
+            patch("src.api.base.pipeline.SessionService.touch_session", return_value=True),
+            patch("src.api.base.pipeline.SessionService.assert_session_device_matches"),
+        ):
+            user, management_token = await pipeline._authenticate_admin(mock_request, mock_db)
+
+        assert user == mock_user
+        assert management_token is None
+        mock_db.rollback.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_authenticate_admin_skips_commit_when_session_touch_not_needed(
+        self, pipeline: ApiRequestPipeline
+    ) -> None:
+        created_at = datetime.now(timezone.utc)
+        mock_session = MagicMock()
+        mock_session.id = "session-123"
+
+        mock_user = MagicMock()
+        mock_user.id = "admin-123"
+        mock_user.is_active = True
+        mock_user.is_deleted = False
+        mock_user.role = UserRole.ADMIN
+        mock_user.email = "admin@example.com"
+        mock_user.created_at = created_at
+
+        mock_request = MagicMock()
+        mock_request.headers = {
+            "authorization": "Bearer valid-token",
+            "X-Client-Device-Id": "device-admin-123",
+        }
+        mock_request.state = MagicMock()
+
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = mock_user
+
+        with (
+            patch.object(
+                pipeline.auth_service,
+                "verify_token",
+                new_callable=AsyncMock,
+                return_value={
+                    "user_id": "admin-123",
+                    "created_at": created_at.isoformat(),
+                    "session_id": "session-123",
+                },
+            ),
+            patch(
+                "src.api.base.pipeline.SessionService.get_active_session",
+                return_value=mock_session,
+            ),
+            patch(
+                "src.api.base.pipeline.SessionService.touch_session",
+                return_value=False,
+            ),
+            patch("src.api.base.pipeline.SessionService.assert_session_device_matches"),
+        ):
+            user, management_token = await pipeline._authenticate_admin(mock_request, mock_db)
+
+        assert user == mock_user
+        assert management_token is None
+        mock_db.commit.assert_not_called()
+
 
 class TestPipelineUserAuth:
     """测试普通用户 JWT 认证"""
@@ -967,7 +1072,7 @@ class TestPipelineUserAuth:
                 "src.api.base.pipeline.SessionService.get_active_session",
                 return_value=mock_session,
             ),
-            patch("src.api.base.pipeline.SessionService.touch_session"),
+            patch("src.api.base.pipeline.SessionService.touch_session", return_value=True),
             patch("src.api.base.pipeline.SessionService.assert_session_device_matches"),
         ):
             user, management_token = await pipeline._authenticate_user(mock_request, mock_db)
@@ -976,6 +1081,7 @@ class TestPipelineUserAuth:
         assert user == mock_user
         assert management_token is None
         assert mock_request.state.user_session_id == "session-456"
+        mock_db.commit.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_authenticate_user_rejects_legacy_token_without_session_id(
@@ -1059,3 +1165,55 @@ class TestPipelineUserAuth:
         ):
             with pytest.raises(HTTPException, match="缺少或无效的设备标识"):
                 await pipeline._authenticate_user(mock_request, mock_db)
+
+    @pytest.mark.asyncio
+    async def test_authenticate_user_skips_commit_when_session_touch_not_needed(
+        self, pipeline: ApiRequestPipeline
+    ) -> None:
+        created_at = datetime.now(timezone.utc)
+        mock_session = MagicMock()
+        mock_session.id = "session-456"
+
+        mock_user = MagicMock()
+        mock_user.id = "user-123"
+        mock_user.is_active = True
+        mock_user.is_deleted = False
+        mock_user.email = "user@example.com"
+        mock_user.created_at = created_at
+
+        mock_request = MagicMock()
+        mock_request.headers = {
+            "authorization": "Bearer valid-token",
+            "X-Client-Device-Id": "device-user-456",
+        }
+        mock_request.state = MagicMock()
+
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = mock_user
+
+        with (
+            patch.object(
+                pipeline.auth_service,
+                "verify_token",
+                new_callable=AsyncMock,
+                return_value={
+                    "user_id": "user-123",
+                    "created_at": created_at.isoformat(),
+                    "session_id": "session-456",
+                },
+            ),
+            patch(
+                "src.api.base.pipeline.SessionService.get_active_session",
+                return_value=mock_session,
+            ),
+            patch(
+                "src.api.base.pipeline.SessionService.touch_session",
+                return_value=False,
+            ),
+            patch("src.api.base.pipeline.SessionService.assert_session_device_matches"),
+        ):
+            user, management_token = await pipeline._authenticate_user(mock_request, mock_db)
+
+        assert user == mock_user
+        assert management_token is None
+        mock_db.commit.assert_not_called()

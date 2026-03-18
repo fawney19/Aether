@@ -58,6 +58,31 @@ def test_patch_openai_cli_request_for_codex_preserves_existing_prompt_cache_key(
     assert out["prompt_cache_key"] == "client-cache-key"
 
 
+def test_patch_openai_cli_request_for_codex_reorders_stable_prefix_keys() -> None:
+    req = {
+        "temperature": 0.7,
+        "input": [],
+        "metadata": {"request_id": "abc"},
+        "model": "gpt-test",
+        "tools": [{"type": "function", "name": "demo"}],
+        "instructions": "keep",
+        "store": True,
+        "_aether_compact": True,
+    }
+
+    out = patch_openai_cli_request_for_codex(req)
+
+    assert list(out.keys()) == [
+        "model",
+        "instructions",
+        "tools",
+        "input",
+        "temperature",
+        "metadata",
+        "store",
+    ]
+
+
 def test_patch_openai_cli_request_for_codex_does_not_inject_prompt_cache_key() -> None:
     req = {"model": "gpt-test", "input": [], "_aether_compact": True}
 
@@ -149,6 +174,34 @@ def test_openai_cli_normalizer_codex_variant_keeps_instructions_missing_for_defa
 
     patched = apply_body_rules(out, list(CODEX_DEFAULT_BODY_RULES))
     assert patched["instructions"] == "You are GPT-5."
+
+
+def test_openai_cli_normalizer_patch_for_codex_reorders_stable_prefix_keys() -> None:
+    from src.core.api_format.conversion.normalizers.openai_cli import OpenAICliNormalizer
+
+    normalizer = OpenAICliNormalizer()
+    out = normalizer.patch_for_variant(
+        {
+            "temperature": 0.7,
+            "input": [],
+            "metadata": {"request_id": "abc"},
+            "model": "gpt-test",
+            "tools": [{"type": "function", "name": "demo"}],
+            "instructions": "keep",
+            "_aether_compact": True,
+        },
+        "codex",
+    )
+
+    assert out is not None
+    assert list(out.keys()) == [
+        "model",
+        "instructions",
+        "tools",
+        "input",
+        "temperature",
+        "metadata",
+    ]
 
 
 def test_codex_envelope_extra_headers_does_not_inject_synthetic_headers() -> None:
