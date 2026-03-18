@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,9 +18,10 @@ from src.services.provider.prompt_cache import build_stable_codex_prompt_cache_k
 
 
 class _DummyAuthInfo:
-    auth_header = "Authorization"
-    auth_value = "Bearer upstream-token"
-    decrypted_auth_config = None
+    def __init__(self, decrypted_auth_config: dict[str, Any] | None = None) -> None:
+        self.auth_header = "Authorization"
+        self.auth_value = "Bearer upstream-token"
+        self.decrypted_auth_config = decrypted_auth_config
 
     def as_tuple(self) -> tuple[str, str]:
         return self.auth_header, self.auth_value
@@ -86,6 +88,10 @@ def _assert_common_codex_headers(headers: dict[str, str]) -> None:
     assert "x-forwarded-scheme" not in headers
 
 
+def _expected_codex_header_id(prompt_cache_key: str) -> str:
+    return hashlib.sha256(prompt_cache_key.encode()).hexdigest()[:16]
+
+
 @pytest.mark.asyncio
 async def test_build_upstream_request_codex_cli_injects_prompt_cache_and_forces_stream(
     monkeypatch: pytest.MonkeyPatch,
@@ -130,15 +136,18 @@ async def test_build_upstream_request_codex_cli_injects_prompt_cache_and_forces_
     assert "max_output_tokens" not in result.payload
     assert "temperature" not in result.payload
     assert "top_p" not in result.payload
+    short_id = _expected_codex_header_id(result.payload["prompt_cache_key"])
+    assert result.headers["session_id"] == short_id
+    assert result.headers["conversation_id"] == short_id
     _assert_common_codex_headers(result.headers)
 
 
 @pytest.mark.asyncio
-async def test_build_upstream_request_codex_compact_drops_stream_and_skips_prompt_cache(
+async def test_build_upstream_request_codex_compact_drops_stream_and_injects_prompt_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _fake_get_provider_auth(endpoint: Any, key: Any) -> _DummyAuthInfo:
-        return _DummyAuthInfo()
+        return _DummyAuthInfo({"account_id": "acc-1"})
 
     monkeypatch.setattr(mixmod, "get_provider_auth", _fake_get_provider_auth)
 
@@ -164,9 +173,13 @@ async def test_build_upstream_request_codex_compact_drops_stream_and_skips_promp
     assert result.url == "https://chatgpt.com/backend-api/codex/responses/compact"
     assert result.upstream_is_stream is False
     assert "stream" not in result.payload
-    assert "prompt_cache_key" not in result.payload
+    assert result.payload["prompt_cache_key"] == build_stable_codex_prompt_cache_key("user-key-123")
     assert result.payload["instructions"] == "You are GPT-5."
     assert result.payload["store"] is False
+    short_id = _expected_codex_header_id(result.payload["prompt_cache_key"])
+    assert result.headers["chatgpt-account-id"] == "acc-1"
+    assert result.headers["session_id"] == short_id
+    assert "conversation_id" not in result.headers
     _assert_common_codex_headers(result.headers)
 
 
@@ -205,8 +218,11 @@ async def test_build_upstream_request_legacy_codex_compact_context_uses_compact_
     assert result.url == "https://chatgpt.com/backend-api/codex/responses/compact"
     assert result.upstream_is_stream is False
     assert "stream" not in result.payload
-    assert "prompt_cache_key" not in result.payload
+    assert result.payload["prompt_cache_key"] == build_stable_codex_prompt_cache_key("user-key-123")
     assert result.payload["instructions"] == "You are GPT-5."
+    short_id = _expected_codex_header_id(result.payload["prompt_cache_key"])
+    assert result.headers["session_id"] == short_id
+    assert "conversation_id" not in result.headers
     _assert_common_codex_headers(result.headers)
 
 

@@ -8,7 +8,6 @@ from collections.abc import Mapping
 from typing import Any
 
 from src.core.provider_types import ProviderType, normalize_provider_type
-from src.services.provider.adapters.codex.context import is_codex_compact_request
 from src.utils.url_utils import is_official_openai_api_url
 
 _OFFICIAL_OPENAI_PROMPT_CACHE_FORMATS: frozenset[str] = frozenset({"openai:chat", "openai:cli"})
@@ -112,14 +111,12 @@ def resolve_prompt_cache_key_scope(
 ) -> str | None:
     """Resolve which prompt cache strategy should be used for this request."""
     fmt = str(provider_api_format or "").strip().lower()
+    pt = normalize_provider_type(provider_type)
+    if pt == ProviderType.CODEX.value and fmt in {"openai:cli", "openai:compact"}:
+        return "codex"
+
     if fmt == "openai:compact":
         return None
-
-    pt = normalize_provider_type(provider_type)
-    if pt == ProviderType.CODEX.value and fmt == "openai:cli":
-        if is_codex_compact_request(endpoint_sig=fmt):
-            return None
-        return "codex"
 
     if fmt in _OFFICIAL_OPENAI_PROMPT_CACHE_FORMATS and is_official_openai_api_url(base_url):
         return "openai"

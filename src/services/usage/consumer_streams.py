@@ -17,7 +17,6 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import ResponseError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
 
 from src.clients.redis_client import get_usage_queue_redis_client as get_redis_client
 from src.config.settings import config
@@ -141,6 +140,20 @@ class UsageQueueConsumer:
         """判断是否为重复键错误（唯一约束冲突）"""
         err_str = str(exc).lower()
         return "unique" in err_str or "duplicate" in err_str
+
+    async def _record_usage_batch(self, records: list[dict[str, Any]]) -> None:
+        """批量写库。
+
+        record_usage_batch 内部包含 async 准备阶段（费率查询等），
+        必须在当前事件循环中 await，不能用 asyncio.run 在子线程创建新循环，
+        否则会导致 Redis 连接泄漏（每次 asyncio.run 都会在 _redis_by_loop 中
+        注册一个短命循环的连接，且永远不会被清理）。
+        """
+        db = create_session()
+        try:
+            await UsageService.record_usage_batch(db, records)
+        finally:
+            db.close()
 
     async def start(self) -> None:
         if self._running:
@@ -282,8 +295,6 @@ class UsageQueueConsumer:
         messages: list[tuple[str, dict[str, Any], UsageEvent]],
     ) -> None:
         """批量处理记录类型的事件"""
-        db = create_session()
-
         try:
             # 准备批量记录数据
             records: list[dict[str, Any]] = []
@@ -294,7 +305,7 @@ class UsageQueueConsumer:
                 message_ids.append(message_id)
 
             # 批量写入
-            await UsageService.record_usage_batch(db, records)
+            await self._record_usage_batch(records)
 
             # 使用 pipeline 批量 ACK 提升性能
             pipe = redis_client.pipeline()
@@ -305,25 +316,17 @@ class UsageQueueConsumer:
             logger.debug("[usage-queue] Batch processed {} records", len(records))
 
         except Exception as exc:
-            # 批量处理失败，回退到逐条处理（复用已创建的 db session）
+            # 批量处理失败，回退到逐条处理，确保每条消息在线程内独立写库
             logger.warning(
                 "[usage-queue] Batch processing failed, falling back to individual: {}", exc
             )
-            try:
-                db.rollback()  # 清理批量失败的事务状态
-            except Exception:
-                pass
             success_ids: list[str] = []
             for message_id, fields, event in messages:
                 try:
-                    await self._apply_record_event(event, db=db)
+                    await self._apply_record_event(event)
                     success_ids.append(message_id)
                 except IntegrityError as ie:
                     # 重复 request_id 导致的唯一约束冲突，视为成功（记录已存在）
-                    try:
-                        db.rollback()
-                    except Exception:
-                        pass
                     if self._is_duplicate_key_error(ie):
                         logger.debug(
                             "[usage-queue] Duplicate request_id, skipping: {}", event.request_id
@@ -341,8 +344,6 @@ class UsageQueueConsumer:
                 for message_id in success_ids:
                     pipe.xack(self._stream_key, self._stream_group, message_id)
                 await pipe.execute()
-        finally:
-            db.close()
 
     async def _handle_processing_error(
         self,
@@ -403,99 +404,36 @@ class UsageQueueConsumer:
     async def _apply_streaming_event(self, event: UsageEvent) -> None:
         """处理 STREAMING 事件（状态更新）"""
         data = event.data
-        db = create_session()
-        try:
-            UsageService.update_usage_status(
-                db=db,
-                request_id=event.request_id,
-                status="streaming",
-                provider=data.get("provider"),
-                target_model=data.get("target_model"),
-                first_byte_time_ms=data.get("first_byte_time_ms"),
-                provider_id=data.get("provider_id"),
-                provider_endpoint_id=data.get("provider_endpoint_id"),
-                provider_api_key_id=data.get("provider_api_key_id"),
-                api_format=data.get("api_format"),
-                endpoint_api_format=data.get("endpoint_api_format"),
-                has_format_conversion=data.get("has_format_conversion"),
-                request_headers=data.get("request_headers"),
-                request_body=data.get("request_body"),
-                provider_request_headers=data.get("provider_request_headers"),
-                provider_request_body=data.get("provider_request_body"),
-            )
-        finally:
-            db.close()
 
-    async def _apply_record_event(self, event: UsageEvent, db: Session | None = None) -> None:
-        """处理记录类型事件（逐条写入，用于 fallback）
-
-        Args:
-            event: 使用事件
-            db: 可选的数据库会话。如果提供，复用该会话；否则创建新会话
-        """
-        from src.models.database import ApiKey, User
-
-        data = event.data
-        own_session = db is None
-        if own_session:
+        def _run_update() -> None:
             db = create_session()
-        try:
-            status = "completed"
-            if event.event_type == UsageEventType.FAILED:
-                status = "failed"
-            elif event.event_type == UsageEventType.CANCELLED:
-                status = "cancelled"
-
-            user = None
-            api_key = None
-            if data.get("user_id"):
-                user = db.query(User).filter(User.id == data["user_id"]).first()
-            if data.get("api_key_id"):
-                api_key = db.query(ApiKey).filter(ApiKey.id == data["api_key_id"]).first()
-
-            await UsageService.record_usage(
-                db=db,
-                user=user,
-                api_key=api_key,
-                provider=data.get("provider") or "unknown",
-                model=data.get("model") or "unknown",
-                input_tokens=int(data.get("input_tokens") or 0),
-                output_tokens=int(data.get("output_tokens") or 0),
-                cache_creation_input_tokens=int(data.get("cache_creation_input_tokens") or 0),
-                cache_read_input_tokens=int(data.get("cache_read_input_tokens") or 0),
-                request_type=data.get("request_type") or "chat",
-                api_format=data.get("api_format"),
-                endpoint_api_format=data.get("endpoint_api_format"),
-                has_format_conversion=bool(data.get("has_format_conversion") or False),
-                is_stream=bool(data.get("is_stream", True)),
-                response_time_ms=data.get("response_time_ms"),
-                first_byte_time_ms=data.get("first_byte_time_ms"),
-                status_code=int(data.get("status_code") or 200),
-                error_message=data.get("error_message"),
-                metadata=data.get("metadata"),
-                request_headers=data.get("request_headers"),
-                request_body=_parse_body(data.get("request_body")),
-                provider_request_headers=data.get("provider_request_headers"),
-                provider_request_body=_parse_body(data.get("provider_request_body")),
-                response_headers=data.get("response_headers"),
-                client_response_headers=data.get("client_response_headers"),
-                response_body=_parse_body(data.get("response_body")),
-                client_response_body=_parse_body(data.get("client_response_body")),
-                request_id=event.request_id,
-                provider_id=data.get("provider_id"),
-                provider_endpoint_id=data.get("provider_endpoint_id"),
-                provider_api_key_id=data.get("provider_api_key_id"),
-                status=status,
-                target_model=data.get("target_model"),
-                finalized_at=(
-                    datetime.fromtimestamp(event.timestamp_ms / 1000, tz=timezone.utc)
-                    if event.timestamp_ms > 0
-                    else None
-                ),
-            )
-        finally:
-            if own_session:
+            try:
+                UsageService.update_usage_status(
+                    db=db,
+                    request_id=event.request_id,
+                    status="streaming",
+                    provider=data.get("provider"),
+                    target_model=data.get("target_model"),
+                    first_byte_time_ms=data.get("first_byte_time_ms"),
+                    provider_id=data.get("provider_id"),
+                    provider_endpoint_id=data.get("provider_endpoint_id"),
+                    provider_api_key_id=data.get("provider_api_key_id"),
+                    api_format=data.get("api_format"),
+                    endpoint_api_format=data.get("endpoint_api_format"),
+                    has_format_conversion=data.get("has_format_conversion"),
+                    request_headers=data.get("request_headers"),
+                    request_body=data.get("request_body"),
+                    provider_request_headers=data.get("provider_request_headers"),
+                    provider_request_body=data.get("provider_request_body"),
+                )
+            finally:
                 db.close()
+
+        await asyncio.to_thread(_run_update)
+
+    async def _apply_record_event(self, event: UsageEvent) -> None:
+        """处理记录类型事件（逐条写入，用于 fallback）"""
+        await self._record_usage_batch([_event_to_record(event)])
 
     async def _apply_event(self, event: UsageEvent) -> None:
         """处理单个事件（兼容旧接口，用于测试）"""

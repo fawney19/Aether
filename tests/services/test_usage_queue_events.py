@@ -985,17 +985,16 @@ async def test_consumer_apply_event_streaming(monkeypatch: Any) -> None:
 async def test_consumer_apply_event_completed(monkeypatch: Any) -> None:
     """测试处理 COMPLETED 事件"""
     mock_db = MagicMock()
-    mock_db.query.return_value.filter.return_value.first.return_value = None
 
     def mock_create_session() -> Any:
         return mock_db
 
     monkeypatch.setattr("src.services.usage.consumer_streams.create_session", mock_create_session)
 
-    mock_record_usage = AsyncMock()
+    mock_record_batch = AsyncMock(return_value=[])
     monkeypatch.setattr(
-        "src.services.usage.consumer_streams.UsageService.record_usage",
-        mock_record_usage,
+        "src.services.usage.consumer_streams.UsageService.record_usage_batch",
+        mock_record_batch,
     )
 
     consumer = UsageQueueConsumer()
@@ -1014,29 +1013,29 @@ async def test_consumer_apply_event_completed(monkeypatch: Any) -> None:
 
     await consumer._apply_event(event)
 
-    mock_record_usage.assert_called_once()
-    call_kwargs = mock_record_usage.call_args.kwargs
-    assert call_kwargs["request_id"] == "req-done"
-    assert call_kwargs["status"] == "completed"
-    assert call_kwargs["provider"] == "openai"
-    assert call_kwargs["input_tokens"] == 100
+    mock_record_batch.assert_awaited_once()
+    records = mock_record_batch.call_args[0][1]
+    assert len(records) == 1
+    assert records[0]["request_id"] == "req-done"
+    assert records[0]["status"] == "completed"
+    assert records[0]["provider"] == "openai"
+    assert records[0]["input_tokens"] == 100
 
 
 @pytest.mark.asyncio
 async def test_consumer_apply_event_failed(monkeypatch: Any) -> None:
     """测试处理 FAILED 事件"""
     mock_db = MagicMock()
-    mock_db.query.return_value.filter.return_value.first.return_value = None
 
     def mock_create_session() -> Any:
         return mock_db
 
     monkeypatch.setattr("src.services.usage.consumer_streams.create_session", mock_create_session)
 
-    mock_record_usage = AsyncMock()
+    mock_record_batch = AsyncMock(return_value=[])
     monkeypatch.setattr(
-        "src.services.usage.consumer_streams.UsageService.record_usage",
-        mock_record_usage,
+        "src.services.usage.consumer_streams.UsageService.record_usage_batch",
+        mock_record_batch,
     )
 
     consumer = UsageQueueConsumer()
@@ -1054,26 +1053,25 @@ async def test_consumer_apply_event_failed(monkeypatch: Any) -> None:
 
     await consumer._apply_event(event)
 
-    call_kwargs = mock_record_usage.call_args.kwargs
-    assert call_kwargs["status"] == "failed"
-    assert call_kwargs["error_message"] == "Rate limited"
+    records = mock_record_batch.call_args[0][1]
+    assert records[0]["status"] == "failed"
+    assert records[0]["error_message"] == "Rate limited"
 
 
 @pytest.mark.asyncio
 async def test_consumer_apply_event_cancelled(monkeypatch: Any) -> None:
     """测试处理 CANCELLED 事件"""
     mock_db = MagicMock()
-    mock_db.query.return_value.filter.return_value.first.return_value = None
 
     def mock_create_session() -> Any:
         return mock_db
 
     monkeypatch.setattr("src.services.usage.consumer_streams.create_session", mock_create_session)
 
-    mock_record_usage = AsyncMock()
+    mock_record_batch = AsyncMock(return_value=[])
     monkeypatch.setattr(
-        "src.services.usage.consumer_streams.UsageService.record_usage",
-        mock_record_usage,
+        "src.services.usage.consumer_streams.UsageService.record_usage_batch",
+        mock_record_batch,
     )
 
     consumer = UsageQueueConsumer()
@@ -1087,8 +1085,8 @@ async def test_consumer_apply_event_cancelled(monkeypatch: Any) -> None:
 
     await consumer._apply_event(event)
 
-    call_kwargs = mock_record_usage.call_args.kwargs
-    assert call_kwargs["status"] == "cancelled"
+    records = mock_record_batch.call_args[0][1]
+    assert records[0]["status"] == "cancelled"
 
 
 # ============ 批量处理测试 ============
@@ -1214,25 +1212,17 @@ async def test_consumer_process_record_batch_fallback(monkeypatch: Any) -> None:
     """测试批量处理失败时回退到逐条处理"""
     mock_redis = MockRedisForConsumer()
     mock_db = MagicMock()
-    mock_db.query.return_value.filter.return_value.first.return_value = None
 
     def mock_create_session() -> Any:
         return mock_db
 
     monkeypatch.setattr("src.services.usage.consumer_streams.create_session", mock_create_session)
 
-    # 批量处理失败
-    mock_record_batch = AsyncMock(side_effect=Exception("Batch failed"))
+    # 首次批量处理失败，回退到单条 batch 成功
+    mock_record_batch = AsyncMock(side_effect=[Exception("Batch failed"), []])
     monkeypatch.setattr(
         "src.services.usage.consumer_streams.UsageService.record_usage_batch",
         mock_record_batch,
-    )
-
-    # 单条处理成功
-    mock_record_usage = AsyncMock()
-    monkeypatch.setattr(
-        "src.services.usage.consumer_streams.UsageService.record_usage",
-        mock_record_usage,
     )
 
     consumer = UsageQueueConsumer()
@@ -1248,8 +1238,11 @@ async def test_consumer_process_record_batch_fallback(monkeypatch: Any) -> None:
         [("msg-1", event.to_stream_fields(), event)],
     )
 
-    # 验证回退到单条处理
-    mock_record_usage.assert_called_once()
+    # 验证回退到单条 batch 处理
+    assert mock_record_batch.await_count == 2
+    fallback_records = mock_record_batch.call_args_list[1][0][1]
+    assert len(fallback_records) == 1
+    assert fallback_records[0]["request_id"] == "req-fallback"
     # 消息被 ACK
     assert len(mock_redis.xack_calls) == 1
 
@@ -1296,17 +1289,16 @@ async def test_consumer_apply_streaming_event(monkeypatch: Any) -> None:
 async def test_consumer_apply_record_event(monkeypatch: Any) -> None:
     """测试记录事件单独处理"""
     mock_db = MagicMock()
-    mock_db.query.return_value.filter.return_value.first.return_value = None
 
     def mock_create_session() -> Any:
         return mock_db
 
     monkeypatch.setattr("src.services.usage.consumer_streams.create_session", mock_create_session)
 
-    mock_record_usage = AsyncMock()
+    mock_record_batch = AsyncMock(return_value=[])
     monkeypatch.setattr(
-        "src.services.usage.consumer_streams.UsageService.record_usage",
-        mock_record_usage,
+        "src.services.usage.consumer_streams.UsageService.record_usage_batch",
+        mock_record_batch,
     )
 
     consumer = UsageQueueConsumer()
@@ -1320,10 +1312,11 @@ async def test_consumer_apply_record_event(monkeypatch: Any) -> None:
 
     await consumer._apply_record_event(event)
 
-    mock_record_usage.assert_called_once()
-    call_kwargs = mock_record_usage.call_args.kwargs
-    assert call_kwargs["request_id"] == "req-record"
-    assert call_kwargs["input_tokens"] == 100
+    mock_record_batch.assert_awaited_once()
+    records = mock_record_batch.call_args[0][1]
+    assert len(records) == 1
+    assert records[0]["request_id"] == "req-record"
+    assert records[0]["input_tokens"] == 100
 
 
 @pytest.mark.asyncio

@@ -106,6 +106,21 @@ def test_maybe_patch_request_with_prompt_cache_key_for_codex_openai_cli() -> Non
     assert out["prompt_cache_key"] == build_stable_codex_prompt_cache_key("user-key-123")
 
 
+def test_maybe_patch_request_with_prompt_cache_key_for_codex_openai_compact() -> None:
+    req = {"model": "gpt-5", "input": []}
+
+    out = maybe_patch_request_with_prompt_cache_key(
+        req,
+        provider_api_format="openai:compact",
+        provider_type="codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        user_api_key_id="user-key-123",
+    )
+
+    assert out is not req
+    assert out["prompt_cache_key"] == build_stable_codex_prompt_cache_key("user-key-123")
+
+
 def test_maybe_patch_request_with_prompt_cache_key_skips_official_compact() -> None:
     req = {"model": "gpt-5", "input": []}
 
@@ -121,7 +136,7 @@ def test_maybe_patch_request_with_prompt_cache_key_skips_official_compact() -> N
     assert "prompt_cache_key" not in out
 
 
-def test_maybe_patch_request_with_prompt_cache_key_skips_legacy_codex_compact_context() -> None:
+def test_maybe_patch_request_with_prompt_cache_key_for_legacy_codex_compact_context() -> None:
     req = {"model": "gpt-5", "input": []}
 
     try:
@@ -136,8 +151,8 @@ def test_maybe_patch_request_with_prompt_cache_key_skips_legacy_codex_compact_co
     finally:
         set_codex_request_context(None)
 
-    assert out is req
-    assert "prompt_cache_key" not in out
+    assert out is not req
+    assert out["prompt_cache_key"] == build_stable_codex_prompt_cache_key("user-key-123")
 
 
 def test_maybe_patch_request_with_prompt_cache_key_preserves_existing_key() -> None:

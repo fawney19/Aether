@@ -91,6 +91,7 @@ from src.services.provider.stream_policy import (
 from src.services.provider.transport import (
     build_provider_url,
 )
+from src.services.provider.upstream_headers import build_upstream_extra_headers
 from src.services.scheduling.aware_scheduler import ProviderCandidate
 from src.services.system.config import SystemConfigService
 from src.services.task.request_state import MutableRequestBodyState
@@ -837,6 +838,16 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
         extra_headers: dict[str, str] = {}
         if envelope:
             extra_headers.update(envelope.extra_headers() or {})
+
+        hook_headers = build_upstream_extra_headers(
+            provider_type=provider_type,
+            endpoint_sig=str(provider_api_format) if provider_api_format else None,
+            request_body=request_body,
+            original_headers=original_headers,
+            decrypted_auth_config=auth_info.decrypted_auth_config if auth_info else None,
+        )
+        if hook_headers:
+            extra_headers.update(hook_headers)
 
         return ProviderRequestResult(
             request_body=request_body,

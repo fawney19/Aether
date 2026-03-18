@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlencode
 
@@ -29,6 +31,85 @@ fetch_models_codex = create_preset_models_fetcher("codex")
 # ---------------------------------------------------------------------------
 # Transport Hook
 # ---------------------------------------------------------------------------
+
+
+def _get_header_value(headers: Mapping[str, Any] | None, header_name: str) -> str | None:
+    if not isinstance(headers, Mapping):
+        return None
+
+    target = str(header_name or "").strip().lower()
+    if not target:
+        return None
+
+    for name, value in headers.items():
+        if str(name or "").strip().lower() != target:
+            continue
+        normalized = str(value or "").strip()
+        return normalized or None
+    return None
+
+
+def _build_short_header_id(seed: str) -> str:
+    return hashlib.sha256(seed.encode()).hexdigest()[:16]
+
+
+def _build_codex_headers(
+    request_body: Any,
+    original_headers: Mapping[str, Any] | None,
+    *,
+    include_conversation_id: bool,
+    decrypted_auth_config: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Codex upstream: chatgpt-account-id + session_id + conversation_id."""
+    headers: dict[str, str] = {}
+
+    if decrypted_auth_config:
+        account_id = str(decrypted_auth_config.get("account_id") or "").strip()
+        if account_id:
+            headers["chatgpt-account-id"] = account_id
+
+    if isinstance(request_body, dict):
+        cache_key = str(request_body.get("prompt_cache_key") or "").strip()
+        if cache_key:
+            short_id = _build_short_header_id(cache_key)
+            if not _get_header_value(original_headers, "session_id"):
+                headers["session_id"] = short_id
+            if include_conversation_id and not _get_header_value(
+                original_headers, "conversation_id"
+            ):
+                headers["conversation_id"] = short_id
+
+    return headers
+
+
+def build_codex_cli_headers(
+    request_body: Any,
+    original_headers: Mapping[str, Any] | None,
+    *,
+    decrypted_auth_config: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    from src.services.provider.adapters.codex.context import is_codex_compact_request
+
+    return _build_codex_headers(
+        request_body,
+        original_headers,
+        include_conversation_id=not is_codex_compact_request(endpoint_sig="openai:cli"),
+        decrypted_auth_config=decrypted_auth_config,
+    )
+
+
+def build_codex_compact_headers(
+    request_body: Any,
+    original_headers: Mapping[str, Any] | None,
+    *,
+    decrypted_auth_config: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    return _build_codex_headers(
+        request_body,
+        original_headers,
+        include_conversation_id=False,
+        decrypted_auth_config=decrypted_auth_config,
+    )
 
 
 def build_codex_url(
@@ -165,10 +246,13 @@ def register_all() -> None:
     from src.core.provider_oauth_utils import register_auth_enricher
     from src.services.model.upstream_fetcher import UpstreamModelsFetcherRegistry
     from src.services.provider.transport import register_transport_hook
+    from src.services.provider.upstream_headers import register_upstream_headers_hook
 
     # Transport
     register_transport_hook("codex", "openai:cli", build_codex_url)
     register_transport_hook("codex", "openai:compact", build_codex_url)
+    register_upstream_headers_hook("codex", "openai:cli", build_codex_cli_headers)
+    register_upstream_headers_hook("codex", "openai:compact", build_codex_compact_headers)
 
     # Auth
     register_auth_enricher("codex", enrich_codex)

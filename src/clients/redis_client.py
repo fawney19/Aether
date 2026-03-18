@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from enum import Enum
@@ -45,6 +46,8 @@ class RedisClientManager:
         degraded_warning: str | None = None,
     ) -> None:
         self._redis: aioredis.Redis | None = None
+        self._redis_by_loop: dict[int, aioredis.Redis] = {}
+        self._primary_loop_key: int | None = None
         self._client_name = client_name
         self._encoding_errors = encoding_errors
         self._degraded_warning = degraded_warning
@@ -54,6 +57,13 @@ class RedisClientManager:
         self._circuit_reset_seconds = int(os.getenv("REDIS_CIRCUIT_BREAKER_RESET_SECONDS", "60"))
         self._last_error: str | None = None  # 记录最后一次错误
 
+    @staticmethod
+    def _current_loop_key() -> int | None:
+        try:
+            return id(asyncio.get_running_loop())
+        except RuntimeError:
+            return None
+
     def get_state(self) -> RedisState:
         """
         获取 Redis 连接状态
@@ -61,7 +71,7 @@ class RedisClientManager:
         Returns:
             当前连接状态枚举值
         """
-        if self._redis is not None:
+        if self._redis_by_loop or self._redis is not None:
             return RedisState.CONNECTED
         if self._circuit_open_until and time.time() < self._circuit_open_until:
             return RedisState.CIRCUIT_OPEN
@@ -111,8 +121,11 @@ class RedisClientManager:
         Raises:
             RuntimeError: 当require_redis=True且连接失败时
         """
-        if self._redis is not None:
-            return self._redis
+        loop_key = self._current_loop_key()
+        if loop_key is not None:
+            existing_client = self._redis_by_loop.get(loop_key)
+            if existing_client is not None:
+                return existing_client
 
         # 检查熔断状态
         if self._circuit_open_until and time.time() < self._circuit_open_until:
@@ -166,7 +179,7 @@ class RedisClientManager:
                     sentinel_list,
                     **sentinel_kwargs,
                 )
-                self._redis = sentinel.master_for(
+                client = sentinel.master_for(
                     service_name=sentinel_service,
                     max_connections=redis_max_conn,
                     decode_responses=True,
@@ -176,7 +189,7 @@ class RedisClientManager:
                 )
                 safe_url = f"sentinel://{sentinel_service}"
             else:
-                self._redis = await aioredis.from_url(
+                client = await aioredis.from_url(
                     redis_url,
                     encoding="utf-8",
                     decode_responses=True,
@@ -189,11 +202,18 @@ class RedisClientManager:
                 safe_url = redis_url.split("@")[-1] if "@" in redis_url else redis_url
 
             # 测试连接
-            await self._redis.ping()
+            await client.ping()
+            if loop_key is not None:
+                self._redis_by_loop[loop_key] = client
+                if self._primary_loop_key is None:
+                    self._primary_loop_key = loop_key
+                    self._redis = client
+            elif self._redis is None:
+                self._redis = client
             logger.info("[OK] {} 初始化成功: {}", self._client_name, safe_url)
             self._consecutive_failures = 0
             self._circuit_open_until = None
-            return self._redis
+            return client
         except Exception as e:
             error_msg = str(e)
             self._last_error = error_msg
@@ -223,15 +243,35 @@ class RedisClientManager:
 
             if self._degraded_warning:
                 logger.warning(self._degraded_warning)
-            self._redis = None
             return None
 
     async def close(self) -> None:
         """关闭Redis连接"""
-        if self._redis:
-            await self._redis.close()
-            self._redis = None
+        clients = list(self._redis_by_loop.values())
+        if self._redis is not None and not clients:
+            clients = [self._redis]
+
+        seen_client_ids: set[int] = set()
+        for client in clients:
+            client_id = id(client)
+            if client_id in seen_client_ids:
+                continue
+            seen_client_ids.add(client_id)
+            await client.close()
+
+        if clients:
             logger.info("{} 已关闭", self._client_name)
+
+        self._redis = None
+        self._redis_by_loop.clear()
+        self._primary_loop_key = None
+
+    def get_current_loop_client(self) -> aioredis.Redis | None:
+        """获取当前事件循环绑定的 Redis 客户端。"""
+        loop_key = self._current_loop_key()
+        if loop_key is None:
+            return self.get_client()
+        return self._redis_by_loop.get(loop_key)
 
     def get_client(self) -> aioredis.Redis | None:
         """
@@ -242,7 +282,16 @@ class RedisClientManager:
         Returns:
             Redis客户端实例或None
         """
-        return self._redis
+        if self._redis is not None:
+            return self._redis
+        if self._primary_loop_key is not None:
+            primary = self._redis_by_loop.get(self._primary_loop_key)
+            if primary is not None:
+                self._redis = primary
+                return primary
+        if self._redis_by_loop:
+            return next(iter(self._redis_by_loop.values()))
+        return None
 
 
 _GLOBAL_REDIS_DEGRADED_WARNING = (
@@ -299,10 +348,10 @@ async def get_redis_client(require_redis: bool = False) -> aioredis.Redis | None
     manager = _get_global_redis_manager()
     # 如果尚未连接（例如启动时降级、或 close() 后），尝试重新初始化。
     # initialize() 内部包含熔断器逻辑，避免频繁重试导致抖动。
-    if manager.get_client() is None:
+    if manager.get_current_loop_client() is None:
         await manager.initialize(require_redis=require_redis)
 
-    return manager.get_client()
+    return manager.get_current_loop_client()
 
 
 async def get_usage_queue_redis_client(require_redis: bool = False) -> aioredis.Redis | None:
@@ -312,10 +361,10 @@ async def get_usage_queue_redis_client(require_redis: bool = False) -> aioredis.
     与全局 Redis 客户端隔离，专门用于 usage queue 的 msgpack/surrogateescape 编解码链路。
     """
     manager = _get_usage_queue_redis_manager()
-    if manager.get_client() is None:
+    if manager.get_current_loop_client() is None:
         await manager.initialize(require_redis=require_redis)
 
-    return manager.get_client()
+    return manager.get_current_loop_client()
 
 
 def get_redis_client_sync() -> aioredis.Redis | None:

@@ -20,6 +20,7 @@ from src.services.provider.stream_policy import (
     resolve_upstream_is_stream,
 )
 from src.services.provider.transport import build_provider_url
+from src.services.provider.upstream_headers import build_upstream_extra_headers
 
 if TYPE_CHECKING:
     from src.api.handlers.base.cli_protocol import CliHandlerProtocol
@@ -301,6 +302,16 @@ class CliRequestMixin:
         extra_headers: dict[str, str] = {}
         if envelope:
             extra_headers.update(envelope.extra_headers() or {})
+
+        hook_headers = build_upstream_extra_headers(
+            provider_type=provider_type,
+            endpoint_sig=provider_api_format,
+            request_body=request_body,
+            original_headers=original_headers,
+            decrypted_auth_config=auth_info.decrypted_auth_config if auth_info else None,
+        )
+        if hook_headers:
+            extra_headers.update(hook_headers)
 
         provider_payload, provider_headers = self._request_builder.build(
             request_body,
