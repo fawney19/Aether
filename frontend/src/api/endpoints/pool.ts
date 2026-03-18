@@ -104,6 +104,7 @@ export interface PoolKeyDetail {
   oauth_plan_type?: string | null
   oauth_account_id?: string | null
   oauth_account_user_id?: string | null
+  oauth_account_name?: string | null
   oauth_organizations?: OAuthOrganizationInfo[] | null
   quota_updated_at?: number | null
   health_score?: number

@@ -85,6 +85,7 @@ class PoolKeyDetail(BaseModel):
     oauth_invalid_reason: str | None = None
     oauth_plan_type: str | None = None
     oauth_account_id: str | None = None
+    oauth_account_name: str | None = None
     oauth_account_user_id: str | None = None
     oauth_organizations: list[OAuthOrganizationSummary] = Field(default_factory=list)
     quota_updated_at: int | None = None

@@ -74,11 +74,14 @@ def build_codex_url(
 async def enrich_codex(
     auth_config: dict[str, Any],
     token_response: dict[str, Any],
-    access_token: str,  # noqa: ARG001
-    proxy_config: dict[str, Any] | None,  # noqa: ARG001
+    access_token: str,
+    proxy_config: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Codex auth_config enrichment: parse token claims -> account/team identity metadata."""
-    from src.core.provider_oauth_utils import parse_codex_id_token
+    from src.core.provider_oauth_utils import (
+        fetch_openai_account_name,
+        parse_codex_id_token,
+    )
 
     def _read_non_empty_str(*values: Any) -> str | None:
         for value in values:
@@ -151,6 +154,17 @@ async def enrich_codex(
             if not auth_config.get(key):
                 auth_config[key] = value
 
+    account_id = _read_non_empty_str(auth_config.get("account_id"))
+    if account_id:
+        account_name = await fetch_openai_account_name(
+            access_token,
+            account_id,
+            proxy_config=proxy_config,
+            timeout_seconds=10.0,
+        )
+        if account_name:
+            auth_config["account_name"] = account_name
+
     return auth_config
 
 
@@ -176,7 +190,9 @@ def register_all() -> None:
     # Provider Format Capability：默认 body_rules
     from src.core.api_format.metadata import CODEX_DEFAULT_BODY_RULES
 
-    register_provider_default_body_rules("codex", "openai:cli", CODEX_DEFAULT_BODY_RULES)
+    register_provider_default_body_rules(
+        "codex", "openai:cli", CODEX_DEFAULT_BODY_RULES
+    )
 
     # Export: Codex uses the default export builder (strip null + temp fields)
     # No need to register a custom one — the default in export.py suffices.

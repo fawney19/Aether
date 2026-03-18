@@ -38,3 +38,10 @@ def test_derive_oauth_expires_at_fallback_to_legacy_datetime() -> None:
     )
 
     assert pool_routes._derive_oauth_expires_at(key) == 1772586123
+
+
+def test_derive_oauth_account_name_from_auth_config() -> None:
+    assert (
+        pool_routes._derive_oauth_account_name({"account_name": " Workspace Alpha "})
+        == "Workspace Alpha"
+    )

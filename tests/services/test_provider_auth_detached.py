@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 from src.services.provider import auth as module
@@ -46,7 +47,9 @@ class _FakeSessionCtx:
         return False
 
 
-def _install_module(monkeypatch: pytest.MonkeyPatch, name: str, attrs: dict[str, Any]) -> None:
+def _install_module(
+    monkeypatch: pytest.MonkeyPatch, name: str, attrs: dict[str, Any]
+) -> None:
     fake_module = types.ModuleType(name)
     for key, value in attrs.items():
         setattr(fake_module, key, value)
@@ -88,7 +91,9 @@ def test_mark_refresh_token_invalid_persists_detached_key(
         module, "object_session", lambda _key: (_ for _ in ()).throw(RuntimeError())
     )
     _install_module(
-        monkeypatch, "src.database", {"create_session": lambda: _FakeSessionCtx(fake_db)}
+        monkeypatch,
+        "src.database",
+        {"create_session": lambda: _FakeSessionCtx(fake_db)},
     )
     _install_module(
         monkeypatch,
@@ -105,7 +110,9 @@ def test_mark_refresh_token_invalid_persists_detached_key(
     assert fake_db.committed is True
     assert key.oauth_invalid_at is not None
     assert row.oauth_invalid_at is not None
-    assert str(key.oauth_invalid_reason).startswith("[REFRESH_FAILED] Token 续期失败 (401)")
+    assert str(key.oauth_invalid_reason).startswith(
+        "[REFRESH_FAILED] Token 续期失败 (401)"
+    )
     assert "refresh_token_reused" in str(row.oauth_invalid_reason)
 
 
@@ -144,3 +151,66 @@ def test_persist_refreshed_token_clears_legacy_token_invalidated_account_block(
     assert key.auth_config == 'enc:{"refresh_token": "rt-2"}'
     assert key.oauth_invalid_at is None
     assert key.oauth_invalid_reason is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_generic_oauth_token_persists_enriched_account_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = SimpleNamespace(id="key-1")
+    endpoint = SimpleNamespace()
+    template = SimpleNamespace(
+        oauth=SimpleNamespace(
+            token_url="https://example.com/oauth/token",
+            client_id="client-id",
+            client_secret=None,
+            scopes=[],
+        )
+    )
+    persisted: dict[str, Any] = {}
+
+    async def _fake_post_oauth_token(**_kwargs: Any) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "new-token",
+                "refresh_token": "rt-2",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            },
+            request=httpx.Request("POST", "https://example.com/oauth/token"),
+        )
+
+    async def _fake_enrich_auth_config(**kwargs: Any) -> dict[str, Any]:
+        auth_config = dict(kwargs["auth_config"])
+        auth_config["account_name"] = "Workspace Alpha"
+        return auth_config
+
+    monkeypatch.setattr(module, "_get_proxy_config", lambda *_args: None)
+    monkeypatch.setattr(module, "post_oauth_token", _fake_post_oauth_token)
+    monkeypatch.setattr(module, "enrich_auth_config", _fake_enrich_auth_config)
+    monkeypatch.setattr(
+        module,
+        "_persist_refreshed_token",
+        lambda _key, _access_token, token_meta: persisted.update(
+            {"access_token": _access_token, "token_meta": dict(token_meta)}
+        ),
+    )
+
+    token_meta = {
+        "provider_type": "codex",
+        "refresh_token": "rt-1",
+    }
+
+    refreshed = await module._refresh_generic_oauth_token(
+        key,
+        endpoint,
+        template,
+        "codex",
+        "rt-1",
+        token_meta,
+    )
+
+    assert refreshed["account_name"] == "Workspace Alpha"
+    assert persisted["access_token"] == "new-token"
+    assert persisted["token_meta"]["account_name"] == "Workspace Alpha"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 from typing import Any, Awaitable, Callable
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -9,11 +10,14 @@ import httpx
 import jwt
 
 from src.clients.http_client import HTTPClientPool
-from src.core.logger import logger
+from src.core.logger import logger  # pyright: ignore
 from src.core.provider_types import ProviderType
 
 _ANTHROPIC_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
 _GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json"
+_OPENAI_ACCOUNTS_CHECK_URL = (
+    "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"
+)
 
 
 def _coerce_proxy_url(proxy_config: dict[str, Any] | None) -> str | None:
@@ -54,11 +58,15 @@ def _inject_auth_into_url(url: str, username: str, password: str | None = None) 
         if parsed.port:
             host_part = f"{host_part}:{parsed.port}"
         auth_part = (
-            f"{encoded_username}:{encoded_password}" if encoded_password else encoded_username
+            f"{encoded_username}:{encoded_password}"
+            if encoded_password
+            else encoded_username
         )
         netloc = f"{auth_part}@{host_part}"
 
-        return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+        return urlunsplit(
+            (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
+        )
     except Exception:
         return url
 
@@ -189,7 +197,7 @@ def _tls_client_post_sync(
     timeout_seconds: float,
 ) -> tuple[int, dict[str, str], str]:
     # tls-client is optional at runtime; import only when needed.
-    import tls_client  # type: ignore
+    import tls_client  # pyright: ignore[reportMissingImports]
 
     session = tls_client.Session(
         client_identifier="firefox_120",
@@ -425,7 +433,10 @@ async def fetch_google_email(
     try:
         resp = await client.get(
             _GOOGLE_USERINFO_URL,
-            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+            },
             timeout=timeout_seconds,
         )
         if resp.status_code < 200 or resp.status_code >= 300:
@@ -435,6 +446,111 @@ async def fetch_google_email(
         if isinstance(email, str) and email:
             return email
         return None
+    except Exception:
+        return None
+
+
+def _extract_openai_account_name(payload: Any, account_id: str) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+
+    accounts = payload.get("accounts")
+    if isinstance(accounts, dict):
+        direct = accounts.get(account_id)
+        if isinstance(direct, dict):
+            account = direct.get("account")
+            account_info = account if isinstance(account, dict) else direct
+            direct_name = _as_non_empty_str(account_info.get("name"))
+            if direct_name:
+                return direct_name
+
+        for item in accounts.values():
+            if not isinstance(item, dict):
+                continue
+            account = item.get("account")
+            account_info = account if isinstance(account, dict) else item
+            matched_account_id = _first_non_empty_str(
+                [
+                    account_info.get("id"),
+                    account_info.get("account_id"),
+                    account_info.get("accountId"),
+                    item.get("id"),
+                    item.get("account_id"),
+                    item.get("accountId"),
+                ]
+            )
+            if matched_account_id != account_id:
+                continue
+            matched_name = _as_non_empty_str(account_info.get("name"))
+            if matched_name:
+                return matched_name
+
+    return None
+
+
+async def fetch_openai_account_name(
+    access_token: str,
+    account_id: str,
+    *,
+    proxy_config: dict[str, Any] | None = None,
+    timeout_seconds: float = 10.0,
+) -> str | None:
+    if not access_token or not account_id:
+        return None
+
+    proxy_url = _coerce_proxy_url(proxy_config)
+    if not proxy_url and proxy_config:
+        try:
+            from src.services.proxy_node.resolver import build_proxy_url_async
+
+            proxy_url = await build_proxy_url_async(proxy_config)
+        except Exception:
+            proxy_url = None
+
+    try:
+        from curl_cffi.requests import AsyncSession  # pyright: ignore[reportMissingImports]
+
+        session = AsyncSession(
+            impersonate="chrome110",
+            proxies={"http": proxy_url, "https": proxy_url} if proxy_url else None,
+            timeout=timeout_seconds,
+            verify=False if proxy_url else True,
+        )
+        try:
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "*/*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://chatgpt.com/",
+                "Origin": "https://chatgpt.com",
+                "Connection": "keep-alive",
+            }
+            for attempt in range(3):
+                if attempt:
+                    await asyncio.sleep(
+                        [1.0, 2.0][attempt - 1] + random.uniform(0.5, 1.5)
+                    )
+                resp = await session.get(_OPENAI_ACCOUNTS_CHECK_URL, headers=headers)
+                if 200 <= resp.status_code < 300:
+                    return _extract_openai_account_name(resp.json(), account_id)
+        finally:
+            await session.close()
+    except Exception:
+        pass
+
+    client = await HTTPClientPool.get_proxy_client(proxy_config)
+    try:
+        resp = await client.get(
+            _OPENAI_ACCOUNTS_CHECK_URL,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+            },
+            timeout=timeout_seconds,
+        )
+        if resp.status_code < 200 or resp.status_code >= 300:
+            return None
+        return _extract_openai_account_name(resp.json(), account_id)
     except Exception:
         return None
 

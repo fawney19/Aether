@@ -516,7 +516,7 @@
                       :key="`${key.key_id}-quota-${idx}`"
                       class="w-full"
                     >
-                      <div class="min-h-4 grid grid-cols-[20px_minmax(0,1fr)_42px] items-center gap-1 text-[10px] leading-tight">
+                      <div class="min-h-4 grid grid-cols-[20px_minmax(0,1fr)_80px] items-center gap-1 text-[10px] leading-tight">
                         <span
                           class="text-muted-foreground whitespace-nowrap text-right tabular-nums"
                           :title="getQuotaProgressTooltip(item)"
@@ -530,12 +530,21 @@
                             :style="{ width: `${item.remainingPercent}%` }"
                           />
                         </div>
-                        <span
-                          class="tabular-nums text-right whitespace-nowrap"
-                          :class="getQuotaRemainingClassByRemaining(item.remainingPercent)"
-                        >
-                          {{ item.remainingPercent.toFixed(1) }}%
-                        </span>
+                        <div class="flex flex-col items-end justify-center gap-0.5 text-right leading-tight">
+                          <span
+                            class="tabular-nums whitespace-nowrap"
+                            :class="getQuotaRemainingClassByRemaining(item.remainingPercent)"
+                          >
+                            {{ item.remainingPercent.toFixed(1) }}%
+                          </span>
+                          <span
+                            v-if="getQuotaProgressCountdownText(item)"
+                            class="text-[9px] text-muted-foreground whitespace-nowrap"
+                            :title="getQuotaProgressTooltip(item)"
+                          >
+                            {{ getQuotaProgressCountdownText(item) }}
+                          </span>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -971,7 +980,7 @@
                     :key="`${key.key_id}-quota-mobile-${idx}`"
                     class="w-full"
                   >
-                    <div class="grid grid-cols-[20px_minmax(0,1fr)_42px] items-center gap-1 text-[10px] leading-tight">
+                    <div class="grid grid-cols-[20px_minmax(0,1fr)_80px] items-center gap-1 text-[10px] leading-tight">
                       <span
                         class="text-muted-foreground whitespace-nowrap text-right tabular-nums"
                         :title="getQuotaProgressTooltip(item)"
@@ -985,12 +994,21 @@
                           :style="{ width: `${item.remainingPercent}%` }"
                         />
                       </div>
-                      <span
-                        class="tabular-nums text-right whitespace-nowrap"
-                        :class="getQuotaRemainingClassByRemaining(item.remainingPercent)"
-                      >
-                        {{ item.remainingPercent.toFixed(1) }}%
-                      </span>
+                      <div class="flex flex-col items-end justify-center gap-0.5 text-right leading-tight">
+                        <span
+                          class="tabular-nums whitespace-nowrap"
+                          :class="getQuotaRemainingClassByRemaining(item.remainingPercent)"
+                        >
+                          {{ item.remainingPercent.toFixed(1) }}%
+                        </span>
+                        <span
+                          v-if="getQuotaProgressCountdownText(item)"
+                          class="text-[9px] text-muted-foreground whitespace-nowrap"
+                          :title="getQuotaProgressTooltip(item)"
+                        >
+                          {{ getQuotaProgressCountdownText(item) }}
+                        </span>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1743,6 +1761,7 @@ function toEndpointApiKey(key: PoolKeyDetail): EndpointAPIKey {
     oauth_plan_type: key.oauth_plan_type ?? null,
     oauth_account_id: key.oauth_account_id ?? null,
     oauth_account_user_id: key.oauth_account_user_id ?? null,
+    oauth_account_name: key.oauth_account_name ?? null,
     oauth_organizations: key.oauth_organizations ?? [],
     oauth_invalid_at: key.oauth_invalid_at ?? null,
     oauth_invalid_reason: key.oauth_invalid_reason ?? null,
