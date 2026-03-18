@@ -573,18 +573,20 @@
                             />
                           </div>
                           <div
-                            v-if="key.upstream_metadata.codex.primary_reset_at || key.upstream_metadata.codex.primary_reset_seconds"
+                            v-if="(key.upstream_metadata.codex.primary_reset_at || key.upstream_metadata.codex.primary_reset_seconds) && shouldStartCodexResetCountdown(key.upstream_metadata.codex.primary_used_percent)"
                             class="text-[9px] mt-0.5 tabular-nums"
                             :class="getResetCountdownClass(
                               key.upstream_metadata.codex.primary_reset_at,
                               key.upstream_metadata.codex.primary_reset_seconds,
-                              key.upstream_metadata.codex.updated_at
+                              key.upstream_metadata.codex.updated_at,
+                              key.upstream_metadata.codex.primary_used_percent
                             )"
                           >
                             {{ getResetCountdownText(
                               key.upstream_metadata.codex.primary_reset_at,
                               key.upstream_metadata.codex.primary_reset_seconds,
-                              key.upstream_metadata.codex.updated_at
+                              key.upstream_metadata.codex.updated_at,
+                              key.upstream_metadata.codex.primary_used_percent
                             ) }}
                           </div>
                         </div>
@@ -604,18 +606,21 @@
                             />
                           </div>
                           <div
+                            v-if="shouldStartCodexResetCountdown(key.upstream_metadata.codex.secondary_used_percent)"
                             class="text-[9px] mt-0.5 tabular-nums"
                             :class="getResetCountdownClass(
                               key.upstream_metadata.codex.secondary_reset_at,
                               key.upstream_metadata.codex.secondary_reset_seconds,
-                              key.upstream_metadata.codex.updated_at
+                              key.upstream_metadata.codex.updated_at,
+                              key.upstream_metadata.codex.secondary_used_percent
                             )"
                           >
                             <template v-if="key.upstream_metadata.codex.secondary_reset_at || key.upstream_metadata.codex.secondary_reset_seconds">
                               {{ getResetCountdownText(
                                 key.upstream_metadata.codex.secondary_reset_at,
                                 key.upstream_metadata.codex.secondary_reset_seconds,
-                                key.upstream_metadata.codex.updated_at
+                                key.upstream_metadata.codex.updated_at,
+                                key.upstream_metadata.codex.secondary_used_percent
                               ) }}
                             </template>
                             <template v-else>
@@ -2549,9 +2554,16 @@ function getAntigravityQuotaSummary(metadata: UpstreamMetadata | null | undefine
 function getResetCountdownText(
   resetAt: number | null | undefined,
   resetSecs: number | null | undefined,
-  updatedAt: number | null | undefined
+  updatedAt: number | null | undefined,
+  usedPercent: number | null | undefined
 ): string {
-  const status = getCodexResetCountdown(resetAt, resetSecs, updatedAt, countdownTick.value)
+  const status = getCodexResetCountdown(
+    resetAt,
+    resetSecs,
+    updatedAt,
+    countdownTick.value,
+    toCodexRemainingPercent(usedPercent)
+  )
   if (!status) return ''
   return status.isExpired ? status.text : `${status.text} 后重置`
 }
@@ -2559,13 +2571,33 @@ function getResetCountdownText(
 function getResetCountdownClass(
   resetAt: number | null | undefined,
   resetSecs: number | null | undefined,
-  updatedAt: number | null | undefined
+  updatedAt: number | null | undefined,
+  usedPercent: number | null | undefined
 ): string {
-  const status = getCodexResetCountdown(resetAt, resetSecs, updatedAt, countdownTick.value)
+  const status = getCodexResetCountdown(
+    resetAt,
+    resetSecs,
+    updatedAt,
+    countdownTick.value,
+    toCodexRemainingPercent(usedPercent)
+  )
   if (!status || status.isExpired) return 'text-muted-foreground/70'
   if (status.isCritical) return 'text-destructive font-medium animate-pulse'
   if (status.isUrgent) return 'text-amber-500 dark:text-amber-400'
   return 'text-muted-foreground/70'
+}
+
+function toCodexRemainingPercent(usedPercent: number | null | undefined): number | null {
+  const normalizedUsed = Number(usedPercent)
+  if (!Number.isFinite(normalizedUsed)) return null
+  const clampedUsed = Math.min(Math.max(normalizedUsed, 0), 100)
+  return Math.max(100 - clampedUsed, 0)
+}
+
+function shouldStartCodexResetCountdown(usedPercent: number | null | undefined): boolean {
+  const remainingPercent = toCodexRemainingPercent(usedPercent)
+  if (remainingPercent == null) return true
+  return remainingPercent < 100
 }
 
 // 格式化重置时间

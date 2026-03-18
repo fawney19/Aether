@@ -69,6 +69,14 @@ def _format_quota_value(value: float) -> str:
     return f"{value:.1f}"
 
 
+def _has_quota_consumption(used_percent_raw: Any) -> bool:
+    used = _to_float(used_percent_raw)
+    if used is None:
+        return False
+    clamped_used = max(0.0, min(used, 100.0))
+    return clamped_used > 1e-6
+
+
 def _format_reset_after(seconds_raw: Any) -> str | None:
     seconds = _to_float(seconds_raw)
     if seconds is None:
@@ -223,7 +231,11 @@ class CodexQuotaReader(PoolQuotaReader):
         primary_used = _to_float(self._data.get("primary_used_percent"))
         if primary_used is not None:
             part = f"周剩余 {_format_percent(100.0 - primary_used)}"
-            reset_text = _format_reset_after(self._data.get("primary_reset_seconds"))
+            reset_text = (
+                _format_reset_after(self._data.get("primary_reset_seconds"))
+                if _has_quota_consumption(primary_used)
+                else None
+            )
             if reset_text:
                 part = f"{part} ({reset_text})"
             parts.append(part)
@@ -231,7 +243,11 @@ class CodexQuotaReader(PoolQuotaReader):
         secondary_used = _to_float(self._data.get("secondary_used_percent"))
         if secondary_used is not None:
             part = f"5H剩余 {_format_percent(100.0 - secondary_used)}"
-            reset_text = _format_reset_after(self._data.get("secondary_reset_seconds"))
+            reset_text = (
+                _format_reset_after(self._data.get("secondary_reset_seconds"))
+                if _has_quota_consumption(secondary_used)
+                else None
+            )
             if reset_text:
                 part = f"{part} ({reset_text})"
             parts.append(part)
