@@ -2428,7 +2428,7 @@ function getQuotaProgressLabel(label: string): string {
 
 function getQuotaProgressCountdown(item: QuotaProgressItem) {
   if ((item.label !== '5H' && item.label !== '周') || item.resetAtSeconds == null) return null
-  return getCodexResetCountdown(item.resetAtSeconds, null, null, countdownTick.value)
+  return getCodexResetCountdown(item.resetAtSeconds, null, null, countdownTick.value, item.remainingPercent)
 }
 
 function getQuotaProgressCountdownText(item: QuotaProgressItem): string {
@@ -2438,6 +2438,9 @@ function getQuotaProgressCountdownText(item: QuotaProgressItem): string {
 }
 
 function getQuotaProgressTooltip(item: QuotaProgressItem): string {
+  if ((item.label === '5H' || item.label === '周') && item.remainingPercent >= 100) {
+    return ''
+  }
   const detail = item.detail?.trim() || ''
   const countdownText = getQuotaProgressCountdownText(item)
   if (countdownText) {

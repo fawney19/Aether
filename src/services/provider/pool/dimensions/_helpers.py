@@ -140,6 +140,13 @@ def _extract_codex_weekly_reset_seconds(metadata: dict[str, Any]) -> float | Non
     if not isinstance(codex, dict):
         return None
 
+    weekly_used_percent = safe_float(codex.get("primary_used_percent"))
+    if weekly_used_percent is not None:
+        clamped_used = max(0.0, min(weekly_used_percent, 100.0))
+        if clamped_used <= 1e-6:
+            # 周额度仍为满额时，不启用周窗口重置倒计时。
+            return None
+
     now = time.time()
 
     # 优先绝对时间戳，避免 reset_seconds 快照随时间漂移。

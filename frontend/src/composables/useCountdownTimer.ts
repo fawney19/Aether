@@ -84,14 +84,23 @@ export interface CodexResetStatus {
  * @param resetSecs 相对剩余秒数（用于 fallback）
  * @param updatedAt 元数据更新时间（Unix 秒）
  * @param _tick 响应式触发器（传入 tick.value 以触发响应式更新）
+ * @param remainingPercent 当前窗口剩余额度百分比（0-100，100 表示满额不启动倒计时）
  */
 export function getCodexResetCountdown(
   resetAt: number | null | undefined,
   resetSecs: number | null | undefined,
   updatedAt: number | null | undefined,
-  _tick: number
+  _tick: number,
+  remainingPercent?: number | null
 ): CodexResetStatus | null {
   void _tick
+
+  if (remainingPercent != null) {
+    const normalizedRemaining = Number(remainingPercent)
+    if (Number.isFinite(normalizedRemaining) && normalizedRemaining >= 100) {
+      return null
+    }
+  }
 
   const nowSec = Math.floor(Date.now() / 1000)
   let remaining: number
