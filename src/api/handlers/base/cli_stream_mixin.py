@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import codecs
-import copy
 import json
 import time
 from collections.abc import AsyncGenerator
@@ -19,10 +18,7 @@ from src.api.handlers.base.base_handler import (
     wait_for_with_disconnect_detection,
 )
 from src.api.handlers.base.parsers import get_parser_for_format
-from src.api.handlers.base.request_builder import (
-    get_cache_sensitive_protected_body_keys,
-    get_provider_auth,
-)
+from src.api.handlers.base.request_builder import get_provider_auth
 from src.api.handlers.base.stream_context import StreamContext
 from src.api.handlers.base.utils import (
     build_sse_headers,
@@ -42,17 +38,9 @@ from src.core.exceptions import (
 )
 from src.core.logger import logger
 from src.services.provider.behavior import get_provider_behavior
-from src.services.provider.prompt_cache import (
-    maybe_patch_request_with_prompt_cache_key,
-)
-from src.services.provider.stream_policy import (
-    enforce_stream_mode_for_upstream,
-    get_upstream_stream_policy,
-    resolve_upstream_is_stream,
-)
-from src.services.provider.transport import build_provider_url
 from src.services.scheduling.aware_scheduler import ProviderCandidate
 from src.services.system.config import SystemConfigService
+from src.services.task.request_state import MutableRequestBodyState
 from src.utils.sse_parser import SSEEventParser
 
 from .cli_sse_helpers import _format_converted_events_to_sse
@@ -96,9 +84,7 @@ class CliStreamMixin:
             client_content_encoding,
         )
 
-        # 可变请求体容器：允许 TaskService 在遇到 Thinking 签名错误时整流请求体后重试
-        # 结构: {"body": 实际请求体, "_rectified": 是否已整流, "_rectified_this_turn": 本轮是否整流}
-        request_body_ref: dict[str, Any] = {"body": copy.deepcopy(original_request_body)}
+        request_state = MutableRequestBodyState(original_request_body)
 
         # 使用子类实现的方法提取 model（不同 API 格式的 model 位置不同）
         # 注意：使用 original_request_body，因为整流只修改 messages，不影响 model 字段
@@ -144,7 +130,7 @@ class CliStreamMixin:
                 provider,
                 endpoint,
                 key,
-                request_body_ref["body"],  # 使用容器中的请求体
+                request_state.build_attempt_body(),
                 original_headers,
                 query_params,
                 candidate,
@@ -179,7 +165,7 @@ class CliStreamMixin:
                 is_stream=True,
                 capability_requirements=capability_requirements or None,
                 preferred_key_ids=preferred_key_ids or None,
-                request_body_ref=request_body_ref,
+                request_body_state=request_state,
                 request_headers=original_headers,
                 request_body=original_request_body,
                 # 预创建失败时，回退到 TaskService 侧创建，避免丢失 pending 状态。
@@ -220,7 +206,7 @@ class CliStreamMixin:
             if isinstance(scheduling_audit, dict):
                 ctx.scheduling_audit = scheduling_audit
             # 同步整流状态（如果请求体被整流过）
-            ctx.rectified = request_body_ref.get("_rectified", False)
+            ctx.rectified = request_state.is_rectified()
 
             # 创建后台任务记录统计
             background_tasks = BackgroundTasks()
@@ -267,7 +253,7 @@ class CliStreamMixin:
         provider: "Provider",
         endpoint: "ProviderEndpoint",
         key: "ProviderAPIKey",
-        original_request_body: dict[str, Any],
+        working_request_body: dict[str, Any],
         original_headers: dict[str, str],
         query_params: dict[str, str] | None = None,
         candidate: ProviderCandidate | None = None,
@@ -310,8 +296,8 @@ class CliStreamMixin:
                 provider_id=str(provider.id),
             )
 
-        # 应用模型映射到请求体（子类可覆盖此方法处理不同格式）
-        request_body = copy.deepcopy(original_request_body)
+        # `working_request_body` is already isolated per attempt.
+        request_body = working_request_body
         if mapped_model:
             ctx.mapped_model = mapped_model  # 保存映射后的模型名，用于 Usage 记录
             request_body = self.apply_mapped_model(request_body, mapped_model)
@@ -327,147 +313,32 @@ class CliStreamMixin:
         )
         ctx.needs_conversion = needs_conversion
 
-        provider_type = str(getattr(provider, "provider_type", "") or "").lower()
-        behavior = get_provider_behavior(
-            provider_type=provider_type,
-            endpoint_sig=provider_api_format,
-        )
-        envelope = behavior.envelope
-        target_variant = behavior.same_format_variant
-        # 跨格式转换也允许变体（Antigravity 需要保留/翻译 Claude thinking 块）
-        conversion_variant = behavior.cross_format_variant
-
-        # Upstream streaming policy (per-endpoint): may force upstream to sync/stream mode.
-        upstream_policy = get_upstream_stream_policy(
-            endpoint,
-            provider_type=provider_type,
-            endpoint_sig=provider_api_format,
-        )
-        upstream_is_stream = resolve_upstream_is_stream(
-            client_is_stream=True,
-            policy=upstream_policy,
-        )
-        # Envelope lifecycle: prepare_context (pre-wrap hook).
-        envelope_tls_profile: str | None = None
-        if envelope and hasattr(envelope, "prepare_context"):
-            envelope_tls_profile = envelope.prepare_context(
-                provider_config=getattr(provider, "config", None),
-                key_id=str(getattr(key, "id", "") or ""),
-                user_api_key_id=str(getattr(self.api_key, "id", "") or ""),
-                is_stream=upstream_is_stream,
-                provider_id=str(getattr(provider, "id", "") or ""),
-                key=key,
-            )
-
-        # 跨格式：先做请求体转换（失败触发 failover）
-        if needs_conversion and provider_api_format:
-            request_body, url_model = await self._convert_request_for_cross_format(
-                request_body,
-                client_api_format,
-                provider_api_format,
-                mapped_model,
-                ctx.model,
-                is_stream=upstream_is_stream,
-                target_variant=conversion_variant,
-                output_limit=candidate.output_limit if candidate else None,
-            )
-        else:
-            # 同格式：按原逻辑做轻量清理（子类可覆盖）
-            request_body = self.prepare_provider_request_body(request_body)
-            url_model = (
-                self.get_model_for_url(request_body, mapped_model) or mapped_model or ctx.model
-            )
-            # 同格式时也需要应用 target_variant 转换（如 Codex）
-            if target_variant and provider_api_format:
-                registry = get_format_converter_registry()
-                request_body = registry.convert_request(
-                    request_body,
-                    provider_api_format,
-                    provider_api_format,
-                    target_variant=target_variant,
-                )
-
-        # 模型感知的请求后处理（如图像生成模型移除不兼容字段）
-        request_body = self.finalize_provider_request(
-            request_body,
+        upstream_request = await self._build_upstream_request(
+            provider=provider,
+            endpoint=endpoint,
+            key=key,
+            request_body=request_body,
+            original_headers=original_headers,
+            query_params=query_params,
+            client_api_format=client_api_format,
+            provider_api_format=provider_api_format,
+            fallback_model=ctx.model,
             mapped_model=mapped_model,
-            provider_api_format=provider_api_format,
+            client_is_stream=True,
+            needs_conversion=needs_conversion,
+            output_limit=candidate.output_limit if candidate else None,
         )
-
-        # Force upstream stream/sync mode in request body (best-effort).
-        if provider_api_format:
-            enforce_stream_mode_for_upstream(
-                request_body,
-                provider_api_format=provider_api_format,
-                upstream_is_stream=upstream_is_stream,
-            )
-
-        request_body = maybe_patch_request_with_prompt_cache_key(
-            request_body,
-            provider_api_format=provider_api_format,
-            provider_type=provider_type,
-            base_url=getattr(endpoint, "base_url", None),
-            user_api_key_id=str(getattr(self.api_key, "id", "") or ""),
-            request_headers=original_headers,
-        )
-
-        # 获取认证信息（处理 Service Account 等异步认证场景）
-        auth_info = await get_provider_auth(endpoint, key)
-
-        # Provider envelope: wrap request after auth is available and before RequestBuilder.build().
-        if envelope:
-            request_body, url_model = envelope.wrap_request(
-                request_body,
-                model=url_model or ctx.model or "",
-                url_model=url_model,
-                decrypted_auth_config=auth_info.decrypted_auth_config if auth_info else None,
-            )
-            # Envelope lifecycle: post_wrap_request (post-wrap hook).
-            if hasattr(envelope, "post_wrap_request"):
-                await envelope.post_wrap_request(request_body)
-
-        # Provider envelope: extra upstream headers (e.g. dedicated User-Agent).
-        extra_headers: dict[str, str] = {}
-        if envelope:
-            extra_headers.update(envelope.extra_headers() or {})
-
-        # 使用 RequestBuilder 构建请求体和请求头
-        # 注意：mapped_model 已经应用到 request_body，这里不再传递
-        # 上游始终使用 header 认证，不跟随客户端的 query 方式
-        provider_payload, provider_headers = self._request_builder.build(
-            request_body,
-            original_headers,
-            endpoint,
-            key,
-            is_stream=upstream_is_stream,
-            extra_headers=extra_headers if extra_headers else None,
-            pre_computed_auth=auth_info.as_tuple() if auth_info else None,
-            envelope=envelope,
-            protected_body_keys=get_cache_sensitive_protected_body_keys(
-                provider_api_format,
-                provider_type=provider_type,
-            ),
-            provider_api_format=provider_api_format,
-        )
-        if upstream_is_stream:
-            from src.core.api_format.headers import set_accept_if_absent
-
-            set_accept_if_absent(provider_headers)
+        provider_headers = upstream_request.headers
+        provider_payload = upstream_request.payload
+        url = upstream_request.url
+        envelope = upstream_request.envelope
+        upstream_is_stream = upstream_request.upstream_is_stream
+        envelope_tls_profile = upstream_request.tls_profile
 
         # 保存发送给 Provider 的请求信息（用于调试和统计）
         ctx.provider_request_headers = provider_headers
         ctx.provider_request_body = provider_payload
-
-        url = build_provider_url(
-            endpoint,
-            query_params=query_params,
-            path_params={"model": url_model},
-            is_stream=upstream_is_stream,
-            key=key,
-            decrypted_auth_config=auth_info.decrypted_auth_config if auth_info else None,
-        )
-        # Capture the selected base_url from transport (used by some envelopes for failover).
-        ctx.selected_base_url = envelope.capture_selected_base_url() if envelope else None
+        ctx.selected_base_url = upstream_request.selected_base_url
 
         # 解析有效代理（Key 级别优先于 Provider 级别）
         from src.services.proxy_node.resolver import get_proxy_label as _gpl
@@ -676,7 +547,7 @@ class CliStreamMixin:
             f"  └─ [{self.request_id}] 发送流式请求: "
             f"Provider={provider.name}, Endpoint={endpoint.id[:8] if endpoint.id else 'N/A'}..., "
             f"Key=***{key.api_key[-4:] if key.api_key else 'N/A'}, "
-            f"原始模型={ctx.model}, 映射后={mapped_model or '无映射'}, URL模型={url_model}, "
+            f"原始模型={ctx.model}, 映射后={mapped_model or '无映射'}, URL模型={upstream_request.url_model}, "
             f"timeout={request_timeout}s, 代理={_proxy_label}"
         )
 

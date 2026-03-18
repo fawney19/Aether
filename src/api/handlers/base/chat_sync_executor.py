@@ -11,7 +11,6 @@ ChatSyncExecutor - 非流式请求执行器
 
 from __future__ import annotations
 
-import copy
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -47,6 +46,7 @@ from src.core.exceptions import (
     UpstreamClientException,
 )
 from src.core.logger import logger
+from src.services.task.request_state import MutableRequestBodyState
 
 if TYPE_CHECKING:
     from fastapi import Request
@@ -122,9 +122,7 @@ class ChatSyncExecutor:
             request_body=original_request_body,
         )
 
-        # 可变请求体容器：允许 TaskService 在遇到 Thinking 签名错误时整流请求体后重试
-        # 结构: {"body": 实际请求体, "_rectified": 是否已整流, "_rectified_this_turn": 本轮是否整流}
-        request_body_ref: dict[str, Any] = {"body": copy.deepcopy(original_request_body)}
+        request_state = MutableRequestBodyState(original_request_body)
 
         # 捕获的上下文变量
         ctx = self._ctx
@@ -143,7 +141,7 @@ class ChatSyncExecutor:
                 model=model,
                 api_format=api_format,
                 original_headers=original_headers,
-                request_body_ref=request_body_ref,
+                request_state=request_state,
                 query_params=query_params,
                 client_content_encoding=effective_client_content_encoding,
             )
@@ -175,7 +173,7 @@ class ChatSyncExecutor:
                 is_stream=False,
                 capability_requirements=capability_requirements or None,
                 preferred_key_ids=preferred_key_ids or None,
-                request_body_ref=request_body_ref,
+                request_body_state=request_state,
                 request_headers=original_headers,
                 request_body=original_request_body,
                 # 预创建失败时，回退到 TaskService 侧创建，避免丢失 pending 状态。
@@ -439,7 +437,7 @@ class ChatSyncExecutor:
         model: str,
         api_format: Any,
         original_headers: dict[str, Any],
-        request_body_ref: dict[str, Any],
+        request_state: MutableRequestBodyState,
         query_params: dict[str, str] | None = None,
         client_content_encoding: str | None = None,
     ) -> dict[str, Any]:
@@ -460,7 +458,7 @@ class ChatSyncExecutor:
             provider=provider,
             endpoint=endpoint,
             key=key,
-            original_request_body=request_body_ref["body"],
+            working_request_body=request_state.build_attempt_body(),
             original_headers=original_headers,
             client_api_format=client_api_format,
             provider_api_format=provider_api_format,
@@ -492,7 +490,6 @@ class ChatSyncExecutor:
             extra_headers=prep.extra_headers if prep.extra_headers else None,
             pre_computed_auth=auth_info.as_tuple() if auth_info else None,
             envelope=envelope,
-            protected_body_keys=prep.protected_body_keys,
             provider_api_format=prep.provider_api_format,
         )
         if upstream_is_stream:

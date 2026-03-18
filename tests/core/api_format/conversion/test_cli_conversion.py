@@ -504,7 +504,7 @@ def test_openai_cli_custom_tool_and_choice_convert_to_openai_chat() -> None:
 
     out = reg.convert_request(openai_cli_req, "openai:cli", "openai:chat")
 
-    assert list(out.keys())[:3] == ["model", "tools", "messages"]
+    assert list(out.keys())[:3] == ["model", "messages", "tools"]
     assert out["tools"] == [
         {
             "type": "custom",
@@ -583,7 +583,7 @@ def test_openai_chat_web_search_options_convert_to_openai_cli_tools() -> None:
 
     out = reg.convert_request(openai_chat_req, "openai:chat", "openai:cli")
 
-    assert list(out.keys())[:3] == ["model", "tools", "input"]
+    assert list(out.keys())[:3] == ["model", "input", "tools"]
     assert out["tools"] == [
         {
             "type": "web_search",
@@ -758,6 +758,22 @@ def test_openai_cli_request_tool_choice_flat_function_roundtrip_preserved() -> N
     out = normalizer.request_from_internal(internal)
 
     assert out["tool_choice"] == {"type": "function", "name": "read_file"}
+
+
+def test_openai_cli_request_from_internal_keeps_natural_insertion_order() -> None:
+    normalizer = OpenAICliNormalizer()
+    internal = normalizer.request_to_internal(
+        {
+            "model": "gpt-test",
+            "input": [],
+            "max_output_tokens": 32,
+            "tools": [{"type": "function", "name": "read_file"}],
+        }
+    )
+
+    out = normalizer.request_from_internal(internal)
+
+    assert list(out.keys())[:4] == ["model", "input", "max_output_tokens", "tools"]
 
 
 def test_claude_explicit_effort_preserved_in_openai_cli() -> None:

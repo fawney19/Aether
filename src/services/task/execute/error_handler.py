@@ -18,6 +18,7 @@ from src.core.logger import logger
 from src.core.provider_types import ProviderType
 from src.services.request.candidate import RequestCandidateService
 from src.services.task.execute.pool import TaskPoolOperationsService
+from src.services.task.request_state import RequestBodyState
 
 
 class TaskErrorOperationsService:
@@ -60,7 +61,7 @@ class TaskErrorOperationsService:
         elapsed_ms: int,
         captured_key_concurrent: int | None,
         serializable_extra_data: dict[str, Any],
-        request_body_ref: dict[str, Any] | None,
+        request_body_state: RequestBodyState | None,
     ) -> str:
         """Try to rectify thinking signature errors and request a retry."""
         from src.services.message.thinking_rectifier import ThinkingRectifier
@@ -79,7 +80,7 @@ class TaskErrorOperationsService:
             )
             raise converted_error
 
-        if request_body_ref is None:
+        if request_body_state is None:
             logger.warning("  [{}] Thinking 错误：无法获取请求体引用，终止重试", request_id)
             self.mark_thinking_error_failed(
                 candidate_record_id,
@@ -93,12 +94,8 @@ class TaskErrorOperationsService:
         provider_type_norm = str(provider_type or "").lower()
 
         # Rectification may have multiple stages (Antigravity only).
-        stage_raw = request_body_ref.get("_rectify_stage", 0)
-        try:
-            stage = int(stage_raw or 0)
-        except Exception:
-            stage = 0
-        if stage <= 0 and request_body_ref.get("_rectified", False):
+        stage = request_body_state.rectify_stage()
+        if stage <= 0 and request_body_state.is_rectified():
             stage = 1
 
         if stage >= 2 or (stage >= 1 and provider_type_norm != ProviderType.ANTIGRAVITY):
@@ -112,7 +109,7 @@ class TaskErrorOperationsService:
             )
             raise converted_error
 
-        request_body = request_body_ref.get("body", {})
+        request_body = request_body_state.current_body
 
         stage_label = "thinking_only"
         next_stage = 1
@@ -129,10 +126,7 @@ class TaskErrorOperationsService:
             next_stage = 2
 
         if modified:
-            request_body_ref["body"] = rectified_body
-            request_body_ref["_rectified"] = True
-            request_body_ref["_rectified_this_turn"] = True
-            request_body_ref["_rectify_stage"] = next_stage
+            request_body_state.mark_rectified(rectified_body, stage=next_stage)
 
             if provider_type_norm == ProviderType.ANTIGRAVITY:
                 try:
@@ -188,7 +182,7 @@ class TaskErrorOperationsService:
         attempt: int,
         max_attempts: int,
         error_classifier: Any,
-        request_body_ref: dict[str, Any] | None = None,
+        request_body_state: RequestBodyState | None = None,
     ) -> str:
         """
         Handle an execution error for a candidate.
@@ -426,7 +420,7 @@ class TaskErrorOperationsService:
                     elapsed_ms=elapsed_ms,
                     captured_key_concurrent=captured_key_concurrent,
                     serializable_extra_data=serializable_extra_data,
-                    request_body_ref=request_body_ref,
+                    request_body_state=request_body_state,
                 )
                 if action == "continue":
                     return "continue"

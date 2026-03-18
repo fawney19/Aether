@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from src.core.provider_types import ProviderType, normalize_provider_type
+from src.services.provider.adapters.codex.context import is_codex_compact_request
 from src.utils.url_utils import is_official_openai_api_url
 
 _OFFICIAL_OPENAI_PROMPT_CACHE_FORMATS: frozenset[str] = frozenset({"openai:chat", "openai:cli"})
@@ -105,7 +106,6 @@ def build_stable_codex_prompt_cache_key(
 
 def resolve_prompt_cache_key_scope(
     *,
-    request_body: dict[str, Any] | None = None,
     provider_api_format: str | None,
     provider_type: str | None = None,
     base_url: str | None = None,
@@ -115,14 +115,10 @@ def resolve_prompt_cache_key_scope(
     if fmt == "openai:compact":
         return None
 
-    # Belt-and-suspenders: finalize_provider_request 通常已 pop _aether_compact，
-    # 但 openai:compact format 检查在上方已拦截；此处防御非 compact 格式端点意外携带标记。
-    request = request_body if isinstance(request_body, dict) else {}
-    if bool(request.get("_aether_compact", False)):
-        return None
-
     pt = normalize_provider_type(provider_type)
     if pt == ProviderType.CODEX.value and fmt == "openai:cli":
+        if is_codex_compact_request(endpoint_sig=fmt):
+            return None
         return "codex"
 
     if fmt in _OFFICIAL_OPENAI_PROMPT_CACHE_FORMATS and is_official_openai_api_url(base_url):
@@ -145,7 +141,6 @@ def maybe_patch_request_with_prompt_cache_key(
         return request_body
 
     scope = resolve_prompt_cache_key_scope(
-        request_body=request_body,
         provider_api_format=provider_api_format,
         provider_type=provider_type,
         base_url=base_url,

@@ -14,6 +14,7 @@ from src.services.task.execute.state_transition import (
     SyncExecutionState,
     resolve_execution_error_transition,
 )
+from src.services.task.request_state import MutableRequestBodyState
 
 
 def _make_candidate() -> SimpleNamespace:
@@ -41,10 +42,11 @@ def test_classify_candidate_error_action(
 
 
 def test_resolve_execution_error_transition_retry_and_consume_rectify_flag() -> None:
-    request_body_ref = {"_rectified_this_turn": True}
+    request_body_state = MutableRequestBodyState({})
+    request_body_state.mark_rectified({}, stage=1)
     state = SyncExecutionState(
         candidate_record_map={},
-        request_body_ref=request_body_ref,
+        request_body_state=request_body_state,
     )
 
     transition = resolve_execution_error_transition(
@@ -56,13 +58,15 @@ def test_resolve_execution_error_transition_retry_and_consume_rectify_flag() -> 
 
     assert transition.failover_action == FailoverAction.RETRY
     assert transition.max_retries == 3
-    assert request_body_ref["_rectified_this_turn"] is False
+    assert request_body_state.consume_rectified_this_turn() is False
 
 
 def test_resolve_execution_error_transition_next_candidate() -> None:
+    request_body_state = MutableRequestBodyState({})
+    request_body_state.mark_rectified({}, stage=1)
     state = SyncExecutionState(
         candidate_record_map={},
-        request_body_ref={"_rectified_this_turn": True},
+        request_body_state=request_body_state,
     )
 
     transition = resolve_execution_error_transition(
@@ -74,13 +78,14 @@ def test_resolve_execution_error_transition_next_candidate() -> None:
 
     assert transition.failover_action == FailoverAction.CONTINUE
     assert transition.max_retries is None
-    assert state.request_body_ref == {"_rectified_this_turn": True}
+    assert state.request_body_state is request_body_state
+    assert request_body_state.consume_rectified_this_turn() is True
 
 
 def test_sync_execution_state_resolve_candidate_record_id_fallback() -> None:
     state = SyncExecutionState(
         candidate_record_map={(2, 0): "r20"},
-        request_body_ref=None,
+        request_body_state=None,
     )
 
     assert state.resolve_candidate_record_id(candidate_index=2, record_id=None) == "r20"
@@ -92,7 +97,7 @@ def test_sync_execution_state_raise_classified_error_uses_last_error() -> None:
     candidate = _make_candidate()
     state = SyncExecutionState(
         candidate_record_map={},
-        request_body_ref=None,
+        request_body_state=None,
         last_error=err,
         last_candidate=candidate,
     )
@@ -117,7 +122,7 @@ def test_sync_execution_state_raise_classified_error_uses_last_error() -> None:
 def test_sync_execution_state_raise_classified_error_fallback_error() -> None:
     state = SyncExecutionState(
         candidate_record_map={},
-        request_body_ref=None,
+        request_body_state=None,
     )
     failure_ops = MagicMock()
 

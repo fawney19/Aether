@@ -1,7 +1,8 @@
-"""Codex request context using contextvars.
+"""Codex request-scoped context.
 
-Similar to Kiro's context pattern, this bridges data from `CodexOAuthEnvelope.wrap_request()`
-(which receives the decrypted auth_config) to `extra_headers()` which is parameterless.
+Codex only needs a small amount of per-request runtime state that does not belong in
+the outbound payload itself. Today that state is the compact-mode flag used by the
+transport and upstream stream-policy layers.
 """
 
 from __future__ import annotations
@@ -12,15 +13,8 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class CodexRequestContext:
-    """Per-request context for the Codex adapter.
+    """Per-request context for the Codex adapter."""
 
-    This bridges data from `CodexOAuthEnvelope.wrap_request()` (which receives the
-    decrypted auth_config) to other layers that only expose parameterless hooks
-    (extra_headers).
-    """
-
-    account_id: str | None = None
-    user_api_key_id: str | None = None
     is_compact: bool = False
 
 
@@ -38,8 +32,24 @@ def get_codex_request_context() -> CodexRequestContext | None:
     return _codex_request_context.get()
 
 
+def is_codex_compact_request(*, endpoint_sig: str | None = None) -> bool:
+    """Return whether the current Codex request should use compact semantics.
+
+    Modern configurations use a dedicated ``openai:compact`` endpoint. Older ones may
+    still route compact traffic through ``openai:cli`` and rely on request-scoped
+    context instead.
+    """
+    normalized_sig = str(endpoint_sig or "").strip().lower()
+    if normalized_sig == "openai:compact":
+        return True
+
+    ctx = get_codex_request_context()
+    return bool(ctx and ctx.is_compact)
+
+
 __all__ = [
     "CodexRequestContext",
     "get_codex_request_context",
+    "is_codex_compact_request",
     "set_codex_request_context",
 ]

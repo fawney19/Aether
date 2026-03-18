@@ -46,21 +46,20 @@ class OpenAICliAdapter(CliAdapterBase):
         self._compact = compact
 
     async def handle(self, context: ApiRequestContext) -> Any:
-        """处理 CLI API 请求 -- compact 模式下注入标记并强制非流式"""
+        """处理 CLI API 请求。"""
         if self._compact:
-            body = await context.ensure_json_body_async()
-            body["_aether_compact"] = True
-            # compact 端点永远非流式
-            body.pop("stream", None)
-            # 预设 Codex compact 上下文 -- finalize_provider_request 在 envelope
-            # 之前运行，会清除 _aether_compact sentinel，所以在此处提前设置
-            # context var 供 Codex envelope 和 build_codex_url 读取
             from src.services.provider.adapters.codex.context import (
                 CodexRequestContext,
                 set_codex_request_context,
             )
 
+            # Keep compact routing state out of the request body. Transport/policy layers
+            # read this request-scoped flag directly when legacy compact fallback is needed.
             set_codex_request_context(CodexRequestContext(is_compact=True))
+
+            body = await context.ensure_json_body_async()
+            # compact 端点永远非流式
+            body.pop("stream", None)
         return await super().handle(context)
 
     @classmethod
@@ -109,63 +108,16 @@ class OpenAICliAdapter(CliAdapterBase):
         base_url: str | None = None,
         provider_type: str | None = None,
     ) -> dict[str, Any]:
-        """构建测试请求体（Codex 端点需要强制 stream=true 等特性）
-
-        provider_type 优先：仅当 provider_type 为 codex 时才应用 Codex 变体；
-        未传入 provider_type 时回退到 URL 模式匹配（兼容旧调用方）。
-        """
+        """构建测试请求体。"""
         from src.api.handlers.base.request_builder import build_test_request_body
 
-        is_codex = (
-            (provider_type or "").lower() == ProviderType.CODEX
-            if provider_type
-            else (bool(base_url) and is_codex_url(base_url))
-        )
-        target_variant = "codex" if is_codex else None
-        return build_test_request_body(
-            cls.FORMAT_ID,
-            request_data,
-            target_variant=target_variant,
-        )
+        del base_url, provider_type
+        return build_test_request_body(cls.FORMAT_ID, request_data)
 
     @classmethod
     def get_cli_user_agent(cls) -> str | None:
         """获取OpenAI CLI User-Agent"""
         return config.internal_user_agent_openai_cli
-
-    @classmethod
-    def get_cli_extra_headers(
-        cls, *, base_url: str | None = None, provider_type: str | None = None
-    ) -> dict[str, str]:
-        """
-        获取额外请求头
-
-        对于 Codex OAuth 端点，添加特定头部（缺少可能导致 Cloudflare 拦截）。
-        对于标准 OpenAI API 端点，仅添加 User-Agent。
-
-        provider_type 优先：仅当 provider_type 为 codex 时才添加 Codex 头部；
-        未传入 provider_type 时回退到 URL 模式匹配（兼容旧调用方）。
-        """
-        headers: dict[str, str] = {}
-
-        # User-Agent
-        cli_user_agent = cls.get_cli_user_agent()
-        if cli_user_agent:
-            headers["User-Agent"] = cli_user_agent
-
-        # 仅 Codex 端点添加特定头部
-        is_codex = (
-            (provider_type or "").lower() == ProviderType.CODEX
-            if provider_type
-            else (bool(base_url) and is_codex_url(base_url))
-        )
-        if is_codex:
-            # 与运行时路径保持一致：使用 Codex envelope 的 best-effort headers。
-            from src.services.provider.adapters.codex.envelope import codex_oauth_envelope
-
-            headers.update(codex_oauth_envelope.extra_headers() or {})
-
-        return headers
 
 
 __all__ = ["OpenAICliAdapter"]

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
     from src.api.handlers.base.base_handler import MessageTelemetry
+    from src.api.handlers.base.cli_request_mixin import CliUpstreamRequestResult
     from src.api.handlers.base.request_builder import RequestBuilder
     from src.api.handlers.base.response_parser import ResponseParser
     from src.api.handlers.base.stream_context import StreamContext
@@ -179,6 +180,24 @@ class CliHandlerProtocol(Protocol):
         target_variant: str | None = ...,
         output_limit: int | None = ...,
     ) -> tuple[dict[str, Any], str]: ...
+
+    async def _build_upstream_request(
+        self,
+        *,
+        provider: Any,
+        endpoint: Any,
+        key: Any,
+        request_body: dict[str, Any],
+        original_headers: dict[str, str],
+        query_params: dict[str, str] | None,
+        client_api_format: str,
+        provider_api_format: str,
+        fallback_model: str,
+        mapped_model: str | None,
+        client_is_stream: bool,
+        needs_conversion: bool = ...,
+        output_limit: int | None = ...,
+    ) -> CliUpstreamRequestResult: ...
 
     def _extract_response_metadata(
         self,

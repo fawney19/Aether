@@ -453,7 +453,7 @@ class OpenAINormalizer(FormatNormalizer):
                 if key in _CHAT_PASSTHROUGH_KEYS and key not in result and key not in _HANDLED_KEYS:
                     result[key] = value
 
-        return self._reorder_request_prefix_keys(result)
+        return result
 
     # =========================
     # Responses
@@ -1400,11 +1400,6 @@ class OpenAINormalizer(FormatNormalizer):
         parts = [seg.text for seg in instructions if seg.text]
         joined = "\n\n".join(parts)
         return joined or None
-
-    _REQUEST_PREFIX_KEYS = ("model", "tools", "messages")
-
-    def _reorder_request_prefix_keys(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._reorder_request_keys(payload, self._REQUEST_PREFIX_KEYS)
 
     def _openai_tools_to_internal(self, tools: Any) -> list[ToolDefinition] | None:
         if not tools or not isinstance(tools, list):

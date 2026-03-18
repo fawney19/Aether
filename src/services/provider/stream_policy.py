@@ -17,6 +17,7 @@ from typing import Any
 
 from src.core.api_format.metadata import resolve_endpoint_definition
 from src.core.provider_types import ProviderType
+from src.services.provider.adapters.codex.context import is_codex_compact_request
 
 
 class UpstreamStreamPolicy(str, Enum):
@@ -64,13 +65,7 @@ def get_upstream_stream_policy(
     is_codex_cli = pt == ProviderType.CODEX and sig == "openai:cli"
     is_codex_compact = pt == ProviderType.CODEX and sig == "openai:compact"
     if is_codex_cli:
-        try:
-            from src.services.provider.adapters.codex.context import get_codex_request_context
-
-            ctx = get_codex_request_context()
-            is_codex_compact = bool(ctx and ctx.is_compact)
-        except Exception:
-            is_codex_compact = False
+        is_codex_compact = is_codex_compact_request(endpoint_sig=sig)
 
     # Explicit config wins (unless upstream has a hard constraint).
     cfg = getattr(endpoint, "config", None)
@@ -142,16 +137,9 @@ def enforce_stream_mode_for_upstream(
         return request_body
 
     # Backward compatibility: Codex compact routed through openai:cli + context marker.
-    if provider_fmt == "openai:cli":
-        try:
-            from src.services.provider.adapters.codex.context import get_codex_request_context
-
-            ctx = get_codex_request_context()
-            if ctx and ctx.is_compact:
-                request_body.pop("stream", None)
-                return request_body
-        except Exception:
-            pass
+    if provider_fmt == "openai:cli" and is_codex_compact_request(endpoint_sig=provider_fmt):
+        request_body.pop("stream", None)
+        return request_body
 
     if provider_uses_stream:
         request_body["stream"] = bool(upstream_is_stream)

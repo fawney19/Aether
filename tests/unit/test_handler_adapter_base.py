@@ -2,7 +2,6 @@ from typing import Any
 
 import pytest
 
-from src.api.handlers.base.request_builder import get_cache_sensitive_protected_body_keys
 from src.api.handlers.claude.adapter import ClaudeChatAdapter
 from src.api.handlers.gemini.adapter import GeminiChatAdapter
 
@@ -30,7 +29,7 @@ def test_validate_test_base_url_trims_whitespace() -> None:
 
 
 @pytest.mark.asyncio
-async def test_claude_check_endpoint_passes_cache_sensitive_protected_keys_to_body_rules(
+async def test_claude_check_endpoint_passes_original_body_to_body_rules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.api.handlers.base import endpoint_checker as endpoint_checker_module
@@ -41,11 +40,9 @@ async def test_claude_check_endpoint_passes_cache_sensitive_protected_keys_to_bo
     def fake_apply_body_rules(
         body: dict[str, Any],
         body_rules: list[dict[str, Any]],
-        protected_keys: frozenset[str] | None = None,
         original_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         captured["body_rules"] = body_rules
-        captured["protected_keys"] = protected_keys
         captured["original_body"] = original_body
         return body
 
@@ -80,15 +77,13 @@ async def test_claude_check_endpoint_passes_cache_sensitive_protected_keys_to_bo
         body_rules=[{"action": "set", "path": "messages", "value": []}],
     )
 
-    assert captured["protected_keys"] == get_cache_sensitive_protected_body_keys(
-        ClaudeChatAdapter.FORMAT_ID
-    )
+    assert captured["original_body"] == captured["json_body"]
     assert result["status_code"] == 200
     assert result["json_body"] == captured["json_body"]
 
 
 @pytest.mark.asyncio
-async def test_gemini_check_endpoint_passes_alias_aware_protected_keys_to_body_rules(
+async def test_gemini_check_endpoint_passes_original_body_to_body_rules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.api.handlers.base import endpoint_checker as endpoint_checker_module
@@ -99,11 +94,9 @@ async def test_gemini_check_endpoint_passes_alias_aware_protected_keys_to_body_r
     def fake_apply_body_rules(
         body: dict[str, Any],
         body_rules: list[dict[str, Any]],
-        protected_keys: frozenset[str] | None = None,
         original_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         captured["body_rules"] = body_rules
-        captured["protected_keys"] = protected_keys
         captured["original_body"] = original_body
         return body
 
@@ -136,8 +129,6 @@ async def test_gemini_check_endpoint_passes_alias_aware_protected_keys_to_body_r
         body_rules=[{"action": "drop", "path": "toolConfig"}],
     )
 
-    protected_keys = captured["protected_keys"]
-    assert protected_keys == get_cache_sensitive_protected_body_keys(GeminiChatAdapter.FORMAT_ID)
-    assert {"systemInstruction", "toolConfig", "generationConfig"}.issubset(protected_keys)
+    assert captured["original_body"] == captured["json_body"]
     assert result["status_code"] == 200
     assert result["json_body"] == captured["json_body"]

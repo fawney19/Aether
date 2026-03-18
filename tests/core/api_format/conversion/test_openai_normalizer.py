@@ -237,6 +237,27 @@ def test_openai_request_preserves_empty_string_legacy_function_call_arguments() 
     assert out["messages"][1]["tool_calls"][0]["function"]["arguments"] == ""
 
 
+def test_openai_request_from_internal_keeps_natural_insertion_order() -> None:
+    n = OpenAINormalizer()
+
+    req = {
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": "weather?"}],
+        "max_tokens": 12,
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "get_weather", "parameters": {"type": "object"}},
+            }
+        ],
+    }
+
+    internal = n.request_to_internal(req)
+    out = n.request_from_internal(internal)
+
+    assert list(out.keys())[:4] == ["model", "messages", "max_tokens", "tools"]
+
+
 def test_openai_request_content_image_and_unknown_drop() -> None:
     n = OpenAINormalizer()
 

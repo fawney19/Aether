@@ -72,20 +72,6 @@ class OpenAICliMessageHandler(CliMessageHandlerBase):
         result["model"] = mapped_model
         return result
 
-    def finalize_provider_request(
-        self,
-        request_body: dict[str, Any],
-        *,
-        mapped_model: str | None,
-        provider_api_format: str | None,
-    ) -> dict[str, Any]:
-        # Strip internal sentinel before sending upstream (non-Codex providers
-        # don't have an envelope that removes it).
-        request_body.pop("_aether_compact", None)
-        return super().finalize_provider_request(
-            request_body, mapped_model=mapped_model, provider_api_format=provider_api_format
-        )
-
     def _process_event_data(
         self,
         ctx: StreamContext,

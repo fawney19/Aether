@@ -369,7 +369,6 @@ class HandlerAdapterBase(ApiAdapter):
         from src.api.handlers.base.request_builder import (
             apply_body_rules,
             evaluate_condition,
-            get_cache_sensitive_protected_body_keys,
         )
         from src.core.api_format.headers import HeaderBuilder
         from src.core.provider_types import ProviderType
@@ -514,10 +513,6 @@ class HandlerAdapterBase(ApiAdapter):
             body = apply_body_rules(
                 body,
                 body_rules,
-                protected_keys=get_cache_sensitive_protected_body_keys(
-                    cls.FORMAT_ID,
-                    provider_type=provider_type,
-                ),
                 original_body=body,
             )
 

@@ -76,8 +76,6 @@ from src.core.api_format.conversion.stream_events import (
 from src.core.api_format.conversion.stream_state import StreamState
 from src.core.logger import logger
 
-_OPENAI_CLI_REQUEST_PREFIX_KEYS = ("model", "instructions", "tools", "input")
-
 
 def _is_chat_completions_response(data: dict[str, Any]) -> bool:
     """检测数据是否为 OpenAI Chat Completions 格式（而非 Responses API 格式）。
@@ -101,18 +99,6 @@ def _get_openai_chat_normalizer() -> "FormatNormalizer | None":
     from src.core.api_format.conversion.registry import format_conversion_registry
 
     return format_conversion_registry.get_normalizer("openai:chat")
-
-
-def reorder_openai_cli_request_prefix_keys(payload: dict[str, Any]) -> dict[str, Any]:
-    """Keep the stable OpenAI Responses prefix ahead of the typically dynamic tail."""
-    ordered: dict[str, Any] = {}
-    for key in _OPENAI_CLI_REQUEST_PREFIX_KEYS:
-        if key in payload:
-            ordered[key] = payload[key]
-    for key, value in payload.items():
-        if key not in ordered:
-            ordered[key] = value
-    return ordered
 
 
 class OpenAICliNormalizer(FormatNormalizer):
@@ -146,13 +132,9 @@ class OpenAICliNormalizer(FormatNormalizer):
         request: dict[str, Any],
         variant: str,
     ) -> dict[str, Any] | None:
-        """Codex 同格式透传：做最小补丁并保持稳定的请求前缀顺序。"""
-        if variant.lower() != "codex":
-            return None
-        out: dict[str, Any] = dict(request)
-        # 内部路由标记：绝不能透传到上游。
-        out.pop("_aether_compact", None)
-        return reorder_openai_cli_request_prefix_keys(out)
+        """OpenAI CLI currently has no provider-specific same-format patching."""
+        del request, variant
+        return None
 
     def request_to_internal(self, request: dict[str, Any]) -> InternalRequest:
         model = str(request.get("model") or "")
@@ -268,7 +250,6 @@ class OpenAICliNormalizer(FormatNormalizer):
         openai_extra = internal.extra.get("openai", {})
         openai_cli_extra = internal.extra.get("openai_cli", {})
         request_flags = internal.extra.get("openai_cli_request_flags", {}) if internal.extra else {}
-        is_codex_variant = (target_variant or "").lower() == "codex"
         has_explicit_instructions = bool(
             isinstance(request_flags, dict) and request_flags.get("has_instructions")
         )
@@ -287,7 +268,6 @@ class OpenAICliNormalizer(FormatNormalizer):
         result: dict[str, Any] = {"model": internal.model}
         if instructions_text or has_explicit_instructions:
             result["instructions"] = instructions_text or ""
-        # Keep the stable system prefix ahead of the typically dynamic input payload.
         result["input"] = self._internal_messages_to_input(
             internal.messages,
             system_to_developer=False,
@@ -414,10 +394,7 @@ class OpenAICliNormalizer(FormatNormalizer):
                 ):
                     result[key] = value
 
-        if is_codex_variant and "store" not in result:
-            result["store"] = False
-
-        return self._reorder_request_prefix_keys(result)
+        return result
 
     # =========================
     # Responses
@@ -2142,9 +2119,6 @@ class OpenAICliNormalizer(FormatNormalizer):
         parts = [seg.text for seg in instructions if seg.text]
         joined = "\n\n".join(parts)
         return joined or None
-
-    def _reorder_request_prefix_keys(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return reorder_openai_cli_request_prefix_keys(payload)
 
     def _error_type_from_value(self, value: str) -> ErrorType:
         for t in ErrorType:

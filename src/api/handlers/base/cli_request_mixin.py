@@ -2,17 +2,42 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
 )
 
+from src.api.handlers.base.request_builder import get_provider_auth
 from src.api.handlers.base.utils import get_format_converter_registry
+from src.core.api_format.headers import set_accept_if_absent
 from src.core.logger import logger
+from src.services.provider.behavior import get_provider_behavior
+from src.services.provider.prompt_cache import maybe_patch_request_with_prompt_cache_key
+from src.services.provider.stream_policy import (
+    enforce_stream_mode_for_upstream,
+    get_upstream_stream_policy,
+    resolve_upstream_is_stream,
+)
+from src.services.provider.transport import build_provider_url
 
 if TYPE_CHECKING:
     from src.api.handlers.base.cli_protocol import CliHandlerProtocol
     from src.core.api_format import EndpointDefinition
+
+
+@dataclass(slots=True)
+class CliUpstreamRequestResult:
+    """Final outbound request artifacts for a selected Provider candidate."""
+
+    payload: dict[str, Any]
+    headers: dict[str, str]
+    url: str
+    url_model: str
+    envelope: Any
+    upstream_is_stream: bool
+    tls_profile: str | None = None
+    selected_base_url: str | None = None
 
 
 class CliRequestMixin:
@@ -165,6 +190,152 @@ class CliRequestMixin:
                 request_body["contents"] = compact_gemini_contents(contents)
 
         return request_body
+
+    async def _build_upstream_request(
+        self: CliHandlerProtocol,
+        *,
+        provider: Any,
+        endpoint: Any,
+        key: Any,
+        request_body: dict[str, Any],
+        original_headers: dict[str, str],
+        query_params: dict[str, str] | None,
+        client_api_format: str,
+        provider_api_format: str,
+        fallback_model: str,
+        mapped_model: str | None,
+        client_is_stream: bool,
+        needs_conversion: bool = False,
+        output_limit: int | None = None,
+    ) -> CliUpstreamRequestResult:
+        """Build the final outbound URL/body/headers for the selected upstream."""
+
+        provider_type = str(getattr(provider, "provider_type", "") or "").lower()
+        behavior = get_provider_behavior(
+            provider_type=provider_type,
+            endpoint_sig=provider_api_format,
+        )
+        envelope = behavior.envelope
+        target_variant = behavior.same_format_variant
+        conversion_variant = behavior.cross_format_variant
+
+        upstream_policy = get_upstream_stream_policy(
+            endpoint,
+            provider_type=provider_type,
+            endpoint_sig=provider_api_format,
+        )
+        upstream_is_stream = resolve_upstream_is_stream(
+            client_is_stream=client_is_stream,
+            policy=upstream_policy,
+        )
+
+        envelope_tls_profile: str | None = None
+        if envelope and hasattr(envelope, "prepare_context"):
+            envelope_tls_profile = envelope.prepare_context(
+                provider_config=getattr(provider, "config", None),
+                key_id=str(getattr(key, "id", "") or ""),
+                user_api_key_id=str(getattr(self.api_key, "id", "") or ""),
+                is_stream=upstream_is_stream,
+                provider_id=str(getattr(provider, "id", "") or ""),
+                key=key,
+            )
+
+        if needs_conversion and provider_api_format:
+            request_body, url_model = await self._convert_request_for_cross_format(
+                request_body,
+                client_api_format,
+                provider_api_format,
+                mapped_model,
+                fallback_model,
+                is_stream=upstream_is_stream,
+                target_variant=conversion_variant,
+                output_limit=output_limit,
+            )
+        else:
+            request_body = self.prepare_provider_request_body(request_body)
+            url_model = (
+                self.get_model_for_url(request_body, mapped_model) or mapped_model or fallback_model
+            )
+            if target_variant and provider_api_format:
+                registry = get_format_converter_registry()
+                request_body = registry.convert_request(
+                    request_body,
+                    provider_api_format,
+                    provider_api_format,
+                    target_variant=target_variant,
+                )
+
+        request_body = self.finalize_provider_request(
+            request_body,
+            mapped_model=mapped_model,
+            provider_api_format=provider_api_format,
+        )
+
+        if provider_api_format:
+            enforce_stream_mode_for_upstream(
+                request_body,
+                provider_api_format=provider_api_format,
+                upstream_is_stream=upstream_is_stream,
+            )
+
+        request_body = maybe_patch_request_with_prompt_cache_key(
+            request_body,
+            provider_api_format=provider_api_format,
+            provider_type=provider_type,
+            base_url=getattr(endpoint, "base_url", None),
+            user_api_key_id=str(getattr(self.api_key, "id", "") or ""),
+            request_headers=original_headers,
+        )
+
+        auth_info = await get_provider_auth(endpoint, key)
+        if envelope:
+            request_body, url_model = envelope.wrap_request(
+                request_body,
+                model=url_model or fallback_model or "",
+                url_model=url_model,
+                decrypted_auth_config=auth_info.decrypted_auth_config if auth_info else None,
+            )
+            if hasattr(envelope, "post_wrap_request"):
+                await envelope.post_wrap_request(request_body)
+
+        extra_headers: dict[str, str] = {}
+        if envelope:
+            extra_headers.update(envelope.extra_headers() or {})
+
+        provider_payload, provider_headers = self._request_builder.build(
+            request_body,
+            original_headers,
+            endpoint,
+            key,
+            is_stream=upstream_is_stream,
+            extra_headers=extra_headers if extra_headers else None,
+            pre_computed_auth=auth_info.as_tuple() if auth_info else None,
+            envelope=envelope,
+            provider_api_format=provider_api_format,
+        )
+        if upstream_is_stream:
+            set_accept_if_absent(provider_headers)
+
+        url = build_provider_url(
+            endpoint,
+            query_params=query_params,
+            path_params={"model": url_model},
+            is_stream=upstream_is_stream,
+            key=key,
+            decrypted_auth_config=auth_info.decrypted_auth_config if auth_info else None,
+        )
+        selected_base_url = envelope.capture_selected_base_url() if envelope else None
+
+        return CliUpstreamRequestResult(
+            payload=provider_payload,
+            headers=provider_headers,
+            url=str(url),
+            url_model=str(url_model or fallback_model or ""),
+            envelope=envelope,
+            upstream_is_stream=upstream_is_stream,
+            tls_profile=envelope_tls_profile,
+            selected_base_url=selected_base_url,
+        )
 
     @staticmethod
     def _get_format_metadata(format_id: str) -> "EndpointDefinition | None":

@@ -1,10 +1,9 @@
 """Codex provider plugin — 统一注册入口。
 
 将 Codex 对各通用 registry / capability registry 的注册集中在一个文件中：
-- Envelope (OAuth headers)
 - Transport Hook (URL 构建)
 - Auth Enricher (OAuth enrichment)
-- Provider Format Capability（格式变体 + 默认 body_rules）
+- Provider Format Capability（默认 body_rules）
 - Model Fetcher (fixed catalog — Codex has no /v1/models endpoint)
 
 新增 provider 时参照此文件创建对应的 plugin.py 即可。
@@ -46,11 +45,10 @@ def build_codex_url(
     """
     _ = is_stream  # Codex 不需要根据 stream 切换路径
 
-    from src.services.provider.adapters.codex.context import get_codex_request_context
-
-    ctx = get_codex_request_context()
     endpoint_sig = str(getattr(endpoint, "api_format", "") or "").strip().lower()
-    is_compact = bool((ctx.is_compact if ctx else False) or endpoint_sig == "openai:compact")
+    from src.services.provider.adapters.codex.context import is_codex_compact_request
+
+    is_compact = is_codex_compact_request(endpoint_sig=endpoint_sig)
 
     base = str(endpoint.base_url).rstrip("/")
     # 如果用户已在 base_url 中包含了 /responses，不要重复追加
@@ -163,20 +161,10 @@ async def enrich_codex(
 
 def register_all() -> None:
     """一次性注册 Codex 的所有 hooks 到各通用 registry。"""
-    from src.core.api_format.capabilities import (
-        register_provider_behavior_variant,
-        register_provider_default_body_rules,
-    )
+    from src.core.api_format.capabilities import register_provider_default_body_rules
     from src.core.provider_oauth_utils import register_auth_enricher
     from src.services.model.upstream_fetcher import UpstreamModelsFetcherRegistry
-    from src.services.provider.adapters.codex.envelope import codex_oauth_envelope
-    from src.services.provider.envelope import register_envelope
     from src.services.provider.transport import register_transport_hook
-
-    # Envelope
-    register_envelope("codex", "openai:cli", codex_oauth_envelope)
-    register_envelope("codex", "openai:compact", codex_oauth_envelope)
-    register_envelope("codex", "", codex_oauth_envelope)
 
     # Transport
     register_transport_hook("codex", "openai:cli", build_codex_url)
@@ -185,10 +173,9 @@ def register_all() -> None:
     # Auth
     register_auth_enricher("codex", enrich_codex)
 
-    # Provider Format Capability：格式变体 + 默认 body_rules
+    # Provider Format Capability：默认 body_rules
     from src.core.api_format.metadata import CODEX_DEFAULT_BODY_RULES
 
-    register_provider_behavior_variant("codex", same_format=True, cross_format=True)
     register_provider_default_body_rules("codex", "openai:cli", CODEX_DEFAULT_BODY_RULES)
 
     # Export: Codex uses the default export builder (strip null + temp fields)

@@ -2,7 +2,6 @@ from typing import Any
 
 from src.api.handlers.base.request_builder import (
     apply_body_rules,
-    get_cache_sensitive_protected_body_keys,
 )
 
 
@@ -37,17 +36,17 @@ class TestApplyBodyRulesNestedPaths:
         )
         assert result == {"old": {}, "new": {"path": "value"}}
 
-    def test_protected_top_level_key(self) -> None:
+    def test_top_level_keys_can_be_updated(self) -> None:
         body = {"model": "gpt-4", "extra": {"model": "ignored"}}
         result = apply_body_rules(
             body,
             [
-                {"action": "set", "path": "model.sub", "value": "x"},  # 应被忽略
-                {"action": "set", "path": "extra.model", "value": "y"},  # 应生效
+                {"action": "set", "path": "model", "value": "gpt-4.1"},
+                {"action": "set", "path": "extra.model", "value": "y"},
             ],
         )
-        assert result["model"] == "gpt-4"  # 顶层受保护，不变
-        assert result["extra"]["model"] == "y"  # extra 不受保护
+        assert result["model"] == "gpt-4.1"
+        assert result["extra"]["model"] == "y"
 
     def test_escaped_dot(self) -> None:
         body: dict[str, Any] = {}
@@ -185,14 +184,14 @@ class TestSetWithOriginalPlaceholder:
         )
         assert result == {"a": {"b": [{"content": "original"}]}}
 
-    def test_protected_field_ignored(self) -> None:
-        """受保护字段（model, stream）跳过"""
+    def test_original_placeholder_updates_top_level_field(self) -> None:
+        """顶层字段同样支持 {{$original}} 占位符更新"""
         body = {"model": "gpt-4", "other": "val"}
         result = apply_body_rules(
             body,
             [{"action": "set", "path": "model", "value": "{{$original}}_modified"}],
         )
-        assert result["model"] == "gpt-4"
+        assert result["model"] == "gpt-4_modified"
 
     def test_does_not_mutate_original(self) -> None:
         """不修改原始 body"""
@@ -1516,57 +1515,12 @@ class TestItemCondition:
         assert result["matched"] is True
 
 
-class TestProtectedBodyKeys:
-    def test_get_cache_sensitive_protected_body_keys_by_format(self) -> None:
-        assert get_cache_sensitive_protected_body_keys("openai:chat") == frozenset(
-            {"model", "stream", "messages", "tools", "tool_choice"}
-        )
-        assert get_cache_sensitive_protected_body_keys("openai:cli") == frozenset(
-            {
-                "model",
-                "stream",
-                "input",
-                "instructions",
-                "tools",
-                "tool_choice",
-                "prompt_cache_key",
-            }
-        )
-        assert get_cache_sensitive_protected_body_keys(
-            "openai:cli",
-            provider_type="codex",
-        ) == frozenset({"model", "stream", "prompt_cache_key"})
-        assert get_cache_sensitive_protected_body_keys(
-            "openai:compact",
-            provider_type="codex",
-        ) == frozenset({"model", "stream", "prompt_cache_key"})
-        assert get_cache_sensitive_protected_body_keys("claude:chat") == frozenset(
-            {"model", "stream", "messages", "system", "tools", "tool_choice"}
-        )
-        assert get_cache_sensitive_protected_body_keys("gemini:chat") == frozenset(
-            {
-                "model",
-                "stream",
-                "contents",
-                "system_instruction",
-                "systemInstruction",
-                "tools",
-                "tool_config",
-                "toolConfig",
-                "generation_config",
-                "generationConfig",
-            }
-        )
-
-    def test_codex_openai_cli_allows_body_rules_on_prompt_fields(self) -> None:
+class TestPromptFieldMutations:
+    def test_openai_cli_prompt_fields_can_be_updated(self) -> None:
         body = {
             "model": "gpt-5-codex",
             "input": [{"role": "user", "content": "hi"}],
         }
-        protected_keys = get_cache_sensitive_protected_body_keys(
-            "openai:cli",
-            provider_type="codex",
-        )
 
         result = apply_body_rules(
             body,
@@ -1575,14 +1529,13 @@ class TestProtectedBodyKeys:
                 {"action": "set", "path": "input[0].content", "value": "patched"},
                 {"action": "set", "path": "prompt_cache_key", "value": "blocked"},
             ],
-            protected_keys=protected_keys,
         )
 
         assert result["instructions"] == "You are GPT-5."
         assert result["input"][0]["content"] == "patched"
-        assert "prompt_cache_key" not in result
+        assert result["prompt_cache_key"] == "blocked"
 
-    def test_gemini_camelcase_alias_prompt_fields_are_protected(self) -> None:
+    def test_gemini_camelcase_alias_prompt_fields_can_be_updated(self) -> None:
         body = {
             "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
             "systemInstruction": {"parts": [{"text": "system"}]},
@@ -1590,7 +1543,6 @@ class TestProtectedBodyKeys:
             "generationConfig": {"temperature": 0.1},
             "metadata": {"safe": True},
         }
-        protected_keys = get_cache_sensitive_protected_body_keys("gemini:chat")
 
         result = apply_body_rules(
             body,
@@ -1607,24 +1559,26 @@ class TestProtectedBodyKeys:
                 },
                 {"action": "set", "path": "metadata.safe", "value": False},
             ],
-            protected_keys=protected_keys,
         )
 
-        assert result["contents"] == [{"role": "user", "parts": [{"text": "hi"}]}]
-        assert result["systemInstruction"] == {"parts": [{"text": "system"}]}
-        assert result["toolConfig"] == {"functionCallingConfig": {"mode": "AUTO"}}
-        assert result["generationConfig"] == {"temperature": 0.1}
-        assert "generation_config" not in result
+        assert result["contents"] == [
+            {"role": "user", "parts": [{"text": "preface"}]},
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {"role": "model", "parts": []},
+        ]
+        assert result["systemInstruction"] == {"parts": [{"text": "mutated"}]}
+        assert "toolConfig" not in result
+        assert "generationConfig" not in result
+        assert result["generation_config"] == {"temperature": 0.1}
         assert result["metadata"]["safe"] is False
 
-    def test_protected_prompt_fields_block_all_mutating_actions(self) -> None:
+    def test_openai_prompt_fields_allow_all_mutating_actions(self) -> None:
         body = {
             "messages": [{"role": "user", "content": "hi"}],
             "tools": [{"name": "ReadFile"}],
             "tool_choice": {"type": "function", "function": {"name": "ReadFile"}},
             "metadata": {"safe": True},
         }
-        protected_keys = get_cache_sensitive_protected_body_keys("openai:chat")
 
         result = apply_body_rules(
             body,
@@ -1652,11 +1606,13 @@ class TestProtectedBodyKeys:
                 {"action": "name_style", "path": "tools[*].name", "style": "snake_case"},
                 {"action": "set", "path": "metadata.safe", "value": False},
             ],
-            protected_keys=protected_keys,
         )
 
-        assert result["messages"] == [{"role": "user", "content": "hi"}]
-        assert result["tools"] == [{"name": "ReadFile"}]
-        assert result["tool_choice"] == {"type": "function", "function": {"name": "ReadFile"}}
-        assert "choice" not in result
+        assert result["messages"] == [
+            {"role": "system", "content": "x"},
+            {"role": "assistant", "content": "x"},
+        ]
+        assert "tools" not in result
+        assert "tool_choice" not in result
+        assert result["choice"] == {"type": "function", "function": {"name": "ReadFile"}}
         assert result["metadata"]["safe"] is False

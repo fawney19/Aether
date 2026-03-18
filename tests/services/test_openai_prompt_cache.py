@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from src.services.provider.adapters.codex.context import (
+    CodexRequestContext,
+    set_codex_request_context,
+)
 from src.services.provider.prompt_cache import (
     build_stable_codex_prompt_cache_key,
     build_stable_openai_prompt_cache_key,
@@ -103,7 +107,7 @@ def test_maybe_patch_request_with_prompt_cache_key_for_codex_openai_cli() -> Non
 
 
 def test_maybe_patch_request_with_prompt_cache_key_skips_official_compact() -> None:
-    req = {"model": "gpt-5", "input": [], "_aether_compact": True}
+    req = {"model": "gpt-5", "input": []}
 
     out = maybe_patch_request_with_prompt_cache_key(
         req,
@@ -117,16 +121,20 @@ def test_maybe_patch_request_with_prompt_cache_key_skips_official_compact() -> N
     assert "prompt_cache_key" not in out
 
 
-def test_maybe_patch_request_with_prompt_cache_key_skips_codex_compact_marker() -> None:
-    req = {"model": "gpt-5", "input": [], "_aether_compact": True}
+def test_maybe_patch_request_with_prompt_cache_key_skips_legacy_codex_compact_context() -> None:
+    req = {"model": "gpt-5", "input": []}
 
-    out = maybe_patch_request_with_prompt_cache_key(
-        req,
-        provider_api_format="openai:cli",
-        provider_type="codex",
-        base_url="https://chatgpt.com/backend-api/codex",
-        user_api_key_id="user-key-123",
-    )
+    try:
+        set_codex_request_context(CodexRequestContext(is_compact=True))
+        out = maybe_patch_request_with_prompt_cache_key(
+            req,
+            provider_api_format="openai:cli",
+            provider_type="codex",
+            base_url="https://chatgpt.com/backend-api/codex",
+            user_api_key_id="user-key-123",
+        )
+    finally:
+        set_codex_request_context(None)
 
     assert out is req
     assert "prompt_cache_key" not in out

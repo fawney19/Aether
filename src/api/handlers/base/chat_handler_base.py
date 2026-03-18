@@ -22,7 +22,6 @@ Chat Handler Base - Chat API 格式的通用基类
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Awaitable, Callable
@@ -47,7 +46,6 @@ from src.api.handlers.base.chat_error_utils import (
 from src.api.handlers.base.parsers import get_parser_for_format
 from src.api.handlers.base.request_builder import (
     PassthroughRequestBuilder,
-    get_cache_sensitive_protected_body_keys,
     get_provider_auth,
 )
 from src.api.handlers.base.response_parser import ResponseParser
@@ -95,6 +93,7 @@ from src.services.provider.transport import (
 )
 from src.services.scheduling.aware_scheduler import ProviderCandidate
 from src.services.system.config import SystemConfigService
+from src.services.task.request_state import MutableRequestBodyState
 
 
 @dataclass
@@ -106,7 +105,6 @@ class ProviderRequestResult:
     mapped_model: str | None
     envelope: Any  # ProviderEnvelope | None
     extra_headers: dict[str, str] = field(default_factory=dict)
-    protected_body_keys: frozenset[str] = field(default_factory=frozenset)
     upstream_is_stream: bool = True
     needs_conversion: bool = False
     provider_api_format: str = ""
@@ -498,9 +496,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
         )
         api_format = self.allowed_api_formats[0]
 
-        # 可变请求体容器：允许 TaskService 在遇到 Thinking 签名错误时整流请求体后重试
-        # 结构: {"body": 实际请求体, "_rectified": 是否已整流, "_rectified_this_turn": 本轮是否整流}
-        request_body_ref: dict[str, Any] = {"body": copy.deepcopy(original_request_body)}
+        request_state = MutableRequestBodyState(original_request_body)
 
         # 创建类型安全的流式上下文
         ctx = StreamContext(
@@ -544,7 +540,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 provider,
                 endpoint,
                 key,
-                request_body_ref["body"],  # 使用容器中的请求体
+                request_state.build_attempt_body(),
                 original_headers,
                 query_params,
                 candidate,
@@ -579,7 +575,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 is_stream=True,
                 capability_requirements=capability_requirements or None,
                 preferred_key_ids=preferred_key_ids or None,
-                request_body_ref=request_body_ref,
+                request_body_state=request_state,
                 request_headers=original_headers,
                 request_body=original_request_body,
                 # 预创建失败时，回退到 TaskService 侧创建，避免丢失 pending 状态。
@@ -616,7 +612,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             if isinstance(scheduling_audit, dict):
                 ctx.scheduling_audit = scheduling_audit
             # 同步整流状态（如果请求体被整流过）
-            ctx.rectified = request_body_ref.get("_rectified", False)
+            ctx.rectified = request_state.is_rectified()
 
             # 创建遥测记录器
             telemetry_recorder = StreamTelemetryRecorder(
@@ -696,7 +692,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
         provider: Provider,
         endpoint: ProviderEndpoint,
         key: ProviderAPIKey,
-        original_request_body: dict[str, Any],
+        working_request_body: dict[str, Any],
         original_headers: dict[str, str],
         client_api_format: str,
         provider_api_format: str,
@@ -725,8 +721,8 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 api_format=provider_api_format,
             )
 
-        # 应用模型映射到请求体
-        request_body = copy.deepcopy(original_request_body)
+        # `working_request_body` is already isolated per attempt.
+        request_body = working_request_body
         if mapped_model:
             request_body = self.apply_mapped_model(request_body, mapped_model)
 
@@ -789,7 +785,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
         else:
             # 同格式：按原逻辑做轻量清理（子类可覆盖以移除不需要的字段）
             request_body = self.prepare_provider_request_body(request_body)
-            # 同格式时也需要应用 target_variant 转换（如 Codex）
+            # 同格式 Provider 仍可能声明 target_variant
             if same_format_variant:
                 request_body = registry.convert_request(
                     request_body,
@@ -848,10 +844,6 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             mapped_model=mapped_model,
             envelope=envelope,
             extra_headers=extra_headers,
-            protected_body_keys=get_cache_sensitive_protected_body_keys(
-                provider_api_format,
-                provider_type=provider_type,
-            ),
             upstream_is_stream=upstream_is_stream,
             needs_conversion=needs_conversion,
             provider_api_format=provider_api_format,
@@ -867,7 +859,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
         provider: Provider,
         endpoint: ProviderEndpoint,
         key: ProviderAPIKey,
-        original_request_body: dict[str, Any],
+        working_request_body: dict[str, Any],
         original_headers: dict[str, str],
         query_params: dict[str, str] | None = None,
         candidate: ProviderCandidate | None = None,
@@ -901,7 +893,7 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             provider=provider,
             endpoint=endpoint,
             key=key,
-            original_request_body=original_request_body,
+            working_request_body=working_request_body,
             original_headers=original_headers,
             client_api_format=client_api_format,
             provider_api_format=provider_api_format,
@@ -932,7 +924,6 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             extra_headers=prep.extra_headers if prep.extra_headers else None,
             pre_computed_auth=auth_info.as_tuple() if auth_info else None,
             envelope=envelope,
-            protected_body_keys=prep.protected_body_keys,
             provider_api_format=prep.provider_api_format,
         )
         if upstream_is_stream:

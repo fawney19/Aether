@@ -10,8 +10,8 @@ from src.services.candidate.schema import CandidateKey
 from src.services.candidate.submit import SubmitOutcome
 from src.services.task.core.context import TaskMode
 from src.services.task.core.protocol import AttemptKind
-from src.services.task.service import pool_on_error
-from src.services.task.service import TaskService
+from src.services.task.request_state import MutableRequestBodyState
+from src.services.task.service import TaskService, pool_on_error
 
 
 @pytest.mark.asyncio
@@ -87,7 +87,7 @@ async def test_task_service_execute_sync_passes_request_headers_and_body() -> No
 
     request_headers = {"authorization": "Bearer test", "x-trace-id": "abc123"}
     request_body = {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]}
-    request_body_ref = {"body": request_body}
+    request_body_state = MutableRequestBodyState(request_body)
 
     result = await svc.execute(
         task_type="chat",
@@ -100,7 +100,7 @@ async def test_task_service_execute_sync_passes_request_headers_and_body() -> No
         is_stream=True,
         request_headers=request_headers,
         request_body=request_body,
-        request_body_ref=request_body_ref,
+        request_body_state=request_body_state,
     )
 
     assert result is sentinel_result
@@ -108,7 +108,7 @@ async def test_task_service_execute_sync_passes_request_headers_and_body() -> No
     kwargs = svc._sync_ops.execute_sync_unified.await_args.kwargs  # type: ignore[attr-defined, union-attr]
     assert kwargs["request_headers"] == request_headers
     assert kwargs["request_body"] == request_body
-    assert kwargs["request_body_ref"] == request_body_ref
+    assert kwargs["request_body_state"] is request_body_state
 
 
 @pytest.mark.asyncio

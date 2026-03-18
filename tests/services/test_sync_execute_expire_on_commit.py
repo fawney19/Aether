@@ -109,7 +109,7 @@ async def test_execute_sync_unified_temporarily_disables_expire_on_commit(
         is_stream=True,
         capability_requirements=None,
         preferred_key_ids=None,
-        request_body_ref=None,
+        request_body_state=None,
         request_headers=None,
         request_body=None,
     )

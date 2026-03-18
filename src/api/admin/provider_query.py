@@ -2179,6 +2179,7 @@ async def test_model_failover(
     from src.services.scheduling.scheduling_config import SchedulingConfig
     from src.services.task import TaskService
     from src.services.task.core.protocol import AttemptKind, AttemptResult
+    from src.services.task.request_state import MutableRequestBodyState
 
     provider = (
         db.query(Provider)
@@ -2363,7 +2364,7 @@ async def test_model_failover(
                 user_api_key=None,
                 is_stream=False,
                 capability_requirements=None,
-                request_body_ref={"body": dict(request_payload)},
+                request_body_state=MutableRequestBodyState(dict(request_payload)),
                 request_headers=None,
                 request_body=dict(request_payload),
                 affinity_key=f"provider-test:{provider.id}",

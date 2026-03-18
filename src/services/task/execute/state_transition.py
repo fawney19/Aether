@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from src.services.candidate.policy import FailoverAction
 from src.services.task.execute.exception_classification import CandidateErrorAction
+from src.services.task.request_state import RequestBodyState
 
 if TYPE_CHECKING:
     from src.services.task.execute.failure import TaskFailureOperationsService
@@ -26,10 +27,9 @@ class SyncExecutionState:
     """同步执行阶段状态容器（候选上下文 + 异常上下文）。"""
 
     candidate_record_map: dict[tuple[int, int], str]
-    request_body_ref: dict[str, Any] | None
+    request_body_state: RequestBodyState | None
     last_error: Exception | None = None
     last_candidate: Any | None = None
-    _rectify_flag_key: str = field(default="_rectified_this_turn", repr=False)
 
     def touch_candidate(self, candidate: Any) -> None:
         self.last_candidate = candidate
@@ -47,12 +47,10 @@ class SyncExecutionState:
     def consume_rectify_retry_extension(
         self, *, max_retries_for_candidate: int, retry_index: int
     ) -> int | None:
-        if not self.request_body_ref:
+        if not self.request_body_state:
             return None
-        if not self.request_body_ref.get(self._rectify_flag_key, False):
+        if not self.request_body_state.consume_rectified_this_turn():
             return None
-
-        self.request_body_ref[self._rectify_flag_key] = False
         return max(max_retries_for_candidate, retry_index + 2)
 
     def raise_classified_error(

@@ -296,15 +296,12 @@ class TestRequestPayloadSummary:
         summary = summarize_request_payload_shape(
             payload,
             provider_api_format="gemini:chat",
-            protected_body_keys=frozenset({"contents", "toolConfig"}),
             body_rules=[{"action": "drop", "path": "toolConfig"}],
         )
 
         assert summary["format"] == "gemini:chat"
         assert summary["contents_count"] == 1
         assert summary["message_count"] is None
-        assert summary["protected_body_keys_enabled"] is True
-        assert summary["protected_body_keys"] == ["contents", "toolConfig"]
         assert summary["body_rule_count"] == 1
         assert summary["top_level_keys"] == ["contents"]
 
@@ -319,7 +316,6 @@ class TestRequestPayloadSummary:
         summary = summarize_request_payload_shape(
             payload,
             provider_api_format="gemini:chat",
-            protected_body_keys=None,
             body_rules=None,
         )
 
@@ -330,7 +326,6 @@ class TestRequestPayloadSummary:
         assert summary["tool_count"] is None
         assert summary["format"] == "gemini:chat"
         assert summary["contents_count"] == 1
-        assert summary["protected_body_keys_enabled"] is False
         assert summary["body_rule_count"] == 0
         assert summary["top_level_keys"] == [
             "contents",

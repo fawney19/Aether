@@ -50,7 +50,6 @@ def summarize_request_payload_shape(
     payload: dict[str, Any],
     *,
     provider_api_format: str | None,
-    protected_body_keys: frozenset[str] | None,
     body_rules: Any,
 ) -> dict[str, Any]:
     """生成最终出站 payload 的结构化摘要，避免记录正文。"""
@@ -85,8 +84,6 @@ def summarize_request_payload_shape(
             k in payload for k in ("generation_config", "generationConfig")
         ),
         "has_prompt_cache_key": bool(str(payload.get("prompt_cache_key") or "").strip()),
-        "protected_body_keys_enabled": bool(protected_body_keys),
-        "protected_body_keys": sorted(protected_body_keys or ()),
         "body_rule_count": len(body_rules) if isinstance(body_rules, list) else 0,
     }
 
@@ -97,63 +94,6 @@ def summarize_request_payload_shape(
 
 # 兼容别名：历史代码使用 SENSITIVE_HEADERS 命名
 SENSITIVE_HEADERS: frozenset[str] = UPSTREAM_DROP_HEADERS
-
-# 请求体中受保护的字段（不能被 body_rules 修改）
-PROTECTED_BODY_FIELDS: frozenset[str] = frozenset(
-    {
-        "model",  # 模型名由系统管理
-        "stream",  # 流式标志由系统管理
-    }
-)
-
-# cache-sensitive 顶层字段：用于阻止 endpoint body_rules 在最终出站前
-# 二次改写 prompt-bearing 结构，破坏上游 prompt cache 一致性。
-_CACHE_SENSITIVE_BODY_FIELDS_BY_FORMAT: dict[str, frozenset[str]] = {
-    "openai:chat": frozenset({"messages", "tools", "tool_choice"}),
-    "openai:cli": frozenset({"input", "instructions", "tools", "tool_choice", "prompt_cache_key"}),
-    "openai:compact": frozenset(
-        {"input", "instructions", "tools", "tool_choice", "prompt_cache_key"}
-    ),
-    "claude:chat": frozenset({"messages", "system", "tools", "tool_choice"}),
-    "gemini:chat": frozenset(
-        {
-            "contents",
-            "system_instruction",
-            "systemInstruction",
-            "tools",
-            "tool_config",
-            "toolConfig",
-            "generation_config",
-            "generationConfig",
-        }
-    ),
-}
-
-# Provider 维度可覆盖默认 prompt-bearing 保护集合。
-# Codex OpenAI CLI/Compact 允许 endpoint body_rules 调整 instructions/input/tools/tool_choice，
-# 仅继续保护系统字段与 prompt_cache_key，避免"已保存但规则不生效"。
-_CODEX_PROTECTED: frozenset[str] = frozenset({"prompt_cache_key"})
-_CACHE_SENSITIVE_BODY_FIELDS_BY_PROVIDER_AND_FORMAT: dict[tuple[str, str], frozenset[str]] = {
-    ("codex", "openai:cli"): _CODEX_PROTECTED,
-    ("codex", "openai:compact"): _CODEX_PROTECTED,
-}
-
-
-def get_cache_sensitive_protected_body_keys(
-    provider_api_format: str | None,
-    *,
-    provider_type: str | None = None,
-) -> frozenset[str]:
-    """根据目标 Provider API 格式和 provider_type 返回需要保护的顶层请求字段。"""
-    fmt = str(provider_api_format or "").strip().lower()
-    pt = str(provider_type or "").strip().lower()
-    extra = _CACHE_SENSITIVE_BODY_FIELDS_BY_PROVIDER_AND_FORMAT.get((pt, fmt))
-    if extra is None:
-        extra = _CACHE_SENSITIVE_BODY_FIELDS_BY_FORMAT.get(fmt, frozenset())
-    if not extra:
-        return PROTECTED_BODY_FIELDS
-    return frozenset({*PROTECTED_BODY_FIELDS, *extra})
-
 
 # ==============================================================================
 # 测试请求常量与辅助函数
@@ -602,28 +542,17 @@ def _rename_nested_value(obj: dict[str, Any], from_path: str, to_path: str) -> b
     return True
 
 
-def _is_protected_path(parts: list[PathSegment], protected_lower: frozenset[str]) -> bool:
-    """检查路径的顶层 key 是否为受保护字段（int 索引不可能是受保护字段）"""
-    if not parts:
-        return False
-    first = parts[0]
-    return isinstance(first, str) and first.lower() in protected_lower
-
-
 def _extract_path(
     rule: dict[str, Any],
-    protected_lower: frozenset[str],
     key: str = "path",
 ) -> str | None:
-    """从规则中提取并校验 path 字段，返回 strip 后的路径或 None（无效/受保护时）。"""
+    """从规则中提取并校验 path 字段，返回 strip 后的路径或 None。"""
     raw = rule.get(key, "")
     if not isinstance(raw, str):
         return None
     path = raw.strip()
     parts = _parse_path(path)
     if not parts:
-        return None
-    if _is_protected_path(parts, protected_lower):
         return None
     return path
 
@@ -976,7 +905,6 @@ def evaluate_condition(
 def apply_body_rules(
     body: dict[str, Any],
     rules: list[dict[str, Any]],
-    protected_keys: frozenset[str] | None = None,
     original_body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
@@ -1008,7 +936,6 @@ def apply_body_rules(
     Args:
         body: 原始请求体
         rules: 规则列表
-        protected_keys: 受保护的字段（不能被 set/drop/rename 修改）
         original_body: 条件评估使用的原始请求体；未提供时回退到当前 body
 
     Returns:
@@ -1019,8 +946,6 @@ def apply_body_rules(
 
     # 深拷贝，避免修改原始数据（尤其是嵌套 dict/list）
     result = copy.deepcopy(body)
-    protected = protected_keys or PROTECTED_BODY_FIELDS
-    protected_lower = frozenset(str(k).lower() for k in protected)
 
     for rule in rules:
         if not isinstance(rule, dict):
@@ -1041,7 +966,7 @@ def apply_body_rules(
         action = action.strip().lower()
 
         if action == "set":
-            path = _extract_path(rule, protected_lower)
+            path = _extract_path(rule)
             if not path:
                 continue
             parts = _parse_path(path)
@@ -1055,7 +980,7 @@ def apply_body_rules(
                 _set_nested_value(result, target_path, value)
 
         elif action == "drop":
-            path = _extract_path(rule, protected_lower)
+            path = _extract_path(rule)
             if not path:
                 continue
             parts = _parse_path(path)
@@ -1085,12 +1010,6 @@ def apply_body_rules(
             if not from_parts or not to_parts:
                 continue
 
-            # 受保护字段只检查顶层 key
-            if _is_protected_path(from_parts, protected_lower) or _is_protected_path(
-                to_parts, protected_lower
-            ):
-                continue
-
             # rename 不支持通配符（语义不明确）
             if _has_wildcard(from_parts) or _has_wildcard(to_parts):
                 continue
@@ -1098,7 +1017,7 @@ def apply_body_rules(
             _rename_nested_value(result, from_path, to_path)
 
         elif action == "append":
-            path = _extract_path(rule, protected_lower)
+            path = _extract_path(rule)
             if not path:
                 continue
             parts = _parse_path(path)
@@ -1116,7 +1035,7 @@ def apply_body_rules(
                     target.append(rule.get("value"))
 
         elif action == "insert":
-            path = _extract_path(rule, protected_lower)
+            path = _extract_path(rule)
             if not path:
                 continue
             index = rule.get("index")
@@ -1129,7 +1048,7 @@ def apply_body_rules(
             target.insert(index, rule.get("value"))
 
         elif action == "regex_replace":
-            path = _extract_path(rule, protected_lower)
+            path = _extract_path(rule)
             if not path:
                 continue
             pattern = rule.get("pattern")
@@ -1167,7 +1086,7 @@ def apply_body_rules(
                     _set_nested_value(result, target_path, new_val)
 
         elif action == "name_style":
-            path = _extract_path(rule, protected_lower)
+            path = _extract_path(rule)
             if not path:
                 continue
             style = rule.get("style")
@@ -1237,7 +1156,6 @@ class RequestBuilder(ABC):
         extra_headers: dict[str, str] | None = None,
         pre_computed_auth: tuple[str, str] | None = None,
         envelope: ProviderEnvelope | None = None,
-        protected_body_keys: frozenset[str] | None = None,
         provider_api_format: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, str]]:
         """
@@ -1252,7 +1170,6 @@ class RequestBuilder(ABC):
             is_stream: 是否为流式请求
             extra_headers: 额外请求头
             pre_computed_auth: 预先计算的认证信息 (auth_header, auth_value)
-            protected_body_keys: body_rules 不允许修改的顶层请求字段
             provider_api_format: 运行时实际生效的 Provider API 格式，用于准确记录摘要日志
 
         Returns:
@@ -1270,7 +1187,6 @@ class RequestBuilder(ABC):
             payload = apply_body_rules(
                 payload,
                 body_rules,
-                protected_keys=protected_body_keys,
                 original_body=original_body,
             )
 
@@ -1280,7 +1196,6 @@ class RequestBuilder(ABC):
             summarize_request_payload_shape(
                 payload,
                 provider_api_format=effective_provider_api_format,
-                protected_body_keys=protected_body_keys,
                 body_rules=body_rules,
             ),
         )
