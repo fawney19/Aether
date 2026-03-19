@@ -127,3 +127,41 @@ async def test_handle_callback_allows_bind_state_without_device_id(
     parsed = urlparse(result.redirect_url)
     assert result.refresh_token is None
     assert parse_qs(parsed.query)["oauth_bound"] == ["GitHub"]
+
+
+@pytest.mark.asyncio
+async def test_handle_login_reloads_user_in_current_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = MagicMock()
+    config = SimpleNamespace(provider_type="github")
+    oauth_user = SimpleNamespace(id="oauth-user")
+    user = SimpleNamespace(
+        id="user-1",
+        email="user@example.com",
+        is_active=True,
+        is_deleted=False,
+    )
+    invalidate_cache = AsyncMock()
+
+    async def _fake_run_in_threadpool(func, provider_type, oauth_user_info):  # type: ignore[no-untyped-def]
+        assert func is OAuthService._handle_login_sync
+        assert provider_type == "github"
+        assert oauth_user_info is oauth_user
+        return "user-1"
+
+    monkeypatch.setattr(
+        "src.services.auth.oauth.service.run_in_threadpool",
+        _fake_run_in_threadpool,
+    )
+    monkeypatch.setattr(
+        "src.services.auth.oauth.service.UserCacheService.invalidate_user_cache",
+        invalidate_cache,
+    )
+
+    db.query.return_value.filter.return_value.first.return_value = user
+
+    result = await OAuthService._handle_login(db, config=config, oauth_user=oauth_user)
+
+    assert result is user
+    invalidate_cache.assert_awaited_once_with("user-1", "user@example.com")

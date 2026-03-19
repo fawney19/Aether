@@ -50,7 +50,9 @@ class OAuthService:
     """OAuth 核心业务服务（v1）。"""
 
     @staticmethod
-    def _handle_login_sync(provider_type: str, oauth_user: OAuthUserInfo) -> User:
+    def _handle_login_sync(provider_type: str, oauth_user: OAuthUserInfo) -> str:
+        # Return a scalar user_id instead of an ORM instance so commit/expunge
+        # state never leaks across the threadpool boundary.
         now = datetime.now(timezone.utc)
 
         with get_db_context() as db:
@@ -70,8 +72,8 @@ class OAuthService:
                 linked_user.last_login_at = now
                 existing_link.last_login_at = now
                 db.commit()
-                db.expunge(linked_user)
-                return linked_user
+                assert linked_user.id is not None
+                return linked_user.id
 
             enable_registration = SystemConfigService.get_config(
                 db, "enable_registration", default=False
@@ -181,13 +183,13 @@ class OAuthService:
                             existing_user.last_login_at = now
                             existing_link.last_login_at = now
                             db.commit()
-                            db.expunge(existing_user)
-                            return existing_user
+                            assert existing_user.id is not None
+                            return existing_user.id
                     raise OAuthFlowError("oauth_already_bound")
                 raise OAuthFlowError("provider_error", "link_create_failed")
 
-            db.expunge(user)
-            return user
+            assert user.id is not None
+            return user.id
 
     @staticmethod
     def _handle_bind_sync(
@@ -794,12 +796,16 @@ class OAuthService:
     async def _handle_login(
         db: Session, *, config: OAuthProvider, oauth_user: OAuthUserInfo
     ) -> User:
-        user = await run_in_threadpool(
+        # Reload the user in the current session to avoid using an expired,
+        # detached ORM instance produced inside the threadpool worker.
+        user_id = await run_in_threadpool(
             OAuthService._handle_login_sync,
             config.provider_type,
             oauth_user,
         )
-        assert user.id is not None
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user or not user.is_active or user.is_deleted:
+            raise OAuthFlowError("provider_error", "user_reload_failed")
         await UserCacheService.invalidate_user_cache(user.id, user.email)
         return user
 
