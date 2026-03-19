@@ -133,7 +133,7 @@ export function getCodexResetCountdown(
 
   let text: string
   if (days > 0) {
-    text = `${days}天 ${hours}:${pad(minutes)}:${pad(seconds)}`
+    text = `${days}d ${hours}:${pad(minutes)}:${pad(seconds)}`
   } else if (hours > 0) {
     text = `${hours}:${pad(minutes)}:${pad(seconds)}`
   } else {
