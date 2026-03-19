@@ -311,7 +311,14 @@ class CliSyncMixin:
             except httpx.HTTPStatusError as e:
                 error_body = ""
                 try:
-                    error_body = resp.text[:4000] if resp.text else ""
+                    if str(getattr(provider, "provider_type", "") or "").lower() == "kiro":
+                        from src.services.provider.adapters.kiro.error_enhancer import (
+                            extract_kiro_http_error_text,
+                        )
+
+                        error_body = await extract_kiro_http_error_text(resp)
+                    else:
+                        error_body = resp.text[:4000] if resp.text else ""
                 except Exception:
                     error_body = ""
                 e.upstream_response = error_body  # type: ignore[attr-defined]
@@ -583,8 +590,19 @@ class CliSyncMixin:
 
             raise
 
-    async def _extract_error_text(self, e: httpx.HTTPStatusError) -> str:
+    async def _extract_error_text(
+        self,
+        e: httpx.HTTPStatusError,
+        *,
+        provider_type: str | None = None,
+    ) -> str:
         """从 HTTP 错误中提取错误文本"""
+        if str(provider_type or "").lower() == "kiro":
+            from src.services.provider.adapters.kiro.error_enhancer import (
+                extract_kiro_http_error_text,
+            )
+
+            return await extract_kiro_http_error_text(e)
         try:
             if hasattr(e.response, "is_stream_consumed") and not e.response.is_stream_consumed:
                 error_bytes = await e.response.aread()

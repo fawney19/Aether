@@ -855,8 +855,6 @@ async def test_antigravity_refresher_success_resets_forbidden_flag(
 async def test_kiro_refresher_runtime_401_marks_key_invalid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.services.provider_keys.quota_refresh import kiro_refresher as module
-
     class _Banned(Exception):
         pass
 
@@ -881,7 +879,10 @@ async def test_kiro_refresher_runtime_401_marks_key_invalid(
         "src.services.proxy_node.resolver",
         {"resolve_effective_proxy": lambda provider_proxy, key_proxy: None},
     )
-    monkeypatch.setattr(module.crypto_service, "decrypt", lambda _v: "{}")
+    monkeypatch.setattr(
+        "src.services.provider_keys.quota_refresh.kiro_refresher.crypto_service.decrypt",
+        lambda _v: "{}",
+    )
 
     db = _FakeDB()
     key = SimpleNamespace(
@@ -919,8 +920,6 @@ async def test_kiro_refresher_runtime_401_marks_key_invalid(
 async def test_kiro_refresher_success_updates_metadata_and_auth_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.services.provider_keys.quota_refresh import kiro_refresher as module
-
     class _Banned(Exception):
         pass
 
@@ -945,8 +944,14 @@ async def test_kiro_refresher_success_updates_metadata_and_auth_config(
         "src.services.proxy_node.resolver",
         {"resolve_effective_proxy": lambda provider_proxy, key_proxy: None},
     )
-    monkeypatch.setattr(module.crypto_service, "decrypt", lambda _v: json.dumps({"seed": 1}))
-    monkeypatch.setattr(module.crypto_service, "encrypt", lambda raw: f"ENC:{raw}")
+    monkeypatch.setattr(
+        "src.services.provider_keys.quota_refresh.kiro_refresher.crypto_service.decrypt",
+        lambda _v: json.dumps({"seed": 1}),
+    )
+    monkeypatch.setattr(
+        "src.services.provider_keys.quota_refresh.kiro_refresher.crypto_service.encrypt",
+        lambda raw: f"ENC:{raw}",
+    )
 
     key = SimpleNamespace(
         id="k1",

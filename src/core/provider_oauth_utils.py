@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import random
 from typing import Any, Awaitable, Callable
@@ -15,9 +16,7 @@ from src.core.provider_types import ProviderType
 
 _ANTHROPIC_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
 _GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json"
-_OPENAI_ACCOUNTS_CHECK_URL = (
-    "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"
-)
+_OPENAI_ACCOUNTS_CHECK_URL = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"
 
 
 def _coerce_proxy_url(proxy_config: dict[str, Any] | None) -> str | None:
@@ -58,15 +57,11 @@ def _inject_auth_into_url(url: str, username: str, password: str | None = None) 
         if parsed.port:
             host_part = f"{host_part}:{parsed.port}"
         auth_part = (
-            f"{encoded_username}:{encoded_password}"
-            if encoded_password
-            else encoded_username
+            f"{encoded_username}:{encoded_password}" if encoded_password else encoded_username
         )
         netloc = f"{auth_part}@{host_part}"
 
-        return urlunsplit(
-            (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
-        )
+        return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
     except Exception:
         return url
 
@@ -112,6 +107,15 @@ def _format_exc_chain(e: BaseException) -> str:
         nxt = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
         cur = nxt if isinstance(nxt, BaseException) else None
     return " <- ".join(parts)
+
+
+def _load_optional_attr(module_name: str, attr_name: str) -> Any | None:
+    """按需加载跨层 helper，避免 core 层产生静态 services import。"""
+    try:
+        module = importlib.import_module(module_name)
+    except Exception:
+        return None
+    return getattr(module, attr_name, None)
 
 
 async def _httpx_post(
@@ -501,9 +505,12 @@ async def fetch_openai_account_name(
     proxy_url = _coerce_proxy_url(proxy_config)
     if not proxy_url and proxy_config:
         try:
-            from src.services.proxy_node.resolver import build_proxy_url_async
-
-            proxy_url = await build_proxy_url_async(proxy_config)
+            build_proxy_url_async = _load_optional_attr(
+                "src.services.proxy_node.resolver",
+                "build_proxy_url_async",
+            )
+            if callable(build_proxy_url_async):
+                proxy_url = await build_proxy_url_async(proxy_config)
         except Exception:
             proxy_url = None
 
@@ -527,9 +534,7 @@ async def fetch_openai_account_name(
             }
             for attempt in range(3):
                 if attempt:
-                    await asyncio.sleep(
-                        [1.0, 2.0][attempt - 1] + random.uniform(0.5, 1.5)
-                    )
+                    await asyncio.sleep([1.0, 2.0][attempt - 1] + random.uniform(0.5, 1.5))
                 resp = await session.get(_OPENAI_ACCOUNTS_CHECK_URL, headers=headers)
                 if 200 <= resp.status_code < 300:
                     return _extract_openai_account_name(resp.json(), account_id)
@@ -638,10 +643,14 @@ async def enrich_auth_config(
     为支持按需 bootstrap，这里会尝试按 provider_type 触发插件注册。
     """
     from src.core.provider_types import normalize_provider_type
-    from src.services.provider.envelope import ensure_providers_bootstrapped
 
     pt = normalize_provider_type(provider_type)
-    ensure_providers_bootstrapped(provider_types=[pt] if pt else None)
+    ensure_providers_bootstrapped = _load_optional_attr(
+        "src.services.provider.envelope",
+        "ensure_providers_bootstrapped",
+    )
+    if callable(ensure_providers_bootstrapped):
+        ensure_providers_bootstrapped(provider_types=[pt] if pt else None)
     enricher = _auth_enrichers.get(pt)
     if enricher:
         return await enricher(auth_config, token_response, access_token, proxy_config)

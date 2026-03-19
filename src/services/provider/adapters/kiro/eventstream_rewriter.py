@@ -19,6 +19,7 @@ from typing import Any
 
 from src.core.logger import logger
 from src.services.provider.adapters.kiro.constants import CONTEXT_WINDOW_TOKENS
+from src.services.provider.adapters.kiro.error_enhancer import build_kiro_network_diagnostic
 from src.services.provider.adapters.kiro.parser.decoder import EventStreamDecoder
 
 # Safety limit for thinking_buffer to prevent memory exhaustion from
@@ -580,6 +581,25 @@ async def rewrite_eventstream_to_sse(
                     )
                     if upstream_msg:
                         error_message = f"Kiro API error: {upstream_msg}"
+            except Exception:
+                pass
+            try:
+                from src.services.provider.adapters.kiro.context import get_kiro_request_context
+
+                kiro_ctx = get_kiro_request_context()
+                diag = build_kiro_network_diagnostic(
+                    http_status=getattr(kiro_ctx, "last_http_status", None) if kiro_ctx else None,
+                    http_category=(
+                        getattr(kiro_ctx, "last_http_error_category", None) if kiro_ctx else None
+                    ),
+                    connection_summary=(
+                        getattr(kiro_ctx, "last_connection_error_summary", None)
+                        if kiro_ctx
+                        else None
+                    ),
+                )
+                if diag:
+                    error_message = f"{error_message} | {diag}"
             except Exception:
                 pass
             yield _sse_data_bytes(

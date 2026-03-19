@@ -1052,7 +1052,14 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                     except httpx.HTTPStatusError as e2:
                         error_body = ""
                         try:
-                            error_body = resp.text[:4000] if resp.text else ""
+                            if str(getattr(provider, "provider_type", "") or "").lower() == "kiro":
+                                from src.services.provider.adapters.kiro.error_enhancer import (
+                                    extract_kiro_http_error_text,
+                                )
+
+                                error_body = await extract_kiro_http_error_text(resp)
+                            else:
+                                error_body = resp.text[:4000] if resp.text else ""
                         except Exception:
                             error_body = ""
                         e2.upstream_response = error_body  # type: ignore[attr-defined]
@@ -1060,7 +1067,14 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
                 else:
                     error_body = ""
                     try:
-                        error_body = resp.text[:4000] if resp.text else ""
+                        if str(getattr(provider, "provider_type", "") or "").lower() == "kiro":
+                            from src.services.provider.adapters.kiro.error_enhancer import (
+                                extract_kiro_http_error_text,
+                            )
+
+                            error_body = await extract_kiro_http_error_text(resp)
+                        else:
+                            error_body = resp.text[:4000] if resp.text else ""
                     except Exception:
                         error_body = ""
                     e.upstream_response = error_body  # type: ignore[attr-defined]
@@ -1325,7 +1339,10 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
 
                 from src.api.handlers.base.chat_sync_executor import ChatSyncExecutor
 
-                error_text = await ChatSyncExecutor(self)._extract_error_text(e)
+                error_text = await ChatSyncExecutor(self)._extract_error_text(
+                    e,
+                    provider_type=str(getattr(provider, "provider_type", "") or ""),
+                )
 
                 try:
                     if response_ctx is not None:

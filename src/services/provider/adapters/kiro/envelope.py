@@ -12,26 +12,20 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.core.logger import logger
 from src.services.provider.adapters.kiro.context import KiroRequestContext, set_kiro_request_context
-from src.services.provider.adapters.kiro.converter import (
-    convert_claude_messages_to_conversation_state,
+from src.services.provider.adapters.kiro.error_enhancer import (
+    classify_kiro_connection_error,
+    classify_kiro_http_status,
+    summarize_kiro_connection_error,
 )
 from src.services.provider.adapters.kiro.headers import build_generate_assistant_headers
 from src.services.provider.adapters.kiro.models.credentials import KiroAuthConfig
-from src.services.provider.adapters.kiro.token_manager import generate_machine_id
-
-
-def _resolve_region(cfg: KiroAuthConfig) -> str:
-    """解析 API 服务端点的 region（q.{region}.amazonaws.com）。"""
-    return cfg.effective_api_region()
-
-
-def _is_thinking_enabled(request_body: dict[str, Any]) -> bool:
-    thinking = request_body.get("thinking")
-    if not isinstance(thinking, dict):
-        return False
-    ttype = str(thinking.get("type") or "").strip().lower()
-    return ttype in {"enabled", "adaptive"}
+from src.services.provider.adapters.kiro.request import (
+    build_kiro_request_context,
+    build_kiro_request_payload,
+)
+from src.services.provider.request_context import get_selected_base_url
 
 
 class KiroEnvelope:
@@ -63,33 +57,12 @@ class KiroEnvelope:
         decrypted_auth_config: dict[str, Any] | None,
     ) -> tuple[dict[str, Any], str | None]:
         cfg = KiroAuthConfig.from_dict(decrypted_auth_config or {})
-
-        region = _resolve_region(cfg)
-        machine_id = generate_machine_id(cfg)
-
-        thinking_enabled = _is_thinking_enabled(request_body)
-
-        set_kiro_request_context(
-            KiroRequestContext(
-                region=region,
-                machine_id=machine_id,
-                kiro_version=cfg.kiro_version,
-                system_version=cfg.system_version,
-                node_version=cfg.node_version,
-                thinking_enabled=thinking_enabled,
-            )
-        )
-
-        conversation_state = convert_claude_messages_to_conversation_state(
+        set_kiro_request_context(build_kiro_request_context(request_body, cfg=cfg))
+        wrapped = build_kiro_request_payload(
             request_body,
             model=model,
+            cfg=cfg,
         )
-
-        wrapped: dict[str, Any] = {
-            "conversationState": conversation_state,
-        }
-        if isinstance(cfg.profile_arn, str) and cfg.profile_arn.strip():
-            wrapped["profileArn"] = cfg.profile_arn.strip()
 
         return wrapped, url_model
 
@@ -100,13 +73,33 @@ class KiroEnvelope:
         return
 
     def capture_selected_base_url(self) -> str | None:
-        return None
+        return get_selected_base_url()
 
-    def on_http_status(self, *, base_url: str | None, status_code: int) -> None:  # noqa: ARG002
-        return
+    def on_http_status(self, *, base_url: str | None, status_code: int) -> None:
+        from src.services.provider.adapters.kiro.context import update_kiro_http_status
 
-    def on_connection_error(self, *, base_url: str | None, exc: Exception) -> None:  # noqa: ARG002
-        return
+        category = classify_kiro_http_status(status_code)
+        update_kiro_http_status(status_code=status_code, category=category)
+        if status_code >= 400:
+            logger.warning(
+                "kiro upstream http status: status={}, category={}, base_url={}",
+                status_code,
+                category,
+                base_url or "-",
+            )
+
+    def on_connection_error(self, *, base_url: str | None, exc: Exception) -> None:
+        from src.services.provider.adapters.kiro.context import update_kiro_connection_error
+
+        category = classify_kiro_connection_error(exc)
+        summary = summarize_kiro_connection_error(exc)
+        update_kiro_connection_error(category=category, summary=summary)
+        logger.warning(
+            "kiro upstream connection error: category={}, base_url={}, error={}",
+            category,
+            base_url or "-",
+            summary,
+        )
 
     def force_stream_rewrite(self) -> bool:
         # Kiro streaming is binary AWS Event Stream and must be rewritten.

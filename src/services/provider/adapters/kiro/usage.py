@@ -21,6 +21,7 @@ from src.services.provider.adapters.kiro.models.usage_limits import (
     calculate_current_usage,
     calculate_total_usage_limit,
 )
+from src.services.provider.adapters.kiro.request import get_profile_arn_for_payload
 from src.services.provider.adapters.kiro.token_manager import (
     generate_machine_id,
     is_token_expired,
@@ -89,7 +90,7 @@ async def fetch_kiro_usage_limits(
     # 构建 URL（添加 isEmailRequired=true 获取邮箱）
     url = f"https://{host}/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true"
 
-    profile_arn = effective_cfg.profile_arn
+    profile_arn = get_profile_arn_for_payload(effective_cfg)
     if profile_arn:
         from urllib.parse import quote
 

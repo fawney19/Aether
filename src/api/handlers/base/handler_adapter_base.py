@@ -380,22 +380,21 @@ class HandlerAdapterBase(ApiAdapter):
         is_kiro = provider_type == ProviderType.KIRO
         is_oauth = auth_type == "oauth"
         vertex_auth_info: Any | None = None
+        kiro_cfg: Any | None = None
+
+        if is_kiro:
+            from src.services.provider.adapters.kiro.models.credentials import KiroAuthConfig
+
+            kiro_cfg = KiroAuthConfig.from_dict(decrypted_auth_config or {})
 
         # ---- URL ----
         if is_kiro:
-            from src.services.provider.adapters.kiro.constants import (
-                KIRO_GENERATE_ASSISTANT_PATH,
+            from src.services.provider.adapters.kiro.request import (
+                build_kiro_generate_assistant_url,
             )
-            from src.services.provider.adapters.kiro.models.credentials import KiroAuthConfig
 
-            _kiro_cfg = KiroAuthConfig.from_dict(decrypted_auth_config or {})
-            region = _kiro_cfg.effective_api_region()
-            effective_base_url = (
-                validated_base_url.replace("{region}", region)
-                if "{region}" in validated_base_url
-                else validated_base_url
-            )
-            url = f"{str(effective_base_url).rstrip('/')}{KIRO_GENERATE_ASSISTANT_PATH}"
+            assert kiro_cfg is not None
+            url = build_kiro_generate_assistant_url(validated_base_url, cfg=kiro_cfg)
         elif is_antigravity:
             from src.services.provider.adapters.antigravity.constants import (
                 V1INTERNAL_PATH_TEMPLATE,
@@ -463,22 +462,14 @@ class HandlerAdapterBase(ApiAdapter):
             merged_extra.update(get_v1internal_extra_headers())
 
         if is_kiro:
-            from src.services.provider.adapters.kiro.headers import (
-                build_generate_assistant_headers,
+            from src.services.provider.adapters.kiro.request import (
+                build_kiro_request_headers,
             )
-            from src.services.provider.adapters.kiro.models.credentials import KiroAuthConfig
-            from src.services.provider.adapters.kiro.token_manager import generate_machine_id
 
-            kiro_cfg = KiroAuthConfig.from_dict(decrypted_auth_config or {})
-            region = kiro_cfg.effective_api_region()
-            machine_id = generate_machine_id(kiro_cfg)
-            kiro_headers = build_generate_assistant_headers(
-                host=f"q.{region}.amazonaws.com",
+            assert kiro_cfg is not None
+            kiro_headers = build_kiro_request_headers(
+                kiro_cfg,
                 access_token=api_key,
-                machine_id=machine_id,
-                kiro_version=kiro_cfg.kiro_version,
-                system_version=kiro_cfg.system_version,
-                node_version=kiro_cfg.node_version,
             )
             merged_extra.update(kiro_headers)
 
@@ -540,18 +531,17 @@ class HandlerAdapterBase(ApiAdapter):
             )
 
         if is_kiro:
-            from src.services.provider.adapters.kiro.converter import (
-                convert_claude_messages_to_conversation_state,
+            from src.services.provider.adapters.kiro.request import (
+                build_kiro_request_payload,
             )
 
+            assert kiro_cfg is not None
             effective_model = model_name or request_data.get("model", "")
-            conversation_state = convert_claude_messages_to_conversation_state(
+            body = build_kiro_request_payload(
                 body,
                 model=effective_model,
+                cfg=kiro_cfg,
             )
-            body = {"conversationState": conversation_state}
-            if isinstance(kiro_cfg.profile_arn, str) and kiro_cfg.profile_arn.strip():
-                body["profileArn"] = kiro_cfg.profile_arn.strip()
 
         # ---- Header Rules ----
         if header_rules:

@@ -21,6 +21,8 @@ from src.services.provider.adapters.kiro.constants import (
     KIRO_GENERATE_ASSISTANT_PATH,
 )
 from src.services.provider.adapters.kiro.context import get_kiro_request_context
+from src.services.provider.adapters.kiro.models.credentials import KiroAuthConfig
+from src.services.provider.adapters.kiro.request import build_kiro_generate_assistant_url
 
 # ---------------------------------------------------------------------------
 # Preset model catalog
@@ -28,6 +30,7 @@ from src.services.provider.adapters.kiro.context import get_kiro_request_context
 # Kiro upstream has no /v1/models endpoint. We use the unified preset models
 # registry from preset_models.py.
 from src.services.provider.preset_models import create_preset_models_fetcher
+from src.services.provider.request_context import set_selected_base_url
 
 fetch_models_kiro = create_preset_models_fetcher("kiro")
 
@@ -51,15 +54,19 @@ def build_kiro_url(
     """
     _ = is_stream
 
-    base = str(getattr(endpoint, "base_url", "") or "").rstrip("/")
-
     ctx = get_kiro_request_context()
     region = (ctx.region if ctx else "") or DEFAULT_REGION
-    if "{region}" in base:
-        base = base.replace("{region}", region)
+    base = str(getattr(endpoint, "base_url", "") or "").rstrip("/")
+    cfg = KiroAuthConfig(api_region=region)
+    base = build_kiro_generate_assistant_url(base, cfg=cfg)
+    base = (
+        base[: -len(KIRO_GENERATE_ASSISTANT_PATH)]
+        if base.endswith(KIRO_GENERATE_ASSISTANT_PATH)
+        else base
+    )
+    set_selected_base_url(base)
 
-    path = KIRO_GENERATE_ASSISTANT_PATH
-    url = base if base.endswith(path) else f"{base}{path}"
+    url = build_kiro_generate_assistant_url(base, cfg=cfg)
 
     if effective_query_params:
         query_string = urlencode(effective_query_params, doseq=True)
