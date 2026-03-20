@@ -38,12 +38,13 @@
 import { computed } from 'vue'
 import type { EndpointStatusMonitor, EndpointHealthEvent, PublicEndpointStatusMonitor, PublicHealthEvent } from '@/api/endpoints'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import type { HealthTimelineMonitorLike } from '@/features/providers/utils/healthMonitorUtils'
 
 // 组件同时支持管理员端和用户端的监控数据类型
 // - EndpointStatusMonitor: 管理员端，包含 provider_count, key_count 等敏感信息
 // - PublicEndpointStatusMonitor: 用户端，不含敏感信息
 const props = defineProps<{
-  monitor?: EndpointStatusMonitor | PublicEndpointStatusMonitor | null
+  monitor?: EndpointStatusMonitor | PublicEndpointStatusMonitor | HealthTimelineMonitorLike | null
   segmentCount?: number
   lookbackHours?: number
 }>()
@@ -198,7 +199,7 @@ function formatTimestamp(timestamp?: string | null) {
 // 计算时间范围显示
 const earliestTime = computed(() => {
   const explicitStart =
-    (props.monitor as (EndpointStatusMonitor | PublicEndpointStatusMonitor | null))?.time_range_start
+    (props.monitor as (EndpointStatusMonitor | PublicEndpointStatusMonitor | HealthTimelineMonitorLike | null))?.time_range_start
   if (explicitStart) return formatTimestamp(explicitStart)
   const lookbackHours = props.lookbackHours ?? 6
   const startTime = new Date(Date.now() - lookbackHours * 60 * 60 * 1000)
@@ -207,7 +208,7 @@ const earliestTime = computed(() => {
 
 const latestTime = computed(() => {
   const explicitEnd =
-    (props.monitor as (EndpointStatusMonitor | PublicEndpointStatusMonitor | null))?.time_range_end
+    (props.monitor as (EndpointStatusMonitor | PublicEndpointStatusMonitor | HealthTimelineMonitorLike | null))?.time_range_end
   if (explicitEnd) return formatTimestamp(explicitEnd)
   return formatTimestamp(new Date().toISOString())
 })
