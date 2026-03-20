@@ -4,6 +4,34 @@ import type { EndpointAPIKey, AllowedModels } from './types'
 // Re-export types for convenience
 export type { EndpointAPIKey, AllowedModels }
 
+export interface GroupedFormatKey {
+  id: string
+  provider_id: string
+  name: string
+  auth_type?: string
+  api_key_masked: string
+  internal_priority: number
+  global_priority_by_format: Record<string, number> | null
+  format_priority: number | null
+  rate_multipliers: Record<string, number> | null
+  is_active: boolean
+  provider_active: boolean
+  pool_enabled: boolean
+  circuit_breaker_open: boolean
+  provider_name: string
+  api_format: string
+  api_formats: string[]
+  capabilities: string[]
+  health_score: number | null
+  success_rate: number | null
+  avg_response_time_ms: number | null
+  request_count: number
+}
+
+function toNumberOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
 /**
  * 能力定义类型
  */
@@ -123,6 +151,51 @@ export async function getProviderKeys(providerId: string): Promise<EndpointAPIKe
   }
 
   return allKeys
+}
+
+/**
+ * 获取按 API 格式分组的 Key 列表
+ */
+export async function getKeysGroupedByFormat(): Promise<Record<string, GroupedFormatKey[]>> {
+  const response = await client.get('/api/admin/endpoints/keys/grouped-by-format')
+  const grouped = response.data as Record<string, Array<Record<string, unknown>>>
+  const result: Record<string, GroupedFormatKey[]> = {}
+
+  for (const [apiFormat, keys] of Object.entries(grouped || {})) {
+    if (!Array.isArray(keys)) continue
+
+    result[apiFormat] = keys.map((key) => ({
+      id: String(key.id || ''),
+      provider_id: String(key.provider_id || ''),
+      name: String(key.name || 'Unnamed Key'),
+      auth_type: typeof key.auth_type === 'string' ? key.auth_type : undefined,
+      api_key_masked: String(key.api_key_masked || '***'),
+      internal_priority: toNumberOrNull(key.internal_priority) ?? 0,
+      global_priority_by_format:
+        key.global_priority_by_format && typeof key.global_priority_by_format === 'object'
+          ? (key.global_priority_by_format as Record<string, number>)
+          : null,
+      format_priority: toNumberOrNull(key.format_priority),
+      rate_multipliers:
+        key.rate_multipliers && typeof key.rate_multipliers === 'object'
+          ? (key.rate_multipliers as Record<string, number>)
+          : null,
+      is_active: key.is_active !== false,
+      provider_active: key.provider_active !== false,
+      pool_enabled: key.pool_enabled === true,
+      circuit_breaker_open: key.circuit_breaker_open === true,
+      provider_name: String(key.provider_name || 'Unknown Provider'),
+      api_format: typeof key.api_format === 'string' ? key.api_format : apiFormat,
+      api_formats: Array.isArray(key.api_formats) ? key.api_formats.map(item => String(item)) : [apiFormat],
+      capabilities: Array.isArray(key.capabilities) ? key.capabilities.map(item => String(item)) : [],
+      health_score: toNumberOrNull(key.health_score),
+      success_rate: toNumberOrNull(key.success_rate),
+      avg_response_time_ms: toNumberOrNull(key.avg_response_time_ms),
+      request_count: toNumberOrNull(key.request_count) ?? 0,
+    }))
+  }
+
+  return result
 }
 
 /**

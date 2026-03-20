@@ -1825,8 +1825,6 @@ mockHandlers['GET /api/admin/endpoints/keys/grouped-by-format'] = async () => {
 
   const grouped: Record<string, Record<string, unknown>[]> = {}
   for (const provider of MOCK_PROVIDERS) {
-    const endpoints = generateMockEndpointsForProvider(provider.id)
-    const baseUrlByFormat = Object.fromEntries(endpoints.map(e => [e.api_format, e.base_url]))
     const keys = PROVIDER_KEYS_CACHE[provider.id] || []
     for (const key of keys) {
       const formats: string[] = key.api_formats || []
@@ -1836,7 +1834,7 @@ mockHandlers['GET /api/admin/endpoints/keys/grouped-by-format'] = async () => {
           ...key,
           api_format: fmt,
           provider_name: provider.name,
-          endpoint_base_url: baseUrlByFormat[fmt],
+          pool_enabled: Boolean((provider.config as Record<string, unknown> | undefined)?.pool_advanced),
           global_priority: key.global_priority ?? null,
           circuit_breaker_open: false,
           capabilities: [],

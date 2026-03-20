@@ -1111,6 +1111,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { useRoute, useRouter, type RouteQuery } from 'vue-router'
 import {
   Search,
   Upload,
@@ -1209,6 +1210,45 @@ const { confirm } = useConfirm()
 const { copyToClipboard } = useClipboard()
 const { tick: countdownTick, start: startCountdownTimer } = useCountdownTimer()
 const proxyNodesStore = useProxyNodesStore()
+const route = useRoute()
+const router = useRouter()
+
+function normalizeQueryValue(value: RouteQuery[string]): string | undefined {
+  if (Array.isArray(value)) {
+    return value.length > 0 ? value[value.length - 1] : undefined
+  }
+  return typeof value === 'string' ? value : undefined
+}
+
+function routeQueriesEqual(left: RouteQuery, right: RouteQuery) {
+  const keys = new Set([...Object.keys(left), ...Object.keys(right)])
+  for (const key of keys) {
+    if (normalizeQueryValue(left[key]) !== normalizeQueryValue(right[key])) {
+      return false
+    }
+  }
+  return true
+}
+
+function applyRouteQueryPatch(patch: Partial<RouteQuery>) {
+  const next: RouteQuery = { ...route.query, ...patch }
+  for (const key of Object.keys(next)) {
+    const value = next[key]
+    if (value == null || (typeof value === 'string' && value.trim() === '')) {
+      delete next[key]
+      continue
+    }
+    if (Array.isArray(value)) {
+      next[key] = value.length > 0 ? value[value.length - 1] : undefined
+      if (next[key] == null) delete next[key]
+      continue
+    }
+    next[key] = String(value)
+  }
+
+  if (routeQueriesEqual(route.query, next)) return
+  void router.replace({ query: next }).catch(() => {})
+}
 
 // --- Overview ---
 const poolProviders = ref<PoolOverviewItem[]>([])
@@ -1430,7 +1470,7 @@ const desktopColumnWidths = computed(() => {
   }
 })
 
-async function selectProvider(id: string) {
+async function selectProvider(id: string, options: { preserveSearch?: boolean } = {}) {
   const requestId = ++selectProviderRequestId
   selectedProviderId.value = id
   selectedProviderData.value = null
@@ -1444,7 +1484,9 @@ async function selectProvider(id: string) {
   proxyMobilePopoverOpenKeyId.value = null
   suppressFiltersWatch = true
   currentPage.value = 1
-  searchQuery.value = ''
+  if (!options.preserveSearch) {
+    searchQuery.value = ''
+  }
   statusFilter.value = 'all'
   suppressFiltersWatch = false
   if (keysSearchDebounceTimer !== null) {
@@ -1503,6 +1545,32 @@ const keyPermissionsDialogOpen = ref(false)
 const keyFormDialogOpen = ref(false)
 const oauthKeyEditDialogOpen = ref(false)
 const editingKeyDetail = ref<PoolKeyDetail | null>(null)
+
+watch(
+  () => normalizeQueryValue(route.query.search) ?? '',
+  (value) => {
+    if (searchQuery.value === value) return
+    searchQuery.value = value
+  },
+  { immediate: true },
+)
+
+watch(searchQuery, (value) => {
+  applyRouteQueryPatch({ search: value.trim() || undefined })
+})
+
+watch(
+  () => normalizeQueryValue(route.query.providerId),
+  (value) => {
+    if (!value || value === selectedProviderId.value) return
+    void selectProvider(value, { preserveSearch: true })
+  },
+  { immediate: true },
+)
+
+watch(selectedProviderId, (value) => {
+  applyRouteQueryPatch({ providerId: value || undefined })
+})
 
 interface QuotaProgressItem {
   label: string

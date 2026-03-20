@@ -17,6 +17,7 @@ from src.core.key_capabilities import get_capability
 from src.core.logger import logger
 from src.models.database import Provider, ProviderAPIKey, ProviderEndpoint
 from src.models.endpoint_models import EndpointAPIKeyResponse
+from src.services.provider.pool.config import parse_pool_config
 from src.services.provider_keys.auth_type import normalize_auth_type
 from src.services.provider_keys.response_builder import build_key_response
 
@@ -98,6 +99,7 @@ def get_keys_grouped_by_format(db: Session) -> dict:
 
     grouped: dict[str, list[dict]] = {}
     for key, provider in keys:
+        pool_enabled = parse_pool_config(getattr(provider, "config", None)) is not None
         raw_api_formats = key.api_formats or []
         api_formats: list[str] = []
         seen_formats: set[str] = set()
@@ -155,6 +157,7 @@ def get_keys_grouped_by_format(db: Session) -> dict:
             "is_active": key.is_active,
             "provider_active": provider.is_active,
             "provider_name": provider.name,
+            "pool_enabled": pool_enabled,
             "api_formats": api_formats,
             "capabilities": caps_list,
             "success_rate": success_rate,

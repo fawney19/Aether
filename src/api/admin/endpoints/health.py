@@ -138,7 +138,7 @@ async def get_health_summary(
     - `total_endpoints`: Endpoint 总数
     - `active_endpoints`: 活跃 Endpoint 数量
     - `total_keys`: Key 总数
-    - `active_keys`: 活跃 Key 数量
+    - `active_keys`: 当前可调度 Key 数量（Provider 活跃 + Key 启用 + 存在活跃 Endpoint + 非熔断）
     - `circuit_breaker_open_keys`: 熔断的 Key 数量
     """
     adapter = AdminHealthSummaryAdapter()

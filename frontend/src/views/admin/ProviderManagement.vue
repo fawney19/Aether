@@ -286,6 +286,7 @@ import {
 } from '@/api/endpoints'
 import { adminApi } from '@/api/admin'
 import { parseApiError } from '@/utils/errorParser'
+import { useRoute, useRouter, type RouteQuery } from 'vue-router'
 
 interface ProviderDeleteProgressState {
   providerId: string
@@ -302,6 +303,45 @@ interface ProviderDeleteProgressState {
 
 const { error: showError, success: showSuccess, info: showInfo } = useToast()
 const { confirmDanger } = useConfirm()
+const route = useRoute()
+const router = useRouter()
+
+function normalizeQueryValue(value: RouteQuery[string]): string | undefined {
+  if (Array.isArray(value)) {
+    return value.length > 0 ? value[value.length - 1] : undefined
+  }
+  return typeof value === 'string' ? value : undefined
+}
+
+function routeQueriesEqual(left: RouteQuery, right: RouteQuery) {
+  const keys = new Set([...Object.keys(left), ...Object.keys(right)])
+  for (const key of keys) {
+    if (normalizeQueryValue(left[key]) !== normalizeQueryValue(right[key])) {
+      return false
+    }
+  }
+  return true
+}
+
+function applyRouteQueryPatch(patch: Partial<RouteQuery>) {
+  const next: RouteQuery = { ...route.query, ...patch }
+  for (const key of Object.keys(next)) {
+    const value = next[key]
+    if (value == null || (typeof value === 'string' && value.trim() === '')) {
+      delete next[key]
+      continue
+    }
+    if (Array.isArray(value)) {
+      next[key] = value.length > 0 ? value[value.length - 1] : undefined
+      if (next[key] == null) delete next[key]
+      continue
+    }
+    next[key] = String(value)
+  }
+
+  if (routeQueriesEqual(route.query, next)) return
+  void router.replace({ query: next }).catch(() => {})
+}
 
 // 状态
 const loading = ref(false)
@@ -459,6 +499,46 @@ const {
   startTick,
   stopTick,
 } = useProviderBalance()
+
+watch(
+  () => normalizeQueryValue(route.query.search) ?? '',
+  (value) => {
+    if (searchQuery.value === value) return
+    searchQuery.value = value
+  },
+  { immediate: true },
+)
+
+watch(searchQuery, (value) => {
+  applyRouteQueryPatch({ search: value.trim() || undefined })
+})
+
+watch(
+  () => normalizeQueryValue(route.query.providerId),
+  (value) => {
+    if (value) {
+      if (selectedProviderId.value === value) {
+        if (!providerDrawerOpen.value) providerDrawerOpen.value = true
+        return
+      }
+      openProviderDrawer(value)
+      return
+    }
+    if (selectedProviderId.value) selectedProviderId.value = null
+    if (providerDrawerOpen.value) providerDrawerOpen.value = false
+  },
+  { immediate: true },
+)
+
+watch(selectedProviderId, (value) => {
+  applyRouteQueryPatch({ providerId: value || undefined })
+})
+
+watch(providerDrawerOpen, (open) => {
+  if (!open && selectedProviderId.value) {
+    selectedProviderId.value = null
+  }
+})
 
 // 扩展操作配置对话框
 const opsConfigDialogOpen = ref(false)

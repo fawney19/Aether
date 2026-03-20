@@ -1006,7 +1006,7 @@ class HealthSummaryResponse(BaseModel):
     """健康状态摘要"""
 
     endpoints: dict[str, int] = Field(..., description="Endpoint 统计 (total, active, unhealthy)")
-    keys: dict[str, int] = Field(..., description="Key 统计 (total, active, unhealthy)")
+    keys: dict[str, int] = Field(..., description="Key 统计 (total, active=当前可调度, unhealthy)")
 
 
 # ========== RPM 控制相关 ==========

@@ -27,7 +27,7 @@ from src.config.constants import CircuitBreakerDefaults
 from src.core.batch_committer import get_batch_committer
 from src.core.logger import logger
 from src.core.metrics import health_open_circuits
-from src.models.database import ProviderAPIKey, ProviderEndpoint
+from src.models.database import Provider, ProviderAPIKey, ProviderEndpoint
 
 
 class CircuitState:
@@ -849,27 +849,64 @@ class HealthMonitor:
             endpoint_stats = db.query(
                 func.count(ProviderEndpoint.id).label("total"),
                 func.sum(case((ProviderEndpoint.is_active.is_(True), 1), else_=0)).label("active"),
-                func.sum(case((ProviderEndpoint.health_score < 0.5, 1), else_=0)).label(
-                    "unhealthy"
-                ),
             ).first()
+
+            active_endpoint_rows_raw = (
+                db.query(ProviderEndpoint.provider_id, ProviderEndpoint.api_format)
+                .join(Provider, ProviderEndpoint.provider_id == Provider.id)
+                .filter(
+                    ProviderEndpoint.is_active.is_(True),
+                    Provider.is_active.is_(True),
+                )
+                .all()
+            )
+            active_endpoint_rows: list[tuple[str, str]] = []
+            active_provider_formats: set[tuple[str, str]] = set()
+            for provider_id, api_format in active_endpoint_rows_raw:
+                format_text = api_format.value if hasattr(api_format, "value") else str(api_format or "")
+                if not format_text:
+                    continue
+                normalized = (str(provider_id), format_text)
+                active_endpoint_rows.append(normalized)
+                active_provider_formats.add(normalized)
 
             # 统计 Key（只加载必要列，避免全字段全表扫描）
             key_rows = db.query(
+                ProviderAPIKey.provider_id,
                 ProviderAPIKey.is_active,
+                ProviderAPIKey.api_formats,
                 ProviderAPIKey.health_by_format,
                 ProviderAPIKey.circuit_breaker_by_format,
+                Provider.is_active,
+            ).join(
+                Provider, ProviderAPIKey.provider_id == Provider.id
             ).all()
             total_keys = len(key_rows)
             active_keys = 0
             unhealthy_keys = 0
             circuit_open_keys = 0
+            schedulable_provider_formats: set[tuple[str, str]] = set()
 
-            for is_active, health_by_format, circuit_by_format in key_rows:
-                if is_active:
-                    active_keys += 1
+            for provider_id, is_active, api_formats, health_by_format, circuit_by_format, provider_active in key_rows:
                 health_by_format = health_by_format or {}
                 circuit_by_format = circuit_by_format or {}
+
+                key_schedulable = False
+                if provider_active and is_active:
+                    for raw_format in api_formats or []:
+                        format_text = (
+                            raw_format.value if hasattr(raw_format, "value") else str(raw_format or "")
+                        )
+                        if not format_text:
+                            continue
+                        if (str(provider_id), format_text) not in active_provider_formats:
+                            continue
+                        format_circuit = circuit_by_format.get(format_text, {})
+                        if not format_circuit.get("open"):
+                            key_schedulable = True
+                            schedulable_provider_formats.add((str(provider_id), format_text))
+                    if key_schedulable:
+                        active_keys += 1
 
                 # 检查是否有任何格式健康度低于 0.5
                 for fmt, health_data in health_by_format.items():
@@ -883,11 +920,17 @@ class HealthMonitor:
                         circuit_open_keys += 1
                         break
 
+            unhealthy_endpoints = sum(
+                1
+                for provider_id, format_text in active_endpoint_rows
+                if (provider_id, format_text) not in schedulable_provider_formats
+            )
+
             return {
                 "endpoints": {
                     "total": endpoint_stats.total or 0 if endpoint_stats else 0,
                     "active": int(endpoint_stats.active or 0) if endpoint_stats else 0,
-                    "unhealthy": int(endpoint_stats.unhealthy or 0) if endpoint_stats else 0,
+                    "unhealthy": unhealthy_endpoints,
                 },
                 "keys": {
                     "total": total_keys,
