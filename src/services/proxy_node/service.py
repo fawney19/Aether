@@ -141,7 +141,7 @@ async def _test_proxy_connectivity(proxy_url: str) -> dict[str, Any]:
     """通过代理 URL 测试连通性，返回标准化结果 dict"""
     import time as _time
 
-    test_url = "https://1.1.1.1/cdn-cgi/trace"
+    test_url = "https://cloudflare.com/cdn-cgi/trace"
     start = _time.monotonic()
     proxy_param = make_proxy_param(proxy_url)
 
@@ -222,7 +222,7 @@ async def _test_tunnel_connectivity(node_id: str) -> dict[str, Any]:
 
     from .tunnel_transport import create_tunnel_transport
 
-    test_url = "https://1.1.1.1/cdn-cgi/trace"
+    test_url = "https://cloudflare.com/cdn-cgi/trace"
     transport = create_tunnel_transport(node_id, timeout=15.0)
     start = _time.monotonic()
 
