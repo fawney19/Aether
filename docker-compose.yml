@@ -24,7 +24,7 @@ services:
     container_name: aether-redis
     command: redis-server --appendonly no --save "" --requirepass ${REDIS_PASSWORD}
     healthcheck:
-      test: [ "CMD", "redis-cli", "--raw", "incr", "ping" ]
+      test: ["CMD", "redis-cli", "--raw", "-a", "${REDIS_PASSWORD}", "incr", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
