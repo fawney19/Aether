@@ -288,7 +288,12 @@ export const cacheAnalysisApi = {
     api_key_id?: string
     hours?: number
   }): Promise<TTLAnalysisResponse> {
-    const response = await api.get('/api/admin/usage/cache-affinity/ttl-analysis', { params })
+    const response = await api.post('/api/analytics/cache-affinity/ttl-analysis', {
+      scope: { kind: 'global' },
+      user_id: params?.user_id ?? null,
+      api_key_id: params?.api_key_id ?? null,
+      hours: params?.hours,
+    })
     return response.data
   },
 
@@ -300,7 +305,12 @@ export const cacheAnalysisApi = {
     api_key_id?: string
     hours?: number
   }): Promise<CacheHitAnalysisResponse> {
-    const response = await api.get('/api/admin/usage/cache-affinity/hit-analysis', { params })
+    const response = await api.post('/api/analytics/cache-affinity/hit-analysis', {
+      scope: { kind: 'global' },
+      user_id: params?.user_id ?? null,
+      api_key_id: params?.api_key_id ?? null,
+      hours: params?.hours,
+    })
     return response.data
   },
 
@@ -319,7 +329,13 @@ export const cacheAnalysisApi = {
     return cachedRequest(
       cacheKey,
       async () => {
-        const response = await api.get('/api/admin/usage/cache-affinity/interval-timeline', { params })
+        const response = await api.post('/api/analytics/interval-timeline', {
+          scope: params?.user_id ? { kind: 'user', user_id: params.user_id } : { kind: 'global' },
+          user_id: params?.user_id ?? null,
+          hours: params?.hours,
+          limit: params?.limit,
+          include_user_info: params?.include_user_info ?? false,
+        })
         return response.data
       },
       30000

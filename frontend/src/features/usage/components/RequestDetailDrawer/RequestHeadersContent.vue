@@ -159,7 +159,7 @@
 import { computed, ref } from 'vue'
 import Card from '@/components/ui/card.vue'
 import JsonContent from './JsonContent.vue'
-import type { RequestDetail } from '@/api/dashboard'
+import type { RequestDetail } from '@/api/request-details'
 
 const props = withDefaults(defineProps<{
   detail: RequestDetail

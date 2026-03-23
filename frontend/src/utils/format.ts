@@ -1,17 +1,34 @@
+function toFiniteNumber(value: number | string | undefined | null): number | null {
+  if (value === undefined || value === null) return null
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null
+  }
+
+  const normalized = value
+    .trim()
+    .replace(/[$,\s]/g, '')
+
+  if (!normalized) return null
+
+  const parsed = Number(normalized)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
 // Token formatting - intelligent display based on value size
-export function formatTokens(num: number | undefined | null): string {
-  if (num === undefined || num === null || num === 0) {
+export function formatTokens(num: number | string | undefined | null): string {
+  const normalized = toFiniteNumber(num)
+  if (normalized === null || normalized === 0) {
     return '0'
   }
 
   // For very small values (< 1000), show as is without unit
-  if (num < 1000) {
-    return num.toString()
+  if (normalized < 1000) {
+    return normalized.toString()
   }
 
   // For values 1K-999K, show in thousands
-  if (num < 1000000) {
-    const thousands = num / 1000
+  if (normalized < 1000000) {
+    const thousands = normalized / 1000
     if (thousands >= 100) {
       return `${Math.round(thousands)  }K`
     } else if (thousands >= 10) {
@@ -22,7 +39,7 @@ export function formatTokens(num: number | undefined | null): string {
   }
 
   // For values >= 1M, show in millions
-  const millions = num / 1000000
+  const millions = normalized / 1000000
   if (millions >= 100) {
     return `${Math.round(millions)  }M`
   } else if (millions >= 10) {
@@ -33,53 +50,54 @@ export function formatTokens(num: number | undefined | null): string {
 }
 
 // Currency formatting with high precision for small values
-export function formatCurrency(amount: number | undefined | null): string {
-  if (amount === undefined || amount === null || amount === 0) {
+export function formatCurrency(amount: number | string | undefined | null): string {
+  const normalized = toFiniteNumber(amount)
+  if (normalized === null || normalized === 0) {
     return '$0.00'
   }
 
   // For very small amounts (< $0.00001), show up to 8 decimal places
-  if (amount > 0 && amount < 0.00001) {
-    const formatted = amount.toFixed(8)
+  if (normalized > 0 && normalized < 0.00001) {
+    const formatted = normalized.toFixed(8)
     // Remove trailing zeros but keep at least 2 decimal places
     const trimmed = formatted.replace(/(\.\d\d)0+$/, '$1')
     return `$${  trimmed}`
   }
 
   // For small amounts (< $0.0001), show up to 6 decimal places
-  if (amount < 0.0001) {
-    const formatted = amount.toFixed(6)
+  if (normalized < 0.0001) {
+    const formatted = normalized.toFixed(6)
     // Remove trailing zeros but keep at least 2 decimal places
     const trimmed = formatted.replace(/(\.\d\d)0+$/, '$1')
     return `$${  trimmed}`
   }
 
   // For small amounts (< $0.01), show up to 5 decimal places
-  if (amount < 0.01) {
-    const formatted = amount.toFixed(5)
+  if (normalized < 0.01) {
+    const formatted = normalized.toFixed(5)
     // Remove trailing zeros but keep at least 2 decimal places
     const trimmed = formatted.replace(/(\.\d\d)0+$/, '$1')
     return `$${  trimmed}`
   }
 
   // For amounts less than $1, show 4 decimal places
-  if (amount < 1) {
-    const formatted = amount.toFixed(4)
+  if (normalized < 1) {
+    const formatted = normalized.toFixed(4)
     // Remove trailing zeros but keep at least 2 decimal places
     const trimmed = formatted.replace(/(\.\d\d)0+$/, '$1')
     return `$${  trimmed}`
   }
 
   // For amounts $1-$100, show 2-3 decimal places
-  if (amount < 100) {
-    const formatted = amount.toFixed(3)
+  if (normalized < 100) {
+    const formatted = normalized.toFixed(3)
     // Remove trailing zeros but keep at least 2 decimal places
     const trimmed = formatted.replace(/(\.\d\d)0+$/, '$1')
     return `$${  trimmed}`
   }
 
   // For larger amounts, show 2 decimal places
-  return `$${  amount.toFixed(2)}`
+  return `$${  normalized.toFixed(2)}`
 }
 
 // Number formatting with locale support
@@ -157,7 +175,8 @@ export function formatRemainingTime(expireAt: number | undefined, currentTime: n
 // Cache hit rate formatting
 export function formatHitRate(rate: number | undefined): string {
   if (typeof rate !== 'number' || Number.isNaN(rate)) return '-'
-  return `${rate.toFixed(2)}%`
+  const normalized = rate <= 1 ? rate * 100 : rate
+  return `${normalized.toFixed(2)}%`
 }
 
 // Rate limit formatting (supports "inherit" semantics: null = inherit system default)

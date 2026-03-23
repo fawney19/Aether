@@ -517,6 +517,7 @@ const navigation = computed(() => {
       items: [
         { name: '仪表盘', href: '/dashboard', icon: Home },
         { name: '健康监控', href: '/dashboard/endpoint-status', icon: Activity },
+        { name: '综合报表', href: '/dashboard/reports', icon: BarChart3 },
       ]
     },
     {
@@ -530,7 +531,7 @@ const navigation = computed(() => {
       title: '账户',
       items: [
          { name: '钱包中心', href: '/dashboard/wallet', icon: Wallet },
-         { name: '使用统计', href: '/dashboard/usage', icon: BarChart3 },
+         { name: '使用记录', href: '/dashboard/usage', icon: Activity },
          { name: '异步任务', href: '/dashboard/async-tasks', icon: Zap },
       ]
     }
@@ -574,10 +575,8 @@ const navigation = computed(() => {
       title: '概览',
       items: [
         { name: '仪表盘', href: '/admin/dashboard', icon: Home },
+        { name: '数据分析', href: '/admin/analytics', icon: BarChart3 },
         { name: '健康监控', href: '/admin/health-monitor', icon: Activity },
-        { name: '用户统计', href: '/admin/user-stats', icon: BarChart3 },
-        { name: '成本分析', href: '/admin/cost-analysis', icon: Gauge },
-        { name: '性能分析', href: '/admin/performance-analysis', icon: Activity },
       ]
     },
     {

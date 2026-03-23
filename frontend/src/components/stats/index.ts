@@ -1,7 +1,4 @@
 export { default as ActivityHeatmap } from './ActivityHeatmap.vue'
 export { default as LeaderboardTable } from './LeaderboardTable.vue'
-export { default as CostForecastChart } from './CostForecastChart.vue'
-export { default as QuotaProgressCard } from './QuotaProgressCard.vue'
 export { default as PercentileChart } from './PercentileChart.vue'
 export { default as ErrorDistributionChart } from './ErrorDistributionChart.vue'
-export { default as ComparisonCard } from './ComparisonCard.vue'

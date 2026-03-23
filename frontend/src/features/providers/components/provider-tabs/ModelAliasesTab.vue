@@ -165,7 +165,6 @@
   <ModelMappingDialog
     v-model:open="dialogOpen"
     :provider-id="provider.id"
-    :provider-api-formats="providerApiFormats"
     :models="models"
     :editing-group="editingGroup"
     :preselected-model-id="preselectedModelId"
@@ -195,7 +194,6 @@ import { useToast } from '@/composables/useToast'
 import {
   getProviderModels,
   testModel,
-  API_FORMAT_LABELS,
   type Model,
   type ProviderModelAlias
 } from '@/api/endpoints'
@@ -226,16 +224,6 @@ const preselectedModelId = ref<string | null>(null)
 
 // 列表展开状态
 const expandedAliasGroups = ref<Set<string>>(new Set())
-
-// 获取 Provider 支持的 API 格式
-const providerApiFormats = computed(() => {
-  const formats = props.provider?.api_formats
-  if (Array.isArray(formats) && formats.length > 0) {
-    const order = Object.keys(API_FORMAT_LABELS)
-    return [...formats].sort((a, b) => order.indexOf(a) - order.indexOf(b))
-  }
-  return []
-})
 
 // 生成作用域唯一键
 function getApiFormatsKey(formats: string[] | undefined): string {

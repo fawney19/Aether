@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from src.core.exceptions import NotFoundException
 from src.core.logger import logger
-from src.models.database import Provider, User, UserPreference
+from src.models.database import User, UserPreference
 from src.services.wallet import WalletService
 
 
@@ -44,7 +44,6 @@ class PreferenceService:
         user_id: str,  # UUID
         avatar_url: str | None = None,
         bio: str | None = None,
-        default_provider_id: str | None = None,  # UUID
         theme: str | None = None,
         language: str | None = None,
         timezone: str | None = None,
@@ -60,16 +59,6 @@ class PreferenceService:
             preferences.avatar_url = avatar_url
         if bio is not None:
             preferences.bio = bio
-        if default_provider_id is not None:
-            # 验证提供商是否存在且活跃
-            provider = (
-                db.query(Provider)
-                .filter(Provider.id == default_provider_id, Provider.is_active == True)
-                .first()
-            )
-            if not provider:
-                raise NotFoundException("Provider not found or inactive")
-            preferences.default_provider_id = default_provider_id
         if theme is not None:
             if theme not in ["light", "dark", "auto", "system"]:
                 raise ValueError("Invalid theme. Must be 'light', 'dark', 'auto', or 'system'")
@@ -116,9 +105,6 @@ class PreferenceService:
             "preferences": {
                 "avatar_url": preferences.avatar_url,
                 "bio": preferences.bio,
-                "default_provider": (
-                    preferences.default_provider.name if preferences.default_provider else None
-                ),
                 "theme": preferences.theme,
                 "language": preferences.language,
                 "timezone": preferences.timezone,
@@ -129,11 +115,6 @@ class PreferenceService:
                 },
             },
             "billing": billing,
-            "stats": {
-                "total_cost": billing["total_consumed"],
-                "total_cost_all_time": billing["total_consumed"],
-                "api_keys_count": len(user.api_keys),
-            },
         }
 
         return user_data

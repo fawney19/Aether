@@ -1,7 +1,5 @@
 import apiClient from './client'
-import type { ActivityHeatmap } from '@/types/activity'
 import type { TieredPricingConfig } from './endpoints/types'
-import { cachedRequest, buildCacheKey } from '@/utils/cache'
 import type { BillingSummary } from './auth'
 
 export interface Profile {
@@ -22,8 +20,6 @@ export interface Profile {
 export interface UserPreferences {
   avatar_url?: string
   bio?: string
-  default_provider_id?: string // UUID
-  default_provider?: Record<string, unknown>
   theme: string
   language: string
   timezone?: string
@@ -32,103 +28,6 @@ export interface UserPreferences {
     usage_alerts?: boolean
     announcements?: boolean
   }
-}
-
-// 提供商配置接口
-export interface ProviderConfig {
-  provider_id: string
-  priority: number  // 优先级（越高越优先）
-  weight: number    // 负载均衡权重
-  enabled: boolean  // 是否启用
-}
-
-// 使用记录接口
-export interface UsageRecordDetail {
-  id: string
-  provider: string
-  model: string
-  input_tokens: number
-  output_tokens: number
-  total_tokens: number
-  cost: number  // 官方费率
-  actual_cost?: number  // 倍率消耗（仅管理员可见）
-  rate_multiplier?: number  // 成本倍率（仅管理员可见）
-  response_time_ms?: number
-  is_stream: boolean
-  created_at: string
-  cache_creation_input_tokens?: number
-  cache_read_input_tokens?: number
-  status_code: number
-  error_message?: string
-  input_price_per_1m: number
-  output_price_per_1m: number
-  cache_creation_price_per_1m?: number
-  cache_read_price_per_1m?: number
-  price_per_request?: number  // 按次计费价格
-  api_key?: {
-    id: string
-    name: string
-    display: string
-  }
-}
-
-// 模型统计接口
-export interface ModelSummary {
-  model: string
-  requests: number
-  input_tokens: number
-  output_tokens: number
-  total_tokens: number
-  cache_read_tokens?: number
-  cache_hit_rate?: number
-  total_cost_usd: number
-  actual_total_cost_usd?: number  // 倍率消耗（仅管理员可见）
-}
-
-// 提供商统计接口
-export interface ProviderSummary {
-  provider: string
-  requests: number
-  total_tokens: number
-  cache_read_tokens?: number
-  cache_hit_rate?: number
-  total_cost_usd: number
-  success_rate: number | null
-  avg_response_time_ms: number | null
-}
-
-// API 格式统计接口
-export interface ApiFormatSummary {
-  api_format: string
-  request_count: number
-  total_tokens: number
-  cache_read_tokens: number
-  cache_hit_rate: number
-  total_cost_usd: number
-  avg_response_time_ms: number
-}
-
-// 使用统计响应接口
-export interface UsageResponse {
-  total_requests: number
-  total_input_tokens: number
-  total_output_tokens: number
-  total_tokens: number
-  total_cost: number  // 官方费率
-  total_actual_cost?: number  // 倍率消耗（仅管理员可见）
-  avg_response_time: number
-  billing: BillingSummary
-  summary_by_model: ModelSummary[]
-  summary_by_provider?: ProviderSummary[]
-  summary_by_api_format?: ApiFormatSummary[]
-  pagination?: {
-    total: number
-    limit: number
-    offset: number
-    has_more: boolean
-  }
-  records: UsageRecordDetail[]
-  activity_heatmap?: ActivityHeatmap | null
 }
 
 export interface ApiKey {
@@ -143,7 +42,6 @@ export interface ApiKey {
   total_requests?: number
   total_cost_usd?: number
   rate_limit?: number | null
-  allowed_providers?: ProviderConfig[]
   force_capabilities?: Record<string, boolean> | null  // 强制能力配置
 }
 
@@ -224,51 +122,6 @@ export const meApi = {
     return response.data
   },
 
-  // 使用统计
-  async getUsage(params?: {
-    start_date?: string
-    end_date?: string
-    preset?: string
-    timezone?: string
-    tz_offset_minutes?: number
-    search?: string  // 通用搜索：密钥名、模型名
-    limit?: number
-    offset?: number
-  }): Promise<UsageResponse> {
-    const response = await apiClient.get<UsageResponse>('/api/users/me/usage', { params })
-    return response.data
-  },
-
-  // 获取活跃请求状态（用于轮询更新）
-  async getActiveRequests(ids?: string): Promise<{
-    requests: Array<{
-      id: string
-      status: 'pending' | 'streaming' | 'completed' | 'failed' | 'cancelled'
-      input_tokens: number
-      output_tokens: number
-      cache_creation_input_tokens?: number | null
-      cache_read_input_tokens?: number | null
-      cost: number
-      actual_cost?: number | null
-      rate_multiplier?: number | null
-      response_time_ms: number | null
-      first_byte_time_ms: number | null
-      api_format?: string | null
-      endpoint_api_format?: string | null
-      has_format_conversion?: boolean | null
-    }>
-  }> {
-    const params = ids ? { ids } : {}
-    const response = await apiClient.get('/api/users/me/usage/active', { params })
-    return response.data
-  },
-
-  // 获取可用的提供商
-  async getAvailableProviders(): Promise<Array<Record<string, unknown>>> {
-    const response = await apiClient.get('/api/users/me/providers')
-    return response.data
-  },
-
   // 获取用户可用的模型列表
   async getAvailableModels(params?: {
     skip?: number
@@ -309,16 +162,6 @@ export const meApi = {
     return response.data
   },
 
-  // 提供商绑定管理相关方法已移除，改为直接从可用提供商中选择
-
-  // API密钥提供商关联
-  async updateApiKeyProviders(keyId: string, data: {
-    allowed_providers?: ProviderConfig[]
-  }): Promise<{ message: string }> {
-    const response = await apiClient.put(`/api/users/me/api-keys/${keyId}/providers`, data)
-    return response.data
-  },
-
   // API密钥能力配置
   async updateApiKeyCapabilities(keyId: string, data: {
     force_capabilities?: Record<string, boolean> | null
@@ -345,39 +188,4 @@ export const meApi = {
     return response.data
   },
 
-  // 获取请求间隔时间线（用于散点图）
-  async getIntervalTimeline(params?: {
-    hours?: number
-    limit?: number
-  }): Promise<{
-    analysis_period_hours: number
-    total_points: number
-    points: Array<{ x: string; y: number; model?: string }>
-    models?: string[]
-  }> {
-    const cacheKey = buildCacheKey('me:interval-timeline', params as Record<string, unknown> | undefined)
-    return cachedRequest(
-      cacheKey,
-      async () => {
-        const response = await apiClient.get('/api/users/me/usage/interval-timeline', { params })
-        return response.data
-      },
-      30000
-    )
-  },
-
-  /**
-   * 获取活跃度热力图数据（用户）
-   * 后端已缓存5分钟
-   */
-  async getActivityHeatmap(): Promise<ActivityHeatmap> {
-    return cachedRequest(
-      'me-activity-heatmap',
-      async () => {
-        const response = await apiClient.get<ActivityHeatmap>('/api/users/me/usage/heatmap')
-        return response.data
-      },
-      60000
-    )
-  }
 }

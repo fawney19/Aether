@@ -1,5 +1,8 @@
 <template>
-  <div class="w-full h-full">
+  <div
+    class="w-full"
+    :style="{ height: `${props.height}px` }"
+  >
     <canvas ref="chartRef" />
   </div>
 </template>
@@ -16,9 +19,11 @@ import {
   Title,
   Tooltip,
   Legend,
+  Filler,
   type ChartData,
   type ChartOptions
 } from 'chart.js'
+import { observeChartThemeChanges, resolveChartTheme } from '@/utils/chartTheme'
 
 const props = withDefaults(defineProps<Props>(), {
   height: 300,
@@ -34,7 +39,8 @@ ChartJS.register(
   LineController,
   Title,
   Tooltip,
-  Legend
+  Legend,
+  Filler
 )
 
 interface Props {
@@ -45,12 +51,17 @@ interface Props {
 
 const chartRef = ref<HTMLCanvasElement>()
 let chart: ChartJS<'line'> | null = null
+let stopThemeObserver: (() => void) | null = null
 
 function buildChartOptions(): ChartOptions<'line'> {
-  return {
+  return resolveChartTheme({
     ...defaultOptions,
     ...props.options
-  }
+  })
+}
+
+function buildChartData(): ChartData<'line'> {
+  return resolveChartTheme(props.data)
 }
 
 const defaultOptions: ChartOptions<'line'> = {
@@ -95,14 +106,14 @@ function createChart() {
 
   chart = new ChartJS(chartRef.value, {
     type: 'line',
-    data: props.data,
+    data: buildChartData(),
     options: buildChartOptions()
   })
 }
 
 function updateChart() {
   if (chart) {
-    chart.data = props.data
+    chart.data = buildChartData()
     chart.update('none') // 禁用动画以提高性能
   }
 }
@@ -110,9 +121,17 @@ function updateChart() {
 onMounted(async () => {
   await nextTick()
   createChart()
+  stopThemeObserver = observeChartThemeChanges(() => {
+    if (!chart) return
+    chart.data = buildChartData()
+    chart.options = buildChartOptions()
+    chart.update('none')
+  })
 })
 
 onUnmounted(() => {
+  stopThemeObserver?.()
+  stopThemeObserver = null
   if (chart) {
     chart.destroy()
     chart = null

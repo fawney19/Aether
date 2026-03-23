@@ -696,7 +696,7 @@ import Skeleton from '@/components/ui/skeleton.vue'
 import Tabs from '@/components/ui/tabs.vue'
 import TabsContent from '@/components/ui/tabs-content.vue'
 import { Copy, Check, Maximize2, Minimize2, Columns2, RefreshCw, X, Monitor, Server, MessageSquareText, Code2, Terminal, Play } from 'lucide-vue-next'
-import { dashboardApi, type RequestDetail } from '@/api/dashboard'
+import { requestDetailsApi, type RequestDetail } from '@/api/request-details'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import { log } from '@/utils/logger'
 
@@ -1319,7 +1319,7 @@ async function ensureBodyContentLoaded() {
   const requestId = ++bodyLoadRequestId
   bodyLoading.value = true
   try {
-    const response = await dashboardApi.getRequestDetail(props.requestId, { includeBodies: true })
+    const response = await requestDetailsApi.getRequestDetail(props.requestId, { includeBodies: true })
     if (requestId !== bodyLoadRequestId || !detail.value) return
     detail.value = {
       ...detail.value,
@@ -1359,7 +1359,7 @@ async function loadDetail(id: string, silent = false) {
   }
   error.value = null
   try {
-    const response = await dashboardApi.getRequestDetail(id, { includeBodies: false })
+    const response = await requestDetailsApi.getRequestDetail(id, { includeBodies: false })
     if (requestId !== loadDetailRequestId) return
 
     const previousDetail = detail.value
@@ -1737,7 +1737,7 @@ async function copyCurlCommand() {
   if (!props.requestId || curlCopying.value) return
   curlCopying.value = true
   try {
-    const data = await dashboardApi.getCurlData(props.requestId)
+    const data = await requestDetailsApi.getCurlData(props.requestId)
     if (data.curl) {
       copyToClipboard(data.curl, false)
       curlCopied.value = true

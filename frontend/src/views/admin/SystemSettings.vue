@@ -73,6 +73,17 @@
             @update:enable-format-conversion="systemConfig.enable_format_conversion = $event"
           />
 
+          <MonitoringCapacitySection
+            id="section-monitoring-capacity"
+            :redis-memory-total-g-b="redisMemoryTotalGB"
+            :postgres-storage-total-g-b="postgresStorageTotalGB"
+            :loading="monitoringConfigLoading"
+            :has-changes="hasMonitoringConfigChanges"
+            @save="saveMonitoringConfig"
+            @update:redis-memory-total-g-b="redisMemoryTotalGB = $event"
+            @update:postgres-storage-total-g-b="postgresStorageTotalGB = $event"
+          />
+
           <!-- 请求记录配置 -->
           <RequestLogSection
             id="section-request-log"
@@ -211,6 +222,7 @@ import UserDataSection from './system-settings/UserDataSection.vue'
 import DataManagementSection from './system-settings/DataManagementSection.vue'
 import ProxyConfigSection from './system-settings/ProxyConfigSection.vue'
 import BasicConfigSection from './system-settings/BasicConfigSection.vue'
+import MonitoringCapacitySection from './system-settings/MonitoringCapacitySection.vue'
 import RequestLogSection from './system-settings/RequestLogSection.vue'
 import CleanupPolicySection from './system-settings/CleanupPolicySection.vue'
 import ScheduledTasksSection from './system-settings/ScheduledTasksSection.vue'
@@ -230,6 +242,7 @@ const tocItems = [
   { id: 'section-data-mgmt', label: '数据管理' },
   { id: 'section-proxy', label: '网络代理' },
   { id: 'section-basic', label: '基础配置' },
+  { id: 'section-monitoring-capacity', label: '监控容量' },
   { id: 'section-request-log', label: '请求记录' },
   { id: 'section-cleanup', label: '记录清理策略' },
   { id: 'section-scheduled', label: '定时任务' },
@@ -290,21 +303,26 @@ const {
   siteInfoLoading,
   proxyConfigLoading,
   basicConfigLoading,
+  monitoringConfigLoading,
   logConfigLoading,
   cleanupConfigLoading,
   hasSiteInfoChanges,
   hasProxyConfigChanges,
   hasBasicConfigChanges,
+  hasMonitoringConfigChanges,
   hasLogConfigChanges,
   hasCleanupConfigChanges,
   maxRequestBodySizeKB,
   maxResponseBodySizeKB,
+  redisMemoryTotalGB,
+  postgresStorageTotalGB,
   sensitiveHeadersStr,
   loadSystemConfig,
   loadSystemVersion,
   saveSiteInfo,
   saveProxyConfig,
   saveBasicConfig,
+  saveMonitoringConfig,
   saveLogConfig,
   saveCleanupConfig,
   handleAutoCleanupToggle,

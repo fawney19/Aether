@@ -200,6 +200,7 @@ class UsageBillingIntegrationMixin:
             provider_endpoint_id=params.provider_endpoint_id,
             provider_api_key_id=params.provider_api_key_id,
             status=params.status,
+            cache_ttl_minutes=effective_cache_ttl_minutes,
             target_model=params.target_model,
             cost=UsageCostInfo(
                 input_cost=input_cost,

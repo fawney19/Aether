@@ -23,15 +23,10 @@ class TimeRangeParams(BaseModel):
     preset: (
         Literal[
             "today",
-            "yesterday",
             "last7days",
             "last30days",
-            "last90days",
-            "this_week",
-            "last_week",
-            "this_month",
-            "last_month",
-            "this_year",
+            "last180days",
+            "last1year",
         ]
         | None
     ) = None
@@ -49,33 +44,17 @@ class TimeRangeParams(BaseModel):
             match self.preset:
                 case "today":
                     self.start_date = self.end_date = user_today
-                case "yesterday":
-                    self.start_date = self.end_date = user_today - timedelta(days=1)
                 case "last7days":
                     self.start_date = user_today - timedelta(days=6)
                     self.end_date = user_today
                 case "last30days":
                     self.start_date = user_today - timedelta(days=29)
                     self.end_date = user_today
-                case "last90days":
-                    self.start_date = user_today - timedelta(days=89)
+                case "last180days":
+                    self.start_date = user_today - timedelta(days=179)
                     self.end_date = user_today
-                case "this_week":
-                    self.start_date = user_today - timedelta(days=user_today.weekday())
-                    self.end_date = user_today
-                case "last_week":
-                    week_start = user_today - timedelta(days=user_today.weekday())
-                    self.start_date = week_start - timedelta(days=7)
-                    self.end_date = week_start - timedelta(days=1)
-                case "this_month":
-                    self.start_date = user_today.replace(day=1)
-                    self.end_date = user_today
-                case "last_month":
-                    first_of_this_month = user_today.replace(day=1)
-                    self.end_date = first_of_this_month - timedelta(days=1)
-                    self.start_date = self.end_date.replace(day=1)
-                case "this_year":
-                    self.start_date = user_today.replace(month=1, day=1)
+                case "last1year":
+                    self.start_date = user_today.replace(year=user_today.year - 1)
                     self.end_date = user_today
 
         if not self.preset and (self.start_date is None or self.end_date is None):
@@ -85,7 +64,7 @@ class TimeRangeParams(BaseModel):
             raise ValueError("start_date must be <= end_date")
 
         if self.start_date and self.end_date:
-            max_days = 365
+            max_days = 366
             days = (self.end_date - self.start_date).days
             if days > max_days:
                 raise ValueError(f"Query range cannot exceed {max_days} days")

@@ -28,18 +28,17 @@ export function getDateRangeFromPeriod(period: PeriodValue): DateRangeParams {
     case 'today':
       startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate())
       break
-    case 'yesterday':
-      startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
-      endDate = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-      break
     case 'last7days':
       startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
       break
     case 'last30days':
       startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
       break
-    case 'last90days':
-      startDate = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000)
+    case 'last180days':
+      startDate = new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000)
+      break
+    case 'last1year':
+      startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate())
       break
     default:
       return {} // 返回空对象表示不过滤时间

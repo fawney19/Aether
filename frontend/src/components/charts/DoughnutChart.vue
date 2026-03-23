@@ -1,5 +1,8 @@
 <template>
-  <div class="w-full h-full">
+  <div
+    class="w-full"
+    :style="{ height: `${props.height}px` }"
+  >
     <canvas ref="chartRef" />
   </div>
 </template>
@@ -16,10 +19,12 @@ import {
   type ChartData,
   type ChartOptions
 } from 'chart.js'
+import { observeChartThemeChanges, resolveChartTheme } from '@/utils/chartTheme'
 
 const props = withDefaults(defineProps<Props>(), {
   height: 300,
-  options: undefined
+  options: undefined,
+  showLegend: true,
 })
 
 ChartJS.register(
@@ -34,15 +39,22 @@ interface Props {
   data: ChartData<'doughnut'>
   options?: ChartOptions<'doughnut'>
   height?: number
+  showLegend?: boolean
 }
 
 const chartRef = ref<HTMLCanvasElement>()
 let chart: ChartJS<'doughnut'> | null = null
+let stopThemeObserver: (() => void) | null = null
 
 const defaultOptions: ChartOptions<'doughnut'> = {
   responsive: true,
   maintainAspectRatio: false,
   cutout: '60%',
+  events: ['mousemove', 'mouseout', 'click', 'touchstart', 'touchmove'],
+  interaction: {
+    mode: 'nearest',
+    intersect: true,
+  },
   plugins: {
     legend: {
       position: 'right',
@@ -71,22 +83,59 @@ const defaultOptions: ChartOptions<'doughnut'> = {
   }
 }
 
+function resolvedOptions(): ChartOptions<'doughnut'> {
+  const incomingOptions = props.options ?? {}
+  const incomingPlugins = (incomingOptions.plugins ?? {}) as Record<string, unknown>
+  const incomingLegend = (incomingPlugins.legend ?? {}) as Record<string, unknown>
+  const incomingTooltip = (incomingPlugins.tooltip ?? {}) as Record<string, unknown>
+  const defaultPlugins = (defaultOptions.plugins ?? {}) as Record<string, unknown>
+  const defaultLegend = (defaultPlugins.legend ?? {}) as Record<string, unknown>
+  const defaultTooltip = (defaultPlugins.tooltip ?? {}) as Record<string, unknown>
+
+  return resolveChartTheme({
+    ...defaultOptions,
+    ...incomingOptions,
+    interaction: {
+      ...defaultOptions.interaction,
+      ...incomingOptions.interaction,
+    },
+    plugins: {
+      ...defaultPlugins,
+      ...incomingPlugins,
+      legend: {
+        ...defaultLegend,
+        ...incomingLegend,
+        display: incomingLegend.display ?? props.showLegend,
+        labels: {
+          ...(defaultLegend.labels as Record<string, unknown> | undefined),
+          ...(incomingLegend.labels as Record<string, unknown> | undefined),
+        },
+      },
+      tooltip: {
+        ...defaultTooltip,
+        ...incomingTooltip,
+        callbacks: {
+          ...(defaultTooltip.callbacks as Record<string, unknown> | undefined),
+          ...(incomingTooltip.callbacks as Record<string, unknown> | undefined),
+        },
+      },
+    },
+  })
+}
+
 function createChart() {
   if (!chartRef.value) return
 
   chart = new ChartJS(chartRef.value, {
     type: 'doughnut',
-    data: props.data,
-    options: {
-      ...defaultOptions,
-      ...props.options
-    }
+    data: resolveChartTheme(props.data),
+    options: resolvedOptions(),
   })
 }
 
 function updateChart() {
   if (chart) {
-    chart.data = props.data
+    chart.data = resolveChartTheme(props.data)
     chart.update('none')
   }
 }
@@ -94,9 +143,17 @@ function updateChart() {
 onMounted(async () => {
   await nextTick()
   createChart()
+  stopThemeObserver = observeChartThemeChanges(() => {
+    if (!chart) return
+    chart.data = resolveChartTheme(props.data)
+    chart.options = resolvedOptions()
+    chart.update('none')
+  })
 })
 
 onUnmounted(() => {
+  stopThemeObserver?.()
+  stopThemeObserver = null
   if (chart) {
     chart.destroy()
     chart = null
@@ -106,8 +163,15 @@ onUnmounted(() => {
 watch(() => props.data, updateChart, { deep: true })
 watch(() => props.options, () => {
   if (chart) {
-    chart.options = { ...defaultOptions, ...props.options }
-    chart.update()
+    chart.options = resolvedOptions()
+    chart.update('none')
   }
 }, { deep: true })
+
+watch(() => props.showLegend, () => {
+  if (chart) {
+    chart.options = resolvedOptions()
+    chart.update('none')
+  }
+})
 </script>

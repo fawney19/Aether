@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -14,8 +14,8 @@ from sqlalchemy.orm import Session
 
 from src.api.base.authenticated_adapter import AuthenticatedApiAdapter
 from src.api.base.context import ApiRequestContext
+from src.api.base.models_service import sanitize_public_global_model_config
 from src.api.base.pipeline import get_pipeline
-from src.config.constants import CacheTTL
 from src.core.crypto import crypto_service
 from src.core.enums import UserRole
 from src.core.exceptions import (
@@ -32,7 +32,6 @@ from src.models.api import (
     CreateMyApiKeyRequest,
     PublicGlobalModelListResponse,
     PublicGlobalModelResponse,
-    UpdateApiKeyProvidersRequest,
     UpdateMyApiKeyRequest,
     UpdatePreferencesRequest,
     UpdateProfileRequest,
@@ -48,32 +47,12 @@ from src.models.database import (
 )
 from src.services.cache.user_cache import UserCacheService
 from src.services.system.config import SystemConfigService
-from src.services.system.time_range import TimeRangeParams
-from src.services.usage.query import input_context_expr
-from src.services.usage.service import UsageService
 from src.services.user.apikey import ApiKeyService
 from src.services.user.bulk_cleanup import pre_clean_api_key
 from src.services.user.preference import PreferenceService
-from src.services.wallet import WalletService
-from src.utils.cache_decorator import cache_result
 
 router = APIRouter(prefix="/api/users/me", tags=["User Profile"])
 pipeline = get_pipeline()
-
-
-def _calculate_token_cache_hit_rate(total_input_context: int, cache_read_tokens: int) -> float:
-    """计算缓存命中率。
-
-    Args:
-        total_input_context: 已归一化的总输入上下文 token 数（由 query.py 按 API 格式精确计算）。
-        cache_read_tokens: 缓存读取 token 数。
-    """
-    context = max(0, int(total_input_context))
-    cached = max(0, int(cache_read_tokens))
-    if context == 0:
-        return 0.0
-    return round(cached / context * 100, 2)
-
 
 def _update_profile_sync(
     user_id: str,
@@ -226,7 +205,6 @@ def _update_my_api_key_sync(
             "key_display": updated.get_display_key(),
             "is_active": updated.is_active,
             "is_locked": updated.is_locked,
-            "allowed_providers": updated.allowed_providers,
             "force_capabilities": updated.force_capabilities,
             "rate_limit": updated.rate_limit,
             "last_used_at": updated.last_used_at.isoformat() if updated.last_used_at else None,
@@ -234,41 +212,6 @@ def _update_my_api_key_sync(
             "created_at": updated.created_at.isoformat(),
             "message": "API密钥已更新",
         }
-
-
-def _update_api_key_providers_sync(
-    user_id: str,
-    api_key_id: str,
-    request: UpdateApiKeyProvidersRequest,
-) -> dict[str, str]:
-    with get_db_context() as db:
-        api_key = (
-            db.query(ApiKey).filter(ApiKey.id == api_key_id, ApiKey.user_id == user_id).first()
-        )
-        if not api_key:
-            raise NotFoundException("API密钥不存在")
-        if api_key.is_locked:
-            raise ForbiddenException("该密钥已被管理员锁定，无法修改")
-
-        if request.allowed_providers is not None and len(request.allowed_providers) > 0:
-            provider_ids = [cfg.provider_id for cfg in request.allowed_providers]
-            valid = (
-                db.query(Provider.id)
-                .filter(Provider.id.in_(provider_ids), Provider.is_active.is_(True))
-                .all()
-            )
-            valid_ids = {p.id for p in valid}
-            invalid = set(provider_ids) - valid_ids
-            if invalid:
-                raise InvalidRequestException(f"无效的提供商ID: {', '.join(invalid)}")
-
-        api_key.allowed_providers = (
-            [cfg.provider_id for cfg in request.allowed_providers]
-            if request.allowed_providers is not None
-            else None
-        )
-        api_key.updated_at = datetime.now(timezone.utc)
-        return {"message": "API密钥可用提供商已更新"}
 
 
 def _update_api_key_capabilities_sync(
@@ -331,7 +274,6 @@ def _update_preferences_sync(user_id: str, request: UpdatePreferencesRequest) ->
             user_id=user_id,
             avatar_url=request.avatar_url,
             bio=request.bio,
-            default_provider_id=request.default_provider_id,
             theme=request.theme,
             language=request.language,
             timezone=request.timezone,
@@ -393,29 +335,6 @@ def _update_model_capability_settings_sync(
             "message": "模型能力配置已更新",
             "model_capability_settings": user.model_capability_settings,
         }, user.email
-
-
-def _build_time_range_params(
-    start_date: date | None,
-    end_date: date | None,
-    preset: str | None,
-    timezone_name: str | None,
-    tz_offset_minutes: int | None,
-) -> TimeRangeParams | None:
-    if not preset and start_date is None and end_date is None:
-        return None
-    try:
-        return TimeRangeParams(
-            start_date=start_date,
-            end_date=end_date,
-            preset=preset,
-            timezone=timezone_name,
-            tz_offset_minutes=tz_offset_minutes or 0,
-        ).validate_and_resolve()
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
 @router.get("")
 async def get_my_profile(request: Request, db: Session = Depends(get_db)) -> Any:
     """
@@ -559,109 +478,6 @@ async def toggle_my_api_key(key_id: str, request: Request, db: Session = Depends
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
-# ============== 使用统计 ==============
-
-
-@router.get("/usage")
-async def get_my_usage(
-    request: Request,
-    start_date: date | None = Query(None, description="开始日期（YYYY-MM-DD）"),
-    end_date: date | None = Query(None, description="结束日期（YYYY-MM-DD）"),
-    preset: str | None = Query(None, description="时间预设（today/last7days 等）"),
-    timezone_name: str | None = Query(None, alias="timezone"),
-    tz_offset_minutes: int | None = Query(None, description="时区偏移（分钟）"),
-    search: str | None = Query(None, description="搜索关键词（密钥名、模型名）"),
-    limit: int = Query(100, ge=1, le=200, description="每页记录数，默认100，最大200"),
-    offset: int = Query(0, ge=0, le=2000, description="偏移量，用于分页，最大2000"),
-    db: Session = Depends(get_db),
-) -> Any:
-    """
-    获取使用统计
-
-    获取当前用户的 API 使用统计数据，包括总量汇总、按模型/提供商分组统计及详细记录。
-
-    **返回字段**:
-    - `total_requests`: 总请求数
-    - `total_tokens`: 总 Token 数
-    - `total_cost`: 总成本（USD）
-    - `summary_by_model`: 按模型分组统计（含 `cache_read_tokens`、`cache_hit_rate`）
-    - `summary_by_provider`: 按提供商分组统计（含 `cache_read_tokens`、`cache_hit_rate`）
-    - `records`: 详细使用记录列表
-    - `pagination`: 分页信息
-    """
-    time_range = _build_time_range_params(
-        start_date, end_date, preset, timezone_name, tz_offset_minutes
-    )
-    adapter = GetUsageAdapter(time_range=time_range, search=search, limit=limit, offset=offset)
-    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
-
-
-@router.get("/usage/active")
-async def get_my_active_requests(
-    request: Request,
-    ids: str | None = Query(None, description="请求 ID 列表，逗号分隔"),
-    db: Session = Depends(get_db),
-) -> Any:
-    """
-    获取活跃请求状态
-
-    查询正在进行中的请求状态，用于前端轮询更新流式请求的进度。
-
-    **查询参数**:
-    - `ids`: 要查询的请求 ID 列表，逗号分隔
-    """
-    adapter = GetActiveRequestsAdapter(ids=ids)
-    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
-
-
-@router.get("/usage/interval-timeline")
-async def get_my_interval_timeline(
-    request: Request,
-    hours: int = Query(24, ge=1, le=720, description="分析最近多少小时的数据"),
-    limit: int = Query(2000, ge=100, le=20000, description="最大返回数据点数量"),
-    db: Session = Depends(get_db),
-) -> Any:
-    """
-    获取请求间隔时间线
-
-    获取请求间隔时间线数据，用于散点图展示请求分布情况。
-
-    **返回**: 包含时间戳和间隔时间的数据点列表
-    """
-    adapter = GetMyIntervalTimelineAdapter(hours=hours, limit=limit)
-    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
-
-
-@router.get("/usage/heatmap")
-async def get_my_activity_heatmap(
-    request: Request,
-    db: Session = Depends(get_db),
-) -> Any:
-    """
-    获取活动热力图数据
-
-    获取过去 365 天的活动热力图数据，用于展示每日使用频率。
-    此接口有 5 分钟缓存。
-
-    **返回**: 包含日期和请求数量的数据列表
-    """
-    adapter = GetMyActivityHeatmapAdapter()
-    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
-
-
-@router.get("/providers")
-async def list_available_providers(request: Request, db: Session = Depends(get_db)) -> Any:
-    """
-    获取可用提供商列表
-
-    获取当前用户可用的所有提供商及其模型信息。
-
-    **返回字段**: id, name, display_name, endpoints, models 等
-    """
-    adapter = ListAvailableProvidersAdapter()
-    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
-
-
 @router.get("/available-models")
 async def list_available_models(
     request: Request,
@@ -700,33 +516,6 @@ async def get_endpoint_status(request: Request, db: Session = Depends(get_db)) -
     **返回**: 按 API 格式分组的端点健康状态
     """
     adapter = GetEndpointStatusAdapter()
-    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
-
-
-# ============== API密钥与提供商关联 ==============
-
-
-# UpdateApiKeyProvidersRequest 已移至 src/models/api.py
-
-
-@router.put("/api-keys/{api_key_id}/providers")
-async def update_api_key_providers(
-    api_key_id: str,
-    request: Request,
-    db: Session = Depends(get_db),
-) -> Any:
-    """
-    更新 API 密钥可用提供商
-
-    设置指定 API 密钥可以使用哪些提供商。未设置时使用用户默认权限。
-
-    **路径参数**:
-    - `api_key_id`: API 密钥 ID
-
-    **请求体**:
-    - `allowed_providers`: 允许的提供商 ID 列表
-    """
-    adapter = UpdateApiKeyProvidersAdapter(api_key_id=api_key_id)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
@@ -939,7 +728,6 @@ class ListMyApiKeysAdapter(AuthenticatedApiAdapter):
                     "total_requests": real_stats["total_requests"],
                     "total_cost_usd": real_stats["total_cost_usd"],
                     "rate_limit": key.rate_limit,
-                    "allowed_providers": key.allowed_providers,
                     "force_capabilities": key.force_capabilities,
                 }
             )
@@ -1018,7 +806,6 @@ class GetMyApiKeyDetailAdapter(AuthenticatedApiAdapter):
             "key_display": api_key.get_display_key(),
             "is_active": api_key.is_active,
             "is_locked": api_key.is_locked,
-            "allowed_providers": api_key.allowed_providers,
             "force_capabilities": api_key.force_capabilities,
             "rate_limit": api_key.rate_limit,
             "last_used_at": api_key.last_used_at.isoformat() if api_key.last_used_at else None,
@@ -1066,484 +853,6 @@ class ToggleMyApiKeyAdapter(AuthenticatedApiAdapter):
 
     async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
         return await run_in_threadpool(_toggle_my_api_key_sync, context.user.id, self.key_id)
-
-
-@dataclass
-class GetUsageAdapter(AuthenticatedApiAdapter):
-    """获取用户使用统计的适配器"""
-
-    time_range: TimeRangeParams | None
-    search: str | None = None
-    limit: int = 100
-    offset: int = 0
-
-    @cache_result(
-        key_prefix="user:usage:records",
-        ttl=3,  # 使用记录页强调实时性，避免 15s 缓存导致列表滞后
-        user_specific=True,
-        vary_by=[
-            "time_range.start_date",
-            "time_range.end_date",
-            "time_range.preset",
-            "time_range.timezone",
-            "time_range.tz_offset_minutes",
-            "search",
-            "limit",
-            "offset",
-        ],
-    )
-    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
-        from sqlalchemy import or_
-        from sqlalchemy.orm import load_only
-
-        from src.models.database import ProviderEndpoint
-        from src.utils.database_helpers import escape_like_pattern, safe_truncate_escaped
-
-        db = context.db
-        user = context.user
-        start_utc = end_utc = None
-        if self.time_range:
-            start_utc, end_utc = self.time_range.to_utc_datetime_range()
-        summary_list = UsageService.get_usage_summary(
-            db=db,
-            user_id=user.id,
-            start_date=start_utc,
-            end_date=end_utc,
-            group_by=None,
-        )
-
-        # 过滤掉 unknown/pending provider 的记录（请求未到达任何提供商）
-        filtered_summary = [
-            item
-            for item in summary_list
-            if item.get("provider") not in ("unknown", "pending", None)
-        ]
-
-        total_requests = 0
-        total_input_tokens = 0
-        total_output_tokens = 0
-        total_tokens = 0
-        total_cost = 0.0
-        total_actual_cost = 0.0
-        model_summary = {}
-        provider_summary = {}
-        for item in filtered_summary:
-            total_requests += item["requests"]
-            total_input_tokens += item["input_tokens"]
-            total_output_tokens += item["output_tokens"]
-            total_tokens += item["total_tokens"]
-            total_cost += item["total_cost_usd"]
-            if user.role == UserRole.ADMIN:
-                total_actual_cost += item.get("actual_total_cost_usd", 0.0)
-
-            model_name = item["model"]
-            base_stats = {
-                "model": model_name,
-                "requests": 0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "total_tokens": 0,
-                "cache_read_tokens": 0,
-                "cache_creation_tokens": 0,
-                "total_input_context": 0,
-                "cache_hit_rate": 0.0,
-                "total_cost_usd": 0.0,
-            }
-            # 管理员可以看到真实成本
-            if user.role == UserRole.ADMIN:
-                base_stats["actual_total_cost_usd"] = 0.0
-
-            stats = model_summary.setdefault(model_name, base_stats)
-            stats["requests"] += item["requests"]
-            stats["input_tokens"] += item["input_tokens"]
-            stats["output_tokens"] += item["output_tokens"]
-            stats["total_tokens"] += item["total_tokens"]
-            stats["cache_read_tokens"] += int(item.get("cache_read_tokens", 0) or 0)
-            stats["cache_creation_tokens"] += int(item.get("cache_creation_tokens", 0) or 0)
-            stats["total_input_context"] += int(item.get("total_input_context", 0) or 0)
-            stats["total_cost_usd"] += item["total_cost_usd"]
-            # 管理员可以看到真实成本
-            if user.role == UserRole.ADMIN:
-                stats["actual_total_cost_usd"] += item.get("actual_total_cost_usd", 0.0)
-
-            provider_name = item["provider"]
-            provider_base_stats = {
-                "provider": provider_name,
-                "requests": 0,
-                "total_tokens": 0,
-                "output_tokens": 0,
-                "cache_read_tokens": 0,
-                "cache_creation_tokens": 0,
-                "total_input_context": 0,
-                "total_cost_usd": 0.0,
-                "success_count": 0,
-                "total_response_time_ms": 0.0,
-                "response_time_count": 0,
-            }
-            provider_stats = provider_summary.setdefault(provider_name, provider_base_stats)
-            provider_stats["requests"] += item["requests"]
-            provider_stats["total_tokens"] += item["total_tokens"]
-            provider_stats["output_tokens"] += item.get("output_tokens", 0) or 0
-            provider_stats["cache_read_tokens"] += int(item.get("cache_read_tokens", 0) or 0)
-            provider_stats["cache_creation_tokens"] += int(
-                item.get("cache_creation_tokens", 0) or 0
-            )
-            provider_stats["total_input_context"] += int(item.get("total_input_context", 0) or 0)
-            provider_stats["total_cost_usd"] += item["total_cost_usd"]
-            provider_stats["success_count"] += int(item.get("success_count", 0) or 0)
-            success_response_time_count = int(item.get("success_response_time_count", 0) or 0)
-            if success_response_time_count > 0:
-                provider_stats["total_response_time_ms"] += float(
-                    item.get("success_response_time_sum_ms", 0.0) or 0.0
-                )
-                provider_stats["response_time_count"] += success_response_time_count
-
-        for model_stats in model_summary.values():
-            model_stats["cache_hit_rate"] = _calculate_token_cache_hit_rate(
-                total_input_context=int(model_stats.get("total_input_context", 0) or 0),
-                cache_read_tokens=int(model_stats.get("cache_read_tokens", 0) or 0),
-            )
-
-        summary_by_model = sorted(model_summary.values(), key=lambda x: x["requests"], reverse=True)
-        summary_by_provider = []
-        for provider_stats in provider_summary.values():
-            avg_response_time_ms = (
-                provider_stats["total_response_time_ms"] / provider_stats["response_time_count"]
-                if provider_stats["response_time_count"] > 0
-                else 0
-            )
-            success_rate = (
-                (provider_stats["success_count"] / provider_stats["requests"] * 100)
-                if provider_stats["requests"] > 0
-                else 100
-            )
-            summary_by_provider.append(
-                {
-                    "provider": provider_stats["provider"],
-                    "requests": provider_stats["requests"],
-                    "total_tokens": provider_stats["total_tokens"],
-                    "total_input_context": provider_stats["total_input_context"],
-                    "output_tokens": provider_stats["output_tokens"],
-                    "cache_read_tokens": provider_stats["cache_read_tokens"],
-                    "cache_creation_tokens": provider_stats["cache_creation_tokens"],
-                    "cache_hit_rate": _calculate_token_cache_hit_rate(
-                        total_input_context=int(provider_stats.get("total_input_context", 0) or 0),
-                        cache_read_tokens=int(provider_stats.get("cache_read_tokens", 0) or 0),
-                    ),
-                    "total_cost_usd": provider_stats["total_cost_usd"],
-                    "success_rate": round(success_rate, 2),
-                    "avg_response_time_ms": round(avg_response_time_ms, 2),
-                }
-            )
-        summary_by_provider = sorted(summary_by_provider, key=lambda x: x["requests"], reverse=True)
-
-        # 按 api_format 聚合统计（独立查询，因为 get_usage_summary 按 provider+model 分组无此维度）
-        api_format_query = db.query(
-            Usage.api_format,
-            func.count(Usage.id).label("request_count"),
-            func.sum(Usage.total_tokens).label("total_tokens"),
-            func.sum(Usage.cache_read_input_tokens).label("cache_read_tokens"),
-            func.sum(input_context_expr()).label("total_input_context"),
-            func.sum(Usage.output_tokens).label("output_tokens"),
-            func.sum(Usage.cache_creation_input_tokens).label("cache_creation_tokens"),
-            func.sum(Usage.total_cost_usd).label("total_cost_usd"),
-            func.avg(Usage.response_time_ms).label("avg_response_time_ms"),
-        ).filter(
-            Usage.user_id == user.id,
-            Usage.status.notin_(["pending", "streaming"]),
-            Usage.provider_name.notin_(["unknown", "pending"]),
-            Usage.api_format.isnot(None),
-        )
-        if start_utc and end_utc:
-            api_format_query = api_format_query.filter(
-                Usage.created_at >= start_utc, Usage.created_at < end_utc
-            )
-        api_format_stats = (
-            api_format_query.group_by(Usage.api_format).order_by(func.count(Usage.id).desc()).all()
-        )
-        summary_by_api_format = [
-            {
-                "api_format": api_format or "unknown",
-                "request_count": count,
-                "total_tokens": int(total_tokens or 0),
-                "total_input_context": int(total_input_context or 0),
-                "output_tokens": int(output_tokens or 0),
-                "cache_read_tokens": int(cache_read_tokens or 0),
-                "cache_creation_tokens": int(cache_creation_tokens or 0),
-                "cache_hit_rate": _calculate_token_cache_hit_rate(
-                    total_input_context=total_input_context,
-                    cache_read_tokens=cache_read_tokens,
-                ),
-                "total_cost_usd": float(total_cost_usd or 0),
-                "avg_response_time_ms": float(avg_response_time_ms or 0),
-            }
-            for (
-                api_format,
-                count,
-                total_tokens,
-                cache_read_tokens,
-                total_input_context,
-                output_tokens,
-                cache_creation_tokens,
-                total_cost_usd,
-                avg_response_time_ms,
-            ) in api_format_stats
-        ]
-
-        query = (
-            db.query(Usage, ApiKey, ProviderEndpoint)
-            .outerjoin(ApiKey, Usage.api_key_id == ApiKey.id)
-            .outerjoin(ProviderEndpoint, Usage.provider_endpoint_id == ProviderEndpoint.id)
-            .filter(Usage.user_id == user.id)
-        )
-        if start_utc and end_utc:
-            query = query.filter(Usage.created_at >= start_utc, Usage.created_at < end_utc)
-
-        # 通用搜索：密钥名、模型名
-        # 支持空格分隔的组合搜索，多个关键词之间是 AND 关系
-        if self.search and self.search.strip():
-            keywords = [kw for kw in self.search.strip().split() if kw][:10]
-            for keyword in keywords:
-                escaped = safe_truncate_escaped(escape_like_pattern(keyword), 100)
-                search_pattern = f"%{escaped}%"
-                query = query.filter(
-                    or_(
-                        ApiKey.name.ilike(search_pattern, escape="\\"),
-                        Usage.model.ilike(search_pattern, escape="\\"),
-                    )
-                )
-
-        # 计算总数用于分页
-        # Perf: avoid Query.count() building a subquery selecting many columns
-        total_records = int(query.with_entities(func.count(Usage.id)).scalar() or 0)
-
-        # Perf: do not load large request/response columns for list view
-        query = query.options(
-            load_only(
-                Usage.id,
-                Usage.user_id,
-                Usage.api_key_id,
-                Usage.provider_name,
-                Usage.model,
-                Usage.target_model,
-                Usage.input_tokens,
-                Usage.output_tokens,
-                Usage.total_tokens,
-                Usage.total_cost_usd,
-                Usage.response_time_ms,
-                Usage.first_byte_time_ms,
-                Usage.is_stream,
-                Usage.status,
-                Usage.created_at,
-                Usage.cache_creation_input_tokens,
-                Usage.cache_read_input_tokens,
-                Usage.status_code,
-                Usage.error_message,
-                Usage.api_format,
-                Usage.endpoint_api_format,
-                Usage.has_format_conversion,
-                Usage.input_price_per_1m,
-                Usage.output_price_per_1m,
-                Usage.cache_creation_price_per_1m,
-                Usage.cache_read_price_per_1m,
-                Usage.actual_total_cost_usd,
-                Usage.rate_multiplier,
-            ),
-            load_only(ApiKey.id, ApiKey.name, ApiKey.key_encrypted),
-            load_only(ProviderEndpoint.id, ProviderEndpoint.api_format),
-        )
-        usage_records = (
-            query.order_by(Usage.created_at.desc()).offset(self.offset).limit(self.limit).all()
-        )
-
-        # 复用 summary 聚合中的成功请求响应时间，避免额外 AVG SQL
-        total_success_response_time_ms = sum(
-            float(item.get("success_response_time_sum_ms", 0.0) or 0.0) for item in summary_list
-        )
-        total_success_response_count = sum(
-            int(item.get("success_response_time_count", 0) or 0) for item in summary_list
-        )
-        avg_response_time = (
-            total_success_response_time_ms / total_success_response_count / 1000.0
-            if total_success_response_count > 0
-            else 0.0
-        )
-        wallet = WalletService.get_wallet(db, user_id=user.id)
-
-        # 构建响应数据
-        response_data = {
-            "total_requests": total_requests,
-            "total_input_tokens": total_input_tokens,
-            "total_output_tokens": total_output_tokens,
-            "total_tokens": total_tokens,
-            "total_cost": total_cost,
-            "avg_response_time": avg_response_time,
-            "billing": WalletService.serialize_wallet_summary(wallet),
-            "summary_by_model": summary_by_model,
-            "summary_by_provider": summary_by_provider,
-            "summary_by_api_format": summary_by_api_format,
-            # 分页信息
-            "pagination": {
-                "total": total_records,
-                "limit": self.limit,
-                "offset": self.offset,
-                "has_more": self.offset + self.limit < total_records,
-            },
-            "records": self._build_usage_records(
-                usage_records, is_admin=(user.role == UserRole.ADMIN)
-            ),
-        }
-
-        # 管理员可以看到真实成本
-        if user.role == UserRole.ADMIN:
-            response_data["total_actual_cost"] = total_actual_cost
-            # 为每条记录添加真实成本和倍率信息
-            for i, (r, _, _) in enumerate(usage_records):
-                # 确保字段有值，避免前端显示 -
-                actual_cost = (
-                    r.actual_total_cost_usd if r.actual_total_cost_usd is not None else 0.0
-                )
-                rate_mult = r.rate_multiplier if r.rate_multiplier is not None else 1.0
-                response_data["records"][i]["actual_cost"] = actual_cost
-                response_data["records"][i]["rate_multiplier"] = rate_mult
-
-        return response_data
-
-    def _build_usage_records(self, usage_records: list, is_admin: bool = False) -> list:
-        """构建使用记录列表，包含格式转换信息的回填逻辑
-
-        Args:
-            usage_records: 使用记录列表
-            is_admin: 是否为管理员，管理员可以看到模型映射信息
-        """
-        from src.core.api_format.metadata import can_passthrough_endpoint
-        from src.core.api_format.signature import normalize_signature_key
-
-        records = []
-        for r, api_key, endpoint in usage_records:
-            # 格式转换追踪（兼容历史数据：尽量回填可展示信息）
-            api_format = r.api_format
-            endpoint_api_format = r.endpoint_api_format or (
-                endpoint.api_format if endpoint else None
-            )
-
-            has_format_conversion = r.has_format_conversion
-            if has_format_conversion is None:
-                # 新模式：仅对 signature 进行推断（历史旧值保持 False，避免解析失败）
-                client_raw = str(api_format or "").strip()
-                endpoint_raw = str(endpoint_api_format or "").strip()
-                if client_raw and endpoint_raw and ":" in client_raw and ":" in endpoint_raw:
-                    client_fmt = normalize_signature_key(client_raw)
-                    endpoint_fmt = normalize_signature_key(endpoint_raw)
-                    has_format_conversion = not can_passthrough_endpoint(client_fmt, endpoint_fmt)
-                else:
-                    has_format_conversion = False
-
-            records.append(
-                {
-                    "id": r.id,
-                    "model": r.model,
-                    # 只有管理员可以看到模型映射信息，普通用户只能看到请求的模型
-                    "target_model": r.target_model if is_admin else None,
-                    "api_format": api_format,
-                    "endpoint_api_format": endpoint_api_format,
-                    "has_format_conversion": bool(has_format_conversion),
-                    "input_tokens": r.input_tokens,
-                    "output_tokens": r.output_tokens,
-                    "total_tokens": r.total_tokens,
-                    "cost": float(r.total_cost_usd or 0),
-                    "response_time_ms": r.response_time_ms,
-                    "first_byte_time_ms": r.first_byte_time_ms,
-                    "is_stream": r.is_stream,
-                    "status": r.status,  # 请求状态: pending, streaming, completed, failed
-                    "created_at": r.created_at.isoformat(),
-                    "cache_creation_input_tokens": r.cache_creation_input_tokens,
-                    "cache_read_input_tokens": r.cache_read_input_tokens,
-                    "status_code": r.status_code,
-                    "error_message": r.error_message,
-                    "input_price_per_1m": r.input_price_per_1m,
-                    "output_price_per_1m": r.output_price_per_1m,
-                    "cache_creation_price_per_1m": r.cache_creation_price_per_1m,
-                    "cache_read_price_per_1m": r.cache_read_price_per_1m,
-                    "api_key": (
-                        {
-                            "id": str(api_key.id),
-                            "name": api_key.name,
-                            "display": api_key.get_display_key(),
-                        }
-                        if api_key
-                        else None
-                    ),
-                }
-            )
-        return records
-
-
-@dataclass
-class GetActiveRequestsAdapter(AuthenticatedApiAdapter):
-    """轻量级活跃请求状态查询适配器（用于用户端轮询）"""
-
-    ids: str | None = None
-
-    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
-        from src.services.usage import UsageService
-
-        db = context.db
-        user = context.user
-        id_list = None
-        if self.ids:
-            id_list = [id.strip() for id in self.ids.split(",") if id.strip()]
-            if not id_list:
-                return {"requests": []}
-
-        requests = UsageService.get_active_requests_status(
-            db=db,
-            ids=id_list,
-            user_id=user.id,
-            maintain_status=True,
-        )
-        return {"requests": requests}
-
-
-@dataclass
-class GetMyIntervalTimelineAdapter(AuthenticatedApiAdapter):
-    """获取当前用户的请求间隔时间线适配器"""
-
-    hours: int
-    limit: int
-
-    @cache_result(
-        key_prefix="user:usage:interval_timeline",
-        ttl=CacheTTL.ADMIN_USAGE_AGGREGATION,
-        user_specific=True,
-        vary_by=["hours", "limit"],
-    )
-    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
-        db = context.db
-        user = context.user
-
-        result = UsageService.get_interval_timeline(
-            db=db,
-            hours=self.hours,
-            limit=self.limit,
-            user_id=str(user.id),
-        )
-
-        return result
-
-
-class GetMyActivityHeatmapAdapter(AuthenticatedApiAdapter):
-    """获取用户活动热力图数据的适配器（带 Redis 缓存）"""
-
-    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
-        user = context.user
-        result = await UsageService.get_cached_heatmap(
-            db=context.db,
-            user_id=user.id,
-            include_actual_cost=user.role == UserRole.ADMIN,
-        )
-        context.add_audit_metadata(action="activity_heatmap")
-        return result
 
 
 @dataclass
@@ -1647,7 +956,7 @@ class ListAvailableModelsAdapter(AuthenticatedApiAdapter):
                 default_price_per_request=gm.default_price_per_request,
                 default_tiered_pricing=gm.default_tiered_pricing,
                 supported_capabilities=gm.supported_capabilities,
-                config=gm.config,
+                config=sanitize_public_global_model_config(gm.config),
                 usage_count=user_usage_map.get(gm.name, 0),
             )
             for gm in models
@@ -1754,103 +1063,6 @@ class ListAvailableModelsAdapter(AuthenticatedApiAdapter):
         return get_available_provider_ids(db, formats, provider_to_formats)
 
 
-class ListAvailableProvidersAdapter(AuthenticatedApiAdapter):
-    """获取可用提供商列表的适配器"""
-
-    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
-        from sqlalchemy.orm import selectinload
-
-        db = context.db
-
-        # 使用 selectinload 预加载所有关联数据，避免 N+1 查询
-        providers = (
-            db.query(Provider)
-            .options(
-                selectinload(Provider.endpoints),
-                selectinload(Provider.models).selectinload(Model.global_model),
-            )
-            .filter(Provider.is_active.is_(True))
-            .all()
-        )
-
-        result = []
-        for provider in providers:
-            # 直接使用预加载的 endpoints，无需额外查询
-            endpoints_data = [
-                {
-                    "id": ep.id,
-                    "api_format": ep.api_format if ep.api_format else None,
-                    "base_url": ep.base_url,
-                    "is_active": ep.is_active,
-                }
-                for ep in provider.endpoints
-            ]
-
-            models_data = []
-            # 直接使用预加载的 models，无需额外查询
-            direct_models = provider.models
-            for model in direct_models:
-                global_model = model.global_model
-                display_name = (
-                    global_model.display_name if global_model else model.provider_model_name
-                )
-                unified_name = global_model.name if global_model else model.provider_model_name
-                models_data.append(
-                    {
-                        "id": model.id,
-                        "name": unified_name,
-                        "display_name": display_name,
-                        "input_price_per_1m": model.input_price_per_1m,
-                        "output_price_per_1m": model.output_price_per_1m,
-                        "cache_creation_price_per_1m": model.cache_creation_price_per_1m,
-                        "cache_read_price_per_1m": model.cache_read_price_per_1m,
-                        "supports_vision": model.supports_vision,
-                        "supports_function_calling": model.supports_function_calling,
-                        "supports_streaming": model.supports_streaming,
-                    }
-                )
-
-            result.append(
-                {
-                    "id": provider.id,
-                    "name": provider.name,
-                    "description": provider.description,
-                    "provider_priority": provider.provider_priority,
-                    "endpoints": endpoints_data,
-                    "models": models_data,
-                }
-            )
-        return result
-
-
-@dataclass
-class UpdateApiKeyProvidersAdapter(AuthenticatedApiAdapter):
-    """更新 API 密钥可用提供商的适配器"""
-
-    api_key_id: str
-
-    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
-        db = context.db
-        user = context.user
-        payload = context.ensure_json_body()
-        try:
-            request = UpdateApiKeyProvidersRequest.model_validate(payload)
-        except ValidationError as e:
-            errors = e.errors()
-            if errors:
-                raise InvalidRequestException(translate_pydantic_error(errors[0]))
-            raise InvalidRequestException("请求数据验证失败")
-
-        result = await run_in_threadpool(
-            _update_api_key_providers_sync,
-            user.id,
-            self.api_key_id,
-            request,
-        )
-        logger.debug(f"用户 {user.id} 更新API密钥 {self.api_key_id} 的可用提供商")
-        return result
-
-
 @dataclass
 class UpdateApiKeyCapabilitiesAdapter(AuthenticatedApiAdapter):
     """更新 API Key 的强制能力配置"""
@@ -1886,10 +1098,6 @@ class GetPreferencesAdapter(AuthenticatedApiAdapter):
         return {
             "avatar_url": preferences.avatar_url,
             "bio": preferences.bio,
-            "default_provider_id": preferences.default_provider_id,
-            "default_provider": (
-                preferences.default_provider.name if preferences.default_provider else None
-            ),
             "theme": preferences.theme,
             "language": preferences.language,
             "timezone": preferences.timezone,

@@ -544,12 +544,12 @@
                             v-if="refreshingQuota"
                             class="w-3 h-3 text-muted-foreground/70 animate-spin"
                           />
-                          <span
-                            v-if="key.upstream_metadata.codex?.updated_at"
-                            class="text-[9px] text-muted-foreground/70"
-                          >
-                            {{ formatCodexUpdatedAt(key.upstream_metadata.codex.updated_at) }}
-                          </span>
+                            <span
+                              v-if="key.upstream_metadata.codex?.updated_at"
+                              class="text-[9px] text-muted-foreground/70"
+                            >
+                              {{ formatUpdatedAt(key.upstream_metadata.codex.updated_at) }}
+                            </span>
                         </div>
                       </div>
                       <!-- 限额并排显示：Team/Plus/Enterprise 账号 2列, Free 账号 1列 -->
@@ -669,7 +669,7 @@
                               v-if="key.upstream_metadata.antigravity?.updated_at"
                               class="text-[9px] text-muted-foreground/70"
                             >
-                              {{ formatAntigravityUpdatedAt(key.upstream_metadata.antigravity.updated_at) }}
+                              {{ formatUpdatedAt(key.upstream_metadata.antigravity.updated_at) }}
                             </span>
                           </div>
                         </div>
@@ -2421,10 +2421,6 @@ function formatUpdatedAt(updatedAt: number): string {
   const days = Math.floor(hours / 24)
   return `${days}天前更新`
 }
-
-// 兼容旧函数名
-const formatCodexUpdatedAt = formatUpdatedAt
-const formatAntigravityUpdatedAt = formatUpdatedAt
 
 function secondsUntilReset(resetTime: string): number | null {
   if (!resetTime) return null

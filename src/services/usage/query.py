@@ -40,13 +40,31 @@ class UsageQueryMixin:
     HEATMAP_CACHE_KEY_PREFIX = "activity_heatmap"
 
     @classmethod
-    def _get_heatmap_cache_key(cls, user_id: str | None, include_actual_cost: bool) -> str:
+    def _get_heatmap_cache_key(
+        cls,
+        user_id: str | None,
+        include_actual_cost: bool,
+        api_key_id: str | None = None,
+        deleted_user_only: bool = False,
+        deleted_api_key_only: bool = False,
+    ) -> str:
         """生成热力图缓存键"""
         cost_suffix = "with_cost" if include_actual_cost else "no_cost"
-        if user_id:
-            return f"{cls.HEATMAP_CACHE_KEY_PREFIX}:user:{user_id}:{cost_suffix}"
+        scope_tokens: list[str] = []
+        if deleted_user_only:
+            scope_tokens.append("deleted_user")
+        elif user_id:
+            scope_tokens.extend(["user", user_id])
         else:
-            return f"{cls.HEATMAP_CACHE_KEY_PREFIX}:admin:all:{cost_suffix}"
+            scope_tokens.extend(["admin", "all"])
+
+        if deleted_api_key_only:
+            scope_tokens.append("deleted_api_key")
+        elif api_key_id:
+            scope_tokens.extend(["api_key", api_key_id])
+
+        scope_key = ":".join(scope_tokens)
+        return f"{cls.HEATMAP_CACHE_KEY_PREFIX}:{scope_key}:{cost_suffix}"
 
     @classmethod
     async def clear_user_heatmap_cache(cls, user_id: str) -> None:
@@ -80,6 +98,9 @@ class UsageQueryMixin:
         cls,
         db: Session,
         user_id: str | None = None,
+        api_key_id: str | None = None,
+        deleted_user_only: bool = False,
+        deleted_api_key_only: bool = False,
         include_actual_cost: bool = False,
     ) -> dict[str, Any]:
         """
@@ -103,7 +124,13 @@ class UsageQueryMixin:
         from src.clients.redis_client import get_redis_client
         from src.config.constants import CacheTTL
 
-        cache_key = cls._get_heatmap_cache_key(user_id, include_actual_cost)
+        cache_key = cls._get_heatmap_cache_key(
+            user_id,
+            include_actual_cost,
+            api_key_id=api_key_id,
+            deleted_user_only=deleted_user_only,
+            deleted_api_key_only=deleted_api_key_only,
+        )
 
         cache_ttl = CacheTTL.ACTIVITY_HEATMAP
         redis_client = await get_redis_client(require_redis=False)
@@ -130,6 +157,9 @@ class UsageQueryMixin:
         result = cls.get_daily_activity(
             db=db,
             user_id=user_id,
+            api_key_id=api_key_id,
+            deleted_user_only=deleted_user_only,
+            deleted_api_key_only=deleted_api_key_only,
             window_days=365,
             include_actual_cost=include_actual_cost,
         )
@@ -326,9 +356,12 @@ class UsageQueryMixin:
     def get_daily_activity(
         db: Session,
         user_id: str | None = None,
+        api_key_id: str | None = None,
         start_date: datetime | None = None,
         end_date: datetime | None = None,
         window_days: int = 365,
+        deleted_user_only: bool = False,
+        deleted_api_key_only: bool = False,
         include_actual_cost: bool = False,
     ) -> dict[str, Any]:
         """按天统计请求活跃度，用于渲染热力图。
@@ -358,99 +391,144 @@ class UsageQueryMixin:
         today_start_dt = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
         aggregated: dict[str, dict[str, Any]] = {}
 
-        # 1. 从预计算表读取历史数据（不包括今天）
-        if user_id:
-            from src.models.database import StatsUserDaily
+        needs_usage_scan = api_key_id is not None or deleted_user_only or deleted_api_key_only
 
-            hist_query = db.query(StatsUserDaily).filter(
-                StatsUserDaily.user_id == user_id,
-                StatsUserDaily.date >= start_dt,
-                StatsUserDaily.date < today_start_dt,
+        # 1. 对带删除态/API Key 过滤的场景直接按 Usage 实时聚合，避免预计算表维度不完整。
+        if needs_usage_scan:
+            usage_query = db.query(
+                Usage.created_at,
+                Usage.total_tokens,
+                Usage.total_cost_usd,
+                Usage.actual_total_cost_usd,
+            ).filter(
+                Usage.created_at >= start_dt,
+                Usage.created_at <= end_dt,
             )
-            for row in hist_query.all():
-                key = (
-                    row.date.date().isoformat()
-                    if isinstance(row.date, datetime)
-                    else str(row.date)[:10]
+
+            if deleted_user_only:
+                usage_query = usage_query.filter(Usage.user_id.is_(None))
+            elif user_id:
+                usage_query = usage_query.filter(Usage.user_id == user_id)
+
+            if deleted_api_key_only:
+                usage_query = usage_query.filter(Usage.api_key_id.is_(None))
+            elif api_key_id:
+                usage_query = usage_query.filter(Usage.api_key_id == api_key_id)
+
+            for row in usage_query.all():
+                created_at = getattr(row, "created_at", None)
+                if not created_at:
+                    continue
+                key = ensure_timezone(created_at).date().isoformat()
+                bucket = aggregated.setdefault(
+                    key,
+                    {
+                        "requests": 0,
+                        "total_tokens": 0,
+                        "total_cost_usd": 0.0,
+                        "actual_total_cost_usd": 0.0,
+                    },
                 )
-                aggregated[key] = {
-                    "requests": row.total_requests or 0,
-                    "total_tokens": (
-                        (row.input_tokens or 0)
-                        + (row.output_tokens or 0)
-                        + (row.cache_creation_tokens or 0)
-                        + (row.cache_read_tokens or 0)
-                    ),
-                    "total_cost_usd": float(row.total_cost or 0.0),
-                }
-                # StatsUserDaily 没有 actual_total_cost 字段，用户视图不需要倍率成本
+                bucket["requests"] += 1
+                bucket["total_tokens"] += int(getattr(row, "total_tokens", 0) or 0)
+                bucket["total_cost_usd"] += float(getattr(row, "total_cost_usd", 0.0) or 0.0)
+                bucket["actual_total_cost_usd"] += float(
+                    getattr(row, "actual_total_cost_usd", 0.0) or 0.0
+                )
         else:
-            from src.models.database import StatsDaily
-
-            hist_query = db.query(StatsDaily).filter(
-                StatsDaily.date >= start_dt,
-                StatsDaily.date < today_start_dt,
-            )
-            for row in hist_query.all():
-                key = (
-                    row.date.date().isoformat()
-                    if isinstance(row.date, datetime)
-                    else str(row.date)[:10]
-                )
-                aggregated[key] = {
-                    "requests": row.total_requests or 0,
-                    "total_tokens": (
-                        (row.input_tokens or 0)
-                        + (row.output_tokens or 0)
-                        + (row.cache_creation_tokens or 0)
-                        + (row.cache_read_tokens or 0)
-                    ),
-                    "total_cost_usd": float(row.total_cost or 0.0),
-                }
-                if include_actual_cost:
-                    aggregated[key]["actual_total_cost_usd"] = float(
-                        row.actual_total_cost or 0.0  # type: ignore[attr-defined]
-                    )
-
-        # 2. 实时查询今天的数据（如果在查询范围内）
-        if today >= start_dt.date() and today <= end_dt.date():
-            today_start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
-            today_end = datetime.combine(today, datetime.max.time(), tzinfo=timezone.utc)
-
-            if include_actual_cost:
-                today_query = db.query(
-                    func.count(Usage.id).label("requests"),
-                    func.sum(Usage.total_tokens).label("total_tokens"),
-                    func.sum(Usage.total_cost_usd).label("total_cost_usd"),
-                    func.sum(Usage.actual_total_cost_usd).label("actual_total_cost_usd"),
-                ).filter(
-                    Usage.created_at >= today_start,
-                    Usage.created_at <= today_end,
-                )
-            else:
-                today_query = db.query(
-                    func.count(Usage.id).label("requests"),
-                    func.sum(Usage.total_tokens).label("total_tokens"),
-                    func.sum(Usage.total_cost_usd).label("total_cost_usd"),
-                ).filter(
-                    Usage.created_at >= today_start,
-                    Usage.created_at <= today_end,
-                )
-
+            # 2. 从预计算表读取历史数据（不包括今天）
             if user_id:
-                today_query = today_query.filter(Usage.user_id == user_id)
+                from src.models.database import StatsUserDaily
 
-            today_row = today_query.first()
-            if today_row and today_row.requests:
-                aggregated[today.isoformat()] = {
-                    "requests": int(today_row.requests or 0),
-                    "total_tokens": int(today_row.total_tokens or 0),
-                    "total_cost_usd": float(today_row.total_cost_usd or 0.0),
-                }
-                if include_actual_cost:
-                    aggregated[today.isoformat()]["actual_total_cost_usd"] = float(
-                        today_row.actual_total_cost_usd or 0.0
+                hist_query = db.query(StatsUserDaily).filter(
+                    StatsUserDaily.user_id == user_id,
+                    StatsUserDaily.date >= start_dt,
+                    StatsUserDaily.date < today_start_dt,
+                )
+                for row in hist_query.all():
+                    key = (
+                        row.date.date().isoformat()
+                        if isinstance(row.date, datetime)
+                        else str(row.date)[:10]
                     )
+                    aggregated[key] = {
+                        "requests": row.total_requests or 0,
+                        "total_tokens": (
+                            (row.input_tokens or 0)
+                            + (row.output_tokens or 0)
+                            + (row.cache_creation_tokens or 0)
+                            + (row.cache_read_tokens or 0)
+                        ),
+                        "total_cost_usd": float(row.total_cost or 0.0),
+                    }
+                    # StatsUserDaily 没有 actual_total_cost 字段，用户视图不需要倍率成本
+            else:
+                from src.models.database import StatsDaily
+
+                hist_query = db.query(StatsDaily).filter(
+                    StatsDaily.date >= start_dt,
+                    StatsDaily.date < today_start_dt,
+                )
+                for row in hist_query.all():
+                    key = (
+                        row.date.date().isoformat()
+                        if isinstance(row.date, datetime)
+                        else str(row.date)[:10]
+                    )
+                    aggregated[key] = {
+                        "requests": row.total_requests or 0,
+                        "total_tokens": (
+                            (row.input_tokens or 0)
+                            + (row.output_tokens or 0)
+                            + (row.cache_creation_tokens or 0)
+                            + (row.cache_read_tokens or 0)
+                        ),
+                        "total_cost_usd": float(row.total_cost or 0.0),
+                    }
+                    if include_actual_cost:
+                        aggregated[key]["actual_total_cost_usd"] = float(
+                            row.actual_total_cost or 0.0  # type: ignore[attr-defined]
+                        )
+
+            # 3. 实时查询今天的数据（如果在查询范围内）
+            if today >= start_dt.date() and today <= end_dt.date():
+                today_start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+                today_end = datetime.combine(today, datetime.max.time(), tzinfo=timezone.utc)
+
+                if include_actual_cost:
+                    today_query = db.query(
+                        func.count(Usage.id).label("requests"),
+                        func.sum(Usage.total_tokens).label("total_tokens"),
+                        func.sum(Usage.total_cost_usd).label("total_cost_usd"),
+                        func.sum(Usage.actual_total_cost_usd).label("actual_total_cost_usd"),
+                    ).filter(
+                        Usage.created_at >= today_start,
+                        Usage.created_at <= today_end,
+                    )
+                else:
+                    today_query = db.query(
+                        func.count(Usage.id).label("requests"),
+                        func.sum(Usage.total_tokens).label("total_tokens"),
+                        func.sum(Usage.total_cost_usd).label("total_cost_usd"),
+                    ).filter(
+                        Usage.created_at >= today_start,
+                        Usage.created_at <= today_end,
+                    )
+
+                if user_id:
+                    today_query = today_query.filter(Usage.user_id == user_id)
+
+                today_row = today_query.first()
+                if today_row and today_row.requests:
+                    aggregated[today.isoformat()] = {
+                        "requests": int(today_row.requests or 0),
+                        "total_tokens": int(today_row.total_tokens or 0),
+                        "total_cost_usd": float(today_row.total_cost_usd or 0.0),
+                    }
+                    if include_actual_cost:
+                        aggregated[today.isoformat()]["actual_total_cost_usd"] = float(
+                            today_row.actual_total_cost_usd or 0.0
+                        )
 
         # 3. 构建返回结果
         days: list[dict[str, Any]] = []

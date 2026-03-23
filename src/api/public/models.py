@@ -33,6 +33,7 @@ from src.services.auth.service import AuthService
 from src.services.provider.format import normalize_endpoint_signature
 
 router = APIRouter(tags=["System Catalog"])
+OPENAI_MODEL_OWNER = "aether"
 
 # 各格式对应的 API 格式列表（包括对应的 CLI 格式）
 _CLAUDE_FORMATS = ["claude:chat", "claude:cli"]
@@ -274,7 +275,7 @@ def _build_openai_list_response(models: list[ModelInfo]) -> dict:
             "id": m.id,
             "object": "model",
             "created": m.created_timestamp,
-            "owned_by": m.provider_name,
+            "owned_by": OPENAI_MODEL_OWNER,
         }
         for m in models
     ]
@@ -339,7 +340,7 @@ def _build_openai_model_response(model_info: ModelInfo) -> dict:
         "id": model_info.id,
         "object": "model",
         "created": model_info.created_timestamp,
-        "owned_by": model_info.provider_name,
+        "owned_by": OPENAI_MODEL_OWNER,
     }
 
 

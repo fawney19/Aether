@@ -590,6 +590,7 @@ export interface HealthSummary {
     total: number
     active: number
     unhealthy: number
+    circuit_open?: number
   }
 }
 

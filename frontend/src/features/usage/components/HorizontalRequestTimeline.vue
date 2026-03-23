@@ -769,11 +769,11 @@ const poolAttemptCandidates = computed<CandidateRecord[]>(() => {
           }
 
       merged.status = normalizeTimelineStatus(raw.status ?? merged.status)
-      if (typeof raw.provider_id === 'string') merged.provider_id = raw.provider_id
-      if (typeof raw.provider_name === 'string') merged.provider_name = raw.provider_name
-      if (typeof raw.endpoint_id === 'string') merged.endpoint_id = raw.endpoint_id
-      if (typeof raw.key_id === 'string') merged.key_id = raw.key_id
-      if (typeof raw.key_name === 'string') merged.key_name = raw.key_name
+      if (!merged.provider_id && typeof raw.provider_id === 'string') merged.provider_id = raw.provider_id
+      if (!merged.provider_name && typeof raw.provider_name === 'string') merged.provider_name = raw.provider_name
+      if (!merged.endpoint_id && typeof raw.endpoint_id === 'string') merged.endpoint_id = raw.endpoint_id
+      if (!merged.key_id && typeof raw.key_id === 'string') merged.key_id = raw.key_id
+      if (!merged.key_name && typeof raw.key_name === 'string') merged.key_name = raw.key_name
       if (typeof raw.status_code === 'number') merged.status_code = raw.status_code
       if (typeof raw.error_type === 'string') merged.error_type = raw.error_type
       const rawPoolGroupId = typeof raw.pool_group_id === 'string' ? raw.pool_group_id.trim() : ''

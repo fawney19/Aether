@@ -17,7 +17,6 @@ from .provider_query import router as provider_query_router
 from .provider_strategy import router as provider_strategy_router
 from .providers import router as providers_router
 from .security import router as security_router
-from .stats import router as stats_router
 from .system import router as system_router
 from .usage import router as usage_router
 from .users import router as users_router
@@ -39,7 +38,6 @@ router.include_router(provider_oauth_router)
 router.include_router(adaptive_router)
 router.include_router(models_router)
 router.include_router(security_router)
-router.include_router(stats_router)
 router.include_router(provider_query_router)
 router.include_router(modules_router)
 router.include_router(pool_router)

@@ -113,6 +113,11 @@ const routes: RouteRecordRaw[] = [
         component: () => importWithRetry(() => import('@/views/shared/Usage.vue'))
       },
       {
+        path: 'reports',
+        name: 'Reports',
+        component: () => importWithRetry(() => import('@/views/user/Reports.vue'))
+      },
+      {
         path: 'endpoint-status',
         name: 'EndpointStatus',
         component: () => importWithRetry(() => import('@/views/shared/HealthMonitor.vue'))
@@ -196,19 +201,9 @@ const routes: RouteRecordRaw[] = [
         component: () => importWithRetry(() => import('@/views/shared/Usage.vue'))
       },
       {
-        path: 'user-stats',
-        name: 'UserStats',
-        component: () => importWithRetry(() => import('@/views/admin/UserStats.vue'))
-      },
-      {
-        path: 'cost-analysis',
-        name: 'CostAnalysis',
-        component: () => importWithRetry(() => import('@/views/admin/CostAnalysis.vue'))
-      },
-      {
-        path: 'performance-analysis',
-        name: 'PerformanceAnalysis',
-        component: () => importWithRetry(() => import('@/views/admin/PerformanceAnalysis.vue'))
+        path: 'analytics',
+        name: 'Analytics',
+        component: () => importWithRetry(() => import('@/views/admin/Analytics.vue'))
       },
       {
         path: 'system',
@@ -272,11 +267,6 @@ const routes: RouteRecordRaw[] = [
         path: 'gemini-files',
         name: 'GeminiFilesManagement',
         component: () => importWithRetry(() => import('@/views/admin/GeminiFilesManagement.vue'))
-      },
-      // 保留旧路由兼容性
-      {
-        path: 'video-tasks',
-        redirect: '/admin/async-tasks'
       }
     ]
   }

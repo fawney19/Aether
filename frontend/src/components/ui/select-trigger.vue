@@ -25,7 +25,7 @@ const triggerClass = computed(() =>
     :class="triggerClass"
     :disabled="disabled"
   >
-    <span class="truncate">
+    <span class="min-w-0 flex-1 truncate">
       <slot />
     </span>
     <ChevronDown class="h-4 w-4 opacity-50 pointer-events-none flex-shrink-0" />

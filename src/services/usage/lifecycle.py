@@ -78,6 +78,8 @@ class UsageLifecycleMixin:
             model=model,
             input_tokens=0,
             output_tokens=0,
+            input_output_total_tokens=0,
+            input_context_tokens=0,
             total_tokens=0,
             total_cost_usd=0.0,
             request_type=request_type,

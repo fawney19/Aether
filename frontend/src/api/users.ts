@@ -124,10 +124,5 @@ export const usersApi = {
       `/api/admin/users/${userId}/api-keys/${keyId}/full-key`
     )
     return response.data
-  },
-  // 管理员统计
-  async getUsageStats(): Promise<Record<string, unknown>> {
-    const response = await apiClient.get('/api/admin/usage/stats')
-    return response.data
   }
 }

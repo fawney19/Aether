@@ -73,7 +73,47 @@ async def _set_cached_models(
         logger.warning(f"[ModelsService] 缓存写入失败: {e}")
 
 
-__all__ = ["AccessRestrictions", "invalidate_models_list_cache", "ModelInfo"]
+_PUBLIC_GLOBAL_MODEL_CONFIG_KEYS = (
+    "description",
+    "icon_url",
+    "streaming",
+    "vision",
+    "function_calling",
+    "extended_thinking",
+    "image_generation",
+    "structured_output",
+    "family",
+    "knowledge_cutoff",
+    "input_modalities",
+    "output_modalities",
+    "context_limit",
+    "output_limit",
+)
+
+
+def sanitize_public_global_model_config(raw_config: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return only user-safe GlobalModel config keys.
+
+    Internal routing fields such as ``model_mappings`` should never be exposed
+    through public or user-facing model catalog APIs.
+    """
+    if not isinstance(raw_config, dict):
+        return None
+
+    sanitized = {
+        key: raw_config[key]
+        for key in _PUBLIC_GLOBAL_MODEL_CONFIG_KEYS
+        if key in raw_config
+    }
+    return sanitized or None
+
+
+__all__ = [
+    "AccessRestrictions",
+    "invalidate_models_list_cache",
+    "ModelInfo",
+    "sanitize_public_global_model_config",
+]
 
 
 @dataclass

@@ -19,6 +19,9 @@ export interface SystemConfig {
   auto_delete_expired_keys: boolean
   // 格式转换
   enable_format_conversion: boolean
+  // 监控容量
+  redis_memory_total_bytes: number
+  postgres_storage_total_bytes: number
   // 请求记录
   request_record_level: string
   max_request_body_size: number
@@ -55,6 +58,9 @@ const CONFIG_KEYS = [
   'auto_delete_expired_keys',
   // 格式转换
   'enable_format_conversion',
+  // 监控容量
+  'redis_memory_total_bytes',
+  'postgres_storage_total_bytes',
   // 请求记录
   'request_record_level',
   'max_request_body_size',
@@ -92,6 +98,9 @@ function createDefaultConfig(): SystemConfig {
     auto_delete_expired_keys: false,
     // 格式转换
     enable_format_conversion: false,
+    // 监控容量
+    redis_memory_total_bytes: 0,
+    postgres_storage_total_bytes: 0,
     // 请求记录
     request_record_level: 'basic',
     max_request_body_size: 1048576,
@@ -114,6 +123,18 @@ function createDefaultConfig(): SystemConfig {
   }
 }
 
+const BYTES_PER_GB = 1024 * 1024 * 1024
+
+function toBytesFromGB(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 0
+  return Math.round(value * BYTES_PER_GB)
+}
+
+function toGBFromBytes(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 0
+  return Math.round((value / BYTES_PER_GB) * 100) / 100
+}
+
 export function useSystemConfig() {
   const { success, error } = useToast()
   const { refreshSiteInfo } = useSiteInfo()
@@ -126,6 +147,7 @@ export function useSystemConfig() {
   const siteInfoLoading = ref(false)
   const proxyConfigLoading = ref(false)
   const basicConfigLoading = ref(false)
+  const monitoringConfigLoading = ref(false)
   const logConfigLoading = ref(false)
   const cleanupConfigLoading = ref(false)
 
@@ -166,6 +188,14 @@ export function useSystemConfig() {
     )
   })
 
+  const hasMonitoringConfigChanges = computed(() => {
+    if (!originalConfig.value) return false
+    return (
+      systemConfig.value.redis_memory_total_bytes !== originalConfig.value.redis_memory_total_bytes ||
+      systemConfig.value.postgres_storage_total_bytes !== originalConfig.value.postgres_storage_total_bytes
+    )
+  })
+
   const hasCleanupConfigChanges = computed(() => {
     if (!originalConfig.value) return false
     return (
@@ -197,6 +227,20 @@ export function useSystemConfig() {
     get: () => Math.round(systemConfig.value.max_response_body_size / 1024),
     set: (val: number) => {
       systemConfig.value.max_response_body_size = val * 1024
+    },
+  })
+
+  const redisMemoryTotalGB = computed({
+    get: () => toGBFromBytes(systemConfig.value.redis_memory_total_bytes),
+    set: (val: number) => {
+      systemConfig.value.redis_memory_total_bytes = toBytesFromGB(val)
+    },
+  })
+
+  const postgresStorageTotalGB = computed({
+    get: () => toGBFromBytes(systemConfig.value.postgres_storage_total_bytes),
+    set: (val: number) => {
+      systemConfig.value.postgres_storage_total_bytes = toBytesFromGB(val)
     },
   })
 
@@ -397,6 +441,40 @@ export function useSystemConfig() {
     }
   }
 
+  async function saveMonitoringConfig() {
+    monitoringConfigLoading.value = true
+    try {
+      const configItems = [
+        {
+          key: 'redis_memory_total_bytes',
+          value: systemConfig.value.redis_memory_total_bytes,
+          description: 'Redis 总内存容量（字节）',
+        },
+        {
+          key: 'postgres_storage_total_bytes',
+          value: systemConfig.value.postgres_storage_total_bytes,
+          description: 'PostgreSQL 总存储空间（字节）',
+        },
+      ]
+
+      await Promise.all(
+        configItems.map((item) =>
+          adminApi.updateSystemConfig(item.key, item.value, item.description)
+        )
+      )
+      if (originalConfig.value) {
+        originalConfig.value.redis_memory_total_bytes = systemConfig.value.redis_memory_total_bytes
+        originalConfig.value.postgres_storage_total_bytes = systemConfig.value.postgres_storage_total_bytes
+      }
+      success('监控容量配置已保存')
+    } catch (err) {
+      error('保存监控容量配置失败')
+      log.error('保存监控容量配置失败:', err)
+    } finally {
+      monitoringConfigLoading.value = false
+    }
+  }
+
   async function saveCleanupConfig() {
     cleanupConfigLoading.value = true
     try {
@@ -497,17 +575,21 @@ export function useSystemConfig() {
     siteInfoLoading,
     proxyConfigLoading,
     basicConfigLoading,
+    monitoringConfigLoading,
     logConfigLoading,
     cleanupConfigLoading,
     // 变动检测
     hasSiteInfoChanges,
     hasProxyConfigChanges,
     hasBasicConfigChanges,
+    hasMonitoringConfigChanges,
     hasLogConfigChanges,
     hasCleanupConfigChanges,
     // 计算属性
     maxRequestBodySizeKB,
     maxResponseBodySizeKB,
+    redisMemoryTotalGB,
+    postgresStorageTotalGB,
     sensitiveHeadersStr,
     // 加载函数
     loadSystemConfig,
@@ -516,6 +598,7 @@ export function useSystemConfig() {
     saveSiteInfo,
     saveProxyConfig,
     saveBasicConfig,
+    saveMonitoringConfig,
     saveLogConfig,
     saveCleanupConfig,
     handleAutoCleanupToggle,

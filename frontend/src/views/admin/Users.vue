@@ -912,7 +912,7 @@ import { adminWalletApi, type AdminWallet } from '@/api/admin-wallets'
 import { useToast } from '@/composables/useToast'
 import { useConfirm } from '@/composables/useConfirm'
 import { useClipboard } from '@/composables/useClipboard'
-import { usageApi, type UsageByUser } from '@/api/usage'
+import { analyticsApi } from '@/api/analytics'
 import { adminApi } from '@/api/admin'
 import { walletStatusBadge, walletStatusLabel } from '@/utils/walletDisplay'
 
@@ -990,7 +990,14 @@ const userApiKeyForm = ref({
 })
 
 // 用户统计
-const userStats = ref<Record<string, UsageByUser>>({})
+interface UserUsageSummary {
+  user_id: string
+  request_count: number
+  total_tokens: number
+  total_cost: number
+}
+
+const userStats = ref<Record<string, UserUsageSummary>>({})
 const loadingStats = ref(false)
 let userStatsRequestId = 0
 const userWalletMap = ref<Record<string, AdminWallet>>({})
@@ -1069,10 +1076,26 @@ async function loadUserStats() {
   const requestId = ++userStatsRequestId
   loadingStats.value = true
   try {
-    const data = await usageApi.getUsageByUser()
+    const response = await analyticsApi.getBreakdown({
+      scope: { kind: 'global' },
+      time_range: {
+        preset: 'last30days',
+        granularity: 'day',
+        timezone: 'UTC',
+        tz_offset_minutes: 0,
+      },
+      dimension: 'user',
+      metric: 'requests_total',
+      limit: 200,
+    })
     if (requestId !== userStatsRequestId) return
-    userStats.value = data.reduce((acc: Record<string, UsageByUser>, stat: UsageByUser) => {
-      acc[stat.user_id] = stat
+    userStats.value = response.rows.reduce((acc: Record<string, UserUsageSummary>, row) => {
+      acc[row.key] = {
+        user_id: row.key,
+        request_count: row.requests_total,
+        total_tokens: row.total_tokens,
+        total_cost: row.total_cost_usd,
+      }
       return acc
     }, {})
   } catch (err) {

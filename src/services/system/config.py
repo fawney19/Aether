@@ -197,6 +197,14 @@ class SystemConfigService:
             "value": True,
             "description": "是否启用数据库表维护任务（定期 VACUUM ANALYZE 防止表和索引膨胀）",
         },
+        "redis_memory_total_bytes": {
+            "value": 0,
+            "description": "Redis 总内存容量（字节）。适用于远程或托管 Redis 无法完整上报容量时手动填写，0 表示自动探测",
+        },
+        "postgres_storage_total_bytes": {
+            "value": 0,
+            "description": "PostgreSQL 总存储空间（字节）。适用于远程或托管 PostgreSQL 无法直接获取总空间时手动填写，0 表示未设置",
+        },
         # 系统代理
         "system_proxy_node_id": {
             "value": None,

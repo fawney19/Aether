@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import case, func
+from sqlalchemy import case, func, text
 from sqlalchemy.orm import Session
+
+try:
+    import psutil
+except ModuleNotFoundError:
+    psutil = None
 
 from src.api.base.admin_adapter import AdminApiAdapter
 from src.api.base.context import ApiRequestContext
@@ -17,6 +24,7 @@ from src.api.base.pipeline import get_pipeline
 from src.config.constants import CacheTTL
 from src.core.logger import logger
 from src.database import get_db
+from src.database.database import get_pool_status
 from src.models.database import (
     ApiKey,
     AuditEventType,
@@ -25,13 +33,343 @@ from src.models.database import (
     Usage,
 )
 from src.models.database import User as DBUser
+from src.clients.redis_client import get_redis_client
 from src.services.health.monitor import HealthMonitor
+from src.services.system.config import SystemConfigService
 from src.services.system.audit import audit_service
 from src.utils.cache_decorator import cache_result
 from src.utils.database_helpers import escape_like_pattern
 
 router = APIRouter(prefix="/api/admin/monitoring", tags=["Admin - Monitoring"])
 pipeline = get_pipeline()
+
+
+def _unavailable_metric(message: str, **fields: Any) -> dict[str, Any]:
+    return {
+        "status": "unknown",
+        "label": _label_for_status("unknown"),
+        **fields,
+        "message": message,
+    }
+
+
+def _round_metric(value: float | int | None, digits: int = 1) -> float | None:
+    if value is None:
+        return None
+    return round(float(value), digits)
+
+
+def _metric_status(percent: float | None, *, warning: float, danger: float) -> str:
+    if percent is None:
+        return "unknown"
+    if percent >= danger:
+        return "danger"
+    if percent >= warning:
+        return "warning"
+    return "ok"
+
+
+def _remaining_status(percent: float | None, *, warning: float, danger: float) -> str:
+    if percent is None:
+        return "unknown"
+    if percent <= danger:
+        return "danger"
+    if percent <= warning:
+        return "warning"
+    return "ok"
+
+
+def _label_for_status(status: str) -> str:
+    return {
+        "ok": "正常",
+        "warning": "偏高",
+        "danger": "紧张",
+        "degraded": "降级",
+        "error": "异常",
+        "unknown": "未知",
+    }.get(status, "未知")
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_manual_capacity_bytes(db: Session, key: str) -> int | None:
+    value = _optional_int(SystemConfigService.get_config(db, key, default=0))
+    if value is None or value <= 0:
+        return None
+    return value
+
+
+def _build_cpu_metric() -> dict[str, Any]:
+    core_count = int((psutil.cpu_count() if psutil is not None else os.cpu_count()) or 0)
+    load_percent: float | None = None
+
+    try:
+        if hasattr(os, "getloadavg") and core_count > 0:
+            load_percent = _round_metric((os.getloadavg()[0] / core_count) * 100)
+    except OSError:
+        load_percent = None
+
+    if psutil is None:
+        status = _metric_status(load_percent, warning=70, danger=85)
+        return {
+            "status": status,
+            "label": _label_for_status(status),
+            "usage_percent": None,
+            "load_percent": load_percent,
+            "core_count": core_count,
+            "message": "psutil is not installed",
+        }
+
+    cpu_percent = _round_metric(psutil.cpu_percent(interval=0.05))
+    status = _metric_status(cpu_percent, warning=70, danger=85)
+    return {
+        "status": status,
+        "label": _label_for_status(status),
+        "usage_percent": cpu_percent,
+        "load_percent": load_percent,
+        "core_count": core_count,
+    }
+
+
+def _build_memory_metric() -> dict[str, Any]:
+    if psutil is None:
+        return _unavailable_metric(
+            "psutil is not installed",
+            used_percent=None,
+            used_bytes=None,
+            available_bytes=None,
+            total_bytes=None,
+        )
+
+    memory = psutil.virtual_memory()
+    used_percent = _round_metric(memory.percent)
+    status = _metric_status(used_percent, warning=75, danger=90)
+    return {
+        "status": status,
+        "label": _label_for_status(status),
+        "used_percent": used_percent,
+        "used_bytes": int(memory.used),
+        "available_bytes": int(memory.available),
+        "total_bytes": int(memory.total),
+    }
+
+
+async def _build_redis_metric(db: Session) -> dict[str, Any]:
+    started = time.perf_counter()
+    try:
+        redis = await get_redis_client(require_redis=False)
+        if redis is None:
+            status = "degraded"
+            return {
+                "status": status,
+                "label": _label_for_status(status),
+                "latency_ms": None,
+                "memory_status": "unknown",
+                "memory_label": _label_for_status("unknown"),
+                "used_memory_bytes": None,
+                "peak_memory_bytes": None,
+                "maxmemory_bytes": None,
+                "memory_ceiling_bytes": None,
+                "memory_source": "unknown",
+                "available_memory_bytes": None,
+                "memory_percent": None,
+                "message": "Redis client not initialized",
+            }
+
+        await redis.ping()
+        latency_ms = _round_metric((time.perf_counter() - started) * 1000)
+        # 优先使用 Redis 自身的 INFO 输出，避免依赖应用所在机器的本地内存视角。
+        memory_info = await redis.info(section="memory")
+        used_memory_bytes = _optional_int(memory_info.get("used_memory"))
+        peak_memory_bytes = _optional_int(memory_info.get("used_memory_peak"))
+        maxmemory_bytes = _optional_int(memory_info.get("maxmemory"))
+        total_system_memory_bytes = _optional_int(memory_info.get("total_system_memory"))
+        configured_memory_bytes = _get_manual_capacity_bytes(db, "redis_memory_total_bytes")
+        if maxmemory_bytes is not None and maxmemory_bytes <= 0:
+            maxmemory_bytes = None
+
+        memory_ceiling_bytes = configured_memory_bytes or maxmemory_bytes or total_system_memory_bytes
+        if configured_memory_bytes is not None:
+            memory_source = "configured"
+        elif maxmemory_bytes is not None:
+            memory_source = "maxmemory"
+        elif total_system_memory_bytes is not None:
+            memory_source = "system"
+        else:
+            memory_source = "unknown"
+        available_memory_bytes = (
+            max(int(memory_ceiling_bytes) - int(used_memory_bytes), 0)
+            if memory_ceiling_bytes is not None and used_memory_bytes is not None
+            else None
+        )
+        memory_percent = _round_metric(
+            (used_memory_bytes / memory_ceiling_bytes * 100)
+            if used_memory_bytes is not None and memory_ceiling_bytes not in (None, 0)
+            else None
+        )
+        status = "warning" if latency_ms is not None and latency_ms >= 80 else "ok"
+        memory_status = _metric_status(memory_percent, warning=75, danger=90)
+        return {
+            "status": status,
+            "label": _label_for_status(status),
+            "latency_ms": latency_ms,
+            "memory_status": memory_status,
+            "memory_label": _label_for_status(memory_status),
+            "used_memory_bytes": used_memory_bytes,
+            "peak_memory_bytes": peak_memory_bytes,
+            "maxmemory_bytes": maxmemory_bytes,
+            "memory_ceiling_bytes": memory_ceiling_bytes,
+            "memory_source": memory_source,
+            "available_memory_bytes": available_memory_bytes,
+            "memory_percent": memory_percent,
+            "message": None,
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "label": _label_for_status("error"),
+            "latency_ms": None,
+            "memory_status": "unknown",
+            "memory_label": _label_for_status("unknown"),
+            "used_memory_bytes": None,
+            "peak_memory_bytes": None,
+            "maxmemory_bytes": None,
+            "memory_ceiling_bytes": None,
+            "memory_source": "unknown",
+            "available_memory_bytes": None,
+            "memory_percent": None,
+            "message": str(exc),
+        }
+
+
+def _build_postgres_metric(db: Session) -> dict[str, Any]:
+    try:
+        pool_status = get_pool_status()
+        checked_out = int(pool_status.get("checked_out") or 0)
+        max_capacity = int(pool_status.get("max_capacity") or 0)
+        pool_usage_percent = _round_metric(
+            (checked_out / max_capacity * 100) if max_capacity > 0 else 0
+        )
+        usage_percent = pool_usage_percent
+        storage_total_bytes: int | None = None
+        storage_free_bytes: int | None = None
+        storage_free_percent: float | None = None
+        database_size_bytes: int | None = None
+        server_connections: int | None = None
+        server_max_connections: int | None = None
+        server_usage_percent: float | None = None
+        message: str | None = None
+        storage_message: str | None = None
+        storage_total_bytes = _get_manual_capacity_bytes(db, "postgres_storage_total_bytes")
+
+        bind = db.get_bind()
+        dialect_name = bind.dialect.name if bind is not None else ""
+        if dialect_name == "postgresql":
+            try:
+                # 只读取 PostgreSQL 原生 SQL 可见的指标，避免依赖本机数据目录或宿主机磁盘。
+                stats = (
+                    db.execute(
+                        text(
+                            """
+                            SELECT
+                                pg_database_size(current_database()) AS database_size_bytes,
+                                current_setting('max_connections')::int AS server_max_connections,
+                                COALESCE(
+                                    (
+                                        SELECT numbackends
+                                        FROM pg_stat_database
+                                        WHERE datname = current_database()
+                                    ),
+                                    0
+                                ) AS server_connections
+                            """
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                database_size_bytes = _optional_int(stats.get("database_size_bytes"))
+                server_max_connections = _optional_int(stats.get("server_max_connections"))
+                server_connections = _optional_int(stats.get("server_connections"))
+                server_usage_percent = _round_metric(
+                    (server_connections / server_max_connections * 100)
+                    if server_connections is not None and server_max_connections not in (None, 0)
+                    else None
+                )
+                if server_usage_percent is not None:
+                    usage_percent = server_usage_percent
+                if storage_total_bytes is not None and database_size_bytes is not None:
+                    storage_free_bytes = max(storage_total_bytes - database_size_bytes, 0)
+                    storage_free_percent = _round_metric(
+                        (storage_free_bytes / storage_total_bytes * 100)
+                        if storage_total_bytes > 0
+                        else None
+                    )
+                else:
+                    storage_message = "请在系统设置中填写 PostgreSQL 总空间"
+            except Exception as exc:
+                message = f"PostgreSQL 原生指标不可用: {exc}"
+                if storage_total_bytes is not None:
+                    storage_message = "已配置 PostgreSQL 总空间，但当前库体积不可用"
+                else:
+                    storage_message = "请在系统设置中填写 PostgreSQL 总空间"
+        else:
+            storage_message = "当前数据库不是 PostgreSQL"
+
+        status = _metric_status(usage_percent, warning=70, danger=90)
+        storage_status = _remaining_status(storage_free_percent, warning=20, danger=10)
+        return {
+            "status": status,
+            "label": _label_for_status(status),
+            "usage_percent": usage_percent,
+            "pool_usage_percent": pool_usage_percent,
+            "checked_out": checked_out,
+            "pool_size": int(pool_status.get("pool_size") or 0),
+            "overflow": int(pool_status.get("overflow") or 0),
+            "max_capacity": max_capacity,
+            "pool_timeout": int(pool_status.get("pool_timeout") or 0),
+            "server_connections": server_connections,
+            "server_max_connections": server_max_connections,
+            "server_usage_percent": server_usage_percent,
+            "storage_status": storage_status,
+            "storage_label": _label_for_status(storage_status),
+            "storage_total_bytes": storage_total_bytes,
+            "storage_free_bytes": storage_free_bytes,
+            "storage_free_percent": storage_free_percent,
+            "database_size_bytes": database_size_bytes,
+            "storage_message": storage_message,
+            "message": message,
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "label": _label_for_status("error"),
+            "usage_percent": None,
+            "pool_usage_percent": None,
+            "checked_out": 0,
+            "pool_size": 0,
+            "overflow": 0,
+            "max_capacity": 0,
+            "pool_timeout": 0,
+            "server_connections": None,
+            "server_max_connections": None,
+            "server_usage_percent": None,
+            "storage_status": "unknown",
+            "storage_label": _label_for_status("unknown"),
+            "storage_total_bytes": None,
+            "storage_free_bytes": None,
+            "storage_free_percent": None,
+            "database_size_bytes": None,
+            "storage_message": None,
+            "message": str(exc),
+        }
 
 
 @router.get("/audit-logs")
@@ -96,6 +434,7 @@ async def get_system_status(request: Request, db: Session = Depends(get_db)) -> 
     - `api_keys`: API Key 统计（total: 总数, active: 活跃数）
     - `today_stats`: 今日统计（requests: 请求数, tokens: token 数, cost_usd: 成本）
     - `recent_errors`: 最近 1 小时内的错误数
+    - `system_metrics`: 系统资源摘要（cpu / memory / redis / postgres）
     """
     adapter = AdminSystemStatusAdapter()
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
@@ -381,6 +720,11 @@ class AdminSystemStatusAdapter(AdminApiAdapter):
             recent_errors=int(recent_errors or 0),
         )
 
+        cpu_metric = _build_cpu_metric()
+        memory_metric = _build_memory_metric()
+        redis_metric = await _build_redis_metric(db)
+        postgres_metric = _build_postgres_metric(db)
+
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "users": {"total": total_users, "active": active_users},
@@ -392,6 +736,12 @@ class AdminSystemStatusAdapter(AdminApiAdapter):
                 "cost_usd": f"${today_cost:.4f}",
             },
             "recent_errors": recent_errors,
+            "system_metrics": {
+                "cpu": cpu_metric,
+                "memory": memory_metric,
+                "redis": redis_metric,
+                "postgres": postgres_metric,
+            },
         }
 
 

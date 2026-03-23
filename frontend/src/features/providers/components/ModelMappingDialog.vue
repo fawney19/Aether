@@ -282,8 +282,6 @@ export interface AliasGroup {
 const props = defineProps<{
   open: boolean
   providerId: string
-  /** @deprecated */
-  providerApiFormats?: string[]
   models: Model[]
   editingGroup?: AliasGroup | null
   preselectedModelId?: string | null

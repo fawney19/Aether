@@ -250,6 +250,7 @@ class UsageActiveRequestsMixin:
         db: Session,
         ids: list[str] | None = None,
         user_id: str | None = None,
+        api_key_id: str | None = None,
         default_timeout_seconds: int = 300,
         *,
         include_admin_fields: bool = False,
@@ -267,6 +268,7 @@ class UsageActiveRequestsMixin:
             db: 数据库会话
             ids: 指定要查询的请求 ID 列表（可选）
             user_id: 限制只查询该用户的请求（可选，用于普通用户接口）
+            api_key_id: 限制只查询该 API Key 的请求（可选）
             default_timeout_seconds: 默认超时时间（秒），当端点未配置时使用
             maintain_status: 是否执行超时修复与状态回写；默认仅在全量活跃请求查询时执行
 
@@ -311,11 +313,15 @@ class UsageActiveRequestsMixin:
             query = query.filter(Usage.id.in_(ids))
             if user_id:
                 query = query.filter(Usage.user_id == user_id)
+            if api_key_id:
+                query = query.filter(Usage.api_key_id == api_key_id)
         else:
             # 查询所有活跃请求
             query = query.filter(Usage.status.in_(["pending", "streaming"]))
             if user_id:
                 query = query.filter(Usage.user_id == user_id)
+            if api_key_id:
+                query = query.filter(Usage.api_key_id == api_key_id)
             query = query.order_by(Usage.created_at.desc()).limit(50)
 
         records = query.all()

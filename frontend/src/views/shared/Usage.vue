@@ -1,79 +1,13 @@
 <template>
   <div class="space-y-6 pb-8">
-    <!-- 面包屑旁的折叠按钮 -->
-    <Teleport
-      to="#header-actions-right"
-      defer
-    >
-      <button
-        class="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition"
-        :title="statsExpanded ? '收起用量分析' : '展开用量分析'"
-        @click="statsExpanded = !statsExpanded"
+    <!-- 跳转数据分析链接 -->
+    <div class="text-right">
+      <RouterLink
+        :to="isAdminPage ? '/admin/analytics' : '/dashboard/reports'"
+        class="text-xs text-muted-foreground hover:text-foreground transition-colors"
       >
-        <PanelTopClose
-          v-if="statsExpanded"
-          class="h-4 w-4"
-        />
-        <PanelTopOpen
-          v-else
-          class="h-4 w-4"
-        />
-      </button>
-    </Teleport>
-
-    <!-- 用量分析面板（可折叠） -->
-    <div
-      v-if="statsExpanded"
-      class="space-y-4"
-    >
-      <!-- 活跃度热图 + 请求间隔时间线 -->
-      <div class="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        <ActivityHeatmapCard
-          :data="activityHeatmapData"
-          :title="isAdminPage ? '总体活跃天数' : '我的活跃天数'"
-          :is-loading="isLoadingHeatmap"
-          :has-error="heatmapError"
-        />
-        <IntervalTimelineCard
-          :title="isAdminPage ? '请求间隔时间线' : '我的请求间隔'"
-          :is-admin="isAdminPage"
-          :hours="24"
-        />
-      </div>
-
-      <!-- 分析统计 -->
-      <!-- 管理员：模型 + 提供商 + API格式（3列） -->
-      <div
-        v-if="isAdminPage"
-        class="grid grid-cols-1 lg:grid-cols-3 gap-4"
-      >
-        <UsageModelTable
-          :data="enhancedModelStats"
-          :is-admin="authStore.isAdmin"
-        />
-        <UsageProviderTable
-          :data="providerStats"
-          :is-admin="authStore.isAdmin"
-        />
-        <UsageApiFormatTable
-          :data="apiFormatStats"
-          :is-admin="authStore.isAdmin"
-        />
-      </div>
-      <!-- 用户：模型 + API格式（2列） -->
-      <div
-        v-else
-        class="grid grid-cols-1 lg:grid-cols-2 gap-4"
-      >
-        <UsageModelTable
-          :data="enhancedModelStats"
-          :is-admin="authStore.isAdmin"
-        />
-        <UsageApiFormatTable
-          :data="apiFormatStats"
-          :is-admin="false"
-        />
-      </div>
+        {{ isAdminPage ? '查看数据分析 →' : '查看综合报表 →' }}
+      </RouterLink>
     </div>
 
     <!-- 使用记录 -->
@@ -85,13 +19,17 @@
       :time-range="timeRange"
       :filter-search="filterSearch"
       :filter-user="filterUser"
+      :filter-api-key="filterApiKey"
       :filter-model="filterModel"
       :filter-provider="filterProvider"
       :filter-api-format="filterApiFormat"
       :filter-status="filterStatus"
       :available-users="availableUsers"
+      :available-api-keys="availableApiKeys"
       :available-models="availableModels"
+      :available-api-formats="availableApiFormats"
       :available-providers="availableProviders"
+      :available-statuses="availableStatuses"
       :current-page="currentPage"
       :page-size="pageSize"
       :total-records="effectiveTotalRecords"
@@ -100,6 +38,7 @@
       @update:time-range="handleTimeRangeChange"
       @update:filter-search="handleFilterSearchChange"
       @update:filter-user="handleFilterUserChange"
+      @update:filter-api-key="handleFilterApiKeyChange"
       @update:filter-model="handleFilterModelChange"
       @update:filter-provider="handleFilterProviderChange"
       @update:filter-api-format="handleFilterApiFormatChange"
@@ -124,29 +63,20 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { useLocalStorage } from '@vueuse/core'
+// useLocalStorage no longer needed (analytics panel removed)
 import { useAuthStore } from '@/stores/auth'
-import { usageApi } from '@/api/usage'
-import { usersApi } from '@/api/users'
-import { meApi } from '@/api/me'
-import { PanelTopClose, PanelTopOpen } from 'lucide-vue-next'
+import { analyticsApi, type AnalyticsFilterOption } from '@/api/analytics'
 import {
-  UsageModelTable,
-  UsageProviderTable,
-  UsageApiFormatTable,
   UsageRecordsTable,
-  ActivityHeatmapCard,
   RequestDetailDrawer,
-  IntervalTimelineCard
 } from '@/features/usage/components'
 import {
   useUsageData,
   getDateRangeFromPeriod
 } from '@/features/usage/composables'
 import type { DateRangeParams, FilterStatusValue } from '@/features/usage/types'
-import type { UserOption } from '@/features/usage/components/UsageRecordsTable.vue'
 import { log } from '@/utils/logger'
-import type { ActivityHeatmap } from '@/types/activity'
+// ActivityHeatmap moved to analytics page
 import { useToast } from '@/composables/useToast'
 
 const route = useRoute()
@@ -155,9 +85,6 @@ const authStore = useAuthStore()
 
 // 判断是否是管理员页面
 const isAdminPage = computed(() => route.path.startsWith('/admin'))
-
-// 用量分析面板折叠状态（默认展开，持久化到 localStorage）
-const statsExpanded = useLocalStorage('usage-stats-expanded', true)
 
 // 时间范围选择
 const timeRange = ref<DateRangeParams>(getDateRangeFromPeriod('today'))
@@ -170,101 +97,28 @@ const pageSizeOptions = [10, 20, 50, 100]
 // 筛选状态
 const filterSearch = ref('')
 const filterUser = ref('__all__')
+const filterApiKey = ref('__all__')
 const filterModel = ref('__all__')
 const filterProvider = ref('__all__')
 const filterApiFormat = ref('__all__')
 const filterStatus = ref<FilterStatusValue>('__all__')
 
-// 用户列表（仅管理员页面使用）
-const availableUsers = ref<UserOption[]>([])
-
 // 使用 composables
 const {
   isLoadingRecords,
-  providerStats,
-  apiFormatStats,
   currentRecords,
   totalRecords,
-  enhancedModelStats,
+  availableUsers,
+  availableApiKeys,
   availableModels,
+  availableApiFormats,
   availableProviders,
+  availableStatuses,
   loadStats,
   loadRecords
 } = useUsageData({ isAdminPage })
 
-// 热力图状态
-const activityHeatmapData = ref<ActivityHeatmap | null>(null)
-const isLoadingHeatmap = ref(false)
-const heatmapError = ref(false)
-
-// 加载热力图数据
-async function loadHeatmapData() {
-  isLoadingHeatmap.value = true
-  heatmapError.value = false
-  try {
-    if (isAdminPage.value) {
-      activityHeatmapData.value = await usageApi.getActivityHeatmap()
-    } else {
-      activityHeatmapData.value = await meApi.getActivityHeatmap()
-    }
-  } catch (error) {
-    log.error('加载热力图数据失败:', error)
-    heatmapError.value = true
-  } finally {
-    isLoadingHeatmap.value = false
-  }
-}
-
-// 用户页面需要前端筛选
-const filteredRecords = computed(() => {
-  if (!isAdminPage.value) {
-    let records = [...currentRecords.value]
-
-    if (filterModel.value !== '__all__') {
-      records = records.filter(record => record.model === filterModel.value)
-    }
-
-    if (filterProvider.value !== '__all__') {
-      records = records.filter(record => record.provider === filterProvider.value)
-    }
-
-    if (filterApiFormat.value !== '__all__') {
-      records = records.filter(record =>
-        record.api_format?.toUpperCase() === filterApiFormat.value.toUpperCase()
-      )
-    }
-
-    if (filterStatus.value !== '__all__') {
-      if (filterStatus.value === 'stream') {
-        records = records.filter(record =>
-          record.is_stream && !record.error_message && (!record.status_code || record.status_code === 200)
-        )
-      } else if (filterStatus.value === 'standard') {
-        records = records.filter(record =>
-          !record.is_stream && !record.error_message && (!record.status_code || record.status_code === 200)
-        )
-      } else if (filterStatus.value === 'active') {
-        records = records.filter(record =>
-          record.status === 'pending' || record.status === 'streaming'
-        )
-      } else if (filterStatus.value === 'failed') {
-        // 失败请求需要同时考虑新旧两种判断方式：
-        // 1. 新方式：status = "failed"
-        // 2. 旧方式：status_code >= 400 或 error_message 不为空
-        records = records.filter(record =>
-          record.status === 'failed' ||
-          (record.status_code && record.status_code >= 400) ||
-          record.error_message
-        )
-      } else if (filterStatus.value === 'cancelled') {
-        records = records.filter(record => record.status === 'cancelled')
-      }
-    }
-
-    return records
-  }
-  return currentRecords.value
-})
+// 热力图已移至数据分析页
 
 // 获取活跃请求的 ID 列表
 const activeRequestIds = computed(() => {
@@ -295,11 +149,10 @@ async function pollActiveRequests() {
   pollInFlight = true
 
   try {
-    // 根据页面类型选择不同的 API
-    const idsParam = activeRequestIds.value.join(',')
-    const { requests } = isAdminPage.value
-      ? await usageApi.getActiveRequests(activeRequestIds.value)
-      : await meApi.getActiveRequests(idsParam)
+    const { requests } = await analyticsApi.getActiveRequests({
+      scope: isAdminPage.value ? { kind: 'global' } : { kind: 'me' },
+      ids: activeRequestIds.value,
+    })
 
     let shouldRefresh = false
 
@@ -458,23 +311,8 @@ onUnmounted(() => {
   stopGlobalAutoRefresh()
 })
 
-// 用户页面的前端分页（后端一次性返回所有记录，前端分页+筛选）
-const paginatedRecords = computed(() => {
-  if (!isAdminPage.value) {
-    const start = (currentPage.value - 1) * pageSize.value
-    const end = start + pageSize.value
-    return filteredRecords.value.slice(start, end)
-  }
-  return currentRecords.value
-})
-
-// 用户页面使用前端筛选后的总数，管理员页面使用后端返回的总数
-const effectiveTotalRecords = computed(() => {
-  if (!isAdminPage.value) {
-    return filteredRecords.value.length
-  }
-  return totalRecords.value
-})
+const paginatedRecords = computed(() => currentRecords.value)
+const effectiveTotalRecords = computed(() => totalRecords.value)
 
 // 显示的记录
 const displayRecords = computed(() => paginatedRecords.value)
@@ -484,36 +322,64 @@ const displayRecords = computed(() => paginatedRecords.value)
 const detailModalOpen = ref(false)
 const selectedRequestId = ref<string | null>(null)
 
+function hasOption(options: AnalyticsFilterOption[], value: string) {
+  return options.some(option => option.value === value)
+}
+
+function normalizeFilterSelections() {
+  let changed = false
+
+  if (filterUser.value !== '__all__' && !hasOption(availableUsers.value, filterUser.value)) {
+    filterUser.value = '__all__'
+    changed = true
+  }
+  if (filterApiKey.value !== '__all__' && !hasOption(availableApiKeys.value, filterApiKey.value)) {
+    filterApiKey.value = '__all__'
+    changed = true
+  }
+  if (filterModel.value !== '__all__' && !hasOption(availableModels.value, filterModel.value)) {
+    filterModel.value = '__all__'
+    changed = true
+  }
+  if (filterProvider.value !== '__all__' && !hasOption(availableProviders.value, filterProvider.value)) {
+    filterProvider.value = '__all__'
+    changed = true
+  }
+  if (filterApiFormat.value !== '__all__' && !hasOption(availableApiFormats.value, filterApiFormat.value)) {
+    filterApiFormat.value = '__all__'
+    changed = true
+  }
+  if (filterStatus.value !== '__all__' && !hasOption(availableStatuses.value, filterStatus.value)) {
+    filterStatus.value = '__all__'
+    changed = true
+  }
+
+  return changed
+}
+
+async function syncFilterOptions() {
+  await loadStats(timeRange.value, getCurrentFilters())
+
+  if (!normalizeFilterSelections()) {
+    return
+  }
+
+  await loadStats(timeRange.value, getCurrentFilters())
+}
+
 // 初始化加载
 onMounted(async () => {
   document.addEventListener('visibilitychange', handleVisibilityChange)
 
-  // 所有数据源并行加载（stats/heatmap/records/users 之间没有数据依赖）
-  const statsTask = loadStats(timeRange.value).catch(err => {
+  const statsTask = syncFilterOptions().catch(err => {
     log.error('加载统计数据失败:', err)
     warning('统计数据加载失败，请刷新重试')
   })
-  const heatmapTask = loadHeatmapData().catch(err => {
-    log.error('加载热力图数据失败:', err)
-  })
-
-  const tasks: Promise<unknown>[] = [statsTask, heatmapTask]
-
-  if (isAdminPage.value) {
-    // 管理员页面：stats 和 records 分开加载（后端分页）
-    tasks.push(loadRecords(
-      { page: currentPage.value, pageSize: pageSize.value },
-      getCurrentFilters()
-    ))
-    tasks.push(
-      usersApi.getAllUsers().then(users => {
-        availableUsers.value = users.map(u => ({ id: u.id, username: u.username, email: u.email }))
-      })
-    )
-  }
-  // 用户页面：loadStats 已包含记录加载，不需要单独调用 loadRecords
-
-  await Promise.allSettled(tasks)
+  await statsTask
+  await loadRecords(
+    { page: currentPage.value, pageSize: pageSize.value },
+    getCurrentFilters()
+  )
 
   if (globalAutoRefresh.value && isPageVisible.value) {
     startGlobalAutoRefresh()
@@ -524,30 +390,21 @@ onMounted(async () => {
 async function handleTimeRangeChange(value: DateRangeParams) {
   timeRange.value = value
   currentPage.value = 1 // 重置到第一页
-  await loadStats(timeRange.value)
-  if (isAdminPage.value) {
-    await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters())
-  }
-  // 用户页面：loadStats 已包含记录加载
+  await syncFilterOptions()
+  await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters())
 }
 
 // 处理分页变化
 async function handlePageChange(page: number) {
   currentPage.value = page
-  if (isAdminPage.value) {
-    await loadRecords({ page, pageSize: pageSize.value }, getCurrentFilters())
-  }
-  // 用户页面使用前端分页，无需重新请求
+  await loadRecords({ page, pageSize: pageSize.value }, getCurrentFilters())
 }
 
 // 处理每页大小变化
 async function handlePageSizeChange(size: number) {
   pageSize.value = size
   currentPage.value = 1  // 重置到第一页
-  if (isAdminPage.value) {
-    await loadRecords({ page: 1, pageSize: size }, getCurrentFilters())
-  }
-  // 用户页面使用前端分页，无需重新请求
+  await loadRecords({ page: 1, pageSize: size }, getCurrentFilters())
 }
 
 // 获取当前筛选参数
@@ -555,6 +412,7 @@ function getCurrentFilters() {
   return {
     search: filterSearch.value.trim() || undefined,
     user_id: filterUser.value !== '__all__' ? filterUser.value : undefined,
+    api_key_id: filterApiKey.value !== '__all__' ? filterApiKey.value : undefined,
     model: filterModel.value !== '__all__' ? filterModel.value : undefined,
     provider: filterProvider.value !== '__all__' ? filterProvider.value : undefined,
     api_format: filterApiFormat.value !== '__all__' ? filterApiFormat.value : undefined,
@@ -566,57 +424,49 @@ function getCurrentFilters() {
 async function handleFilterSearchChange(value: string) {
   filterSearch.value = value
   currentPage.value = 1
-
-  if (isAdminPage.value) {
-    await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters())
-  }
-  // 用户页面：search 需要重新从后端拉取数据（后端支持 search 参数）
-  // 但通过 filteredRecords 做前端过滤已覆盖，无需额外请求
+  await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters())
 }
 
 async function handleFilterUserChange(value: string) {
   filterUser.value = value
   currentPage.value = 1  // 重置到第一页
+  await syncFilterOptions()
+  await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters())
+}
 
-  if (isAdminPage.value) {
-    await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters())
-  }
+async function handleFilterApiKeyChange(value: string) {
+  filterApiKey.value = value
+  currentPage.value = 1
+  await syncFilterOptions()
+  await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters())
 }
 
 async function handleFilterModelChange(value: string) {
   filterModel.value = value
   currentPage.value = 1  // 重置到第一页
-
-  if (isAdminPage.value) {
-    await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters())
-  }
+  await syncFilterOptions()
+  await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters())
 }
 
 async function handleFilterProviderChange(value: string) {
   filterProvider.value = value
   currentPage.value = 1
-
-  if (isAdminPage.value) {
-    await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters())
-  }
+  await syncFilterOptions()
+  await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters())
 }
 
 async function handleFilterApiFormatChange(value: string) {
   filterApiFormat.value = value
   currentPage.value = 1
-
-  if (isAdminPage.value) {
-    await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters())
-  }
+  await syncFilterOptions()
+  await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters())
 }
 
 async function handleFilterStatusChange(value: string) {
   filterStatus.value = value as FilterStatusValue
   currentPage.value = 1
-
-  if (isAdminPage.value) {
-    await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters())
-  }
+  await syncFilterOptions()
+  await loadRecords({ page: 1, pageSize: pageSize.value }, getCurrentFilters())
 }
 
 // 刷新数据
@@ -625,17 +475,8 @@ async function refreshData() {
   if (refreshInFlight) return refreshInFlight
 
   refreshInFlight = (async () => {
-    if (isAdminPage.value) {
-      // loadStats 会同步更新 currentDateRange，随后 loadRecords 复用同一时间范围
-      await Promise.all([
-        loadStats(timeRange.value),
-        loadRecords({ page: currentPage.value, pageSize: pageSize.value }, getCurrentFilters())
-      ])
-      return
-    }
-
-    await loadStats(timeRange.value)
-    // 用户页面：loadStats 已包含记录加载
+    await syncFilterOptions()
+    await loadRecords({ page: currentPage.value, pageSize: pageSize.value }, getCurrentFilters())
   })()
 
   try {

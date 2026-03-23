@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from src.models.database import RequestCandidate
+from src.models.database import ProviderAPIKey, RequestCandidate
 
 from .schema import CandidateKey
 
@@ -21,13 +21,31 @@ class CandidateRecorder:
             .all()
         )
 
+        provider_key_ids = {
+            str(row.key_id)
+            for row in rows
+            if getattr(row, "key_id", None)
+        }
+        provider_key_name_map: dict[str, str] = {}
+        if provider_key_ids:
+            provider_key_rows = (
+                self.db.query(ProviderAPIKey.id, ProviderAPIKey.name)
+                .filter(ProviderAPIKey.id.in_(provider_key_ids))
+                .all()
+            )
+            provider_key_name_map = {
+                str(key_id): str(name)
+                for key_id, name in provider_key_rows
+                if key_id and name
+            }
+
         result: list[CandidateKey] = []
         for row in rows:
             provider_name = None
             if getattr(row, "provider", None) is not None:
                 provider_name = getattr(row.provider, "name", None)
 
-            key_name = getattr(row, "api_key_name", None)
+            key_name = provider_key_name_map.get(str(row.key_id)) if getattr(row, "key_id", None) else None
 
             result.append(
                 CandidateKey(

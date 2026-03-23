@@ -25,13 +25,6 @@ export interface UserPreferences {
   [key: string]: unknown // 允许扩展其他偏好设置
 }
 
-export interface UserStats {
-  total_requests?: number
-  total_cost?: number
-  last_request_at?: string
-  [key: string]: unknown // 允许扩展其他统计数据
-}
-
 export interface SendVerificationCodeRequest {
   email: string
 }
@@ -114,13 +107,9 @@ export interface User {
   role: string  // 'admin' or 'user'
   is_active: boolean
   billing?: BillingSummary
-  allowed_providers?: string[] | null  // 允许使用的提供商 ID 列表
-  allowed_api_formats?: string[] | null  // 允许使用的 API 格式列表
-  allowed_models?: string[] | null  // 允许使用的模型名称列表
   created_at: string
   last_login_at?: string
   preferences?: UserPreferences
-  stats?: UserStats
 }
 
 export const authApi = {

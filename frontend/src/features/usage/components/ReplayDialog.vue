@@ -293,7 +293,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { dashboardApi, type ReplayResponse, type RequestDetail } from '@/api/dashboard'
+import { requestDetailsApi, type ReplayResponse, type RequestDetail } from '@/api/request-details'
 import { getProvidersSummary } from '@/api/endpoints/providers'
 import { getProviderKeys } from '@/api/endpoints/keys'
 import type { EndpointAPIKey } from '@/api/endpoints/types'
@@ -427,7 +427,7 @@ async function doReplay() {
     if (selectedProviderId.value) params.provider_id = selectedProviderId.value
     if (selectedKeyId.value) params.api_key_id = selectedKeyId.value
 
-    replayResult.value = await dashboardApi.replayRequest(
+    replayResult.value = await requestDetailsApi.replayRequest(
       props.requestId,
       Object.keys(params).length > 0 ? params : undefined,
     )

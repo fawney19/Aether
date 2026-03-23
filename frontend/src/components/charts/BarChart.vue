@@ -1,5 +1,8 @@
 <template>
-  <div class="w-full h-full">
+  <div
+    class="w-full"
+    :style="{ height: `${props.height}px` }"
+  >
     <canvas ref="chartRef" />
   </div>
 </template>
@@ -18,6 +21,7 @@ import {
   type ChartData,
   type ChartOptions
 } from 'chart.js'
+import { observeChartThemeChanges, resolveChartTheme } from '@/utils/chartTheme'
 
 const props = withDefaults(defineProps<Props>(), {
   height: 300,
@@ -44,6 +48,7 @@ interface Props {
 
 const chartRef = ref<HTMLCanvasElement>()
 let chart: ChartJS<'bar'> | null = null
+let stopThemeObserver: (() => void) | null = null
 
 const defaultOptions: ChartOptions<'bar'> = {
   responsive: true,
@@ -91,9 +96,7 @@ const defaultOptions: ChartOptions<'bar'> = {
   }
 }
 
-function createChart() {
-  if (!chartRef.value) return
-
+function buildChartOptions(): ChartOptions<'bar'> {
   const stackedOptions = props.stacked ? {
     scales: {
       x: { ...defaultOptions.scales?.x, stacked: true },
@@ -106,20 +109,26 @@ function createChart() {
     }
   }
 
+  return resolveChartTheme({
+    ...defaultOptions,
+    ...stackedOptions,
+    ...props.options
+  })
+}
+
+function createChart() {
+  if (!chartRef.value) return
+
   chart = new ChartJS(chartRef.value, {
     type: 'bar',
-    data: props.data,
-    options: {
-      ...defaultOptions,
-      ...stackedOptions,
-      ...props.options
-    }
+    data: resolveChartTheme(props.data),
+    options: buildChartOptions()
   })
 }
 
 function updateChart() {
   if (chart) {
-    chart.data = props.data
+    chart.data = resolveChartTheme(props.data)
     chart.update('none')
   }
 }
@@ -127,9 +136,17 @@ function updateChart() {
 onMounted(async () => {
   await nextTick()
   createChart()
+  stopThemeObserver = observeChartThemeChanges(() => {
+    if (!chart) return
+    chart.data = resolveChartTheme(props.data)
+    chart.options = buildChartOptions()
+    chart.update('none')
+  })
 })
 
 onUnmounted(() => {
+  stopThemeObserver?.()
+  stopThemeObserver = null
   if (chart) {
     chart.destroy()
     chart = null
@@ -139,11 +156,8 @@ onUnmounted(() => {
 watch(() => props.data, updateChart, { deep: true })
 watch(() => props.options, () => {
   if (chart) {
-    chart.options = {
-      ...defaultOptions,
-      ...props.options
-    }
-    chart.update()
+    chart.options = buildChartOptions()
+    chart.update('none')
   }
 }, { deep: true })
 </script>

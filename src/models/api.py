@@ -699,8 +699,6 @@ class PublicModelResponse(BaseModel):
     """公开的模型信息响应"""
 
     id: str
-    provider_id: str
-    provider_name: str
     name: str
     display_name: str
     description: str | None = None
@@ -767,7 +765,6 @@ class UpdatePreferencesRequest(BaseModel):
 
     avatar_url: str | None = None
     bio: str | None = None
-    default_provider_id: int | None = None
     theme: str | None = None
     language: str | None = None
     timezone: str | None = None
@@ -799,21 +796,6 @@ class UpdateMyApiKeyRequest(BaseModel):
         ge=0,
         description="该 Key 的每分钟请求限制；0 表示不限制，null 表示不修改",
     )
-
-
-class ProviderConfig(BaseModel):
-    """提供商配置"""
-
-    provider_id: str = Field(..., description="提供商ID")
-    priority: int = Field(100, description="优先级（越高越优先）")
-    weight: float = Field(1.0, description="负载均衡权重")
-    enabled: bool = Field(True, description="是否启用")
-
-
-class UpdateApiKeyProvidersRequest(BaseModel):
-    """更新API密钥可用提供商请求"""
-
-    allowed_providers: list[ProviderConfig] | None = None  # 提供商配置列表
 
 
 # ========== 公告相关模型 ==========

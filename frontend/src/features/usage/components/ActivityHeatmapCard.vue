@@ -20,26 +20,31 @@
     </div>
     <div
       v-if="isLoading"
-      class="h-full min-h-[160px] flex items-center justify-center text-sm text-muted-foreground"
+      class="flex items-center justify-center text-sm text-muted-foreground"
+      :style="{ minHeight: `${minHeight}px` }"
     >
       <Loader2 class="h-5 w-5 animate-spin mr-2" />
       加载中...
     </div>
     <div
       v-else-if="hasError"
-      class="h-full min-h-[160px] flex items-center justify-center text-sm text-destructive"
+      class="flex items-center justify-center text-sm text-destructive"
+      :style="{ minHeight: `${minHeight}px` }"
     >
       <AlertCircle class="h-4 w-4 mr-1.5" />
-      加载失败
+      数据暂不可用
     </div>
     <ActivityHeatmap
       v-else-if="hasData"
       :data="data"
       :show-header="false"
+      :value-label="valueLabel"
+      :actual-value-label="actualValueLabel"
     />
     <div
       v-else
-      class="h-full min-h-[160px] flex items-center justify-center text-sm text-muted-foreground"
+      class="flex items-center justify-center text-sm text-muted-foreground"
+      :style="{ minHeight: `${minHeight}px` }"
     >
       暂无活跃数据
     </div>
@@ -58,6 +63,9 @@ const props = defineProps<{
   title: string
   isLoading?: boolean
   hasError?: boolean
+  minHeight?: number
+  valueLabel?: string
+  actualValueLabel?: string
 }>()
 
 const legendLevels = [0.08, 0.25, 0.45, 0.65, 0.85]
@@ -65,4 +73,6 @@ const legendLevels = [0.08, 0.25, 0.45, 0.65, 0.85]
 const hasData = computed(() =>
   props.data && props.data.days && props.data.days.length > 0
 )
+
+const minHeight = computed(() => props.minHeight ?? 160)
 </script>

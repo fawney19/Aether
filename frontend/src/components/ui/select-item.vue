@@ -59,7 +59,7 @@ const isHidden = computed(
 )
 const itemClass = computed(() =>
   cn(
-    'relative flex w-full cursor-pointer select-none items-center rounded-lg py-1.5 pl-8 pr-2 text-sm outline-none',
+    'relative flex min-w-0 w-full cursor-pointer select-none items-center rounded-lg py-1.5 pl-8 pr-2 text-sm outline-none',
     'data-[highlighted]:bg-accent focus:bg-accent text-foreground',
     'transition-colors data-[disabled]:pointer-events-none data-[disabled]:opacity-50',
     isHidden.value && 'hidden',
@@ -101,8 +101,16 @@ onBeforeUnmount(() => {
         <Check class="h-4 w-4" />
       </SelectItemIndicator>
     </span>
-    <SelectItemText>
-      <slot />
+    <SelectItemText
+      as="div"
+      class="min-w-0 flex-1 overflow-hidden"
+    >
+      <span
+        class="block w-full min-w-0 truncate"
+        :title="normalizedText"
+      >
+        <slot />
+      </span>
     </SelectItemText>
   </SelectItemPrimitive>
 </template>

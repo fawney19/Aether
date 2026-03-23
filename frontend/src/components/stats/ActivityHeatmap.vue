@@ -13,8 +13,11 @@
         <p class="mt-0.5">
           {{ tooltip.day.requests }} 次请求 · {{ formatTokens(tooltip.day.total_tokens) }}
         </p>
-        <p class="text-[11px] text-muted-foreground">
-          成本 {{ formatCurrency(tooltip.day.total_cost) }}
+        <p class="text-[11px] text-muted-foreground whitespace-nowrap">
+          {{ valueLabel }} {{ formatCurrency(tooltip.day.total_cost) }}
+          <template v-if="actualValueLabel && tooltip.day.actual_total_cost !== undefined">
+            · {{ actualValueLabel }} {{ formatCurrency(tooltip.day.actual_total_cost) }}
+          </template>
         </p>
       </div>
     </Teleport>
@@ -90,7 +93,7 @@
           class="flex items-center invisible"
         >周六</span>
       </div>
-      <div class="flex-1 min-w-[200px]">
+      <div class="flex-1 min-w-0">
         <div
           ref="heatmapWrapper"
           class="relative block w-full"
@@ -100,12 +103,12 @@
             :style="horizontalGapStyle"
           >
             <div
-              v-for="(week, weekIndex) in weekColumns"
+              v-for="(week, weekIndex) in visibleWeekColumns"
               :key="`month-${weekIndex}`"
               :style="monthCellStyle"
               class="text-center"
             >
-              <span v-if="monthMarkers[weekIndex]">{{ monthMarkers[weekIndex] }}</span>
+              <span v-if="visibleMonthMarkers[weekIndex]">{{ visibleMonthMarkers[weekIndex] }}</span>
             </div>
           </div>
           <div
@@ -113,7 +116,7 @@
             :style="horizontalGapStyle"
           >
             <div
-              v-for="(week, weekIndex) in weekColumns"
+              v-for="(week, weekIndex) in visibleWeekColumns"
               :key="weekIndex"
               class="flex flex-col"
               :style="verticalGapStyle"
@@ -161,11 +164,15 @@ const props = withDefaults(defineProps<{
   title?: string
   subtitle?: string
   showHeader?: boolean
+  valueLabel?: string
+  actualValueLabel?: string
 }>(), {
   data: undefined,
   title: undefined,
   subtitle: undefined,
-  showHeader: true
+  showHeader: true,
+  valueLabel: '费用',
+  actualValueLabel: undefined,
 })
 
 const legendLevels = [0.08, 0.25, 0.45, 0.65, 0.85]
@@ -270,7 +277,47 @@ const monthMarkers = computed(() => {
     if (month === lastMonth) {
       return
     }
-    markers[index] = `${month + 1}月`
+    markers[index] = String(month + 1)
+    lastMonth = month
+  })
+
+  return markers
+})
+
+const MIN_CELL_SIZE = 6
+
+// 根据容器宽度计算最多能放多少周，然后从后面截取（保留最新数据）
+const maxVisibleWeeks = computed(() => {
+  const total = weekColumns.value.length
+  if (!heatmapWidth.value || !total) return total
+  // 先尝试用理想尺寸放全部
+  const totalGapAll = Math.max(total - 1, 0) * cellGap.value
+  const rawSizeAll = (heatmapWidth.value - totalGapAll) / total
+  if (rawSizeAll >= MIN_CELL_SIZE) return total
+  // 放不下，算容器最多能容纳几周（用最小尺寸）
+  // n * MIN_CELL_SIZE + (n-1) * gap <= width
+  const maxN = Math.floor((heatmapWidth.value + cellGap.value) / (MIN_CELL_SIZE + cellGap.value))
+  return Math.max(1, Math.min(maxN, total))
+})
+
+const visibleWeekColumns = computed(() => {
+  const all = weekColumns.value
+  const n = maxVisibleWeeks.value
+  if (n >= all.length) return all
+  return all.slice(all.length - n)
+})
+
+const visibleMonthMarkers = computed(() => {
+  const markers: Record<number, string> = {}
+  const columns = visibleWeekColumns.value
+  let lastMonth: number | null = null
+
+  columns.forEach((week, index) => {
+    const firstValid = week.find((day): day is DayWithMeta => day !== null)
+    if (!firstValid) return
+    const month = firstValid.dateObj.getUTCMonth()
+    if (month === lastMonth) return
+    markers[index] = String(month + 1)
     lastMonth = month
   })
 
@@ -282,7 +329,7 @@ let mediaQuery: MediaQueryList | null = null
 let mediaQueryHandler: ((event?: MediaQueryListEvent) => void) | null = null
 
 const recalcCellSize = () => {
-  const columnCount = weekColumns.value.length
+  const columnCount = visibleWeekColumns.value.length
   if (!columnCount || !heatmapWidth.value) {
     return
   }
@@ -290,12 +337,12 @@ const recalcCellSize = () => {
   const totalGap = Math.max(columnCount - 1, 0) * cellGap.value
   const availableSpace = Math.max(heatmapWidth.value - totalGap, 0)
   const rawSize = availableSpace / columnCount
-  // 自适应尺寸，最小 6px
-  cellSize.value = Math.max(6, rawSize)
+  // 当所有列都能放下时，让格子继续随容器放大，避免宽屏下出现大块留白。
+  cellSize.value = Math.max(MIN_CELL_SIZE, rawSize)
 }
 
 watch(
-  [() => heatmapWidth.value, () => weekColumns.value.length, () => cellGap.value],
+  [() => heatmapWidth.value, () => visibleWeekColumns.value.length, () => cellGap.value],
   () => {
     recalcCellSize()
   },
@@ -345,7 +392,7 @@ onBeforeUnmount(() => {
 
 function handleHover(day: ActivityHeatmapDay, event: MouseEvent) {
   const cellRect = (event.currentTarget as HTMLElement).getBoundingClientRect()
-  const tooltipWidth = 200
+  const tooltipWidth = 280
   const tooltipHeight = 72
 
   // Calculate horizontal position (centered on cell)
@@ -402,10 +449,10 @@ function getCellStyle(requests: number) {
 
 function buildTooltip(day: ActivityHeatmapDay): string {
   const dateLabel = day.date
-  const costLabel = formatCurrency(day.total_cost || 0)
+  const costLabel = `${props.valueLabel} ${formatCurrency(day.total_cost || 0)}`
   const parts = [`${dateLabel}`, `${day.requests} 次请求`, `${formatTokens(day.total_tokens)} tokens`, costLabel]
-  if (day.actual_total_cost !== undefined) {
-    parts.push(`倍率: ${formatCurrency(day.actual_total_cost)}`)
+  if (props.actualValueLabel && day.actual_total_cost !== undefined) {
+    parts.push(`${props.actualValueLabel} ${formatCurrency(day.actual_total_cost)}`)
   }
   return parts.join(' · ')
 }

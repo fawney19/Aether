@@ -1,16 +1,10 @@
-import { ref, computed, type Ref } from 'vue'
-import { usageApi } from '@/api/usage'
-import { meApi } from '@/api/me'
+import { ref, type Ref } from 'vue'
+import { analyticsApi, type AnalyticsBaseRequest, type AnalyticsFilterOption, type AnalyticsRecord, type AnalyticsScope } from '@/api/analytics'
+import { buildTimeRangeParams } from '@/composables/useAnalyticsFilters'
 import type {
-  UsageStatsState,
-  ModelStatsItem,
-  ProviderStatsItem,
-  ApiFormatStatsItem,
   UsageRecord,
   DateRangeParams,
-  EnhancedModelStatsItem
 } from '../types'
-import { createDefaultStats } from '../types'
 import { log } from '@/utils/logger'
 import { getErrorStatus } from '@/types/api-error'
 
@@ -26,27 +20,21 @@ export interface PaginationParams {
 export interface FilterParams {
   search?: string
   user_id?: string
+  api_key_id?: string
   model?: string
   provider?: string
   api_format?: string
   status?: string
 }
 
+type FilterOptionDimension = 'user' | 'api_key' | 'model' | 'provider' | 'api_format' | 'status'
+
 export function useUsageData(options: UseUsageDataOptions) {
   const { isAdminPage } = options
 
-  // 加载状态
-  const isLoadingStats = ref(true)
   const isLoadingRecords = ref(false)
-  const loading = computed(() => isLoadingStats.value || isLoadingRecords.value)
 
-  // 统计数据
-  const stats = ref<UsageStatsState>(createDefaultStats())
-  const modelStats = ref<ModelStatsItem[]>([])
-  const providerStats = ref<ProviderStatsItem[]>([])
-  const apiFormatStats = ref<ApiFormatStatsItem[]>([])
-
-  // 记录数据 - 只存储当前页
+  // 记录数据：前后端统一按当前页维护
   const currentRecords = ref<UsageRecord[]>([])
   const totalRecords = ref(0)
 
@@ -56,185 +44,93 @@ export function useUsageData(options: UseUsageDataOptions) {
   let loadRecordsRequestId = 0
 
   // 可用的筛选选项（从统计数据获取，而不是从记录中）
-  const availableModels = ref<string[]>([])
-  const availableProviders = ref<string[]>([])
+  const availableUsers = ref<AnalyticsFilterOption[]>([])
+  const availableModels = ref<AnalyticsFilterOption[]>([])
+  const availableProviders = ref<AnalyticsFilterOption[]>([])
+  const availableApiKeys = ref<AnalyticsFilterOption[]>([])
+  const availableApiFormats = ref<AnalyticsFilterOption[]>([])
+  const availableStatuses = ref<AnalyticsFilterOption[]>([])
 
-  // 增强的模型统计（包含效率分析）
-  const enhancedModelStats = computed<EnhancedModelStatsItem[]>(() => {
-    return modelStats.value.map(model => ({
-      ...model,
-      costPerToken: model.total_tokens > 0
-        ? `$${(model.total_cost / model.total_tokens * 1000000).toFixed(2)}/M`
-        : '-'
-    }))
-  })
+  function mapAnalyticsRecord(record: AnalyticsRecord): UsageRecord {
+    return {
+      id: record.id,
+      user_id: record.user_id || undefined,
+      username: record.username || undefined,
+      api_key: {
+        id: record.api_key_id,
+        name: record.api_key_name,
+        display: null,
+      },
+      provider: record.provider_name,
+      api_key_name: record.provider_api_key_name || undefined,
+      rate_multiplier: record.rate_multiplier,
+      model: record.model,
+      target_model: record.target_model,
+      api_format: record.api_format || undefined,
+      endpoint_api_format: undefined,
+      has_format_conversion: record.has_format_conversion ?? undefined,
+      input_tokens: record.input_tokens,
+      output_tokens: record.output_tokens,
+      cache_creation_input_tokens: record.cache_creation_input_tokens,
+      cache_read_input_tokens: record.cache_read_input_tokens,
+      total_tokens: record.total_tokens,
+      cost: record.total_cost_usd,
+      actual_cost: record.actual_total_cost_usd,
+      response_time_ms: record.response_time_ms ?? undefined,
+      first_byte_time_ms: record.first_byte_time_ms ?? undefined,
+      is_stream: record.is_stream,
+      status_code: record.status_code ?? undefined,
+      error_message: record.error_message ?? undefined,
+      status: record.status as UsageRecord['status'],
+      created_at: record.created_at || '',
+      has_fallback: record.has_fallback ?? undefined,
+      has_retry: record.has_retry ?? undefined,
+    }
+  }
+
+  function buildScope(): AnalyticsScope {
+    if (isAdminPage.value) {
+      return { kind: 'global' }
+    }
+    return { kind: 'me' }
+  }
+
+  function buildAnalyticsFilters(
+    filters?: FilterParams,
+    excludeDimension?: FilterOptionDimension,
+  ): NonNullable<AnalyticsBaseRequest['filters']> {
+    return {
+      user_ids: filters?.user_id && excludeDimension !== 'user' ? [filters.user_id] : [],
+      models: filters?.model && excludeDimension !== 'model' ? [filters.model] : [],
+      provider_names: filters?.provider && excludeDimension !== 'provider' ? [filters.provider] : [],
+      api_key_ids: filters?.api_key_id && excludeDimension !== 'api_key' ? [filters.api_key_id] : [],
+      api_formats: filters?.api_format && excludeDimension !== 'api_format' ? [filters.api_format] : [],
+      statuses: filters?.status && excludeDimension !== 'status' ? [filters.status] : [],
+    }
+  }
 
   // 加载统计数据（不加载记录）
-  async function loadStats(dateRange?: DateRangeParams) {
+  async function loadStats(dateRange?: DateRangeParams, filters?: FilterParams) {
     const requestId = ++loadStatsRequestId
-    isLoadingStats.value = true
     currentDateRange.value = dateRange
 
     try {
-      if (isAdminPage.value) {
-        // 管理员页面，并行加载统计数据
-        const [statsData, modelData, providerData, apiFormatData] = await Promise.all([
-          usageApi.getUsageStats(dateRange),
-          usageApi.getUsageByModel(dateRange),
-          usageApi.getUsageByProvider(dateRange),
-          usageApi.getUsageByApiFormat(dateRange)
-        ])
+      const response = await analyticsApi.getFilterOptions({
+        scope: buildScope(),
+        time_range: buildTimeRangeParams(dateRange || currentDateRange.value || {}),
+        filters: buildAnalyticsFilters(filters),
+      })
 
-        if (requestId !== loadStatsRequestId) {
-          return
-        }
-
-        // statsData may contain additional fields not declared in UsageStats
-        const statsRaw = statsData as Record<string, unknown>
-        stats.value = {
-          total_requests: statsData.total_requests || 0,
-          total_tokens: statsData.total_tokens || 0,
-          total_cost: statsData.total_cost || 0,
-          total_actual_cost: statsData.total_actual_cost,
-          avg_response_time: statsData.avg_response_time || 0,
-          error_count: typeof statsRaw.error_count === 'number' ? statsRaw.error_count : undefined,
-          error_rate: typeof statsRaw.error_rate === 'number' ? statsRaw.error_rate : undefined,
-          cache_stats: statsRaw.cache_stats as UsageStatsState['cache_stats'],
-          period_start: '',
-          period_end: '',
-        }
-
-        modelStats.value = modelData.map(item => {
-          const raw = item as Record<string, unknown>
-          return {
-            model: item.model,
-            request_count: item.request_count || 0,
-            total_tokens: item.total_tokens || 0,
-            total_input_context: typeof raw.total_input_context === 'number' ? raw.total_input_context : 0,
-            output_tokens: typeof raw.output_tokens === 'number' ? raw.output_tokens : 0,
-            cache_read_tokens: typeof raw.cache_read_tokens === 'number' ? raw.cache_read_tokens : 0,
-            cache_creation_tokens: typeof raw.cache_creation_tokens === 'number' ? raw.cache_creation_tokens : 0,
-            cache_hit_rate: typeof raw.cache_hit_rate === 'number' ? raw.cache_hit_rate : 0,
-            total_cost: item.total_cost || 0,
-            actual_cost: typeof raw.actual_cost === 'number' ? raw.actual_cost : undefined
-          }
-        })
-
-        providerStats.value = providerData.map(item => ({
-          provider: item.provider,
-          requests: item.request_count,
-          totalTokens: item.total_tokens || 0,
-          totalInputContext: item.total_input_context || 0,
-          outputTokens: item.output_tokens || 0,
-          cacheReadTokens: item.cache_read_tokens || 0,
-          cacheCreationTokens: item.cache_creation_tokens || 0,
-          cacheHitRate: item.cache_hit_rate || 0,
-          totalCost: item.total_cost,
-          actualCost: item.actual_cost,
-          successRate: item.success_rate,
-          avgResponseTime: item.avg_response_time_ms > 0
-            ? `${(item.avg_response_time_ms / 1000).toFixed(2)}s`
-            : '-'
-        }))
-
-        apiFormatStats.value = apiFormatData.map(item => ({
-          api_format: item.api_format,
-          request_count: item.request_count || 0,
-          total_tokens: item.total_tokens || 0,
-          total_input_context: item.total_input_context || 0,
-          output_tokens: item.output_tokens || 0,
-          cache_read_tokens: item.cache_read_tokens || 0,
-          cache_creation_tokens: item.cache_creation_tokens || 0,
-          cache_hit_rate: item.cache_hit_rate || 0,
-          total_cost: item.total_cost || 0,
-          actual_cost: item.actual_cost,
-          avgResponseTime: item.avg_response_time_ms > 0
-            ? `${(item.avg_response_time_ms / 1000).toFixed(2)}s`
-            : '-'
-        }))
-
-        // 从统计数据中提取可用的筛选选项
-        availableModels.value = modelData.map(item => item.model).filter(Boolean).sort()
-        availableProviders.value = providerData.map(item => item.provider).filter(Boolean).sort()
-
-      } else {
-        // 用户页面
-        const userData = await meApi.getUsage(dateRange)
-        if (requestId !== loadStatsRequestId) {
-          return
-        }
-
-        stats.value = {
-          total_requests: userData.total_requests || 0,
-          total_tokens: userData.total_tokens || 0,
-          total_cost: userData.total_cost || 0,
-          total_actual_cost: userData.total_actual_cost,
-          avg_response_time: userData.avg_response_time || 0,
-          period_start: '',
-          period_end: '',
-        }
-
-        modelStats.value = (userData.summary_by_model || []).map((item) => ({
-          model: item.model,
-          request_count: item.requests || 0,
-          total_tokens: item.total_tokens || 0,
-          total_input_context: item.total_input_context || 0,
-          output_tokens: item.output_tokens || 0,
-          cache_read_tokens: item.cache_read_tokens || 0,
-          cache_creation_tokens: item.cache_creation_tokens || 0,
-          cache_hit_rate: item.cache_hit_rate || 0,
-          total_cost: item.total_cost_usd || 0,
-          actual_cost: item.actual_total_cost_usd
-        }))
-
-        providerStats.value = (userData.summary_by_provider || []).map((item) => ({
-          provider: item.provider,
-          requests: item.requests || 0,
-          totalTokens: item.total_tokens || 0,
-          totalInputContext: item.total_input_context || 0,
-          outputTokens: item.output_tokens || 0,
-          cacheReadTokens: item.cache_read_tokens || 0,
-          cacheCreationTokens: item.cache_creation_tokens || 0,
-          cacheHitRate: item.cache_hit_rate || 0,
-          totalCost: item.total_cost_usd || 0,
-          successRate: item.success_rate || 0,
-          avgResponseTime: (item.avg_response_time_ms ?? 0) > 0
-            ? `${((item.avg_response_time_ms ?? 0) / 1000).toFixed(2)}s`
-            : '-'
-        }))
-
-        // 用户页面：记录直接从 userData 获取（数量较少）
-        // 使用 mergeRecordStatus 保护已有的活跃状态，避免轮询更新被覆盖
-        const nextRecords = (userData.records || []) as UsageRecord[]
-        currentRecords.value = mergeRecordStatus(currentRecords.value, nextRecords)
-        totalRecords.value = userData.pagination?.total ?? currentRecords.value.length
-
-        // 从记录中提取筛选选项
-        const models = new Set<string>()
-        const providers = new Set<string>()
-        currentRecords.value.forEach(record => {
-          if (record.model) models.add(record.model)
-          if (record.provider) providers.add(record.provider)
-        })
-        availableModels.value = Array.from(models).sort()
-        availableProviders.value = Array.from(providers).sort()
-
-        // API 格式统计直接使用后端聚合数据
-        apiFormatStats.value = (userData.summary_by_api_format || []).map(item => ({
-          api_format: item.api_format,
-          request_count: item.request_count || 0,
-          total_tokens: item.total_tokens || 0,
-          total_input_context: item.total_input_context || 0,
-          output_tokens: item.output_tokens || 0,
-          cache_read_tokens: item.cache_read_tokens || 0,
-          cache_creation_tokens: item.cache_creation_tokens || 0,
-          cache_hit_rate: item.cache_hit_rate || 0,
-          total_cost: item.total_cost_usd || 0,
-          avgResponseTime: (item.avg_response_time_ms ?? 0) > 0
-            ? `${((item.avg_response_time_ms ?? 0) / 1000).toFixed(2)}s`
-            : '-'
-        }))
+      if (requestId !== loadStatsRequestId) {
+        return
       }
+
+      availableUsers.value = response.users ?? []
+      availableModels.value = response.models ?? []
+      availableProviders.value = response.providers ?? []
+      availableApiKeys.value = response.api_keys ?? []
+      availableApiFormats.value = response.api_formats ?? []
+      availableStatuses.value = response.statuses ?? []
     } catch (error: unknown) {
       if (requestId !== loadStatsRequestId) {
         return
@@ -242,17 +138,17 @@ export function useUsageData(options: UseUsageDataOptions) {
       if (getErrorStatus(error) !== 403) {
         log.error('加载统计数据失败:', error)
       }
-      stats.value = createDefaultStats()
-      modelStats.value = []
+      availableUsers.value = []
+      availableModels.value = []
+      availableProviders.value = []
       currentRecords.value = []
-    } finally {
-      if (requestId === loadStatsRequestId) {
-        isLoadingStats.value = false
-      }
+      availableApiKeys.value = []
+      availableApiFormats.value = []
+      availableStatuses.value = []
     }
   }
 
-  // 加载记录（真正的后端分页）
+  // 加载记录：前后端统一由后端分页和筛选
   async function loadRecords(
     pagination: PaginationParams,
     filters?: FilterParams
@@ -263,53 +159,24 @@ export function useUsageData(options: UseUsageDataOptions) {
     try {
       const offset = (pagination.page - 1) * pagination.pageSize
 
-      // 构建请求参数
-      const params: Record<string, unknown> = {
-        limit: pagination.pageSize,
-        offset,
-        ...currentDateRange.value
+      const response = await analyticsApi.getRecords({
+        scope: buildScope(),
+        time_range: buildTimeRangeParams(currentDateRange.value || {}),
+        filters: buildAnalyticsFilters(filters),
+        search: {
+          text: filters?.search || null,
+        },
+        pagination: {
+          limit: pagination.pageSize,
+          offset,
+        },
+      })
+      if (requestId !== loadRecordsRequestId) {
+        return
       }
-
-      // 添加筛选条件
-      if (filters?.search?.trim()) {
-        params.search = filters.search.trim()
-      }
-
-      if (isAdminPage.value) {
-        // 管理员页面：使用管理员 API
-        if (filters?.user_id) {
-          params.user_id = filters.user_id
-        }
-        if (filters?.model) {
-          params.model = filters.model
-        }
-        if (filters?.provider) {
-          params.provider = filters.provider
-        }
-        if (filters?.api_format) {
-          params.api_format = filters.api_format
-        }
-        if (filters?.status) {
-          params.status = filters.status
-        }
-
-        const response = await usageApi.getAllUsageRecords(params)
-        if (requestId !== loadRecordsRequestId) {
-          return
-        }
-        const nextRecords = (response.records || []) as UsageRecord[]
-        currentRecords.value = mergeRecordStatus(currentRecords.value, nextRecords)
-        totalRecords.value = response.total || 0
-      } else {
-        // 用户页面：使用用户 API
-        const userData = await meApi.getUsage(params)
-        if (requestId !== loadRecordsRequestId) {
-          return
-        }
-        const nextRecords = (userData.records || []) as UsageRecord[]
-        currentRecords.value = mergeRecordStatus(currentRecords.value, nextRecords)
-        totalRecords.value = userData.pagination?.total || currentRecords.value.length
-      }
+      const nextRecords = (response.records || []).map(mapAnalyticsRecord)
+      currentRecords.value = mergeRecordStatus(currentRecords.value, nextRecords)
+      totalRecords.value = response.total || 0
     } catch (error) {
       if (requestId !== loadRecordsRequestId) {
         return
@@ -397,33 +264,19 @@ export function useUsageData(options: UseUsageDataOptions) {
     })
   }
 
-  // 刷新所有数据
-  async function refreshData(dateRange?: DateRangeParams) {
-    await loadStats(dateRange)
-  }
-
   return {
-    // 状态
-    loading,
-    isLoadingStats,
     isLoadingRecords,
-    stats,
-    modelStats,
-    providerStats,
-    apiFormatStats,
     currentRecords,
     totalRecords,
 
-    // 筛选选项
+    availableUsers,
     availableModels,
     availableProviders,
+    availableApiKeys,
+    availableApiFormats,
+    availableStatuses,
 
-    // 计算属性
-    enhancedModelStats,
-
-    // 方法
     loadStats,
     loadRecords,
-    refreshData
   }
 }

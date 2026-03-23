@@ -34,10 +34,8 @@ from .context import ApiRequestContext
 
 # 高频轮询端点，抑制其 debug 日志以减少噪音
 QUIET_POLLING_PATHS: set[str] = {
-    "/api/admin/usage/active",
-    "/api/admin/usage/records",
-    "/api/admin/usage/stats",
-    "/api/admin/usage/aggregation/stats",
+    "/api/analytics/active-requests",
+    "/api/analytics/records",
     "/api/admin/health/status",
     "/api/wallet/today-cost",
 }

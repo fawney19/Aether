@@ -14,9 +14,9 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from src.api.base.authenticated_adapter import AuthenticatedApiAdapter
 from src.api.base.context import ApiRequestContext
 from src.api.base.pipeline import get_pipeline
-from src.api.dashboard.routes import DashboardAdapter
 from src.clients.http_client import HTTPClientPool
 from src.config.constants import CacheTTL
 from src.core.crypto import crypto_service
@@ -232,7 +232,7 @@ async def proxy_video_stream(
 
 
 @dataclass
-class VideoTaskListAdapter(DashboardAdapter):
+class VideoTaskListAdapter(AuthenticatedApiAdapter):
     """视频任务列表适配器"""
 
     status: str | None
@@ -338,7 +338,7 @@ class VideoTaskListAdapter(DashboardAdapter):
 
 
 @dataclass
-class VideoTaskStatsAdapter(DashboardAdapter):
+class VideoTaskStatsAdapter(AuthenticatedApiAdapter):
     """视频任务统计适配器"""
 
     @cache_result(
@@ -417,7 +417,7 @@ class VideoTaskStatsAdapter(DashboardAdapter):
 
 
 @dataclass
-class VideoTaskDetailAdapter(DashboardAdapter):
+class VideoTaskDetailAdapter(AuthenticatedApiAdapter):
     """视频任务详情适配器"""
 
     task_id: str
@@ -507,7 +507,7 @@ class VideoTaskDetailAdapter(DashboardAdapter):
 
 
 @dataclass
-class VideoTaskCancelAdapter(DashboardAdapter):
+class VideoTaskCancelAdapter(AuthenticatedApiAdapter):
     """视频任务取消适配器"""
 
     task_id: str

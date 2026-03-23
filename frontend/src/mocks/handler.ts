@@ -12,10 +12,6 @@ import {
   MOCK_LOGIN_RESPONSE_USER,
   MOCK_ADMIN_PROFILE,
   MOCK_USER_PROFILE,
-  MOCK_DASHBOARD_STATS,
-  MOCK_RECENT_REQUESTS,
-  MOCK_PROVIDER_STATUS,
-  MOCK_DAILY_STATS,
   MOCK_ALL_USERS,
   MOCK_USER_API_KEYS,
   MOCK_ADMIN_API_KEYS,
@@ -57,6 +53,36 @@ function getCurrentUser() {
 // 获取当前用户 Profile
 function getCurrentProfile() {
   return isCurrentUserAdmin() ? MOCK_ADMIN_PROFILE : MOCK_USER_PROFILE
+}
+
+function sanitizePublicModelConfig(config: unknown): Record<string, unknown> | null {
+  if (!config || typeof config !== 'object') return null
+
+  const raw = config as Record<string, unknown>
+  const allowedKeys = [
+    'description',
+    'icon_url',
+    'streaming',
+    'vision',
+    'function_calling',
+    'extended_thinking',
+    'image_generation',
+    'structured_output',
+    'family',
+    'knowledge_cutoff',
+    'input_modalities',
+    'output_modalities',
+    'context_limit',
+    'output_limit'
+  ]
+
+  const sanitized = Object.fromEntries(
+    allowedKeys
+      .filter(key => key in raw)
+      .map(key => [key, raw[key]])
+  )
+
+  return Object.keys(sanitized).length > 0 ? sanitized : null
 }
 
 // 检查管理员权限
@@ -408,6 +434,714 @@ function getUsageRecords() {
   return cachedUsageRecords
 }
 
+function buildMockAnalyticsBreakdownRows(
+  dimension: 'model' | 'provider' | 'api_format' | 'api_key' | 'user',
+  records: ReturnType<typeof getUsageRecords> = getUsageRecords(),
+) {
+  const groups = new Map<string, {
+    key: string
+    label: string
+    requests_total: number
+    requests_success: number
+    requests_error: number
+    requests_stream: number
+    input_tokens: number
+    output_tokens: number
+    cache_creation_input_tokens: number
+    cache_read_input_tokens: number
+    total_tokens: number
+    total_cost_usd: number
+    actual_total_cost_usd: number
+    total_response_time_ms: number
+    response_samples: number
+  }>()
+
+  for (const record of records) {
+    const key = (
+      dimension === 'model'
+        ? record.model
+        : dimension === 'provider'
+          ? record.provider
+          : dimension === 'api_key'
+            ? (record.api_key?.id || 'unknown')
+          : dimension === 'api_format'
+            ? record.api_format
+            : record.user_id
+    ) || 'unknown'
+
+    const label = dimension === 'user'
+      ? (record.username || record.user_email || key)
+      : dimension === 'api_key'
+        ? (record.api_key?.name || key)
+        : key
+
+    const current = groups.get(key) || {
+      key,
+      label,
+      requests_total: 0,
+      requests_success: 0,
+      requests_error: 0,
+      requests_stream: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+      total_tokens: 0,
+      total_cost_usd: 0,
+      actual_total_cost_usd: 0,
+      total_response_time_ms: 0,
+      response_samples: 0,
+    }
+
+    current.requests_total += 1
+    current.requests_success += record.status === 'failed' ? 0 : 1
+    current.requests_error += record.status === 'failed' ? 1 : 0
+    current.requests_stream += record.is_stream ? 1 : 0
+    current.input_tokens += record.input_tokens || 0
+    current.output_tokens += record.output_tokens || 0
+    current.cache_creation_input_tokens += record.cache_creation_input_tokens || 0
+    current.cache_read_input_tokens += record.cache_read_input_tokens || 0
+    current.total_tokens += record.total_tokens || 0
+    current.total_cost_usd += record.cost || 0
+    current.actual_total_cost_usd += record.actual_cost || 0
+
+    if (typeof record.response_time_ms === 'number') {
+      current.total_response_time_ms += record.response_time_ms
+      current.response_samples += 1
+    }
+
+    groups.set(key, current)
+  }
+
+  const rows = Array.from(groups.values()).map(group => {
+    const inputContextTokens = group.input_tokens + group.cache_read_input_tokens
+    const successRate = group.requests_total > 0
+      ? Number(((group.requests_success / group.requests_total) * 100).toFixed(2))
+      : 0
+    const avgResponseTimeMs = group.response_samples > 0
+      ? Math.round(group.total_response_time_ms / group.response_samples)
+      : 0
+
+    return {
+      key: group.key,
+      label: group.label,
+      requests_total: group.requests_total,
+      requests_success: group.requests_success,
+      requests_error: group.requests_error,
+      requests_stream: group.requests_stream,
+      success_rate: successRate,
+      input_tokens: group.input_tokens,
+      output_tokens: group.output_tokens,
+      input_output_total_tokens: group.input_tokens + group.output_tokens,
+      cache_creation_input_tokens: group.cache_creation_input_tokens,
+      cache_creation_input_tokens_5m: 0,
+      cache_creation_input_tokens_1h: group.cache_creation_input_tokens,
+      cache_read_input_tokens: group.cache_read_input_tokens,
+      input_context_tokens: inputContextTokens,
+      total_tokens: group.total_tokens,
+      cache_hit_rate: inputContextTokens > 0
+        ? Number(((group.cache_read_input_tokens / inputContextTokens) * 100).toFixed(2))
+        : 0,
+      input_cost_usd: 0,
+      output_cost_usd: 0,
+      cache_creation_cost_usd: 0,
+      cache_creation_cost_usd_5m: 0,
+      cache_creation_cost_usd_1h: 0,
+      cache_read_cost_usd: 0,
+      cache_cost_usd: 0,
+      request_cost_usd: Number(group.total_cost_usd.toFixed(6)),
+      total_cost_usd: Number(group.total_cost_usd.toFixed(6)),
+      actual_total_cost_usd: Number(group.actual_total_cost_usd.toFixed(6)),
+      actual_cache_cost_usd: 0,
+      avg_response_time_ms: avgResponseTimeMs,
+      avg_first_byte_time_ms: 0,
+      format_conversion_count: 0,
+      models_used_count: 1,
+      share_of_total_cost: 0,
+      share_of_total_tokens: 0,
+      share_of_selected_metric: 0,
+    }
+  })
+
+  const totalCost = rows.reduce((sum, row) => sum + row.total_cost_usd, 0)
+  const totalTokens = rows.reduce((sum, row) => sum + row.total_tokens, 0)
+
+  return rows.map(row => ({
+    ...row,
+    share_of_total_cost: totalCost > 0
+      ? Number(((row.total_cost_usd / totalCost) * 100).toFixed(2))
+      : 0,
+    share_of_total_tokens: totalTokens > 0
+      ? Number(((row.total_tokens / totalTokens) * 100).toFixed(2))
+      : 0,
+  }))
+}
+
+function buildMockActiveRequests(
+  ids: string[] = [],
+  includeAdminFields: boolean = false,
+  records: ReturnType<typeof getUsageRecords> = getUsageRecords(),
+) {
+  const activeRecords = records.filter(record =>
+    (record.status === 'streaming' || record.status === 'pending') &&
+    (ids.length === 0 || ids.includes(record.id))
+  )
+
+  return activeRecords.map(record => {
+    const item: Record<string, unknown> = {
+      id: record.id,
+      status: record.status,
+      input_tokens: record.input_tokens,
+      output_tokens: record.output_tokens,
+      cache_creation_input_tokens: record.cache_creation_input_tokens,
+      cache_read_input_tokens: record.cache_read_input_tokens,
+      cost: record.cost,
+      actual_cost: record.actual_cost,
+      rate_multiplier: record.rate_multiplier,
+      response_time_ms: record.response_time_ms ?? null,
+      first_byte_time_ms: record.first_byte_time_ms ?? null,
+      api_format: record.api_format,
+      endpoint_api_format: record.endpoint_api_format,
+      has_format_conversion: record.has_format_conversion,
+      target_model: record.target_model,
+    }
+    if (includeAdminFields) {
+      item.provider = record.provider
+      item.api_key_name = record.api_key_name
+    }
+    return item
+  })
+}
+
+type MockUsageRecord = ReturnType<typeof getUsageRecords>[number]
+
+interface MockAnalyticsPayload {
+  scope?: {
+    kind?: 'global' | 'me' | 'user' | 'api_key'
+    user_id?: string | null
+    api_key_id?: string | null
+  }
+  time_range?: {
+    start_date?: string
+    end_date?: string
+    preset?: string
+    granularity?: 'hour' | 'day' | 'week' | 'month'
+  }
+  filters?: {
+    user_ids?: string[]
+    provider_names?: string[]
+    models?: string[]
+    target_models?: string[]
+    api_key_ids?: string[]
+    api_formats?: string[]
+    request_types?: string[]
+    statuses?: string[]
+    error_categories?: string[]
+    is_stream?: boolean | null
+    has_format_conversion?: boolean | null
+  }
+  search?: {
+    text?: string | null
+    request_id?: string | null
+  }
+  pagination?: {
+    limit?: number
+    offset?: number
+  }
+  dimension?: 'model' | 'provider' | 'api_format' | 'api_key' | 'user'
+  metric?: 'requests_total' | 'total_tokens' | 'total_cost_usd' | 'actual_total_cost_usd'
+  entity?: 'user' | 'api_key'
+  limit?: number
+  user_id?: string | null
+  api_key_id?: string | null
+  ids?: string[]
+  hours?: number
+  include_user_info?: boolean
+}
+
+function parseMockAnalyticsPayload(config: AxiosRequestConfig): MockAnalyticsPayload {
+  if (!config.data) return {}
+  try {
+    return JSON.parse(config.data) as MockAnalyticsPayload
+  } catch {
+    return {}
+  }
+}
+
+function getMockRecordRequestType(record: MockUsageRecord): string {
+  return record.is_stream ? 'stream' : 'standard'
+}
+
+const MOCK_ERROR_CATEGORY_LABELS: Record<string, string> = {
+  rate_limit: '频率限制',
+  auth: '认证失败',
+  invalid_request: '请求无效',
+  not_found: '资源不存在',
+  content_filter: '内容过滤',
+  context_length: '上下文过长',
+  server_error: '服务端错误',
+  timeout: '请求超时',
+  network: '网络错误',
+  cancelled: '已取消',
+  unknown: '未知错误',
+}
+
+function getMockErrorCategory(record: MockUsageRecord): string | null {
+  if (record.status !== 'failed') return null
+  const message = (record.error_message || '').toLowerCase()
+  if (message.includes('rate')) return 'rate_limit'
+  if ((record.status_code || 0) >= 500) return 'server_error'
+  if ((record.status_code || 0) >= 400) return 'invalid_request'
+  return 'unknown'
+}
+
+function getMockErrorCategoryLabel(category: string): string {
+  return MOCK_ERROR_CATEGORY_LABELS[category] || category
+}
+
+function requireAnalyticsScope(scopeKind?: 'global' | 'me' | 'user' | 'api_key') {
+  if (!isCurrentUserAdmin() && scopeKind && scopeKind !== 'me') {
+    throw { response: createMockResponse({ detail: 'Only admin can access non-personal analytics scope' }, 403) }
+  }
+}
+
+function resolveMockTimeRangeBounds(timeRange?: MockAnalyticsPayload['time_range']) {
+  const now = new Date()
+  let start: Date | null = null
+  let endExclusive: Date | null = null
+
+  const startOfDay = (date: Date) => new Date(date.getFullYear(), date.getMonth(), date.getDate())
+  const addDays = (date: Date, days: number) => {
+    const next = new Date(date)
+    next.setDate(next.getDate() + days)
+    return next
+  }
+
+  switch (timeRange?.preset) {
+    case 'today': {
+      const dayStart = startOfDay(now)
+      start = dayStart
+      endExclusive = addDays(dayStart, 1)
+      break
+    }
+    case 'last7days': {
+      const dayStart = startOfDay(now)
+      start = addDays(dayStart, -6)
+      endExclusive = addDays(dayStart, 1)
+      break
+    }
+    case 'last30days': {
+      const dayStart = startOfDay(now)
+      start = addDays(dayStart, -29)
+      endExclusive = addDays(dayStart, 1)
+      break
+    }
+    case 'last180days': {
+      const dayStart = startOfDay(now)
+      start = addDays(dayStart, -179)
+      endExclusive = addDays(dayStart, 1)
+      break
+    }
+    case 'last1year': {
+      const dayStart = startOfDay(now)
+      start = addDays(dayStart, -364)
+      endExclusive = addDays(dayStart, 1)
+      break
+    }
+    default: {
+      if (timeRange?.start_date) {
+        start = new Date(`${timeRange.start_date}T00:00:00`)
+      }
+      if (timeRange?.end_date) {
+        endExclusive = addDays(new Date(`${timeRange.end_date}T00:00:00`), 1)
+      }
+      break
+    }
+  }
+
+  return {
+    start,
+    endExclusive,
+    granularity: timeRange?.granularity || 'day',
+  }
+}
+
+function applyMockAnalyticsScope(records: MockUsageRecord[], payload: MockAnalyticsPayload): MockUsageRecord[] {
+  const scope = payload.scope || { kind: 'me' as const }
+  requireAnalyticsScope(scope.kind)
+
+  switch (scope.kind) {
+    case 'global':
+      return records
+    case 'user':
+      return records.filter(record => record.user_id === scope.user_id)
+    case 'api_key': {
+      const apiKeyId = scope.api_key_id
+      return apiKeyId
+        ? records.filter(record => record.api_key?.id === apiKeyId)
+        : []
+    }
+    case 'me':
+    default:
+      return records.filter(record => record.user_id === getCurrentUser().id)
+  }
+}
+
+function applyMockAnalyticsTimeRange(records: MockUsageRecord[], payload: MockAnalyticsPayload): MockUsageRecord[] {
+  const { start, endExclusive } = resolveMockTimeRangeBounds(payload.time_range)
+  return records.filter(record => {
+    const createdAt = new Date(record.created_at)
+    if (start && createdAt < start) return false
+    if (endExclusive && createdAt >= endExclusive) return false
+    return true
+  })
+}
+
+function applyMockAnalyticsFilters(records: MockUsageRecord[], payload: MockAnalyticsPayload): MockUsageRecord[] {
+  const filters = payload.filters || {}
+  return records.filter(record => {
+    if (filters.user_ids?.length && !filters.user_ids.includes(record.user_id)) return false
+    if (filters.provider_names?.length && !filters.provider_names.includes(record.provider)) return false
+    if (filters.models?.length && !filters.models.includes(record.model)) return false
+    if (filters.target_models?.length && !filters.target_models.includes(record.target_model || '')) return false
+    if (filters.api_key_ids?.length && !filters.api_key_ids.includes(record.api_key?.id || '')) return false
+    if (filters.api_formats?.length && !filters.api_formats.includes(record.api_format || '')) return false
+    if (filters.request_types?.length && !filters.request_types.includes(getMockRecordRequestType(record))) return false
+    if (filters.statuses?.length && !filters.statuses.includes(record.status)) return false
+    if (filters.error_categories?.length && !filters.error_categories.includes(getMockErrorCategory(record) || '')) return false
+    if (typeof filters.is_stream === 'boolean' && record.is_stream !== filters.is_stream) return false
+    if (typeof filters.has_format_conversion === 'boolean') {
+      const hasFormatConversion = record.has_format_conversion === true
+      if (hasFormatConversion !== filters.has_format_conversion) return false
+    }
+    return true
+  })
+}
+
+function applyMockAnalyticsSearch(records: MockUsageRecord[], payload: MockAnalyticsPayload): MockUsageRecord[] {
+  const search = payload.search
+  if (!search?.text && !search?.request_id) return records
+
+  return records.filter(record => {
+    if (search.request_id) {
+      const normalized = search.request_id.trim()
+      if (normalized && normalized !== record.id && normalized !== `req_${record.id}`) {
+        return false
+      }
+    }
+
+    if (!search.text?.trim()) return true
+    const keywords = search.text.toLowerCase().split(/\s+/).filter(Boolean)
+    const haystacks = [
+      record.id,
+      `req_${record.id}`,
+      record.username,
+      record.user_email,
+      record.api_key?.name,
+      record.provider,
+      record.api_key_name,
+      record.model,
+      record.target_model,
+      record.api_format,
+      record.error_message,
+    ]
+      .filter(Boolean)
+      .map(value => String(value).toLowerCase())
+
+    return keywords.every(keyword => haystacks.some(field => field.includes(keyword)))
+  })
+}
+
+function getMockAnalyticsRecords(payload: MockAnalyticsPayload): MockUsageRecord[] {
+  let records = getUsageRecords()
+  records = applyMockAnalyticsScope(records, payload)
+  records = applyMockAnalyticsTimeRange(records, payload)
+  records = applyMockAnalyticsFilters(records, payload)
+  records = applyMockAnalyticsSearch(records, payload)
+  return records
+}
+
+function roundNumber(value: number, digits: number = 6): number {
+  return Number(value.toFixed(digits))
+}
+
+function percentile(values: number[], p: number): number | null {
+  if (!values.length) return null
+  const sorted = [...values].sort((a, b) => a - b)
+  const index = (sorted.length - 1) * p
+  const lower = Math.floor(index)
+  const upper = Math.ceil(index)
+  if (lower === upper) return Math.round(sorted[lower] * 100) / 100
+  const weight = index - lower
+  return Math.round((sorted[lower] * (1 - weight) + sorted[upper] * weight) * 100) / 100
+}
+
+function buildMockAnalyticsSummary(records: MockUsageRecord[]) {
+  const requestsTotal = records.length
+  const requestsSuccess = records.filter(record => record.status !== 'failed').length
+  const requestsError = records.filter(record => record.status === 'failed').length
+  const requestsStream = records.filter(record => record.is_stream).length
+  const inputTokens = records.reduce((sum, record) => sum + (record.input_tokens || 0), 0)
+  const outputTokens = records.reduce((sum, record) => sum + (record.output_tokens || 0), 0)
+  const cacheCreationTokens = records.reduce((sum, record) => sum + (record.cache_creation_input_tokens || 0), 0)
+  const cacheReadTokens = records.reduce((sum, record) => sum + (record.cache_read_input_tokens || 0), 0)
+  const totalTokens = records.reduce((sum, record) => sum + (record.total_tokens || 0), 0)
+  const totalCost = records.reduce((sum, record) => sum + (record.cost || 0), 0)
+  const actualTotalCost = records.reduce((sum, record) => sum + (record.actual_cost || 0), 0)
+  const responseTimes = records
+    .map(record => typeof record.response_time_ms === 'number' ? record.response_time_ms : null)
+    .filter((value): value is number => value !== null)
+  const firstByteTimes = responseTimes.map(value => Math.round(value * 0.18))
+  const inputContextTokens = inputTokens + cacheReadTokens
+
+  return {
+    requests_total: requestsTotal,
+    requests_success: requestsSuccess,
+    requests_error: requestsError,
+    requests_stream: requestsStream,
+    success_rate: requestsTotal > 0 ? roundNumber((requestsSuccess / requestsTotal) * 100, 2) : 0,
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    input_output_total_tokens: inputTokens + outputTokens,
+    cache_creation_input_tokens: cacheCreationTokens,
+    cache_creation_input_tokens_5m: 0,
+    cache_creation_input_tokens_1h: cacheCreationTokens,
+    cache_read_input_tokens: cacheReadTokens,
+    input_context_tokens: inputContextTokens,
+    total_tokens: totalTokens,
+    cache_hit_rate: inputContextTokens > 0 ? roundNumber((cacheReadTokens / inputContextTokens) * 100, 2) : 0,
+    input_cost_usd: 0,
+    output_cost_usd: 0,
+    cache_creation_cost_usd: 0,
+    cache_creation_cost_usd_5m: 0,
+    cache_creation_cost_usd_1h: 0,
+    cache_read_cost_usd: 0,
+    cache_cost_usd: 0,
+    request_cost_usd: roundNumber(totalCost),
+    total_cost_usd: roundNumber(totalCost),
+    actual_total_cost_usd: roundNumber(actualTotalCost),
+    actual_cache_cost_usd: 0,
+    avg_response_time_ms: responseTimes.length
+      ? roundNumber(responseTimes.reduce((sum, value) => sum + value, 0) / responseTimes.length, 2)
+      : 0,
+    avg_first_byte_time_ms: firstByteTimes.length
+      ? roundNumber(firstByteTimes.reduce((sum, value) => sum + value, 0) / firstByteTimes.length, 2)
+      : 0,
+    format_conversion_count: records.filter(record => record.has_format_conversion === true).length,
+    models_used_count: new Set(records.map(record => record.model)).size,
+  }
+}
+
+function buildMockAnalyticsRecord(record: MockUsageRecord, includeAdminFields: boolean) {
+  return {
+    id: record.id,
+    request_id: `req_${record.id}`,
+    created_at: record.created_at,
+    user_id: record.user_id,
+    username: record.username,
+    api_key_id: record.api_key?.id || null,
+    api_key_name: record.api_key?.name || null,
+    provider_api_key_name: includeAdminFields ? record.api_key_name || null : null,
+    provider_name: includeAdminFields ? record.provider : null,
+    model: record.model,
+    target_model: record.target_model || null,
+    api_format: record.api_format || null,
+    request_type: getMockRecordRequestType(record),
+    status: record.status,
+    billing_status: record.status === 'failed' ? 'failed' : 'billed',
+    is_stream: record.is_stream,
+    has_format_conversion: record.has_format_conversion ?? false,
+    has_fallback: record.has_fallback ?? false,
+    has_retry: false,
+    status_code: record.status_code ?? null,
+    error_message: record.error_message || null,
+    error_category: getMockErrorCategory(record),
+    response_time_ms: record.response_time_ms ?? null,
+    first_byte_time_ms: typeof record.response_time_ms === 'number' ? Math.round(record.response_time_ms * 0.18) : null,
+    input_tokens: record.input_tokens,
+    output_tokens: record.output_tokens,
+    input_output_total_tokens: record.input_tokens + record.output_tokens,
+    cache_creation_input_tokens: record.cache_creation_input_tokens || 0,
+    cache_creation_input_tokens_5m: 0,
+    cache_creation_input_tokens_1h: record.cache_creation_input_tokens || 0,
+    cache_read_input_tokens: record.cache_read_input_tokens || 0,
+    input_context_tokens: record.input_tokens + (record.cache_read_input_tokens || 0),
+    total_tokens: record.total_tokens,
+    input_cost_usd: 0,
+    output_cost_usd: 0,
+    cache_creation_cost_usd: 0,
+    cache_creation_cost_usd_5m: 0,
+    cache_creation_cost_usd_1h: 0,
+    cache_read_cost_usd: 0,
+    cache_cost_usd: 0,
+    request_cost_usd: roundNumber(record.cost || 0),
+    total_cost_usd: roundNumber(record.cost || 0),
+    actual_total_cost_usd: includeAdminFields ? roundNumber(record.actual_cost || 0) : 0,
+    actual_cache_cost_usd: 0,
+    rate_multiplier: includeAdminFields ? (record.rate_multiplier || 1) : 1,
+  }
+}
+
+function buildMockComposition(summary: ReturnType<typeof buildMockAnalyticsSummary>) {
+  const tokenTotal = summary.total_tokens || 1
+  const costTotal = summary.total_cost_usd || 1
+  return {
+    token_segments: [
+      { key: 'input', value: summary.input_tokens, percentage: roundNumber((summary.input_tokens / tokenTotal) * 100, 2) },
+      { key: 'output', value: summary.output_tokens, percentage: roundNumber((summary.output_tokens / tokenTotal) * 100, 2) },
+      { key: 'cache_creation', value: summary.cache_creation_input_tokens, percentage: roundNumber((summary.cache_creation_input_tokens / tokenTotal) * 100, 2) },
+      { key: 'cache_read', value: summary.cache_read_input_tokens, percentage: roundNumber((summary.cache_read_input_tokens / tokenTotal) * 100, 2) },
+    ].filter(segment => segment.value > 0),
+    cost_segments: [
+      { key: 'request', value: summary.request_cost_usd, percentage: roundNumber((summary.request_cost_usd / costTotal) * 100, 2) },
+      { key: 'cache', value: summary.cache_cost_usd, percentage: roundNumber((summary.cache_cost_usd / costTotal) * 100, 2) },
+    ].filter(segment => segment.value > 0),
+  }
+}
+
+function toMockBucketStart(date: Date, granularity: 'hour' | 'day' | 'week' | 'month'): Date {
+  const next = new Date(date)
+  if (granularity === 'hour') {
+    next.setUTCMinutes(0, 0, 0)
+    return next
+  }
+  if (granularity === 'week') {
+    next.setUTCHours(0, 0, 0, 0)
+    const day = next.getUTCDay()
+    const diff = day === 0 ? -6 : 1 - day
+    next.setUTCDate(next.getUTCDate() + diff)
+    return next
+  }
+  if (granularity === 'month') {
+    next.setUTCDate(1)
+    next.setUTCHours(0, 0, 0, 0)
+    return next
+  }
+  next.setUTCHours(0, 0, 0, 0)
+  return next
+}
+
+function addMockBucketStep(date: Date, granularity: 'hour' | 'day' | 'week' | 'month'): Date {
+  const next = new Date(date)
+  if (granularity === 'hour') {
+    next.setUTCHours(next.getUTCHours() + 1)
+    return next
+  }
+  if (granularity === 'week') {
+    next.setUTCDate(next.getUTCDate() + 7)
+    return next
+  }
+  if (granularity === 'month') {
+    next.setUTCMonth(next.getUTCMonth() + 1)
+    return next
+  }
+  next.setUTCDate(next.getUTCDate() + 1)
+  return next
+}
+
+function buildMockTimeseriesBuckets(records: MockUsageRecord[], granularity: 'hour' | 'day' | 'week' | 'month') {
+  const groups = new Map<string, MockUsageRecord[]>()
+
+  for (const record of records) {
+    const bucketStart = toMockBucketStart(new Date(record.created_at), granularity)
+    const key = bucketStart.toISOString()
+    const items = groups.get(key) || []
+    items.push(record)
+    groups.set(key, items)
+  }
+
+  return Array.from(groups.entries())
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([bucketStart, items]) => {
+      const summary = buildMockAnalyticsSummary(items)
+      const start = new Date(bucketStart)
+      return {
+        bucket_start: bucketStart,
+        bucket_end: addMockBucketStep(start, granularity).toISOString(),
+        ...summary,
+      }
+    })
+}
+
+function buildMockAnalyticsFilterOptions(records: MockUsageRecord[], includeAdminFields: boolean) {
+  const toOptions = (values: Array<{ value: string; label?: string }>) => values.map(item => ({
+    value: item.value,
+    label: item.label || item.value,
+  }))
+  const unique = (values: string[]) => Array.from(new Set(values)).sort()
+
+  return {
+    providers: includeAdminFields
+      ? toOptions(unique(records.map(record => record.provider).filter(Boolean)).map(value => ({ value, label: value })))
+      : [],
+    models: toOptions(unique(records.map(record => record.model).filter(Boolean)).map(value => ({ value, label: value }))),
+    target_models: toOptions(unique(records.map(record => record.target_model).filter(Boolean) as string[]).map(value => ({ value, label: value }))),
+    api_formats: toOptions(unique(records.map(record => record.api_format).filter(Boolean) as string[]).map(value => ({ value, label: value }))),
+    request_types: toOptions(unique(records.map(record => getMockRecordRequestType(record))).map(value => ({ value, label: value }))),
+    error_categories: toOptions(unique(records.map(record => getMockErrorCategory(record)).filter(Boolean) as string[]).map(value => ({
+      value,
+      label: getMockErrorCategoryLabel(value),
+    }))),
+    statuses: toOptions(unique(records.map(record => record.status)).map(value => ({ value, label: value }))),
+    users: includeAdminFields
+      ? toOptions(
+        unique(records.map(record => record.user_id).filter(Boolean) as string[])
+          .map(value => ({
+            value,
+            label: records.find(record => record.user_id === value)?.username || value,
+          })),
+      )
+      : undefined,
+    api_keys: toOptions(
+      unique(records.map(record => record.api_key?.id).filter(Boolean) as string[])
+        .map(value => ({
+          value,
+          label: records.find(record => record.api_key?.id === value)?.api_key?.name || value,
+        })),
+    ),
+  }
+}
+
+function buildMockAnalyticsLeaderboardItems(
+  records: MockUsageRecord[],
+  entity: 'user' | 'api_key',
+  metric: 'requests_total' | 'total_tokens' | 'total_cost_usd' | 'actual_total_cost_usd',
+  includeAdminFields: boolean,
+) {
+  const groups = new Map<string, { id: string; label: string; records: MockUsageRecord[] }>()
+
+  for (const record of records) {
+    const id = entity === 'user' ? record.user_id : (record.api_key?.id || '')
+    if (!id) continue
+    const label = entity === 'user'
+      ? (record.username || record.user_email || id)
+      : (record.api_key?.name || id)
+    const current = groups.get(id) || { id, label, records: [] }
+    current.records.push(record)
+    groups.set(id, current)
+  }
+
+  return Array.from(groups.values())
+    .map(group => {
+      const summary = buildMockAnalyticsSummary(group.records)
+      const metricValue = summary[metric]
+      return {
+        id: group.id,
+        label: group.label,
+        requests_total: summary.requests_total,
+        total_tokens: summary.total_tokens,
+        total_cost_usd: summary.total_cost_usd,
+        actual_total_cost_usd: includeAdminFields ? summary.actual_total_cost_usd : 0,
+        metric_value: typeof metricValue === 'number' ? metricValue : 0,
+      }
+    })
+    .sort((left, right) => right.metric_value - left.metric_value)
+    .map((item, index) => ({
+      rank: index + 1,
+      ...item,
+    }))
+}
+
 // Mock 映射数据
 const MOCK_ALIASES = [
   { id: 'alias-001', source_model: 'claude-4-sonnet', target_global_model_id: 'gm-003', target_global_model_name: 'claude-sonnet-4-5-20250929', target_global_model_display_name: 'Claude Sonnet 4.5', provider_id: null, provider_name: null, scope: 'global', mapping_type: 'alias', is_active: true, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z' },
@@ -553,93 +1287,7 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     return createMockResponse(newKey)
   },
 
-  'GET /api/users/me/usage': async () => {
-    await delay()
-    const heatmap = getActivityHeatmap()
-    const records = getUsageRecords()
-    // 只返回当前用户的数据
-    const userRecords = records.filter(r => r.user_id === getCurrentUser().id)
-    const totalRequests = userRecords.length
-    const totalTokens = userRecords.reduce((sum, r) => sum + r.total_tokens, 0)
-    const totalInputTokens = userRecords.reduce((sum, r) => sum + r.input_tokens, 0)
-    const totalOutputTokens = userRecords.reduce((sum, r) => sum + r.output_tokens, 0)
-    const totalCost = userRecords.reduce((sum, r) => sum + r.cost, 0)
-    const totalActualCost = userRecords.reduce((sum, r) => sum + (r.actual_cost || 0), 0)
-    const avgResponseTime = userRecords.filter(r => r.response_time_ms).reduce((sum, r) => sum + (r.response_time_ms || 0), 0) / userRecords.filter(r => r.response_time_ms).length / 1000
-
-    // 按模型聚合
-    const modelStats = new Map<string, { requests: number; input_tokens: number; output_tokens: number; total_tokens: number; total_cost_usd: number; actual_total_cost_usd: number }>()
-    for (const r of userRecords) {
-      const existing = modelStats.get(r.model) || { requests: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, total_cost_usd: 0, actual_total_cost_usd: 0 }
-      existing.requests++
-      existing.input_tokens += r.input_tokens
-      existing.output_tokens += r.output_tokens
-      existing.total_tokens += r.total_tokens
-      existing.total_cost_usd += r.cost
-      existing.actual_total_cost_usd += r.actual_cost || 0
-      modelStats.set(r.model, existing)
-    }
-
-    return createMockResponse({
-      total_requests: totalRequests * 20,
-      total_input_tokens: totalInputTokens * 20,
-      total_output_tokens: totalOutputTokens * 20,
-      total_tokens: totalTokens * 20,
-      total_cost: Number((totalCost * 20).toFixed(2)),
-      total_actual_cost: Number((totalActualCost * 20).toFixed(2)),
-      avg_response_time: Number(avgResponseTime.toFixed(2)) || 1.23,
-      billing: {
-        id: 'wallet-demo-user',
-        balance: Number((100 - totalCost * 20).toFixed(2)),
-        recharge_balance: Number((100 - totalCost * 20).toFixed(2)),
-        gift_balance: 0,
-        refundable_balance: Number((100 - totalCost * 20).toFixed(2)),
-        currency: 'USD',
-        status: 'active',
-        limit_mode: 'finite',
-        unlimited: false,
-        total_recharged: 100,
-        total_consumed: Number((totalCost * 20).toFixed(2)),
-        total_refunded: 0,
-        total_adjusted: 0,
-        updated_at: new Date().toISOString(),
-      },
-      activity_heatmap: heatmap,
-      summary_by_model: Array.from(modelStats.entries()).map(([model, stats]) => ({
-        model,
-        requests: stats.requests * 20,
-        input_tokens: stats.input_tokens * 20,
-        output_tokens: stats.output_tokens * 20,
-        total_tokens: stats.total_tokens * 20,
-        total_cost_usd: Number((stats.total_cost_usd * 20).toFixed(2)),
-        actual_total_cost_usd: Number((stats.actual_total_cost_usd * 20).toFixed(2))
-      })),
-      records: userRecords.slice(0, 10).map(r => ({
-        id: r.id,
-        provider: r.provider,
-        model: r.model,
-        input_tokens: r.input_tokens,
-        output_tokens: r.output_tokens,
-        total_tokens: r.total_tokens,
-        cost: r.cost,
-        response_time_ms: r.response_time_ms,
-        is_stream: r.is_stream,
-        created_at: r.created_at,
-        status_code: r.status_code,
-        input_price_per_1m: 3,
-        output_price_per_1m: 15
-      }))
-    })
-  },
-
-  'GET /api/users/me/providers': async () => {
-    await delay()
-    return createMockResponse(MOCK_PROVIDERS.map(p => ({
-      id: p.id,
-      name: p.name,
-      is_active: p.is_active
-    })))
-  },
+  'GET /api/users/me/providers': async () => createMockResponse({ detail: 'Not Found' }, 404),
 
   'GET /api/users/me/endpoint-status': async () => {
     await delay()
@@ -668,27 +1316,6 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
   'PUT /api/users/me/model-capabilities': async () => {
     await delay()
     return createMockResponse({ message: '已更新', model_capability_settings: {} })
-  },
-
-  // ========== Dashboard ==========
-  'GET /api/dashboard/stats': async () => {
-    await delay()
-    return createMockResponse(MOCK_DASHBOARD_STATS)
-  },
-
-  'GET /api/dashboard/recent-requests': async () => {
-    await delay()
-    return createMockResponse({ requests: MOCK_RECENT_REQUESTS })
-  },
-
-  'GET /api/dashboard/provider-status': async () => {
-    await delay()
-    return createMockResponse({ providers: MOCK_PROVIDER_STATUS })
-  },
-
-  'GET /api/dashboard/daily-stats': async () => {
-    await delay()
-    return createMockResponse(MOCK_DAILY_STATS)
   },
 
   // ========== 公告 ==========
@@ -823,6 +1450,124 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     return createMockResponse(MOCK_ENDPOINT_STATUS)
   },
 
+  'GET /api/admin/monitoring/system-status': async () => {
+    await delay()
+    requireAdmin()
+
+    const records = getUsageRecords()
+    const now = new Date()
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000)
+    const todayRecords = records.filter(record => new Date(record.created_at) >= startOfToday)
+    const recentErrors = records.filter(record => (
+      record.status === 'failed' && new Date(record.created_at) >= oneHourAgo
+    )).length
+
+    const totalApiKeys = MOCK_ADMIN_API_KEYS.api_keys.length + MOCK_USER_API_KEYS.length
+    const activeApiKeys = [
+      ...MOCK_ADMIN_API_KEYS.api_keys,
+      ...MOCK_USER_API_KEYS,
+    ].filter(key => key.is_active).length
+    const cpuUsage = Math.min(92, 22 + (todayRecords.length % 38))
+    const memoryPercent = Math.min(94, 46 + (todayRecords.length % 28))
+    const totalMemory = 32 * 1024 * 1024 * 1024
+    const usedMemory = Math.round(totalMemory * (memoryPercent / 100))
+    const redisLatency = recentErrors > 0 ? 24 + recentErrors * 6 : 12
+    const redisMemoryCeiling = 2 * 1024 * 1024 * 1024
+    const redisUsedMemory = Math.round(redisMemoryCeiling * (0.34 + (todayRecords.length % 18) / 100))
+    const redisMemoryPercent = roundNumber((redisUsedMemory / redisMemoryCeiling) * 100, 1)
+    const postgresUsage = Math.min(96, 28 + ((activeApiKeys + recentErrors) % 6) * 10)
+    const postgresStorageTotal = 512 * 1024 * 1024 * 1024
+    const postgresStorageFree = Math.round(postgresStorageTotal * (0.18 + ((activeApiKeys + 1) % 5) * 0.05))
+    const postgresStorageFreePercent = roundNumber((postgresStorageFree / postgresStorageTotal) * 100, 1)
+    const postgresDatabaseSize = Math.round(postgresStorageTotal * 0.29)
+
+    const metricStatus = (value: number, warning: number, danger: number) => (
+      value >= danger ? ['danger', '紧张'] : value >= warning ? ['warning', '偏高'] : ['ok', '正常']
+    ) as const
+    const remainingStatus = (value: number, warning: number, danger: number) => (
+      value <= danger ? ['danger', '紧张'] : value <= warning ? ['warning', '偏高'] : ['ok', '正常']
+    ) as const
+
+    const [cpuStatus, cpuLabel] = metricStatus(cpuUsage, 70, 85)
+    const [memoryStatus, memoryLabel] = metricStatus(memoryPercent, 75, 90)
+    const [redisMemoryStatus, redisMemoryLabel] = metricStatus(redisMemoryPercent, 75, 90)
+    const [postgresStatus, postgresLabel] = metricStatus(postgresUsage, 70, 90)
+    const [postgresStorageStatus, postgresStorageLabel] = remainingStatus(postgresStorageFreePercent, 20, 10)
+    const redisStatus = redisLatency >= 80 ? 'warning' : 'ok'
+    const redisLabel = redisLatency >= 80 ? '偏高' : '正常'
+
+    return createMockResponse({
+      timestamp: now.toISOString(),
+      users: {
+        total: MOCK_ALL_USERS.length,
+        active: MOCK_ALL_USERS.filter(user => user.is_active).length,
+      },
+      providers: {
+        total: MOCK_PROVIDERS.length,
+        active: MOCK_PROVIDERS.filter(provider => provider.is_active).length,
+      },
+      api_keys: {
+        total: totalApiKeys,
+        active: activeApiKeys,
+      },
+      today_stats: {
+        requests: todayRecords.length,
+        tokens: todayRecords.reduce((sum, record) => sum + (record.total_tokens || 0), 0),
+        cost_usd: roundNumber(todayRecords.reduce((sum, record) => sum + (record.total_cost_usd || 0), 0), 4),
+      },
+      recent_errors: recentErrors,
+      system_metrics: {
+        cpu: {
+          status: cpuStatus,
+          label: cpuLabel,
+          usage_percent: cpuUsage,
+          load_percent: roundNumber(Math.max(0, cpuUsage - 8), 1),
+          core_count: 8,
+        },
+        memory: {
+          status: memoryStatus,
+          label: memoryLabel,
+          used_percent: memoryPercent,
+          used_bytes: usedMemory,
+          available_bytes: totalMemory - usedMemory,
+          total_bytes: totalMemory,
+        },
+        redis: {
+          status: redisStatus,
+          label: redisLabel,
+          latency_ms: redisLatency,
+          memory_status: redisMemoryStatus,
+          memory_label: redisMemoryLabel,
+          used_memory_bytes: redisUsedMemory,
+          peak_memory_bytes: Math.round(redisUsedMemory * 1.12),
+          maxmemory_bytes: redisMemoryCeiling,
+          memory_ceiling_bytes: redisMemoryCeiling,
+          available_memory_bytes: redisMemoryCeiling - redisUsedMemory,
+          memory_percent: redisMemoryPercent,
+          message: redisLatency >= 80 ? '缓存响应偏慢' : null,
+        },
+        postgres: {
+          status: postgresStatus,
+          label: postgresLabel,
+          usage_percent: postgresUsage,
+          checked_out: Math.max(1, Math.round((postgresUsage / 100) * 20)),
+          pool_size: 12,
+          overflow: Math.max(0, Math.round((postgresUsage - 60) / 12)),
+          max_capacity: 20,
+          pool_timeout: 30,
+          storage_status: postgresStorageStatus,
+          storage_label: postgresStorageLabel,
+          storage_total_bytes: postgresStorageTotal,
+          storage_free_bytes: postgresStorageFree,
+          storage_free_percent: postgresStorageFreePercent,
+          database_size_bytes: postgresDatabaseSize,
+          message: null,
+        },
+      },
+    })
+  },
+
   'GET /api/admin/endpoints/keys': async () => {
     await delay()
     requireAdmin()
@@ -857,173 +1602,264 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     return createMockResponse({ ...body, id: `alias-demo-${Date.now()}`, created_at: new Date().toISOString(), updated_at: new Date().toISOString() })
   },
 
-  // ========== Admin: Usage ==========
-  'GET /api/admin/usage/stats': async () => {
+  'POST /api/analytics/overview': async (config) => {
     await delay()
-    requireAdmin()
-    const heatmap = getActivityHeatmap()
-    const records = getUsageRecords()
-    const totalRequests = records.length
-    const totalTokens = records.reduce((sum, r) => sum + r.total_tokens, 0)
-    const totalCost = records.reduce((sum, r) => sum + r.cost, 0)
-    const totalActualCost = records.reduce((sum, r) => sum + (r.actual_cost || 0), 0)
-    const avgResponseTime = records.filter(r => r.response_time_ms).reduce((sum, r) => sum + (r.response_time_ms || 0), 0) / records.filter(r => r.response_time_ms).length / 1000
-
-    // 今日数据
-    const today = new Date().toISOString().split('T')[0]
-    const todayRecords = records.filter(r => r.created_at.startsWith(today))
-
-    return createMockResponse({
-      total_requests: totalRequests * 100, // 放大显示
-      total_tokens: totalTokens * 100,
-      total_cost: Number((totalCost * 100).toFixed(2)),
-      total_actual_cost: Number((totalActualCost * 100).toFixed(2)),
-      avg_response_time: Number(avgResponseTime.toFixed(2)),
-      today: {
-        requests: todayRecords.length * 10,
-        tokens: todayRecords.reduce((sum, r) => sum + r.total_tokens, 0) * 10,
-        cost: Number((todayRecords.reduce((sum, r) => sum + r.cost, 0) * 10).toFixed(2))
-      },
-      activity_heatmap: heatmap
-    })
-  },
-
-  'GET /api/admin/usage/records': async (config) => {
-    await delay()
-    requireAdmin()
-    let records = getUsageRecords()
-    const params = config.params || {}
-    const limit = parseInt(params.limit) || 20
-    const offset = parseInt(params.offset) || 0
-
-    // 通用搜索：用户名、密钥名、模型名、提供商名
-    // 支持空格分隔的组合搜索，多个关键词之间是 AND 关系
-    if (typeof params.search === 'string' && params.search.trim()) {
-      const keywords = params.search.trim().toLowerCase().split(/\s+/)
-      records = records.filter(r => {
-        // 每个关键词都要匹配至少一个字段
-        return keywords.every((keyword: string) =>
-          (r.username || '').toLowerCase().includes(keyword) ||
-          (r.api_key?.name || '').toLowerCase().includes(keyword) ||
-          (r.model || '').toLowerCase().includes(keyword) ||
-          (r.provider || '').toLowerCase().includes(keyword)
-        )
-      })
+    const body = parseMockAnalyticsPayload(config)
+    const records = getMockAnalyticsRecords(body)
+    const includeAdminFields = isCurrentUserAdmin()
+    const summary = buildMockAnalyticsSummary(records)
+    const responseSummary = {
+      ...summary,
+      actual_total_cost_usd: includeAdminFields ? summary.actual_total_cost_usd : 0,
+      actual_cache_cost_usd: 0,
     }
 
     return createMockResponse({
-      records: records.slice(offset, offset + limit),
+      query_context: {
+        scope: body.scope || { kind: 'me' },
+        time_range: body.time_range || { preset: 'last30days' },
+      },
+      summary: responseSummary,
+      composition: buildMockComposition(responseSummary),
+    })
+  },
+
+  'POST /api/analytics/timeseries': async (config) => {
+    await delay()
+    const body = parseMockAnalyticsPayload(config)
+    const records = getMockAnalyticsRecords(body)
+    const includeAdminFields = isCurrentUserAdmin()
+    const { granularity } = resolveMockTimeRangeBounds(body.time_range)
+    const buckets = buildMockTimeseriesBuckets(records, granularity)
+      .map(bucket => ({
+        ...bucket,
+        actual_total_cost_usd: includeAdminFields ? bucket.actual_total_cost_usd : 0,
+        actual_cache_cost_usd: 0,
+      }))
+
+    return createMockResponse({ buckets })
+  },
+
+  'POST /api/analytics/breakdown': async (config) => {
+    await delay()
+    const body = parseMockAnalyticsPayload(config)
+    const dimension = body.dimension || 'model'
+    const limit = Number(body.limit) || 50
+
+    if (!isCurrentUserAdmin() && dimension === 'provider') {
+      throw { response: createMockResponse({ detail: 'Only admin can access provider breakdown' }, 403) }
+    }
+    if (!isCurrentUserAdmin() && body.metric === 'actual_total_cost_usd') {
+      throw { response: createMockResponse({ detail: 'Only admin can access actual cost breakdown' }, 403) }
+    }
+
+    if (!['model', 'provider', 'api_format', 'api_key', 'user'].includes(dimension)) {
+      return createMockResponse({ dimension, metric: body.metric || 'total_cost_usd', rows: [] })
+    }
+
+    const metric = body.metric || 'total_cost_usd'
+    const rows = buildMockAnalyticsBreakdownRows(
+      dimension as 'model' | 'provider' | 'api_format' | 'api_key' | 'user',
+      getMockAnalyticsRecords(body),
+    )
+      .sort((a, b) => {
+        const left = typeof a[metric as keyof typeof a] === 'number' ? a[metric as keyof typeof a] as number : 0
+        const right = typeof b[metric as keyof typeof b] === 'number' ? b[metric as keyof typeof b] as number : 0
+        return right - left
+      })
+      .slice(0, limit)
+      .map(row => ({
+        ...row,
+        actual_total_cost_usd: isCurrentUserAdmin() ? row.actual_total_cost_usd : 0,
+        actual_cache_cost_usd: 0,
+      }))
+
+    return createMockResponse({
+      dimension,
+      metric,
+      rows,
+    })
+  },
+
+  'POST /api/analytics/records': async (config) => {
+    await delay()
+    const body = parseMockAnalyticsPayload(config)
+    const includeAdminFields = isCurrentUserAdmin()
+    const records = getMockAnalyticsRecords(body)
+      .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
+    const limit = Number(body.pagination?.limit) || 100
+    const offset = Number(body.pagination?.offset) || 0
+
+    return createMockResponse({
       total: records.length,
       limit,
-      offset
+      offset,
+      records: records
+        .slice(offset, offset + limit)
+        .map(record => buildMockAnalyticsRecord(record, includeAdminFields)),
     })
   },
 
-  'GET /api/admin/usage/aggregation/stats': async (config) => {
+  'POST /api/analytics/filter-options': async (config) => {
     await delay()
-    requireAdmin()
-    const params = config.params || {}
-    const groupBy = params.group_by || 'model'
-    const records = getUsageRecords()
-
-    if (groupBy === 'model') {
-      // 按模型聚合
-      const modelStats = new Map<string, { request_count: number; total_tokens: number; total_cost: number }>()
-      for (const r of records) {
-        const existing = modelStats.get(r.model) || { request_count: 0, total_tokens: 0, total_cost: 0 }
-        existing.request_count++
-        existing.total_tokens += r.total_tokens
-        existing.total_cost += r.cost
-        modelStats.set(r.model, existing)
-      }
-      return createMockResponse(
-        Array.from(modelStats.entries()).map(([model, stats]) => ({
-          model,
-          request_count: stats.request_count * 50,
-          total_tokens: stats.total_tokens * 50,
-          total_cost: Number((stats.total_cost * 50).toFixed(2))
-        }))
-      )
-    }
-
-    if (groupBy === 'provider') {
-      const providerStats = new Map<string, { request_count: number; total_tokens: number; total_cost: number; actual_cost: number; response_times: number[]; errors: number }>()
-      for (const r of records) {
-        const existing = providerStats.get(r.provider) || { request_count: 0, total_tokens: 0, total_cost: 0, actual_cost: 0, response_times: [], errors: 0 }
-        existing.request_count++
-        existing.total_tokens += r.total_tokens
-        existing.total_cost += r.cost
-        existing.actual_cost += r.actual_cost || 0
-        if (r.response_time_ms) existing.response_times.push(r.response_time_ms)
-        if (r.status === 'failed') existing.errors++
-        providerStats.set(r.provider, existing)
-      }
-      return createMockResponse(
-        Array.from(providerStats.entries()).map(([provider, stats]) => ({
-          provider_id: `provider-${provider}`,
-          provider,
-          request_count: stats.request_count * 50,
-          total_tokens: stats.total_tokens * 50,
-          total_cost: Number((stats.total_cost * 50).toFixed(2)),
-          actual_cost: Number((stats.actual_cost * 50).toFixed(2)),
-          avg_response_time_ms: Math.round(stats.response_times.reduce((a, b) => a + b, 0) / stats.response_times.length || 0),
-          success_rate: (stats.request_count - stats.errors) / stats.request_count,
-          error_count: stats.errors * 50
-        }))
-      )
-    }
-
-    if (groupBy === 'user') {
-      const userStats = new Map<string, { user_id: string; username: string; email: string; request_count: number; total_tokens: number; total_cost: number }>()
-      for (const r of records) {
-        const existing = userStats.get(r.user_id) || { user_id: r.user_id, username: r.username, email: r.user_email || '', request_count: 0, total_tokens: 0, total_cost: 0 }
-        existing.request_count++
-        existing.total_tokens += r.total_tokens
-        existing.total_cost += r.cost
-        userStats.set(r.user_id, existing)
-      }
-      return createMockResponse(
-        Array.from(userStats.values()).map(stats => ({
-          user_id: stats.user_id,
-          email: stats.email,
-          username: stats.username,
-          request_count: stats.request_count * 50,
-          total_tokens: stats.total_tokens * 50,
-          total_cost: Number((stats.total_cost * 50).toFixed(2))
-        }))
-      )
-    }
-
-    if (groupBy === 'api_format') {
-      const formatStats = new Map<string, { request_count: number; total_tokens: number; total_cost: number; actual_cost: number; response_times: number[] }>()
-      for (const r of records) {
-        const existing = formatStats.get(r.api_format) || { request_count: 0, total_tokens: 0, total_cost: 0, actual_cost: 0, response_times: [] }
-        existing.request_count++
-        existing.total_tokens += r.total_tokens
-        existing.total_cost += r.cost
-        existing.actual_cost += r.actual_cost || 0
-        if (r.response_time_ms) existing.response_times.push(r.response_time_ms)
-        formatStats.set(r.api_format, existing)
-      }
-      return createMockResponse(
-        Array.from(formatStats.entries()).map(([api_format, stats]) => ({
-          api_format,
-          request_count: stats.request_count * 50,
-          total_tokens: stats.total_tokens * 50,
-          total_cost: Number((stats.total_cost * 50).toFixed(2)),
-          actual_cost: Number((stats.actual_cost * 50).toFixed(2)),
-          avg_response_time_ms: Math.round(stats.response_times.reduce((a, b) => a + b, 0) / stats.response_times.length || 0)
-        }))
-      )
-    }
-
-    return createMockResponse([])
+    const body = parseMockAnalyticsPayload(config)
+    const records = getMockAnalyticsRecords(body)
+    return createMockResponse(buildMockAnalyticsFilterOptions(records, isCurrentUserAdmin()))
   },
 
-  'GET /api/admin/usage/active': async () => {
+  'POST /api/analytics/heatmap': async () => {
+    await delay()
+    const includeAdminFields = isCurrentUserAdmin()
+    const heatmap = getActivityHeatmap()
+    return createMockResponse({
+      ...heatmap,
+      days: heatmap.days.map(day => ({
+        ...day,
+        actual_total_cost: includeAdminFields ? day.actual_total_cost : 0,
+      })),
+    })
+  },
+
+  'POST /api/analytics/active-requests': async (config) => {
+    await delay()
+    const body = parseMockAnalyticsPayload(config)
+    const ids = Array.isArray(body.ids)
+      ? body.ids.filter((id: unknown): id is string => typeof id === 'string')
+      : []
+
+    return createMockResponse({
+      requests: buildMockActiveRequests(
+        ids,
+        isCurrentUserAdmin(),
+        applyMockAnalyticsScope(getUsageRecords(), body),
+      )
+    })
+  },
+
+  'POST /api/analytics/interval-timeline': async (config) => {
+    await delay()
+    const body = parseMockAnalyticsPayload(config)
+    const hours = Number(body.hours) || 24
+    const limit = Number(body.limit) || 5000
+    const includeUserInfo = body.include_user_info === true && body.scope?.kind === 'global'
+    return createMockResponse(generateIntervalTimelineData(hours, limit, includeUserInfo))
+  },
+
+  'POST /api/analytics/leaderboard': async (config) => {
+    await delay()
+    const body = parseMockAnalyticsPayload(config)
+    const entity = body.entity || 'user'
+    const metric = body.metric || 'total_cost_usd'
+    const limit = Number(body.limit) || 20
+    const items = buildMockAnalyticsLeaderboardItems(
+      getMockAnalyticsRecords(body),
+      entity,
+      metric,
+      isCurrentUserAdmin(),
+    ).slice(0, limit)
+
+    return createMockResponse({
+      entity,
+      metric,
+      items,
+    })
+  },
+
+  'POST /api/analytics/performance': async (config) => {
+    await delay()
+    const body = parseMockAnalyticsPayload(config)
+    const records = getMockAnalyticsRecords(body)
+    const responseTimes = records
+      .map(record => typeof record.response_time_ms === 'number' ? record.response_time_ms : null)
+      .filter((value): value is number => value !== null)
+    const firstByteTimes = responseTimes.map(value => Math.round(value * 0.18))
+    const dailyBuckets = buildMockTimeseriesBuckets(records, 'day')
+
+    const errorRecords = records.filter(record => record.status === 'failed')
+    const errorCategories = Array.from(
+      errorRecords.reduce((map, record) => {
+        const category = getMockErrorCategory(record) || 'unknown'
+        map.set(category, (map.get(category) || 0) + 1)
+        return map
+      }, new Map<string, number>()),
+    ).map(([category, count]) => ({
+      category,
+      label: getMockErrorCategoryLabel(category),
+      count,
+    }))
+
+    const errorTrend = dailyBuckets.map(bucket => ({
+      date: bucket.bucket_start.slice(0, 10),
+      total: records.filter(record =>
+        record.status === 'failed' &&
+        record.created_at >= bucket.bucket_start &&
+        record.created_at < bucket.bucket_end,
+      ).length,
+    }))
+
+    const providerHealth = isCurrentUserAdmin()
+      ? buildMockAnalyticsBreakdownRows('provider', records).map(row => ({
+        provider_name: row.label,
+        requests_total: row.requests_total,
+        success_rate: row.success_rate,
+        error_rate: row.requests_total > 0 ? roundNumber((row.requests_error / row.requests_total) * 100, 2) : 0,
+        avg_response_time_ms: row.avg_response_time_ms,
+        avg_first_byte_time_ms: row.avg_first_byte_time_ms,
+      }))
+      : []
+
+    return createMockResponse({
+      latency: {
+        response_time_ms: {
+          avg: responseTimes.length
+            ? roundNumber(responseTimes.reduce((sum, value) => sum + value, 0) / responseTimes.length, 2)
+            : 0,
+          p50: percentile(responseTimes, 0.5),
+          p90: percentile(responseTimes, 0.9),
+          p99: percentile(responseTimes, 0.99),
+        },
+        first_byte_time_ms: {
+          avg: firstByteTimes.length
+            ? roundNumber(firstByteTimes.reduce((sum, value) => sum + value, 0) / firstByteTimes.length, 2)
+            : 0,
+          p50: percentile(firstByteTimes, 0.5),
+          p90: percentile(firstByteTimes, 0.9),
+          p99: percentile(firstByteTimes, 0.99),
+        },
+      },
+      percentiles: dailyBuckets.map(bucket => ({
+        date: bucket.bucket_start.slice(0, 10),
+        p50_response_time_ms: bucket.avg_response_time_ms || null,
+        p90_response_time_ms: bucket.avg_response_time_ms ? roundNumber(bucket.avg_response_time_ms * 1.35, 2) : null,
+        p99_response_time_ms: bucket.avg_response_time_ms ? roundNumber(bucket.avg_response_time_ms * 1.6, 2) : null,
+        p50_first_byte_time_ms: bucket.avg_first_byte_time_ms || null,
+        p90_first_byte_time_ms: bucket.avg_first_byte_time_ms ? roundNumber(bucket.avg_first_byte_time_ms * 1.35, 2) : null,
+        p99_first_byte_time_ms: bucket.avg_first_byte_time_ms ? roundNumber(bucket.avg_first_byte_time_ms * 1.6, 2) : null,
+      })),
+      errors: {
+        total: errorRecords.length,
+        rate: records.length > 0 ? roundNumber((errorRecords.length / records.length) * 100, 2) : 0,
+        categories: errorCategories,
+        trend: errorTrend,
+      },
+      provider_health: providerHealth,
+    })
+  },
+
+  'POST /api/analytics/cache-affinity/ttl-analysis': async (config) => {
     await delay()
     requireAdmin()
-    return createMockResponse({ requests: [] })
+    const body = JSON.parse(config.data || '{}')
+    const hours = Number(body.hours) || 168
+    return createMockResponse(generateTTLAnalysisData(hours))
+  },
+
+  'POST /api/analytics/cache-affinity/hit-analysis': async (config) => {
+    await delay()
+    requireAdmin()
+    const body = JSON.parse(config.data || '{}')
+    const hours = Number(body.hours) || 168
+    return createMockResponse(generateCacheHitAnalysisData(hours))
   },
 
   // ========== Admin: System ==========
@@ -1076,7 +1912,7 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
         default_tiered_pricing: m.default_tiered_pricing,
         default_price_per_request: m.default_price_per_request,
         supported_capabilities: m.supported_capabilities,
-        config: m.config
+        config: sanitizePublicModelConfig(m.config)
       })),
       total: MOCK_GLOBAL_MODELS.length
     })
@@ -1733,6 +2569,45 @@ registerDynamicRoute('POST', '/api/admin/endpoints/keys/:keyId/clear-oauth-inval
   return createMockResponse({ message: 'OAuth invalid cleared (demo)', key_id: params.keyId })
 })
 
+registerDynamicRoute('GET', '/api/admin/system/configs/:key', async (_config, params) => {
+  await delay()
+  requireAdmin()
+  const config = MOCK_SYSTEM_CONFIGS.find(item => item.key === params.key)
+  return createMockResponse({
+    key: params.key,
+    value: config?.value ?? null,
+  })
+})
+
+registerDynamicRoute('PUT', '/api/admin/system/configs/:key', async (config, params) => {
+  await delay()
+  requireAdmin()
+  const body = JSON.parse(config.data || '{}')
+  const existing = MOCK_SYSTEM_CONFIGS.find(item => item.key === params.key)
+  if (existing) {
+    existing.value = body.value
+    existing.description = body.description ?? existing.description
+    return createMockResponse({
+      ...existing,
+      updated_at: new Date().toISOString(),
+    })
+  }
+
+  MOCK_SYSTEM_CONFIGS.push({
+    key: params.key,
+    value: body.value ?? null,
+    description: body.description ?? '',
+  })
+
+  const created = {
+    key: params.key,
+    value: body.value ?? null,
+    description: body.description ?? '',
+    updated_at: new Date().toISOString(),
+  }
+  return createMockResponse(created)
+})
+
 
 // Keys grouped by format
 mockHandlers['GET /api/admin/endpoints/keys/grouped-by-format'] = async () => {
@@ -2130,17 +3005,23 @@ registerDynamicRoute('DELETE', '/api/users/me/api-keys/:keyId', async (_config, 
   return createMockResponse({ message: '删除成功（演示模式）' })
 })
 
+function resolveUsageRecordOrThrow(requestId: string) {
+  const records = getUsageRecords()
+  const record = records.find(r => r.id === requestId || `req_${r.id}` === requestId)
+
+  if (!record) {
+    throw { response: createMockResponse({ detail: '请求记录不存在' }, 404) }
+  }
+
+  return record
+}
+
 // 使用记录详情 - /api/admin/usage/:requestId
 registerDynamicRoute('GET', '/api/admin/usage/:requestId', async (_config, params) => {
   await delay()
   requireAdmin()
 
-  const records = getUsageRecords()
-  const record = records.find(r => r.id === params.requestId)
-
-  if (!record) {
-    throw { response: createMockResponse({ detail: '请求记录不存在' }, 404) }
-  }
+  const record = resolveUsageRecordOrThrow(params.requestId)
 
   // 生成详细的请求信息
   const users = [
@@ -2297,6 +3178,81 @@ registerDynamicRoute('GET', '/api/admin/usage/:requestId', async (_config, param
   }
 
   return createMockResponse(detail)
+})
+
+registerDynamicRoute('GET', '/api/admin/usage/:requestId/curl', async (_config, params) => {
+  await delay()
+  requireAdmin()
+
+  const record = resolveUsageRecordOrThrow(params.requestId)
+  const url = `https://api.${record.provider}.com/v1/messages`
+  const body = {
+    model: record.target_model || record.model,
+    max_tokens: 4096,
+    messages: [
+      {
+        role: 'user',
+        content: 'Hello! Can you help me understand how AI gateways work?'
+      }
+    ],
+    stream: record.is_stream
+  }
+  const headers = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer sk-${record.provider}-demo-key`,
+    'X-Request-ID': `req_${record.id}`
+  }
+
+  return createMockResponse({
+    url,
+    method: 'POST',
+    headers,
+    body,
+    curl: [
+      `curl -X POST '${url}'`,
+      `-H 'Content-Type: ${headers['Content-Type']}'`,
+      `-H 'Authorization: ${headers.Authorization}'`,
+      `-H 'X-Request-ID: ${headers['X-Request-ID']}'`,
+      `-d '${JSON.stringify(body)}'`,
+    ].join(' \\\n  '),
+  })
+})
+
+registerDynamicRoute('POST', '/api/admin/usage/:requestId/replay', async (config, params) => {
+  await delay()
+  requireAdmin()
+
+  const record = resolveUsageRecordOrThrow(params.requestId)
+  const payload = parseMockAnalyticsPayload(config) as {
+    provider_id?: string
+    api_key_id?: string
+  }
+  const provider = payload.provider_id || record.provider || 'openai'
+
+  return createMockResponse({
+    url: `https://api.${provider}.com/v1/messages`,
+    provider,
+    status_code: 200,
+    response_headers: {
+      'Content-Type': 'application/json',
+      'X-Request-ID': `replay_${record.id}`,
+    },
+    response_body: {
+      id: `replay_${record.id}`,
+      type: 'message',
+      role: 'assistant',
+      content: [
+        {
+          type: 'text',
+          text: payload.api_key_id
+            ? 'Replay completed successfully with the selected provider key.'
+            : 'Replay completed successfully.'
+        }
+      ],
+      model: record.target_model || record.model,
+    },
+    response_time_ms: Math.max(120, Math.round((record.response_time_ms || 1000) * 0.85)),
+  })
 })
 
 // 请求链路追踪 - /api/admin/monitoring/trace/:requestId
@@ -2559,31 +3515,6 @@ function generateIntervalTimelineData(
   return response
 }
 
-// 用户 interval-timeline 接口
-mockHandlers['GET /api/users/me/usage/interval-timeline'] = async (config) => {
-  await delay()
-  const params = config.params || {}
-  const hours = parseInt(params.hours) || 24
-  const limit = parseInt(params.limit) || 5000
-  const data = generateIntervalTimelineData(hours, limit, false)
-  return createMockResponse(data)
-}
-
-// 管理员 interval-timeline 接口
-mockHandlers['GET /api/admin/usage/cache-affinity/interval-timeline'] = async (config) => {
-  await delay()
-  requireAdmin()
-  const params = config.params || {}
-  const hours = parseInt(params.hours) || 24
-  const limit = parseInt(params.limit) || 10000
-  const userId = params.user_id
-  const includeUserInfo = params.include_user_info === 'true' || params.include_user_info === true
-
-  // 如果指定了 user_id，则不包含用户信息
-  const data = generateIntervalTimelineData(hours, limit, includeUserInfo && !userId)
-  return createMockResponse(data)
-}
-
 // ========== TTL 分析 Mock 数据 ==========
 
 // 生成 TTL 分析数据
@@ -2741,206 +3672,4 @@ function generateCacheHitAnalysisData(hours: number = 168) {
     total_cache_creation_cost_usd: Math.round(totalCacheCreationCost * 10000) / 10000,
     estimated_savings_usd: Math.round(estimatedSavings * 10000) / 10000
   }
-}
-
-// TTL 分析接口
-mockHandlers['GET /api/admin/usage/cache-affinity/ttl-analysis'] = async (config) => {
-  await delay()
-  requireAdmin()
-  const params = config.params || {}
-  const hours = parseInt(params.hours) || 168
-  const data = generateTTLAnalysisData(hours)
-  return createMockResponse(data)
-}
-
-// 缓存命中分析接口
-mockHandlers['GET /api/admin/usage/cache-affinity/hit-analysis'] = async (config) => {
-  await delay()
-  requireAdmin()
-  const params = config.params || {}
-  const hours = parseInt(params.hours) || 168
-  const data = generateCacheHitAnalysisData(hours)
-  return createMockResponse(data)
-}
-
-// ========== Admin: Stats / Leaderboard ==========
-mockHandlers['GET /api/admin/stats/leaderboard/users'] = async () => {
-  await delay()
-  requireAdmin()
-  return createMockResponse({
-    items: [
-      { rank: 1, id: 'user-1', name: 'Demo Admin', value: 1200, requests: 1200, tokens: 240000, cost: 123.4 },
-      { rank: 2, id: 'user-2', name: 'Demo User', value: 980, requests: 980, tokens: 180000, cost: 98.7 }
-    ],
-    total: 2,
-    metric: 'requests',
-    start_date: '2026-02-01',
-    end_date: '2026-02-07'
-  })
-}
-
-mockHandlers['GET /api/admin/stats/leaderboard/api-keys'] = async () => {
-  await delay()
-  requireAdmin()
-  return createMockResponse({
-    items: [
-      { rank: 1, id: 'key-1', name: 'Key A', value: 800, requests: 800, tokens: 160000, cost: 76.2 },
-      { rank: 2, id: 'key-2', name: 'Key B', value: 620, requests: 620, tokens: 120000, cost: 55.1 }
-    ],
-    total: 2,
-    metric: 'requests',
-    start_date: '2026-02-01',
-    end_date: '2026-02-07'
-  })
-}
-
-mockHandlers['GET /api/admin/stats/leaderboard/models'] = async () => {
-  await delay()
-  requireAdmin()
-  return createMockResponse({
-    items: [
-      { rank: 1, id: 'gpt-4', name: 'gpt-4', value: 500, requests: 500, tokens: 100000, cost: 44.2 },
-      { rank: 2, id: 'claude-3', name: 'claude-3', value: 420, requests: 420, tokens: 90000, cost: 40.1 }
-    ],
-    total: 2,
-    metric: 'requests',
-    start_date: '2026-02-01',
-    end_date: '2026-02-07'
-  })
-}
-
-mockHandlers['GET /api/admin/stats/cost/forecast'] = async () => {
-  await delay()
-  requireAdmin()
-  return createMockResponse({
-    history: [
-      { date: '2026-02-01', total_cost: 120 },
-      { date: '2026-02-02', total_cost: 132 },
-      { date: '2026-02-03', total_cost: 140 }
-    ],
-    forecast: [
-      { date: '2026-02-04', total_cost: 150 },
-      { date: '2026-02-05', total_cost: 158 }
-    ],
-    slope: 5.2,
-    intercept: 110.5,
-    start_date: '2026-02-01',
-    end_date: '2026-02-03'
-  })
-}
-
-mockHandlers['GET /api/admin/stats/cost/savings'] = async () => {
-  await delay()
-  requireAdmin()
-  return createMockResponse({
-    cache_read_tokens: 120000,
-    cache_read_cost: 8.2,
-    cache_creation_cost: 3.4,
-    estimated_full_cost: 82.0,
-    cache_savings: 73.8
-  })
-}
-
-mockHandlers['GET /api/admin/stats/providers/quota-usage'] = async () => {
-  await delay()
-  requireAdmin()
-  return createMockResponse({
-    providers: [
-      {
-        id: 'prov-1',
-        name: 'Provider A',
-        quota_usd: 500,
-        used_usd: 320,
-        remaining_usd: 180,
-        usage_percent: 64,
-        quota_expires_at: null,
-        estimated_exhaust_at: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString()
-      }
-    ]
-  })
-}
-
-mockHandlers['GET /api/admin/stats/performance/percentiles'] = async () => {
-  await delay()
-  requireAdmin()
-  return createMockResponse([
-    {
-      date: '2026-02-01',
-      p50_response_time_ms: 320,
-      p90_response_time_ms: 560,
-      p99_response_time_ms: 860,
-      p50_first_byte_time_ms: 120,
-      p90_first_byte_time_ms: 210,
-      p99_first_byte_time_ms: 400
-    },
-    {
-      date: '2026-02-02',
-      p50_response_time_ms: 300,
-      p90_response_time_ms: 540,
-      p99_response_time_ms: 820,
-      p50_first_byte_time_ms: 110,
-      p90_first_byte_time_ms: 200,
-      p99_first_byte_time_ms: 380
-    }
-  ])
-}
-
-mockHandlers['GET /api/admin/stats/errors/distribution'] = async () => {
-  await delay()
-  requireAdmin()
-  return createMockResponse({
-    distribution: [
-      { category: 'rate_limit', count: 24 },
-      { category: 'server_error', count: 12 },
-      { category: 'timeout', count: 6 }
-    ],
-    trend: [
-      { date: '2026-02-01', total: 8, categories: { rate_limit: 5, server_error: 3 } },
-      { date: '2026-02-02', total: 6, categories: { rate_limit: 4, timeout: 2 } }
-    ]
-  })
-}
-
-mockHandlers['GET /api/admin/stats/comparison'] = async () => {
-  await delay()
-  requireAdmin()
-  return createMockResponse({
-    current: {
-      total_requests: 1200,
-      total_tokens: 320000,
-      total_cost: 180,
-      actual_total_cost: 190,
-      avg_response_time_ms: 350,
-      error_requests: 42
-    },
-    comparison: {
-      total_requests: 900,
-      total_tokens: 260000,
-      total_cost: 150,
-      actual_total_cost: 160,
-      avg_response_time_ms: 370,
-      error_requests: 38
-    },
-    change_percent: {
-      total_requests: 33.3,
-      total_tokens: 23.1,
-      total_cost: 20.0,
-      actual_total_cost: 18.8,
-      avg_response_time_ms: -5.4,
-      error_requests: 10.5
-    },
-    current_start: '2026-02-01',
-    current_end: '2026-02-07',
-    comparison_start: '2026-01-25',
-    comparison_end: '2026-01-31'
-  })
-}
-
-mockHandlers['GET /api/admin/stats/time-series'] = async () => {
-  await delay()
-  requireAdmin()
-  return createMockResponse([
-    { date: '2026-02-01', total_requests: 120, input_tokens: 20000, output_tokens: 30000, total_cost: 12.3 },
-    { date: '2026-02-02', total_requests: 140, input_tokens: 22000, output_tokens: 32000, total_cost: 13.8 }
-  ])
 }

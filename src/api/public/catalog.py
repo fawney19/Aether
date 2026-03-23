@@ -10,12 +10,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session, joinedload, load_only
 
 from src.api.base.adapter import ApiAdapter, ApiMode
 from src.api.base.context import ApiRequestContext
+from src.api.base.models_service import sanitize_public_global_model_config
 from src.api.base.pipeline import get_pipeline
 from src.config.constants import CacheTTL
 from src.core.logger import logger
@@ -56,7 +57,7 @@ def get_site_info(db: Session = Depends(get_db)) -> dict[str, str]:
     }
 
 
-@router.get("/providers", response_model=list[PublicProviderResponse])
+@router.get("/providers", response_model=list[PublicProviderResponse], include_in_schema=False)
 async def get_public_providers(
     request: Request,
     is_active: bool | None = Query(None, description="过滤活跃状态"),
@@ -64,38 +65,12 @@ async def get_public_providers(
     limit: int = Query(100, description="返回记录数限制"),
     db: Session = Depends(get_db),
 ) -> Any:
-    """
-    获取提供商列表（用户视图）
-
-    返回系统中可用的提供商列表，包含提供商的基本信息和统计数据。
-    默认只返回活跃的提供商。
-
-    **查询参数**
-    - is_active: 可选，过滤活跃状态。None 表示只返回活跃提供商，True 返回活跃，False 返回非活跃
-    - skip: 跳过的记录数，用于分页，默认 0
-    - limit: 返回记录数限制，默认 100，最大 100
-
-    **返回字段**
-    - id: 提供商唯一标识符
-    - name: 提供商名称（英文标识）
-    - display_name: 提供商显示名称
-    - description: 提供商描述信息
-    - is_active: 是否活跃
-    - provider_priority: 提供商优先级
-    - models_count: 该提供商下的模型总数
-    - active_models_count: 该提供商下活跃的模型数
-    - endpoints_count: 该提供商下的端点总数
-    - active_endpoints_count: 该提供商下活跃的端点数
-    """
-
-    adapter = PublicProvidersAdapter(is_active=is_active, skip=skip, limit=limit)
-    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=ApiMode.PUBLIC)
+    raise HTTPException(status_code=404, detail="Not Found")
 
 
 @router.get("/models", response_model=list[PublicModelResponse])
 async def get_public_models(
     request: Request,
-    provider_id: str | None = Query(None, description="提供商ID过滤"),
     is_active: bool | None = Query(None, description="过滤活跃状态"),
     skip: int = Query(0, description="跳过记录数"),
     limit: int = Query(100, description="返回记录数限制"),
@@ -131,9 +106,7 @@ async def get_public_models(
     - supports_streaming: 是否支持流式输出
     - is_active: 是否活跃
     """
-    adapter = PublicModelsAdapter(
-        provider_id=provider_id, is_active=is_active, skip=skip, limit=limit
-    )
+    adapter = PublicModelsAdapter(is_active=is_active, skip=skip, limit=limit)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=ApiMode.PUBLIC)
 
 
@@ -160,7 +133,6 @@ async def get_public_stats(request: Request, db: Session = Depends(get_db)) -> A
 async def search_models(
     request: Request,
     q: str = Query(..., description="搜索关键词"),
-    provider_id: int | None = Query(None, description="提供商ID过滤"),
     limit: int = Query(20, description="返回记录数限制"),
     db: Session = Depends(get_db),
 ) -> Any:
@@ -195,7 +167,7 @@ async def search_models(
     - supports_streaming: 是否支持流式输出
     - is_active: 是否活跃
     """
-    adapter = PublicSearchModelsAdapter(query=q, provider_id=provider_id, limit=limit)
+    adapter = PublicSearchModelsAdapter(query=q, limit=limit)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=ApiMode.PUBLIC)
 
 
@@ -399,7 +371,6 @@ class PublicProvidersAdapter(PublicApiAdapter):
 
 @dataclass
 class PublicModelsAdapter(PublicApiAdapter):
-    provider_id: str | None
     is_active: bool | None
     skip: int
     limit: int
@@ -408,13 +379,13 @@ class PublicModelsAdapter(PublicApiAdapter):
         key_prefix="public:catalog:models",
         ttl=CacheTTL.ADMIN_USAGE_AGGREGATION,
         user_specific=False,
-        vary_by=["provider_id", "is_active", "skip", "limit"],
+        vary_by=["is_active", "skip", "limit"],
     )
     async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
         db = context.db
         logger.debug("公共API请求模型列表")
         query = (
-            db.query(Model, Provider)
+            db.query(Model)
             .options(joinedload(Model.global_model))
             .join(Provider)
             .filter(
@@ -424,19 +395,15 @@ class PublicModelsAdapter(PublicApiAdapter):
                 )
             )
         )
-        if self.provider_id is not None:
-            query = query.filter(Model.provider_id == self.provider_id)
         results = query.offset(self.skip).limit(self.limit).all()
 
         response = []
-        for model, provider in results:
+        for model in results:
             global_model = model.global_model
             display_name = global_model.display_name if global_model else model.provider_model_name
             unified_name = global_model.name if global_model else model.provider_model_name
             model_data = PublicModelResponse(
                 id=model.id,
-                provider_id=model.provider_id,
-                provider_name=provider.name,
                 name=unified_name,
                 display_name=display_name,
                 description=(
@@ -515,20 +482,19 @@ class PublicStatsAdapter(PublicApiAdapter):
 @dataclass
 class PublicSearchModelsAdapter(PublicApiAdapter):
     query: str
-    provider_id: int | None
     limit: int
 
     @cache_result(
         key_prefix="public:catalog:search_models",
         ttl=CacheTTL.ADMIN_USAGE_AGGREGATION,
         user_specific=False,
-        vary_by=["query", "provider_id", "limit"],
+        vary_by=["query", "limit"],
     )
     async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
         db = context.db
         logger.debug(f"公共API搜索模型: {self.query}")
         query_stmt = (
-            db.query(Model, Provider)
+            db.query(Model)
             .options(joinedload(Model.global_model))
             .join(Provider)
             .outerjoin(GlobalModel, Model.global_model_id == GlobalModel.id)
@@ -545,19 +511,15 @@ class PublicSearchModelsAdapter(PublicApiAdapter):
             | GlobalModel.display_name.ilike(f"%{self.query}%")
         )
         query_stmt = query_stmt.filter(search_filter)
-        if self.provider_id is not None:
-            query_stmt = query_stmt.filter(Model.provider_id == self.provider_id)
         results = query_stmt.limit(self.limit).all()
 
         response = []
-        for model, provider in results:
+        for model in results:
             global_model = model.global_model
             display_name = global_model.display_name if global_model else model.provider_model_name
             unified_name = global_model.name if global_model else model.provider_model_name
             model_data = PublicModelResponse(
                 id=model.id,
-                provider_id=model.provider_id,
-                provider_name=provider.name,
                 name=unified_name,
                 display_name=display_name,
                 description=(
@@ -802,7 +764,7 @@ class PublicGlobalModelsAdapter(PublicApiAdapter):
                     default_price_per_request=gm.default_price_per_request,
                     default_tiered_pricing=gm.default_tiered_pricing,
                     supported_capabilities=gm.supported_capabilities,
-                    config=gm.config,
+                    config=sanitize_public_global_model_config(gm.config),
                 )
             )
 

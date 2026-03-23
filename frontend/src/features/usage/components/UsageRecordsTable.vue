@@ -36,10 +36,33 @@
           </SelectItem>
           <SelectItem
             v-for="user in availableUsers"
-            :key="user.id"
-            :value="user.id"
+            :key="user.value"
+            :value="user.value"
           >
-            {{ user.username || user.email }}
+            {{ user.label }}
+          </SelectItem>
+        </SelectContent>
+      </Select>
+
+      <!-- Key 筛选 -->
+      <Select
+        v-if="availableApiKeys.length > 0"
+        :model-value="filterApiKey"
+        @update:model-value="$emit('update:filterApiKey', $event)"
+      >
+        <SelectTrigger class="flex-1 min-w-0 sm:flex-none sm:w-36 h-8 text-xs border-border/60">
+          <SelectValue placeholder="Key" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="__all__">
+            全部 Key
+          </SelectItem>
+          <SelectItem
+            v-for="apiKey in availableApiKeys"
+            :key="apiKey.value"
+            :value="apiKey.value"
+          >
+            {{ apiKey.label }}
           </SelectItem>
         </SelectContent>
       </Select>
@@ -58,10 +81,10 @@
           </SelectItem>
           <SelectItem
             v-for="model in availableModels"
-            :key="model"
-            :value="model"
+            :key="model.value"
+            :value="model.value"
           >
-            {{ model.replace('claude-', '') }}
+            {{ model.label }}
           </SelectItem>
         </SelectContent>
       </Select>
@@ -81,10 +104,10 @@
           </SelectItem>
           <SelectItem
             v-for="provider in availableProviders"
-            :key="provider"
-            :value="provider"
+            :key="provider.value"
+            :value="provider.value"
           >
-            {{ provider }}
+            {{ provider.label }}
           </SelectItem>
         </SelectContent>
       </Select>
@@ -106,7 +129,7 @@
             :key="format.value"
             :value="format.value"
           >
-            {{ format.label }}
+            {{ getApiFormatOptionLabel(format) }}
           </SelectItem>
         </SelectContent>
       </Select>
@@ -123,26 +146,12 @@
           <SelectItem value="__all__">
             全部状态
           </SelectItem>
-          <SelectItem value="stream">
-            流式
-          </SelectItem>
-          <SelectItem value="standard">
-            标准
-          </SelectItem>
-          <SelectItem value="active">
-            活跃
-          </SelectItem>
-          <SelectItem value="failed">
-            失败
-          </SelectItem>
-          <SelectItem value="cancelled">
-            已取消
-          </SelectItem>
-          <SelectItem value="has_retry">
-            发生重试
-          </SelectItem>
-          <SelectItem value="has_fallback">
-            发生转移
+          <SelectItem
+            v-for="status in availableStatuses"
+            :key="status.value"
+            :value="status.value"
+          >
+            {{ getStatusOptionLabel(status) }}
           </SelectItem>
         </SelectContent>
       </Select>
@@ -350,18 +359,18 @@
           <TableCell
             v-if="isAdmin"
             class="py-4 w-[100px] truncate"
-            :title="record.username || record.user_email || (record.user_id ? `User ${record.user_id}` : '已删除用户')"
+            :title="getUserDisplayName(record)"
           >
             <div class="flex flex-col text-xs gap-0.5">
               <span class="truncate">
-                {{ record.username || record.user_email || (record.user_id ? `User ${record.user_id}` : '已删除用户') }}
+                {{ getUserDisplayName(record) }}
               </span>
               <span
-                v-if="record.api_key?.name"
+                v-if="getUserApiKeyLabel(record)"
                 class="text-muted-foreground truncate"
-                :title="record.api_key.name"
+                :title="getUserApiKeyLabel(record) || undefined"
               >
-                {{ record.api_key.name }}
+                {{ getUserApiKeyLabel(record) }}
               </span>
             </div>
           </TableCell>
@@ -369,10 +378,10 @@
           <TableCell
             v-if="!isAdmin"
             class="py-4 w-[100px]"
-            :title="record.api_key?.name || '-'"
+            :title="getUserApiKeyLabel(record) || '-'"
           >
             <div class="flex flex-col text-xs gap-0.5">
-              <span class="truncate">{{ record.api_key?.name || '-' }}</span>
+              <span class="truncate">{{ getUserApiKeyLabel(record) || '-' }}</span>
               <span
                 v-if="record.api_key?.display"
                 class="text-muted-foreground truncate"
@@ -417,7 +426,7 @@
           >
             <div class="flex items-center gap-1">
               <div class="flex flex-col text-xs gap-0.5">
-                <span>{{ record.provider }}</span>
+                <span>{{ formatProviderLabel(record.provider) }}</span>
                 <span
                   v-if="record.api_key_name"
                   class="text-muted-foreground truncate"
@@ -672,15 +681,10 @@ import { formatTokens, formatCurrency } from '@/utils/format'
 import { formatDateTime } from '../composables'
 import { useRowClick } from '@/composables/useRowClick'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
+import type { AnalyticsFilterOption } from '@/api/analytics'
 import type { DateRangeParams, UsageRecord } from '../types'
 import { TimeRangePicker } from '@/components/common'
 import ElapsedTimeText from './ElapsedTimeText.vue'
-
-export interface UserOption {
-  id: string
-  username: string
-  email: string
-}
 
 const props = defineProps<{
   records: UsageRecord[]
@@ -692,13 +696,17 @@ const props = defineProps<{
   // 筛选
   filterSearch: string
   filterUser: string
+  filterApiKey: string
   filterModel: string
   filterProvider: string
   filterApiFormat: string
   filterStatus: string
-  availableUsers: UserOption[]
-  availableModels: string[]
-  availableProviders: string[]
+  availableUsers: AnalyticsFilterOption[]
+  availableApiKeys: AnalyticsFilterOption[]
+  availableModels: AnalyticsFilterOption[]
+  availableApiFormats: AnalyticsFilterOption[]
+  availableProviders: AnalyticsFilterOption[]
+  availableStatuses: AnalyticsFilterOption[]
   // 分页
   currentPage: number
   pageSize: number
@@ -712,6 +720,7 @@ const emit = defineEmits<{
   'update:timeRange': [value: DateRangeParams]
   'update:filterSearch': [value: string]
   'update:filterUser': [value: string]
+  'update:filterApiKey': [value: string]
   'update:filterModel': [value: string]
   'update:filterProvider': [value: string]
   'update:filterApiFormat': [value: string]
@@ -722,22 +731,6 @@ const emit = defineEmits<{
   'refresh': []
   'showDetail': [id: string]
 }>()
-
-// 静态常量（放在 defineProps/defineEmits 之后）
-const AVAILABLE_API_FORMATS = [
-  { value: 'openai:chat', label: 'OpenAI Chat' },
-  { value: 'openai:cli', label: 'OpenAI CLI' },
-  { value: 'openai:compact', label: 'OpenAI Compact' },
-  { value: 'openai:video', label: 'OpenAI Video' },
-  { value: 'claude:chat', label: 'Claude Chat' },
-  { value: 'claude:cli', label: 'Claude CLI' },
-  { value: 'gemini:chat', label: 'Gemini Chat' },
-  { value: 'gemini:cli', label: 'Gemini CLI' },
-  { value: 'gemini:video', label: 'Gemini Video' },
-] as const
-
-// 使用模块级常量
-const availableApiFormats = AVAILABLE_API_FORMATS
 
 const timeRangeModel = computed({
   get: () => props.timeRange,
@@ -759,6 +752,44 @@ watch(() => props.filterSearch, (value) => {
 watch(localSearch, (value) => {
   emitSearchDebounced(value)
 })
+
+function getApiFormatOptionLabel(option: AnalyticsFilterOption): string {
+  return formatApiFormat(option.label || option.value)
+}
+
+function getStatusOptionLabel(option: AnalyticsFilterOption): string {
+  const statusLabelMap: Record<string, string> = {
+    pending: '等待',
+    streaming: '传输中',
+    completed: '已完成',
+    failed: '失败',
+    cancelled: '已取消',
+    active: '活跃',
+    stream: '流式',
+    standard: '标准',
+    has_retry: '发生重试',
+    has_fallback: '发生转移',
+  }
+
+  return statusLabelMap[option.value] || option.label || option.value
+}
+
+function formatProviderLabel(value: string | null | undefined): string {
+  if (!value) return '-'
+  if (value === 'pending') return '待分配提供商'
+  if (value === 'unknown') return '未识别提供商'
+  return value
+}
+
+function getUserDisplayName(record: UsageRecord): string {
+  return record.username || record.user_email || (record.user_id ? `User ${record.user_id}` : '已删除用户')
+}
+
+function getUserApiKeyLabel(record: UsageRecord): string | null {
+  const name = record.api_key?.name?.trim()
+  if (name) return name
+  return record.api_key?.id ? null : '已删除Key'
+}
 
 // 使用复用的行点击逻辑
 const { handleMouseDown, shouldTriggerRowClick } = useRowClick()
