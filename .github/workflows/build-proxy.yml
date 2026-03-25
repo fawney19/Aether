@@ -158,7 +158,6 @@ jobs:
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.GHCR_IMAGE }}
-            docker.io/${{ env.DOCKERHUB_IMAGE }}
           tags: |
             type=match,pattern=proxy-v(.*),group=1
             type=match,pattern=proxy-v(\d+\.\d+),group=1
