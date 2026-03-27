@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import tuple_
 from sqlalchemy.orm import Session
 
 from src.core.exceptions import ProviderNotAvailableException
@@ -368,10 +369,60 @@ class CandidateResolver:
                     candidate_record_map[(candidate_index, retry_index)] = record_id
 
         if candidate_records_to_insert:
-            self.db.bulk_insert_mappings(
-                RequestCandidate, candidate_records_to_insert  # type: ignore
-            )
-            self.db.flush()
+            bind = self.db.get_bind()
+            dialect_name = getattr(bind.dialect, "name", "")
+
+            if request_id and dialect_name in {"postgresql", "sqlite"}:
+                if dialect_name == "postgresql":
+                    from sqlalchemy.dialects.postgresql import insert as dialect_insert
+
+                    stmt = dialect_insert(RequestCandidate).values(candidate_records_to_insert)
+                    stmt = stmt.on_conflict_do_nothing(
+                        constraint="uq_request_candidate_with_retry"
+                    )
+                else:
+                    from sqlalchemy.dialects.sqlite import insert as dialect_insert
+
+                    stmt = dialect_insert(RequestCandidate).values(candidate_records_to_insert)
+                    stmt = stmt.on_conflict_do_nothing(
+                        index_elements=["request_id", "candidate_index", "retry_index"]
+                    )
+
+                self.db.execute(stmt)
+                self.db.flush()
+
+                expected_slots = sorted(candidate_record_map.keys())
+                actual_rows = (
+                    self.db.query(
+                        RequestCandidate.id,
+                        RequestCandidate.candidate_index,
+                        RequestCandidate.retry_index,
+                    )
+                    .filter(RequestCandidate.request_id == request_id)
+                    .filter(
+                        tuple_(
+                            RequestCandidate.candidate_index,
+                            RequestCandidate.retry_index,
+                        ).in_(expected_slots)
+                    )
+                    .all()
+                )
+                candidate_record_map = {
+                    (int(row.candidate_index), int(row.retry_index)): str(row.id)
+                    for row in actual_rows
+                }
+
+                if len(candidate_record_map) != len(expected_slots):
+                    raise RuntimeError(
+                        "candidate records incomplete after idempotent insert: "
+                        f"expected={len(expected_slots)}, actual={len(candidate_record_map)}, "
+                        f"request_id={request_id}"
+                    )
+            else:
+                self.db.bulk_insert_mappings(
+                    RequestCandidate, candidate_records_to_insert  # type: ignore
+                )
+                self.db.flush()
 
             logger.debug(
                 f"  [{request_id}] 批量插入完成: {len(candidate_records_to_insert)} 条记录"

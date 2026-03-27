@@ -30,9 +30,11 @@ from sqlalchemy.orm import Session
 
 from src.core.api_format import filter_response_headers as filter_proxy_response_headers
 from src.core.logger import logger
+from src.database import create_session
 from src.models.database import ApiKey, User
 from src.services.request.result import RequestResult
 from src.services.system.audit import audit_service
+from src.services.usage._db_retry import run_async_db_retry
 from src.services.usage.service import UsageService
 
 
@@ -60,6 +62,24 @@ class UsageRecorder:
         self.api_key = api_key
         self.client_ip = client_ip
         self.request_id = request_id
+
+    async def _run_in_isolated_session(
+        self,
+        operation: Any,
+        *,
+        context: str,
+    ) -> None:
+        async def _attempt() -> None:
+            bg_db = create_session()
+            try:
+                await operation(bg_db)
+            except Exception:
+                bg_db.rollback()
+                raise
+            finally:
+                bg_db.close()
+
+        await run_async_db_retry(_attempt, context=context)
 
     async def record(self, result: RequestResult) -> None:
         """
@@ -99,50 +119,56 @@ class UsageRecorder:
         client_response_headers = filter_proxy_response_headers(metadata.provider_response_headers)
         client_response_headers["content-type"] = "application/json"
 
-        await UsageService.record_usage(
-            db=self.db,
-            user=self.user,
-            api_key=self.api_key,
-            provider=metadata.provider,
-            model=metadata.original_model or metadata.model,
-            target_model=target_model,
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            cache_creation_input_tokens=usage.cache_creation_input_tokens,
-            cache_read_input_tokens=usage.cache_read_input_tokens,
-            request_type="chat",
-            api_format=metadata.api_format,
-            api_family=metadata.api_family,
-            endpoint_kind=metadata.endpoint_kind,
-            is_stream=result.is_stream,
-            response_time_ms=result.response_time_ms,
-            status_code=200,
-            error_message=None,
-            metadata=metadata.response_metadata if metadata.response_metadata else None,
-            request_headers=request_headers or result.request_headers,
-            request_body=request_body or result.request_body,
-            provider_request_headers=metadata.provider_request_headers,
-            response_headers=metadata.provider_response_headers,
-            client_response_headers=client_response_headers,
-            response_body=result.response_data if isinstance(result.response_data, dict) else {},
-            request_id=self.request_id,
-            provider_id=metadata.provider_id,
-            provider_endpoint_id=metadata.provider_endpoint_id,
-            provider_api_key_id=metadata.provider_api_key_id,
-            status="completed",  # 成功请求
-        )
+        async def _write(bg_db: Session) -> None:
+            await UsageService.record_usage(
+                db=bg_db,
+                user=self.user,
+                api_key=self.api_key,
+                provider=metadata.provider,
+                model=metadata.original_model or metadata.model,
+                target_model=target_model,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cache_creation_input_tokens=usage.cache_creation_input_tokens,
+                cache_read_input_tokens=usage.cache_read_input_tokens,
+                request_type="chat",
+                api_format=metadata.api_format,
+                api_family=metadata.api_family,
+                endpoint_kind=metadata.endpoint_kind,
+                is_stream=result.is_stream,
+                response_time_ms=result.response_time_ms,
+                status_code=200,
+                error_message=None,
+                metadata=metadata.response_metadata if metadata.response_metadata else None,
+                request_headers=request_headers or result.request_headers,
+                request_body=request_body or result.request_body,
+                provider_request_headers=metadata.provider_request_headers,
+                response_headers=metadata.provider_response_headers,
+                client_response_headers=client_response_headers,
+                response_body=result.response_data if isinstance(result.response_data, dict) else {},
+                request_id=self.request_id,
+                provider_id=metadata.provider_id,
+                provider_endpoint_id=metadata.provider_endpoint_id,
+                provider_api_key_id=metadata.provider_api_key_id,
+                status="completed",
+            )
 
-        # 记录审计日志
-        audit_service.log_api_request(
-            db=self.db,
-            user_id=self.user.id,
-            api_key_id=self.api_key.id,
-            request_id=self.request_id or "",
-            model=metadata.original_model or metadata.model,
-            provider=metadata.provider,
-            success=True,
-            ip_address=self.client_ip,
-            status_code=200,
+            audit_service.log_api_request(
+                db=bg_db,
+                user_id=self.user.id,
+                api_key_id=self.api_key.id,
+                request_id=self.request_id or "",
+                model=metadata.original_model or metadata.model,
+                provider=metadata.provider,
+                success=True,
+                ip_address=self.client_ip,
+                status_code=200,
+            )
+            bg_db.commit()
+
+        await self._run_in_isolated_session(
+            _write,
+            context=f"usage_recorder.record_success:{self.request_id or 'unknown'}",
         )
 
         logger.debug(
@@ -172,50 +198,55 @@ class UsageRecorder:
         if metadata.original_model and metadata.original_model != metadata.model:
             target_model = metadata.model
 
-        await UsageService.record_usage(
-            db=self.db,
-            user=self.user,
-            api_key=self.api_key,
-            provider=metadata.provider,
-            model=metadata.original_model or metadata.model,
-            target_model=target_model,
-            input_tokens=0,
-            output_tokens=0,
-            request_type="chat",
-            api_format=metadata.api_format,
-            api_family=metadata.api_family,
-            endpoint_kind=metadata.endpoint_kind,
-            is_stream=result.is_stream,
-            response_time_ms=result.response_time_ms,
-            status_code=result.status_code,
-            error_message=result.error_message,
-            metadata=metadata.response_metadata if metadata.response_metadata else None,
-            request_headers=request_headers or result.request_headers,
-            request_body=request_body or result.request_body,
-            provider_request_headers=metadata.provider_request_headers,
-            response_headers={},
-            # 失败请求返回给客户端的是 JSON 错误响应
-            client_response_headers={"content-type": "application/json"},
-            response_body={"error": result.error_message} if result.error_message else {},
-            request_id=self.request_id,
-            provider_id=metadata.provider_id,
-            provider_endpoint_id=metadata.provider_endpoint_id,
-            provider_api_key_id=metadata.provider_api_key_id,
-            status="failed",  # 失败请求
-        )
+        async def _write(bg_db: Session) -> None:
+            await UsageService.record_usage(
+                db=bg_db,
+                user=self.user,
+                api_key=self.api_key,
+                provider=metadata.provider,
+                model=metadata.original_model or metadata.model,
+                target_model=target_model,
+                input_tokens=0,
+                output_tokens=0,
+                request_type="chat",
+                api_format=metadata.api_format,
+                api_family=metadata.api_family,
+                endpoint_kind=metadata.endpoint_kind,
+                is_stream=result.is_stream,
+                response_time_ms=result.response_time_ms,
+                status_code=result.status_code,
+                error_message=result.error_message,
+                metadata=metadata.response_metadata if metadata.response_metadata else None,
+                request_headers=request_headers or result.request_headers,
+                request_body=request_body or result.request_body,
+                provider_request_headers=metadata.provider_request_headers,
+                response_headers={},
+                client_response_headers={"content-type": "application/json"},
+                response_body={"error": result.error_message} if result.error_message else {},
+                request_id=self.request_id,
+                provider_id=metadata.provider_id,
+                provider_endpoint_id=metadata.provider_endpoint_id,
+                provider_api_key_id=metadata.provider_api_key_id,
+                status="failed",
+            )
 
-        # 记录审计日志
-        audit_service.log_api_request(
-            db=self.db,
-            user_id=self.user.id,
-            api_key_id=self.api_key.id,
-            request_id=self.request_id or "",
-            model=metadata.original_model or metadata.model,
-            provider=metadata.provider,
-            success=False,
-            ip_address=self.client_ip,
-            status_code=result.status_code,
-            error_message=result.error_message,
+            audit_service.log_api_request(
+                db=bg_db,
+                user_id=self.user.id,
+                api_key_id=self.api_key.id,
+                request_id=self.request_id or "",
+                model=metadata.original_model or metadata.model,
+                provider=metadata.provider,
+                success=False,
+                ip_address=self.client_ip,
+                status_code=result.status_code,
+                error_message=result.error_message,
+            )
+            bg_db.commit()
+
+        await self._run_in_isolated_session(
+            _write,
+            context=f"usage_recorder.record_failure:{self.request_id or 'unknown'}",
         )
 
         logger.debug(

@@ -22,6 +22,7 @@ from src.clients.redis_client import get_usage_queue_redis_client as get_redis_c
 from src.config.settings import config
 from src.core.logger import logger
 from src.database.database import create_session
+from src.services.usage._db_retry import run_async_db_retry
 from src.services.usage.events import UsageEvent, UsageEventType
 from src.services.usage.service import UsageService
 
@@ -152,11 +153,20 @@ class UsageQueueConsumer:
         否则会导致 Redis 连接泄漏（每次 asyncio.run 都会在 _redis_by_loop 中
         注册一个短命循环的连接，且永远不会被清理）。
         """
-        db = create_session()
-        try:
-            await UsageService.record_usage_batch(db, records)
-        finally:
-            db.close()
+        async def _write() -> None:
+            db = create_session()
+            try:
+                await UsageService.record_usage_batch(db, records)
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
+        await run_async_db_retry(
+            _write,
+            context=f"usage_queue.batch:{len(records)}",
+        )
 
     async def start(self) -> None:
         if self._running:
