@@ -7,13 +7,18 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Any, TypeVar
 
 from sqlalchemy.orm import Session
 
 from src.core.logger import logger
+from src.database import create_session
 from src.services.system.audit import audit_service
+from src.services.usage._db_retry import run_async_db_retry
 from src.services.usage.service import UsageService
+
+T = TypeVar("T")
 
 
 class MessageTelemetry:
@@ -46,6 +51,24 @@ class MessageTelemetry:
             metadata = dict(response_metadata)
 
         return metadata
+
+    async def _run_in_isolated_session(
+        self,
+        operation: Callable[[Session], Awaitable[T]],
+        *,
+        context: str,
+    ) -> T:
+        async def _attempt() -> T:
+            bg_db = create_session()
+            try:
+                return await operation(bg_db)
+            except Exception:
+                bg_db.rollback()
+                raise
+            finally:
+                bg_db.close()
+
+        return await run_async_db_retry(_attempt, context=context)
 
     async def calculate_cost(
         self,
@@ -118,66 +141,71 @@ class MessageTelemetry:
             response_metadata=response_metadata,
         )
 
-        usage = await UsageService.record_usage(
-            db=self.db,
-            user=self.user,
-            api_key=self.api_key,
-            provider=provider,
-            model=model,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_creation_input_tokens=cache_creation_tokens,
-            cache_read_input_tokens=cache_read_tokens,
-            cache_creation_input_tokens_5m=cache_creation_tokens_5m,
-            cache_creation_input_tokens_1h=cache_creation_tokens_1h,
-            request_type="chat",
-            api_format=api_format,
-            api_family=api_family,
-            endpoint_kind=endpoint_kind,
-            endpoint_api_format=endpoint_api_format,
-            has_format_conversion=has_format_conversion,
-            is_stream=is_stream,
-            response_time_ms=response_time_ms,
-            first_byte_time_ms=first_byte_time_ms,  # 传递首字时间
-            status_code=status_code,
-            request_headers=request_headers,
-            request_body=request_body,
-            provider_request_headers=provider_request_headers or {},
-            provider_request_body=provider_request_body,
-            response_headers=response_headers,
-            client_response_headers=client_response_headers,
-            response_body=response_body,
-            client_response_body=client_response_body,
-            request_id=self.request_id,
-            # Provider 侧追踪信息（用于记录真实成本）
-            provider_id=provider_id,
-            provider_endpoint_id=provider_endpoint_id,
-            provider_api_key_id=provider_api_key_id,
-            # 模型映射信息
-            target_model=target_model,
-            # Provider 响应元数据/请求元数据
-            metadata=metadata,
-        )
-
-        total_cost = float(getattr(usage, "total_cost_usd", 0.0) or 0.0)
-
-        if self.user and self.api_key:
-            audit_service.log_api_request(
-                db=self.db,
-                user_id=self.user.id,
-                api_key_id=self.api_key.id,
-                request_id=self.request_id,
-                model=model,
+        async def _write(bg_db: Session) -> float:
+            usage = await UsageService.record_usage(
+                db=bg_db,
+                user=self.user,
+                api_key=self.api_key,
                 provider=provider,
-                success=True,
-                ip_address=self.client_ip,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_creation_input_tokens=cache_creation_tokens,
+                cache_read_input_tokens=cache_read_tokens,
+                cache_creation_input_tokens_5m=cache_creation_tokens_5m,
+                cache_creation_input_tokens_1h=cache_creation_tokens_1h,
+                request_type="chat",
+                api_format=api_format,
+                api_family=api_family,
+                endpoint_kind=endpoint_kind,
+                endpoint_api_format=endpoint_api_format,
+                has_format_conversion=has_format_conversion,
+                is_stream=is_stream,
+                response_time_ms=response_time_ms,
+                first_byte_time_ms=first_byte_time_ms,
                 status_code=status_code,
-                input_tokens=getattr(usage, "input_tokens", input_tokens),
-                output_tokens=getattr(usage, "output_tokens", output_tokens),
-                cost_usd=total_cost,
+                request_headers=request_headers,
+                request_body=request_body,
+                provider_request_headers=provider_request_headers or {},
+                provider_request_body=provider_request_body,
+                response_headers=response_headers,
+                client_response_headers=client_response_headers,
+                response_body=response_body,
+                client_response_body=client_response_body,
+                request_id=self.request_id,
+                provider_id=provider_id,
+                provider_endpoint_id=provider_endpoint_id,
+                provider_api_key_id=provider_api_key_id,
+                target_model=target_model,
+                metadata=metadata,
             )
 
-        return total_cost
+            total_cost = float(getattr(usage, "total_cost_usd", 0.0) or 0.0)
+            user_id = getattr(self.user, "id", None)
+            api_key_id = getattr(self.api_key, "id", None)
+            if user_id and api_key_id:
+                audit_service.log_api_request(
+                    db=bg_db,
+                    user_id=str(user_id),
+                    api_key_id=str(api_key_id),
+                    request_id=self.request_id,
+                    model=model,
+                    provider=provider,
+                    success=True,
+                    ip_address=self.client_ip,
+                    status_code=status_code,
+                    input_tokens=getattr(usage, "input_tokens", input_tokens),
+                    output_tokens=getattr(usage, "output_tokens", output_tokens),
+                    cost_usd=total_cost,
+                )
+                bg_db.commit()
+
+            return total_cost
+
+        return await self._run_in_isolated_session(
+            _write,
+            context=f"telemetry.record_success:{self.request_id}",
+        )
 
     async def record_failure(
         self,
@@ -242,45 +270,48 @@ class MessageTelemetry:
             request_metadata=request_metadata,
         )
 
-        await UsageService.record_usage(
-            db=self.db,
-            user=self.user,
-            api_key=self.api_key,
-            provider=provider_name,
-            model=model,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_creation_input_tokens=cache_creation_tokens,
-            cache_read_input_tokens=cache_read_tokens,
-            cache_creation_input_tokens_5m=cache_creation_tokens_5m,
-            cache_creation_input_tokens_1h=cache_creation_tokens_1h,
-            request_type="chat",
-            api_format=api_format,
-            api_family=api_family,
-            endpoint_kind=endpoint_kind,
-            endpoint_api_format=endpoint_api_format,
-            has_format_conversion=has_format_conversion,
-            is_stream=is_stream,
-            response_time_ms=response_time_ms,
-            status_code=status_code,
-            error_message=error_message,
-            request_headers=request_headers,
-            request_body=request_body,
-            provider_request_headers=provider_request_headers or {},
-            provider_request_body=provider_request_body,
-            response_headers=response_headers or {},
-            client_response_headers=client_response_headers,
-            response_body=response_body or {"error": error_message},
-            client_response_body=client_response_body,
-            request_id=self.request_id,
-            # Provider 侧追踪信息
-            provider_id=provider_id,
-            provider_endpoint_id=provider_endpoint_id,
-            provider_api_key_id=provider_api_key_id,
-            # 模型映射信息
-            target_model=target_model,
-            # 请求元数据
-            metadata=metadata,
+        async def _write(bg_db: Session) -> None:
+            await UsageService.record_usage(
+                db=bg_db,
+                user=self.user,
+                api_key=self.api_key,
+                provider=provider_name,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_creation_input_tokens=cache_creation_tokens,
+                cache_read_input_tokens=cache_read_tokens,
+                cache_creation_input_tokens_5m=cache_creation_tokens_5m,
+                cache_creation_input_tokens_1h=cache_creation_tokens_1h,
+                request_type="chat",
+                api_format=api_format,
+                api_family=api_family,
+                endpoint_kind=endpoint_kind,
+                endpoint_api_format=endpoint_api_format,
+                has_format_conversion=has_format_conversion,
+                is_stream=is_stream,
+                response_time_ms=response_time_ms,
+                status_code=status_code,
+                error_message=error_message,
+                request_headers=request_headers,
+                request_body=request_body,
+                provider_request_headers=provider_request_headers or {},
+                provider_request_body=provider_request_body,
+                response_headers=response_headers or {},
+                client_response_headers=client_response_headers,
+                response_body=response_body or {"error": error_message},
+                client_response_body=client_response_body,
+                request_id=self.request_id,
+                provider_id=provider_id,
+                provider_endpoint_id=provider_endpoint_id,
+                provider_api_key_id=provider_api_key_id,
+                target_model=target_model,
+                metadata=metadata,
+            )
+
+        await self._run_in_isolated_session(
+            _write,
+            context=f"telemetry.record_failure:{self.request_id}",
         )
 
     async def record_cancelled(
@@ -330,42 +361,47 @@ class MessageTelemetry:
             request_metadata=request_metadata,
         )
 
-        await UsageService.record_usage(
-            db=self.db,
-            user=self.user,
-            api_key=self.api_key,
-            provider=provider_name,
-            model=model,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_creation_input_tokens=cache_creation_tokens,
-            cache_read_input_tokens=cache_read_tokens,
-            cache_creation_input_tokens_5m=cache_creation_tokens_5m,
-            cache_creation_input_tokens_1h=cache_creation_tokens_1h,
-            request_type="chat",
-            api_format=api_format,
-            api_family=api_family,
-            endpoint_kind=endpoint_kind,
-            endpoint_api_format=endpoint_api_format,
-            has_format_conversion=has_format_conversion,
-            is_stream=is_stream,
-            response_time_ms=response_time_ms,
-            first_byte_time_ms=first_byte_time_ms,
-            status_code=status_code,
-            status="cancelled",
-            request_headers=request_headers,
-            request_body=request_body,
-            provider_request_headers=provider_request_headers or {},
-            provider_request_body=provider_request_body,
-            response_headers=response_headers or {},
-            client_response_headers=client_response_headers,
-            response_body=response_body or {},
-            client_response_body=client_response_body,
-            request_id=self.request_id,
-            # Provider 侧追踪信息
-            provider_id=provider_id,
-            provider_endpoint_id=provider_endpoint_id,
-            provider_api_key_id=provider_api_key_id,
-            target_model=target_model,
-            metadata=metadata,
+        async def _write(bg_db: Session) -> None:
+            await UsageService.record_usage(
+                db=bg_db,
+                user=self.user,
+                api_key=self.api_key,
+                provider=provider_name,
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_creation_input_tokens=cache_creation_tokens,
+                cache_read_input_tokens=cache_read_tokens,
+                cache_creation_input_tokens_5m=cache_creation_tokens_5m,
+                cache_creation_input_tokens_1h=cache_creation_tokens_1h,
+                request_type="chat",
+                api_format=api_format,
+                api_family=api_family,
+                endpoint_kind=endpoint_kind,
+                endpoint_api_format=endpoint_api_format,
+                has_format_conversion=has_format_conversion,
+                is_stream=is_stream,
+                response_time_ms=response_time_ms,
+                first_byte_time_ms=first_byte_time_ms,
+                status_code=status_code,
+                status="cancelled",
+                request_headers=request_headers,
+                request_body=request_body,
+                provider_request_headers=provider_request_headers or {},
+                provider_request_body=provider_request_body,
+                response_headers=response_headers or {},
+                client_response_headers=client_response_headers,
+                response_body=response_body or {},
+                client_response_body=client_response_body,
+                request_id=self.request_id,
+                provider_id=provider_id,
+                provider_endpoint_id=provider_endpoint_id,
+                provider_api_key_id=provider_api_key_id,
+                target_model=target_model,
+                metadata=metadata,
+            )
+
+        await self._run_in_isolated_session(
+            _write,
+            context=f"telemetry.record_cancelled:{self.request_id}",
         )

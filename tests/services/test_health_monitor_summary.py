@@ -12,6 +12,9 @@ class _SequentialQuery:
     def __init__(self, result: Any) -> None:
         self._result = result
 
+    def join(self, *_args: object, **_kwargs: object) -> "_SequentialQuery":
+        return self
+
     def filter(self, *_args: object, **_kwargs: object) -> "_SequentialQuery":
         return self
 
@@ -57,9 +60,34 @@ def test_get_all_health_status_aggregates_endpoint_health_from_key_formats() -> 
                 ),
             ],
             [
-                (True, {"openai:chat": {"health_score": 0.4}}, {"openai:chat": {"open": True}}),
-                (False, {"claude:chat": {"health_score": 0.7}}, {}),
-                (True, {"openai:chat": {"health_score": 0.9}}, {}),
+                ("provider-1", "openai:chat"),
+                ("provider-2", "openai:chat"),
+            ],
+            [
+                (
+                    "provider-1",
+                    True,
+                    ["openai:chat"],
+                    {"openai:chat": {"health_score": 0.4}},
+                    {},
+                    True,
+                ),
+                (
+                    "provider-1",
+                    False,
+                    ["claude:chat"],
+                    {"claude:chat": {"health_score": 0.7}},
+                    {"claude:chat": {"open": True}},
+                    True,
+                ),
+                (
+                    "provider-2",
+                    True,
+                    ["openai:chat"],
+                    {"openai:chat": {"health_score": 0.9}},
+                    {},
+                    True,
+                ),
             ],
         ]
     )
