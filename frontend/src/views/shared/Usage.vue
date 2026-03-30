@@ -10,6 +10,21 @@
       </RouterLink>
     </div>
 
+    <UsageBreakdownTable
+      v-if="isAdminPage"
+      :title="activeBreakdownMeta.title"
+      :description="activeBreakdownMeta.description"
+      :entity-label="activeBreakdownMeta.entityLabel"
+      :rows="activeBreakdownRows"
+      :tabs="breakdownTabs"
+      :active-tab="breakdownTab"
+      :loading="isLoadingBreakdown"
+      :has-loaded="breakdownHasLoaded"
+      :error="breakdownError"
+      :show-actual-cost="authStore.isAdmin"
+      @update:active-tab="handleBreakdownTabChange"
+    />
+
     <!-- 使用记录 -->
     <UsageRecordsTable
       :records="displayRecords"
@@ -65,8 +80,14 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 // useLocalStorage no longer needed (analytics panel removed)
 import { useAuthStore } from '@/stores/auth'
-import { analyticsApi, type AnalyticsFilterOption } from '@/api/analytics'
 import {
+  analyticsApi,
+  type AnalyticsBreakdownRow,
+  type AnalyticsFilterOption,
+} from '@/api/analytics'
+import { buildTimeRangeParams } from '@/composables/useAnalyticsFilters'
+import {
+  UsageBreakdownTable,
   UsageRecordsTable,
   RequestDetailDrawer,
 } from '@/features/usage/components'
@@ -85,6 +106,25 @@ const authStore = useAuthStore()
 
 // 判断是否是管理员页面
 const isAdminPage = computed(() => route.path.startsWith('/admin'))
+type BreakdownTab = 'provider' | 'model'
+const breakdownTab = ref<BreakdownTab>('provider')
+const breakdownTabs = [
+  { value: 'provider', label: '供应商统计' },
+  { value: 'model', label: '模型统计' },
+] as const
+const activeBreakdownMeta = computed(() => (
+  breakdownTab.value === 'provider'
+    ? {
+        title: '按供应商统计',
+        description: '在同一张统计卡片里查看供应商维度下的成功率、缓存、费用与延迟表现。',
+        entityLabel: '供应商',
+      }
+    : {
+        title: '按模型统计',
+        description: '在同一张统计卡片里查看模型维度下的请求量、缓存命中率、费用与耗时表现。',
+        entityLabel: '模型',
+      }
+))
 
 // 时间范围选择
 const timeRange = ref<DateRangeParams>(getDateRangeFromPeriod('today'))
@@ -119,6 +159,17 @@ const {
 } = useUsageData({ isAdminPage })
 
 // 热力图已移至数据分析页
+const providerBreakdownRows = ref<AnalyticsBreakdownRow[]>([])
+const modelBreakdownRows = ref<AnalyticsBreakdownRow[]>([])
+const isLoadingBreakdown = ref(false)
+const breakdownHasLoaded = ref(false)
+const breakdownError = ref(false)
+let loadBreakdownRequestId = 0
+const activeBreakdownRows = computed(() => (
+  breakdownTab.value === 'provider'
+    ? providerBreakdownRows.value
+    : modelBreakdownRows.value
+))
 
 // 获取活跃请求的 ID 列表
 const activeRequestIds = computed(() => {
@@ -357,14 +408,88 @@ function normalizeFilterSelections() {
   return changed
 }
 
-async function syncFilterOptions() {
-  await loadStats(timeRange.value, getCurrentFilters())
+function buildBreakdownFilters() {
+  return {
+    user_ids: filterUser.value !== '__all__' ? [filterUser.value] : [],
+    provider_names: filterProvider.value !== '__all__' ? [filterProvider.value] : [],
+    models: filterModel.value !== '__all__' ? [filterModel.value] : [],
+    api_key_ids: filterApiKey.value !== '__all__' ? [filterApiKey.value] : [],
+    api_formats: filterApiFormat.value !== '__all__' ? [filterApiFormat.value] : [],
+    statuses: filterStatus.value !== '__all__' ? [filterStatus.value] : [],
+  }
+}
 
-  if (!normalizeFilterSelections()) {
+function handleBreakdownTabChange(value: string) {
+  if (value === 'provider' || value === 'model') {
+    breakdownTab.value = value
+  }
+}
+
+async function loadAdminBreakdowns() {
+  if (!isAdminPage.value) {
+    providerBreakdownRows.value = []
+    modelBreakdownRows.value = []
+    isLoadingBreakdown.value = false
+    breakdownError.value = false
+    breakdownHasLoaded.value = false
     return
   }
 
+  const requestId = ++loadBreakdownRequestId
+  isLoadingBreakdown.value = true
+  breakdownError.value = false
+
+  try {
+    const basePayload = {
+      scope: { kind: 'global' as const },
+      time_range: buildTimeRangeParams(timeRange.value),
+      filters: buildBreakdownFilters(),
+      metric: 'requests_total' as const,
+      limit: 12,
+    }
+
+    const [providerResponse, modelResponse] = await Promise.all([
+      analyticsApi.getBreakdown({
+        ...basePayload,
+        dimension: 'provider',
+      }),
+      analyticsApi.getBreakdown({
+        ...basePayload,
+        dimension: 'model',
+      }),
+    ])
+
+    if (requestId !== loadBreakdownRequestId) {
+      return
+    }
+
+    providerBreakdownRows.value = providerResponse.rows
+    modelBreakdownRows.value = modelResponse.rows
+    breakdownHasLoaded.value = true
+  } catch (error) {
+    if (requestId !== loadBreakdownRequestId) {
+      return
+    }
+
+    log.error('加载管理员统计卡片失败:', error)
+    providerBreakdownRows.value = []
+    modelBreakdownRows.value = []
+    breakdownError.value = true
+  } finally {
+    if (requestId === loadBreakdownRequestId) {
+      isLoadingBreakdown.value = false
+    }
+  }
+}
+
+async function syncFilterOptions() {
   await loadStats(timeRange.value, getCurrentFilters())
+
+  if (normalizeFilterSelections()) {
+    await loadStats(timeRange.value, getCurrentFilters())
+  }
+
+  await loadAdminBreakdowns()
 }
 
 // 初始化加载
