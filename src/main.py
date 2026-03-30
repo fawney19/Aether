@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from src.core.modules.base import ModuleDefinition
     from src.plugins.manager import PluginManager
     from src.services.model.fetch_scheduler import ModelFetchScheduler
+    from src.services.payment.status_scheduler import PaymentStatusScheduler
     from src.services.provider_keys.pool_quota_probe_scheduler import PoolQuotaProbeScheduler
     from src.services.rate_limit.concurrency_manager import ConcurrencyManager
     from src.services.rate_limit.user_rpm_limiter import UserRpmLimiter
@@ -108,6 +109,7 @@ class LifecycleState:
     task_coordinator: StartupTaskCoordinator | None = None
     quota_scheduler: QuotaScheduler | None = None
     maintenance_scheduler: MaintenanceScheduler | None = None
+    payment_status_scheduler: PaymentStatusScheduler | None = None
     model_fetch_scheduler: ModelFetchScheduler | None = None
     pool_quota_probe_scheduler: PoolQuotaProbeScheduler | None = None
     task_poller: TaskPollerService | None = None
@@ -412,6 +414,7 @@ async def _start_background_services(state: LifecycleState) -> None:
     # 启动月卡额度重置调度器（仅一个 worker 执行）
     logger.info("启动月卡额度重置调度器...")
     from src.services.model.fetch_scheduler import get_model_fetch_scheduler
+    from src.services.payment.status_scheduler import get_payment_status_scheduler
     from src.services.provider_keys.pool_quota_probe_scheduler import (
         get_pool_quota_probe_scheduler,
     )
@@ -460,6 +463,27 @@ async def _start_background_services(state: LifecycleState) -> None:
     else:
         logger.info("检测到其他 worker 已运行维护调度器，本实例跳过")
         state.maintenance_scheduler = None
+
+    payment_status_scheduler_active = await state.task_coordinator.acquire(
+        "payment_status_scheduler"
+    )
+    if payment_status_scheduler_active:
+        state.payment_status_scheduler = get_payment_status_scheduler()
+        logger.info("启动支付状态主动查询调度器...")
+        await state.payment_status_scheduler.start()
+        state.task_coordinator.register_lock_lost_callback(
+            "payment_status_scheduler",
+            _make_lock_lost_callback(
+                state,
+                lock_name="payment_status_scheduler",
+                service_name="支付状态主动查询调度器",
+                state_attr="payment_status_scheduler",
+                stop=state.payment_status_scheduler.stop,
+            ),
+        )
+    else:
+        logger.info("检测到其他 worker 已运行支付状态主动查询调度器，本实例跳过")
+        state.payment_status_scheduler = None
 
     # 启动模型自动获取调度器
     model_fetch_scheduler_active = await state.task_coordinator.acquire("model_fetch_scheduler")
@@ -590,6 +614,12 @@ async def _run_shutdown(state: LifecycleState) -> None:
         await state.maintenance_scheduler.stop()
         if state.task_coordinator:
             await state.task_coordinator.release("maintenance_scheduler")
+
+    if state.payment_status_scheduler:
+        logger.info("停止支付状态主动查询调度器...")
+        await state.payment_status_scheduler.stop()
+        if state.task_coordinator:
+            await state.task_coordinator.release("payment_status_scheduler")
 
     # 停止月卡额度重置调度器，并释放分布式锁
     if state.quota_scheduler:

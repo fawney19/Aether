@@ -17,6 +17,7 @@ from src.models.database import Provider, SystemConfig
 
 REQUEST_RECORD_LEVEL_KEY = "request_record_level"
 _LEGACY_REQUEST_LOG_LEVEL_KEY = "request_log_level"
+WALLET_RECHARGE_METHOD_ORDER = ("alipay", "wechat")
 
 
 class RequestRecordLevel(str, Enum):
@@ -248,6 +249,35 @@ class SystemConfigService:
             "value": True,
             "description": "是否启用 OAuth Token 自动刷新任务，主动刷新即将过期的 OAuth token",
         },
+        # 钱包充值配置
+        "wallet_recharge_enabled": {
+            "value": True,
+            "description": "是否开启前台钱包充值入口。关闭后用户侧不显示发起充值卡片，后端也拒绝创建充值订单",
+        },
+        "wallet_recharge_alipay_enabled": {
+            "value": True,
+            "description": "是否开启支付宝充值通道",
+        },
+        "wallet_recharge_wechat_enabled": {
+            "value": False,
+            "description": "是否开启微信充值通道",
+        },
+        "wallet_recharge_min_amount": {
+            "value": 0.01,
+            "description": "单笔最小充值金额（按用户实际支付金额计，单位 CNY）",
+        },
+        "wallet_recharge_max_amount": {
+            "value": 1000.0,
+            "description": "单笔最大充值金额（按用户实际支付金额计，单位 CNY）",
+        },
+        "wallet_recharge_expire_minutes": {
+            "value": 15,
+            "description": "充值订单过期时间（分钟）",
+        },
+        "wallet_recharge_credit_ratio": {
+            "value": 1.0,
+            "description": "充值到账比例。例如 1 表示支付 1 CNY 到账 1 余额；2 表示支付 1 CNY 到账 2 余额",
+        },
     }
 
     @classmethod
@@ -419,6 +449,77 @@ class SystemConfigService:
         return SystemConfigService.set_config(
             db, "default_provider", provider_name, "系统默认提供商，当用户未设置个人提供商时使用"
         )
+
+    @staticmethod
+    def get_wallet_recharge_settings(db: Session) -> dict[str, Any]:
+        raw = SystemConfigService.get_configs(
+            db,
+            [
+                "wallet_recharge_enabled",
+                "wallet_recharge_alipay_enabled",
+                "wallet_recharge_wechat_enabled",
+                "wallet_recharge_min_amount",
+                "wallet_recharge_max_amount",
+                "wallet_recharge_expire_minutes",
+                "wallet_recharge_credit_ratio",
+            ],
+        )
+
+        def _as_bool(value: Any, default: bool) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in {"true", "1", "yes", "on"}:
+                    return True
+                if normalized in {"false", "0", "no", "off"}:
+                    return False
+            if value is None:
+                return default
+            return bool(value)
+
+        def _as_float(value: Any, default: float) -> float:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        def _as_int(value: Any, default: int) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        recharge_enabled = _as_bool(raw.get("wallet_recharge_enabled"), True)
+        method_enabled_map = {
+            "alipay": _as_bool(raw.get("wallet_recharge_alipay_enabled"), True),
+            "wechat": _as_bool(raw.get("wallet_recharge_wechat_enabled"), False),
+        }
+        enabled_payment_methods = [
+            method for method in WALLET_RECHARGE_METHOD_ORDER if method_enabled_map.get(method)
+        ]
+
+        min_amount = max(_as_float(raw.get("wallet_recharge_min_amount"), 0.01), 0.01)
+        max_amount = max(_as_float(raw.get("wallet_recharge_max_amount"), 1000.0), min_amount)
+        expire_minutes = max(_as_int(raw.get("wallet_recharge_expire_minutes"), 15), 1)
+        credit_ratio = max(_as_float(raw.get("wallet_recharge_credit_ratio"), 1.0), 0.01)
+
+        return {
+            "recharge_enabled": recharge_enabled and bool(enabled_payment_methods),
+            "global_enabled": recharge_enabled,
+            "enabled_payment_methods": enabled_payment_methods,
+            "payment_methods": [
+                {
+                    "code": method,
+                    "enabled": bool(method_enabled_map.get(method)),
+                }
+                for method in WALLET_RECHARGE_METHOD_ORDER
+            ],
+            "min_amount": min_amount,
+            "max_amount": max_amount,
+            "expire_minutes": expire_minutes,
+            "credit_ratio": credit_ratio,
+        }
 
     # 敏感配置项，不返回实际值
     SENSITIVE_KEYS = {"smtp_password"}

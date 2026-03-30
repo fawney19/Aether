@@ -571,7 +571,7 @@ function getProviderBalance(providerId: string): { available: number | null; cur
   }
   return {
     available: result.data.total_available,
-    currency: result.data.currency || 'USD'
+    currency: result.data.currency || 'CNY'
   }
 }
 
@@ -581,7 +581,7 @@ function formatBalanceDisplay(providerId: string): string {
   if (!balance || balance.available == null) {
     return ''
   }
-  const symbol = balance.currency === 'USD' ? '$' : balance.currency
+  const symbol = balance.currency === 'USD' ? '$' : (balance.currency === 'CNY' ? '¥' : balance.currency)
   return `${symbol}${balance.available.toFixed(2)}`
 }
 

@@ -193,7 +193,7 @@
           class="grid grid-cols-2 gap-4 p-3 border rounded-lg bg-muted/50"
         >
           <div class="space-y-1.5">
-            <Label class="text-xs">周期额度 (USD)</Label>
+            <Label class="text-xs">周期额度 (CNY)</Label>
             <Input
               :model-value="form.monthly_quota_usd ?? ''"
               type="number"

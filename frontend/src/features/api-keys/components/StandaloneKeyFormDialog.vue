@@ -215,7 +215,7 @@
                   type="number"
                   step="0.01"
                   min="0.01"
-                  placeholder="初始额度 (USD)"
+                  placeholder="初始额度 (CNY)"
                   class="h-10"
                   @update:model-value="(v) => form.initial_balance_usd = parseNumberInput(v, { allowFloat: true, min: 0.01 })"
                 />

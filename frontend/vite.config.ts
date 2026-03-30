@@ -50,6 +50,7 @@ export default defineConfig(({ mode }) => ({
     drop: mode === 'production' ? ['console', 'debugger'] : [],
   },
   server: {
+    allowedHosts: ['trish-salamandrine-uncongruously.ngrok-free.dev'],
     port: 5173,
     proxy: {
       // 只代理真正的 API 路径

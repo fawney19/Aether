@@ -31,6 +31,20 @@ export interface WalletBalanceResponse {
   pending_refund_count?: number
 }
 
+export interface WalletRechargeSettingsResponse {
+  recharge_enabled: boolean
+  global_enabled: boolean
+  enabled_payment_methods: string[]
+  payment_methods: Array<{
+    code: string
+    enabled: boolean
+  }>
+  min_amount: number
+  max_amount: number
+  expire_minutes: number
+  credit_ratio: number
+}
+
 export interface WalletTransaction {
   id: string
   category: string
@@ -176,6 +190,11 @@ export const walletApi = {
     payment_instructions: Record<string, unknown>
   }> {
     const response = await apiClient.post('/api/wallet/recharge', payload)
+    return response.data
+  },
+
+  async getRechargeSettings(): Promise<WalletRechargeSettingsResponse> {
+    const response = await apiClient.get<WalletRechargeSettingsResponse>('/api/wallet/recharge/settings')
     return response.data
   },
 

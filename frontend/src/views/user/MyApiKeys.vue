@@ -80,7 +80,7 @@
                 密钥
               </TableHead>
               <TableHead class="min-w-[100px] h-12 font-semibold">
-                费用(USD)
+                费用(CNY)
               </TableHead>
               <TableHead class="min-w-[100px] h-12 font-semibold">
                 请求次数
@@ -935,7 +935,7 @@ async function confirmCcSwitchImport() {
         return {
           isValid: response?.is_active ?? response?.is_valid ?? false,
           remaining,
-          unit: response?.unit ?? "USD"
+          unit: response?.unit ?? "CNY"
         };
       }
     })`

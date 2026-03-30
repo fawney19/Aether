@@ -210,6 +210,7 @@ backups/
 
 # Cloud database configuration (contains sensitive credentials)
 .env.cloud
+certs/alipay/
 
 # Runtime lock files
 .locks/
@@ -239,3 +240,7 @@ src/_version.py
 analysis/
 new-api/
 /aether-proxy/target/
+
+# Security / Credentials
+*.pem
+certs/

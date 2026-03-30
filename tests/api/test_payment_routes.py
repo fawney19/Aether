@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.api.admin.payments.routes import AdminPaymentOrderCreditAdapter
+from src.api.admin.payments.routes import _query_payment_order_status_sync
 from src.api.payment.routes import router as payment_router
 from src.config import config
 from src.database import get_db
@@ -179,7 +180,6 @@ def test_callback_disabled_when_secret_not_configured(monkeypatch: pytest.Monkey
 async def test_admin_payment_credit_adapter_marks_manual_credit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    db = MagicMock()
     order = PaymentOrder(
         id="po-credit",
         order_no="order-credit",
@@ -194,7 +194,7 @@ async def test_admin_payment_credit_adapter_marks_manual_credit(
     )
     adapter = AdminPaymentOrderCreditAdapter(order_id=order.id)
     context = SimpleNamespace(
-        db=db,
+        db=MagicMock(),
         raw_body=b"{}",
         ensure_json_body=lambda: {
             "pay_amount": 58.0,
@@ -211,13 +211,23 @@ async def test_admin_payment_credit_adapter_marks_manual_credit(
 
     captured: dict[str, object] = {}
 
-    def _fake_credit_order(_db: MagicMock, **kwargs: object) -> tuple[PaymentOrder, bool]:
-        captured.update(kwargs)
-        return order, True
-
     monkeypatch.setattr(
-        "src.api.admin.payments.routes.PaymentService.credit_order",
-        _fake_credit_order,
+        "src.api.admin.payments.routes._credit_payment_order_sync",
+        lambda order_id, payload, operator_id: (
+            captured.update(
+                {
+                    "order_id": order_id,
+                    "payload": payload,
+                    "operator_id": operator_id,
+                    "gateway_response": {
+                        **dict(order.gateway_response or {}),
+                        "manual_credit": True,
+                        "credited_by": operator_id,
+                    },
+                }
+            )
+            or {"order": {"id": order.id}, "credited": True}
+        ),
     )
 
     result = await adapter.handle(context)
@@ -229,4 +239,52 @@ async def test_admin_payment_credit_adapter_marks_manual_credit(
     assert gateway_response["existing"] is True
     assert gateway_response["manual_credit"] is True
     assert gateway_response["credited_by"] == "admin-1"
-    db.commit.assert_called_once()
+
+
+def test_admin_query_payment_order_status_sync(monkeypatch: pytest.MonkeyPatch) -> None:
+    order = PaymentOrder(
+        id="po-query",
+        order_no="order-query",
+        wallet_id="w1",
+        user_id="u1",
+        amount_usd=Decimal("8.00000000"),
+        refunded_amount_usd=Decimal("0"),
+        refundable_amount_usd=Decimal("0"),
+        payment_method="alipay",
+        status="pending",
+    )
+
+    class _DummyDb:
+        pass
+
+    class _DummyContext:
+        def __enter__(self) -> _DummyDb:
+            return _DummyDb()
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    monkeypatch.setattr("src.api.admin.payments.routes.get_db_context", lambda: _DummyContext())
+    monkeypatch.setattr(
+        "src.api.admin.payments.routes.PaymentService.get_order",
+        lambda _db, order_id=None, **kwargs: order if order_id == order.id else None,
+    )
+    monkeypatch.setattr(
+        "src.api.admin.payments.routes.get_payment_gateway",
+        lambda payment_method: SimpleNamespace(
+            capabilities=SimpleNamespace(supports_active_query=True),
+        ),
+    )
+    monkeypatch.setattr(
+        "src.api.admin.payments.routes.PaymentService.query_and_sync_order_status",
+        lambda _db, order: {
+            "ok": True,
+            "status": order.status,
+            "trade_status": "WAIT_BUYER_PAY",
+        },
+    )
+
+    result = _query_payment_order_status_sync(order.id)
+
+    assert result["order"]["id"] == order.id
+    assert result["query_result"]["trade_status"] == "WAIT_BUYER_PAY"

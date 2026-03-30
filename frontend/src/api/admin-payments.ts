@@ -71,6 +71,16 @@ export const adminPaymentsApi = {
     return response.data
   },
 
+  async queryOrderStatus(
+    orderId: string
+  ): Promise<{ order: PaymentOrder; query_result: Record<string, unknown> }> {
+    const response = await apiClient.post<{ order: PaymentOrder; query_result: Record<string, unknown> }>(
+      `/api/admin/payments/orders/${orderId}/query-status`,
+      {}
+    )
+    return response.data
+  },
+
   async creditOrder(
     orderId: string,
     payload: AdminPaymentCreditRequest

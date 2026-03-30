@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from src.api.wallet.routes import router as wallet_router
 from src.database import get_db
+from src.models.database import PaymentOrder, User
 
 
 def _build_wallet_app(
@@ -22,6 +23,15 @@ def _build_wallet_app(
     app = FastAPI()
     app.include_router(wallet_router)
     app.dependency_overrides[get_db] = lambda: db
+
+    class _DummyContext:
+        def __enter__(self) -> MagicMock:
+            return db
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    monkeypatch.setattr("src.api.wallet.routes.get_db_context", lambda: _DummyContext())
 
     async def _fake_pipeline_run(*, adapter: object, http_request: object, db: MagicMock, mode: object) -> object:
         _ = http_request, mode
@@ -37,6 +47,24 @@ def _build_wallet_app(
     return TestClient(app)
 
 
+def _mock_wallet_queries(
+    db: MagicMock,
+    *,
+    user_id: str = "user-1",
+    payment_order: object | None = None,
+) -> None:
+    def _query(model: object) -> MagicMock:
+        query = MagicMock()
+        model_name = getattr(model, "__name__", "")
+        if model is User or model_name == "User":
+            query.filter.return_value.first.return_value = SimpleNamespace(id=user_id)
+        elif model is PaymentOrder or model_name == "PaymentOrder":
+            query.filter.return_value.first.return_value = payment_order
+        return query
+
+    db.query.side_effect = _query
+
+
 def test_create_refund_route_maps_uncredited_order_to_400(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -50,7 +78,7 @@ def test_create_refund_route_maps_uncredited_order_to_400(
         "src.api.wallet.routes.WalletService.get_or_create_wallet",
         lambda _db, user: wallet,
     )
-    db.query.return_value.filter.return_value.first.return_value = payment_order
+    _mock_wallet_queries(db, payment_order=payment_order)
 
     def _raise(*args: object, **kwargs: object) -> object:
         raise ValueError("payment order is not refundable")
@@ -77,6 +105,7 @@ def test_create_refund_route_maps_reserved_wallet_amount_to_400(
         "src.api.wallet.routes.WalletService.get_or_create_wallet",
         lambda _db, user: wallet,
     )
+    _mock_wallet_queries(db)
 
     def _raise(*args: object, **kwargs: object) -> object:
         raise ValueError("refund amount exceeds available refundable recharge balance")
@@ -124,7 +153,7 @@ def test_create_refund_route_passes_default_order_refund_mode_and_commits(
         "src.api.wallet.routes.WalletService.get_or_create_wallet",
         lambda _db, user: wallet,
     )
-    db.query.return_value.filter.return_value.first.return_value = payment_order
+    _mock_wallet_queries(db, payment_order=payment_order)
     captured: dict[str, object] = {}
 
     def _create_refund_request(_db: MagicMock, **kwargs: object) -> object:
@@ -184,7 +213,7 @@ def test_create_refund_route_uses_offline_payout_for_manual_recharge(
         "src.api.wallet.routes.WalletService.get_or_create_wallet",
         lambda _db, user: wallet,
     )
-    db.query.return_value.filter.return_value.first.return_value = payment_order
+    _mock_wallet_queries(db, payment_order=payment_order)
     captured: dict[str, object] = {}
 
     def _create_refund_request(_db: MagicMock, **kwargs: object) -> object:

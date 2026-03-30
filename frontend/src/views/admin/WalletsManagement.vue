@@ -113,7 +113,7 @@
                       <TableHead>时间</TableHead>
                       <TableHead>归属</TableHead>
                       <TableHead>类型</TableHead>
-                      <TableHead>金额</TableHead>
+                      <TableHead>到账金额</TableHead>
                       <TableHead>余额变化</TableHead>
                       <TableHead>说明</TableHead>
                       <TableHead class="text-right">
@@ -461,7 +461,13 @@
                         </div>
                       </TableCell>
                       <TableCell class="tabular-nums">
-                        {{ formatCurrency(order.amount_usd) }}
+                        <div>{{ formatCurrency(order.amount_usd) }}</div>
+                        <div
+                          v-if="order.pay_amount !== null && order.pay_amount !== undefined"
+                          class="text-[11px] text-muted-foreground"
+                        >
+                          实付 {{ formatPaymentCurrency(order.pay_amount) }}
+                        </div>
                       </TableCell>
                       <TableCell>{{ paymentMethodLabel(order.payment_method) }}</TableCell>
                       <TableCell>
@@ -474,6 +480,15 @@
                       </TableCell>
                       <TableCell class="text-right">
                         <div class="flex justify-end gap-2">
+                          <Button
+                            v-if="canQueryOrderStatus(order)"
+                            size="sm"
+                            variant="outline"
+                            :disabled="submittingOrderAction || queryingOrderId === order.id"
+                            @click="queryOrderStatus(order)"
+                          >
+                            {{ queryingOrderId === order.id ? '查询中...' : '立即查询' }}
+                          </Button>
                           <Button
                             v-if="canCreditOrder(order.status)"
                             size="sm"
@@ -1049,6 +1064,7 @@ import { log } from '@/utils/logger'
 import {
   callbackStatusBadge,
   callbackStatusLabel,
+  formatPaymentCurrency,
   formatWalletCurrency as formatCurrency,
   paymentMethodLabel,
   paymentStatusBadge,
@@ -1094,6 +1110,7 @@ const loadingOrders = ref(false)
 const loadingCallbacks = ref(false)
 const submittingRefundAction = ref(false)
 const submittingOrderAction = ref(false)
+const queryingOrderId = ref<string | null>(null)
 
 const ledgerItems = ref<AdminLedgerTransaction[]>([])
 const ledgerTotal = ref(0)
@@ -1500,6 +1517,35 @@ async function failOrder(orderId: string) {
   }
 }
 
+async function queryOrderStatus(order: PaymentOrder) {
+  queryingOrderId.value = order.id
+  try {
+    const resp = await adminPaymentsApi.queryOrderStatus(order.id)
+    const tradeStatus = String(resp.query_result?.trade_status || '')
+    const queryError = String(resp.query_result?.error || '')
+    const nextCheckAt = resp.query_result?.next_check_at
+    if (resp.order.status === 'credited') {
+      success('主动查询成功，订单已补偿到账')
+    } else if (queryError) {
+      showError(`支付宝返回：${queryError}`)
+    } else if (tradeStatus) {
+      success(
+        nextCheckAt
+          ? `查询完成，当前支付宝状态为 ${tradeStatus}，已安排后续补偿查询`
+          : `查询完成，当前支付宝状态为 ${tradeStatus}`
+      )
+    } else {
+      success('查询完成，订单状态已刷新')
+    }
+    await Promise.all([loadOrders(), loadLedger(), loadWalletMetaMap()])
+  } catch (error) {
+    log.error('主动查询订单状态失败:', error)
+    showError(parseApiError(error, '主动查询订单状态失败'))
+  } finally {
+    queryingOrderId.value = null
+  }
+}
+
 function canProcessRefund(status: string) {
   return status === 'pending_approval' || status === 'approved'
 }
@@ -1522,6 +1568,10 @@ function canExpireOrder(status: string) {
 
 function canFailOrder(status: string) {
   return status !== 'credited' && status !== 'refunded'
+}
+
+function canQueryOrderStatus(order: PaymentOrder) {
+  return order.payment_method === 'alipay' && order.status === 'pending'
 }
 
 function handleLedgerPageChange(page: number) {

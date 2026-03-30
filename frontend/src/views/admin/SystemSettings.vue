@@ -126,6 +126,19 @@
             @update:request-candidates-cleanup-batch-size="systemConfig.request_candidates_cleanup_batch_size = $event"
           />
 
+          <RechargeConfigSection
+            id="section-recharge"
+            :wallet-recharge-enabled="systemConfig.wallet_recharge_enabled"
+            :wallet-recharge-alipay-enabled="systemConfig.wallet_recharge_alipay_enabled"
+            :wallet-recharge-wechat-enabled="systemConfig.wallet_recharge_wechat_enabled"
+            :wallet-recharge-min-amount="systemConfig.wallet_recharge_min_amount"
+            :wallet-recharge-max-amount="systemConfig.wallet_recharge_max_amount"
+            :wallet-recharge-expire-minutes="systemConfig.wallet_recharge_expire_minutes"
+            :wallet-recharge-credit-ratio="systemConfig.wallet_recharge_credit_ratio"
+            :loading="rechargeConfigLoading"
+            @save="handleRechargeConfigSave"
+          />
+
           <!-- 定时任务 -->
           <ScheduledTasksSection
             id="section-scheduled"
@@ -225,6 +238,7 @@ import BasicConfigSection from './system-settings/BasicConfigSection.vue'
 import MonitoringCapacitySection from './system-settings/MonitoringCapacitySection.vue'
 import RequestLogSection from './system-settings/RequestLogSection.vue'
 import CleanupPolicySection from './system-settings/CleanupPolicySection.vue'
+import RechargeConfigSection from './system-settings/RechargeConfigSection.vue'
 import ScheduledTasksSection from './system-settings/ScheduledTasksSection.vue'
 import SystemInfoSection from './system-settings/SystemInfoSection.vue'
 
@@ -245,6 +259,7 @@ const tocItems = [
   { id: 'section-monitoring-capacity', label: '监控容量' },
   { id: 'section-request-log', label: '请求记录' },
   { id: 'section-cleanup', label: '记录清理策略' },
+  { id: 'section-recharge', label: '充值配置' },
   { id: 'section-scheduled', label: '定时任务' },
   { id: 'section-sysinfo', label: '系统信息' },
 ]
@@ -296,6 +311,25 @@ function setupScrollSpy() {
   }
 }
 
+async function handleRechargeConfigSave(payload: {
+  walletRechargeEnabled: boolean
+  walletRechargeAlipayEnabled: boolean
+  walletRechargeWechatEnabled: boolean
+  walletRechargeMinAmount: number
+  walletRechargeMaxAmount: number
+  walletRechargeExpireMinutes: number
+  walletRechargeCreditRatio: number
+}) {
+  systemConfig.value.wallet_recharge_enabled = payload.walletRechargeEnabled
+  systemConfig.value.wallet_recharge_alipay_enabled = payload.walletRechargeAlipayEnabled
+  systemConfig.value.wallet_recharge_wechat_enabled = payload.walletRechargeWechatEnabled
+  systemConfig.value.wallet_recharge_min_amount = payload.walletRechargeMinAmount
+  systemConfig.value.wallet_recharge_max_amount = payload.walletRechargeMaxAmount
+  systemConfig.value.wallet_recharge_expire_minutes = payload.walletRechargeExpireMinutes
+  systemConfig.value.wallet_recharge_credit_ratio = payload.walletRechargeCreditRatio
+  await saveRechargeConfig()
+}
+
 // System config composable
 const {
   systemConfig,
@@ -306,6 +340,7 @@ const {
   monitoringConfigLoading,
   logConfigLoading,
   cleanupConfigLoading,
+  rechargeConfigLoading,
   hasSiteInfoChanges,
   hasProxyConfigChanges,
   hasBasicConfigChanges,
@@ -325,6 +360,7 @@ const {
   saveMonitoringConfig,
   saveLogConfig,
   saveCleanupConfig,
+  saveRechargeConfig,
   handleAutoCleanupToggle,
 } = useSystemConfig()
 

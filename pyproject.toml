@@ -50,6 +50,7 @@ dependencies = [
     "apscheduler>=3.11.2",
     "ldap3>=2.9.1",
     "msgpack>=1.1.2",
+    "alipay-sdk-python>=3.7.1018",
 ]
 
 [project.optional-dependencies]
@@ -71,8 +72,8 @@ Issues = "https://github.com/fawney19/Aether/issues"
 [project.scripts]
 aether = "src.main:main"
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",

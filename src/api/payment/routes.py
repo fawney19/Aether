@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from src.config import config
 from src.database import get_db
 from src.services.payment import PaymentService
+from src.services.payment.gateway import get_payment_gateway
 
 router = APIRouter(prefix="/api/payment", tags=["Payment"])
 CALLBACK_TOKEN_HEADER = "x-payment-callback-token"
@@ -82,18 +83,51 @@ async def _process_callback(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/callback/alipay")
-async def handle_alipay_callback(
+@router.post("/callback/alipay/webhook")
+async def handle_alipay_webhook(
     request: Request,
-    payload: PaymentCallbackPayload,
     db: Session = Depends(get_db),
-) -> dict[str, Any]:
-    return await _process_callback(
-        payment_method="alipay",
-        request=request,
-        payload=payload,
-        db=db,
-    )
+) -> Any:
+    from fastapi.responses import PlainTextResponse
+    import logging
+
+    try:
+        form_data = await request.form()
+        payload = dict(form_data)
+
+        gateway = get_payment_gateway("alipay")
+        is_valid = gateway.verify_callback_payload(
+            payload=payload,
+            callback_signature=None,
+            callback_secret=None,
+        )
+
+        if not is_valid:
+            logging.warning("Alipay webhook signature validation failed.")
+            return PlainTextResponse("failure")
+
+        parsed = gateway.parse_callback_payload(payload=payload)
+        PaymentService.handle_callback(
+            db,
+            payment_method="alipay",
+            callback_key=parsed.callback_key or f"alipay_{payload.get('notify_id', secrets.token_hex(8))}",
+            payload=payload,
+            callback_signature=payload.get("sign"),
+            callback_secret=None,
+            order_no=parsed.order_no,
+            gateway_order_id=parsed.gateway_order_id,
+            amount_usd=parsed.pay_amount,
+            pay_amount=parsed.pay_amount,
+            pay_currency=parsed.pay_currency,
+            exchange_rate=parsed.exchange_rate,
+        )
+        db.commit()
+        return PlainTextResponse("success")
+
+    except Exception as e:
+        db.rollback()
+        logging.error(f"Alipay webhook error: {e}")
+        return PlainTextResponse("failure")
 
 
 @router.post("/callback/wechat")

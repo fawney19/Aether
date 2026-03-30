@@ -17,6 +17,7 @@ from src.api.serializers import serialize_payment_callback, serialize_payment_or
 from src.core.exceptions import InvalidRequestException, NotFoundException, translate_pydantic_error
 from src.database import get_db, get_db_context
 from src.services.payment import PaymentService
+from src.services.payment.gateway import get_payment_gateway
 
 router = APIRouter(prefix="/api/admin/payments", tags=["Admin - Payments"])
 pipeline = get_pipeline()
@@ -134,6 +135,28 @@ def _fail_payment_order_sync(order_id: str) -> dict[str, Any]:
         return {"order": serialize_payment_order(updated)}
 
 
+def _query_payment_order_status_sync(order_id: str) -> dict[str, Any]:
+    with get_db_context() as db:
+        order = PaymentService.get_order(db, order_id=order_id)
+        if order is None:
+            raise NotFoundException("Payment order not found")
+        if order.status not in {"pending", "paid"}:
+            raise InvalidRequestException(f"当前订单状态不需要主动查询: {order.status}")
+
+        gateway = get_payment_gateway(order.payment_method)
+        if not getattr(getattr(gateway, "capabilities", None), "supports_active_query", False):
+            raise InvalidRequestException("当前支付通道不支持主动查询")
+
+        result = PaymentService.query_and_sync_order_status(db, order=order)
+        refreshed = PaymentService.get_order(db, order_id=order_id)
+        if refreshed is None:
+            raise NotFoundException("Payment order not found")
+        return {
+            "order": serialize_payment_order(refreshed),
+            "query_result": result,
+        }
+
+
 @router.get("/orders")
 async def list_payment_orders(
     request: Request,
@@ -189,6 +212,16 @@ async def fail_payment_order(
     db: Session = Depends(get_db),
 ) -> Any:
     adapter = AdminPaymentOrderFailAdapter(order_id=order_id)
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.post("/orders/{order_id}/query-status")
+async def query_payment_order_status(
+    order_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    adapter = AdminPaymentOrderQueryStatusAdapter(order_id=order_id)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
@@ -284,3 +317,11 @@ class AdminPaymentCallbackListAdapter(AdminApiAdapter):
             "limit": self.limit,
             "offset": self.offset,
         }
+
+
+@dataclass
+class AdminPaymentOrderQueryStatusAdapter(AdminApiAdapter):
+    order_id: str
+
+    async def handle(self, context: ApiRequestContext) -> dict[str, Any]:
+        return await run_in_threadpool(_query_payment_order_status_sync, self.order_id)

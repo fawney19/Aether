@@ -18,7 +18,7 @@
           for="default-quota"
           class="block text-sm font-medium"
         >
-          默认用户初始赠款(美元)
+          默认用户初始赠款(人民币)
         </Label>
         <Input
           id="default-quota"

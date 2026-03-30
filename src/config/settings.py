@@ -137,6 +137,97 @@ class Config:
 
         # 支付回调安全配置（公开回调入口必须携带该共享密钥）
         self.payment_callback_secret = os.getenv("PAYMENT_CALLBACK_SECRET", "").strip()
+       
+        # Alipay 配置
+        self.alipay_app_id = os.getenv("ALIPAY_APP_ID", "").strip()
+        self.alipay_debug = os.getenv("ALIPAY_DEBUG", "true").lower() == "true"
+        legacy_alipay_base_url = os.getenv("ALIPAY_BASE_URL", "").strip().rstrip("/")
+        legacy_notify_base_url = os.getenv("ALIPAY_NOTIFY_BASE_URL", "").strip().rstrip("/")
+        legacy_return_base_url = os.getenv("ALIPAY_RETURN_BASE_URL", "").strip().rstrip("/")
+        default_alipay_base_url = (
+            legacy_alipay_base_url
+            or legacy_notify_base_url
+            or legacy_return_base_url
+            or "https://www.hook.rs"
+        )
+        self.alipay_base_url = os.getenv(
+            "ALIPAY_BASE_URL",
+            default_alipay_base_url,
+        ).strip().rstrip("/")
+
+        def _normalize_url_path(raw_path: str, default_path: str) -> str:
+            path_value = raw_path.strip() or default_path
+            if not path_value.startswith("/"):
+                path_value = f"/{path_value}"
+            return path_value
+
+        self.alipay_notify_path = _normalize_url_path(
+            os.getenv("ALIPAY_NOTIFY_PATH", "/api/payment/callback/alipay/webhook"),
+            "/api/payment/callback/alipay/webhook",
+        )
+        self.alipay_return_path = _normalize_url_path(
+            os.getenv("ALIPAY_RETURN_PATH", "/dashboard/wallet"),
+            "/dashboard/wallet",
+        )
+
+        base_dir = Path(__file__).parent.parent.parent  # 项目根目录
+        alipay_cert_dir = base_dir / "certs" / "alipay" / ("debug" if self.alipay_debug else "prod")
+
+        def _resolve_cert_path(raw_path: str, default_path: Path) -> Path:
+            path_value = raw_path.strip()
+            if not path_value:
+                return default_path
+
+            configured_path = Path(path_value).expanduser()
+            if configured_path.is_absolute():
+                return configured_path
+            return (base_dir / configured_path).resolve()
+
+        self.alipay_private_key_path = os.getenv(
+            "ALIPAY_PRIVATE_KEY_PATH",
+            str(alipay_cert_dir / "app_private_key.pem"),
+        ).strip()
+        self.alipay_public_key_path = os.getenv(
+            "ALIPAY_PUBLIC_KEY_PATH",
+            str(alipay_cert_dir / "alipay_public_key.pem"),
+        ).strip()
+        self.payment_status_scheduler_enabled = (
+            os.getenv("PAYMENT_STATUS_SCHEDULER_ENABLED", "true").lower() == "true"
+        )
+        self.payment_status_check_interval_seconds = int(
+            os.getenv("PAYMENT_STATUS_CHECK_INTERVAL_SECONDS", "60")
+        )
+        self.payment_status_check_batch_size = int(
+            os.getenv("PAYMENT_STATUS_CHECK_BATCH_SIZE", "20")
+        )
+        self.payment_status_check_max_age_hours = int(
+            os.getenv("PAYMENT_STATUS_CHECK_MAX_AGE_HOURS", "24")
+        )
+
+        priv_key_path = _resolve_cert_path(
+            self.alipay_private_key_path,
+            alipay_cert_dir / "app_private_key.pem",
+        )
+        pub_key_path = _resolve_cert_path(
+            self.alipay_public_key_path,
+            alipay_cert_dir / "alipay_public_key.pem",
+        )
+
+        def _read_cert_file(path: Path) -> str:
+            if path.exists():
+                try:
+                    return path.read_text(encoding="utf-8").strip()
+                except Exception as e:
+                    # 避免循环导入，延迟导入 logger
+                    try:
+                        from src.core.logger import logger
+                        logger.error(f"Failed to read Alipay cert file {path}: {e}")
+                    except ImportError:
+                        print(f"Failed to read Alipay cert file {path}: {e}")
+            return ""
+
+        self.alipay_private_key = _read_cert_file(priv_key_path)
+        self.alipay_public_key = _read_cert_file(pub_key_path)
 
         self.public_api_rate_limit = int(os.getenv("PUBLIC_API_RATE_LIMIT", "60"))
 

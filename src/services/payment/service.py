@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
+from src.config import config
 from src.models.database import PaymentCallback, PaymentOrder, User, Wallet
 from src.services.billing.precision import to_money_decimal
 from src.services.payment.gateway import get_payment_gateway
@@ -24,6 +25,8 @@ class PaymentService:
     - 真实网关签名/SDK 留给后续渠道适配层
     """
 
+    _STATUS_CHECK_BACKOFF_MINUTES = (1, 2, 5, 10, 20, 30)
+
     @staticmethod
     def _build_order_no() -> str:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
@@ -38,6 +41,123 @@ class PaymentService:
         )
         return hashlib.sha256(encoded).hexdigest()
 
+    @staticmethod
+    def _clear_status_check_schedule(order: PaymentOrder) -> None:
+        order.next_status_check_at = None
+        order.last_status_check_error = None
+
+    @staticmethod
+    def _get_locked_order(db: Session, *, order_id: str) -> PaymentOrder | None:
+        return (
+            db.query(PaymentOrder)
+            .filter(PaymentOrder.id == order_id)
+            .with_for_update()
+            .one_or_none()
+        )
+
+    @staticmethod
+    def _merge_gateway_response(
+        existing: dict[str, Any] | None,
+        updates: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        payload = dict(existing or {})
+        if updates:
+            payload.update(updates)
+        return payload
+
+    @classmethod
+    def calculate_next_status_check_at(
+        cls,
+        *,
+        order: PaymentOrder,
+        now: datetime | None = None,
+        attempts: int | None = None,
+    ) -> datetime | None:
+        if order.status != "pending":
+            return None
+
+        now = now or datetime.now(timezone.utc)
+        attempt_index = max(0, attempts if attempts is not None else int(order.status_check_attempts or 0))
+        if attempt_index < len(cls._STATUS_CHECK_BACKOFF_MINUTES):
+            next_run = now + timedelta(minutes=cls._STATUS_CHECK_BACKOFF_MINUTES[attempt_index])
+        else:
+            next_run = now + timedelta(hours=1)
+
+        max_age_hours = max(1, config.payment_status_check_max_age_hours)
+        created_ref = order.created_at or now
+        expiry_ref = order.expires_at or created_ref
+        stop_at = min(
+            created_ref + timedelta(hours=max_age_hours),
+            expiry_ref + timedelta(hours=max_age_hours),
+        )
+        if next_run > stop_at:
+            return None
+        return next_run
+
+    @classmethod
+    def record_status_check_result(
+        cls,
+        *,
+        order: PaymentOrder,
+        checked_at: datetime,
+        result: str,
+        error: str | None = None,
+        next_check_at: datetime | None,
+    ) -> None:
+        order.status_check_attempts = int(order.status_check_attempts or 0) + 1
+        order.last_status_check_at = checked_at
+        order.last_status_check_result = result
+        order.last_status_check_error = error
+        order.next_status_check_at = next_check_at
+
+    @classmethod
+    def _build_query_gateway_response(
+        cls,
+        *,
+        order: PaymentOrder,
+        query_response: dict[str, Any],
+        checked_at: datetime,
+    ) -> dict[str, Any]:
+        return cls._merge_gateway_response(
+            order.gateway_response if isinstance(order.gateway_response, dict) else None,
+            {
+                "gateway_trade_no": query_response.get("trade_no"),
+                "gateway_trade_status": query_response.get("trade_status"),
+                "last_gateway_query_at": checked_at.isoformat(),
+                "last_gateway_query_response": query_response,
+            },
+        )
+
+    @classmethod
+    def _build_status_snapshot_gateway_response(
+        cls,
+        *,
+        order: PaymentOrder,
+        checked_at: datetime,
+        channel_status: str | None,
+        gateway_order_id: str | None,
+        query_response: dict[str, Any] | None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "gateway_trade_no": gateway_order_id,
+            "gateway_trade_status": channel_status,
+            "last_gateway_query_at": checked_at.isoformat(),
+            "last_gateway_query_response": query_response or {},
+        }
+        if error:
+            payload["last_gateway_query_error"] = error
+        return cls._merge_gateway_response(
+            order.gateway_response if isinstance(order.gateway_response, dict) else None,
+            payload,
+        )
+
+    @classmethod
+    def get_expected_pay_amount(cls, *, order: PaymentOrder) -> Decimal:
+        pay_amount = getattr(order, "pay_amount", None)
+        expected = pay_amount if pay_amount is not None else order.amount_usd
+        return to_money_decimal(expected)
+
     @classmethod
     def create_recharge_order(
         cls,
@@ -49,7 +169,7 @@ class PaymentService:
         pay_amount: Decimal | float | int | str | None = None,
         pay_currency: str | None = None,
         exchange_rate: Decimal | float | int | str | None = None,
-        expires_in_minutes: int = 30,
+        expires_in_minutes: int = 15,
         gateway_order_id: str | None = None,
         gateway_response: dict[str, Any] | None = None,
     ) -> PaymentOrder:
@@ -85,6 +205,9 @@ class PaymentService:
             status="pending",
             expires_at=now + timedelta(minutes=max(expires_in_minutes, 1)),
         )
+        if gateway.capabilities.supports_active_query:
+            order.next_status_check_at = cls.calculate_next_status_check_at(order=order, now=now, attempts=0)
+            order.last_status_check_result = "scheduled"
         db.add(order)
         db.flush()
         checkout = gateway.create_checkout_payload(order=order)
@@ -101,6 +224,8 @@ class PaymentService:
         now = datetime.now(timezone.utc)
         if order.expires_at is not None and order.expires_at < now:
             order.status = "expired"
+            cls._clear_status_check_schedule(order)
+            order.last_status_check_result = "local_expired"
             return True
         return False
 
@@ -220,17 +345,13 @@ class PaymentService:
         order: PaymentOrder,
         reason: str | None = None,
     ) -> PaymentOrder:
-        locked_order = (
-            db.query(PaymentOrder)
-            .filter(PaymentOrder.id == order.id)
-            .with_for_update()
-            .one_or_none()
-        )
+        locked_order = cls._get_locked_order(db, order_id=order.id)
         if locked_order is None:
             raise ValueError("payment order not found")
         if locked_order.status == "credited":
             raise ValueError("credited order cannot be failed")
         locked_order.status = "failed"
+        cls._clear_status_check_schedule(locked_order)
         payload = dict(locked_order.gateway_response or {})
         if reason:
             payload["failure_reason"] = reason
@@ -246,12 +367,7 @@ class PaymentService:
         order: PaymentOrder,
         reason: str | None = None,
     ) -> tuple[PaymentOrder, bool]:
-        locked_order = (
-            db.query(PaymentOrder)
-            .filter(PaymentOrder.id == order.id)
-            .with_for_update()
-            .one_or_none()
-        )
+        locked_order = cls._get_locked_order(db, order_id=order.id)
         if locked_order is None:
             raise ValueError("payment order not found")
         if locked_order.status == "credited":
@@ -262,6 +378,7 @@ class PaymentService:
             raise ValueError(f"only pending order can be expired: {locked_order.status}")
 
         locked_order.status = "expired"
+        cls._clear_status_check_schedule(locked_order)
         payload = dict(locked_order.gateway_response or {})
         if reason:
             payload["expire_reason"] = reason
@@ -318,24 +435,15 @@ class PaymentService:
         pay_currency: str | None = None,
         exchange_rate: Decimal | float | int | str | None = None,
     ) -> tuple[PaymentOrder, bool]:
-        locked_order = (
-            db.query(PaymentOrder)
-            .filter(PaymentOrder.id == order.id)
-            .with_for_update()
-            .one_or_none()
-        )
+        locked_order = cls._get_locked_order(db, order_id=order.id)
         if locked_order is None:
             raise ValueError("payment order not found")
 
         if locked_order.status == "credited":
             return locked_order, False
-        if locked_order.status in {"failed", "expired", "refunded"}:
+        if locked_order.status in {"failed", "refunded"}:
             raise ValueError(f"payment order is not creditable: {locked_order.status}")
-
         now = datetime.now(timezone.utc)
-        if locked_order.expires_at is not None and locked_order.expires_at < now:
-            locked_order.status = "expired"
-            raise ValueError("payment order expired")
 
         wallet = db.query(Wallet).filter(Wallet.id == locked_order.wallet_id).first()
         if wallet is None:
@@ -346,7 +454,10 @@ class PaymentService:
         if gateway_order_id:
             locked_order.gateway_order_id = gateway_order_id
         if gateway_response is not None:
-            locked_order.gateway_response = gateway_response
+            locked_order.gateway_response = cls._merge_gateway_response(
+                locked_order.gateway_response if isinstance(locked_order.gateway_response, dict) else None,
+                gateway_response,
+            )
         if pay_amount is not None:
             locked_order.pay_amount = to_money_decimal(pay_amount)
         if pay_currency is not None:
@@ -357,6 +468,7 @@ class PaymentService:
         locked_order.status = "paid"
         locked_order.paid_at = locked_order.paid_at or now
         locked_order.refundable_amount_usd = to_money_decimal(locked_order.amount_usd)
+        cls._clear_status_check_schedule(locked_order)
 
         WalletService.create_wallet_transaction(
             db,
@@ -373,6 +485,288 @@ class PaymentService:
         locked_order.status = "credited"
         locked_order.credited_at = now
         return locked_order, True
+
+    @classmethod
+    def sync_order_status(
+        cls,
+        db: Session,
+        *,
+        order: PaymentOrder,
+        query_response: dict[str, Any],
+        checked_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        checked_at = checked_at or datetime.now(timezone.utc)
+        locked_order = cls._get_locked_order(db, order_id=order.id)
+        if locked_order is None:
+            raise ValueError("payment order not found")
+        gateway = get_payment_gateway(locked_order.payment_method)
+        if not gateway.capabilities.supports_active_query:
+            raise ValueError(
+                f"payment method does not support active status query: {locked_order.payment_method}"
+            )
+
+        if locked_order.status == "credited":
+            cls._clear_status_check_schedule(locked_order)
+            return {"ok": True, "noop": True, "status": locked_order.status}
+        if locked_order.status in {"failed", "refunded"}:
+            cls._clear_status_check_schedule(locked_order)
+            return {"ok": True, "noop": True, "status": locked_order.status}
+
+        snapshot = gateway.normalize_query_response(order=locked_order, query_response=query_response)
+        trade_status = snapshot.channel_status
+
+        if snapshot.error:
+            next_check_at = cls.calculate_next_status_check_at(
+                order=locked_order,
+                now=checked_at,
+                attempts=int(locked_order.status_check_attempts or 0) + 1,
+            )
+            locked_order.gateway_response = cls._build_status_snapshot_gateway_response(
+                order=locked_order,
+                checked_at=checked_at,
+                channel_status=snapshot.channel_status,
+                gateway_order_id=snapshot.gateway_order_id,
+                query_response=snapshot.raw,
+                error=snapshot.error,
+            )
+            cls.record_status_check_result(
+                order=locked_order,
+                checked_at=checked_at,
+                result=trade_status or "query_error",
+                error=snapshot.error,
+                next_check_at=next_check_at,
+            )
+            return {
+                "ok": False,
+                "status": locked_order.status,
+                "trade_status": trade_status,
+                "error": snapshot.error,
+                "next_check_at": next_check_at,
+            }
+
+        if snapshot.order_status in {"paid", "credited"}:
+            if snapshot.pay_amount is None:
+                next_check_at = cls.calculate_next_status_check_at(
+                    order=locked_order,
+                    now=checked_at,
+                    attempts=int(locked_order.status_check_attempts or 0) + 1,
+                )
+                locked_order.gateway_response = cls._build_status_snapshot_gateway_response(
+                    order=locked_order,
+                    checked_at=checked_at,
+                    channel_status=snapshot.channel_status,
+                    gateway_order_id=snapshot.gateway_order_id,
+                    query_response=snapshot.raw,
+                    error="missing pay_amount in payment query response",
+                )
+                cls.record_status_check_result(
+                    order=locked_order,
+                    checked_at=checked_at,
+                    result=trade_status or "missing_pay_amount",
+                    error="missing pay_amount in payment query response",
+                    next_check_at=next_check_at,
+                )
+                return {
+                    "ok": False,
+                    "status": locked_order.status,
+                    "trade_status": trade_status,
+                    "error": "missing pay_amount in payment query response",
+                    "next_check_at": next_check_at,
+                }
+
+            expected_amount = cls.get_expected_pay_amount(order=locked_order)
+            actual_amount = to_money_decimal(snapshot.pay_amount)
+            if actual_amount != expected_amount:
+                next_check_at = cls.calculate_next_status_check_at(
+                    order=locked_order,
+                    now=checked_at,
+                    attempts=int(locked_order.status_check_attempts or 0) + 1,
+                )
+                locked_order.gateway_response = cls._build_status_snapshot_gateway_response(
+                    order=locked_order,
+                    checked_at=checked_at,
+                    channel_status=snapshot.channel_status,
+                    gateway_order_id=snapshot.gateway_order_id,
+                    query_response=snapshot.raw,
+                    error="payment query amount mismatch",
+                )
+                cls.record_status_check_result(
+                    order=locked_order,
+                    checked_at=checked_at,
+                    result=trade_status or "amount_mismatch",
+                    error="payment query amount mismatch",
+                    next_check_at=next_check_at,
+                )
+                return {
+                    "ok": False,
+                    "status": locked_order.status,
+                    "trade_status": trade_status,
+                    "error": "payment query amount mismatch",
+                    "next_check_at": next_check_at,
+                }
+
+            updated_order, credited = cls.credit_order(
+                db,
+                order=locked_order,
+                gateway_order_id=snapshot.gateway_order_id,
+                gateway_response=cls._build_status_snapshot_gateway_response(
+                    order=locked_order,
+                    checked_at=checked_at,
+                    channel_status=snapshot.channel_status,
+                    gateway_order_id=snapshot.gateway_order_id,
+                    query_response=snapshot.raw,
+                ),
+                pay_amount=actual_amount,
+                pay_currency=snapshot.pay_currency,
+                exchange_rate=snapshot.exchange_rate,
+            )
+            cls.record_status_check_result(
+                order=updated_order,
+                checked_at=checked_at,
+                result=trade_status or "paid",
+                error=None,
+                next_check_at=None,
+            )
+            return {
+                "ok": True,
+                "credited": credited,
+                "status": updated_order.status,
+                "trade_status": trade_status,
+            }
+
+        if snapshot.order_status == "expired":
+            locked_order.gateway_response = cls._build_status_snapshot_gateway_response(
+                order=locked_order,
+                checked_at=checked_at,
+                channel_status=snapshot.channel_status,
+                gateway_order_id=snapshot.gateway_order_id,
+                query_response=snapshot.raw,
+            )
+            locked_order.status = "expired"
+            cls.record_status_check_result(
+                order=locked_order,
+                checked_at=checked_at,
+                result=trade_status or "expired",
+                error=None,
+                next_check_at=None,
+            )
+            return {
+                "ok": True,
+                "credited": False,
+                "status": locked_order.status,
+                "trade_status": trade_status,
+            }
+
+        if snapshot.order_status == "failed":
+            updated_order = cls.fail_order(
+                db,
+                order=locked_order,
+                reason=snapshot.error or snapshot.channel_status or "gateway_reported_failed",
+            )
+            updated_order.gateway_response = cls._build_status_snapshot_gateway_response(
+                order=updated_order,
+                checked_at=checked_at,
+                channel_status=snapshot.channel_status,
+                gateway_order_id=snapshot.gateway_order_id,
+                query_response=snapshot.raw,
+                error=snapshot.error,
+            )
+            cls.record_status_check_result(
+                order=updated_order,
+                checked_at=checked_at,
+                result=trade_status or "failed",
+                error=snapshot.error,
+                next_check_at=None,
+            )
+            return {
+                "ok": True,
+                "credited": False,
+                "status": updated_order.status,
+                "trade_status": trade_status,
+            }
+
+        if locked_order.expires_at is not None and locked_order.expires_at < checked_at:
+            locked_order.status = "expired"
+            cls.record_status_check_result(
+                order=locked_order,
+                checked_at=checked_at,
+                result=trade_status or "local_expired",
+                error=None,
+                next_check_at=None,
+            )
+            return {
+                "ok": True,
+                "credited": False,
+                "status": locked_order.status,
+                "trade_status": trade_status or None,
+            }
+
+        next_check_at = cls.calculate_next_status_check_at(
+            order=locked_order,
+            now=checked_at,
+            attempts=int(locked_order.status_check_attempts or 0) + 1,
+        )
+        locked_order.gateway_response = cls._build_status_snapshot_gateway_response(
+            order=locked_order,
+            checked_at=checked_at,
+            channel_status=snapshot.channel_status,
+            gateway_order_id=snapshot.gateway_order_id,
+            query_response=snapshot.raw,
+        )
+        cls.record_status_check_result(
+            order=locked_order,
+            checked_at=checked_at,
+            result=trade_status or "unknown",
+            error=None,
+            next_check_at=next_check_at,
+        )
+        return {
+            "ok": True,
+            "credited": False,
+            "status": locked_order.status,
+            "trade_status": trade_status or None,
+            "next_check_at": next_check_at,
+        }
+
+    @classmethod
+    def sync_alipay_order_status(
+        cls,
+        db: Session,
+        *,
+        order: PaymentOrder,
+        query_response: dict[str, Any],
+        checked_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        return cls.sync_order_status(
+            db,
+            order=order,
+            query_response=query_response,
+            checked_at=checked_at,
+        )
+
+    @classmethod
+    def query_and_sync_order_status(
+        cls,
+        db: Session,
+        *,
+        order: PaymentOrder,
+        checked_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        gateway = get_payment_gateway(order.payment_method)
+        if not gateway.capabilities.supports_active_query:
+            raise ValueError(
+                f"payment method does not support active status query: {order.payment_method}"
+            )
+        query_response = gateway.query_order_status(
+            order_no=order.order_no,
+            gateway_order_id=order.gateway_order_id,
+        )
+        return cls.sync_order_status(
+            db,
+            order=order,
+            query_response=query_response,
+            checked_at=checked_at,
+        )
 
     @classmethod
     def handle_callback(
@@ -392,6 +786,21 @@ class PaymentService:
         exchange_rate: Decimal | float | int | str | None = None,
     ) -> dict[str, Any]:
         gateway = get_payment_gateway(payment_method)
+        parsed = gateway.parse_callback_payload(payload=payload)
+        resolved_callback_key = callback_key or parsed.callback_key
+        resolved_order_no = order_no or parsed.order_no
+        resolved_gateway_order_id = gateway_order_id or parsed.gateway_order_id
+        resolved_order_status = parsed.order_status or "paid"
+        resolved_pay_amount = (
+            pay_amount
+            if pay_amount is not None
+            else amount_usd
+            if amount_usd is not None
+            else parsed.pay_amount
+        )
+        resolved_pay_currency = pay_currency or parsed.pay_currency
+        resolved_exchange_rate = exchange_rate if exchange_rate is not None else parsed.exchange_rate
+
         verified = gateway.verify_callback_payload(
             payload=payload,
             callback_signature=callback_signature,
@@ -400,13 +809,13 @@ class PaymentService:
         callback, created = cls.log_callback(
             db,
             payment_method=payment_method,
-            callback_key=callback_key,
-            order_no=order_no,
-            gateway_order_id=gateway_order_id,
+            callback_key=resolved_callback_key,
+            order_no=resolved_order_no,
+            gateway_order_id=resolved_gateway_order_id,
             payload=payload,
             signature_valid=verified,
         )
-        if not created and callback.status == "processed":
+        if not created and callback.status in {"processed", "ignored"}:
             return {
                 "ok": True,
                 "duplicate": True,
@@ -421,8 +830,8 @@ class PaymentService:
 
         order = cls.get_order(
             db,
-            order_no=order_no or callback.order_no,
-            gateway_order_id=gateway_order_id or callback.gateway_order_id,
+            order_no=resolved_order_no or callback.order_no,
+            gateway_order_id=resolved_gateway_order_id or callback.gateway_order_id,
         )
         if order is None:
             callback.status = "failed"
@@ -432,16 +841,49 @@ class PaymentService:
 
         callback.payment_order_id = order.id
         callback.order_no = order.order_no
-        callback.gateway_order_id = gateway_order_id or order.gateway_order_id
+        callback.gateway_order_id = resolved_gateway_order_id or order.gateway_order_id
 
-        if amount_usd is None:
+        if resolved_order_status == "expired":
+            updated_order, _changed = cls.expire_order(
+                db,
+                order=order,
+                reason="gateway_callback_expired",
+            )
+            callback.status = "processed"
+            callback.error_message = None
+            callback.processed_at = datetime.now(timezone.utc)
+            return {
+                "ok": True,
+                "duplicate": not created,
+                "credited": False,
+                "order_id": updated_order.id,
+                "order_no": updated_order.order_no,
+                "status": updated_order.status,
+                "wallet_id": updated_order.wallet_id,
+            }
+
+        if resolved_order_status not in {"paid", "credited"}:
+            callback.status = "ignored"
+            callback.error_message = None
+            callback.processed_at = datetime.now(timezone.utc)
+            return {
+                "ok": True,
+                "duplicate": not created,
+                "credited": False,
+                "order_id": order.id,
+                "order_no": order.order_no,
+                "status": order.status,
+                "wallet_id": order.wallet_id,
+            }
+
+        if resolved_pay_amount is None:
             callback.status = "failed"
             callback.error_message = "callback amount is required"
             callback.processed_at = datetime.now(timezone.utc)
             return {"ok": False, "duplicate": not created, "error": callback.error_message}
 
-        expected = to_money_decimal(order.amount_usd)
-        actual = to_money_decimal(amount_usd)
+        expected = cls.get_expected_pay_amount(order=order)
+        actual = to_money_decimal(resolved_pay_amount)
         if actual != expected:
             callback.status = "failed"
             callback.error_message = "callback amount mismatch"
@@ -452,11 +894,11 @@ class PaymentService:
             updated_order, credited = cls.credit_order(
                 db,
                 order=order,
-                gateway_order_id=gateway_order_id,
+                gateway_order_id=resolved_gateway_order_id,
                 gateway_response=payload,
-                pay_amount=pay_amount,
-                pay_currency=pay_currency,
-                exchange_rate=exchange_rate,
+                pay_amount=resolved_pay_amount,
+                pay_currency=resolved_pay_currency,
+                exchange_rate=resolved_exchange_rate,
             )
         except ValueError as exc:
             callback.status = "failed"

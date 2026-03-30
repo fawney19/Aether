@@ -17,7 +17,17 @@ export function formatWalletCurrency(
   return `$${amount.toFixed(decimals)}`
 }
 
-export function walletStatusBadge(status: string | null | undefined): string {
+export function formatPaymentCurrency(
+  value: number | null | undefined,
+  options?: { decimals?: number }
+): string {
+  const decimals = options?.decimals ?? 2
+  const amount = Number(value ?? 0)
+  return `CNY ${amount.toFixed(decimals)}`
+}
+export type BadgeVariant = 'success' | 'warning' | 'default' | 'secondary' | 'destructive' | 'outline' | 'dark' | undefined;
+
+export function walletStatusBadge(status: string | null | undefined): BadgeVariant {
   if (status === 'active') return 'success'
   if (status === 'suspended') return 'warning'
   if (status === 'closed') return 'destructive'
@@ -109,7 +119,7 @@ export function walletLinkTypeLabel(type: string | null | undefined): string {
   return labels[type] || '其他'
 }
 
-export function paymentStatusBadge(status: string | null | undefined): string {
+export function paymentStatusBadge(status: string | null | undefined): BadgeVariant {
   if (status === 'credited' || status === 'refunded') return 'success'
   if (status === 'paid' || status === 'refunding') return 'outline'
   if (status === 'pending') return 'secondary'
@@ -140,7 +150,7 @@ export function refundStatusLabel(status: string | null | undefined): string {
   return labels[status] || status
 }
 
-export function refundStatusBadge(status: string | null | undefined): string {
+export function refundStatusBadge(status: string | null | undefined): BadgeVariant {
   if (status === 'succeeded') return 'success'
   if (status === 'processing') return 'outline'
   if (status === 'pending_approval' || status === 'approved') return 'secondary'
@@ -160,7 +170,7 @@ export function callbackStatusLabel(status: string | null | undefined): string {
   return labels[status] || status
 }
 
-export function callbackStatusBadge(status: string | null | undefined): string {
+export function callbackStatusBadge(status: string | null | undefined): BadgeVariant {
   if (status === 'processed') return 'success'
   if (status === 'duplicate' || status === 'ignored') return 'secondary'
   if (status === 'invalid_signature' || status === 'error') return 'destructive'

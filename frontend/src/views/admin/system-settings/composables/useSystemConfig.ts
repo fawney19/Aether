@@ -41,6 +41,14 @@ export interface SystemConfig {
   enable_provider_checkin: boolean
   provider_checkin_time: string
   enable_oauth_token_refresh: boolean
+  // 充值配置
+  wallet_recharge_enabled: boolean
+  wallet_recharge_alipay_enabled: boolean
+  wallet_recharge_wechat_enabled: boolean
+  wallet_recharge_min_amount: number
+  wallet_recharge_max_amount: number
+  wallet_recharge_expire_minutes: number
+  wallet_recharge_credit_ratio: number
 }
 
 const CONFIG_KEYS = [
@@ -80,6 +88,14 @@ const CONFIG_KEYS = [
   'enable_provider_checkin',
   'provider_checkin_time',
   'enable_oauth_token_refresh',
+  // 充值配置
+  'wallet_recharge_enabled',
+  'wallet_recharge_alipay_enabled',
+  'wallet_recharge_wechat_enabled',
+  'wallet_recharge_min_amount',
+  'wallet_recharge_max_amount',
+  'wallet_recharge_expire_minutes',
+  'wallet_recharge_credit_ratio',
 ]
 
 function createDefaultConfig(): SystemConfig {
@@ -120,6 +136,35 @@ function createDefaultConfig(): SystemConfig {
     enable_provider_checkin: true,
     provider_checkin_time: '01:05',
     enable_oauth_token_refresh: true,
+    // 充值配置
+    wallet_recharge_enabled: true,
+    wallet_recharge_alipay_enabled: true,
+    wallet_recharge_wechat_enabled: false,
+    wallet_recharge_min_amount: 0.01,
+    wallet_recharge_max_amount: 1000,
+    wallet_recharge_expire_minutes: 15,
+    wallet_recharge_credit_ratio: 1,
+  }
+}
+
+function normalizeRechargeConfig(config: Pick<
+  SystemConfig,
+  | 'wallet_recharge_enabled'
+  | 'wallet_recharge_alipay_enabled'
+  | 'wallet_recharge_wechat_enabled'
+  | 'wallet_recharge_min_amount'
+  | 'wallet_recharge_max_amount'
+  | 'wallet_recharge_expire_minutes'
+  | 'wallet_recharge_credit_ratio'
+>) {
+  return {
+    wallet_recharge_enabled: Boolean(config.wallet_recharge_enabled),
+    wallet_recharge_alipay_enabled: Boolean(config.wallet_recharge_alipay_enabled),
+    wallet_recharge_wechat_enabled: Boolean(config.wallet_recharge_wechat_enabled),
+    wallet_recharge_min_amount: Number(config.wallet_recharge_min_amount),
+    wallet_recharge_max_amount: Number(config.wallet_recharge_max_amount),
+    wallet_recharge_expire_minutes: Number(config.wallet_recharge_expire_minutes),
+    wallet_recharge_credit_ratio: Number(config.wallet_recharge_credit_ratio),
   }
 }
 
@@ -150,6 +195,7 @@ export function useSystemConfig() {
   const monitoringConfigLoading = ref(false)
   const logConfigLoading = ref(false)
   const cleanupConfigLoading = ref(false)
+  const rechargeConfigLoading = ref(false)
 
   // 变动检测
   const hasSiteInfoChanges = computed(() => {
@@ -213,6 +259,12 @@ export function useSystemConfig() {
       systemConfig.value.request_candidates_cleanup_batch_size !==
       originalConfig.value.request_candidates_cleanup_batch_size
     )
+  })
+
+  const hasRechargeConfigChanges = computed(() => {
+    if (!originalConfig.value) return false
+    return JSON.stringify(normalizeRechargeConfig(systemConfig.value)) !==
+      JSON.stringify(normalizeRechargeConfig(originalConfig.value))
   })
 
   // KB 和字节之间的转换
@@ -550,6 +602,78 @@ export function useSystemConfig() {
     }
   }
 
+  async function saveRechargeConfig() {
+    rechargeConfigLoading.value = true
+    try {
+      const configItems = [
+        {
+          key: 'wallet_recharge_enabled',
+          value: systemConfig.value.wallet_recharge_enabled,
+          description: '是否开启前台钱包充值入口',
+        },
+        {
+          key: 'wallet_recharge_alipay_enabled',
+          value: systemConfig.value.wallet_recharge_alipay_enabled,
+          description: '是否开启支付宝充值通道',
+        },
+        {
+          key: 'wallet_recharge_wechat_enabled',
+          value: systemConfig.value.wallet_recharge_wechat_enabled,
+          description: '是否开启微信充值通道',
+        },
+        {
+          key: 'wallet_recharge_min_amount',
+          value: systemConfig.value.wallet_recharge_min_amount,
+          description: '单笔最小充值金额（CNY）',
+        },
+        {
+          key: 'wallet_recharge_max_amount',
+          value: systemConfig.value.wallet_recharge_max_amount,
+          description: '单笔最大充值金额（CNY）',
+        },
+        {
+          key: 'wallet_recharge_expire_minutes',
+          value: systemConfig.value.wallet_recharge_expire_minutes,
+          description: '充值订单过期时间（分钟）',
+        },
+        {
+          key: 'wallet_recharge_credit_ratio',
+          value: systemConfig.value.wallet_recharge_credit_ratio,
+          description: '充值到账比例',
+        },
+      ]
+
+      await Promise.all(
+        configItems.map((item) =>
+          adminApi.updateSystemConfig(item.key, item.value, item.description)
+        )
+      )
+
+      if (originalConfig.value) {
+        originalConfig.value.wallet_recharge_enabled = systemConfig.value.wallet_recharge_enabled
+        originalConfig.value.wallet_recharge_alipay_enabled =
+          systemConfig.value.wallet_recharge_alipay_enabled
+        originalConfig.value.wallet_recharge_wechat_enabled =
+          systemConfig.value.wallet_recharge_wechat_enabled
+        originalConfig.value.wallet_recharge_min_amount =
+          systemConfig.value.wallet_recharge_min_amount
+        originalConfig.value.wallet_recharge_max_amount =
+          systemConfig.value.wallet_recharge_max_amount
+        originalConfig.value.wallet_recharge_expire_minutes =
+          systemConfig.value.wallet_recharge_expire_minutes
+        originalConfig.value.wallet_recharge_credit_ratio =
+          systemConfig.value.wallet_recharge_credit_ratio
+      }
+
+      success('充值配置已保存')
+    } catch (err) {
+      error('保存充值配置失败')
+      log.error('保存充值配置失败:', err)
+    } finally {
+      rechargeConfigLoading.value = false
+    }
+  }
+
   async function handleAutoCleanupToggle(enabled: boolean) {
     const previousValue = systemConfig.value.enable_auto_cleanup
     systemConfig.value.enable_auto_cleanup = enabled
@@ -578,6 +702,7 @@ export function useSystemConfig() {
     monitoringConfigLoading,
     logConfigLoading,
     cleanupConfigLoading,
+    rechargeConfigLoading,
     // 变动检测
     hasSiteInfoChanges,
     hasProxyConfigChanges,
@@ -585,6 +710,7 @@ export function useSystemConfig() {
     hasMonitoringConfigChanges,
     hasLogConfigChanges,
     hasCleanupConfigChanges,
+    hasRechargeConfigChanges,
     // 计算属性
     maxRequestBodySizeKB,
     maxResponseBodySizeKB,
@@ -601,6 +727,7 @@ export function useSystemConfig() {
     saveMonitoringConfig,
     saveLogConfig,
     saveCleanupConfig,
+    saveRechargeConfig,
     handleAutoCleanupToggle,
   }
 }

@@ -675,7 +675,7 @@ class Wallet(Base):
     gift_balance = Column(Numeric(20, 8), nullable=False, default=0)
     # finite: 按余额校验；unlimited: 忽略余额放行，但仍统计消费
     limit_mode = Column(String(20), nullable=False, default="finite")
-    currency = Column(String(3), nullable=False, default="USD")
+    currency = Column(String(3), nullable=False, default="CNY")
     status = Column(String(20), nullable=False, default="active")
 
     total_recharged = Column(Numeric(20, 8), nullable=False, default=0)
@@ -809,6 +809,12 @@ class PaymentOrder(Base):
         Index("idx_payment_orders_user_created", "user_id", "created_at"),
         Index("idx_payment_orders_status", "status"),
         Index("idx_payment_orders_gateway_order_id", "gateway_order_id"),
+        Index(
+            "idx_payment_orders_status_check_due",
+            "payment_method",
+            "status",
+            "next_status_check_at",
+        ),
     )
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -828,6 +834,11 @@ class PaymentOrder(Base):
     gateway_response = Column(JSONB, nullable=True)
 
     status = Column(String(20), nullable=False, default="pending")
+    status_check_attempts = Column(Integer, nullable=False, default=0)
+    last_status_check_at = Column(DateTime(timezone=True), nullable=True)
+    next_status_check_at = Column(DateTime(timezone=True), nullable=True)
+    last_status_check_result = Column(String(64), nullable=True)
+    last_status_check_error = Column(Text, nullable=True)
     created_at = Column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )

@@ -57,9 +57,10 @@
       </div>
 
       <!-- TODO(wallet): 充值/退款用户主动操作入口暂未启用，待支付链路联调完成后再开放 -->
+      <!-- 支付开发测试进行中 -->
       <div
-        v-if="ENABLE_WALLET_ACTION_FORMS"
-        class="grid grid-cols-1 xl:grid-cols-2 gap-4"
+        v-if="showRechargeCard"
+        class="grid grid-cols-1 gap-4"
       >
         <Card class="p-5 space-y-4">
           <div class="flex items-center justify-between">
@@ -74,14 +75,17 @@
 
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div class="space-y-1.5">
-              <Label>充值金额 (USD)</Label>
+              <Label>充值金额 (CNY)</Label>
               <Input
                 v-model.number="rechargeForm.amount_usd"
                 type="number"
-                min="0.01"
+                :min="rechargeSettings?.min_amount || 0.01"
                 step="0.01"
                 placeholder="10"
               />
+              <p class="text-xs text-muted-foreground">
+                单笔范围 {{ formatPaymentCurrency(rechargeSettings?.min_amount) }} - {{ formatPaymentCurrency(rechargeSettings?.max_amount) }}
+              </p>
             </div>
 
             <div class="space-y-1.5">
@@ -91,14 +95,18 @@
                   <SelectValue placeholder="选择支付方式" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="alipay">
-                    支付宝
-                  </SelectItem>
-                  <SelectItem value="wechat">
-                    微信支付
+                  <SelectItem
+                    v-for="method in availableRechargeMethods"
+                    :key="method"
+                    :value="method"
+                  >
+                    {{ paymentMethodLabel(method) }}
                   </SelectItem>
                 </SelectContent>
               </Select>
+              <p class="text-xs text-muted-foreground">
+                当前比例 1 CNY = {{ rechargeSettings?.credit_ratio || 1 }} $余额，订单 {{ rechargeSettings?.expire_minutes || 15 }} 分钟过期
+              </p>
             </div>
           </div>
 
@@ -118,6 +126,10 @@
               最新订单: <span class="font-medium text-foreground">{{ latestRecharge.order.order_no }}</span>
             </div>
             <div class="text-xs text-muted-foreground">
+              实付金额: <span class="font-medium text-foreground">{{ formatPaymentCurrency(latestRecharge.order.pay_amount ?? latestRecharge.order.amount_usd) }}</span>
+              · 到账金额: <span class="font-medium text-foreground">{{ formatCurrency(latestRecharge.order.amount_usd) }}</span>
+            </div>
+            <div class="text-xs text-muted-foreground">
               状态:
               <Badge
                 :variant="paymentStatusBadge(latestRecharge.order.status)"
@@ -132,6 +144,7 @@
               :href="String(latestRecharge.payment_instructions.payment_url)"
               target="_blank"
               rel="noopener noreferrer"
+              @click.prevent="openPaymentWindow(String(latestRecharge.payment_instructions.payment_url))"
             >
               打开支付链接
             </a>
@@ -143,8 +156,8 @@
             </div>
           </div>
         </Card>
-
-        <Card class="p-5 space-y-4">
+        <!-- TODO: 暂时屏蔽退款入口 -->
+        <Card v-if="false" class="p-5 space-y-4">
           <div class="flex items-center justify-between">
             <h3 class="text-base font-semibold">
               申请退款
@@ -157,7 +170,7 @@
 
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div class="space-y-1.5">
-              <Label>退款金额 (USD)</Label>
+              <Label>退款金额 (CNY)</Label>
               <Input
                 v-model.number="refundForm.amount_usd"
                 type="number"
@@ -405,11 +418,12 @@
                   <TableHeader>
                     <TableRow>
                       <TableHead>订单号</TableHead>
-                      <TableHead>金额</TableHead>
+                      <TableHead>到账金额</TableHead>
                       <TableHead>支付方式</TableHead>
                       <TableHead>状态</TableHead>
                       <TableHead>可退金额</TableHead>
                       <TableHead>创建时间</TableHead>
+                      <TableHead class="text-right">操作</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -421,7 +435,13 @@
                         {{ order.order_no }}
                       </TableCell>
                       <TableCell class="tabular-nums">
-                        {{ formatCurrency(order.amount_usd) }}
+                        <div>{{ formatCurrency(order.amount_usd) }}</div>
+                        <div
+                          v-if="order.pay_amount !== null && order.pay_amount !== undefined"
+                          class="text-[11px] text-muted-foreground"
+                        >
+                          实付 {{ formatPaymentCurrency(order.pay_amount) }}
+                        </div>
                       </TableCell>
                       <TableCell>{{ paymentMethodLabel(order.payment_method) }}</TableCell>
                       <TableCell>
@@ -435,10 +455,28 @@
                       <TableCell class="text-xs text-muted-foreground">
                         {{ formatDateTime(order.created_at) }}
                       </TableCell>
+                      <TableCell class="text-right">
+                        <Button
+                          v-if="canContinuePayment(order)"
+                          variant="default"
+                          size="default"
+                          class="h-9 px-4 text-xs"
+                          :disabled="continuingPayOrderId === order.id"
+                          @click="continuePayOrder(order)"
+                        >
+                          {{ continuingPayOrderId === order.id ? '打开中...' : '继续支付' }}
+                        </Button>
+                        <span
+                          v-else
+                          class="text-xs text-muted-foreground"
+                        >
+                          -
+                        </span>
+                      </TableCell>
                     </TableRow>
                     <TableRow v-if="!loadingOrders && rechargeOrders.length === 0">
                       <TableCell
-                        colspan="6"
+                        colspan="7"
                         class="py-10"
                       >
                         <EmptyState
@@ -539,6 +577,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import {
   Badge,
   Button,
@@ -572,12 +611,14 @@ import {
   type PaymentOrder,
   type RefundRequest,
   type WalletBalanceResponse,
+  type WalletRechargeSettingsResponse,
 } from '@/api/wallet'
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
 import {
   dailyUsageCategoryLabel,
+  formatPaymentCurrency,
   formatTokenCount,
   formatWalletCurrency as formatCurrency,
   paymentMethodLabel,
@@ -592,10 +633,10 @@ import {
   walletTransactionReasonLabel,
 } from '@/utils/walletDisplay'
 
-const { success, error: showError } = useToast()
+const route = useRoute()
+const router = useRouter()
 
-// TODO(wallet): 充值和退款前台入口尚未正式启用；联调完成后改为 true 即可恢复显示。
-const ENABLE_WALLET_ACTION_FORMS = false
+const { success, error: showError, info } = useToast()
 
 const loadingInitial = ref(true)
 const loadingTransactions = ref(false)
@@ -603,8 +644,10 @@ const loadingOrders = ref(false)
 const loadingRefunds = ref(false)
 const submittingRecharge = ref(false)
 const submittingRefund = ref(false)
+const continuingPayOrderId = ref<string | null>(null)
 
 const walletBalance = ref<WalletBalanceResponse | null>(null)
+const rechargeSettings = ref<WalletRechargeSettingsResponse | null>(null)
 const latestRecharge = ref<{ order: PaymentOrder; payment_instructions: Record<string, unknown> } | null>(null)
 
 const flowItems = ref<FlowItem[]>([])
@@ -642,16 +685,48 @@ const refundableOrders = computed(() =>
   rechargeOrders.value.filter(o => (o.refundable_amount_usd || 0) > 0)
 )
 
+const availableRechargeMethods = computed(() => rechargeSettings.value?.enabled_payment_methods || [])
+const showRechargeCard = computed(() => {
+  const settings = rechargeSettings.value
+  return Boolean(settings?.recharge_enabled && settings.enabled_payment_methods.length > 0)
+})
+
+const PAYMENT_RETURN_QUERY_KEYS = new Set([
+  'charset',
+  'out_trade_no',
+  'trade_no',
+  'transaction_id',
+  'merchant_trade_no',
+  'total_amount',
+  'cash_fee',
+  'payment_status',
+  'result',
+  'return_code',
+  'return_msg',
+  'sign',
+  'auth_app_id',
+  'appid',
+  'version',
+  'app_id',
+  'sign_type',
+  'seller_id',
+  'timestamp',
+  'nonce_str',
+  'method',
+])
+
 onMounted(async () => {
   document.addEventListener('visibilitychange', handleVisibilityChange)
   try {
     await Promise.all([
+      loadRechargeSettings(),
       loadBalance(),
       loadTransactions(),
       loadTodayCost(),
       loadOrders(),
       loadRefunds(),
     ])
+    await handlePaymentGatewayReturn()
     syncTodayCostPolling()
   } finally {
     loadingInitial.value = false
@@ -669,6 +744,19 @@ watch(activeTab, () => {
 
 async function loadBalance() {
   walletBalance.value = await walletApi.getBalance()
+}
+
+async function loadRechargeSettings() {
+  try {
+    rechargeSettings.value = await walletApi.getRechargeSettings()
+    const methods = rechargeSettings.value.enabled_payment_methods
+    if (!methods.includes(rechargeForm.payment_method)) {
+      rechargeForm.payment_method = methods[0] || ''
+    }
+  } catch (error) {
+    log.error('加载充值配置失败:', error)
+    rechargeSettings.value = null
+  }
 }
 
 async function loadTransactions() {
@@ -720,6 +808,90 @@ function handleVisibilityChange() {
   syncTodayCostPolling()
 }
 
+function getSingleQueryValue(value: unknown): string | null {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value) && typeof value[0] === 'string') return value[0]
+  return null
+}
+
+function hasPaymentGatewayReturnQuery(): boolean {
+  const orderNo = getSingleQueryValue(route.query.out_trade_no)
+  const tradeNo = getSingleQueryValue(route.query.trade_no)
+  const transactionId = getSingleQueryValue(route.query.transaction_id)
+  const result = getSingleQueryValue(route.query.result)
+  const returnCode = getSingleQueryValue(route.query.return_code)
+  const paymentStatus = getSingleQueryValue(route.query.payment_status)
+  const method = getSingleQueryValue(route.query.method)
+
+  return Boolean(
+    (orderNo && (tradeNo || transactionId))
+      || result
+      || returnCode
+      || paymentStatus
+      || method,
+  )
+}
+
+async function clearPaymentGatewayReturnQuery() {
+  const nextQuery: Record<string, string | string[]> = {}
+  let removed = false
+
+  for (const [key, value] of Object.entries(route.query)) {
+    if (PAYMENT_RETURN_QUERY_KEYS.has(key)) {
+      removed = true
+      continue
+    }
+    if (typeof value === 'string') {
+      nextQuery[key] = value
+      continue
+    }
+    if (Array.isArray(value)) {
+      nextQuery[key] = value.filter((item): item is string => typeof item === 'string')
+    }
+  }
+
+  if (!removed) return
+
+  await router.replace({
+    path: route.path,
+    query: nextQuery,
+    hash: route.hash,
+  })
+}
+
+async function handlePaymentGatewayReturn() {
+  if (!hasPaymentGatewayReturnQuery()) return
+
+  const orderNo = getSingleQueryValue(route.query.out_trade_no)
+  activeTab.value = 'orders'
+  info('已收到支付回跳，正在确认订单状态...')
+
+  try {
+    await Promise.all([loadOrders(), loadBalance()])
+
+    const matchedOrder = orderNo
+      ? rechargeOrders.value.find(order => order.order_no === orderNo) ?? null
+      : null
+
+    if (matchedOrder) {
+      latestRecharge.value = {
+        order: matchedOrder,
+        payment_instructions: matchedOrder.gateway_response ?? {},
+      }
+
+      if (matchedOrder.status === 'credited' || matchedOrder.status === 'paid') {
+        success(`订单 ${matchedOrder.order_no} 已更新为${paymentStatusLabel(matchedOrder.status)}`)
+      } else {
+        info(`订单 ${matchedOrder.order_no} 当前状态：${paymentStatusLabel(matchedOrder.status)}`)
+      }
+    }
+  } catch (error) {
+    log.error('处理支付回跳失败:', error)
+  } finally {
+    await clearPaymentGatewayReturnQuery()
+  }
+}
+
 async function loadOrders() {
   loadingOrders.value = true
   try {
@@ -751,9 +923,31 @@ async function loadRefunds() {
 }
 
 async function submitRecharge() {
+  if (!showRechargeCard.value) {
+    showError('充值功能暂未开放')
+    return
+  }
   if (!rechargeForm.amount_usd || rechargeForm.amount_usd <= 0) {
     showError('请输入有效的充值金额')
     return
+  }
+  if (!rechargeForm.payment_method) {
+    showError('请选择支付方式')
+    return
+  }
+  if (rechargeSettings.value) {
+    if (rechargeForm.amount_usd < rechargeSettings.value.min_amount) {
+      showError(`单笔充值金额不能低于 ${formatPaymentCurrency(rechargeSettings.value.min_amount)}`)
+      return
+    }
+    if (rechargeForm.amount_usd > rechargeSettings.value.max_amount) {
+      showError(`单笔充值金额不能高于 ${formatPaymentCurrency(rechargeSettings.value.max_amount)}`)
+      return
+    }
+    if (!rechargeSettings.value.enabled_payment_methods.includes(rechargeForm.payment_method)) {
+      showError('当前支付方式暂未开放')
+      return
+    }
   }
 
   submittingRecharge.value = true
@@ -765,11 +959,49 @@ async function submitRecharge() {
     success('充值订单创建成功')
     await Promise.all([loadOrders(), loadBalance()])
     activeTab.value = 'orders'
+    
+    // 自动跳转到支付页面
+    if (latestRecharge.value?.payment_instructions?.payment_url) {
+      success('正在为您跳转到支付页面...')
+      openPaymentWindow(String(latestRecharge.value.payment_instructions.payment_url))
+    }
   } catch (error) {
     log.error('创建充值订单失败:', error)
     showError(parseApiError(error, '创建充值订单失败'))
   } finally {
     submittingRecharge.value = false
+  }
+}
+
+function openPaymentWindow(url: string) {
+  window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+function canContinuePayment(order: PaymentOrder) {
+  return order.status === 'pending'
+}
+
+async function continuePayOrder(order: PaymentOrder) {
+  continuingPayOrderId.value = order.id
+  try {
+    const resp = await walletApi.getRechargeOrder(order.id)
+    const paymentUrl = resp.order.gateway_response?.payment_url
+
+    if (!paymentUrl || typeof paymentUrl !== 'string') {
+      showError('当前订单暂无可用支付链接，请重新创建订单')
+      return
+    }
+
+    latestRecharge.value = {
+      order: resp.order,
+      payment_instructions: resp.order.gateway_response ?? {},
+    }
+    openPaymentWindow(paymentUrl)
+  } catch (error) {
+    log.error('继续支付失败:', error)
+    showError(parseApiError(error, '继续支付失败'))
+  } finally {
+    continuingPayOrderId.value = null
   }
 }
 
@@ -813,7 +1045,7 @@ async function submitRefund() {
 
 function buildRefundIdempotencyKey(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID().replaceAll('-', '')
+    return crypto.randomUUID().replace(/-/g, '')
   }
   return `${Date.now()}_${Math.random().toString(16).slice(2, 10)}`
 }

@@ -136,7 +136,7 @@
                   <Label
                     for="wallet-action-amount"
                     class="text-sm font-medium"
-                  >金额 (USD)</Label>
+                  >金额 (CNY)</Label>
                   <Input
                     id="wallet-action-amount"
                     :model-value="actionAmount ?? ''"
