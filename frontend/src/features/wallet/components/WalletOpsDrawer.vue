@@ -60,7 +60,7 @@
                     class="mt-1 text-lg font-semibold"
                     :class="localWallet.balance < 0 ? 'text-rose-600' : 'text-foreground'"
                   >
-                    ${{ formatFixed(localWallet.balance, 2) }}
+                    ¥{{ formatFixed(localWallet.balance, 2) }}
                   </div>
                 </div>
                 <div class="rounded-xl bg-background/80 p-3">
@@ -68,7 +68,7 @@
                     充值余额
                   </div>
                   <div class="mt-1 text-lg font-semibold text-foreground">
-                    ${{ formatFixed(localWallet.recharge_balance, 2) }}
+                    ¥{{ formatFixed(localWallet.recharge_balance, 2) }}
                   </div>
                 </div>
                 <div class="rounded-xl bg-background/80 p-3">
@@ -76,7 +76,7 @@
                     赠款余额
                   </div>
                   <div class="mt-1 text-lg font-semibold text-foreground">
-                    {{ isApiKeyWallet ? '不支持' : `$${formatFixed(localWallet.gift_balance, 2)}` }}
+                    {{ isApiKeyWallet ? '不支持' : `$¥{formatFixed(localWallet.gift_balance, 2)}` }}
                   </div>
                 </div>
                 <div class="rounded-xl bg-background/80 p-3">
@@ -84,7 +84,7 @@
                     累计消费
                   </div>
                   <div class="mt-1 text-lg font-semibold text-foreground">
-                    ${{ formatFixed(localWallet.total_consumed, 2) }}
+                    ¥{{ formatFixed(localWallet.total_consumed, 2) }}
                   </div>
                 </div>
               </div>
@@ -401,7 +401,7 @@
                             {{ refund.refund_no }}
                           </TableCell>
                           <TableCell class="tabular-nums whitespace-nowrap">
-                            ${{ formatFixed(refund.amount_usd, 4) }}
+                            ¥{{ formatFixed(refund.amount_usd, 4) }}
                           </TableCell>
                           <TableCell>
                             {{ refundModeLabel(refund.refund_mode) }}
@@ -751,7 +751,7 @@ async function submitRecharge() {
   const totalAfter = totalBefore + actionAmount.value
   const confirmed = await confirm({
     title: '确认人工充值',
-    message: `将为 ${props.ownerName || '该钱包'} 充值 **$${formatFixed(actionAmount.value, 4)}**\n该账户**充值余额**将从 **$${formatFixed(rechargeBefore, 4)}** 变为 **$${formatFixed(rechargeAfter, 4)}**，**总可用余额**将从 **$${formatFixed(totalBefore, 4)}** 变为 **$${formatFixed(totalAfter, 4)}**`,
+    message: `将为 ${props.ownerName || '该钱包'} 充值 **¥${formatFixed(actionAmount.value, 4)}**\n该账户**充值余额**将从 **¥${formatFixed(rechargeBefore, 4)}** 变为 **¥${formatFixed(rechargeAfter, 4)}**，**总可用余额**将从 **¥${formatFixed(totalBefore, 4)}** 变为 **¥${formatFixed(totalAfter, 4)}**`,
     confirmText: '确认充值',
     variant: 'warning',
   })
@@ -853,11 +853,11 @@ async function submitAdjust() {
   const balanceTypeLabel = adjustBalanceType.value === 'gift' ? '赠款余额' : '充值余额'
   const isDeduct = actionAmount.value < 0
   const detailLine = isDeduct
-    ? `该账户**充值余额**将从 **$${formatFixed(rechargeBefore, 4)}** 变为 **$${formatFixed(preview.rechargeAfter, 4)}**，**赠款余额**将从 **$${formatFixed(giftBefore, 4)}** 变为 **$${formatFixed(preview.giftAfter, 4)}**`
-    : `该账户**${balanceTypeLabel}**将从 **$${formatFixed(currentBucketBalance, 4)}** 变为 **$${formatFixed(afterBalance, 4)}**`
+    ? `该账户**充值余额**将从 **¥${formatFixed(rechargeBefore, 4)}** 变为 **¥${formatFixed(preview.rechargeAfter, 4)}**，**赠款余额**将从 **¥${formatFixed(giftBefore, 4)}** 变为 **¥${formatFixed(preview.giftAfter, 4)}**`
+    : `该账户**${balanceTypeLabel}**将从 **¥${formatFixed(currentBucketBalance, 4)}** 变为 **¥${formatFixed(afterBalance, 4)}**`
   const confirmed = await confirm({
     title: '确认钱包调账',
-    message: `将对 ${props.ownerName || '该钱包'} 的**${balanceTypeLabel}**${actionAmount.value > 0 ? '增加' : '扣减'} **$${formatFixed(Math.abs(actionAmount.value), 4)}**\n${detailLine}，**总可用余额**将从 **$${formatFixed(totalBefore, 4)}** 变为 **$${formatFixed(totalAfter, 4)}**`,
+    message: `将对 ${props.ownerName || '该钱包'} 的**${balanceTypeLabel}**${actionAmount.value > 0 ? '增加' : '扣减'} **¥${formatFixed(Math.abs(actionAmount.value), 4)}**\n${detailLine}，**总可用余额**将从 **¥${formatFixed(totalBefore, 4)}** 变为 **¥${formatFixed(totalAfter, 4)}**`,
     confirmText: '确认调账',
     variant: 'warning',
   })

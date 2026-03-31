@@ -8,8 +8,10 @@ from alipay.aop.api.AlipayClientConfig import AlipayClientConfig
 from alipay.aop.api.DefaultAlipayClient import DefaultAlipayClient
 from alipay.aop.api.domain.AlipayTradeQueryModel import AlipayTradeQueryModel
 from alipay.aop.api.domain.AlipayTradePagePayModel import AlipayTradePagePayModel
+from alipay.aop.api.domain.AlipayTradeWapPayModel import AlipayTradeWapPayModel
 from alipay.aop.api.request.AlipayTradeQueryRequest import AlipayTradeQueryRequest
 from alipay.aop.api.request.AlipayTradePagePayRequest import AlipayTradePagePayRequest
+from alipay.aop.api.request.AlipayTradeWapPayRequest import AlipayTradeWapPayRequest
 from alipay.aop.api.util.SignatureUtils import verify_with_rsa
 
 from src.config.settings import config
@@ -69,34 +71,33 @@ class AlipayGateway(PaymentGateway):
         
         notify_url = f"{config.alipay_base_url}{config.alipay_notify_path}"
 
-        # alipay.trade.pay
-        model = AlipayTradePagePayModel()
-        # 商户订单号，64个字符以内，由商家自主生成
-        model.out_trade_no = getattr(order, "order_no")
-        # 订单总金额，单位：元（精确到小数点后两位）
-        model.total_amount = amount_str
-        # 订单标题，用于在支付界面显示
-        model.subject = f"充值订单 - {getattr(order, 'order_no')}"
-        # 销售产品码，与支付宝签约的产品码名称。注：目前电脑支付场景下仅支持FAST_INSTANT_TRADE_PAY
-        model.product_code = "FAST_INSTANT_TRADE_PAY"
-        # 支持前置模式和跳转模式。
-        # 前置模式是将二维码前置到商户的订单确认页的模式。需要商户在自己的页面中以 iframe 方式请求支付宝页面。具体支持的枚举值有以下几种：
-        # 0：订单码-简约前置模式，对应 iframe 宽度不能小于600px，高度不能小于300px；
-        # 1：订单码-前置模式，对应iframe 宽度不能小于 300px，高度不能小于600px；
-        # 3：订单码-迷你前置模式，对应 iframe 宽度不能小于 75px，高度不能小于75px；
-        # 4：订单码-可定义宽度的嵌入式二维码，商户可根据需要设定二维码的大小。
-        # 跳转模式下，用户的扫码界面是由支付宝生成的，不在商户的域名下。支持传入的枚举值有：
-        # 2：订单码-跳转模式
-        # model.qr_pay_mode = "0"
+        gateway_response = getattr(order, "gateway_response", {}) or {}
+        client_type = gateway_response.get("client_type", "pc")
 
-        request = AlipayTradePagePayRequest(biz_model=model)
-        # 异步通知地址
-        request.notify_url = notify_url
-        # 同步跳转地址 - 指向前端钱包页面
-        request.return_url = f"{config.alipay_base_url}{config.alipay_return_path}"
+        if client_type == "h5":
+            model = AlipayTradeWapPayModel()
+            model.out_trade_no = getattr(order, "order_no")
+            model.total_amount = amount_str
+            model.subject = f"充值订单 - {getattr(order, 'order_no')}"
+            model.product_code = "QUICK_WAP_WAY"
 
-        # Retrieve the page pay URL parameters formatted appropriately
-        payment_url = client.page_execute(request, http_method="GET")
+            request = AlipayTradeWapPayRequest(biz_model=model)
+            request.notify_url = notify_url
+            request.return_url = f"{config.alipay_base_url}{config.alipay_return_path}?client=h5"
+
+            payment_url = client.page_execute(request, http_method="GET")
+        else:
+            model = AlipayTradePagePayModel()
+            model.out_trade_no = getattr(order, "order_no")
+            model.total_amount = amount_str
+            model.subject = f"充值订单 - {getattr(order, 'order_no')}"
+            model.product_code = "FAST_INSTANT_TRADE_PAY"
+
+            request = AlipayTradePagePayRequest(biz_model=model)
+            request.notify_url = notify_url
+            request.return_url = f"{config.alipay_base_url}{config.alipay_return_path}"
+
+            payment_url = client.page_execute(request, http_method="GET")
         return CheckoutPayload(
             gateway=self.payment_method,
             display_name=self.display_name,

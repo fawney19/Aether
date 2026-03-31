@@ -260,7 +260,10 @@ class PaymentService:
         db.flush()
         checkout = gateway.create_checkout_payload(order=order)
         order.gateway_order_id = order.gateway_order_id or checkout.get("gateway_order_id")
-        order.gateway_response = gateway_response if gateway_response is not None else checkout
+        
+        merged_response = dict(gateway_response or {})
+        merged_response.update(checkout)
+        order.gateway_response = merged_response
         return order
 
     @classmethod

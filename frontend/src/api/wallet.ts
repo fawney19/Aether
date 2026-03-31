@@ -173,6 +173,7 @@ export interface WalletRechargeCreateRequest {
   pay_amount?: number
   pay_currency?: string
   exchange_rate?: number
+  client_type?: string
 }
 
 export interface WalletRefundCreateRequest {

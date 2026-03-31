@@ -104,6 +104,7 @@ def _create_recharge_order_sync(user_id: str, req: CreateRechargePayload) -> dic
                 pay_currency="CNY",
                 exchange_rate=credit_ratio,
                 expires_in_minutes=int(settings["expire_minutes"]),
+                gateway_response={"client_type": req.client_type or "pc"},
                 max_pending_orders=config.payment_max_pending_orders,
             )
         except ValueError as exc:
@@ -272,6 +273,7 @@ class CreateRechargePayload(BaseModel):
     pay_amount: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     pay_currency: str | None = Field(default=None, min_length=3, max_length=3)
     exchange_rate: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    client_type: str | None = Field(default="pc", max_length=10)
 
 
 def _default_refund_mode_for_order(order: PaymentOrder) -> str:
