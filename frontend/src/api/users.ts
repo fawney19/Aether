@@ -7,10 +7,12 @@ export interface User {
   role: 'admin' | 'user'
   is_active: boolean
   unlimited: boolean
-  allowed_providers: string[] | null  // 允许使用的提供商 ID 列表
-  allowed_api_formats: string[] | null  // 允许使用的 API 格式列表
-  allowed_models: string[] | null  // 允许使用的模型名称列表
-  rate_limit?: number | null  // null = 跟随系统默认，0 = 不限制
+  group_id?: string | null
+  group_name?: string | null
+  effective_allowed_providers?: string[] | null
+  effective_allowed_api_formats?: string[] | null
+  effective_allowed_models?: string[] | null
+  effective_rate_limit?: number | null
   created_at: string
   updated_at?: string
   last_login_at?: string | null
@@ -23,22 +25,58 @@ export interface CreateUserRequest {
   role?: 'admin' | 'user'
   initial_gift_usd?: number | null
   unlimited?: boolean
+  group_id?: string | null
+}
+
+export interface UpdateUserRequest {
+  username?: string
+  email?: string
+  is_active?: boolean
+  role?: 'admin' | 'user'
+  unlimited?: boolean
+  password?: string
+  group_id?: string | null
+}
+
+export interface UserGroup {
+  id: string
+  name: string
+  description?: string | null
+  is_default: boolean
+  allowed_providers: string[] | null
+  allowed_api_formats: string[] | null
+  allowed_models: string[] | null
+  rate_limit?: number | null
+  user_count: number
+  created_at: string
+  updated_at?: string | null
+}
+
+export interface CreateUserGroupRequest {
+  name: string
+  description?: string | null
   allowed_providers?: string[] | null
   allowed_api_formats?: string[] | null
   allowed_models?: string[] | null
   rate_limit?: number | null
 }
 
-export interface UpdateUserRequest {
-  email?: string
-  is_active?: boolean
-  role?: 'admin' | 'user'
-  unlimited?: boolean
-  password?: string
-  allowed_providers?: string[] | null
-  allowed_api_formats?: string[] | null
-  allowed_models?: string[] | null
-  rate_limit?: number | null
+export type UpdateUserGroupRequest = Partial<CreateUserGroupRequest>
+
+export interface BatchUserGroupBindingRequest {
+  action: 'bind' | 'unbind'
+  user_ids: string[]
+  group_id?: string | null
+  source_group_id?: string | null
+}
+
+export interface BatchUserGroupBindingResponse {
+  action: 'bind' | 'unbind'
+  group_id?: string | null
+  source_group_id?: string | null
+  updated_count: number
+  skipped_count: number
+  users: User[]
 }
 
 export interface ApiKey {
@@ -72,6 +110,35 @@ export const usersApi = {
 
   async getUser(userId: string): Promise<User> {
     const response = await apiClient.get<User>(`/api/admin/users/${userId}`)
+    return response.data
+  },
+
+  async getAllUserGroups(): Promise<UserGroup[]> {
+    const response = await apiClient.get<UserGroup[]>('/api/admin/users/groups')
+    return response.data
+  },
+
+  async createUserGroup(data: CreateUserGroupRequest): Promise<UserGroup> {
+    const response = await apiClient.post<UserGroup>('/api/admin/users/groups', data)
+    return response.data
+  },
+
+  async updateUserGroup(groupId: string, data: UpdateUserGroupRequest): Promise<UserGroup> {
+    const response = await apiClient.put<UserGroup>(`/api/admin/users/groups/${groupId}`, data)
+    return response.data
+  },
+
+  async deleteUserGroup(groupId: string): Promise<void> {
+    await apiClient.delete(`/api/admin/users/groups/${groupId}`)
+  },
+
+  async batchUpdateUserGroupBinding(
+    data: BatchUserGroupBindingRequest
+  ): Promise<BatchUserGroupBindingResponse> {
+    const response = await apiClient.post<BatchUserGroupBindingResponse>(
+      '/api/admin/users/groups/bindings/batch',
+      data
+    )
     return response.data
   },
 

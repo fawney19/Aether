@@ -14,6 +14,15 @@
               用户管理
             </h3>
             <div class="flex items-center gap-2">
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8"
+                title="用户分组"
+                @click="goToUserGroupsPage"
+              >
+                <UsersIcon class="w-3.5 h-3.5" />
+              </Button>
               <!-- 新增用户按钮 -->
               <Button
                 variant="ghost"
@@ -76,6 +85,23 @@
                 </SelectItem>
                 <SelectItem value="inactive">
                   禁用
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <Select v-model="filterGroup">
+              <SelectTrigger class="w-24 h-8 text-xs border-border/60">
+                <SelectValue placeholder="分组" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">
+                  全部
+                </SelectItem>
+                <SelectItem
+                  v-for="group in userGroups"
+                  :key="group.id"
+                  :value="group.id"
+                >
+                  {{ group.name }}
                 </SelectItem>
               </SelectContent>
             </Select>
@@ -145,8 +171,36 @@
               </SelectContent>
             </Select>
 
+            <Select v-model="filterGroup">
+              <SelectTrigger class="w-32 h-8 text-xs border-border/60">
+                <SelectValue placeholder="全部分组" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">
+                  全部分组
+                </SelectItem>
+                <SelectItem
+                  v-for="group in userGroups"
+                  :key="group.id"
+                  :value="group.id"
+                >
+                  {{ group.name }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+
             <!-- 分隔线 -->
             <div class="h-4 w-px bg-border" />
+
+            <Button
+              variant="outline"
+              size="sm"
+              class="h-8 px-3 text-xs"
+              @click="goToUserGroupsPage"
+            >
+              <UsersIcon class="mr-1.5 h-3.5 w-3.5" />
+              分组
+            </Button>
 
             <!-- 新增用户按钮 -->
             <Button
@@ -220,6 +274,13 @@
                       >
                         {{ user.role === 'admin' ? '管理员' : '普通用户' }}
                       </Badge>
+                      <Badge
+                        v-if="user.group_name"
+                        variant="outline"
+                        class="h-5 px-1.5 py-0 text-[10px] font-medium flex-shrink-0"
+                      >
+                        {{ user.group_name }}
+                      </Badge>
                     </div>
                     <div
                       class="truncate text-xs text-muted-foreground"
@@ -280,17 +341,17 @@
                   <div class="flex items-center text-muted-foreground">
                     <span class="w-14">限速:</span>
                     <Badge
-                      v-if="isRateLimitInherited(user.rate_limit) || isRateLimitUnlimited(user.rate_limit)"
+                      v-if="isRateLimitInherited(user.effective_rate_limit) || isRateLimitUnlimited(user.effective_rate_limit)"
                       variant="secondary"
                       class="h-5 px-1.5 py-0 text-[10px] font-medium"
                     >
-                      {{ formatRateLimitInheritable(user.rate_limit) }}
+                      {{ formatRateLimitInheritable(user.effective_rate_limit) }}
                     </Badge>
                     <span
                       v-else
                       class="font-medium text-foreground"
                     >
-                      {{ formatRateLimitInheritable(user.rate_limit) }}
+                      {{ formatRateLimitInheritable(user.effective_rate_limit) }}
                     </span>
                   </div>
                 </div>
@@ -397,10 +458,10 @@
             </AvatarFallback>
           </Avatar>
           <p class="text-sm font-medium text-foreground">
-            {{ searchQuery || filterRole !== 'all' || filterStatus !== 'all' ? '未找到匹配的用户' : '暂无用户' }}
+            {{ searchQuery || filterRole !== 'all' || filterStatus !== 'all' || filterGroup !== 'all' ? '未找到匹配的用户' : '暂无用户' }}
           </p>
           <p
-            v-if="searchQuery || filterRole !== 'all' || filterStatus !== 'all'"
+            v-if="searchQuery || filterRole !== 'all' || filterStatus !== 'all' || filterGroup !== 'all'"
             class="mt-1 text-xs text-muted-foreground"
           >
             尝试调整筛选条件
@@ -437,6 +498,13 @@
                     >
                       {{ user.role === 'admin' ? '管理员' : '普通用户' }}
                     </Badge>
+                    <Badge
+                      v-if="user.group_name"
+                      variant="outline"
+                      class="h-5 px-1.5 py-0 text-[10px] font-medium"
+                    >
+                      {{ user.group_name }}
+                    </Badge>
                   </div>
                   <div
                     class="truncate text-[11px] text-muted-foreground"
@@ -465,7 +533,7 @@
                   variant="secondary"
                   class="h-5 px-1.5 py-0 text-[10px] font-medium"
                 >
-                  {{ formatRateLimitInheritable(user.rate_limit) }}
+                  {{ formatRateLimitInheritable(user.effective_rate_limit) }}
                 </Badge>
               </div>
 
@@ -1012,8 +1080,9 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useUsersStore } from '@/stores/users'
-import type { User, ApiKey, UserSession } from '@/api/users'
+import { usersApi, type User, type ApiKey, type UserSession, type UserGroup } from '@/api/users'
 import { formatSessionMeta } from '@/types/session'
 import { adminWalletApi, type AdminWallet } from '@/api/admin-wallets'
 import { useToast } from '@/composables/useToast'
@@ -1050,6 +1119,7 @@ import {
 
 import {
   Plus,
+  Users as UsersIcon,
   SquarePen,
   Key,
   PauseCircle,
@@ -1076,11 +1146,13 @@ const { success, error } = useToast()
 const { confirmDanger } = useConfirm()
 const { copyToClipboard } = useClipboard()
 const usersStore = useUsersStore()
+const router = useRouter()
 
 // 用户表单对话框状态
 const showUserFormDialog = ref(false)
 const editingUser = ref<UserFormData | null>(null)
 const userFormDialogRef = ref<InstanceType<typeof UserFormDialog>>()
+const userGroups = ref<UserGroup[]>([])
 
 // API Keys 对话框状态
 const showApiKeysDialog = ref(false)
@@ -1120,6 +1192,7 @@ const walletActionTarget = ref<{ user: User; wallet: AdminWallet } | null>(null)
 const searchQuery = ref('')
 const filterRole = ref('all')
 const filterStatus = ref('all')
+const filterGroup = ref('all')
 
 const currentPage = ref(1)
 const pageSize = ref(20)
@@ -1140,7 +1213,7 @@ const filteredUsers = computed(() => {
   if (searchQuery.value) {
     const keywords = searchQuery.value.toLowerCase().split(/\s+/).filter(k => k.length > 0)
     filtered = filtered.filter(u => {
-      const searchableText = `${u.username} ${u.email || ''}`.toLowerCase()
+      const searchableText = `${u.username} ${u.email || ''} ${u.group_name || ''}`.toLowerCase()
       return keywords.every(keyword => searchableText.includes(keyword))
     })
   }
@@ -1155,6 +1228,10 @@ const filteredUsers = computed(() => {
     )
   }
 
+  if (filterGroup.value !== 'all') {
+    filtered = filtered.filter((u) => u.group_id === filterGroup.value)
+  }
+
   return filtered
 })
 
@@ -1164,7 +1241,7 @@ const paginatedUsers = computed(() => {
 })
 
 // Watch filter changes and reset to first page
-watch([searchQuery, filterRole, filterStatus], () => {
+watch([searchQuery, filterRole, filterStatus, filterGroup], () => {
   currentPage.value = 1
 })
 
@@ -1175,9 +1252,14 @@ onMounted(async () => {
 async function refreshUsers() {
   await Promise.all([
     usersStore.fetchUsers(),
+    loadUserGroups(),
     loadUserStats(),
     loadUserWallets()
   ])
+}
+
+async function loadUserGroups() {
+  userGroups.value = await usersApi.getAllUserGroups()
 }
 
 function formatDate(dateString: string) {
@@ -1305,6 +1387,10 @@ function openCreateDialog() {
   showUserFormDialog.value = true
 }
 
+function goToUserGroupsPage() {
+  void router.push('/admin/user-groups')
+}
+
 function editUser(user: User) {
   // 创建数组副本，避免与 store 数据共享引用
   editingUser.value = {
@@ -1314,10 +1400,8 @@ function editUser(user: User) {
     unlimited: user.unlimited,
     role: user.role,
     is_active: user.is_active,
-    allowed_providers: user.allowed_providers == null ? null : [...user.allowed_providers],
-    allowed_api_formats: user.allowed_api_formats == null ? null : [...user.allowed_api_formats],
-    allowed_models: user.allowed_models == null ? null : [...user.allowed_models],
-    rate_limit: user.rate_limit ?? null
+    group_id: user.group_id ?? null,
+    group_name: user.group_name ?? null,
   }
   showUserFormDialog.value = true
 }
@@ -1337,10 +1421,7 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string; un
         email: data.email || undefined,
         unlimited: data.unlimited,
         role: data.role,
-        allowed_providers: data.allowed_providers,
-        allowed_api_formats: data.allowed_api_formats,
-        allowed_models: data.allowed_models,
-        rate_limit: data.rate_limit ?? null
+        group_id: data.group_id ?? null,
       }
       if (data.password) {
         updateData.password = data.password
@@ -1357,10 +1438,7 @@ async function handleUserFormSubmit(data: UserFormData & { password?: string; un
         initial_gift_usd: data.initial_gift_usd,
         unlimited: data.unlimited,
         role: data.role,
-        allowed_providers: data.allowed_providers,
-        allowed_api_formats: data.allowed_api_formats,
-        allowed_models: data.allowed_models,
-        rate_limit: data.rate_limit ?? null
+        group_id: data.group_id ?? null,
       })
       // 如果创建时指定为禁用，则更新状态
       if (data.is_active === false && newUser) {

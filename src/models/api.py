@@ -118,6 +118,29 @@ class RegisterResponse(BaseModel):
     user_id: str
     email: str | None = None
     username: str
+
+
+def normalize_allowed_api_formats(v: list[str] | None) -> list[str] | None:
+    """校验并规范化 allowed_api_formats（endpoint signature: family:kind）。"""
+    if v is None:
+        return None
+    from src.core.api_format import list_endpoint_definitions, resolve_endpoint_definition
+    from src.core.api_format.signature import normalize_signature_key
+
+    allowed = [d.signature_key for d in list_endpoint_definitions()]
+    out: list[str] = []
+    seen: set[str] = set()
+    for fmt in v:
+        if not fmt:
+            continue
+        norm = normalize_signature_key(fmt)
+        if resolve_endpoint_definition(norm) is None:
+            raise ValueError(f"allowed_api_formats 必须是以下之一: {allowed}，当前值: {fmt}")
+        if norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
+    return out
     message: str
 
 
@@ -234,21 +257,7 @@ class CreateUserRequest(BaseModel):
         default=None, description="初始赠款（USD），null 表示使用系统默认初始赠款"
     )
     unlimited: bool = Field(default=False, description="是否无限制")
-    # 访问限制字段
-    allowed_providers: list[str] | None = Field(
-        default=None, description="允许使用的提供商ID列表，null表示无限制"
-    )
-    allowed_api_formats: list[str] | None = Field(
-        default=None, description="允许使用的API格式列表，null表示无限制"
-    )
-    allowed_models: list[str] | None = Field(
-        default=None, description="允许使用的模型名称列表，null表示无限制"
-    )
-    rate_limit: int | None = Field(
-        default=None,
-        ge=0,
-        description="每分钟请求限制；null 表示继承系统默认，0 表示不限制",
-    )
+    group_id: str | None = Field(default=None, description="所属用户分组 ID")
 
     @field_validator("initial_gift_usd", mode="before")
     @classmethod
@@ -287,29 +296,13 @@ class CreateUserRequest(BaseModel):
             raise ValueError("用户名只能包含字母、数字、下划线、连字符和点号")
         return v
 
-    @field_validator("allowed_api_formats")
+    @field_validator("group_id")
     @classmethod
-    def validate_allowed_api_formats(cls, v: list[str] | None) -> list[str] | None:
-        """校验并规范化 allowed_api_formats（endpoint signature: family:kind）。"""
+    def validate_group_id(cls, v: str | None) -> str | None:
         if v is None:
             return None
-        from src.core.api_format import list_endpoint_definitions, resolve_endpoint_definition
-        from src.core.api_format.signature import normalize_signature_key
-
-        allowed = [d.signature_key for d in list_endpoint_definitions()]
-        out: list[str] = []
-        seen: set[str] = set()
-        for fmt in v:
-            if not fmt:
-                continue
-            norm = normalize_signature_key(fmt)
-            if resolve_endpoint_definition(norm) is None:
-                raise ValueError(f"allowed_api_formats 必须是以下之一: {allowed}，当前值: {fmt}")
-            if norm in seen:
-                continue
-            seen.add(norm)
-            out.append(norm)
-        return out
+        v = v.strip()
+        return v or None
 
     @field_validator("password")
     @classmethod
@@ -329,21 +322,16 @@ class UpdateUserRequest(BaseModel):
     password: str | None = Field(None, description="新密码（留空保持不变）")
     role: UserRole | None = None
     unlimited: bool | None = None
-    allowed_providers: list[str] | None = None  # 允许使用的提供商 ID 列表
-    allowed_api_formats: list[str] | None = None  # 允许使用的 API 格式列表
-    allowed_models: list[str] | None = None  # 允许使用的模型名称列表
-    rate_limit: int | None = Field(
-        default=None,
-        ge=0,
-        description="每分钟请求限制；null 表示继承系统默认，0 表示不限制",
-    )
+    group_id: str | None = Field(default=None, description="所属用户分组 ID；null 表示回到默认分组")
     is_active: bool | None = None
 
-    @field_validator("allowed_api_formats")
+    @field_validator("group_id")
     @classmethod
-    def validate_allowed_api_formats(cls, v: list[str] | None) -> list[str] | None:
-        # 与 CreateUserRequest 保持一致
-        return CreateUserRequest.validate_allowed_api_formats(v)
+    def validate_group_id(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
 
     @field_validator("password")
     @classmethod
@@ -381,8 +369,7 @@ class CreateApiKeyRequest(BaseModel):
     @field_validator("allowed_api_formats")
     @classmethod
     def validate_allowed_api_formats(cls, v: list[str] | None) -> list[str] | None:
-        # 与 CreateUserRequest 保持一致
-        return CreateUserRequest.validate_allowed_api_formats(v)
+        return normalize_allowed_api_formats(v)
 
 
 class UserResponse(BaseModel):
@@ -392,15 +379,171 @@ class UserResponse(BaseModel):
     email: str | None = None
     username: str
     role: UserRole
-    allowed_providers: list[str] | None = None  # 允许使用的提供商 ID 列表
-    allowed_api_formats: list[str] | None = None  # 允许使用的 API 格式列表
-    allowed_models: list[str] | None = None  # 允许使用的模型名称列表
-    rate_limit: int | None = None
+    group_id: str | None = None
+    group_name: str | None = None
+    effective_allowed_providers: list[str] | None = None
+    effective_allowed_api_formats: list[str] | None = None
+    effective_allowed_models: list[str] | None = None
+    effective_rate_limit: int | None = None
     unlimited: bool = False
     is_active: bool
     created_at: datetime
     updated_at: datetime
     last_login_at: datetime | None
+
+
+class UserGroupBase(BaseModel):
+    """用户分组基础字段。"""
+
+    name: str = Field(..., min_length=1, max_length=100, description="分组名称")
+    description: str | None = Field(None, max_length=500, description="分组描述")
+    allowed_providers: list[str] | None = Field(
+        default=None, description="分组默认允许的提供商列表，null 表示不限制"
+    )
+    allowed_api_formats: list[str] | None = Field(
+        default=None, description="分组默认允许的 API 格式列表，null 表示不限制"
+    )
+    allowed_models: list[str] | None = Field(
+        default=None, description="分组默认允许的模型列表，null 表示不限制"
+    )
+    rate_limit: int | None = Field(
+        default=None,
+        ge=0,
+        description="分组默认 RPM 限制；null 表示继承系统默认，0 表示不限制",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("分组名称不能为空")
+        return v
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+    @field_validator("allowed_api_formats")
+    @classmethod
+    def validate_group_allowed_api_formats(cls, v: list[str] | None) -> list[str] | None:
+        return normalize_allowed_api_formats(v)
+
+
+class CreateUserGroupRequest(UserGroupBase):
+    """创建用户分组请求。"""
+
+
+class UpdateUserGroupRequest(BaseModel):
+    """更新用户分组请求。"""
+
+    name: str | None = Field(None, min_length=1, max_length=100)
+    description: str | None = Field(None, max_length=500)
+    allowed_providers: list[str] | None = None
+    allowed_api_formats: list[str] | None = None
+    allowed_models: list[str] | None = None
+    rate_limit: int | None = Field(
+        default=None,
+        ge=0,
+        description="分组默认 RPM 限制；null 表示继承系统默认，0 表示不限制",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            raise ValueError("分组名称不能为空")
+        return v
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+    @field_validator("allowed_api_formats")
+    @classmethod
+    def validate_group_allowed_api_formats(cls, v: list[str] | None) -> list[str] | None:
+        return normalize_allowed_api_formats(v)
+
+
+class UserGroupResponse(BaseModel):
+    """用户分组响应。"""
+
+    id: str
+    name: str
+    description: str | None = None
+    is_default: bool = False
+    allowed_providers: list[str] | None = None
+    allowed_api_formats: list[str] | None = None
+    allowed_models: list[str] | None = None
+    rate_limit: int | None = None
+    user_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class BatchUserGroupBindingRequest(BaseModel):
+    """批量绑定/取消绑定用户分组请求。"""
+
+    action: Literal["bind", "unbind"] = Field(description="操作类型：bind / unbind")
+    user_ids: list[str] = Field(..., min_length=1, max_length=500, description="用户 ID 列表")
+    group_id: str | None = Field(default=None, description="目标用户分组 ID（bind 时必填）")
+    source_group_id: str | None = Field(
+        default=None,
+        description="取消绑定时的来源分组过滤（可选，仅移除该分组成员）",
+    )
+
+    @field_validator("user_ids")
+    @classmethod
+    def validate_user_ids(cls, v: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for user_id in v:
+            item = str(user_id or "").strip()
+            if not item:
+                continue
+            if item in seen:
+                continue
+            seen.add(item)
+            normalized.append(item)
+        if not normalized:
+            raise ValueError("至少需要提供一个用户 ID")
+        return normalized
+
+    @field_validator("group_id", "source_group_id")
+    @classmethod
+    def validate_group_id_fields(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+    @model_validator(mode="after")
+    def validate_action_fields(self) -> "BatchUserGroupBindingRequest":
+        if self.action == "bind" and not self.group_id:
+            raise ValueError("绑定用户到分组时必须提供 group_id")
+        return self
+
+
+class BatchUserGroupBindingResponse(BaseModel):
+    """批量绑定/取消绑定用户分组响应。"""
+
+    action: Literal["bind", "unbind"]
+    group_id: str | None = None
+    source_group_id: str | None = None
+    updated_count: int
+    skipped_count: int
+    users: list[UserResponse]
 
 
 class ApiKeyResponse(BaseModel):

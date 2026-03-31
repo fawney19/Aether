@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 from src.models.database import ApiKey, User, UserRole
 from src.services.auth.jwt_blacklist import JWTBlacklistService
 from src.services.cache.user_cache import UserCacheService
+from src.services.user.group_service import UserGroupService
 
 
 @dataclass
@@ -525,6 +526,7 @@ class AuthService:
             default_initial_gift = SystemConfigService.get_config(
                 db, "default_user_initial_gift_usd", default=None
             )
+            default_group = UserGroupService.get_or_create_default_group(db)
 
             # 创建新用户
             user = User(
@@ -537,6 +539,8 @@ class AuthService:
                 ldap_username=ldap_username,
                 role=UserRole.USER,
                 is_active=True,
+                group_id=default_group.id,
+                group=default_group,
                 last_login_at=None,
             )
 

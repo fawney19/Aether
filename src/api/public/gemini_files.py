@@ -33,6 +33,7 @@ from src.clients.http_client import HTTPClientPool
 from src.core.api_format import get_auth_handler, get_default_auth_method_for_endpoint
 from src.core.crypto import crypto_service
 from src.core.logger import logger
+from src.core.user_access import resolve_user_allowed_models
 from src.database import create_session
 from src.models.database import ApiKey, GlobalModel, Model, Provider, ProviderEndpoint, User
 from src.services.auth.service import AuthService
@@ -184,7 +185,7 @@ def _resolve_files_model_name(
 
     allowed_models = merge_allowed_models(
         user_api_key.allowed_models,
-        user.allowed_models if user else None,
+        resolve_user_allowed_models(user) if user else None,
     )
     if allowed_models is not None:
         if not allowed_models:

@@ -1079,24 +1079,28 @@ const cacheCreationSplitRows = computed(() => {
   const cache1h = detail.value.cache_creation_input_tokens_1h || 0
 
   if (cache5m > 0) {
-    const pricePer1M = getActiveCachePriceForTTL(5, 'cache_creation_price_per_1m')
+    const pricePer1M = getRecordedCacheCreationPriceForTTL(5)
+      ?? getActiveCachePriceForTTL(5, 'cache_creation_price_per_1m')
     rows.push({
       key: '5m',
       label: '5min 创建',
       tokens: cache5m,
       pricePer1M,
-      cost: pricePer1M !== null ? (cache5m * pricePer1M) / 1_000_000 : null,
+      cost: getRecordedCacheCreationCostForTTL(5)
+        ?? (pricePer1M !== null ? (cache5m * pricePer1M) / 1_000_000 : null),
     })
   }
 
   if (cache1h > 0) {
-    const pricePer1M = getActiveCachePriceForTTL(60, 'cache_creation_price_per_1m')
+    const pricePer1M = getRecordedCacheCreationPriceForTTL(60)
+      ?? getActiveCachePriceForTTL(60, 'cache_creation_price_per_1m')
     rows.push({
       key: '1h',
       label: '1h 创建',
       tokens: cache1h,
       pricePer1M,
-      cost: pricePer1M !== null ? (cache1h * pricePer1M) / 1_000_000 : null,
+      cost: getRecordedCacheCreationCostForTTL(60)
+        ?? (pricePer1M !== null ? (cache1h * pricePer1M) / 1_000_000 : null),
     })
   }
 
@@ -1192,8 +1196,20 @@ function getTierCachePriceForTTL(
 
   if (ttlPricing.length === 0) return fallback
 
-  const matched = ttlPricing.find((entry) => Number(entry.ttl_minutes || 0) >= ttlMinutes)
-    || ttlPricing[ttlPricing.length - 1]
+  const exactMatch = ttlPricing.find((entry) => Number(entry.ttl_minutes || 0) === ttlMinutes)
+  if (exactMatch) {
+    const exactPrice = toFiniteNumber(exactMatch?.[priceKey])
+    return exactPrice ?? fallback
+  }
+
+  let matched: CacheTTLPriceEntry | null = null
+  for (const entry of ttlPricing) {
+    if (Number(entry.ttl_minutes || 0) <= ttlMinutes) {
+      matched = entry
+    }
+  }
+
+  if (!matched) return fallback
   const price = toFiniteNumber(matched?.[priceKey])
   return price ?? fallback
 }
@@ -1217,6 +1233,22 @@ function getActiveCachePriceForTTL(
     return toFiniteNumber(detail.value?.cache_creation_price_per_1m)
   }
   return toFiniteNumber(detail.value?.cache_read_price_per_1m)
+}
+
+function getRecordedCacheCreationPriceForTTL(ttlMinutes: number): number | null {
+  if (!detail.value) return null
+  if (ttlMinutes >= 60) {
+    return toFiniteNumber(detail.value.cache_creation_price_per_1m_1h)
+  }
+  return toFiniteNumber(detail.value.cache_creation_price_per_1m_5m)
+}
+
+function getRecordedCacheCreationCostForTTL(ttlMinutes: number): number | null {
+  if (!detail.value) return null
+  if (ttlMinutes >= 60) {
+    return toFiniteNumber(detail.value.cache_creation_cost_1h)
+  }
+  return toFiniteNumber(detail.value.cache_creation_cost_5m)
 }
 
 function getDefaultDataSourceForTab(tab: string): 'client' | 'provider' {

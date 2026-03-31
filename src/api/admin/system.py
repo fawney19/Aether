@@ -2218,16 +2218,37 @@ class AdminExportUsersAdapter(AdminApiAdapter):
         from datetime import datetime, timezone
 
         from src.core.enums import UserRole
-        from src.models.database import ApiKey, User
+        from src.models.database import ApiKey, User, UserGroup
 
         db = context.db
 
         wallet_service = _wallet_service()
 
+        user_groups = (
+            db.query(UserGroup, func.count(User.id).label("user_count"))
+            .outerjoin(User, User.group_id == UserGroup.id)
+            .group_by(UserGroup.id)
+            .order_by(UserGroup.name.asc())
+            .all()
+        )
+        user_groups_data = [
+            {
+                "name": group.name,
+                "description": group.description,
+                "is_default": bool(getattr(group, "is_default", False)),
+                "allowed_providers": group.allowed_providers,
+                "allowed_api_formats": group.allowed_api_formats,
+                "allowed_models": group.allowed_models,
+                "rate_limit": group.rate_limit,
+                "user_count": int(user_count),
+            }
+            for group, user_count in user_groups
+        ]
+
         # 导出 Users（排除管理员），预加载非独立余额 Key，避免 N+1
         users = (
             db.query(User)
-            .options(selectinload(User.api_keys))
+            .options(selectinload(User.api_keys), selectinload(User.group))
             .filter(User.is_deleted.is_(False), User.role != UserRole.ADMIN)
             .all()
         )
@@ -2249,10 +2270,7 @@ class AdminExportUsersAdapter(AdminApiAdapter):
                     "username": user.username,
                     "password_hash": user.password_hash,
                     "role": user.role.value if user.role else "user",
-                    "allowed_providers": user.allowed_providers,
-                    "allowed_api_formats": user.allowed_api_formats,
-                    "allowed_models": user.allowed_models,
-                    "rate_limit": user.rate_limit,
+                    "group_name": user.group.name if user.group else None,
                     "model_capability_settings": user.model_capability_settings,
                     "unlimited": wallet_service.is_unlimited_wallet(wallet),
                     "wallet": (wallet_service.serialize_wallet_summary(wallet) if wallet else None),
@@ -2266,8 +2284,9 @@ class AdminExportUsersAdapter(AdminApiAdapter):
         standalone_keys_data = [self._serialize_api_key(key, db=db) for key in standalone_keys]
 
         return {
-            "version": "1.3",
+            "version": "1.5",
             "exported_at": datetime.now(timezone.utc).isoformat(),
+            "user_groups": user_groups_data,
             "users": users_data,
             "standalone_keys": standalone_keys_data,
         }
@@ -2302,11 +2321,12 @@ class AdminImportUsersAdapter(AdminApiAdapter):
         return key_hash, key_encrypted
 
     @staticmethod
-    def _normalize_imported_user_rate_limit(user_data: dict[str, Any]) -> int | None:
-        if "rate_limit" not in user_data:
+    def _normalize_imported_group_name(user_data: dict[str, Any]) -> str | None:
+        value = user_data.get("group_name")
+        if value is None:
             return None
-        value = user_data.get("rate_limit")
-        return int(value) if value is not None else None
+        normalized = str(value).strip()
+        return normalized or None
 
     @staticmethod
     def _normalize_imported_api_key_rate_limit(
@@ -2331,7 +2351,8 @@ class AdminImportUsersAdapter(AdminApiAdapter):
         from datetime import datetime, timezone
 
         from src.core.enums import UserRole
-        from src.models.database import ApiKey, User
+        from src.models.database import ApiKey, User, UserGroup
+        from src.services.user.group_service import UserGroupService
 
         # 检查请求体大小
         if context.raw_body and len(context.raw_body) > MAX_IMPORT_SIZE:
@@ -2343,15 +2364,181 @@ class AdminImportUsersAdapter(AdminApiAdapter):
         # 获取导入选项
         merge_mode = payload.get("merge_mode", "skip")  # skip, overwrite, error
         legacy_export = self._is_legacy_users_export(payload.get("version"))
+        user_groups_data = payload.get("user_groups", [])
         users_data = payload.get("users", [])
         standalone_keys_data = payload.get("standalone_keys", [])
 
         stats = {
+            "user_groups": {"created": 0, "updated": 0, "skipped": 0},
             "users": {"created": 0, "updated": 0, "skipped": 0},
             "api_keys": {"created": 0, "skipped": 0},
             "standalone_keys": {"created": 0, "skipped": 0},
             "errors": [],
         }
+
+        group_name_to_id: dict[str, str] = {}
+        group_config_by_id: dict[str, dict[str, Any]] = {}
+        group_signature_to_id: dict[str, str] = {}
+        existing_group_names: set[str] = set()
+
+        def _build_group_signature(
+            *,
+            allowed_providers: Any,
+            allowed_api_formats: Any,
+            allowed_models: Any,
+            rate_limit: int | None,
+        ) -> str:
+            return json.dumps(
+                {
+                    "allowed_providers": allowed_providers,
+                    "allowed_api_formats": allowed_api_formats,
+                    "allowed_models": allowed_models,
+                    "rate_limit": rate_limit,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+
+        def _register_group_config(
+            *,
+            group_id: str,
+            allowed_providers: Any,
+            allowed_api_formats: Any,
+            allowed_models: Any,
+            rate_limit: int | None,
+        ) -> None:
+            config = {
+                "allowed_providers": allowed_providers,
+                "allowed_api_formats": allowed_api_formats,
+                "allowed_models": allowed_models,
+                "rate_limit": rate_limit,
+            }
+            group_config_by_id[group_id] = config
+            group_signature_to_id[
+                _build_group_signature(
+                    allowed_providers=allowed_providers,
+                    allowed_api_formats=allowed_api_formats,
+                    allowed_models=allowed_models,
+                    rate_limit=rate_limit,
+                )
+            ] = group_id
+
+        def _next_generated_group_name() -> str:
+            index = 1
+            while True:
+                candidate = f"导入迁移分组 {index}"
+                if candidate not in existing_group_names:
+                    existing_group_names.add(candidate)
+                    return candidate
+                index += 1
+
+        def _resolve_imported_user_group_id(
+            *,
+            user_data: dict[str, Any],
+            imported_group_id: str | None,
+        ) -> str | None:
+            legacy_fields_present = any(
+                field_name in user_data
+                for field_name in (
+                    "allowed_providers",
+                    "allowed_api_formats",
+                    "allowed_models",
+                    "rate_limit",
+                    "inherit_group_allowed_providers",
+                    "inherit_group_allowed_api_formats",
+                    "inherit_group_allowed_models",
+                    "inherit_group_rate_limit",
+                )
+            )
+            if not legacy_fields_present:
+                return imported_group_id
+
+            group_config = group_config_by_id.get(imported_group_id or "", {})
+
+            effective_allowed_providers = (
+                group_config.get("allowed_providers")
+                if bool(user_data.get("inherit_group_allowed_providers", False))
+                and imported_group_id is not None
+                else user_data.get("allowed_providers")
+            )
+            effective_allowed_api_formats = (
+                group_config.get("allowed_api_formats")
+                if bool(user_data.get("inherit_group_allowed_api_formats", False))
+                and imported_group_id is not None
+                else user_data.get("allowed_api_formats")
+            )
+            effective_allowed_models = (
+                group_config.get("allowed_models")
+                if bool(user_data.get("inherit_group_allowed_models", False))
+                and imported_group_id is not None
+                else user_data.get("allowed_models")
+            )
+            raw_effective_rate_limit = (
+                group_config.get("rate_limit")
+                if bool(user_data.get("inherit_group_rate_limit", False))
+                and imported_group_id is not None
+                else user_data.get("rate_limit")
+            )
+            effective_rate_limit = (
+                int(raw_effective_rate_limit) if raw_effective_rate_limit is not None else None
+            )
+
+            effective_signature = _build_group_signature(
+                allowed_providers=effective_allowed_providers,
+                allowed_api_formats=effective_allowed_api_formats,
+                allowed_models=effective_allowed_models,
+                rate_limit=effective_rate_limit,
+            )
+            if (
+                imported_group_id is not None
+                and group_signature_to_id.get(effective_signature) == imported_group_id
+            ):
+                return imported_group_id
+
+            if (
+                imported_group_id is None
+                and effective_allowed_providers is None
+                and effective_allowed_api_formats is None
+                and effective_allowed_models is None
+                and effective_rate_limit is None
+            ):
+                return None
+
+            matched_group_id = group_signature_to_id.get(effective_signature)
+            if matched_group_id is not None:
+                return matched_group_id
+
+            generated_group = UserGroup(
+                id=str(uuid.uuid4()),
+                name=_next_generated_group_name(),
+                description="由旧版用户级访问限制导入自动生成",
+                allowed_providers=effective_allowed_providers,
+                allowed_api_formats=effective_allowed_api_formats,
+                allowed_models=effective_allowed_models,
+                rate_limit=effective_rate_limit,
+            )
+            db.add(generated_group)
+            db.flush()
+            group_name_to_id[generated_group.name] = generated_group.id
+            _register_group_config(
+                group_id=generated_group.id,
+                allowed_providers=generated_group.allowed_providers,
+                allowed_api_formats=generated_group.allowed_api_formats,
+                allowed_models=generated_group.allowed_models,
+                rate_limit=generated_group.rate_limit,
+            )
+            return generated_group.id
+
+        for existing_group in db.query(UserGroup).all():
+            existing_group_names.add(existing_group.name)
+            group_name_to_id.setdefault(existing_group.name, existing_group.id)
+            _register_group_config(
+                group_id=existing_group.id,
+                allowed_providers=existing_group.allowed_providers,
+                allowed_api_formats=existing_group.allowed_api_formats,
+                allowed_models=existing_group.allowed_models,
+                rate_limit=existing_group.rate_limit,
+            )
 
         def _create_api_key_from_data(
             key_data: dict,
@@ -2412,6 +2599,75 @@ class AdminImportUsersAdapter(AdminApiAdapter):
             )
 
         try:
+            for group_data in user_groups_data:
+                group_name = str(group_data.get("name") or "").strip()
+                if not group_name:
+                    stats["errors"].append("跳过未命名用户分组")
+                    stats["user_groups"]["skipped"] += 1
+                    continue
+
+                existing_group = db.query(UserGroup).filter(UserGroup.name == group_name).first()
+                if existing_group:
+                    group_name_to_id[group_name] = existing_group.id
+                    existing_group_names.add(existing_group.name)
+                    _register_group_config(
+                        group_id=existing_group.id,
+                        allowed_providers=existing_group.allowed_providers,
+                        allowed_api_formats=existing_group.allowed_api_formats,
+                        allowed_models=existing_group.allowed_models,
+                        rate_limit=existing_group.rate_limit,
+                    )
+                    if merge_mode == "skip":
+                        stats["user_groups"]["skipped"] += 1
+                    elif merge_mode == "error":
+                        raise InvalidRequestException(f"用户分组 '{group_name}' 已存在")
+                    elif merge_mode == "overwrite":
+                        existing_group.description = group_data.get("description")
+                        existing_group.allowed_providers = group_data.get("allowed_providers")
+                        existing_group.allowed_api_formats = group_data.get("allowed_api_formats")
+                        existing_group.allowed_models = group_data.get("allowed_models")
+                        existing_group.rate_limit = (
+                            int(group_data["rate_limit"])
+                            if group_data.get("rate_limit") is not None
+                            else None
+                        )
+                        existing_group.updated_at = datetime.now(timezone.utc)
+                        _register_group_config(
+                            group_id=existing_group.id,
+                            allowed_providers=existing_group.allowed_providers,
+                            allowed_api_formats=existing_group.allowed_api_formats,
+                            allowed_models=existing_group.allowed_models,
+                            rate_limit=existing_group.rate_limit,
+                        )
+                        stats["user_groups"]["updated"] += 1
+                    continue
+
+                new_group = UserGroup(
+                    id=str(uuid.uuid4()),
+                    name=group_name,
+                    description=group_data.get("description"),
+                    allowed_providers=group_data.get("allowed_providers"),
+                    allowed_api_formats=group_data.get("allowed_api_formats"),
+                    allowed_models=group_data.get("allowed_models"),
+                    rate_limit=(
+                        int(group_data["rate_limit"])
+                        if group_data.get("rate_limit") is not None
+                        else None
+                    ),
+                )
+                db.add(new_group)
+                db.flush()
+                group_name_to_id[group_name] = new_group.id
+                existing_group_names.add(new_group.name)
+                _register_group_config(
+                    group_id=new_group.id,
+                    allowed_providers=new_group.allowed_providers,
+                    allowed_api_formats=new_group.allowed_api_formats,
+                    allowed_models=new_group.allowed_models,
+                    rate_limit=new_group.rate_limit,
+                )
+                stats["user_groups"]["created"] += 1
+
             for user_data in users_data:
                 # 跳过管理员角色的导入（不区分大小写）
                 role_str = str(user_data.get("role", "")).lower()
@@ -2437,7 +2693,35 @@ class AdminImportUsersAdapter(AdminApiAdapter):
                     and wallet_payload.get("limit_mode") in {"finite", "unlimited"}
                     else ("unlimited" if user_data.get("unlimited") else "finite")
                 )
-                imported_user_rate_limit = self._normalize_imported_user_rate_limit(user_data)
+                imported_group_name = self._normalize_imported_group_name(user_data)
+                imported_group_id = (
+                    group_name_to_id.get(imported_group_name) if imported_group_name else None
+                )
+                if imported_group_name and imported_group_id is None:
+                    existing_group = (
+                        db.query(UserGroup).filter(UserGroup.name == imported_group_name).first()
+                    )
+                    if existing_group:
+                        imported_group_id = existing_group.id
+                        group_name_to_id[imported_group_name] = existing_group.id
+                        existing_group_names.add(existing_group.name)
+                        _register_group_config(
+                            group_id=existing_group.id,
+                            allowed_providers=existing_group.allowed_providers,
+                            allowed_api_formats=existing_group.allowed_api_formats,
+                            allowed_models=existing_group.allowed_models,
+                            rate_limit=existing_group.rate_limit,
+                        )
+                    else:
+                        stats["errors"].append(
+                            f"用户 '{import_email}' 引用了不存在的用户分组: {imported_group_name}"
+                        )
+                imported_group_id = _resolve_imported_user_group_id(
+                    user_data=user_data,
+                    imported_group_id=imported_group_id,
+                )
+                if imported_group_id is None:
+                    imported_group_id = UserGroupService.get_or_create_default_group(db).id
 
                 if existing_user:
                     user_id = existing_user.id
@@ -2452,10 +2736,7 @@ class AdminImportUsersAdapter(AdminApiAdapter):
                             existing_user.password_hash = user_data["password_hash"]
                         if user_data.get("role"):
                             existing_user.role = UserRole(user_data["role"])
-                        existing_user.allowed_providers = user_data.get("allowed_providers")
-                        existing_user.allowed_api_formats = user_data.get("allowed_api_formats")
-                        existing_user.allowed_models = user_data.get("allowed_models")
-                        existing_user.rate_limit = imported_user_rate_limit
+                        existing_user.group_id = imported_group_id
                         existing_user.model_capability_settings = user_data.get(
                             "model_capability_settings"
                         )
@@ -2489,10 +2770,7 @@ class AdminImportUsersAdapter(AdminApiAdapter):
                         username=user_data.get("username") or import_email.split("@")[0],
                         password_hash=user_data.get("password_hash", ""),
                         role=role,
-                        allowed_providers=user_data.get("allowed_providers"),
-                        allowed_api_formats=user_data.get("allowed_api_formats"),
-                        allowed_models=user_data.get("allowed_models"),
-                        rate_limit=imported_user_rate_limit,
+                        group_id=imported_group_id,
                         model_capability_settings=user_data.get("model_capability_settings"),
                         is_active=user_data.get("is_active", True),
                     )

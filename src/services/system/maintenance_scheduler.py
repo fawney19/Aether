@@ -50,6 +50,7 @@ class MaintenanceScheduler:
         self._stats_aggregation_lock = asyncio.Lock()
         self._wallet_daily_usage_lock = asyncio.Lock()
         self._startup_task: asyncio.Task[Any] | None = None
+        self._historical_rebilling_task: asyncio.Task[Any] | None = None
         self._registered_job_ids: list[str] = []
 
     @staticmethod
@@ -296,6 +297,15 @@ class MaintenanceScheduler:
         except Exception as e:
             logger.exception(f"启动时 pending 清理执行出错: {e}")
 
+        try:
+            from src.utils.async_utils import safe_create_task
+
+            self._historical_rebilling_task = safe_create_task(
+                self._run_historical_usage_rebilling_maintenance()
+            )
+        except Exception as e:
+            logger.exception(f"启动时历史计费重算任务拉起失败: {e}")
+
     async def stop(self) -> Any:
         """停止调度器"""
         if not self.running:
@@ -310,6 +320,13 @@ class MaintenanceScheduler:
             except asyncio.CancelledError:
                 pass
         self._startup_task = None
+        if self._historical_rebilling_task and not self._historical_rebilling_task.done():
+            self._historical_rebilling_task.cancel()
+            try:
+                await self._historical_rebilling_task
+            except asyncio.CancelledError:
+                pass
+        self._historical_rebilling_task = None
 
         scheduler = get_scheduler()
         for job_id in self._registered_job_ids:
@@ -1393,6 +1410,17 @@ class MaintenanceScheduler:
                 batch_db.close()
 
         return total_deleted
+
+    async def _run_historical_usage_rebilling_maintenance(self) -> None:
+        """启动后后台静默执行一次历史计费重算维护。"""
+        try:
+            from src.services.usage.historical_rebilling import HistoricalUsageRebillingService
+
+            await HistoricalUsageRebillingService.run_once_in_background()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.exception("历史计费重算后台维护执行失败: {}", e)
 
 
 # 全局单例

@@ -4,7 +4,7 @@
  */
 
 import type { User, LoginResponse } from '@/api/auth'
-import type { User as AdminUser } from '@/api/users'
+import type { User as AdminUser, UserGroup } from '@/api/users'
 import type { AdminApiKeysResponse } from '@/api/admin'
 import type { Profile } from '@/api/me'
 import type { ProviderWithEndpointsSummary, GlobalModelResponse } from '@/api/endpoints/types'
@@ -129,6 +129,48 @@ export const MOCK_USER_PROFILE: Profile = {
 
 // ========== 用户管理数据 ==========
 
+export const MOCK_USER_GROUPS: UserGroup[] = [
+  {
+    id: 'group-default-demo',
+    name: '默认分组',
+    description: '系统默认分组，所有未显式指定分组的用户都会归入此组。',
+    is_default: true,
+    allowed_providers: null,
+    allowed_api_formats: null,
+    allowed_models: null,
+    rate_limit: null,
+    user_count: 0,
+    created_at: '2024-01-05T00:00:00Z',
+    updated_at: '2024-01-05T00:00:00Z',
+  },
+  {
+    id: 'group-internal-demo',
+    name: '内部研发',
+    description: '内部员工默认不限制访问范围',
+    is_default: false,
+    allowed_providers: null,
+    allowed_api_formats: null,
+    allowed_models: null,
+    rate_limit: null,
+    user_count: 1,
+    created_at: '2024-01-10T00:00:00Z',
+    updated_at: '2024-01-10T00:00:00Z',
+  },
+  {
+    id: 'group-vendor-demo',
+    name: '供应商',
+    description: '外部合作方默认只开放受限资源',
+    is_default: false,
+    allowed_providers: ['provider-demo-openai'],
+    allowed_api_formats: ['openai:chat'],
+    allowed_models: ['gpt-4o-mini'],
+    rate_limit: 30,
+    user_count: 2,
+    created_at: '2024-02-10T00:00:00Z',
+    updated_at: '2024-02-10T00:00:00Z',
+  },
+]
+
 export const MOCK_ALL_USERS: AdminUser[] = [
   {
     id: 'demo-admin-uuid-0001',
@@ -137,9 +179,12 @@ export const MOCK_ALL_USERS: AdminUser[] = [
     role: 'admin',
     unlimited: true,
     is_active: true,
-    allowed_providers: null,
-    allowed_api_formats: null,
-    allowed_models: null,
+    group_id: 'group-default-demo',
+    group_name: '默认分组',
+    effective_allowed_providers: null,
+    effective_allowed_api_formats: null,
+    effective_allowed_models: null,
+    effective_rate_limit: null,
     created_at: '2024-01-01T00:00:00Z'
   },
   {
@@ -149,9 +194,12 @@ export const MOCK_ALL_USERS: AdminUser[] = [
     role: 'user',
     unlimited: false,
     is_active: true,
-    allowed_providers: null,
-    allowed_api_formats: null,
-    allowed_models: null,
+    group_id: 'group-internal-demo',
+    group_name: '内部研发',
+    effective_allowed_providers: null,
+    effective_allowed_api_formats: null,
+    effective_allowed_models: null,
+    effective_rate_limit: null,
     created_at: '2024-06-01T00:00:00Z'
   },
   {
@@ -161,9 +209,12 @@ export const MOCK_ALL_USERS: AdminUser[] = [
     role: 'user',
     unlimited: false,
     is_active: true,
-    allowed_providers: null,
-    allowed_api_formats: null,
-    allowed_models: null,
+    group_id: 'group-vendor-demo',
+    group_name: '供应商',
+    effective_allowed_providers: ['provider-demo-openai'],
+    effective_allowed_api_formats: ['openai:chat'],
+    effective_allowed_models: ['gpt-4o-mini'],
+    effective_rate_limit: 30,
     created_at: '2024-03-15T00:00:00Z'
   },
   {
@@ -173,9 +224,12 @@ export const MOCK_ALL_USERS: AdminUser[] = [
     role: 'user',
     unlimited: false,
     is_active: true,
-    allowed_providers: null,
-    allowed_api_formats: null,
-    allowed_models: null,
+    group_id: 'group-vendor-demo',
+    group_name: '供应商',
+    effective_allowed_providers: ['provider-demo-openai'],
+    effective_allowed_api_formats: ['openai:chat'],
+    effective_allowed_models: ['gpt-4o-mini'],
+    effective_rate_limit: 30,
     created_at: '2024-02-20T00:00:00Z'
   },
   {
@@ -185,9 +239,12 @@ export const MOCK_ALL_USERS: AdminUser[] = [
     role: 'user',
     unlimited: false,
     is_active: false,
-    allowed_providers: null,
-    allowed_api_formats: null,
-    allowed_models: null,
+    group_id: 'group-default-demo',
+    group_name: '默认分组',
+    effective_allowed_providers: null,
+    effective_allowed_api_formats: null,
+    effective_allowed_models: null,
+    effective_rate_limit: null,
     created_at: '2024-04-10T00:00:00Z'
   }
 ]

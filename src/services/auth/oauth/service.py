@@ -27,6 +27,7 @@ from src.services.auth.service import AuthService
 from src.services.auth.session_service import SessionService
 from src.services.cache.user_cache import UserCacheService
 from src.services.system.config import SystemConfigService
+from src.services.user.group_service import UserGroupService
 
 
 def _build_oauth_client_kwargs(
@@ -117,6 +118,7 @@ class OAuthService:
                 default_initial_gift = SystemConfigService.get_config(
                     db, "default_user_initial_gift_usd", default=None
                 )
+                default_group = UserGroupService.get_or_create_default_group(db)
 
                 user: User | None = None
                 last_error: Exception | None = None
@@ -131,6 +133,8 @@ class OAuthService:
                             auth_source=AuthSource.OAUTH,
                             role=UserRole.USER,
                             is_active=True,
+                            group_id=default_group.id,
+                            group=default_group,
                             last_login_at=now,
                         )
                         db.add(user)

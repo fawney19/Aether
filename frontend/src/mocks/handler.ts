@@ -13,6 +13,7 @@ import {
   MOCK_ADMIN_PROFILE,
   MOCK_USER_PROFILE,
   MOCK_ALL_USERS,
+  MOCK_USER_GROUPS,
   MOCK_USER_API_KEYS,
   MOCK_ADMIN_API_KEYS,
   MOCK_PROVIDERS,
@@ -54,6 +55,45 @@ function getCurrentUser() {
 function getCurrentProfile() {
   return isCurrentUserAdmin() ? MOCK_ADMIN_PROFILE : MOCK_USER_PROFILE
 }
+
+function cloneNullableList(value: string[] | null | undefined): string[] | null {
+  if (value == null) return null
+  return [...value]
+}
+
+function getMockUserGroupById(groupId: string | null | undefined) {
+  if (!groupId) return null
+  return MOCK_USER_GROUPS.find(group => group.id === groupId) ?? null
+}
+
+function getDefaultMockUserGroup() {
+  return MOCK_USER_GROUPS.find(group => group.is_default) ?? MOCK_USER_GROUPS[0] ?? null
+}
+
+function syncMockUserAccess(user: (typeof MOCK_ALL_USERS)[number]) {
+  if (!user.group_id) {
+    user.group_id = getDefaultMockUserGroup()?.id ?? null
+  }
+  const group = getMockUserGroupById(user.group_id)
+
+  user.group_name = group?.name ?? null
+  user.effective_allowed_providers = cloneNullableList(group?.allowed_providers ?? null)
+  user.effective_allowed_api_formats = cloneNullableList(group?.allowed_api_formats ?? null)
+  user.effective_allowed_models = cloneNullableList(group?.allowed_models ?? null)
+  user.effective_rate_limit = group?.rate_limit ?? null
+}
+
+function syncMockUserGroupsAndUsers() {
+  for (const user of MOCK_ALL_USERS) {
+    syncMockUserAccess(user)
+  }
+
+  for (const group of MOCK_USER_GROUPS) {
+    group.user_count = MOCK_ALL_USERS.filter(user => user.group_id === group.id).length
+  }
+}
+
+syncMockUserGroupsAndUsers()
 
 function sanitizePublicModelConfig(config: unknown): Record<string, unknown> | null {
   if (!config || typeof config !== 'object') return null
@@ -1428,23 +1468,149 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     return createMockResponse(MOCK_ALL_USERS)
   },
 
+  'GET /api/admin/users/groups': async () => {
+    await delay()
+    requireAdmin()
+    return createMockResponse(MOCK_USER_GROUPS)
+  },
+
+  'POST /api/admin/users/groups': async (config) => {
+    await delay()
+    requireAdmin()
+    const body = JSON.parse(config.data || '{}')
+    const newGroup = {
+      id: `group-demo-${Date.now()}`,
+      name: body.name,
+      description: body.description ?? null,
+      is_default: false,
+      allowed_providers: body.allowed_providers ?? null,
+      allowed_api_formats: body.allowed_api_formats ?? null,
+      allowed_models: body.allowed_models ?? null,
+      rate_limit: body.rate_limit ?? null,
+      user_count: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    }
+    MOCK_USER_GROUPS.push(newGroup)
+    syncMockUserGroupsAndUsers()
+    return createMockResponse(newGroup)
+  },
+
   'POST /api/admin/users': async (config) => {
     await delay()
     requireAdmin()
     const body = JSON.parse(config.data || '{}')
+    const defaultGroup = getDefaultMockUserGroup()
+    const now = new Date().toISOString()
     const newUser = {
       id: `user-demo-${Date.now()}`,
       username: body.username,
-      email: body.email,
+      email: body.email ?? '',
       role: body.role || 'user',
       unlimited: Boolean(body.unlimited),
       is_active: true,
-      allowed_providers: null,
-      allowed_api_formats: null,
-      allowed_models: null,
-      created_at: new Date().toISOString()
+      group_id: body.group_id ?? defaultGroup?.id ?? null,
+      group_name: null,
+      effective_allowed_providers: null,
+      effective_allowed_api_formats: null,
+      effective_allowed_models: null,
+      effective_rate_limit: null,
+      created_at: now,
+      updated_at: now
     }
+    MOCK_ALL_USERS.push(newUser)
+    syncMockUserGroupsAndUsers()
     return createMockResponse(newUser)
+  },
+
+  'POST /api/admin/users/groups/bindings/batch': async (config) => {
+    await delay()
+    requireAdmin()
+    const body = JSON.parse(config.data || '{}')
+    const action = body.action
+    const normalizedUserIds = Array.from(
+      new Set(
+        (Array.isArray(body.user_ids) ? body.user_ids : [])
+          .map((userId: unknown) => String(userId ?? '').trim())
+          .filter(Boolean)
+      )
+    )
+
+    if (!normalizedUserIds.length) {
+      throw { response: createMockResponse({ detail: '至少需要提供一个用户 ID' }, 400) }
+    }
+    if (action !== 'bind' && action !== 'unbind') {
+      throw { response: createMockResponse({ detail: '不支持的批量分组操作' }, 400) }
+    }
+
+    const targetGroup = action === 'bind'
+      ? getMockUserGroupById(body.group_id ?? null)
+      : null
+    const defaultGroup = getDefaultMockUserGroup()
+
+    if (action === 'bind') {
+      if (!body.group_id) {
+        throw { response: createMockResponse({ detail: '绑定用户到分组时必须提供 group_id' }, 400) }
+      }
+      if (!targetGroup) {
+        throw { response: createMockResponse({ detail: '用户分组不存在' }, 404) }
+      }
+    }
+
+    const updatedUsers: (typeof MOCK_ALL_USERS)[number][] = []
+    let skippedCount = 0
+    const now = new Date().toISOString()
+
+    for (const userId of normalizedUserIds) {
+      const user = MOCK_ALL_USERS.find(item => item.id === userId)
+      if (!user) {
+        skippedCount += 1
+        continue
+      }
+
+      let changed = false
+
+      if (action === 'bind' && targetGroup) {
+        if (user.group_id !== targetGroup.id) {
+          user.group_id = targetGroup.id
+          changed = true
+        }
+      } else {
+        if (body.source_group_id && user.group_id !== body.source_group_id) {
+          skippedCount += 1
+          continue
+        }
+
+        if (!defaultGroup || user.group_id === defaultGroup.id) {
+          skippedCount += 1
+          continue
+        }
+
+        if (user.group_id != null) {
+          user.group_id = defaultGroup.id
+          changed = true
+        }
+      }
+
+      if (!changed) {
+        skippedCount += 1
+        continue
+      }
+
+      user.updated_at = now
+      updatedUsers.push(user)
+    }
+
+    syncMockUserGroupsAndUsers()
+
+    return createMockResponse({
+      action,
+      group_id: action === 'bind' ? body.group_id ?? null : defaultGroup?.id ?? null,
+      source_group_id: body.source_group_id ?? null,
+      updated_count: updatedUsers.length,
+      skipped_count: skippedCount,
+      users: updatedUsers,
+    })
   },
 
   // ========== Admin: API Keys ==========
@@ -3006,6 +3172,55 @@ registerDynamicRoute('GET', '/api/admin/users/:userId', async (_config, params) 
   return createMockResponse(user)
 })
 
+registerDynamicRoute('PUT', '/api/admin/users/groups/:groupId', async (config, params) => {
+  await delay()
+  requireAdmin()
+  const group = MOCK_USER_GROUPS.find(g => g.id === params.groupId)
+  if (!group) {
+    throw { response: createMockResponse({ detail: '用户分组不存在' }, 404) }
+  }
+  const body = JSON.parse(config.data || '{}')
+  if ('name' in body && body.name != null) {
+    group.name = body.name
+  }
+  if ('description' in body) {
+    group.description = body.description ?? null
+  }
+  if ('allowed_providers' in body) {
+    group.allowed_providers = body.allowed_providers ?? null
+  }
+  if ('allowed_api_formats' in body) {
+    group.allowed_api_formats = body.allowed_api_formats ?? null
+  }
+  if ('allowed_models' in body) {
+    group.allowed_models = body.allowed_models ?? null
+  }
+  if ('rate_limit' in body) {
+    group.rate_limit = body.rate_limit ?? null
+  }
+  group.updated_at = new Date().toISOString()
+  syncMockUserGroupsAndUsers()
+  return createMockResponse(group)
+})
+
+registerDynamicRoute('DELETE', '/api/admin/users/groups/:groupId', async (_config, params) => {
+  await delay()
+  requireAdmin()
+  const groupIndex = MOCK_USER_GROUPS.findIndex(g => g.id === params.groupId)
+  if (groupIndex === -1) {
+    throw { response: createMockResponse({ detail: '用户分组不存在' }, 404) }
+  }
+  if (MOCK_USER_GROUPS[groupIndex]?.is_default) {
+    throw { response: createMockResponse({ detail: '默认分组不能删除' }, 400) }
+  }
+  if (MOCK_ALL_USERS.some(user => user.group_id === params.groupId)) {
+    throw { response: createMockResponse({ detail: '该分组仍有关联用户，请先移除分组成员' }, 400) }
+  }
+  MOCK_USER_GROUPS.splice(groupIndex, 1)
+  syncMockUserGroupsAndUsers()
+  return createMockResponse({ message: '删除成功（演示模式）' })
+})
+
 // 用户更新
 registerDynamicRoute('PATCH', '/api/admin/users/:userId', async (config, params) => {
   await delay()
@@ -3015,17 +3230,43 @@ registerDynamicRoute('PATCH', '/api/admin/users/:userId', async (config, params)
     throw { response: createMockResponse({ detail: '用户不存在' }, 404) }
   }
   const body = JSON.parse(config.data || '{}')
-  return createMockResponse({ ...user, ...body })
+  const defaultGroup = getDefaultMockUserGroup()
+  Object.assign(user, body, {
+    group_id: body.group_id ?? defaultGroup?.id ?? user.group_id ?? null,
+    updated_at: new Date().toISOString()
+  })
+  syncMockUserGroupsAndUsers()
+  return createMockResponse(user)
 })
 
-// 用户删除
-registerDynamicRoute('DELETE', '/api/admin/users/:userId', async (_config, params) => {
+registerDynamicRoute('PUT', '/api/admin/users/:userId', async (config, params) => {
   await delay()
   requireAdmin()
   const user = MOCK_ALL_USERS.find(u => u.id === params.userId)
   if (!user) {
     throw { response: createMockResponse({ detail: '用户不存在' }, 404) }
   }
+  const body = JSON.parse(config.data || '{}')
+  const defaultGroup = getDefaultMockUserGroup()
+  Object.assign(user, {
+    ...body,
+    group_id: body.group_id ?? defaultGroup?.id ?? null,
+    updated_at: new Date().toISOString()
+  })
+  syncMockUserGroupsAndUsers()
+  return createMockResponse(user)
+})
+
+// 用户删除
+registerDynamicRoute('DELETE', '/api/admin/users/:userId', async (_config, params) => {
+  await delay()
+  requireAdmin()
+  const userIndex = MOCK_ALL_USERS.findIndex(u => u.id === params.userId)
+  if (userIndex === -1) {
+    throw { response: createMockResponse({ detail: '用户不存在' }, 404) }
+  }
+  MOCK_ALL_USERS.splice(userIndex, 1)
+  syncMockUserGroupsAndUsers()
   return createMockResponse({ message: '删除成功（演示模式）' })
 })
 

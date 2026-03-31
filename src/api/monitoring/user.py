@@ -14,6 +14,7 @@ from src.api.base.context import ApiRequestContext
 from src.api.base.pagination import PaginationMeta, build_pagination_payload, paginate_query
 from src.api.base.pipeline import get_pipeline
 from src.core.logger import logger
+from src.core.user_access import resolve_user_rate_limit
 from src.database import get_db
 from src.models.database import ApiKey, AuditLog
 from src.services.rate_limit.user_rpm_limiter import SYSTEM_RPM_CONFIG_KEY, get_user_rpm_limiter
@@ -177,7 +178,12 @@ class UserRateLimitStatusAdapter(AuthenticatedApiAdapter):
                     user_scope_key = limiter.get_standalone_rpm_key(key.id)
                     key_limit = 0
                 else:
-                    user_limit = user.rate_limit if user.rate_limit is not None else system_default
+                    effective_user_rate_limit = resolve_user_rate_limit(user)
+                    user_limit = (
+                        effective_user_rate_limit
+                        if effective_user_rate_limit is not None
+                        else system_default
+                    )
                     user_scope_key = limiter.get_user_rpm_key(user.id)
                     key_limit = max(int(key.rate_limit or 0), 0)
 

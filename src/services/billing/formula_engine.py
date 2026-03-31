@@ -749,8 +749,9 @@ class FormulaEngine:
         Resolve TTL-dependent pricing (legacy: cache_ttl_pricing).
 
         Rules:
-        - pick the first entry whose ttl_minutes >= requested ttl
-        - otherwise pick the last entry
+        - exact match wins
+        - otherwise use the nearest configured entry whose ttl_minutes <= requested ttl
+        - if the requested ttl is below every configured override, fallback to the base tier price
         - if missing/invalid, fallback to base value
         """
         try:
@@ -762,14 +763,27 @@ class FormulaEngine:
                 return to_decimal(e.get("ttl_minutes") or 0)
 
             entries_sorted = sorted(entries, key=_ttl_key)
-            chosen: dict[str, Any] = entries_sorted[-1]
+
             for e in entries_sorted:
                 try:
-                    if ttl_minutes <= to_decimal(e.get("ttl_minutes") or 0):
-                        chosen = e
-                        break
+                    if ttl_minutes == to_decimal(e.get("ttl_minutes") or 0):
+                        v = e.get(ttl_value_key)
+                        if v is None:
+                            return fallback
+                        return to_decimal(v)
                 except Exception:
                     continue
+
+            chosen: dict[str, Any] | None = None
+            for e in entries_sorted:
+                try:
+                    if to_decimal(e.get("ttl_minutes") or 0) <= ttl_minutes:
+                        chosen = e
+                except Exception:
+                    continue
+
+            if chosen is None:
+                return fallback
 
             v = chosen.get(ttl_value_key)
             if v is None:

@@ -119,9 +119,13 @@ def build_usage_params(
     cache_cost = cost.cache_cost
     request_cost = cost.request_cost
     total_cost = cost.total_cost
+    explicit_cache_creation_cost_5m = cost.cache_creation_cost_5m
+    explicit_cache_creation_cost_1h = cost.cache_creation_cost_1h
     input_price = cost.input_price
     output_price = cost.output_price
     cache_creation_price = cost.cache_creation_price
+    explicit_cache_creation_price_5m = cost.cache_creation_price_5m
+    explicit_cache_creation_price_1h = cost.cache_creation_price_1h
     cache_read_price = cost.cache_read_price
     request_price = cost.request_price
     actual_rate_multiplier = cost.actual_rate_multiplier
@@ -230,7 +234,25 @@ def build_usage_params(
     ttl_5m_tokens = int(cache_creation_input_tokens_5m or 0)
     ttl_1h_tokens = int(cache_creation_input_tokens_1h or 0)
 
-    if total_cache_creation_tokens > 0:
+    has_explicit_cache_creation_split = (
+        explicit_cache_creation_cost_5m > 0
+        or explicit_cache_creation_cost_1h > 0
+        or explicit_cache_creation_price_5m is not None
+        or explicit_cache_creation_price_1h is not None
+    )
+
+    if has_explicit_cache_creation_split:
+        cache_creation_cost_5m = explicit_cache_creation_cost_5m
+        cache_creation_cost_1h = explicit_cache_creation_cost_1h
+        cache_creation_price_5m = explicit_cache_creation_price_5m
+        cache_creation_price_1h = explicit_cache_creation_price_1h
+        if is_free_tier:
+            actual_cache_creation_cost_5m = 0.0
+            actual_cache_creation_cost_1h = 0.0
+        else:
+            actual_cache_creation_cost_5m = cache_creation_cost_5m * actual_rate_multiplier
+            actual_cache_creation_cost_1h = cache_creation_cost_1h * actual_rate_multiplier
+    elif total_cache_creation_tokens > 0:
         if ttl_5m_tokens > 0 and ttl_1h_tokens > 0:
             ttl_5m_ratio = ttl_5m_tokens / total_cache_creation_tokens
             cache_creation_cost_5m = cache_creation_cost * ttl_5m_ratio

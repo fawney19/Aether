@@ -693,14 +693,7 @@ class UpdateUserRequest(BaseModel):
     unlimited: bool | None = Field(None, description="是否无限制（true=无限制，false=有限制）")
     is_active: bool | None = None
     role: str | None = None
-    allowed_providers: list[str] | None = Field(None, description="允许使用的提供商 ID 列表")
-    allowed_api_formats: list[str] | None = Field(None, description="允许使用的 API 格式列表")
-    allowed_models: list[str] | None = Field(None, description="允许使用的模型名称列表")
-    rate_limit: int | None = Field(
-        None,
-        ge=0,
-        description="每分钟请求限制；null 表示继承系统默认，0 表示不限制",
-    )
+    group_id: str | None = Field(None, description="所属用户分组 ID；null 表示不分组")
 
     @field_validator("username")
     @classmethod
@@ -727,6 +720,14 @@ class UpdateUserRequest(BaseModel):
             raise ValueError("邮箱格式不正确")
 
         return v.lower()
+
+    @field_validator("group_id")
+    @classmethod
+    def validate_group_id(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
 
     @field_validator("password")
     @classmethod

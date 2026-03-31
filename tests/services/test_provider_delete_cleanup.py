@@ -63,7 +63,7 @@ async def test_cleanup_deleted_provider_references_cleans_large_fanout_tables(
 ) -> None:
     db = MagicMock()
 
-    user_records = [SimpleNamespace(allowed_providers=["provider-a", "provider-b"])]
+    user_group_records = [SimpleNamespace(allowed_providers=["provider-a", "provider-b"])]
     api_key_records = [SimpleNamespace(allowed_providers=["provider-a"])]
     key_cleanup_calls: list[list[str]] = []
 
@@ -76,7 +76,7 @@ async def test_cleanup_deleted_provider_references_cleans_large_fanout_tables(
     db.query.side_effect = [
         _query_mock(rows=[("endpoint-1",), ("endpoint-2",)]),
         _query_mock(rows=[("key-1",), ("key-2",)]),
-        _query_mock(rows=user_records),
+        _query_mock(rows=user_group_records),
         _query_mock(rows=api_key_records),
         _query_mock(update_count=2),
         _query_mock(update_count=3),
@@ -90,7 +90,7 @@ async def test_cleanup_deleted_provider_references_cleans_large_fanout_tables(
     stats = cleanup_module.cleanup_deleted_provider_references(db, "provider-a")
 
     assert stats == {
-        "users": 1,
+        "user_groups": 1,
         "api_keys": 1,
         "user_preferences": 2,
         "usage_provider": 3,
@@ -100,7 +100,7 @@ async def test_cleanup_deleted_provider_references_cleans_large_fanout_tables(
         "request_candidates_provider": 8,
         "request_candidates_endpoint": 7,
     }
-    assert user_records[0].allowed_providers == ["provider-b"]
+    assert user_group_records[0].allowed_providers == ["provider-b"]
     assert api_key_records[0].allowed_providers == []
     assert key_cleanup_calls == [["key-1", "key-2"]]
 
@@ -112,7 +112,7 @@ def test_delete_provider_tree_deletes_children_before_provider(
 
     cleanup_mock = MagicMock(
         return_value={
-            "users": 1,
+            "user_groups": 1,
             "api_keys": 2,
             "user_preferences": 3,
             "usage_provider": 4,

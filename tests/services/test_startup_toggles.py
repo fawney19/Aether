@@ -6,7 +6,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -87,6 +87,39 @@ async def test_maintenance_scheduler_stop_cancels_startup_task_and_removes_jobs(
     assert scheduler._startup_task is None
     assert set(removed_jobs) == set(expected_job_ids)
     assert scheduler._registered_job_ids == []
+
+
+@pytest.mark.asyncio
+async def test_run_startup_tasks_starts_historical_rebilling_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler = MaintenanceScheduler()
+    created: list[Any] = []
+
+    async def fake_sleep(_seconds: float) -> None:
+        return None
+
+    async def fake_pending_cleanup() -> None:
+        return None
+
+    def fake_safe_create_task(coro: Any) -> object:
+        created.append(coro)
+        if inspect.iscoroutine(coro):
+            coro.close()
+        return object()
+
+    monkeypatch.setattr(maintenance_scheduler_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(scheduler, "_perform_pending_cleanup", fake_pending_cleanup)
+    monkeypatch.setattr(
+        "src.services.provider.adapters.antigravity.client.refresh_user_agent",
+        AsyncMock(),
+    )
+    monkeypatch.setattr("src.utils.async_utils.safe_create_task", fake_safe_create_task)
+
+    await scheduler._run_startup_tasks()
+
+    assert len(created) == 1
+    assert scheduler._historical_rebilling_task is not None
 
 
 @pytest.mark.asyncio

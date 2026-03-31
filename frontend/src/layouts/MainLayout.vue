@@ -582,6 +582,7 @@ const navigation = computed(() => {
       title: '管理',
       items: [
         { name: '用户管理', href: '/admin/users', icon: Users },
+        { name: '用户分组', href: '/admin/user-groups', icon: Users },
         { name: '提供商', href: '/admin/providers', icon: FolderTree },
         { name: '模型管理', href: '/admin/models', icon: Layers },
         { name: '号池管理', href: '/admin/pool', icon: Database },

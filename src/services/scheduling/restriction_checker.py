@@ -10,6 +10,11 @@ from typing import Any
 
 from src.core.logger import logger
 from src.core.model_permissions import merge_allowed_models
+from src.core.user_access import (
+    resolve_user_allowed_api_formats,
+    resolve_user_allowed_models,
+    resolve_user_allowed_providers,
+)
 from src.models.database import ApiKey
 
 
@@ -48,26 +53,29 @@ def get_effective_restrictions(user_api_key: ApiKey | None) -> dict[str, Any]:
     # 调试日志
     logger.debug(
         "[_get_effective_restrictions] ApiKey={}..., User={}..., "
-        "ApiKey.allowed_models={}, User.allowed_models={}",
+        "ApiKey.allowed_models={}, Group.allowed_models={}",
         user_api_key.id[:8],
         user.id[:8] if user else "None",
         user_api_key.allowed_models,
-        user.allowed_models if user else "N/A",
+        resolve_user_allowed_models(user) if user else "N/A",
     )
 
     # 合并 allowed_providers
     result["allowed_providers"] = merge_restriction_sets(
-        user_api_key.allowed_providers, user.allowed_providers if user else None
+        user_api_key.allowed_providers,
+        resolve_user_allowed_providers(user) if user else None,
     )
 
     # 合并 allowed_models（取交集）
     result["allowed_models"] = merge_allowed_models(
-        user_api_key.allowed_models, user.allowed_models if user else None
+        user_api_key.allowed_models,
+        resolve_user_allowed_models(user) if user else None,
     )
 
     # 合并 allowed_api_formats
     result["allowed_api_formats"] = merge_restriction_sets(
-        user_api_key.allowed_api_formats, user.allowed_api_formats if user else None
+        user_api_key.allowed_api_formats,
+        resolve_user_allowed_api_formats(user) if user else None,
     )
 
     return result
