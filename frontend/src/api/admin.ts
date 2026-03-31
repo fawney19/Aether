@@ -1,5 +1,4 @@
 import apiClient from './client'
-import { cachedRequest, buildCacheKey } from '@/utils/cache'
 import type { BillingSummary } from './auth'
 
 // LDAP 配置导出结构
@@ -73,8 +72,19 @@ export interface ProxyNodeExport {
 export interface UsersExportData {
   version: string
   exported_at: string
+  user_groups?: UserGroupExport[]
   users: UserExport[]
   standalone_keys?: StandaloneKeyExport[]
+}
+
+export interface UserGroupExport {
+  name: string
+  description?: string | null
+  allowed_providers?: string[] | null
+  allowed_api_formats?: string[] | null
+  allowed_models?: string[] | null
+  rate_limit?: number | null
+  user_count?: number
 }
 
 export interface UserExport {
@@ -83,10 +93,7 @@ export interface UserExport {
   username: string
   password_hash: string
   role: string
-  allowed_providers?: string[] | null
-  allowed_api_formats?: string[] | null
-  allowed_models?: string[] | null
-  rate_limit?: number | null  // null = 跟随系统默认，0 = 不限制
+  group_name?: string | null
   model_capability_settings?: Record<string, Record<string, boolean>>
   unlimited?: boolean
   wallet?: BillingSummary | null
