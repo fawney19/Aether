@@ -78,7 +78,7 @@ def _validate_config(db: Session) -> tuple[bool, str]:
 gemini_files_module = ModuleDefinition(
     metadata=ModuleMetadata(
         name="gemini_files",
-        display_name="文件缓存",
+        display_name="Gemini Files 文件缓存",
         description="管理 Gemini Files API 上传的文件，支持文件上传、查看和删除",
         category=ModuleCategory.INTEGRATION,
         env_key="GEMINI_FILES_AVAILABLE",

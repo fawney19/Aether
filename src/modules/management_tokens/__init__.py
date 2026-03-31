@@ -89,11 +89,11 @@ management_tokens_module = ModuleDefinition(
         required_packages=[],
         # 路由配置
         api_prefix="/api/admin/management-tokens, /api/me/management-tokens",
-        # 前端配置 - 不在导航栏显示，但保留路由用于直接访问
+        # 前端配置
         admin_route="/admin/management-tokens",
-        admin_menu_icon=None,
-        admin_menu_group=None,  # 不显示在导航菜单中
-        admin_menu_order=0,
+        admin_menu_icon="KeyRound",
+        admin_menu_group="system",
+        admin_menu_order=57,
     ),
     router_factory=_get_router,
     health_check=_health_check,

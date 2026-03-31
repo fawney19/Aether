@@ -266,7 +266,8 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'gemini-files',
         name: 'GeminiFilesManagement',
-        component: () => importWithRetry(() => import('@/views/admin/GeminiFilesManagement.vue'))
+        component: () => importWithRetry(() => import('@/views/admin/GeminiFilesManagement.vue')),
+        meta: { module: 'gemini_files' }
       }
     ]
   }

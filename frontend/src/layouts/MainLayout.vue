@@ -370,7 +370,7 @@ import {
   type LucideIcon,
 } from 'lucide-vue-next'
 
-import { BUILTIN_TOOL_BREADCRUMBS } from '@/config/builtin-tools'
+import { BUILTIN_TOOLS, BUILTIN_TOOL_BREADCRUMBS } from '@/config/builtin-tools'
 
 const router = useRouter()
 const route = useRoute()
@@ -531,6 +531,15 @@ const navigation = computed(() => {
     { name: '缓存监控', href: '/admin/cache-monitoring', icon: Gauge },
   ]
 
+  // 内置工具也直接显示在系统菜单中，避免只能绕到模块管理页进入
+  const builtinSystemItems = BUILTIN_TOOLS.map(tool => ({
+    name: tool.name,
+    href: tool.href,
+    icon: tool.icon
+  }))
+
+  systemItems.push(...builtinSystemItems)
+
   // 动态添加已激活模块的菜单项
   // 图标映射
   const iconMap: Record<string, LucideIcon> = {
@@ -542,9 +551,9 @@ const navigation = computed(() => {
     Server,
   }
 
-  // 添加模块菜单项（按 admin_menu_order 排序，只显示已激活的）
+  // 添加系统模块菜单项（按 admin_menu_order 排序，按启用状态显示）
   const moduleMenuItems = Object.values(moduleStore.modules)
-    .filter(m => m.active && m.admin_route && m.admin_menu_group === 'system')
+    .filter(m => m.enabled && m.admin_route && m.admin_menu_group === 'system')
     .sort((a, b) => a.admin_menu_order - b.admin_menu_order)
     .map(m => ({
       name: m.display_name,
@@ -609,6 +618,12 @@ const breadcrumbs = computed((): BreadcrumbItem[] => {
     const moduleName = route.meta.module as string
     const moduleStatus = moduleStore.modules[moduleName]
     const displayName = moduleStatus?.display_name || moduleName
+    if (moduleStatus?.admin_menu_group === 'system' && moduleStatus?.enabled) {
+      return [
+        { label: '系统' },
+        { label: displayName }
+      ]
+    }
     return [
       { label: '系统' },
       { label: '模块管理', href: '/admin/modules' },
@@ -620,7 +635,6 @@ const breadcrumbs = computed((): BreadcrumbItem[] => {
   if (BUILTIN_TOOL_BREADCRUMBS[route.path]) {
     return [
       { label: '系统' },
-      { label: '模块管理', href: '/admin/modules' },
       { label: BUILTIN_TOOL_BREADCRUMBS[route.path] }
     ]
   }
@@ -642,6 +656,12 @@ const breadcrumbs = computed((): BreadcrumbItem[] => {
     m => m.admin_route && route.path === m.admin_route
   )
   if (currentModule) {
+    if (currentModule.admin_menu_group === 'system' && currentModule.enabled) {
+      return [
+        { label: '系统' },
+        { label: currentModule.display_name }
+      ]
+    }
     return [
       { label: '模块管理', href: '/admin/modules' },
       { label: currentModule.display_name }
