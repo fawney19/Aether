@@ -203,6 +203,10 @@ class Config:
         self.payment_status_check_max_age_hours = int(
             os.getenv("PAYMENT_STATUS_CHECK_MAX_AGE_HOURS", "24")
         )
+        self.payment_max_pending_orders = max(
+            0,
+            int(os.getenv("PAYMENT_MAX_PENDING_ORDERS", "5")),
+        )
 
         priv_key_path = _resolve_cert_path(
             self.alipay_private_key_path,

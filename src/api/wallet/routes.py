@@ -20,22 +20,25 @@ from src.api.base.pipeline import get_pipeline
 from src.api.serializers import (
     safe_gateway_response,
     serialize_payment_order,
+    serialize_recharge_package,
     serialize_wallet_daily_usage,
     serialize_wallet_payload,
     serialize_wallet_refund,
     serialize_wallet_transaction,
 )
+from src.config import config
 from src.core.exceptions import InvalidRequestException, NotFoundException, translate_pydantic_error
 from src.database import get_db, get_db_context
 from src.models.database import (
     PaymentOrder,
+    RechargePackage,
     RefundRequest,
     User,
     Wallet,
     WalletDailyUsageLedger,
     WalletTransaction,
 )
-from src.services.payment import PaymentService
+from src.services.payment import PaymentService, RechargePackageService
 from src.services.system.config import SystemConfigService
 from src.services.wallet import WalletDailyUsageLedgerService, WalletService
 
@@ -58,7 +61,29 @@ def _create_recharge_order_sync(user_id: str, req: CreateRechargePayload) -> dic
         if payment_method not in enabled_methods:
             raise InvalidRequestException("当前支付方式暂未开放")
 
-        requested_pay_amount = float(req.pay_amount if req.pay_amount is not None else req.amount_usd)
+        package: RechargePackage | None = None
+        if req.package_id:
+            package = RechargePackageService.get_package(db, req.package_id)
+            if package is None or not package.is_active:
+                raise InvalidRequestException("充值套餐不存在或已下架")
+
+        if package is not None:
+            requested_pay_amount = float(
+                RechargePackageService.calculate_pay_amount(
+                    recharge_amount_usd=package.recharge_amount_usd,
+                    credit_ratio=settings["credit_ratio"],
+                )
+            )
+            credited_amount = float(package.recharge_amount_usd or 0)
+            bonus_amount = float(package.bonus_amount_usd or 0)
+        else:
+            if req.amount_usd is None:
+                raise InvalidRequestException("请输入有效的充值金额")
+            requested_pay_amount = float(req.pay_amount if req.pay_amount is not None else req.amount_usd)
+            credit_ratio = float(settings["credit_ratio"])
+            credited_amount = requested_pay_amount * credit_ratio
+            bonus_amount = 0.0
+
         min_amount = float(settings["min_amount"])
         max_amount = float(settings["max_amount"])
         if requested_pay_amount < min_amount:
@@ -67,18 +92,19 @@ def _create_recharge_order_sync(user_id: str, req: CreateRechargePayload) -> dic
             raise InvalidRequestException(f"单笔充值金额不能高于 {max_amount:.2f}")
 
         credit_ratio = float(settings["credit_ratio"])
-        credited_amount = requested_pay_amount * credit_ratio
 
         try:
             order = PaymentService.create_recharge_order(
                 db,
                 user=user,
                 amount_usd=credited_amount,
+                bonus_amount_usd=bonus_amount,
                 payment_method=payment_method,
                 pay_amount=requested_pay_amount,
                 pay_currency="CNY",
                 exchange_rate=credit_ratio,
                 expires_in_minutes=int(settings["expire_minutes"]),
+                max_pending_orders=config.payment_max_pending_orders,
             )
         except ValueError as exc:
             raise InvalidRequestException(str(exc)) from exc
@@ -93,7 +119,19 @@ def _create_recharge_order_sync(user_id: str, req: CreateRechargePayload) -> dic
 
 def _get_recharge_settings_sync() -> dict[str, Any]:
     with get_db_context() as db:
-        return SystemConfigService.get_wallet_recharge_settings(db)
+        settings = SystemConfigService.get_wallet_recharge_settings(db)
+        packages = RechargePackageService.list_packages(db, active_only=True)
+        settings["packages"] = [
+            serialize_recharge_package(
+                item,
+                credit_ratio=float(settings["credit_ratio"]),
+                min_amount=float(settings["min_amount"]),
+                max_amount=float(settings["max_amount"]),
+            )
+            for item in packages
+        ]
+        settings["max_pending_orders"] = config.payment_max_pending_orders
+        return settings
 
 
 def _list_recharge_orders_sync(user_id: str, limit: int, offset: int) -> dict[str, Any]:
@@ -228,7 +266,8 @@ class CreateRefundPayload(BaseModel):
 
 
 class CreateRechargePayload(BaseModel):
-    amount_usd: float = Field(..., gt=0, allow_inf_nan=False)
+    amount_usd: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    package_id: str | None = Field(default=None, max_length=36)
     payment_method: str = Field(..., min_length=1, max_length=30)
     pay_amount: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     pay_currency: str | None = Field(default=None, min_length=3, max_length=3)

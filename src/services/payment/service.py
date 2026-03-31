@@ -56,6 +56,15 @@ class PaymentService:
         )
 
     @staticmethod
+    def _get_locked_wallet(db: Session, *, wallet_id: str) -> Wallet | None:
+        return (
+            db.query(Wallet)
+            .filter(Wallet.id == wallet_id)
+            .with_for_update()
+            .one_or_none()
+        )
+
+    @staticmethod
     def _merge_gateway_response(
         existing: dict[str, Any] | None,
         updates: dict[str, Any] | None,
@@ -159,12 +168,33 @@ class PaymentService:
         return to_money_decimal(expected)
 
     @classmethod
+    def count_active_pending_orders(
+        cls,
+        db: Session,
+        *,
+        user_id: str,
+        refresh_expired: bool = True,
+    ) -> int:
+        if refresh_expired:
+            cls.expire_overdue_pending_orders(db, user_id=user_id)
+        return int(
+            db.query(PaymentOrder)
+            .filter(
+                PaymentOrder.user_id == user_id,
+                PaymentOrder.status == "pending",
+            )
+            .count()
+            or 0
+        )
+
+    @classmethod
     def create_recharge_order(
         cls,
         db: Session,
         *,
         user: User,
         amount_usd: Decimal | float | int | str,
+        bonus_amount_usd: Decimal | float | int | str = 0,
         payment_method: str,
         pay_amount: Decimal | float | int | str | None = None,
         pay_currency: str | None = None,
@@ -172,10 +202,14 @@ class PaymentService:
         expires_in_minutes: int = 15,
         gateway_order_id: str | None = None,
         gateway_response: dict[str, Any] | None = None,
+        max_pending_orders: int | None = None,
     ) -> PaymentOrder:
         amount = to_money_decimal(amount_usd)
+        bonus_amount = to_money_decimal(bonus_amount_usd)
         if amount <= Decimal("0"):
             raise ValueError("recharge amount must be positive")
+        if bonus_amount < Decimal("0"):
+            raise ValueError("bonus amount must not be negative")
         if not payment_method:
             raise ValueError("payment_method is required")
         if payment_method == "admin_manual":
@@ -185,7 +219,20 @@ class PaymentService:
         wallet = WalletService.get_or_create_wallet(db, user=user)
         if wallet is None:
             raise ValueError("wallet not available")
-        if wallet.status != "active":
+
+        if max_pending_orders is not None and max_pending_orders > 0:
+            locked_wallet = cls._get_locked_wallet(db, wallet_id=wallet.id)
+            if locked_wallet is None:
+                raise ValueError("wallet not found")
+            if locked_wallet.status != "active":
+                raise ValueError("wallet is not active")
+            wallet = locked_wallet
+            pending_count = cls.count_active_pending_orders(db, user_id=user.id, refresh_expired=True)
+            if pending_count >= max_pending_orders:
+                raise ValueError(
+                    f"当前待支付订单已达上限（{max_pending_orders}笔），请先完成支付或等待旧订单过期后再试"
+                )
+        elif wallet.status != "active":
             raise ValueError("wallet is not active")
 
         now = datetime.now(timezone.utc)
@@ -194,6 +241,7 @@ class PaymentService:
             wallet_id=wallet.id,
             user_id=user.id,
             amount_usd=amount,
+            bonus_amount_usd=bonus_amount,
             pay_amount=to_money_decimal(pay_amount) if pay_amount is not None else None,
             pay_currency=pay_currency,
             exchange_rate=to_money_decimal(exchange_rate) if exchange_rate is not None else None,
@@ -360,6 +408,41 @@ class PaymentService:
         return locked_order
 
     @classmethod
+    def mark_order_manual_review(
+        cls,
+        db: Session,
+        *,
+        order: PaymentOrder,
+        reason: str | None = None,
+        gateway_response: dict[str, Any] | None = None,
+    ) -> tuple[PaymentOrder, bool]:
+        locked_order = cls._get_locked_order(db, order_id=order.id)
+        if locked_order is None:
+            raise ValueError("payment order not found")
+        if locked_order.status in {"credited", "refunded"}:
+            raise ValueError(f"payment order cannot enter manual review: {locked_order.status}")
+        if locked_order.status == "manual_review":
+            if gateway_response is not None:
+                locked_order.gateway_response = cls._merge_gateway_response(
+                    locked_order.gateway_response
+                    if isinstance(locked_order.gateway_response, dict)
+                    else None,
+                    gateway_response,
+                )
+            return locked_order, False
+
+        locked_order.status = "manual_review"
+        cls._clear_status_check_schedule(locked_order)
+        payload = dict(locked_order.gateway_response or {})
+        if gateway_response is not None:
+            payload = cls._merge_gateway_response(payload, gateway_response)
+        if reason:
+            payload["manual_review_reason"] = reason
+        payload["manual_review_marked_at"] = datetime.now(timezone.utc).isoformat()
+        locked_order.gateway_response = payload
+        return locked_order, True
+
+    @classmethod
     def expire_order(
         cls,
         db: Session,
@@ -481,6 +564,19 @@ class PaymentService:
             link_id=locked_order.id,
             description=f"充值到账({locked_order.payment_method})",
         )
+        bonus_amount = to_money_decimal(getattr(locked_order, "bonus_amount_usd", None))
+        if bonus_amount > Decimal("0"):
+            WalletService.create_wallet_transaction(
+                db,
+                wallet=wallet,
+                category="gift",
+                reason_code="gift_recharge_bonus",
+                amount=bonus_amount,
+                balance_type="gift",
+                link_type="payment_order",
+                link_id=locked_order.id,
+                description=f"充值赠送({locked_order.payment_method})",
+            )
 
         locked_order.status = "credited"
         locked_order.credited_at = now
@@ -508,7 +604,7 @@ class PaymentService:
         if locked_order.status == "credited":
             cls._clear_status_check_schedule(locked_order)
             return {"ok": True, "noop": True, "status": locked_order.status}
-        if locked_order.status in {"failed", "refunded"}:
+        if locked_order.status in {"failed", "refunded", "manual_review"}:
             cls._clear_status_check_schedule(locked_order)
             return {"ok": True, "noop": True, "status": locked_order.status}
 
@@ -889,6 +985,31 @@ class PaymentService:
             callback.error_message = "callback amount mismatch"
             callback.processed_at = datetime.now(timezone.utc)
             return {"ok": False, "duplicate": not created, "error": callback.error_message}
+
+        if order.status in {"failed", "manual_review"}:
+            updated_order, _changed = cls.mark_order_manual_review(
+                db,
+                order=order,
+                reason=(
+                    "paid_callback_after_failed_order"
+                    if order.status == "failed"
+                    else "paid_callback_requires_manual_review"
+                ),
+                gateway_response=payload,
+            )
+            callback.status = "processed"
+            callback.error_message = None
+            callback.processed_at = datetime.now(timezone.utc)
+            return {
+                "ok": True,
+                "duplicate": not created,
+                "credited": False,
+                "requires_manual_review": True,
+                "order_id": updated_order.id,
+                "order_no": updated_order.order_no,
+                "status": updated_order.status,
+                "wallet_id": updated_order.wallet_id,
+            }
 
         try:
             updated_order, credited = cls.credit_order(

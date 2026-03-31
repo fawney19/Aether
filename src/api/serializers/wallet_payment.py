@@ -5,11 +5,13 @@ from typing import Any
 from src.models.database import (
     PaymentCallback,
     PaymentOrder,
+    RechargePackage,
     RefundRequest,
     Wallet,
     WalletDailyUsageLedger,
     WalletTransaction,
 )
+from src.services.payment import RechargePackageService
 from src.services.wallet import WalletDailyUsageSnapshot, WalletService
 
 
@@ -33,12 +35,16 @@ def serialize_payment_order(
     *,
     sanitize_gateway_response: bool = False,
 ) -> dict[str, Any]:
+    bonus_amount = float(getattr(order, "bonus_amount_usd", 0) or 0)
+    recharge_amount = float(order.amount_usd or 0)
     return {
         "id": order.id,
         "order_no": order.order_no,
         "wallet_id": order.wallet_id,
         "user_id": order.user_id,
-        "amount_usd": float(order.amount_usd or 0),
+        "amount_usd": recharge_amount,
+        "bonus_amount_usd": bonus_amount,
+        "total_amount_usd": recharge_amount + bonus_amount,
         "pay_amount": float(order.pay_amount or 0) if order.pay_amount is not None else None,
         "pay_currency": order.pay_currency,
         "exchange_rate": (
@@ -59,6 +65,21 @@ def serialize_payment_order(
         "credited_at": order.credited_at,
         "expires_at": order.expires_at,
     }
+
+
+def serialize_recharge_package(
+    package: RechargePackage,
+    *,
+    credit_ratio: float,
+    min_amount: float | None = None,
+    max_amount: float | None = None,
+) -> dict[str, Any]:
+    return RechargePackageService.serialize_package(
+        package,
+        credit_ratio=credit_ratio,
+        min_amount=min_amount,
+        max_amount=max_amount,
+    )
 
 
 def serialize_payment_callback(callback: PaymentCallback) -> dict[str, Any]:

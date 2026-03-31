@@ -63,8 +63,8 @@ export const adminPaymentsApi = {
     return response.data
   },
 
-  async failOrder(orderId: string): Promise<{ order: PaymentOrder }> {
-    const response = await apiClient.post<{ order: PaymentOrder }>(
+  async failOrder(orderId: string): Promise<{ order: PaymentOrder; changed: boolean }> {
+    const response = await apiClient.post<{ order: PaymentOrder; changed: boolean }>(
       `/api/admin/payments/orders/${orderId}/fail`,
       {}
     )

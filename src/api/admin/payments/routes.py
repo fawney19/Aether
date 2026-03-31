@@ -125,14 +125,14 @@ def _fail_payment_order_sync(order_id: str) -> dict[str, Any]:
         if order is None:
             raise NotFoundException("Payment order not found")
         try:
-            updated = PaymentService.fail_order(
+            updated, changed = PaymentService.mark_order_manual_review(
                 db,
                 order=order,
-                reason="admin_mark_failed",
+                reason="admin_mark_manual_review",
             )
         except ValueError as exc:
             raise InvalidRequestException(str(exc)) from exc
-        return {"order": serialize_payment_order(updated)}
+        return {"order": serialize_payment_order(updated), "changed": changed}
 
 
 def _query_payment_order_status_sync(order_id: str) -> dict[str, Any]:

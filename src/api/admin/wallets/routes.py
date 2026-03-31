@@ -17,10 +17,13 @@ from src.api.serializers import (
     serialize_admin_wallet,
     serialize_admin_wallet_refund,
     serialize_admin_wallet_transaction,
+    serialize_recharge_package,
 )
 from src.core.exceptions import InvalidRequestException, NotFoundException, translate_pydantic_error
 from src.database import get_db, get_db_context
-from src.models.database import RefundRequest, Wallet, WalletTransaction
+from src.models.database import RechargePackage, RefundRequest, Wallet, WalletTransaction
+from src.services.payment import RechargePackageService
+from src.services.system.config import SystemConfigService
 from src.services.wallet import WalletService
 
 router = APIRouter(prefix="/api/admin/wallets", tags=["Admin - Wallets"])
@@ -49,6 +52,15 @@ class RefundCompletePayload(BaseModel):
     payout_proof: dict[str, Any] | None = None
 
 
+class RechargePackagePayload(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    recharge_amount_usd: float = Field(..., gt=0, allow_inf_nan=False)
+    bonus_amount_usd: float = Field(default=0, ge=0, allow_inf_nan=False)
+    sort_order: int = Field(default=0, ge=0, le=9999)
+    description: str | None = Field(default=None, max_length=500)
+    is_active: bool = True
+
+
 def _get_wallet_or_raise(db: Session, wallet_id: str) -> Wallet:
     wallet = (
         db.query(Wallet)
@@ -70,6 +82,13 @@ def _get_refund_or_raise(db: Session, wallet_id: str, refund_id: str) -> RefundR
     if refund is None:
         raise NotFoundException("Refund request not found")
     return refund
+
+
+def _get_recharge_package_or_raise(db: Session, package_id: str) -> RechargePackage:
+    package = RechargePackageService.get_package(db, package_id)
+    if package is None:
+        raise NotFoundException("Recharge package not found")
+    return package
 
 
 def _ensure_user_wallet_for_refund(wallet: Wallet) -> None:
@@ -238,6 +257,79 @@ def _complete_refund_sync(
         return {"refund": serialize_admin_wallet_refund(updated)}
 
 
+def _serialize_recharge_package_with_settings(
+    db: Session,
+    package: RechargePackage,
+) -> dict[str, Any]:
+    settings = SystemConfigService.get_wallet_recharge_settings(db)
+    return serialize_recharge_package(
+        package,
+        credit_ratio=float(settings["credit_ratio"]),
+        min_amount=float(settings["min_amount"]),
+        max_amount=float(settings["max_amount"]),
+    )
+
+
+def _list_recharge_packages_sync() -> dict[str, Any]:
+    with get_db_context() as db:
+        items = RechargePackageService.list_packages(db)
+        return {
+            "items": [_serialize_recharge_package_with_settings(db, item) for item in items],
+            "total": len(items),
+        }
+
+
+def _create_recharge_package_sync(payload: RechargePackagePayload) -> dict[str, Any]:
+    with get_db_context() as db:
+        try:
+            package = RechargePackageService.create_package(
+                db,
+                name=payload.name,
+                recharge_amount_usd=payload.recharge_amount_usd,
+                bonus_amount_usd=payload.bonus_amount_usd,
+                sort_order=payload.sort_order,
+                description=payload.description,
+                is_active=payload.is_active,
+            )
+        except ValueError as exc:
+            raise InvalidRequestException(str(exc)) from exc
+        db.commit()
+        db.refresh(package)
+        return {"package": _serialize_recharge_package_with_settings(db, package)}
+
+
+def _update_recharge_package_sync(
+    package_id: str,
+    payload: RechargePackagePayload,
+) -> dict[str, Any]:
+    with get_db_context() as db:
+        package = _get_recharge_package_or_raise(db, package_id)
+        try:
+            updated = RechargePackageService.update_package(
+                db,
+                package=package,
+                name=payload.name,
+                recharge_amount_usd=payload.recharge_amount_usd,
+                bonus_amount_usd=payload.bonus_amount_usd,
+                sort_order=payload.sort_order,
+                description=payload.description,
+                is_active=payload.is_active,
+            )
+        except ValueError as exc:
+            raise InvalidRequestException(str(exc)) from exc
+        db.commit()
+        db.refresh(updated)
+        return {"package": _serialize_recharge_package_with_settings(db, updated)}
+
+
+def _delete_recharge_package_sync(package_id: str) -> dict[str, Any]:
+    with get_db_context() as db:
+        package = _get_recharge_package_or_raise(db, package_id)
+        RechargePackageService.delete_package(db, package=package)
+        db.commit()
+        return {"deleted": True}
+
+
 @router.get("")
 async def list_wallets(
     request: Request,
@@ -285,6 +377,38 @@ async def list_global_refunds(
         limit=limit,
         offset=offset,
     )
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.get("/recharge-packages")
+async def list_recharge_packages(request: Request, db: Session = Depends(get_db)) -> Any:
+    adapter = AdminRechargePackageListAdapter()
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.post("/recharge-packages")
+async def create_recharge_package(request: Request, db: Session = Depends(get_db)) -> Any:
+    adapter = AdminRechargePackageCreateAdapter()
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.put("/recharge-packages/{package_id}")
+async def update_recharge_package(
+    package_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    adapter = AdminRechargePackageUpdateAdapter(package_id=package_id)
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.delete("/recharge-packages/{package_id}")
+async def delete_recharge_package(
+    package_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    adapter = AdminRechargePackageDeleteAdapter(package_id=package_id)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
@@ -361,6 +485,36 @@ async def complete_refund(
 ) -> Any:
     adapter = AdminWalletRefundCompleteAdapter(wallet_id=wallet_id, refund_id=refund_id)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+class AdminRechargePackageListAdapter(AdminApiAdapter):
+    async def handle(self, context: ApiRequestContext) -> dict[str, Any]:
+        return await run_in_threadpool(_list_recharge_packages_sync)
+
+
+class AdminRechargePackageCreateAdapter(AdminApiAdapter):
+    async def handle(self, context: ApiRequestContext) -> dict[str, Any]:
+        payload = _parse_payload(RechargePackagePayload, context.ensure_json_body())
+        assert isinstance(payload, RechargePackagePayload)
+        return await run_in_threadpool(_create_recharge_package_sync, payload)
+
+
+@dataclass
+class AdminRechargePackageUpdateAdapter(AdminApiAdapter):
+    package_id: str
+
+    async def handle(self, context: ApiRequestContext) -> dict[str, Any]:
+        payload = _parse_payload(RechargePackagePayload, context.ensure_json_body())
+        assert isinstance(payload, RechargePackagePayload)
+        return await run_in_threadpool(_update_recharge_package_sync, self.package_id, payload)
+
+
+@dataclass
+class AdminRechargePackageDeleteAdapter(AdminApiAdapter):
+    package_id: str
+
+    async def handle(self, context: ApiRequestContext) -> dict[str, Any]:
+        return await run_in_threadpool(_delete_recharge_package_sync, self.package_id)
 
 
 @dataclass

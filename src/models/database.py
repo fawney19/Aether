@@ -799,6 +799,34 @@ class WalletDailyUsageLedger(Base):
     wallet = relationship("Wallet", back_populates="daily_usage_ledgers")
 
 
+class RechargePackage(Base):
+    """充值套餐配置。"""
+
+    __tablename__ = "recharge_packages"
+    __table_args__ = (
+        CheckConstraint("recharge_amount_usd > 0", name="ck_recharge_packages_recharge_positive"),
+        CheckConstraint("bonus_amount_usd >= 0", name="ck_recharge_packages_bonus_non_negative"),
+        Index("idx_recharge_packages_active_sort", "is_active", "sort_order", "created_at"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(100), nullable=False)
+    description = Column(Text, nullable=True)
+    recharge_amount_usd = Column(Numeric(20, 8), nullable=False)
+    bonus_amount_usd = Column(Numeric(20, 8), nullable=False, default=0)
+    sort_order = Column(Integer, nullable=False, default=0)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
 class PaymentOrder(Base):
     """充值订单"""
 
@@ -823,6 +851,7 @@ class PaymentOrder(Base):
     user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
     amount_usd = Column(Numeric(20, 8), nullable=False)
+    bonus_amount_usd = Column(Numeric(20, 8), nullable=False, default=0)
     pay_amount = Column(Numeric(20, 2), nullable=True)
     pay_currency = Column(String(3), nullable=True)
     exchange_rate = Column(Numeric(18, 8), nullable=True)

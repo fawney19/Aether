@@ -1,5 +1,5 @@
 import apiClient from './client'
-import type { RefundRequest, WalletSummary, WalletTransaction } from './wallet'
+import type { RechargePackage, RefundRequest, WalletSummary, WalletTransaction } from './wallet'
 
 export interface AdminWallet extends WalletSummary {
   user_id: string | null
@@ -84,6 +84,17 @@ export interface RefundCompleteRequest {
   gateway_refund_id?: string
   payout_reference?: string
   payout_proof?: Record<string, unknown>
+}
+
+export interface AdminRechargePackage extends RechargePackage {}
+
+export interface RechargePackageRequest {
+  name: string
+  recharge_amount_usd: number
+  bonus_amount_usd?: number
+  sort_order?: number
+  description?: string
+  is_active?: boolean
 }
 
 export const adminWalletApi = {
@@ -242,6 +253,29 @@ export const adminWalletApi = {
       `/api/admin/wallets/${walletId}/refunds/${refundId}/complete`,
       payload
     )
+    return response.data
+  },
+
+  async listRechargePackages(): Promise<{ items: AdminRechargePackage[]; total: number }> {
+    const response = await apiClient.get('/api/admin/wallets/recharge-packages')
+    return response.data
+  },
+
+  async createRechargePackage(payload: RechargePackageRequest): Promise<{ package: AdminRechargePackage }> {
+    const response = await apiClient.post('/api/admin/wallets/recharge-packages', payload)
+    return response.data
+  },
+
+  async updateRechargePackage(
+    packageId: string,
+    payload: RechargePackageRequest
+  ): Promise<{ package: AdminRechargePackage }> {
+    const response = await apiClient.put(`/api/admin/wallets/recharge-packages/${packageId}`, payload)
+    return response.data
+  },
+
+  async deleteRechargePackage(packageId: string): Promise<{ deleted: boolean }> {
+    const response = await apiClient.delete(`/api/admin/wallets/recharge-packages/${packageId}`)
     return response.data
   },
 }

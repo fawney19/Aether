@@ -30,6 +30,7 @@ REASON_TOPUP_GATEWAY = "topup_gateway"
 REASON_TOPUP_CARD_CODE = "topup_card_code"
 REASON_GIFT_INITIAL = "gift_initial"
 REASON_GIFT_CAMPAIGN = "gift_campaign"
+REASON_GIFT_RECHARGE_BONUS = "gift_recharge_bonus"
 REASON_GIFT_EXPIRE_RECLAIM = "gift_expire_reclaim"
 REASON_ADJUST_ADMIN = "adjust_admin"
 REASON_ADJUST_SYSTEM = "adjust_system"
@@ -573,6 +574,7 @@ class WalletService:
             wallet_id=wallet.id,
             user_id=wallet.user_id,
             amount_usd=amount,
+            bonus_amount_usd=Decimal("0"),
             refunded_amount_usd=Decimal("0"),
             refundable_amount_usd=amount,
             payment_method=payment_method,

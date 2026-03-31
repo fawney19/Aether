@@ -43,6 +43,24 @@ export interface WalletRechargeSettingsResponse {
   max_amount: number
   expire_minutes: number
   credit_ratio: number
+  packages: RechargePackage[]
+}
+
+export interface RechargePackage {
+  id: string
+  name: string
+  description: string | null
+  recharge_amount_usd: number
+  bonus_amount_usd: number
+  total_amount_usd: number
+  pay_amount: number
+  pay_currency: string
+  sort_order: number
+  is_active: boolean
+  available: boolean
+  availability_message: string | null
+  created_at: string
+  updated_at: string
 }
 
 export interface WalletTransaction {
@@ -110,6 +128,8 @@ export interface PaymentOrder {
   wallet_id: string
   user_id: string | null
   amount_usd: number
+  bonus_amount_usd: number
+  total_amount_usd: number
   pay_amount: number | null
   pay_currency: string | null
   exchange_rate: number | null
@@ -147,7 +167,8 @@ export interface RefundRequest {
 }
 
 export interface WalletRechargeCreateRequest {
-  amount_usd: number
+  amount_usd?: number
+  package_id?: string
   payment_method: string
   pay_amount?: number
   pay_currency?: string

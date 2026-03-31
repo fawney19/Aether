@@ -73,18 +73,94 @@
             />
           </div>
 
+          <div
+            v-if="rechargePackages.length > 0"
+            class="space-y-2"
+          >
+            <div class="flex items-center justify-between gap-3">
+              <div class="text-sm font-medium">
+                快捷套餐
+              </div>
+              <Button
+                v-if="selectedRechargePackage"
+                variant="ghost"
+                size="sm"
+                class="h-8 px-2 text-xs"
+                @click="clearSelectedPackage"
+              >
+                改为自定义
+              </Button>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <button
+                v-for="pkg in rechargePackages"
+                :key="pkg.id"
+                type="button"
+                class="rounded-2xl border p-4 text-left transition"
+                :class="selectedPackageId === pkg.id
+                  ? 'border-primary bg-primary/5 shadow-sm'
+                  : 'border-border/60 hover:border-primary/40 hover:bg-muted/20'"
+                :disabled="!pkg.available"
+                :aria-pressed="selectedPackageId === pkg.id"
+                @click="selectRechargePackage(pkg)"
+              >
+                <div class="flex items-start justify-between gap-2">
+                  <div>
+                    <div class="font-medium">
+                      {{ pkg.name }}
+                    </div>
+                    <div class="text-xs text-muted-foreground mt-1">
+                      {{ pkg.description || '固定面额套餐' }}
+                    </div>
+                  </div>
+                  <Badge :variant="selectedPackageId === pkg.id ? 'success' : pkg.available ? 'outline' : 'warning'">
+                    {{ selectedPackageId === pkg.id ? '已选中' : pkg.available ? '可用' : '不可售' }}
+                  </Badge>
+                </div>
+                <div class="mt-3 text-sm">
+                  充 <span class="font-semibold">{{ formatCurrency(pkg.recharge_amount_usd) }}</span>
+                  <span class="text-muted-foreground mx-1">送</span>
+                  <span class="font-semibold text-emerald-600">{{ formatCurrency(pkg.bonus_amount_usd) }}</span>
+                </div>
+                <div class="mt-2 text-xs text-muted-foreground">
+                  实付 {{ formatPaymentCurrency(pkg.pay_amount) }} · 合计到账 {{ formatCurrency(pkg.total_amount_usd) }}
+                </div>
+                <div
+                  v-if="!pkg.available && pkg.availability_message"
+                  class="mt-2 text-xs text-amber-600"
+                >
+                  {{ pkg.availability_message }}
+                </div>
+                <div
+                  v-else-if="selectedPackageId === pkg.id"
+                  class="mt-2 text-xs text-primary"
+                >
+                  再次点击可取消选择
+                </div>
+              </button>
+            </div>
+          </div>
+
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div class="space-y-1.5">
-              <Label>充值金额 (CNY)</Label>
+              <Label>自定义充值金额 (CNY)</Label>
               <Input
-                v-model.number="rechargeForm.amount_usd"
+                :model-value="rechargeForm.amount_usd"
                 type="number"
                 :min="rechargeSettings?.min_amount || 0.01"
                 step="0.01"
                 placeholder="10"
+                :disabled="Boolean(selectedRechargePackage)"
+                @update:model-value="handleRechargeAmountChange"
               />
               <p class="text-xs text-muted-foreground">
                 单笔范围 {{ formatPaymentCurrency(rechargeSettings?.min_amount) }} - {{ formatPaymentCurrency(rechargeSettings?.max_amount) }}
+              </p>
+              <p
+                v-if="selectedRechargePackage"
+                class="text-xs text-primary"
+              >
+                当前已选择套餐，若需手动输入金额，请先取消套餐选择。
               </p>
             </div>
 
@@ -110,6 +186,15 @@
             </div>
           </div>
 
+          <div
+            v-if="selectedRechargePackage"
+            class="rounded-xl border border-primary/20 bg-primary/5 p-3 text-sm"
+          >
+            已选择套餐
+            <span class="font-medium">{{ selectedRechargePackage.name }}</span>
+            ，实付 {{ formatPaymentCurrency(selectedRechargePackage.pay_amount) }}，到账 {{ formatCurrency(selectedRechargePackage.recharge_amount_usd) }}，赠送 {{ formatCurrency(selectedRechargePackage.bonus_amount_usd) }}。
+          </div>
+
           <Button
             class="w-full"
             :disabled="submittingRecharge"
@@ -128,6 +213,9 @@
             <div class="text-xs text-muted-foreground">
               实付金额: <span class="font-medium text-foreground">{{ formatPaymentCurrency(latestRecharge.order.pay_amount ?? latestRecharge.order.amount_usd) }}</span>
               · 到账金额: <span class="font-medium text-foreground">{{ formatCurrency(latestRecharge.order.amount_usd) }}</span>
+              <span v-if="latestRecharge.order.bonus_amount_usd > 0">
+                · 赠送: <span class="font-medium text-emerald-600">{{ formatCurrency(latestRecharge.order.bonus_amount_usd) }}</span>
+              </span>
             </div>
             <div class="text-xs text-muted-foreground">
               状态:
@@ -422,7 +510,9 @@
                       <TableHead>支付方式</TableHead>
                       <TableHead>状态</TableHead>
                       <TableHead>可退金额</TableHead>
+                      <TableHead>支付时间</TableHead>
                       <TableHead>创建时间</TableHead>
+                      <TableHead>最晚支付时间</TableHead>
                       <TableHead class="text-right">操作</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -436,6 +526,12 @@
                       </TableCell>
                       <TableCell class="tabular-nums">
                         <div>{{ formatCurrency(order.amount_usd) }}</div>
+                        <div
+                          v-if="order.bonus_amount_usd > 0"
+                          class="text-[11px] text-emerald-600"
+                        >
+                          赠送 {{ formatCurrency(order.bonus_amount_usd) }} · 合计 {{ formatCurrency(order.total_amount_usd) }}
+                        </div>
                         <div
                           v-if="order.pay_amount !== null && order.pay_amount !== undefined"
                           class="text-[11px] text-muted-foreground"
@@ -452,8 +548,26 @@
                       <TableCell class="tabular-nums">
                         {{ formatCurrency(order.refundable_amount_usd) }}
                       </TableCell>
+                      <TableCell
+                        class="text-xs whitespace-nowrap"
+                        :class="order.paid_at ? 'text-emerald-600' : 'text-muted-foreground'"
+                      >
+                        {{ order.paid_at ? formatDateTime(order.paid_at) : '-' }}
+                      </TableCell>
                       <TableCell class="text-xs text-muted-foreground">
                         {{ formatDateTime(order.created_at) }}
+                      </TableCell>
+                      <TableCell
+                        class="text-xs whitespace-nowrap"
+                        :class="order.status === 'expired' ? 'text-rose-600' : 'text-muted-foreground'"
+                      >
+                        <div>{{ order.expires_at ? formatDateTime(order.expires_at) : '-' }}</div>
+                        <div
+                          v-if="order.status === 'expired'"
+                          class="mt-1 text-[11px] text-rose-600"
+                        >
+                          已超时
+                        </div>
                       </TableCell>
                       <TableCell class="text-right">
                         <Button
@@ -476,7 +590,7 @@
                     </TableRow>
                     <TableRow v-if="!loadingOrders && rechargeOrders.length === 0">
                       <TableCell
-                        colspan="7"
+                        colspan="9"
                         class="py-10"
                       >
                         <EmptyState
@@ -609,6 +723,7 @@ import {
   type DailyUsageRecord,
   type FlowItem,
   type PaymentOrder,
+  type RechargePackage,
   type RefundRequest,
   type WalletBalanceResponse,
   type WalletRechargeSettingsResponse,
@@ -636,7 +751,7 @@ import {
 const route = useRoute()
 const router = useRouter()
 
-const { success, error: showError, info } = useToast()
+const { success, error: showError } = useToast()
 
 const loadingInitial = ref(true)
 const loadingTransactions = ref(false)
@@ -649,6 +764,7 @@ const continuingPayOrderId = ref<string | null>(null)
 const walletBalance = ref<WalletBalanceResponse | null>(null)
 const rechargeSettings = ref<WalletRechargeSettingsResponse | null>(null)
 const latestRecharge = ref<{ order: PaymentOrder; payment_instructions: Record<string, unknown> } | null>(null)
+const selectedPackageId = ref<string | null>(null)
 
 const flowItems = ref<FlowItem[]>([])
 const todayUsage = ref<DailyUsageRecord | null>(null)
@@ -686,6 +802,10 @@ const refundableOrders = computed(() =>
 )
 
 const availableRechargeMethods = computed(() => rechargeSettings.value?.enabled_payment_methods || [])
+const rechargePackages = computed(() => rechargeSettings.value?.packages || [])
+const selectedRechargePackage = computed<RechargePackage | null>(() =>
+  rechargePackages.value.find(pkg => pkg.id === selectedPackageId.value) || null
+)
 const showRechargeCard = computed(() => {
   const settings = rechargeSettings.value
   return Boolean(settings?.recharge_enabled && settings.enabled_payment_methods.length > 0)
@@ -752,6 +872,12 @@ async function loadRechargeSettings() {
     const methods = rechargeSettings.value.enabled_payment_methods
     if (!methods.includes(rechargeForm.payment_method)) {
       rechargeForm.payment_method = methods[0] || ''
+    }
+    if (
+      selectedPackageId.value
+      && !rechargeSettings.value.packages.some(pkg => pkg.id === selectedPackageId.value && pkg.available)
+    ) {
+      selectedPackageId.value = null
     }
   } catch (error) {
     log.error('加载充值配置失败:', error)
@@ -864,7 +990,6 @@ async function handlePaymentGatewayReturn() {
 
   const orderNo = getSingleQueryValue(route.query.out_trade_no)
   activeTab.value = 'orders'
-  info('已收到支付回跳，正在确认订单状态...')
 
   try {
     await Promise.all([loadOrders(), loadBalance()])
@@ -927,33 +1052,45 @@ async function submitRecharge() {
     showError('充值功能暂未开放')
     return
   }
-  if (!rechargeForm.amount_usd || rechargeForm.amount_usd <= 0) {
-    showError('请输入有效的充值金额')
-    return
-  }
   if (!rechargeForm.payment_method) {
     showError('请选择支付方式')
     return
   }
+  const selectedPackage = selectedRechargePackage.value
   if (rechargeSettings.value) {
-    if (rechargeForm.amount_usd < rechargeSettings.value.min_amount) {
-      showError(`单笔充值金额不能低于 ${formatPaymentCurrency(rechargeSettings.value.min_amount)}`)
-      return
-    }
-    if (rechargeForm.amount_usd > rechargeSettings.value.max_amount) {
-      showError(`单笔充值金额不能高于 ${formatPaymentCurrency(rechargeSettings.value.max_amount)}`)
-      return
-    }
     if (!rechargeSettings.value.enabled_payment_methods.includes(rechargeForm.payment_method)) {
       showError('当前支付方式暂未开放')
       return
     }
+    if (selectedPackage) {
+      if (!selectedPackage.available) {
+        showError(selectedPackage.availability_message || '当前套餐暂不可购买')
+        return
+      }
+    } else {
+      if (!rechargeForm.amount_usd || rechargeForm.amount_usd <= 0) {
+        showError('请输入有效的充值金额')
+        return
+      }
+      if (rechargeForm.amount_usd < rechargeSettings.value.min_amount) {
+        showError(`单笔充值金额不能低于 ${formatPaymentCurrency(rechargeSettings.value.min_amount)}`)
+        return
+      }
+      if (rechargeForm.amount_usd > rechargeSettings.value.max_amount) {
+        showError(`单笔充值金额不能高于 ${formatPaymentCurrency(rechargeSettings.value.max_amount)}`)
+        return
+      }
+    }
+  } else if (!selectedPackage && (!rechargeForm.amount_usd || rechargeForm.amount_usd <= 0)) {
+    showError('请输入有效的充值金额')
+    return
   }
 
   submittingRecharge.value = true
   try {
     latestRecharge.value = await walletApi.createRechargeOrder({
-      amount_usd: rechargeForm.amount_usd,
+      amount_usd: selectedPackage ? undefined : rechargeForm.amount_usd,
+      package_id: selectedPackage?.id,
       payment_method: rechargeForm.payment_method,
     })
     success('充值订单创建成功')
@@ -977,6 +1114,28 @@ function openPaymentWindow(url: string) {
   window.open(url, '_blank', 'noopener,noreferrer')
 }
 
+function handleRechargeAmountChange(value: string | number) {
+  selectedPackageId.value = null
+  const nextValue = typeof value === 'number' ? value : Number(value)
+  rechargeForm.amount_usd = Number.isFinite(nextValue) ? nextValue : 0
+}
+
+function selectRechargePackage(pkg: RechargePackage) {
+  if (!pkg.available) {
+    return
+  }
+  if (selectedPackageId.value === pkg.id) {
+    clearSelectedPackage()
+    return
+  }
+  selectedPackageId.value = pkg.id
+  rechargeForm.amount_usd = pkg.pay_amount
+}
+
+function clearSelectedPackage() {
+  selectedPackageId.value = null
+}
+
 function canContinuePayment(order: PaymentOrder) {
   return order.status === 'pending'
 }
@@ -985,6 +1144,12 @@ async function continuePayOrder(order: PaymentOrder) {
   continuingPayOrderId.value = order.id
   try {
     const resp = await walletApi.getRechargeOrder(order.id)
+    if (resp.order.status !== 'pending') {
+      await loadOrders()
+      showError(`当前订单状态为${paymentStatusLabel(resp.order.status)}，无法继续支付`)
+      return
+    }
+
     const paymentUrl = resp.order.gateway_response?.payment_url
 
     if (!paymentUrl || typeof paymentUrl !== 'string') {

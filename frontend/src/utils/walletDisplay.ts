@@ -67,6 +67,7 @@ export function walletTransactionReasonLabel(reasonCode: string | null | undefin
     topup_card_code: '卡密充值',
     gift_initial: '初始赠款',
     gift_campaign: '活动赠款',
+    gift_recharge_bonus: '充值赠送',
     gift_expire_reclaim: '赠款回收',
     adjust_admin: '人工调账',
     adjust_system: '系统调账',
@@ -99,6 +100,7 @@ export function paymentStatusLabel(status: string | null | undefined): string {
     credited: '已到账',
     failed: '支付失败',
     expired: '已过期',
+    manual_review: '人工复核',
     refunding: '退款中',
     refunded: '已退款',
   }
@@ -124,6 +126,7 @@ export function paymentStatusBadge(status: string | null | undefined): BadgeVari
   if (status === 'paid' || status === 'refunding') return 'outline'
   if (status === 'pending') return 'secondary'
   if (status === 'expired') return 'warning'
+  if (status === 'manual_review') return 'warning'
   if (status === 'failed') return 'destructive'
   return 'secondary'
 }

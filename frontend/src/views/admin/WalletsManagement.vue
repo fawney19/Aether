@@ -7,16 +7,19 @@
             钱包管理
           </h3>
           <p class="text-xs text-muted-foreground mt-1">
-            统一管理资金流水、退款审批、充值订单与支付回调
+            统一管理资金流水、充值套餐、退款审批、充值订单与支付回调
           </p>
         </div>
       </div>
 
       <div class="px-5 py-5">
         <Tabs v-model="activeTab">
-          <TabsList class="tabs-button-list grid w-full max-w-[760px] grid-cols-4">
+          <TabsList class="tabs-button-list grid w-full max-w-[940px] grid-cols-5">
             <TabsTrigger value="ledger">
               资金流水
+            </TabsTrigger>
+            <TabsTrigger value="packages">
+              充值套餐
             </TabsTrigger>
             <TabsTrigger value="orders">
               充值订单
@@ -384,6 +387,9 @@
                   <SelectItem value="credited">
                     已到账
                   </SelectItem>
+                  <SelectItem value="manual_review">
+                    人工复核
+                  </SelectItem>
                   <SelectItem value="failed">
                     支付失败
                   </SelectItem>
@@ -438,7 +444,9 @@
                       <TableHead>金额</TableHead>
                       <TableHead>支付方式</TableHead>
                       <TableHead>状态</TableHead>
+                      <TableHead>支付时间</TableHead>
                       <TableHead>创建时间</TableHead>
+                      <TableHead>最晚支付时间</TableHead>
                       <TableHead class="text-right">
                         操作
                       </TableHead>
@@ -468,6 +476,12 @@
                         >
                           实付 {{ formatPaymentCurrency(order.pay_amount) }}
                         </div>
+                        <div
+                          v-if="order.bonus_amount_usd > 0"
+                          class="text-[11px] text-emerald-600"
+                        >
+                          送 {{ formatCurrency(order.bonus_amount_usd) }} · 合计 {{ formatCurrency(order.total_amount_usd) }}
+                        </div>
                       </TableCell>
                       <TableCell>{{ paymentMethodLabel(order.payment_method) }}</TableCell>
                       <TableCell>
@@ -475,8 +489,26 @@
                           {{ paymentStatusLabel(order.status) }}
                         </Badge>
                       </TableCell>
+                      <TableCell
+                        class="text-xs whitespace-nowrap"
+                        :class="order.paid_at ? 'text-emerald-600' : 'text-muted-foreground'"
+                      >
+                        {{ order.paid_at ? formatDateTime(order.paid_at) : '-' }}
+                      </TableCell>
                       <TableCell class="text-xs text-muted-foreground whitespace-nowrap">
                         {{ formatDateTime(order.created_at) }}
+                      </TableCell>
+                      <TableCell
+                        class="text-xs whitespace-nowrap"
+                        :class="order.status === 'expired' ? 'text-rose-600' : 'text-muted-foreground'"
+                      >
+                        <div>{{ order.expires_at ? formatDateTime(order.expires_at) : '-' }}</div>
+                        <div
+                          v-if="order.status === 'expired'"
+                          class="mt-1 text-[11px] text-rose-600"
+                        >
+                          已超时
+                        </div>
                       </TableCell>
                       <TableCell class="text-right">
                         <div class="flex justify-end gap-2">
@@ -508,18 +540,18 @@
                           <Button
                             v-if="canFailOrder(order.status)"
                             size="sm"
-                            variant="destructive"
+                            variant="outline"
                             :disabled="submittingOrderAction"
                             @click="failOrder(order.id)"
                           >
-                            失败
+                            转人工
                           </Button>
                         </div>
                       </TableCell>
                     </TableRow>
                     <TableRow v-if="!loadingOrders && orders.length === 0">
                       <TableCell
-                        colspan="7"
+                        colspan="9"
                         class="py-10"
                       >
                         <EmptyState
@@ -540,6 +572,123 @@
               @update:current="handleOrderPageChange"
               @update:page-size="handleOrderPageSizeChange"
             />
+          </TabsContent>
+
+          <TabsContent
+            value="packages"
+            class="mt-5 space-y-4"
+          >
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <div class="text-sm font-medium">
+                  当前套餐的实付金额会自动跟随系统充值比例换算
+                </div>
+                <div class="text-xs text-muted-foreground mt-1">
+                  例如配置“充 $500 送 $50”，用户实际支付金额会按当前 1 CNY = X $ 余额自动反推。
+                </div>
+              </div>
+              <div class="flex items-center gap-2">
+                <RefreshButton
+                  :loading="loadingPackages"
+                  @click="loadRechargePackages"
+                />
+                <Button @click="openPackageDialog()">
+                  新建套餐
+                </Button>
+              </div>
+            </div>
+
+            <div class="rounded-2xl border border-border/60 overflow-hidden bg-background">
+              <div class="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>套餐名</TableHead>
+                      <TableHead>充值额度</TableHead>
+                      <TableHead>赠送额度</TableHead>
+                      <TableHead>合计到账</TableHead>
+                      <TableHead>预计实付</TableHead>
+                      <TableHead>状态</TableHead>
+                      <TableHead>排序</TableHead>
+                      <TableHead>更新时间</TableHead>
+                      <TableHead class="text-right">操作</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    <TableRow
+                      v-for="pkg in rechargePackages"
+                      :key="pkg.id"
+                    >
+                      <TableCell class="min-w-[220px]">
+                        <div class="font-medium">
+                          {{ pkg.name }}
+                        </div>
+                        <div class="text-xs text-muted-foreground mt-1">
+                          {{ pkg.description || '-' }}
+                        </div>
+                      </TableCell>
+                      <TableCell class="tabular-nums">
+                        {{ formatCurrency(pkg.recharge_amount_usd) }}
+                      </TableCell>
+                      <TableCell class="tabular-nums text-emerald-600">
+                        {{ formatCurrency(pkg.bonus_amount_usd) }}
+                      </TableCell>
+                      <TableCell class="tabular-nums font-medium">
+                        {{ formatCurrency(pkg.total_amount_usd) }}
+                      </TableCell>
+                      <TableCell class="tabular-nums">
+                        <div>{{ formatPaymentCurrency(pkg.pay_amount) }}</div>
+                        <div
+                          v-if="!pkg.available"
+                          class="text-[11px] text-amber-600 mt-1"
+                        >
+                          {{ pkg.availability_message || '当前不可售' }}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <Badge :variant="pkg.is_active ? 'success' : 'secondary'">
+                          {{ pkg.is_active ? '启用中' : '已停用' }}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>{{ pkg.sort_order }}</TableCell>
+                      <TableCell class="text-xs text-muted-foreground whitespace-nowrap">
+                        {{ formatDateTime(pkg.updated_at) }}
+                      </TableCell>
+                      <TableCell class="text-right">
+                        <div class="flex justify-end gap-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            @click="openPackageDialog(pkg)"
+                          >
+                            编辑
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            :disabled="submittingPackageAction"
+                            @click="deleteRechargePackage(pkg)"
+                          >
+                            删除
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                    <TableRow v-if="!loadingPackages && rechargePackages.length === 0">
+                      <TableCell
+                        colspan="9"
+                        class="py-10"
+                      >
+                        <EmptyState
+                          title="暂无充值套餐"
+                          description="新建套餐后，用户充值页会展示固定面额入口"
+                        />
+                      </TableCell>
+                    </TableRow>
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
           </TabsContent>
 
           <TabsContent
@@ -962,6 +1111,88 @@
       </Transition>
     </Teleport>
 
+    <Dialog v-model="showPackageDialog">
+      <template #header>
+        <div class="px-6 py-4 border-b border-border">
+          <h3 class="text-lg font-semibold">
+            {{ editingPackageId ? '编辑充值套餐' : '新建充值套餐' }}
+          </h3>
+          <p class="text-xs text-muted-foreground mt-1">
+            充值额度用于换算用户实付金额，赠送额度到账后进入 gift 余额
+          </p>
+        </div>
+      </template>
+      <div class="space-y-4">
+        <div class="space-y-1.5">
+          <Label>套餐名称</Label>
+          <Input v-model="packageForm.name" placeholder="例如：标准 500" />
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div class="space-y-1.5">
+            <Label>充值额度 ($)</Label>
+            <Input
+              v-model.number="packageForm.recharge_amount_usd"
+              type="number"
+              min="0.01"
+              step="0.01"
+            />
+          </div>
+          <div class="space-y-1.5">
+            <Label>赠送额度 ($)</Label>
+            <Input
+              v-model.number="packageForm.bonus_amount_usd"
+              type="number"
+              min="0"
+              step="0.01"
+            />
+          </div>
+          <div class="space-y-1.5">
+            <Label>排序</Label>
+            <Input
+              v-model.number="packageForm.sort_order"
+              type="number"
+              min="0"
+              step="1"
+            />
+          </div>
+        </div>
+        <div class="space-y-1.5">
+          <Label>描述</Label>
+          <Input v-model="packageForm.description" placeholder="例如：适合日常高频使用" />
+        </div>
+        <div class="space-y-1.5">
+          <Label>状态</Label>
+          <Select v-model="packageForm.status">
+            <SelectTrigger>
+              <SelectValue placeholder="选择状态" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="active">
+                启用
+              </SelectItem>
+              <SelectItem value="inactive">
+                停用
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      <template #footer>
+        <Button
+          variant="outline"
+          @click="showPackageDialog = false"
+        >
+          取消
+        </Button>
+        <Button
+          :disabled="submittingPackageAction"
+          @click="submitRechargePackage"
+        >
+          {{ submittingPackageAction ? '提交中...' : editingPackageId ? '保存' : '创建' }}
+        </Button>
+      </template>
+    </Dialog>
+
     <Dialog v-model="showCreditDialog">
       <template #header>
         <div class="px-6 py-4 border-b border-border">
@@ -1053,6 +1284,7 @@ import { EmptyState } from '@/components/common'
 import { X } from 'lucide-vue-next'
 import {
   adminWalletApi,
+  type AdminRechargePackage,
   type AdminGlobalRefund,
   type AdminLedgerTransaction,
 } from '@/api/admin-wallets'
@@ -1078,7 +1310,7 @@ import {
   walletTransactionReasonLabel,
 } from '@/utils/walletDisplay'
 
-type WalletManagementTab = 'ledger' | 'refunds' | 'orders' | 'callbacks'
+type WalletManagementTab = 'ledger' | 'packages' | 'refunds' | 'orders' | 'callbacks'
 type LedgerCategory = 'recharge' | 'gift' | 'adjust' | 'refund'
 type LedgerReasonOption = {
   value: string
@@ -1092,6 +1324,7 @@ const LEDGER_REASON_OPTIONS: LedgerReasonOption[] = [
   { value: 'topup_card_code', label: '卡密充值', category: 'recharge' },
   { value: 'gift_initial', label: '初始赠款', category: 'gift' },
   { value: 'gift_campaign', label: '活动赠款', category: 'gift' },
+  { value: 'gift_recharge_bonus', label: '充值赠送', category: 'gift' },
   { value: 'gift_expire_reclaim', label: '赠款回收', category: 'gift' },
   { value: 'adjust_admin', label: '人工调账', category: 'adjust' },
   { value: 'adjust_system', label: '系统调账', category: 'adjust' },
@@ -1108,8 +1341,10 @@ const loadingLedger = ref(false)
 const loadingRefunds = ref(false)
 const loadingOrders = ref(false)
 const loadingCallbacks = ref(false)
+const loadingPackages = ref(false)
 const submittingRefundAction = ref(false)
 const submittingOrderAction = ref(false)
+const submittingPackageAction = ref(false)
 const queryingOrderId = ref<string | null>(null)
 
 const ledgerItems = ref<AdminLedgerTransaction[]>([])
@@ -1146,6 +1381,10 @@ const callbackPage = ref(1)
 const callbackPageSize = ref(20)
 const callbackMethodFilter = ref('all')
 
+const rechargePackages = ref<AdminRechargePackage[]>([])
+const showPackageDialog = ref(false)
+const editingPackageId = ref<string | null>(null)
+
 const walletMetaMap = ref<Record<string, { ownerName: string; ownerType: 'user' | 'api_key' }>>({})
 
 const showLedgerDrawer = ref(false)
@@ -1158,6 +1397,15 @@ const ledgerPaymentMethod = ref<string | null>(null)
 
 const showCreditDialog = ref(false)
 const currentOrder = ref<PaymentOrder | null>(null)
+
+const packageForm = reactive({
+  name: '',
+  recharge_amount_usd: 100,
+  bonus_amount_usd: 0,
+  sort_order: 0,
+  description: '',
+  status: 'active',
+})
 
 const failRefundForm = reactive({
   reason: '',
@@ -1220,6 +1468,7 @@ onMounted(async () => {
   await Promise.all([
     loadWalletMetaMap(),
     loadLedger(),
+    loadRechargePackages(),
     loadRefunds(),
     loadOrders(),
     loadCallbacks(),
@@ -1227,7 +1476,7 @@ onMounted(async () => {
 })
 
 function isValidTab(tab: unknown): tab is WalletManagementTab {
-  return tab === 'ledger' || tab === 'refunds' || tab === 'orders' || tab === 'callbacks'
+  return tab === 'ledger' || tab === 'packages' || tab === 'refunds' || tab === 'orders' || tab === 'callbacks'
 }
 
 async function loadWalletMetaMap() {
@@ -1294,6 +1543,19 @@ async function loadRefunds() {
   }
 }
 
+async function loadRechargePackages() {
+  loadingPackages.value = true
+  try {
+    const resp = await adminWalletApi.listRechargePackages()
+    rechargePackages.value = resp.items
+  } catch (error) {
+    log.error('加载充值套餐失败:', error)
+    showError(parseApiError(error, '加载充值套餐失败'))
+  } finally {
+    loadingPackages.value = false
+  }
+}
+
 async function loadOrders() {
   loadingOrders.value = true
   try {
@@ -1311,6 +1573,89 @@ async function loadOrders() {
     showError(parseApiError(error, '加载支付订单失败'))
   } finally {
     loadingOrders.value = false
+  }
+}
+
+function resetPackageForm() {
+  packageForm.name = ''
+  packageForm.recharge_amount_usd = 100
+  packageForm.bonus_amount_usd = 0
+  packageForm.sort_order = 0
+  packageForm.description = ''
+  packageForm.status = 'active'
+}
+
+function openPackageDialog(pkg?: AdminRechargePackage) {
+  if (!pkg) {
+    editingPackageId.value = null
+    resetPackageForm()
+  } else {
+    editingPackageId.value = pkg.id
+    packageForm.name = pkg.name
+    packageForm.recharge_amount_usd = pkg.recharge_amount_usd
+    packageForm.bonus_amount_usd = pkg.bonus_amount_usd
+    packageForm.sort_order = pkg.sort_order
+    packageForm.description = pkg.description || ''
+    packageForm.status = pkg.is_active ? 'active' : 'inactive'
+  }
+  showPackageDialog.value = true
+}
+
+async function submitRechargePackage() {
+  if (!packageForm.name.trim()) {
+    showError('请输入套餐名称')
+    return
+  }
+  if (!packageForm.recharge_amount_usd || packageForm.recharge_amount_usd <= 0) {
+    showError('请输入有效的充值额度')
+    return
+  }
+  if (packageForm.bonus_amount_usd < 0) {
+    showError('赠送额度不能小于 0')
+    return
+  }
+
+  submittingPackageAction.value = true
+  try {
+    const payload = {
+      name: packageForm.name.trim(),
+      recharge_amount_usd: packageForm.recharge_amount_usd,
+      bonus_amount_usd: packageForm.bonus_amount_usd,
+      sort_order: packageForm.sort_order,
+      description: packageForm.description.trim() || undefined,
+      is_active: packageForm.status === 'active',
+    }
+    if (editingPackageId.value) {
+      await adminWalletApi.updateRechargePackage(editingPackageId.value, payload)
+      success('充值套餐已更新')
+    } else {
+      await adminWalletApi.createRechargePackage(payload)
+      success('充值套餐已创建')
+    }
+    showPackageDialog.value = false
+    await loadRechargePackages()
+  } catch (error) {
+    log.error('保存充值套餐失败:', error)
+    showError(parseApiError(error, '保存充值套餐失败'))
+  } finally {
+    submittingPackageAction.value = false
+  }
+}
+
+async function deleteRechargePackage(pkg: AdminRechargePackage) {
+  if (!window.confirm(`确认删除套餐“${pkg.name}”吗？`)) {
+    return
+  }
+  submittingPackageAction.value = true
+  try {
+    await adminWalletApi.deleteRechargePackage(pkg.id)
+    success('充值套餐已删除')
+    await loadRechargePackages()
+  } catch (error) {
+    log.error('删除充值套餐失败:', error)
+    showError(parseApiError(error, '删除充值套餐失败'))
+  } finally {
+    submittingPackageAction.value = false
   }
 }
 
@@ -1506,12 +1851,12 @@ async function expireOrder(orderId: string) {
 async function failOrder(orderId: string) {
   submittingOrderAction.value = true
   try {
-    await adminPaymentsApi.failOrder(orderId)
-    success('订单已标记失败')
+    const resp = await adminPaymentsApi.failOrder(orderId)
+    success(resp.changed ? '订单已转入人工复核' : '订单已在人工复核中')
     await loadOrders()
   } catch (error) {
-    log.error('标记失败失败:', error)
-    showError(parseApiError(error, '标记失败失败'))
+    log.error('转人工复核失败:', error)
+    showError(parseApiError(error, '转人工复核失败'))
   } finally {
     submittingOrderAction.value = false
   }
@@ -1559,7 +1904,7 @@ function canCompleteRefund(status: string) {
 }
 
 function canCreditOrder(status: string) {
-  return status === 'pending' || status === 'paid'
+  return status === 'pending' || status === 'paid' || status === 'manual_review'
 }
 
 function canExpireOrder(status: string) {
@@ -1567,7 +1912,7 @@ function canExpireOrder(status: string) {
 }
 
 function canFailOrder(status: string) {
-  return status !== 'credited' && status !== 'refunded'
+  return status === 'pending' || status === 'paid' || status === 'expired'
 }
 
 function canQueryOrderStatus(order: PaymentOrder) {
