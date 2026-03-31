@@ -528,6 +528,10 @@ export interface FailoverRulesConfig {
   error_stop_patterns: FailoverRuleItem[]
 }
 
+export interface ErrorPassthroughRulesConfig {
+  patterns: FailoverRuleItem[]
+}
+
 export interface ProviderWithEndpointsSummary {
   id: string
   name: string
@@ -564,6 +568,7 @@ export interface ProviderWithEndpointsSummary {
   claude_code_advanced?: ClaudeCodeAdvancedConfig | null
   pool_advanced?: PoolAdvancedConfig | null
   failover_rules?: FailoverRulesConfig | null
+  error_passthrough_rules?: ErrorPassthroughRulesConfig | null
   ops_configured: boolean  // 是否配置了扩展操作（余额监控等）
   ops_architecture_id?: string  // 扩展操作使用的架构 ID（如 cubence, anyrouter）
   created_at: string

@@ -21,6 +21,7 @@ from src.core.logger import logger
 from src.database import get_db
 from src.models.admin_requests import (
     ClaudeCodeAdvancedConfig,
+    ErrorPassthroughRulesConfig,
     FailoverRulesConfig,
     PoolAdvancedConfig,
 )
@@ -314,6 +315,38 @@ def _extract_failover_rules_from_config(
         return None
 
 
+def _extract_error_passthrough_rules_from_config(
+    provider_config: dict[str, Any] | None,
+    *,
+    provider_id: str,
+) -> ErrorPassthroughRulesConfig | None:
+    """从 Provider.config 中安全提取错误透传规则配置。"""
+    raw = (provider_config or {}).get("error_passthrough_rules")
+    if raw is None:
+        return None
+
+    if isinstance(raw, ErrorPassthroughRulesConfig):
+        return raw
+
+    if not isinstance(raw, dict):
+        logger.warning(
+            "Provider {} 的 error_passthrough_rules 类型无效: {}，已忽略",
+            provider_id,
+            type(raw).__name__,
+        )
+        return None
+
+    try:
+        return ErrorPassthroughRulesConfig.model_validate(raw)
+    except Exception as exc:
+        logger.warning(
+            "Provider {} 的 error_passthrough_rules 配置无效，已忽略: {}",
+            provider_id,
+            str(exc),
+        )
+        return None
+
+
 def _build_provider_summary(db: Session, provider: Provider) -> ProviderWithEndpointsSummary:
     endpoints = (
         db.query(ProviderEndpoint)
@@ -480,6 +513,10 @@ def _compose_provider_summary(
         provider_config,
         provider_id=str(provider.id),
     )
+    error_passthrough_rules = _extract_error_passthrough_rules_from_config(
+        provider_config,
+        provider_id=str(provider.id),
+    )
 
     return ProviderWithEndpointsSummary(
         id=provider.id,
@@ -504,6 +541,7 @@ def _compose_provider_summary(
         claude_code_advanced=claude_code_advanced,
         pool_advanced=pool_advanced,
         failover_rules=failover_rules,
+        error_passthrough_rules=error_passthrough_rules,
         total_endpoints=total_endpoints,
         active_endpoints=active_endpoints,
         total_keys=total_keys,

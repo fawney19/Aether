@@ -323,8 +323,21 @@ class RequestResult:
             status_code = 504
             error_type = "timeout_error"
         elif isinstance(exception, ProviderNotAvailableException):
-            status_code = 503
-            error_type = "provider_unavailable"
+            passthrough_enabled = bool(
+                getattr(exception, "client_error_passthrough", False)
+            )
+            upstream_status = getattr(exception, "upstream_status", None)
+            if passthrough_enabled and isinstance(upstream_status, int) and upstream_status > 0:
+                status_code = upstream_status
+                if upstream_status == 429:
+                    error_type = "rate_limit_exceeded"
+                elif 400 <= upstream_status < 500:
+                    error_type = "upstream_client_error"
+                else:
+                    error_type = "provider_unavailable"
+            else:
+                status_code = 503
+                error_type = "provider_unavailable"
         else:
             status_code = 500
             error_type = "internal_error"
