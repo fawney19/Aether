@@ -441,6 +441,98 @@ class WalletService:
         return before_total, after_total
 
     @classmethod
+    def reconcile_usage_charge_delta(
+        cls,
+        db: Session,
+        *,
+        usage: Usage,
+        previous_amount_usd: Decimal | float | int | str,
+        next_amount_usd: Decimal | float | int | str,
+    ) -> tuple[Decimal | None, Decimal | None]:
+        """按差额修正已结算 Usage 对钱包的影响。
+
+        设计目标：
+        - 只做短事务、短锁，适合在线后台维护任务增量修正历史账单
+        - 正向差额（新费用更高）沿用当前钱包的 gift -> recharge 扣减规则
+        - 负向差额（新费用更低）优先按原始扣减的反向顺序返还：recharge -> gift
+        - 若该 Usage 历史上按 unlimited 语义结算，则仅修正 total_consumed，不改余额
+        """
+
+        previous_amount = to_money_decimal(previous_amount_usd)
+        next_amount = to_money_decimal(next_amount_usd)
+        delta = next_amount - previous_amount
+        if delta == Decimal("0"):
+            return None, None
+
+        locked_wallet = cls._resolve_wallet_for_usage(db, usage, for_update=True)
+        if locked_wallet is None:
+            return None, None
+
+        before_recharge = cls.get_recharge_balance_value(locked_wallet)
+        before_gift = cls.get_gift_balance_value(locked_wallet)
+        before_total = before_recharge + before_gift
+
+        usage_before_total = to_money_decimal(getattr(usage, "wallet_balance_before", None))
+        usage_after_total = to_money_decimal(getattr(usage, "wallet_balance_after", None))
+        usage_before_recharge = to_money_decimal(
+            getattr(usage, "wallet_recharge_balance_before", None)
+        )
+        usage_after_recharge = to_money_decimal(getattr(usage, "wallet_recharge_balance_after", None))
+        usage_before_gift = to_money_decimal(getattr(usage, "wallet_gift_balance_before", None))
+        usage_after_gift = to_money_decimal(getattr(usage, "wallet_gift_balance_after", None))
+
+        historical_unlimited = (
+            previous_amount > Decimal("0")
+            and usage.wallet_balance_before is not None
+            and usage.wallet_balance_after is not None
+            and usage_before_total == usage_after_total
+            and usage.wallet_recharge_balance_before is not None
+            and usage.wallet_recharge_balance_after is not None
+            and usage_before_recharge == usage_after_recharge
+            and usage.wallet_gift_balance_before is not None
+            and usage.wallet_gift_balance_after is not None
+            and usage_before_gift == usage_after_gift
+        )
+
+        if historical_unlimited:
+            locked_wallet.total_consumed = to_money_decimal(locked_wallet.total_consumed) + delta
+            locked_wallet.updated_at = datetime.now(timezone.utc)
+            return before_total, before_total
+
+        if delta > Decimal("0"):
+            additional = delta
+            gift_deduction = min(max(before_gift, Decimal("0")), additional)
+            recharge_deduction = additional - gift_deduction
+
+            after_gift = before_gift - gift_deduction
+            after_recharge = before_recharge - recharge_deduction
+        else:
+            refund = -delta
+
+            original_recharge_deduction = max(usage_before_recharge - usage_after_recharge, Decimal("0"))
+            original_gift_deduction = max(usage_before_gift - usage_after_gift, Decimal("0"))
+
+            recharge_refund = min(refund, original_recharge_deduction)
+            remaining_refund = refund - recharge_refund
+            gift_refund = min(remaining_refund, original_gift_deduction)
+            residual_refund = remaining_refund - gift_refund
+
+            # 历史快照缺失时兜底返还到 recharge，避免吞掉差额。
+            recharge_refund += residual_refund
+
+            after_recharge = before_recharge + recharge_refund
+            after_gift = before_gift + gift_refund
+
+        after_total = after_recharge + after_gift
+
+        locked_wallet.balance = after_recharge
+        locked_wallet.gift_balance = after_gift
+        locked_wallet.total_consumed = to_money_decimal(locked_wallet.total_consumed) + delta
+        locked_wallet.updated_at = datetime.now(timezone.utc)
+
+        return before_total, after_total
+
+    @classmethod
     def set_wallet_limit_mode(
         cls,
         db: Session,
