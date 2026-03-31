@@ -356,3 +356,113 @@ async def test_admin_usage_detail_returns_provider_key_and_deleted_fallbacks(
     assert result["api_key"]["name"] == "已删除Key"
     assert result["provider"] == "CRS"
     assert result["provider_api_key"]["name"] == "Pool-Key-A"
+
+
+@pytest.mark.asyncio
+async def test_admin_usage_detail_includes_split_cache_creation_prices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_get_tiered_pricing_info(
+        self: AdminUsageDetailAdapter,
+        db: Any,
+        usage_record: Any,
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(
+        AdminUsageDetailAdapter,
+        "_get_tiered_pricing_info",
+        _fake_get_tiered_pricing_info,
+    )
+    monkeypatch.setattr(
+        AdminUsageDetailAdapter,
+        "_extract_video_billing_info",
+        lambda self, usage_record: None,
+    )
+
+    class _UsageRecord:
+        id = "usage-3"
+        request_id = "req-3"
+        user_id = "user-1"
+        api_key_id = "key-1"
+        provider_name = "anthropic"
+        api_format = "claude:chat"
+        model = "claude-sonnet-4-5"
+        target_model = None
+        input_tokens = 1
+        output_tokens = 2
+        total_tokens = 261
+        cache_creation_input_tokens = 258
+        cache_read_input_tokens = 0
+        cache_creation_input_tokens_5m = 258
+        cache_creation_input_tokens_1h = 0
+        input_cost_usd = Decimal("0.000003")
+        output_cost_usd = Decimal("0.001845")
+        total_cost_usd = Decimal("0.003393")
+        cache_creation_cost_usd = Decimal("0.001545")
+        cache_creation_cost_usd_5m = Decimal("0.001545")
+        cache_creation_cost_usd_1h = Decimal("0")
+        cache_read_cost_usd = Decimal("0")
+        request_cost_usd = Decimal("0")
+        input_price_per_1m = Decimal("3")
+        output_price_per_1m = Decimal("15")
+        cache_creation_price_per_1m = Decimal("6")
+        cache_creation_price_per_1m_5m = Decimal("3.75")
+        cache_creation_price_per_1m_1h = Decimal("6")
+        cache_read_price_per_1m = Decimal("0.3")
+        price_per_request = None
+        request_type = "chat"
+        is_stream = False
+        status_code = 200
+        error_message = None
+        status = "completed"
+        response_time_ms = 800
+        first_byte_time_ms = 120
+        created_at = datetime(2026, 3, 12, 7, 0, tzinfo=timezone.utc)
+        request_headers = None
+        provider_request_headers = None
+        response_headers = None
+        client_response_headers = None
+        request_metadata = None
+
+        def get_request_body(self) -> Any:
+            return None
+
+        def get_provider_request_body(self) -> Any:
+            return None
+
+        def get_response_body(self) -> Any:
+            return None
+
+        def get_client_response_body(self) -> Any:
+            return None
+
+    class _ApiKeyRecord:
+        id = "key-1"
+        name = "Primary"
+
+        def get_display_key(self) -> str:
+            return "sk-test"
+
+    usage_query = _FakeQuery(
+        first_result=(_UsageRecord(), False, False, False, False),
+    )
+    user_query = _FakeQuery(
+        first_result=SimpleNamespace(id="user-1", username="tester", email="u@example.com"),
+    )
+    api_key_query = _FakeQuery(first_result=_ApiKeyRecord())
+    db = _FakeDb([usage_query, user_query, api_key_query])
+    context = SimpleNamespace(
+        db=db,
+        user=SimpleNamespace(id="admin-1"),
+        add_audit_metadata=lambda **_: None,
+    )
+
+    adapter = AdminUsageDetailAdapter(usage_id="usage-3", include_bodies=False)
+    result = await adapter.handle(context)  # type: ignore[arg-type]
+
+    assert result["cache_creation_price_per_1m"] == 6.0
+    assert result["cache_creation_cost_5m"] == 0.001545
+    assert result["cache_creation_cost_1h"] == 0.0
+    assert result["cache_creation_price_per_1m_5m"] == 3.75
+    assert result["cache_creation_price_per_1m_1h"] == 6.0

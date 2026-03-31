@@ -108,18 +108,25 @@ class ModelCostService:
         # 首先检查是否有 TTL 差异化定价
         ttl_pricing = tier.get("cache_ttl_pricing")
         if ttl_pricing and cache_ttl_minutes is not None:
-            # 找到匹配或最接近的 TTL 价格
-            matched_price = None
-            for ttl_config in ttl_pricing:
-                ttl_limit = ttl_config.get("ttl_minutes", 0)
-                if cache_ttl_minutes <= ttl_limit:
+            sorted_pricing = sorted(
+                (item for item in ttl_pricing if isinstance(item, dict)),
+                key=lambda item: float(item.get("ttl_minutes", 0) or 0),
+            )
+
+            for ttl_config in sorted_pricing:
+                ttl_value = int(ttl_config.get("ttl_minutes", 0) or 0)
+                if cache_ttl_minutes == ttl_value:
                     matched_price = ttl_config.get("cache_read_price_per_1m")
-                    break
+                    if matched_price is not None:
+                        return matched_price
+
+            matched_price = None
+            for ttl_config in sorted_pricing:
+                ttl_value = int(ttl_config.get("ttl_minutes", 0) or 0)
+                if ttl_value <= cache_ttl_minutes:
+                    matched_price = ttl_config.get("cache_read_price_per_1m")
             if matched_price is not None:
                 return matched_price
-            # 如果超过所有配置的 TTL，使用最后一个
-            if ttl_pricing:
-                return ttl_pricing[-1].get("cache_read_price_per_1m")
 
         # 使用默认的缓存读取价格
         return tier.get("cache_read_price_per_1m")

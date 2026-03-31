@@ -324,6 +324,16 @@ class AdminUsageDetailAdapter(AdminApiAdapter):
             "cache_creation_input_tokens_5m": usage_record.cache_creation_input_tokens_5m or 0,
             "cache_creation_input_tokens_1h": usage_record.cache_creation_input_tokens_1h or 0,
             "cache_creation_cost": float(getattr(usage_record, "cache_creation_cost_usd", 0) or 0),
+            "cache_creation_cost_5m": (
+                float(usage_record.cache_creation_cost_usd_5m)
+                if getattr(usage_record, "cache_creation_cost_usd_5m", None) is not None
+                else None
+            ),
+            "cache_creation_cost_1h": (
+                float(usage_record.cache_creation_cost_usd_1h)
+                if getattr(usage_record, "cache_creation_cost_usd_1h", None) is not None
+                else None
+            ),
             "cache_read_cost": float(getattr(usage_record, "cache_read_cost_usd", 0) or 0),
             "request_cost": float(getattr(usage_record, "request_cost_usd", 0) or 0),
             "input_price_per_1m": (
@@ -339,6 +349,16 @@ class AdminUsageDetailAdapter(AdminApiAdapter):
             "cache_creation_price_per_1m": (
                 float(usage_record.cache_creation_price_per_1m)
                 if usage_record.cache_creation_price_per_1m is not None
+                else None
+            ),
+            "cache_creation_price_per_1m_5m": (
+                float(usage_record.cache_creation_price_per_1m_5m)
+                if getattr(usage_record, "cache_creation_price_per_1m_5m", None) is not None
+                else None
+            ),
+            "cache_creation_price_per_1m_1h": (
+                float(usage_record.cache_creation_price_per_1m_1h)
+                if getattr(usage_record, "cache_creation_price_per_1m_1h", None) is not None
                 else None
             ),
             "cache_read_price_per_1m": (

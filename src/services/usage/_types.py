@@ -99,10 +99,14 @@ class UsageCostInfo:
     cache_cost: float = 0.0
     request_cost: float = 0.0
     total_cost: float = 0.0
+    cache_creation_cost_5m: float = 0.0
+    cache_creation_cost_1h: float = 0.0
     # 价格信息
     input_price: float | None = None
     output_price: float | None = None
     cache_creation_price: float | None = None
+    cache_creation_price_5m: float | None = None
+    cache_creation_price_1h: float | None = None
     cache_read_price: float | None = None
     request_price: float | None = None
     # 倍率

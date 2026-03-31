@@ -54,11 +54,15 @@ export interface RequestDetail {
   output_cost?: number
   total_cost?: number
   cache_creation_cost?: number
+  cache_creation_cost_5m?: number
+  cache_creation_cost_1h?: number
   cache_read_cost?: number
   request_cost?: number
   input_price_per_1m?: number
   output_price_per_1m?: number
   cache_creation_price_per_1m?: number
+  cache_creation_price_per_1m_5m?: number
+  cache_creation_price_per_1m_1h?: number
   cache_read_price_per_1m?: number
   price_per_request?: number
   request_type: string
