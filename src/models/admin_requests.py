@@ -128,6 +128,15 @@ class FailoverRulesConfig(BaseModel):
     )
 
 
+class ErrorPassthroughRulesConfig(BaseModel):
+    """错误透传规则配置。"""
+
+    patterns: list[FailoverRuleItem] = Field(
+        default_factory=list,
+        description="错误透传规则: HTTP 非 2xx 且响应体匹配正则时，向客户端返回上游原始错误信息",
+    )
+
+
 class ScoringWeightsConfig(BaseModel):
     """多维评分权重配置。"""
 
@@ -422,6 +431,9 @@ class CreateProviderRequest(BaseModel):
         None, description="Claude Code 特有配置"
     )
     failover_rules: FailoverRulesConfig | None = Field(None, description="故障转移规则配置")
+    error_passthrough_rules: ErrorPassthroughRulesConfig | None = Field(
+        None, description="错误透传规则配置"
+    )
     config: dict[str, Any] | None = Field(None, description="其他配置")
 
     @field_validator("provider_type")
@@ -536,6 +548,9 @@ class UpdateProviderRequest(BaseModel):
         None, description="Claude Code 特有配置"
     )
     failover_rules: FailoverRulesConfig | None = Field(None, description="故障转移规则配置")
+    error_passthrough_rules: ErrorPassthroughRulesConfig | None = Field(
+        None, description="错误透传规则配置"
+    )
     enable_format_conversion: bool | None = Field(
         None, description="是否允许格式转换（提供商级别开关）"
     )

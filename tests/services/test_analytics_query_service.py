@@ -122,6 +122,56 @@ class _FakePerformanceQuery:
         return self._rows
 
 
+class _FakeFilterOptionsQuery:
+    def __init__(self, raw_status_rows: list[tuple[str, ...]], matched_statuses: set[str] | None = None) -> None:
+        self._raw_status_rows = raw_status_rows
+        self._matched_statuses = matched_statuses or set()
+        self._entities: tuple[str, ...] = ()
+        self._compiled_filters: list[str] = []
+
+    def with_entities(self, *entities: object, **_kwargs: object) -> "_FakeFilterOptionsQuery":
+        self._entities = tuple(str(entity) for entity in entities)
+        self._compiled_filters = []
+        return self
+
+    def filter(self, *conditions: object, **_kwargs: object) -> "_FakeFilterOptionsQuery":
+        for condition in conditions:
+            try:
+                compiled = str(condition.compile(dialect=sqlite.dialect(), compile_kwargs={"literal_binds": True}))
+            except Exception:
+                compiled = str(condition)
+            self._compiled_filters.append(compiled)
+        return self
+
+    def distinct(self) -> "_FakeFilterOptionsQuery":
+        return self
+
+    def order_by(self, *_args: object, **_kwargs: object) -> "_FakeFilterOptionsQuery":
+        return self
+
+    def all(self) -> list[Any]:
+        if len(self._entities) == 1 and any(entity.endswith(".status") for entity in self._entities):
+            return self._raw_status_rows
+        return []
+
+    def first(self) -> tuple[int] | None:
+        signature = " ".join(self._compiled_filters)
+        checks = {
+            "failed": [
+                "usage.status = 'failed'",
+                "usage.status_code >= 400",
+                "usage.error_message IS NOT NULL",
+            ],
+            "active": ["usage.status IN ('pending', 'streaming')"],
+            "stream": ["usage.is_stream IS 1"],
+            "standard": ["usage.is_stream IS 0"],
+        }
+        for status, markers in checks.items():
+            if any(marker in signature for marker in markers):
+                return (1,) if status in self._matched_statuses else None
+        return None
+
+
 def _empty_filters() -> AnalyticsFilters:
     return AnalyticsFilters(
         user_ids=[],
@@ -510,7 +560,7 @@ def test_build_usage_query_applies_stream_status_filter_without_failed_requests(
     ]
 
     assert any("usage.is_stream IS 1" in condition for condition in compiled_filters)
-    assert any("usage.status != 'failed'" in condition for condition in compiled_filters)
+    assert any("usage.status IS NULL OR usage.status = 'completed'" in condition for condition in compiled_filters)
     assert any("usage.error_message IS NULL" in condition for condition in compiled_filters)
 
 
@@ -556,6 +606,64 @@ def test_compose_status_options_only_returns_present_statuses() -> None:
         {"value": "standard", "label": "standard"},
         {"value": "has_fallback", "label": "has_fallback"},
     ]
+
+
+def test_summary_columns_treat_legacy_error_fields_as_failures() -> None:
+    compiled_columns = [
+        str(column.compile(dialect=sqlite.dialect(), compile_kwargs={"literal_binds": True}))
+        for column in AnalyticsQueryService._summary_columns()
+    ]
+
+    assert any(
+        "CASE WHEN ((usage.status IS NULL OR usage.status = 'completed') AND (usage.status_code IS NULL OR usage.status_code < 400) AND usage.error_message IS NULL) THEN 1 ELSE 0 END"
+        in column
+        for column in compiled_columns
+    )
+    assert any(
+        "CASE WHEN (usage.status = 'failed' OR usage.status_code >= 400 OR usage.error_message IS NOT NULL) THEN 1 ELSE 0 END"
+        in column
+        for column in compiled_columns
+    )
+
+
+def test_filter_options_includes_failed_when_only_legacy_error_fields_exist(monkeypatch) -> None:
+    fake_query = _FakeFilterOptionsQuery(
+        raw_status_rows=[("completed",)],
+        matched_statuses={"failed"},
+    )
+
+    monkeypatch.setattr(
+        AnalyticsQueryService,
+        "build_usage_query",
+        lambda *_args, **_kwargs: fake_query,
+    )
+    monkeypatch.setattr(
+        AnalyticsQueryService,
+        "_resolve_current_api_key_options",
+        staticmethod(lambda _db, _ids: []),
+    )
+    monkeypatch.setattr(
+        AnalyticsQueryService,
+        "_retry_request_ids_subquery",
+        staticmethod(lambda _db: []),
+    )
+    monkeypatch.setattr(
+        AnalyticsQueryService,
+        "_fallback_request_ids_subquery",
+        staticmethod(lambda _db: []),
+    )
+
+    result = AnalyticsQueryService.filter_options(
+        cast(Any, SimpleNamespace()),
+        SimpleNamespace(id="user-1", role=UserRole.USER),
+        time_range=TimeRangeParams(start_date=date(2026, 3, 19), end_date=date(2026, 3, 19)),
+        scope_kind="me",
+        scope_user_id=None,
+        scope_api_key_id=None,
+        filters=_empty_filters(),
+    )
+
+    assert {"value": "failed", "label": "failed"} in result["statuses"]
 
 
 def test_records_prefers_current_user_and_key_names_over_usage_snapshots(monkeypatch) -> None:
@@ -846,4 +954,57 @@ def test_performance_returns_readable_error_category_labels(monkeypatch) -> None
             "label": "未知错误",
             "count": 1,
         },
+    ]
+
+
+def test_performance_counts_legacy_error_fields_in_provider_health(monkeypatch) -> None:
+    rows = [
+        SimpleNamespace(
+            created_at=datetime(2026, 3, 19, 12, 0, 0),
+            provider_name="openai",
+            error_category=ErrorCategory.SERVER_ERROR.value,
+            status="completed",
+            status_code=502,
+            error_message="upstream boom",
+            response_time_ms=1200,
+            first_byte_time_ms=320,
+        ),
+        SimpleNamespace(
+            created_at=datetime(2026, 3, 19, 13, 0, 0),
+            provider_name="openai",
+            error_category=None,
+            status="completed",
+            status_code=200,
+            error_message=None,
+            response_time_ms=900,
+            first_byte_time_ms=210,
+        ),
+    ]
+
+    monkeypatch.setattr(
+        AnalyticsQueryService,
+        "build_usage_query",
+        lambda *_args, **_kwargs: _FakePerformanceQuery(rows),
+    )
+
+    result = AnalyticsQueryService.performance(
+        cast(Any, SimpleNamespace()),
+        SimpleNamespace(id="admin-1", role=UserRole.ADMIN),
+        time_range=TimeRangeParams(start_date=date(2026, 3, 19), end_date=date(2026, 3, 19)),
+        scope_kind="global",
+        scope_user_id=None,
+        scope_api_key_id=None,
+        filters=_empty_filters(),
+    )
+
+    assert result["errors"]["total"] == 1
+    assert result["provider_health"] == [
+        {
+            "provider_name": "openai",
+            "requests_total": 2,
+            "success_rate": 50.0,
+            "error_rate": 50.0,
+            "avg_response_time_ms": 1050.0,
+            "avg_first_byte_time_ms": 265.0,
+        }
     ]

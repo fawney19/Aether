@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.models.admin_requests import (
     ClaudeCodeAdvancedConfig,
+    ErrorPassthroughRulesConfig,
     FailoverRulesConfig,
     PoolAdvancedConfig,
     ProxyConfig,
@@ -1073,6 +1074,9 @@ class ProviderUpdateRequest(BaseModel):
     )
     pool_advanced: PoolAdvancedConfig | None = Field(None, description="通用号池配置")
     failover_rules: FailoverRulesConfig | None = Field(None, description="故障转移规则配置")
+    error_passthrough_rules: ErrorPassthroughRulesConfig | None = Field(
+        None, description="错误透传规则配置"
+    )
 
 
 class ProviderWithEndpointsSummary(BaseModel):
@@ -1119,6 +1123,9 @@ class ProviderWithEndpointsSummary(BaseModel):
     )
     pool_advanced: PoolAdvancedConfig | None = Field(default=None, description="通用号池配置")
     failover_rules: FailoverRulesConfig | None = Field(default=None, description="故障转移规则配置")
+    error_passthrough_rules: ErrorPassthroughRulesConfig | None = Field(
+        default=None, description="错误透传规则配置"
+    )
 
     # Endpoint 统计
     total_endpoints: int = Field(default=0, description="总 Endpoint 数量")

@@ -142,6 +142,32 @@ def _merge_failover_rules_config(
     return merged_config or None, config_changed
 
 
+def _merge_error_passthrough_rules_config(
+    *,
+    provider_config: dict[str, Any] | None,
+    error_passthrough_rules: dict[str, Any] | None,
+    error_passthrough_rules_in_payload: bool,
+) -> tuple[dict[str, Any] | None, bool]:
+    """合并 error_passthrough_rules 到 provider.config。"""
+    merged_config = dict(provider_config or {})
+    config_changed = False
+
+    if not error_passthrough_rules_in_payload:
+        return merged_config or None, config_changed
+
+    if error_passthrough_rules is None:
+        if "error_passthrough_rules" in merged_config:
+            merged_config.pop("error_passthrough_rules", None)
+            config_changed = True
+    else:
+        next_value = dict(error_passthrough_rules)
+        if merged_config.get("error_passthrough_rules") != next_value:
+            merged_config["error_passthrough_rules"] = next_value
+            config_changed = True
+
+    return merged_config or None, config_changed
+
+
 def _merge_claude_code_advanced_config(
     *,
     provider_type: str | None,
@@ -510,6 +536,17 @@ class AdminCreateProviderAdapter(AdminApiAdapter):
                 ),
                 failover_rules_in_payload=validated_data.failover_rules is not None,
             )
+            provider_config, _ = _merge_error_passthrough_rules_config(
+                provider_config=provider_config,
+                error_passthrough_rules=(
+                    validated_data.error_passthrough_rules.model_dump()
+                    if validated_data.error_passthrough_rules is not None
+                    else None
+                ),
+                error_passthrough_rules_in_payload=(
+                    validated_data.error_passthrough_rules is not None
+                ),
+            )
 
             current_min_priority = db.query(func.min(Provider.provider_priority)).scalar()
             target_priority, needs_shift = _resolve_new_provider_priority(
@@ -649,6 +686,7 @@ class AdminUpdateProviderAdapter(AdminApiAdapter):
             claude_advanced_in_payload = "claude_code_advanced" in update_data
             pool_advanced_in_payload = "pool_advanced" in update_data
             failover_rules_in_payload = "failover_rules" in update_data
+            error_passthrough_rules_in_payload = "error_passthrough_rules" in update_data
             provider_config = (
                 dict(update_data.pop("config") or {})
                 if config_in_payload
@@ -660,6 +698,11 @@ class AdminUpdateProviderAdapter(AdminApiAdapter):
             pool_advanced = update_data.pop("pool_advanced") if pool_advanced_in_payload else None
             failover_rules = (
                 update_data.pop("failover_rules") if failover_rules_in_payload else None
+            )
+            error_passthrough_rules = (
+                update_data.pop("error_passthrough_rules")
+                if error_passthrough_rules_in_payload
+                else None
             )
             target_provider_type = (
                 update_data.get("provider_type")
@@ -683,6 +726,11 @@ class AdminUpdateProviderAdapter(AdminApiAdapter):
                 failover_rules=failover_rules,
                 failover_rules_in_payload=failover_rules_in_payload,
             )
+            provider_config, config_changed_by_passthrough = _merge_error_passthrough_rules_config(
+                provider_config=provider_config,
+                error_passthrough_rules=error_passthrough_rules,
+                error_passthrough_rules_in_payload=error_passthrough_rules_in_payload,
+            )
 
             config_touched = (
                 config_in_payload
@@ -692,6 +740,8 @@ class AdminUpdateProviderAdapter(AdminApiAdapter):
                 or config_changed_by_pool
                 or failover_rules_in_payload
                 or config_changed_by_failover
+                or error_passthrough_rules_in_payload
+                or config_changed_by_passthrough
             )
             if config_touched:
                 update_data["config"] = provider_config

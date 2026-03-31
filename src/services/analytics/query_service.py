@@ -177,12 +177,46 @@ def _bucket_end(start: datetime, granularity: str) -> datetime:
 
 class AnalyticsQueryService:
     @staticmethod
+    def _failed_request_clause() -> Any:
+        return or_(
+            Usage.status == "failed",
+            Usage.status_code >= 400,
+            Usage.error_message.isnot(None),
+        )
+
+    @staticmethod
     def _successful_request_clause() -> Any:
         return and_(
-            Usage.status != "failed",
+            or_(Usage.status.is_(None), Usage.status == "completed"),
             or_(Usage.status_code.is_(None), Usage.status_code < 400),
             Usage.error_message.is_(None),
         )
+
+    @classmethod
+    def _terminal_or_resolved_status_clause(cls) -> Any:
+        return or_(
+            Usage.status.in_(TERMINAL_STATUSES),
+            cls._failed_request_clause(),
+            cls._successful_request_clause(),
+        )
+
+    @staticmethod
+    def _is_failed_usage_row(row: Any) -> bool:
+        status = str(getattr(row, "status", "") or "").strip().lower()
+        status_code = getattr(row, "status_code", None)
+        error_message = getattr(row, "error_message", None)
+        return (
+            status == "failed"
+            or (status_code is not None and int(status_code) >= 400)
+            or error_message is not None
+        )
+
+    @classmethod
+    def _is_successful_usage_row(cls, row: Any) -> bool:
+        if cls._is_failed_usage_row(row):
+            return False
+        status = str(getattr(row, "status", "") or "").strip().lower()
+        return status in {"", "completed"}
 
     @staticmethod
     def _retry_request_ids_subquery(db: Session) -> Any:
@@ -218,7 +252,7 @@ class AnalyticsQueryService:
         if not filters.statuses:
             if include_non_terminal:
                 return query
-            return query.filter(Usage.status.in_(TERMINAL_STATUSES))
+            return query.filter(cls._terminal_or_resolved_status_clause())
 
         clauses = [
             clause
@@ -248,11 +282,7 @@ class AnalyticsQueryService:
         if status == "active":
             return Usage.status.in_(["pending", "streaming"])
         if status == "failed":
-            return or_(
-                Usage.status == "failed",
-                Usage.status_code >= 400,
-                Usage.error_message.isnot(None),
-            )
+            return cls._failed_request_clause()
         if status == "has_retry":
             return Usage.request_id.in_(cls._retry_request_ids_subquery(db))
         if status == "has_fallback":
@@ -550,10 +580,10 @@ class AnalyticsQueryService:
             query = query.filter(Usage.provider_name.notin_(["pending", "unknown"]))
         return query
 
-    @staticmethod
-    def _summary_columns() -> list[Any]:
-        success_case = case((Usage.status == "completed", 1), else_=0)
-        error_case = case((Usage.status == "failed", 1), else_=0)
+    @classmethod
+    def _summary_columns(cls) -> list[Any]:
+        success_case = case((cls._successful_request_clause(), 1), else_=0)
+        error_case = case((cls._failed_request_clause(), 1), else_=0)
         stream_case = case((Usage.is_stream.is_(True), 1), else_=0)
         conversion_case = case((Usage.has_format_conversion.is_(True), 1), else_=0)
         model_name_expr = func.coalesce(func.nullif(Usage.model, ""), func.nullif(Usage.target_model, ""))
@@ -655,6 +685,8 @@ class AnalyticsQueryService:
             Usage.model,
             Usage.target_model,
             Usage.status,
+            Usage.status_code,
+            Usage.error_message,
             Usage.is_stream,
             Usage.has_format_conversion,
             Usage.input_tokens,
@@ -730,9 +762,9 @@ class AnalyticsQueryService:
             if model_name:
                 bucket["_models_used"].add(model_name)
             bucket["requests_total"] += 1
-            if row.status == "completed":
+            if cls._is_successful_usage_row(row):
                 bucket["requests_success"] += 1
-            if row.status == "failed":
+            if cls._is_failed_usage_row(row):
                 bucket["requests_error"] += 1
             if row.is_stream:
                 bucket["requests_stream"] += 1
@@ -1309,6 +1341,9 @@ class AnalyticsQueryService:
                 is not None
             )
 
+        if _has_status_option("failed"):
+            raw_statuses.add("failed")
+
         response["statuses"] = cls._compose_status_options(
             raw_statuses=raw_statuses,
             has_active=_has_status_option("active"),
@@ -1451,6 +1486,8 @@ class AnalyticsQueryService:
             Usage.provider_name,
             Usage.error_category,
             Usage.status,
+            Usage.status_code,
+            Usage.error_message,
             Usage.response_time_ms,
             Usage.first_byte_time_ms,
         ).all()
@@ -1479,7 +1516,7 @@ class AnalyticsQueryService:
             if row.first_byte_time_ms is not None:
                 percentiles_by_bucket[bucket_key]["ttfb"].append(_to_float(row.first_byte_time_ms))
 
-            if row.status == "failed":
+            if cls._is_failed_usage_row(row):
                 category = row.error_category or "unknown"
                 distribution[category] += 1
                 trend[bucket_key] += 1
@@ -1498,9 +1535,9 @@ class AnalyticsQueryService:
                 },
             )
             metrics["requests_total"] += 1
-            if row.status == "completed":
+            if cls._is_successful_usage_row(row):
                 metrics["requests_success"] += 1
-            if row.status == "failed":
+            if cls._is_failed_usage_row(row):
                 metrics["requests_error"] += 1
             if row.response_time_ms is not None:
                 metrics["response_sum"] += _to_float(row.response_time_ms)

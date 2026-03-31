@@ -7,6 +7,7 @@ import httpx
 from src.core.exceptions import ProviderNotAvailableException
 from src.core.logger import logger
 from src.services.request.result import RequestMetadata
+from src.services.provider.error_passthrough import match_error_passthrough_rule
 
 
 class TaskFailureOperationsService:
@@ -94,14 +95,28 @@ class TaskFailureOperationsService:
                 upstream_response = str(last_error)
 
         friendly_message = "服务暂时不可用，请稍后重试"
+        client_error_passthrough = False
+        matched_passthrough_pattern: str | None = None
         if last_error:
             last_error_message = getattr(last_error, "message", None)
             if last_error_message and isinstance(last_error_message, str):
                 friendly_message = last_error_message
+            provider_config = getattr(getattr(last_candidate, "provider", None), "config", None)
+            passthrough_match = match_error_passthrough_rule(
+                provider_config,
+                response_text=upstream_response,
+                status_code=upstream_status,
+            )
+            if passthrough_match is not None:
+                friendly_message = passthrough_match.message
+                client_error_passthrough = True
+                matched_passthrough_pattern = passthrough_match.pattern
 
         raise ProviderNotAvailableException(
             friendly_message,
             request_metadata=request_metadata,
             upstream_status=upstream_status,
             upstream_response=upstream_response,
+            client_error_passthrough=client_error_passthrough,
+            matched_passthrough_pattern=matched_passthrough_pattern,
         )
