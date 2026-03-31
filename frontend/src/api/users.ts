@@ -43,21 +43,31 @@ export interface UserGroup {
   name: string
   description?: string | null
   is_default: boolean
-  allowed_providers: string[] | null
   allowed_api_formats: string[] | null
-  allowed_models: string[] | null
+  model_group_bindings: UserGroupModelGroupBindingResponse[]
   rate_limit?: number | null
   user_count: number
   created_at: string
   updated_at?: string | null
 }
 
+export interface UserGroupModelGroupBinding {
+  model_group_id: string
+  priority: number
+  is_active: boolean
+}
+
+export interface UserGroupModelGroupBindingResponse extends UserGroupModelGroupBinding {
+  model_group_name?: string | null
+  model_group_display_name?: string | null
+  model_group_is_default: boolean
+}
+
 export interface CreateUserGroupRequest {
   name: string
   description?: string | null
-  allowed_providers?: string[] | null
   allowed_api_formats?: string[] | null
-  allowed_models?: string[] | null
+  model_group_bindings?: UserGroupModelGroupBinding[] | null
   rate_limit?: number | null
 }
 

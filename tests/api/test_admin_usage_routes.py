@@ -101,11 +101,12 @@ async def test_admin_usage_detail_defers_large_body_columns_when_bodies_excluded
         target_model = None
         input_tokens = 10
         output_tokens = 20
+        input_output_total_tokens = 30
+        input_context_tokens = 10
         total_tokens = 30
         cache_creation_input_tokens = 0
         cache_read_input_tokens = 0
-        cache_creation_input_tokens_5m = 0
-        cache_creation_input_tokens_1h = 0
+        cache_ttl_minutes = 5
         input_cost_usd = Decimal("0.001")
         output_cost_usd = Decimal("0.002")
         total_cost_usd = Decimal("0.003")
@@ -117,6 +118,7 @@ async def test_admin_usage_detail_defers_large_body_columns_when_bodies_excluded
         cache_creation_price_per_1m = None
         cache_read_price_per_1m = None
         price_per_request = None
+        upstream_usage_snapshot = None
         request_type = "chat"
         is_stream = True
         status_code = 200
@@ -292,11 +294,12 @@ async def test_admin_usage_detail_returns_provider_key_and_deleted_fallbacks(
         target_model = None
         input_tokens = 10
         output_tokens = 20
+        input_output_total_tokens = 30
+        input_context_tokens = 10
         total_tokens = 30
         cache_creation_input_tokens = 0
         cache_read_input_tokens = 0
-        cache_creation_input_tokens_5m = 0
-        cache_creation_input_tokens_1h = 0
+        cache_ttl_minutes = 5
         input_cost_usd = Decimal("0.001")
         output_cost_usd = Decimal("0.002")
         total_cost_usd = Decimal("0.003")
@@ -308,6 +311,7 @@ async def test_admin_usage_detail_returns_provider_key_and_deleted_fallbacks(
         cache_creation_price_per_1m = None
         cache_read_price_per_1m = None
         price_per_request = None
+        upstream_usage_snapshot = None
         request_type = "chat"
         is_stream = False
         status_code = 200
@@ -359,7 +363,7 @@ async def test_admin_usage_detail_returns_provider_key_and_deleted_fallbacks(
 
 
 @pytest.mark.asyncio
-async def test_admin_usage_detail_includes_split_cache_creation_prices(
+async def test_admin_usage_detail_returns_nested_cache_and_pricing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _fake_get_tiered_pricing_info(
@@ -391,26 +395,28 @@ async def test_admin_usage_detail_includes_split_cache_creation_prices(
         target_model = None
         input_tokens = 1
         output_tokens = 2
+        input_output_total_tokens = 3
+        input_context_tokens = 1
         total_tokens = 261
         cache_creation_input_tokens = 258
         cache_read_input_tokens = 0
-        cache_creation_input_tokens_5m = 258
-        cache_creation_input_tokens_1h = 0
+        cache_ttl_minutes = 5
         input_cost_usd = Decimal("0.000003")
         output_cost_usd = Decimal("0.001845")
         total_cost_usd = Decimal("0.003393")
         cache_creation_cost_usd = Decimal("0.001545")
-        cache_creation_cost_usd_5m = Decimal("0.001545")
-        cache_creation_cost_usd_1h = Decimal("0")
         cache_read_cost_usd = Decimal("0")
         request_cost_usd = Decimal("0")
         input_price_per_1m = Decimal("3")
         output_price_per_1m = Decimal("15")
         cache_creation_price_per_1m = Decimal("6")
-        cache_creation_price_per_1m_5m = Decimal("3.75")
-        cache_creation_price_per_1m_1h = Decimal("6")
         cache_read_price_per_1m = Decimal("0.3")
         price_per_request = None
+        upstream_usage_snapshot = {
+            "snapshot_type": "response_usage",
+            "api_family": "claude",
+            "usage": {"claude_cache_creation_5_m_tokens": 258},
+        }
         request_type = "chat"
         is_stream = False
         status_code = 200
@@ -461,8 +467,8 @@ async def test_admin_usage_detail_includes_split_cache_creation_prices(
     adapter = AdminUsageDetailAdapter(usage_id="usage-3", include_bodies=False)
     result = await adapter.handle(context)  # type: ignore[arg-type]
 
-    assert result["cache_creation_price_per_1m"] == 6.0
-    assert result["cache_creation_cost_5m"] == 0.001545
-    assert result["cache_creation_cost_1h"] == 0.0
-    assert result["cache_creation_price_per_1m_5m"] == 3.75
-    assert result["cache_creation_price_per_1m_1h"] == 6.0
+    assert result["cache"]["ttl_minutes"] == 5
+    assert result["cache"]["creation_input_tokens"] == 258
+    assert result["cache"]["creation_cost"] == 0.001545
+    assert result["pricing"]["cache_creation_price_per_1m"] == 6.0
+    assert result["upstream_usage_snapshot"]["snapshot_type"] == "response_usage"

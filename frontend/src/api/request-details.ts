@@ -36,35 +36,37 @@ export interface RequestDetail {
   tokens: {
     input: number
     output: number
+    input_output_total?: number
+    input_context?: number
+    cache_creation?: number
+    cache_read?: number
     total: number
   }
   cost: {
     input: number
     output: number
+    cache_creation?: number
+    cache_read?: number
+    request?: number
     total: number
   }
-  input_tokens?: number
-  output_tokens?: number
-  total_tokens?: number
-  cache_creation_input_tokens?: number
-  cache_creation_input_tokens_5m?: number
-  cache_creation_input_tokens_1h?: number
-  cache_read_input_tokens?: number
-  input_cost?: number
-  output_cost?: number
-  total_cost?: number
-  cache_creation_cost?: number
-  cache_creation_cost_5m?: number
-  cache_creation_cost_1h?: number
-  cache_read_cost?: number
-  request_cost?: number
-  input_price_per_1m?: number
-  output_price_per_1m?: number
-  cache_creation_price_per_1m?: number
-  cache_creation_price_per_1m_5m?: number
-  cache_creation_price_per_1m_1h?: number
-  cache_read_price_per_1m?: number
-  price_per_request?: number
+  pricing?: {
+    input_price_per_1m?: number | null
+    output_price_per_1m?: number | null
+    cache_creation_price_per_1m?: number | null
+    cache_read_price_per_1m?: number | null
+    price_per_request?: number | null
+  }
+  cache?: {
+    ttl_minutes?: number | null
+    creation_input_tokens?: number
+    read_input_tokens?: number
+    creation_cost?: number
+    read_cost?: number
+    creation_price_per_1m?: number | null
+    read_price_per_1m?: number | null
+  }
+  upstream_usage_snapshot?: Record<string, unknown> | null
   request_type: string
   is_stream: boolean
   status_code: number

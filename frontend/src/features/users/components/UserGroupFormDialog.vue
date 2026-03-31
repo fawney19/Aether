@@ -7,15 +7,15 @@
     <template #header>
       <div class="border-b border-border px-6 py-4">
         <div class="flex items-center gap-3">
-          <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 flex-shrink-0">
+          <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10">
             <Users class="h-5 w-5 text-primary" />
           </div>
-          <div class="flex-1 min-w-0">
-            <h3 class="text-lg font-semibold text-foreground leading-tight">
+          <div class="min-w-0 flex-1">
+            <h3 class="text-lg font-semibold leading-tight text-foreground">
               {{ isEditMode ? '编辑用户分组' : '新增用户分组' }}
             </h3>
             <p class="text-xs text-muted-foreground">
-              配置该分组的默认访问限制
+              配置该分组的模型分组绑定顺序与访问限制
             </p>
           </div>
         </div>
@@ -24,8 +24,8 @@
 
     <form @submit.prevent="handleSubmit">
       <div class="grid grid-cols-2 gap-0">
-        <div class="pr-6 space-y-4">
-          <div class="flex items-center gap-2 pb-2 border-b border-border/60">
+        <div class="space-y-4 pr-6">
+          <div class="flex items-center gap-2 border-b border-border/60 pb-2">
             <span class="text-sm font-medium">基础信息</span>
           </div>
 
@@ -69,37 +69,126 @@
           </div>
         </div>
 
-        <div class="pl-6 space-y-4 border-l border-border">
-          <div class="flex items-center gap-2 pb-2 border-b border-border/60">
-            <span class="text-sm font-medium">默认限制</span>
+        <div class="space-y-4 border-l border-border pl-6">
+          <div class="flex items-center gap-2 border-b border-border/60 pb-2">
+            <span class="text-sm font-medium">访问策略</span>
           </div>
 
           <div class="space-y-2">
-            <Label class="text-sm font-medium">默认 Provider</Label>
-            <div class="flex items-center gap-3">
-              <div class="flex-1 min-w-0">
-                <MultiSelect
-                  v-model="form.allowed_providers"
-                  :options="providerOptions"
-                  :search-threshold="0"
-                  :disabled="form.provider_unrestricted"
-                  :placeholder="form.provider_unrestricted ? '不限制' : '未选择（全部禁用）'"
-                  empty-text="暂无可用 Provider"
-                  no-results-text="未找到匹配的 Provider"
-                  search-placeholder="搜索 Provider 名称..."
+            <Label class="text-sm font-medium">模型分组绑定顺序</Label>
+            <div class="flex gap-2">
+              <Select v-model="pendingModelGroupId">
+                <SelectTrigger class="h-10 flex-1">
+                  <SelectValue placeholder="选择要绑定的模型分组" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem
+                    v-for="option in availableModelGroupOptions"
+                    :key="option.id"
+                    :value="option.id"
+                  >
+                    {{ option.display_name }}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              <Button
+                type="button"
+                variant="outline"
+                class="h-10 px-3"
+                :disabled="!pendingModelGroupId"
+                @click="addModelGroupBinding"
+              >
+                添加
+              </Button>
+            </div>
+            <p class="text-[11px] text-muted-foreground">
+              请求会按从上到下顺序尝试命中模型分组，首个可用分组生效。
+            </p>
+
+            <div
+              v-if="form.model_group_bindings.length === 0"
+              class="rounded-lg border border-dashed border-border/60 px-3 py-4 text-xs text-muted-foreground"
+            >
+              未显式绑定模型分组时，保存后会自动绑定系统模型分组。
+            </div>
+
+            <div
+              v-else
+              class="space-y-2"
+            >
+              <div
+                v-for="(binding, index) in form.model_group_bindings"
+                :key="binding.model_group_id"
+                class="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/15 px-3 py-2"
+              >
+                <Badge
+                  variant="secondary"
+                  class="h-6 min-w-6 shrink-0 justify-center px-1.5 py-0 text-[10px]"
+                >
+                  {{ index + 1 }}
+                </Badge>
+
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-2">
+                    <span
+                      class="truncate text-sm font-medium"
+                      :class="binding.is_active ? 'text-foreground' : 'text-muted-foreground'"
+                    >
+                      {{ getModelGroupLabel(binding.model_group_id) }}
+                    </span>
+                    <span
+                      v-if="!binding.is_active"
+                      class="shrink-0 text-[11px] text-muted-foreground"
+                    >
+                      已停用
+                    </span>
+                  </div>
+                </div>
+
+                <div class="flex shrink-0 items-center gap-0.5">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    class="h-7 w-7"
+                    :disabled="index === 0"
+                    @click="moveBinding(index, -1)"
+                  >
+                    <ArrowUp class="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    class="h-7 w-7"
+                    :disabled="index === form.model_group_bindings.length - 1"
+                    @click="moveBinding(index, 1)"
+                  >
+                    <ArrowDown class="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+
+                <Switch
+                  :model-value="binding.is_active"
+                  @update:model-value="(value) => updateBindingActive(index, value)"
                 />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  class="h-7 w-7 shrink-0 text-rose-600 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-950/30"
+                  @click="removeBinding(index)"
+                >
+                  <Trash2 class="h-3.5 w-3.5" />
+                </Button>
               </div>
-              <Switch
-                v-model="form.provider_unrestricted"
-                class="shrink-0"
-              />
             </div>
           </div>
 
           <div class="space-y-2">
-            <Label class="text-sm font-medium">默认 API 格式</Label>
+            <Label class="text-sm font-medium">API 格式</Label>
             <div class="flex items-center gap-3">
-              <div class="flex-1 min-w-0">
+              <div class="min-w-0 flex-1">
                 <MultiSelect
                   v-model="form.allowed_api_formats"
                   :options="apiFormatOptions"
@@ -119,34 +208,12 @@
           </div>
 
           <div class="space-y-2">
-            <Label class="text-sm font-medium">默认模型</Label>
-            <div class="flex items-center gap-3">
-              <div class="flex-1 min-w-0">
-                <MultiSelect
-                  v-model="form.allowed_models"
-                  :options="modelOptions"
-                  :search-threshold="0"
-                  :disabled="form.model_unrestricted"
-                  :placeholder="form.model_unrestricted ? '不限制' : '未选择（全部禁用）'"
-                  empty-text="暂无可用模型"
-                  no-results-text="未找到匹配的模型"
-                  search-placeholder="输入模型名搜索..."
-                />
-              </div>
-              <Switch
-                v-model="form.model_unrestricted"
-                class="shrink-0"
-              />
-            </div>
-          </div>
-
-          <div class="space-y-2">
             <Label
               for="group-rate-limit"
               class="text-sm font-medium"
-            >默认速率限制 (请求/分钟)</Label>
+            >速率限制 (请求/分钟)</Label>
             <div class="flex items-center gap-3">
-              <div class="flex-1 min-w-0">
+              <div class="min-w-0 flex-1">
                 <Input
                   v-if="!form.rate_limit_inherited"
                   id="group-rate-limit"
@@ -161,7 +228,7 @@
                 <span
                   v-else
                   class="flex h-10 w-full items-center rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-60"
-                >跟随系统默认</span>
+                >跟随系统</span>
               </div>
               <Switch
                 v-model="form.rate_limit_inherited"
@@ -195,34 +262,48 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Users } from 'lucide-vue-next'
 import {
+  ArrowDown,
+  ArrowUp,
+  Trash2,
+  Users,
+} from 'lucide-vue-next'
+import {
+  Badge,
   Button,
   Dialog,
   Input,
   Label,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
   Switch,
   Textarea,
 } from '@/components/ui'
 import { MultiSelect } from '@/components/common'
 import { useFormDialog } from '@/composables/useFormDialog'
-import { getProvidersSummary } from '@/api/endpoints/providers'
-import { getGlobalModels } from '@/api/global-models'
 import { adminApi } from '@/api/admin'
+import { modelGroupsApi, type ModelGroupSummary } from '@/api/model-groups'
 import { log } from '@/utils/logger'
 import { parseNumberInput } from '@/utils/form'
-import type {
-  ProviderWithEndpointsSummary,
-  GlobalModelResponse,
-} from '@/api/endpoints/types'
+
+export interface UserGroupFormBinding {
+  model_group_id: string
+  priority: number
+  is_active: boolean
+  model_group_name?: string | null
+  model_group_display_name?: string | null
+  model_group_is_default?: boolean
+}
 
 export interface UserGroupFormData {
   id?: string
   name: string
   description?: string | null
-  allowed_providers?: string[] | null
   allowed_api_formats?: string[] | null
-  allowed_models?: string[] | null
+  model_group_bindings?: UserGroupFormBinding[] | null
   rate_limit?: number | null
 }
 
@@ -237,71 +318,105 @@ const emit = defineEmits<{
 }>()
 
 const saving = ref(false)
-
-const providers = ref<ProviderWithEndpointsSummary[]>([])
-const globalModels = ref<GlobalModelResponse[]>([])
+const modelGroups = ref<ModelGroupSummary[]>([])
 const apiFormats = ref<Array<{ value: string; label: string }>>([])
+const pendingModelGroupId = ref('')
 
-const providerOptions = computed(() =>
-  providers.value.map((provider) => ({
-    value: provider.id,
-    label: provider.name,
-  })),
-)
 const apiFormatOptions = computed(() =>
   apiFormats.value.map((format) => ({
     value: format.value,
     label: format.label,
   })),
 )
-const modelOptions = computed(() =>
-  globalModels.value.map((model) => ({
-    value: model.name,
-    label: model.name,
-  })),
-)
+
+const availableModelGroupOptions = computed(() => {
+  const selected = new Set(form.value.model_group_bindings.map((item) => item.model_group_id))
+  return modelGroups.value.filter((group) => !selected.has(group.id))
+})
+
+const defaultModelGroup = computed(() => {
+  return modelGroups.value.find((group) => group.is_default) || null
+})
 
 const form = ref({
   name: '',
   description: '',
-  provider_unrestricted: true,
   api_format_unrestricted: true,
-  model_unrestricted: true,
   rate_limit_inherited: true,
-  allowed_providers: [] as string[],
   allowed_api_formats: [] as string[],
-  allowed_models: [] as string[],
+  model_group_bindings: [] as UserGroupFormBinding[],
   rate_limit: undefined as number | undefined,
 })
 
+function reindexBindings() {
+  form.value.model_group_bindings = form.value.model_group_bindings.map((binding, index) => ({
+    ...binding,
+    priority: (index + 1) * 10,
+  }))
+}
+
+function cloneBindings(bindings: UserGroupFormBinding[] | null | undefined): UserGroupFormBinding[] {
+  return [...(bindings || [])]
+    .map((binding) => ({
+      model_group_id: binding.model_group_id,
+      priority: binding.priority,
+      is_active: binding.is_active,
+      model_group_name: binding.model_group_name ?? null,
+      model_group_display_name: binding.model_group_display_name ?? null,
+      model_group_is_default: binding.model_group_is_default ?? false,
+    }))
+    .sort((a, b) => a.priority - b.priority)
+}
+
 function resetForm() {
+  pendingModelGroupId.value = ''
   form.value = {
     name: '',
     description: '',
-    provider_unrestricted: true,
     api_format_unrestricted: true,
-    model_unrestricted: true,
     rate_limit_inherited: true,
-    allowed_providers: [],
     allowed_api_formats: [],
-    allowed_models: [],
+    model_group_bindings: [],
     rate_limit: undefined,
   }
 }
 
+function ensureCreateDefaultBinding() {
+  if (props.group || form.value.model_group_bindings.length > 0 || !defaultModelGroup.value) {
+    return
+  }
+  form.value.model_group_bindings = [
+    {
+      model_group_id: defaultModelGroup.value.id,
+      priority: 10,
+      is_active: true,
+      model_group_name: defaultModelGroup.value.name,
+      model_group_display_name: defaultModelGroup.value.display_name,
+      model_group_is_default: defaultModelGroup.value.is_default,
+    },
+  ]
+}
+
 function loadGroupData() {
-  if (!props.group) return
+  pendingModelGroupId.value = ''
+  if (!props.group) {
+    resetForm()
+    ensureCreateDefaultBinding()
+    return
+  }
   form.value = {
     name: props.group.name,
     description: props.group.description ?? '',
-    provider_unrestricted: props.group.allowed_providers == null,
     api_format_unrestricted: props.group.allowed_api_formats == null,
-    model_unrestricted: props.group.allowed_models == null,
     rate_limit_inherited: props.group.rate_limit == null,
-    allowed_providers: props.group.allowed_providers ? [...props.group.allowed_providers] : [],
     allowed_api_formats: props.group.allowed_api_formats ? [...props.group.allowed_api_formats] : [],
-    allowed_models: props.group.allowed_models ? [...props.group.allowed_models] : [],
+    model_group_bindings: cloneBindings(props.group.model_group_bindings),
     rate_limit: props.group.rate_limit ?? undefined,
+  }
+  if (form.value.model_group_bindings.length === 0) {
+    ensureCreateDefaultBinding()
+  } else {
+    reindexBindings()
   }
 }
 
@@ -323,16 +438,67 @@ const nameError = computed(() => {
 })
 const isFormValid = computed(() => !nameError.value)
 
+function getModelGroupMeta(modelGroupId: string): ModelGroupSummary | undefined {
+  return modelGroups.value.find((group) => group.id === modelGroupId)
+}
+
+function getModelGroupLabel(modelGroupId: string): string {
+  const binding = form.value.model_group_bindings.find((item) => item.model_group_id === modelGroupId)
+  if (binding?.model_group_display_name) return binding.model_group_display_name
+  if (binding?.model_group_name) return binding.model_group_name
+  const meta = getModelGroupMeta(modelGroupId)
+  return meta?.display_name || meta?.name || modelGroupId
+}
+
+function addModelGroupBinding() {
+  const modelGroupId = pendingModelGroupId.value
+  if (!modelGroupId) return
+  const meta = getModelGroupMeta(modelGroupId)
+  form.value.model_group_bindings.push({
+    model_group_id: modelGroupId,
+    priority: 0,
+    is_active: true,
+    model_group_name: meta?.name ?? null,
+    model_group_display_name: meta?.display_name ?? null,
+    model_group_is_default: meta?.is_default ?? false,
+  })
+  pendingModelGroupId.value = ''
+  reindexBindings()
+}
+
+function moveBinding(index: number, direction: -1 | 1) {
+  const targetIndex = index + direction
+  if (targetIndex < 0 || targetIndex >= form.value.model_group_bindings.length) return
+  const next = [...form.value.model_group_bindings]
+  const [current] = next.splice(index, 1)
+  next.splice(targetIndex, 0, current)
+  form.value.model_group_bindings = next
+  reindexBindings()
+}
+
+function removeBinding(index: number) {
+  form.value.model_group_bindings.splice(index, 1)
+  reindexBindings()
+}
+
+function updateBindingActive(index: number, value: boolean) {
+  form.value.model_group_bindings[index] = {
+    ...form.value.model_group_bindings[index],
+    is_active: !!value,
+  }
+}
+
 async function loadAccessControlOptions(): Promise<void> {
   try {
-    const [providersResponse, modelsData, formatsData] = await Promise.all([
-      getProvidersSummary({ page_size: 9999 }),
-      getGlobalModels({ limit: 1000, is_active: true }),
+    const [groups, formatsData] = await Promise.all([
+      modelGroupsApi.list(),
       adminApi.getApiFormats(),
     ])
-    providers.value = providersResponse.items
-    globalModels.value = modelsData.models || []
+    modelGroups.value = groups
     apiFormats.value = formatsData.formats || []
+    if (props.open) {
+      loadGroupData()
+    }
   } catch (err) {
     log.error('加载用户分组选项失败:', err)
   }
@@ -346,9 +512,17 @@ async function handleSubmit() {
       id: props.group?.id,
       name: form.value.name.trim(),
       description: form.value.description.trim() || null,
-      allowed_providers: form.value.provider_unrestricted ? null : [...form.value.allowed_providers],
       allowed_api_formats: form.value.api_format_unrestricted ? null : [...form.value.allowed_api_formats],
-      allowed_models: form.value.model_unrestricted ? null : [...form.value.allowed_models],
+      model_group_bindings: form.value.model_group_bindings.length > 0
+        ? form.value.model_group_bindings.map((binding, index) => ({
+          model_group_id: binding.model_group_id,
+          priority: (index + 1) * 10,
+          is_active: binding.is_active,
+          model_group_name: binding.model_group_name ?? null,
+          model_group_display_name: binding.model_group_display_name ?? null,
+          model_group_is_default: binding.model_group_is_default ?? false,
+        }))
+        : [],
       rate_limit: form.value.rate_limit_inherited ? null : (form.value.rate_limit ?? 0),
     })
   } finally {
@@ -362,7 +536,7 @@ function setSaving(value: boolean) {
 
 watch(isOpen, (val) => {
   if (val) {
-    loadAccessControlOptions()
+    void loadAccessControlOptions()
   }
 })
 

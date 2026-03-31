@@ -61,6 +61,7 @@ def test_create_user_assigns_default_group_when_group_not_provided(
 def test_batch_update_user_group_binding_sets_group_on_bind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    default_group = SimpleNamespace(id="group-default")
     group = SimpleNamespace(id="group-1")
     user = SimpleNamespace(
         id="user-1",
@@ -87,6 +88,10 @@ def test_batch_update_user_group_binding_sets_group_on_bind(
     create_task = MagicMock()
 
     monkeypatch.setattr("src.utils.transaction_manager._find_db_session", lambda args, kwargs: db)
+    monkeypatch.setattr(
+        "src.services.user.service.UserGroupService.get_or_create_default_group",
+        lambda _db: default_group,
+    )
     monkeypatch.setattr(
         "src.services.user.service.UserCacheService.invalidate_user_cache",
         invalidate_user_cache,
@@ -148,6 +153,10 @@ def test_batch_update_user_group_binding_unbind_respects_source_group(
     create_task = MagicMock()
 
     monkeypatch.setattr("src.utils.transaction_manager._find_db_session", lambda args, kwargs: db)
+    monkeypatch.setattr(
+        "src.services.user.service.UserGroupService.get_or_create_default_group",
+        lambda _db: default_group,
+    )
     monkeypatch.setattr(
         "src.services.user.service.UserCacheService.invalidate_user_cache",
         invalidate_user_cache,

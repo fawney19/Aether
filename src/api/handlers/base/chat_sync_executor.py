@@ -72,6 +72,9 @@ class SyncRequestContext:
     provider_id: str | None = None
     endpoint_id: str | None = None
     key_id: str | None = None
+    model_group_id: str | None = None
+    model_group_route_id: str | None = None
+    user_billing_multiplier: float = 1.0
     mapped_model_result: str | None = None
     sync_proxy_info: dict[str, Any] | None = None
     provider_response_json: dict[str, Any] | None = None  # 格式转换前的提供商原始响应
@@ -200,8 +203,7 @@ class ChatSyncExecutor:
             output_tokens = usage_info.get("output_tokens", 0)
             cache_creation_tokens = usage_info.get("cache_creation_input_tokens", 0)
             cached_tokens = usage_info.get("cache_read_input_tokens", 0)
-            cache_creation_tokens_5m = usage_info.get("cache_creation_input_tokens_5m", 0)
-            cache_creation_tokens_1h = usage_info.get("cache_creation_input_tokens_1h", 0)
+            cache_ttl_minutes = usage_info.get("cache_ttl_minutes")
 
             # 非流式成功时，返回给客户端的是提供商响应头（透传）
             # JSONResponse 会自动设置 content-type，但我们记录实际返回的完整头
@@ -239,8 +241,7 @@ class ChatSyncExecutor:
                 provider_request_body=ctx.provider_request_body,
                 cache_creation_tokens=cache_creation_tokens,
                 cache_read_tokens=cached_tokens,
-                cache_creation_tokens_5m=cache_creation_tokens_5m,
-                cache_creation_tokens_1h=cache_creation_tokens_1h,
+                cache_ttl_minutes=cache_ttl_minutes,
                 is_stream=False,
                 provider_request_headers=ctx.provider_request_headers,
                 api_format=api_format,
@@ -254,6 +255,9 @@ class ChatSyncExecutor:
                 provider_id=ctx.provider_id,
                 provider_endpoint_id=ctx.endpoint_id,
                 provider_api_key_id=ctx.key_id,
+                model_group_id=ctx.model_group_id,
+                model_group_route_id=ctx.model_group_route_id,
+                user_billing_multiplier=ctx.user_billing_multiplier,
                 # 模型映射信息
                 target_model=ctx.mapped_model_result,
                 request_metadata=request_metadata,
@@ -297,6 +301,9 @@ class ChatSyncExecutor:
                 provider_id=ctx.provider_id,
                 provider_endpoint_id=ctx.endpoint_id,
                 provider_api_key_id=ctx.key_id,
+                model_group_id=ctx.model_group_id,
+                model_group_route_id=ctx.model_group_route_id,
+                user_billing_multiplier=ctx.user_billing_multiplier,
                 request_metadata=request_metadata,
             )
             client_format = (ctx.client_api_format_for_error or "").upper()
@@ -358,6 +365,9 @@ class ChatSyncExecutor:
                 provider_id=ctx.provider_id,
                 provider_endpoint_id=ctx.endpoint_id,
                 provider_api_key_id=ctx.key_id,
+                model_group_id=ctx.model_group_id,
+                model_group_route_id=ctx.model_group_route_id,
+                user_billing_multiplier=ctx.user_billing_multiplier,
                 # 格式转换追踪
                 endpoint_api_format=ctx.provider_api_format_for_error or None,
                 has_format_conversion=is_format_converted(
@@ -415,6 +425,9 @@ class ChatSyncExecutor:
                 provider_id=ctx.provider_id,
                 provider_endpoint_id=ctx.endpoint_id,
                 provider_api_key_id=ctx.key_id,
+                model_group_id=ctx.model_group_id,
+                model_group_route_id=ctx.model_group_route_id,
+                user_billing_multiplier=ctx.user_billing_multiplier,
                 # 格式转换追踪
                 endpoint_api_format=ctx.provider_api_format_for_error or None,
                 has_format_conversion=is_format_converted(
@@ -449,6 +462,9 @@ class ChatSyncExecutor:
         ctx.provider_id = str(provider.id)
         ctx.endpoint_id = str(endpoint.id)
         ctx.key_id = str(key.id)
+        ctx.model_group_id = candidate.model_group_id
+        ctx.model_group_route_id = candidate.model_group_route_id
+        ctx.user_billing_multiplier = float(candidate.user_billing_multiplier or 1.0)
         provider_api_format = str(endpoint.api_format or api_format)
         client_api_format = api_format.value if hasattr(api_format, "value") else str(api_format)
 
@@ -806,6 +822,9 @@ class ChatSyncExecutor:
             provider_id=ctx.provider_id,
             provider_endpoint_id=ctx.endpoint_id,
             provider_api_key_id=ctx.key_id,
+            model_group_id=ctx.model_group_id,
+            model_group_route_id=ctx.model_group_route_id,
+            user_billing_multiplier=ctx.user_billing_multiplier,
             # 格式转换追踪
             endpoint_api_format=ctx.provider_api_format or None,
             has_format_conversion=ctx.has_format_conversion,

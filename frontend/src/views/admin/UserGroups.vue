@@ -125,7 +125,15 @@
                 </p>
               </div>
 
-              <div class="grid grid-cols-3 gap-2 sm:flex sm:flex-wrap sm:items-center">
+              <div class="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="h-8 w-full px-3 text-xs sm:w-auto"
+                  @click="goToModelGroupsPage"
+                >
+                  模型分组
+                </Button>
                 <Button
                   variant="outline"
                   size="sm"
@@ -156,7 +164,7 @@
               </div>
             </div>
 
-            <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
+            <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
               <div class="rounded-xl border border-border/60 bg-muted/30 p-3">
                 <div class="flex items-center gap-2 text-muted-foreground">
                   <UsersIcon class="h-4 w-4" />
@@ -169,11 +177,11 @@
 
               <div class="rounded-xl border border-border/60 bg-muted/30 p-3">
                 <div class="flex items-center gap-2 text-muted-foreground">
-                  <Shield class="h-4 w-4" />
-                  <span class="text-xs font-medium">默认 Provider</span>
+                  <Layers3 class="h-4 w-4" />
+                  <span class="text-xs font-medium">模型分组</span>
                 </div>
                 <div class="mt-2 text-sm font-medium text-foreground">
-                  {{ formatRestrictionSummary(selectedGroup.allowed_providers, '个 Provider') }}
+                  {{ formatModelGroupBindingsSummary(selectedGroup.model_group_bindings) }}
                 </div>
               </div>
 
@@ -189,22 +197,43 @@
 
               <div class="rounded-xl border border-border/60 bg-muted/30 p-3">
                 <div class="flex items-center gap-2 text-muted-foreground">
-                  <Layers3 class="h-4 w-4" />
-                  <span class="text-xs font-medium">默认模型</span>
-                </div>
-                <div class="mt-2 text-sm font-medium text-foreground">
-                  {{ formatRestrictionSummary(selectedGroup.allowed_models, '个模型') }}
-                </div>
-              </div>
-
-              <div class="rounded-xl border border-border/60 bg-muted/30 p-3">
-                <div class="flex items-center gap-2 text-muted-foreground">
                   <Gauge class="h-4 w-4" />
                   <span class="text-xs font-medium">默认速率</span>
                 </div>
                 <div class="mt-2 text-sm font-medium text-foreground">
                   {{ formatRateLimitInheritable(selectedGroup.rate_limit) }}
                 </div>
+              </div>
+            </div>
+
+            <div class="rounded-xl border border-border/60 bg-card px-3 py-3">
+              <div class="flex items-center gap-2 text-muted-foreground">
+                <Shield class="h-4 w-4" />
+                <span class="text-xs font-medium">绑定顺序</span>
+              </div>
+              <div
+                v-if="selectedGroup.model_group_bindings.length === 0"
+                class="mt-2 text-sm text-muted-foreground"
+              >
+                未显式绑定，保存时会自动落到默认模型分组。
+              </div>
+              <div
+                v-else
+                class="mt-3 flex flex-wrap gap-2"
+              >
+                <Badge
+                  v-for="(binding, index) in selectedGroup.model_group_bindings"
+                  :key="`${binding.model_group_id}-${index}`"
+                  variant="outline"
+                  class="h-7 gap-1.5 px-2.5 text-xs"
+                >
+                  <span>{{ index + 1 }}</span>
+                  <span>{{ binding.model_group_display_name || binding.model_group_name || binding.model_group_id }}</span>
+                  <span
+                    v-if="!binding.is_active"
+                    class="text-muted-foreground"
+                  >停用</span>
+                </Badge>
               </div>
             </div>
           </div>
@@ -641,9 +670,24 @@ const selectedCurrentGroupUserCount = computed(() => {
   }).length
 })
 
-function formatRestrictionSummary(list: string[] | null | undefined, unitLabel: string): string {
+function formatModelGroupBindingsSummary(bindings: UserGroup['model_group_bindings'] | null | undefined): string {
+  if (!bindings || bindings.length === 0) return '默认模型分组'
+  const activeBindings = bindings.filter((binding) => binding.is_active)
+  if (activeBindings.length === 0) return '全部停用'
+  if (activeBindings.length === 1) {
+    const first = activeBindings[0]
+    return first.model_group_display_name || first.model_group_name || first.model_group_id
+  }
+  return `${activeBindings.length} 个模型分组`
+}
+
+function formatRestrictionSummary(
+  list: string[] | null | undefined,
+  unitLabel: string,
+): string {
   if (list == null) return '不限制'
   if (list.length === 0) return '未开放'
+  if (list.length <= 2) return list.join('、')
   return `${list.length} ${unitLabel}`
 }
 
@@ -701,9 +745,15 @@ function editUserGroup(group: UserGroup) {
     id: group.id,
     name: group.name,
     description: group.description ?? null,
-    allowed_providers: group.allowed_providers == null ? null : [...group.allowed_providers],
     allowed_api_formats: group.allowed_api_formats == null ? null : [...group.allowed_api_formats],
-    allowed_models: group.allowed_models == null ? null : [...group.allowed_models],
+    model_group_bindings: group.model_group_bindings.map((binding) => ({
+      model_group_id: binding.model_group_id,
+      priority: binding.priority,
+      is_active: binding.is_active,
+      model_group_name: binding.model_group_name ?? null,
+      model_group_display_name: binding.model_group_display_name ?? null,
+      model_group_is_default: binding.model_group_is_default,
+    })),
     rate_limit: group.rate_limit ?? null,
   }
   showUserGroupFormDialog.value = true
@@ -721,9 +771,12 @@ async function handleUserGroupFormSubmit(data: UserGroupFormData) {
       const updated = await usersApi.updateUserGroup(data.id, {
         name: data.name,
         description: data.description ?? null,
-        allowed_providers: data.allowed_providers,
         allowed_api_formats: data.allowed_api_formats,
-        allowed_models: data.allowed_models,
+        model_group_bindings: data.model_group_bindings?.map((binding) => ({
+          model_group_id: binding.model_group_id,
+          priority: binding.priority,
+          is_active: binding.is_active,
+        })) ?? [],
         rate_limit: data.rate_limit ?? null,
       })
       success('用户分组已更新')
@@ -732,9 +785,12 @@ async function handleUserGroupFormSubmit(data: UserGroupFormData) {
       const created = await usersApi.createUserGroup({
         name: data.name,
         description: data.description ?? null,
-        allowed_providers: data.allowed_providers,
         allowed_api_formats: data.allowed_api_formats,
-        allowed_models: data.allowed_models,
+        model_group_bindings: data.model_group_bindings?.map((binding) => ({
+          model_group_id: binding.model_group_id,
+          priority: binding.priority,
+          is_active: binding.is_active,
+        })) ?? [],
         rate_limit: data.rate_limit ?? null,
       })
       success('用户分组创建成功')
@@ -854,6 +910,10 @@ async function handleSingleUnbind(userId: string) {
 
 function goToUsersPage() {
   void router.push('/admin/users')
+}
+
+function goToModelGroupsPage() {
+  void router.push('/admin/model-groups')
 }
 
 watch([groupSearchQuery], () => {

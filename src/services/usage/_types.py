@@ -49,8 +49,9 @@ class UsageRecordParams:
     cache_ttl_minutes: int | None
     use_tiered_pricing: bool
     target_model: str | None
-    cache_creation_input_tokens_5m: int = 0
-    cache_creation_input_tokens_1h: int = 0
+    model_group_id: str | None = None
+    model_group_route_id: str | None = None
+    user_billing_multiplier: float = 1.0
 
     def __post_init__(self) -> None:
         """验证关键字段，确保数据完整性"""
@@ -99,16 +100,20 @@ class UsageCostInfo:
     cache_cost: float = 0.0
     request_cost: float = 0.0
     total_cost: float = 0.0
-    cache_creation_cost_5m: float = 0.0
-    cache_creation_cost_1h: float = 0.0
     # 价格信息
     input_price: float | None = None
     output_price: float | None = None
     cache_creation_price: float | None = None
-    cache_creation_price_5m: float | None = None
-    cache_creation_price_1h: float | None = None
     cache_read_price: float | None = None
     request_price: float | None = None
     # 倍率
     actual_rate_multiplier: float = 1.0
     is_free_tier: bool = False
+    user_billing_multiplier: float = 1.0
+    actual_input_cost: float | None = None
+    actual_output_cost: float | None = None
+    actual_cache_creation_cost: float | None = None
+    actual_cache_read_cost: float | None = None
+    actual_cache_cost: float | None = None
+    actual_request_cost: float | None = None
+    actual_total_cost: float | None = None

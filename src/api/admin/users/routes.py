@@ -32,6 +32,7 @@ from src.models.database import ApiKey, User, UserGroup, UserRole, Wallet
 from src.services.auth.session_service import SessionService
 from src.services.cache.user_cache import UserCacheService
 from src.services.system.config import SystemConfigService
+from src.services.model.group_service import ModelGroupBindingPayload
 from src.services.user.apikey import ApiKeyService
 from src.services.user.bulk_cleanup import pre_clean_api_key
 from src.services.user.group_service import UserGroupService
@@ -80,14 +81,28 @@ def _serialize_user(
 
 
 def _serialize_user_group(group: UserGroup, user_count: int = 0) -> dict[str, Any]:
+    model_group_bindings = []
+    for link in list(getattr(group, "model_group_links", None) or []):
+        model_group = getattr(link, "model_group", None)
+        model_group_bindings.append(
+            {
+                "model_group_id": str(getattr(link, "model_group_id", "") or ""),
+                "model_group_name": getattr(model_group, "name", None),
+                "model_group_display_name": getattr(model_group, "display_name", None),
+                "model_group_is_default": bool(getattr(model_group, "is_default", False)),
+                "priority": int(getattr(link, "priority", 100) or 100),
+                "is_active": bool(getattr(link, "is_active", True)),
+            }
+        )
+    model_group_bindings.sort(key=lambda item: (item["priority"], item["model_group_name"] or ""))
+
     return {
         "id": group.id,
         "name": group.name,
         "description": group.description,
         "is_default": bool(group.is_default),
-        "allowed_providers": group.allowed_providers,
         "allowed_api_formats": group.allowed_api_formats,
-        "allowed_models": group.allowed_models,
+        "model_group_bindings": model_group_bindings,
         "rate_limit": group.rate_limit,
         "user_count": int(user_count),
         "created_at": group.created_at.isoformat(),
@@ -236,14 +251,25 @@ def _create_user_group_sync(
     request: CreateUserGroupRequest,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     with get_db_context() as db:
+        model_group_bindings = (
+            [
+                ModelGroupBindingPayload(
+                    model_group_id=item.model_group_id,
+                    priority=item.priority,
+                    is_active=item.is_active,
+                )
+                for item in request.model_group_bindings
+            ]
+            if request.model_group_bindings is not None
+            else None
+        )
         group = UserGroupService.create_group(
             db,
             name=request.name,
             description=request.description,
-            allowed_providers=request.allowed_providers,
             allowed_api_formats=request.allowed_api_formats,
-            allowed_models=request.allowed_models,
             rate_limit=request.rate_limit,
+            model_group_bindings=model_group_bindings,
         )
         return _serialize_user_group(group, 0), {
             "action": "create_user_group",
@@ -258,6 +284,15 @@ def _update_user_group_sync(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     with get_db_context() as db:
         update_data = request.model_dump(exclude_unset=True)
+        if "model_group_bindings" in update_data and update_data["model_group_bindings"] is not None:
+            update_data["model_group_bindings"] = [
+                ModelGroupBindingPayload(
+                    model_group_id=item["model_group_id"],
+                    priority=int(item.get("priority", 100)),
+                    is_active=bool(item.get("is_active", True)),
+                )
+                for item in update_data["model_group_bindings"]
+            ]
         group = UserGroupService.update_group(db, group_id, **update_data)
         if not group:
             raise NotFoundException("用户分组不存在", "user_group")
@@ -443,7 +478,7 @@ def _delete_user_key_sync(user_id: str, key_id: str) -> tuple[dict[str, Any], di
             .filter(
                 ApiKey.id == key_id,
                 ApiKey.user_id == user_id,
-                ApiKey.is_standalone == False,
+                ApiKey.is_standalone.is_(False),
             )
             .first()
         )
@@ -472,7 +507,7 @@ def _update_user_key_sync(
             .filter(
                 ApiKey.id == key_id,
                 ApiKey.user_id == user_id,
-                ApiKey.is_standalone == False,
+                ApiKey.is_standalone.is_(False),
             )
             .first()
         )
@@ -526,7 +561,7 @@ def _toggle_user_key_lock_sync(
             .filter(
                 ApiKey.id == key_id,
                 ApiKey.user_id == user_id,
-                ApiKey.is_standalone == False,
+                ApiKey.is_standalone.is_(False),
             )
             .first()
         )
@@ -1233,7 +1268,7 @@ class AdminGetUserKeyFullKeyAdapter(AdminApiAdapter):
             .filter(
                 ApiKey.id == self.key_id,
                 ApiKey.user_id == self.user_id,
-                ApiKey.is_standalone == False,  # 仅普通用户Key
+                ApiKey.is_standalone.is_(False),  # 仅普通用户Key
             )
             .first()
         )

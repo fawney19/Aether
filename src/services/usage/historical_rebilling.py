@@ -17,13 +17,18 @@ from src.services.billing.service import BillingService
 from src.services.billing.token_normalization import normalize_input_tokens_for_billing
 from src.services.system.config import SystemConfigService
 from src.services.usage._recording_helpers import sanitize_request_metadata
+from src.services.usage.upstream_usage_snapshot import (
+    build_upstream_usage_snapshot,
+    extract_usage_metrics_from_snapshot,
+    infer_cache_ttl_minutes,
+)
 from src.services.wallet import WalletDailyUsageLedgerService, WalletService
 
 
 class HistoricalUsageRebillingService:
     """升级后一次性的历史 Usage 重算维护任务。"""
 
-    TARGET_VERSION = "2026-03-31-usage-billing-recalc-v1"
+    TARGET_VERSION = "2026-03-31-usage-billing-recalc-v2"
     STATE_KEY = "historical_usage_rebilling_state"
     ENABLED_KEY = "historical_usage_rebilling_enabled"
     USAGE_BATCH_SIZE_KEY = "historical_usage_rebilling_usage_batch_size"
@@ -403,14 +408,41 @@ class HistoricalUsageRebillingService:
             return None
 
         total_cost = to_money_decimal(snap.total_cost or 0.0)
-        request_cost = total_cost
+        billable_multiplier = cls._get_usage_billable_multiplier(usage)
+        base_request_cost = total_cost
+        request_cost = to_money_decimal(base_request_cost * billable_multiplier)
+        total_cost = request_cost
 
         actual_rate_multiplier = cls._get_usage_rate_multiplier(usage)
         is_free_tier = cls._usage_is_free_tier(usage)
-        actual_request_cost = Decimal("0") if is_free_tier else request_cost * actual_rate_multiplier
-        actual_total_cost = Decimal("0") if is_free_tier else total_cost * actual_rate_multiplier
+        actual_request_cost = (
+            Decimal("0") if is_free_tier else to_money_decimal(base_request_cost * actual_rate_multiplier)
+        )
+        actual_total_cost = actual_request_cost
 
-        metadata["billing_snapshot"] = snap.to_dict()
+        billing_snapshot_payload = snap.to_dict()
+        billing_snapshot_payload["base_cost_breakdown"] = {
+            "input_cost": 0.0,
+            "output_cost": 0.0,
+            "cache_creation_cost": 0.0,
+            "cache_read_cost": 0.0,
+            "request_cost": float(base_request_cost),
+            "total_cost": float(base_request_cost),
+        }
+        billing_snapshot_payload["billing_multiplier"] = float(billable_multiplier)
+        billing_snapshot_payload["actual_rate_multiplier"] = float(actual_rate_multiplier)
+        billing_snapshot_payload["billable_cost_breakdown"] = {
+            "input_cost": 0.0,
+            "output_cost": 0.0,
+            "cache_creation_cost": 0.0,
+            "cache_read_cost": 0.0,
+            "request_cost": float(request_cost),
+            "total_cost": float(total_cost),
+        }
+
+        upstream_usage_snapshot = cls._build_or_get_upstream_usage_snapshot(usage)
+
+        metadata["billing_snapshot"] = billing_snapshot_payload
         metadata["billing_updated_at"] = datetime.now(timezone.utc).isoformat()
         metadata["billing_recalc_version"] = cls.TARGET_VERSION
         metadata["billing_recalc_pricing_source"] = "latest_model_pricing"
@@ -421,16 +453,12 @@ class HistoricalUsageRebillingService:
             "output_cost_usd": Decimal("0"),
             "cache_cost_usd": Decimal("0"),
             "cache_creation_cost_usd": Decimal("0"),
-            "cache_creation_cost_usd_5m": Decimal("0"),
-            "cache_creation_cost_usd_1h": Decimal("0"),
             "cache_read_cost_usd": Decimal("0"),
             "request_cost_usd": request_cost,
             "total_cost_usd": total_cost,
             "actual_input_cost_usd": Decimal("0"),
             "actual_output_cost_usd": Decimal("0"),
             "actual_cache_creation_cost_usd": Decimal("0"),
-            "actual_cache_creation_cost_usd_5m": Decimal("0"),
-            "actual_cache_creation_cost_usd_1h": Decimal("0"),
             "actual_cache_read_cost_usd": Decimal("0"),
             "actual_cache_cost_usd": Decimal("0"),
             "actual_request_cost_usd": actual_request_cost,
@@ -438,11 +466,10 @@ class HistoricalUsageRebillingService:
             "input_price_per_1m": None,
             "output_price_per_1m": None,
             "cache_creation_price_per_1m": None,
-            "cache_creation_price_per_1m_5m": None,
-            "cache_creation_price_per_1m_1h": None,
             "cache_read_price_per_1m": None,
             "price_per_request": request_cost,
             "request_metadata": sanitized_metadata,
+            "upstream_usage_snapshot": upstream_usage_snapshot,
         }
 
     @classmethod
@@ -456,8 +483,29 @@ class HistoricalUsageRebillingService:
             return None
 
         billing_api_format = cls._resolve_billing_api_format(usage)
-        raw_input_tokens = cls._get_usage_raw_input_tokens(usage)
-        cache_read_tokens = cls._to_int(usage.cache_read_input_tokens)
+        upstream_usage_snapshot = cls._build_or_get_upstream_usage_snapshot(usage)
+        usage_metrics = extract_usage_metrics_from_snapshot(upstream_usage_snapshot)
+
+        raw_input_tokens = (
+            cls._to_int(usage_metrics.get("input_tokens"))
+            if isinstance(usage_metrics, dict)
+            else cls._get_usage_raw_input_tokens(usage)
+        )
+        output_tokens = (
+            cls._to_int(usage_metrics.get("output_tokens"))
+            if isinstance(usage_metrics, dict)
+            else cls._to_int(usage.output_tokens)
+        )
+        cache_creation_tokens = (
+            cls._to_int(usage_metrics.get("cache_creation_input_tokens"))
+            if isinstance(usage_metrics, dict)
+            else cls._to_int(usage.cache_creation_input_tokens)
+        )
+        cache_read_tokens = (
+            cls._to_int(usage_metrics.get("cache_read_input_tokens"))
+            if isinstance(usage_metrics, dict)
+            else cls._to_int(usage.cache_read_input_tokens)
+        )
         input_tokens_for_billing = normalize_input_tokens_for_billing(
             billing_api_format,
             raw_input_tokens,
@@ -466,29 +514,11 @@ class HistoricalUsageRebillingService:
 
         is_failed_request = cls._to_int(usage.status_code) >= 400 or bool(usage.error_message)
         request_count = 0 if is_failed_request else 1
-        cache_creation_tokens = cls._to_int(usage.cache_creation_input_tokens)
-        ttl_5m_tokens = max(
-            min(cls._to_int(usage.cache_creation_input_tokens_5m), cache_creation_tokens),
-            0,
-        )
-        ttl_1h_tokens = max(
-            min(
-                cls._to_int(usage.cache_creation_input_tokens_1h),
-                max(cache_creation_tokens - ttl_5m_tokens, 0),
-            ),
-            0,
-        )
-        remaining_cache_creation_tokens = max(
-            cache_creation_tokens - ttl_5m_tokens - ttl_1h_tokens,
-            0,
-        )
         has_cache_tokens = bool(cache_creation_tokens > 0 or cache_read_tokens > 0)
-        effective_cache_ttl_minutes = cls._determine_effective_cache_ttl_minutes(
-            db,
-            usage,
+        effective_cache_ttl_minutes = infer_cache_ttl_minutes(
+            snapshot=upstream_usage_snapshot,
             has_cache_tokens=has_cache_tokens,
-            ttl_5m_tokens=ttl_5m_tokens,
-            ttl_1h_tokens=ttl_1h_tokens,
+            explicit_cache_ttl_minutes=getattr(usage, "cache_ttl_minutes", None),
         )
 
         billing = BillingService(db)
@@ -524,242 +554,73 @@ class HistoricalUsageRebillingService:
                 strict_mode=None,
             ).snapshot
 
-        mixed_cache_creation_ttls = ttl_5m_tokens > 0 and ttl_1h_tokens > 0
-
-        input_cost = Decimal("0")
-        output_cost = Decimal("0")
-        cache_creation_cost = Decimal("0")
-        cache_creation_cost_5m = Decimal("0")
-        cache_creation_cost_1h = Decimal("0")
-        cache_read_cost = Decimal("0")
-        request_cost = Decimal("0")
-        input_price = None
-        output_price = None
-        cache_creation_price = None
-        cache_creation_price_5m = None
-        cache_creation_price_1h = None
-        cache_read_price = None
-        request_price = None
-
-        if mixed_cache_creation_ttls:
-            common_snap = _run_billing(
-                _make_dims(
-                    input_tokens=input_tokens_for_billing,
-                    output_tokens=cls._to_int(usage.output_tokens),
-                    cache_creation_input_tokens=0,
-                    cache_read_input_tokens=cache_read_tokens,
-                    request_count_value=request_count,
-                    cache_ttl_minutes=effective_cache_ttl_minutes,
-                )
+        snap = _run_billing(
+            _make_dims(
+                input_tokens=input_tokens_for_billing,
+                output_tokens=output_tokens,
+                cache_creation_input_tokens=cache_creation_tokens,
+                cache_read_input_tokens=cache_read_tokens,
+                request_count_value=request_count,
+                cache_ttl_minutes=effective_cache_ttl_minutes,
             )
-            cache_5m_snap = _run_billing(
-                _make_dims(
-                    input_tokens=0,
-                    output_tokens=0,
-                    cache_creation_input_tokens=ttl_5m_tokens,
-                    cache_read_input_tokens=0,
-                    request_count_value=0,
-                    cache_ttl_minutes=5,
-                )
-            )
-            cache_1h_snap = _run_billing(
-                _make_dims(
-                    input_tokens=0,
-                    output_tokens=0,
-                    cache_creation_input_tokens=ttl_1h_tokens,
-                    cache_read_input_tokens=0,
-                    request_count_value=0,
-                    cache_ttl_minutes=60,
-                )
-            )
-            remaining_snap = None
-            if remaining_cache_creation_tokens > 0:
-                remaining_snap = _run_billing(
-                    _make_dims(
-                        input_tokens=0,
-                        output_tokens=0,
-                        cache_creation_input_tokens=remaining_cache_creation_tokens,
-                        cache_read_input_tokens=0,
-                        request_count_value=0,
-                        cache_ttl_minutes=effective_cache_ttl_minutes,
-                    )
-                )
+        )
+        if getattr(snap, "status", None) != "complete":
+            return None
 
-            if any(
-                getattr(snap, "status", None) != "complete"
-                for snap in [common_snap, cache_5m_snap, cache_1h_snap]
-            ):
-                return None
-            if remaining_snap is not None and getattr(remaining_snap, "status", None) != "complete":
-                return None
+        breakdown = snap.cost_breakdown or {}
+        input_cost_base = to_money_decimal(breakdown.get("input_cost", 0.0) or 0.0)
+        output_cost_base = to_money_decimal(breakdown.get("output_cost", 0.0) or 0.0)
+        cache_creation_cost_base = to_money_decimal(
+            breakdown.get("cache_creation_cost", 0.0) or 0.0
+        )
+        cache_read_cost_base = to_money_decimal(breakdown.get("cache_read_cost", 0.0) or 0.0)
+        request_cost_base = to_money_decimal(breakdown.get("request_cost", 0.0) or 0.0)
+        total_cost_base = to_money_decimal(snap.total_cost or 0.0)
 
-            common_breakdown = common_snap.cost_breakdown or {}
-            common_vars = common_snap.resolved_variables or {}
-            cache_5m_breakdown = cache_5m_snap.cost_breakdown or {}
-            cache_5m_vars = cache_5m_snap.resolved_variables or {}
-            cache_1h_breakdown = cache_1h_snap.cost_breakdown or {}
-            cache_1h_vars = cache_1h_snap.resolved_variables or {}
-            remaining_breakdown = remaining_snap.cost_breakdown or {} if remaining_snap else {}
-            remaining_vars = remaining_snap.resolved_variables or {} if remaining_snap else {}
+        vars_map = snap.resolved_variables or {}
+        input_price_base = cls._as_money_or_none(vars_map.get("input_price_per_1m"))
+        output_price_base = cls._as_money_or_none(vars_map.get("output_price_per_1m"))
+        cache_creation_price_base = cls._as_money_or_none(
+            vars_map.get("cache_creation_price_per_1m")
+        )
+        cache_read_price_base = cls._as_money_or_none(vars_map.get("cache_read_price_per_1m"))
+        request_price_base = cls._as_money_or_none(vars_map.get("price_per_request"))
 
-            input_cost = to_money_decimal(common_breakdown.get("input_cost", 0.0) or 0.0)
-            output_cost = to_money_decimal(common_breakdown.get("output_cost", 0.0) or 0.0)
-            cache_read_cost = to_money_decimal(common_breakdown.get("cache_read_cost", 0.0) or 0.0)
-            request_cost = to_money_decimal(common_breakdown.get("request_cost", 0.0) or 0.0)
-            cache_creation_cost_5m = to_money_decimal(
-                cache_5m_breakdown.get("cache_creation_cost", 0.0) or 0.0
-            )
-            cache_creation_cost_1h = to_money_decimal(
-                cache_1h_breakdown.get("cache_creation_cost", 0.0) or 0.0
-            )
-            remaining_cache_creation_cost = to_money_decimal(
-                remaining_breakdown.get("cache_creation_cost", 0.0) or 0.0
-            )
-            cache_creation_cost = (
-                cache_creation_cost_5m + cache_creation_cost_1h + remaining_cache_creation_cost
-            )
-
-            input_price = cls._as_money_or_none(common_vars.get("input_price_per_1m"))
-            output_price = cls._as_money_or_none(common_vars.get("output_price_per_1m"))
-            cache_creation_price_5m = cls._as_money_or_none(
-                cache_5m_vars.get("cache_creation_price_per_1m")
-            )
-            cache_creation_price_1h = cls._as_money_or_none(
-                cache_1h_vars.get("cache_creation_price_per_1m")
-            )
-            remaining_cache_creation_price = cls._as_money_or_none(
-                remaining_vars.get("cache_creation_price_per_1m")
-            )
-            cache_read_price = cls._as_money_or_none(common_vars.get("cache_read_price_per_1m"))
-            request_price = cls._as_money_or_none(common_vars.get("price_per_request"))
-
-            cache_creation_price = remaining_cache_creation_price
-            if (
-                remaining_cache_creation_tokens == 0
-                and cache_creation_price_5m is not None
-                and cache_creation_price_1h is not None
-                and cache_creation_price_5m == cache_creation_price_1h
-            ):
-                cache_creation_price = cache_creation_price_5m
-
-            base_snapshot = cls._snapshot_to_dict(common_snap)
-            if not base_snapshot:
-                base_snapshot = cls._snapshot_to_dict(cache_5m_snap)
-            if not base_snapshot:
-                base_snapshot = cls._snapshot_to_dict(cache_1h_snap)
-
-            resolved_dimensions = {
-                "input_tokens": input_tokens_for_billing,
-                "output_tokens": cls._to_int(usage.output_tokens),
-                "cache_creation_input_tokens": cache_creation_tokens,
-                "cache_read_input_tokens": cache_read_tokens,
-                "request_count": request_count,
-                "total_input_context": total_input_context,
-            }
-            if effective_cache_ttl_minutes is not None:
-                resolved_dimensions["cache_ttl_minutes"] = effective_cache_ttl_minutes
-
-            resolved_variables = dict(base_snapshot.get("resolved_variables") or {})
-            resolved_variables["input_price_per_1m"] = cls._serialize_money_or_none(input_price)
-            resolved_variables["output_price_per_1m"] = cls._serialize_money_or_none(output_price)
-            resolved_variables["cache_read_price_per_1m"] = cls._serialize_money_or_none(cache_read_price)
-            resolved_variables["price_per_request"] = cls._serialize_money_or_none(request_price)
-            resolved_variables["cache_creation_price_per_1m_5m"] = cls._serialize_money_or_none(
-                cache_creation_price_5m
-            )
-            resolved_variables["cache_creation_price_per_1m_1h"] = cls._serialize_money_or_none(
-                cache_creation_price_1h
-            )
-            if cache_creation_price is None:
-                resolved_variables.pop("cache_creation_price_per_1m", None)
-            else:
-                resolved_variables["cache_creation_price_per_1m"] = cls._serialize_money_or_none(
-                    cache_creation_price
-                )
-
-            billing_snapshot_payload = {
-                **base_snapshot,
-                "resolved_dimensions": resolved_dimensions,
-                "dimensions_used": resolved_dimensions,
-                "resolved_variables": resolved_variables,
-                "cost_breakdown": {
-                    "input_cost": float(input_cost),
-                    "output_cost": float(output_cost),
-                    "cache_creation_cost": float(cache_creation_cost),
-                    "cache_read_cost": float(cache_read_cost),
-                    "request_cost": float(request_cost),
-                },
-                "total_cost": float(
-                    input_cost + output_cost + cache_creation_cost + cache_read_cost + request_cost
-                ),
-                "cost": float(
-                    input_cost + output_cost + cache_creation_cost + cache_read_cost + request_cost
-                ),
-                "cache_creation_split": {
-                    "5m": {
-                        "tokens": ttl_5m_tokens,
-                        "price_per_1m": cls._serialize_money_or_none(cache_creation_price_5m),
-                        "cost": float(cache_creation_cost_5m),
-                    },
-                    "1h": {
-                        "tokens": ttl_1h_tokens,
-                        "price_per_1m": cls._serialize_money_or_none(cache_creation_price_1h),
-                        "cost": float(cache_creation_cost_1h),
-                    },
-                },
-            }
-            if remaining_cache_creation_tokens > 0:
-                billing_snapshot_payload["cache_creation_split"]["other"] = {
-                    "tokens": remaining_cache_creation_tokens,
-                    "price_per_1m": cls._serialize_money_or_none(remaining_cache_creation_price),
-                    "cost": float(remaining_cache_creation_cost),
-                }
-        else:
-            snap = _run_billing(
-                _make_dims(
-                    input_tokens=input_tokens_for_billing,
-                    output_tokens=cls._to_int(usage.output_tokens),
-                    cache_creation_input_tokens=cache_creation_tokens,
-                    cache_read_input_tokens=cache_read_tokens,
-                    request_count_value=request_count,
-                    cache_ttl_minutes=effective_cache_ttl_minutes,
-                )
-            )
-            if getattr(snap, "status", None) != "complete":
-                return None
-
-            breakdown = snap.cost_breakdown or {}
-            vars_map = snap.resolved_variables or {}
-            input_cost = to_money_decimal(breakdown.get("input_cost", 0.0) or 0.0)
-            output_cost = to_money_decimal(breakdown.get("output_cost", 0.0) or 0.0)
-            cache_creation_cost = to_money_decimal(breakdown.get("cache_creation_cost", 0.0) or 0.0)
-            cache_read_cost = to_money_decimal(breakdown.get("cache_read_cost", 0.0) or 0.0)
-            request_cost = to_money_decimal(breakdown.get("request_cost", 0.0) or 0.0)
-            input_price = cls._as_money_or_none(vars_map.get("input_price_per_1m"))
-            output_price = cls._as_money_or_none(vars_map.get("output_price_per_1m"))
-            cache_creation_price = cls._as_money_or_none(
-                vars_map.get("cache_creation_price_per_1m")
-            )
-            cache_read_price = cls._as_money_or_none(vars_map.get("cache_read_price_per_1m"))
-            request_price = cls._as_money_or_none(vars_map.get("price_per_request"))
-            billing_snapshot_payload = cls._snapshot_to_dict(snap)
-
-            if cache_creation_tokens > 0:
-                if ttl_5m_tokens > 0 and ttl_1h_tokens == 0:
-                    cache_creation_cost_5m = cache_creation_cost
-                    cache_creation_price_5m = cache_creation_price
-                elif ttl_1h_tokens > 0 and ttl_5m_tokens == 0:
-                    cache_creation_cost_1h = cache_creation_cost
-                    cache_creation_price_1h = cache_creation_price
-                elif effective_cache_ttl_minutes is not None and effective_cache_ttl_minutes <= 5:
-                    cache_creation_cost_5m = cache_creation_cost
-                    cache_creation_price_5m = cache_creation_price
-                else:
-                    cache_creation_cost_1h = cache_creation_cost
-                    cache_creation_price_1h = cache_creation_price
-
+        billable_multiplier = cls._get_usage_billable_multiplier(usage)
+        input_cost = to_money_decimal(input_cost_base * billable_multiplier)
+        output_cost = to_money_decimal(output_cost_base * billable_multiplier)
+        cache_creation_cost = to_money_decimal(cache_creation_cost_base * billable_multiplier)
+        cache_read_cost = to_money_decimal(cache_read_cost_base * billable_multiplier)
+        request_cost = to_money_decimal(request_cost_base * billable_multiplier)
+        total_cost = to_money_decimal(total_cost_base * billable_multiplier)
         cache_cost = cache_creation_cost + cache_read_cost
-        total_cost = input_cost + output_cost + cache_creation_cost + cache_read_cost + request_cost
+
+        input_price = (
+            to_money_decimal(input_price_base * billable_multiplier)
+            if input_price_base is not None
+            else None
+        )
+        output_price = (
+            to_money_decimal(output_price_base * billable_multiplier)
+            if output_price_base is not None
+            else None
+        )
+        cache_creation_price = (
+            to_money_decimal(cache_creation_price_base * billable_multiplier)
+            if cache_creation_price_base is not None
+            else None
+        )
+        cache_read_price = (
+            to_money_decimal(cache_read_price_base * billable_multiplier)
+            if cache_read_price_base is not None
+            else None
+        )
+        request_price = (
+            to_money_decimal(request_price_base * billable_multiplier)
+            if request_price_base is not None
+            else None
+        )
+        billing_snapshot_payload = cls._snapshot_to_dict(snap)
 
         actual_rate_multiplier = cls._get_usage_rate_multiplier(usage)
         is_free_tier = cls._usage_is_free_tier(usage)
@@ -767,22 +628,39 @@ class HistoricalUsageRebillingService:
             actual_input_cost = Decimal("0")
             actual_output_cost = Decimal("0")
             actual_cache_creation_cost = Decimal("0")
-            actual_cache_creation_cost_5m = Decimal("0")
-            actual_cache_creation_cost_1h = Decimal("0")
             actual_cache_read_cost = Decimal("0")
             actual_cache_cost = Decimal("0")
             actual_request_cost = Decimal("0")
             actual_total_cost = Decimal("0")
         else:
-            actual_input_cost = input_cost * actual_rate_multiplier
-            actual_output_cost = output_cost * actual_rate_multiplier
-            actual_cache_creation_cost = cache_creation_cost * actual_rate_multiplier
-            actual_cache_creation_cost_5m = cache_creation_cost_5m * actual_rate_multiplier
-            actual_cache_creation_cost_1h = cache_creation_cost_1h * actual_rate_multiplier
-            actual_cache_read_cost = cache_read_cost * actual_rate_multiplier
+            actual_input_cost = to_money_decimal(input_cost_base * actual_rate_multiplier)
+            actual_output_cost = to_money_decimal(output_cost_base * actual_rate_multiplier)
+            actual_cache_creation_cost = to_money_decimal(
+                cache_creation_cost_base * actual_rate_multiplier
+            )
+            actual_cache_read_cost = to_money_decimal(cache_read_cost_base * actual_rate_multiplier)
             actual_cache_cost = actual_cache_creation_cost + actual_cache_read_cost
-            actual_request_cost = request_cost * actual_rate_multiplier
-            actual_total_cost = total_cost * actual_rate_multiplier
+            actual_request_cost = to_money_decimal(request_cost_base * actual_rate_multiplier)
+            actual_total_cost = to_money_decimal(total_cost_base * actual_rate_multiplier)
+
+        billing_snapshot_payload["base_cost_breakdown"] = {
+            "input_cost": float(input_cost_base),
+            "output_cost": float(output_cost_base),
+            "cache_creation_cost": float(cache_creation_cost_base),
+            "cache_read_cost": float(cache_read_cost_base),
+            "request_cost": float(request_cost_base),
+            "total_cost": float(total_cost_base),
+        }
+        billing_snapshot_payload["billing_multiplier"] = float(billable_multiplier)
+        billing_snapshot_payload["actual_rate_multiplier"] = float(actual_rate_multiplier)
+        billing_snapshot_payload["billable_cost_breakdown"] = {
+            "input_cost": float(input_cost),
+            "output_cost": float(output_cost),
+            "cache_creation_cost": float(cache_creation_cost),
+            "cache_read_cost": float(cache_read_cost),
+            "request_cost": float(request_cost),
+            "total_cost": float(total_cost),
+        }
 
         metadata = cls._copy_metadata(usage)
         metadata["billing_snapshot"] = billing_snapshot_payload
@@ -792,20 +670,29 @@ class HistoricalUsageRebillingService:
         sanitized_metadata = sanitize_request_metadata(metadata)
 
         return {
+            "input_tokens": input_tokens_for_billing,
+            "output_tokens": output_tokens,
+            "input_output_total_tokens": input_tokens_for_billing + output_tokens,
+            "input_context_tokens": input_tokens_for_billing + cache_read_tokens,
+            "total_tokens": (
+                input_tokens_for_billing
+                + output_tokens
+                + cache_creation_tokens
+                + cache_read_tokens
+            ),
+            "cache_creation_input_tokens": cache_creation_tokens,
+            "cache_read_input_tokens": cache_read_tokens,
+            "cache_ttl_minutes": effective_cache_ttl_minutes if effective_cache_ttl_minutes is not None else 5,
             "input_cost_usd": input_cost,
             "output_cost_usd": output_cost,
             "cache_cost_usd": cache_cost,
             "cache_creation_cost_usd": cache_creation_cost,
-            "cache_creation_cost_usd_5m": cache_creation_cost_5m,
-            "cache_creation_cost_usd_1h": cache_creation_cost_1h,
             "cache_read_cost_usd": cache_read_cost,
             "request_cost_usd": request_cost,
             "total_cost_usd": total_cost,
             "actual_input_cost_usd": actual_input_cost,
             "actual_output_cost_usd": actual_output_cost,
             "actual_cache_creation_cost_usd": actual_cache_creation_cost,
-            "actual_cache_creation_cost_usd_5m": actual_cache_creation_cost_5m,
-            "actual_cache_creation_cost_usd_1h": actual_cache_creation_cost_1h,
             "actual_cache_read_cost_usd": actual_cache_read_cost,
             "actual_cache_cost_usd": actual_cache_cost,
             "actual_request_cost_usd": actual_request_cost,
@@ -813,11 +700,10 @@ class HistoricalUsageRebillingService:
             "input_price_per_1m": input_price,
             "output_price_per_1m": output_price,
             "cache_creation_price_per_1m": cache_creation_price,
-            "cache_creation_price_per_1m_5m": cache_creation_price_5m,
-            "cache_creation_price_per_1m_1h": cache_creation_price_1h,
             "cache_read_price_per_1m": cache_read_price,
             "price_per_request": request_price,
             "request_metadata": sanitized_metadata,
+            "upstream_usage_snapshot": upstream_usage_snapshot,
         }
 
     @classmethod
@@ -830,39 +716,12 @@ class HistoricalUsageRebillingService:
         ttl_5m_tokens: int,
         ttl_1h_tokens: int,
     ) -> int | None:
-        metadata = cls._copy_metadata(usage)
-        billing_snapshot = metadata.get("billing_snapshot") if isinstance(metadata, dict) else None
-        dims = cls._extract_billing_dimensions(billing_snapshot)
-        ttl_from_snapshot = dims.get("cache_ttl_minutes") if isinstance(dims, dict) else None
-        try:
-            if ttl_from_snapshot is not None:
-                return int(ttl_from_snapshot)
-        except Exception:
-            pass
-
-        if has_cache_tokens:
-            if ttl_1h_tokens > 0 and ttl_5m_tokens == 0:
-                return 60
-            if ttl_5m_tokens > 0 and ttl_1h_tokens == 0:
-                return 5
-            if ttl_1h_tokens > 0:
-                return 60
-
-        if has_cache_tokens and usage.provider_api_key_id:
-            try:
-                key_ttl = (
-                    db.query(ProviderAPIKey.cache_ttl_minutes)
-                    .filter(ProviderAPIKey.id == usage.provider_api_key_id)
-                    .scalar()
-                )
-                if key_ttl is not None:
-                    key_ttl_int = int(key_ttl)
-                    if key_ttl_int >= 0:
-                        return key_ttl_int
-            except Exception:
-                return None
-
-        return None
+        _ = (db, ttl_5m_tokens, ttl_1h_tokens)
+        return infer_cache_ttl_minutes(
+            snapshot=cls._build_or_get_upstream_usage_snapshot(usage),
+            has_cache_tokens=has_cache_tokens,
+            explicit_cache_ttl_minutes=getattr(usage, "cache_ttl_minutes", None),
+        )
 
     @classmethod
     def _resolve_billing_api_format(cls, usage: Usage) -> str | None:
@@ -906,6 +765,29 @@ class HistoricalUsageRebillingService:
         except Exception:
             return {}
         return data if isinstance(data, dict) else {}
+
+    @classmethod
+    def _build_or_get_upstream_usage_snapshot(cls, usage: Usage) -> dict[str, Any] | None:
+        snapshot = getattr(usage, "upstream_usage_snapshot", None)
+        if isinstance(snapshot, dict):
+            return dict(snapshot)
+
+        api_family = getattr(usage, "provider_api_family", None) or getattr(usage, "api_family", None)
+        response_body = usage.get_response_body()
+        built_snapshot = build_upstream_usage_snapshot(
+            response_body,
+            api_family=api_family,
+            is_stream=bool(getattr(usage, "is_stream", False)),
+        )
+        if built_snapshot is not None:
+            return built_snapshot
+
+        client_response_body = usage.get_client_response_body()
+        return build_upstream_usage_snapshot(
+            client_response_body,
+            api_family=api_family,
+            is_stream=bool(getattr(usage, "is_stream", False)),
+        )
 
     @staticmethod
     def _to_int(value: Any) -> int:
@@ -961,6 +843,10 @@ class HistoricalUsageRebillingService:
     @staticmethod
     def _get_usage_rate_multiplier(usage: Usage) -> Decimal:
         return to_money_decimal(getattr(usage, "rate_multiplier", None) or 1.0)
+
+    @staticmethod
+    def _get_usage_billable_multiplier(usage: Usage) -> Decimal:
+        return to_money_decimal(getattr(usage, "user_billing_multiplier", None) or 1.0)
 
     @staticmethod
     def _usage_is_free_tier(usage: Usage) -> bool:
@@ -1026,4 +912,3 @@ class HistoricalUsageRebillingService:
             .where(Provider.id == usage.provider_id)
             .values(monthly_used_usd=Provider.monthly_used_usd + delta)
         )
-

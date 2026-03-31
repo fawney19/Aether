@@ -141,7 +141,6 @@ def normalize_allowed_api_formats(v: list[str] | None) -> list[str] | None:
         seen.add(norm)
         out.append(norm)
     return out
-    message: str
 
 
 class LogoutResponse(BaseModel):
@@ -392,19 +391,41 @@ class UserResponse(BaseModel):
     last_login_at: datetime | None
 
 
+class UserGroupModelGroupBinding(BaseModel):
+    """用户分组绑定的模型分组。"""
+
+    model_group_id: str = Field(..., min_length=1, description="模型分组 ID")
+    priority: int = Field(default=100, ge=0, le=999999, description="尝试顺序，数字越小越优先")
+    is_active: bool = Field(default=True, description="是否启用该绑定")
+
+    @field_validator("model_group_id")
+    @classmethod
+    def validate_model_group_id(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("model_group_id 不能为空")
+        return v
+
+
+class UserGroupModelGroupBindingResponse(UserGroupModelGroupBinding):
+    """用户分组绑定的模型分组响应。"""
+
+    model_group_name: str | None = None
+    model_group_display_name: str | None = None
+    model_group_is_default: bool = False
+
+
 class UserGroupBase(BaseModel):
     """用户分组基础字段。"""
 
     name: str = Field(..., min_length=1, max_length=100, description="分组名称")
     description: str | None = Field(None, max_length=500, description="分组描述")
-    allowed_providers: list[str] | None = Field(
-        default=None, description="分组默认允许的提供商列表，null 表示不限制"
-    )
     allowed_api_formats: list[str] | None = Field(
         default=None, description="分组默认允许的 API 格式列表，null 表示不限制"
     )
-    allowed_models: list[str] | None = Field(
-        default=None, description="分组默认允许的模型列表，null 表示不限制"
+    model_group_bindings: list[UserGroupModelGroupBinding] | None = Field(
+        default=None,
+        description="按顺序绑定的模型分组列表；为空时自动绑定默认模型分组",
     )
     rate_limit: int | None = Field(
         default=None,
@@ -433,6 +454,22 @@ class UserGroupBase(BaseModel):
     def validate_group_allowed_api_formats(cls, v: list[str] | None) -> list[str] | None:
         return normalize_allowed_api_formats(v)
 
+    @field_validator("model_group_bindings")
+    @classmethod
+    def validate_model_group_bindings(
+        cls, v: list[UserGroupModelGroupBinding] | None
+    ) -> list[UserGroupModelGroupBinding] | None:
+        if v is None:
+            return None
+        normalized: list[UserGroupModelGroupBinding] = []
+        seen: set[str] = set()
+        for binding in v:
+            if binding.model_group_id in seen:
+                continue
+            seen.add(binding.model_group_id)
+            normalized.append(binding)
+        return normalized
+
 
 class CreateUserGroupRequest(UserGroupBase):
     """创建用户分组请求。"""
@@ -443,9 +480,8 @@ class UpdateUserGroupRequest(BaseModel):
 
     name: str | None = Field(None, min_length=1, max_length=100)
     description: str | None = Field(None, max_length=500)
-    allowed_providers: list[str] | None = None
     allowed_api_formats: list[str] | None = None
-    allowed_models: list[str] | None = None
+    model_group_bindings: list[UserGroupModelGroupBinding] | None = None
     rate_limit: int | None = Field(
         default=None,
         ge=0,
@@ -475,6 +511,22 @@ class UpdateUserGroupRequest(BaseModel):
     def validate_group_allowed_api_formats(cls, v: list[str] | None) -> list[str] | None:
         return normalize_allowed_api_formats(v)
 
+    @field_validator("model_group_bindings")
+    @classmethod
+    def validate_update_model_group_bindings(
+        cls, v: list[UserGroupModelGroupBinding] | None
+    ) -> list[UserGroupModelGroupBinding] | None:
+        if v is None:
+            return None
+        normalized: list[UserGroupModelGroupBinding] = []
+        seen: set[str] = set()
+        for binding in v:
+            if binding.model_group_id in seen:
+                continue
+            seen.add(binding.model_group_id)
+            normalized.append(binding)
+        return normalized
+
 
 class UserGroupResponse(BaseModel):
     """用户分组响应。"""
@@ -483,9 +535,8 @@ class UserGroupResponse(BaseModel):
     name: str
     description: str | None = None
     is_default: bool = False
-    allowed_providers: list[str] | None = None
     allowed_api_formats: list[str] | None = None
-    allowed_models: list[str] | None = None
+    model_group_bindings: list[UserGroupModelGroupBindingResponse] = Field(default_factory=list)
     rate_limit: int | None = None
     user_count: int = 0
     created_at: datetime

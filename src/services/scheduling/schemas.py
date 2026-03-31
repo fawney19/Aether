@@ -34,6 +34,11 @@ class ProviderCandidate:
     provider_api_format: str = ""  # Provider 端点实际格式（用于健康度/熔断 bucket）
     output_limit: int | None = None  # GlobalModel 配置的模型输出上限
     capability_miss_count: int = 0  # COMPATIBLE 能力不匹配数（0=完全匹配，用于排序）
+    effective_provider_priority: int | None = None  # 模型分组覆盖后的 Provider 优先级
+    model_group_id: str | None = None
+    model_group_name: str | None = None
+    model_group_route_id: str | None = None
+    user_billing_multiplier: float = 1.0
 
     def _stable_order_key(self) -> tuple[int, int, str, str, str]:
         """
@@ -45,7 +50,11 @@ class ProviderCandidate:
           TypeError: '<' not supported between instances of 'ProviderCandidate' and 'ProviderCandidate'
         - 这里提供一个与调度逻辑无关、但足够稳定且可比的兜底顺序。
         """
-        provider_priority_raw = getattr(self.provider, "provider_priority", None)
+        provider_priority_raw = (
+            self.effective_provider_priority
+            if self.effective_provider_priority is not None
+            else getattr(self.provider, "provider_priority", None)
+        )
         internal_priority_raw = getattr(self.key, "internal_priority", None)
 
         try:

@@ -412,6 +412,12 @@ class CliMonitorMixin:
                                 client_response_body=recorded_bodies.client_response_body,
                                 response_headers=ctx.response_headers,
                                 client_response_headers=client_response_headers,
+                                provider_id=ctx.provider_id,
+                                provider_endpoint_id=ctx.endpoint_id,
+                                provider_api_key_id=ctx.key_id,
+                                model_group_id=ctx.model_group_id,
+                                model_group_route_id=ctx.model_group_route_id,
+                                user_billing_multiplier=ctx.user_billing_multiplier,
                                 endpoint_api_format=ctx.provider_api_format or None,
                                 has_format_conversion=ctx.has_format_conversion,
                                 target_model=ctx.mapped_model,
@@ -461,6 +467,12 @@ class CliMonitorMixin:
                                 client_response_body=recorded_bodies.client_response_body,
                                 response_headers=ctx.response_headers,
                                 client_response_headers=client_response_headers,
+                                provider_id=ctx.provider_id,
+                                provider_endpoint_id=ctx.endpoint_id,
+                                provider_api_key_id=ctx.key_id,
+                                model_group_id=ctx.model_group_id,
+                                model_group_route_id=ctx.model_group_route_id,
+                                user_billing_multiplier=ctx.user_billing_multiplier,
                                 # 格式转换追踪
                                 endpoint_api_format=ctx.provider_api_format or None,
                                 has_format_conversion=ctx.has_format_conversion,
@@ -552,6 +564,9 @@ class CliMonitorMixin:
                             provider_id=ctx.provider_id,
                             provider_endpoint_id=ctx.endpoint_id,
                             provider_api_key_id=ctx.key_id,
+                            model_group_id=ctx.model_group_id,
+                            model_group_route_id=ctx.model_group_route_id,
+                            user_billing_multiplier=ctx.user_billing_multiplier,
                             # 模型映射信息
                             target_model=ctx.mapped_model,
                             # Provider 响应元数据（如 Gemini 的 modelVersion）
@@ -654,7 +669,7 @@ class CliMonitorMixin:
             finally:
                 bg_db.close()
 
-        except Exception as e:
+        except Exception:
             logger.exception("记录流式统计信息时出错")
         finally:
             # 遥测写入完成后主动释放大对象列表，降低高并发长流的内存滞留。
@@ -711,6 +726,12 @@ class CliMonitorMixin:
                 provider_request_body=ctx.provider_request_body,
                 response_headers=ctx.response_headers,
                 client_response_headers=client_response_headers,
+                provider_id=ctx.provider_id,
+                provider_endpoint_id=ctx.endpoint_id,
+                provider_api_key_id=ctx.key_id,
+                model_group_id=ctx.model_group_id,
+                model_group_route_id=ctx.model_group_route_id,
+                user_billing_multiplier=ctx.user_billing_multiplier,
                 # 格式转换追踪
                 endpoint_api_format=ctx.provider_api_format or None,
                 has_format_conversion=ctx.has_format_conversion,

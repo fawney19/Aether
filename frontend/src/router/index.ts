@@ -196,6 +196,11 @@ const routes: RouteRecordRaw[] = [
         component: () => importWithRetry(() => import('@/views/admin/ModelManagement.vue'))
       },
       {
+        path: 'model-groups',
+        name: 'ModelGroups',
+        component: () => importWithRetry(() => import('@/views/admin/ModelGroups.vue'))
+      },
+      {
         path: 'health-monitor',
         name: 'HealthMonitor',
         component: () => importWithRetry(() => import('@/views/shared/HealthMonitor.vue'))

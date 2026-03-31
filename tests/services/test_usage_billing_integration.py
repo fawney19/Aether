@@ -162,10 +162,9 @@ def _build_params(
     *,
     cache_creation_input_tokens: int = 0,
     cache_read_input_tokens: int = 0,
-    cache_creation_input_tokens_5m: int = 0,
-    cache_creation_input_tokens_1h: int = 0,
     cache_ttl_minutes: int | None = None,
     provider_api_key_id: str | None = "pak-test",
+    response_body: Any = None,
 ) -> UsageRecordParams:
     return UsageRecordParams(
         db=db,
@@ -177,8 +176,6 @@ def _build_params(
         output_tokens=50,
         cache_creation_input_tokens=cache_creation_input_tokens,
         cache_read_input_tokens=cache_read_input_tokens,
-        cache_creation_input_tokens_5m=cache_creation_input_tokens_5m,
-        cache_creation_input_tokens_1h=cache_creation_input_tokens_1h,
         request_type="chat",
         api_format="claude:chat",
         api_family="claude",
@@ -197,7 +194,7 @@ def _build_params(
         provider_request_body=None,
         response_headers=None,
         client_response_headers=None,
-        response_body=None,
+        response_body=response_body,
         client_response_body=None,
         request_id="req-test",
         provider_id="provider-id",
@@ -211,11 +208,10 @@ def _build_params(
 
 
 @pytest.mark.asyncio
-async def test_prepare_usage_record_uses_provider_key_ttl_for_cache_read(
+async def test_prepare_usage_record_defaults_cache_read_ttl_to_5m(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db = MagicMock()
-    db.query.return_value.filter.return_value.scalar.return_value = 60
 
     monkeypatch.setattr("src.services.billing.service.BillingService", _DummyBillingService)
     monkeypatch.setattr(
@@ -231,7 +227,7 @@ async def test_prepare_usage_record_uses_provider_key_ttl_for_cache_read(
     await _TestUsageBillingIntegration._prepare_usage_record(params)
 
     assert _DummyBillingService.last_dimensions is not None
-    assert _DummyBillingService.last_dimensions.get("cache_ttl_minutes") == 60
+    assert _DummyBillingService.last_dimensions.get("cache_ttl_minutes") == 5
 
 
 @pytest.mark.asyncio
@@ -259,7 +255,7 @@ async def test_prepare_usage_record_prefers_explicit_cache_ttl(
 
 
 @pytest.mark.asyncio
-async def test_prepare_usage_record_infers_ttl_from_1h_cache_split(
+async def test_prepare_usage_record_infers_ttl_from_upstream_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db = MagicMock()
@@ -278,7 +274,13 @@ async def test_prepare_usage_record_infers_ttl_from_1h_cache_split(
         db,
         provider_api_key_id=None,
         cache_creation_input_tokens=1000,
-        cache_creation_input_tokens_1h=1000,
+        response_body={
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "claude_cache_creation_1_h_tokens": 1000,
+            }
+        },
     )
     await _TestUsageBillingIntegration._prepare_usage_record(params)
 
@@ -287,11 +289,10 @@ async def test_prepare_usage_record_infers_ttl_from_1h_cache_split(
 
 
 @pytest.mark.asyncio
-async def test_prepare_usage_record_prefers_cache_split_over_provider_key_ttl(
+async def test_prepare_usage_record_defaults_cache_creation_ttl_to_5m_without_snapshot_ttl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db = MagicMock()
-    db.query.return_value.filter.return_value.scalar.return_value = 60
 
     monkeypatch.setattr("src.services.billing.service.BillingService", _DummyBillingService)
     monkeypatch.setattr(
@@ -306,7 +307,6 @@ async def test_prepare_usage_record_prefers_cache_split_over_provider_key_ttl(
     params = _build_params(
         db,
         cache_creation_input_tokens=258,
-        cache_creation_input_tokens_5m=258,
     )
     await _TestUsageBillingIntegration._prepare_usage_record(params)
 
@@ -315,7 +315,7 @@ async def test_prepare_usage_record_prefers_cache_split_over_provider_key_ttl(
 
 
 @pytest.mark.asyncio
-async def test_prepare_usage_record_bills_mixed_cache_creation_ttls_separately(
+async def test_prepare_usage_record_bills_single_cache_ttl_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db = MagicMock()
@@ -342,35 +342,25 @@ async def test_prepare_usage_record_bills_mixed_cache_creation_ttls_separately(
         db,
         provider_api_key_id=None,
         cache_creation_input_tokens=300,
-        cache_creation_input_tokens_5m=200,
-        cache_creation_input_tokens_1h=100,
+        response_body={
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "claude_cache_creation_1_h_tokens": 300,
+            }
+        },
     )
     await _TestUsageBillingIntegration._prepare_usage_record(params)
 
     cost = captured["cost"]
-    assert len(_SplitAwareBillingService.calls) == 3
-    assert all(call.get("total_input_context") == 400 for call in _SplitAwareBillingService.calls)
-    assert any(
-        call.get("cache_creation_input_tokens") == 200 and call.get("cache_ttl_minutes") == 5
-        for call in _SplitAwareBillingService.calls
-    )
-    assert any(
-        call.get("cache_creation_input_tokens") == 100 and call.get("cache_ttl_minutes") == 60
-        for call in _SplitAwareBillingService.calls
-    )
-    assert cost.cache_creation_cost_5m == pytest.approx(0.00075)
-    assert cost.cache_creation_cost_1h == pytest.approx(0.0006)
-    assert cost.cache_creation_cost == pytest.approx(0.00135)
-    assert cost.cache_creation_price is None
-    assert cost.cache_creation_price_5m == pytest.approx(3.75)
-    assert cost.cache_creation_price_1h == pytest.approx(6.0)
-    assert cost.total_cost == pytest.approx(0.01105 + 0.00075 + 0.0006)
-    assert captured["metadata"]["billing_snapshot"]["cache_creation_split"]["5m"]["cost"] == pytest.approx(
-        0.00075
-    )
-    assert captured["metadata"]["billing_snapshot"]["cache_creation_split"]["1h"]["cost"] == pytest.approx(
-        0.0006
-    )
+    assert len(_SplitAwareBillingService.calls) == 1
+    assert _SplitAwareBillingService.calls[0].get("total_input_context") == 400
+    assert _SplitAwareBillingService.calls[0].get("cache_creation_input_tokens") == 300
+    assert _SplitAwareBillingService.calls[0].get("cache_ttl_minutes") == 60
+    assert cost.cache_creation_cost == pytest.approx(0.0018)
+    assert cost.cache_creation_price == pytest.approx(6.0)
+    assert cost.total_cost == pytest.approx(0.0018)
+    assert "cache_creation_split" not in captured["metadata"]["billing_snapshot"]
 
 
 @pytest.mark.asyncio

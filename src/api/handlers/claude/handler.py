@@ -110,8 +110,7 @@ class ClaudeChatHandler(ChatHandlerBase):
             "output_tokens": usage.get("output_tokens", 0),
             "cache_creation_input_tokens": total,
             "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
-            "cache_creation_input_tokens_5m": t5m,
-            "cache_creation_input_tokens_1h": t1h,
+            "cache_ttl_minutes": 60 if t1h > 0 else (5 if total > 0 else None),
         }
 
     def _normalize_response(self, response: dict[str, Any]) -> dict[str, Any]:

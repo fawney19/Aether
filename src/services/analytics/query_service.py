@@ -597,16 +597,12 @@ class AnalyticsQueryService:
             func.coalesce(func.sum(Usage.output_tokens), 0).label("output_tokens"),
             func.coalesce(func.sum(Usage.input_output_total_tokens), 0).label("input_output_total_tokens"),
             func.coalesce(func.sum(Usage.cache_creation_input_tokens), 0).label("cache_creation_input_tokens"),
-            func.coalesce(func.sum(Usage.cache_creation_input_tokens_5m), 0).label("cache_creation_input_tokens_5m"),
-            func.coalesce(func.sum(Usage.cache_creation_input_tokens_1h), 0).label("cache_creation_input_tokens_1h"),
             func.coalesce(func.sum(Usage.cache_read_input_tokens), 0).label("cache_read_input_tokens"),
             func.coalesce(func.sum(Usage.input_context_tokens), 0).label("input_context_tokens"),
             func.coalesce(func.sum(Usage.total_tokens), 0).label("total_tokens"),
             func.coalesce(func.sum(Usage.input_cost_usd), 0).label("input_cost_usd"),
             func.coalesce(func.sum(Usage.output_cost_usd), 0).label("output_cost_usd"),
             func.coalesce(func.sum(Usage.cache_creation_cost_usd), 0).label("cache_creation_cost_usd"),
-            func.coalesce(func.sum(Usage.cache_creation_cost_usd_5m), 0).label("cache_creation_cost_usd_5m"),
-            func.coalesce(func.sum(Usage.cache_creation_cost_usd_1h), 0).label("cache_creation_cost_usd_1h"),
             func.coalesce(func.sum(Usage.cache_read_cost_usd), 0).label("cache_read_cost_usd"),
             func.coalesce(func.sum(Usage.cache_cost_usd), 0).label("cache_cost_usd"),
             func.coalesce(func.sum(Usage.request_cost_usd), 0).label("request_cost_usd"),
@@ -693,16 +689,12 @@ class AnalyticsQueryService:
             Usage.output_tokens,
             Usage.input_output_total_tokens,
             Usage.cache_creation_input_tokens,
-            Usage.cache_creation_input_tokens_5m,
-            Usage.cache_creation_input_tokens_1h,
             Usage.cache_read_input_tokens,
             Usage.input_context_tokens,
             Usage.total_tokens,
             Usage.input_cost_usd,
             Usage.output_cost_usd,
             Usage.cache_creation_cost_usd,
-            Usage.cache_creation_cost_usd_5m,
-            Usage.cache_creation_cost_usd_1h,
             Usage.cache_read_cost_usd,
             Usage.cache_cost_usd,
             Usage.request_cost_usd,
@@ -734,16 +726,12 @@ class AnalyticsQueryService:
                     "output_tokens": 0,
                     "input_output_total_tokens": 0,
                     "cache_creation_input_tokens": 0,
-                    "cache_creation_input_tokens_5m": 0,
-                    "cache_creation_input_tokens_1h": 0,
                     "cache_read_input_tokens": 0,
                     "input_context_tokens": 0,
                     "total_tokens": 0,
                     "input_cost_usd": 0.0,
                     "output_cost_usd": 0.0,
                     "cache_creation_cost_usd": 0.0,
-                    "cache_creation_cost_usd_5m": 0.0,
-                    "cache_creation_cost_usd_1h": 0.0,
                     "cache_read_cost_usd": 0.0,
                     "cache_cost_usd": 0.0,
                     "request_cost_usd": 0.0,
@@ -774,16 +762,12 @@ class AnalyticsQueryService:
             bucket["output_tokens"] += _to_int(row.output_tokens)
             bucket["input_output_total_tokens"] += _to_int(row.input_output_total_tokens)
             bucket["cache_creation_input_tokens"] += _to_int(row.cache_creation_input_tokens)
-            bucket["cache_creation_input_tokens_5m"] += _to_int(row.cache_creation_input_tokens_5m)
-            bucket["cache_creation_input_tokens_1h"] += _to_int(row.cache_creation_input_tokens_1h)
             bucket["cache_read_input_tokens"] += _to_int(row.cache_read_input_tokens)
             bucket["input_context_tokens"] += _to_int(row.input_context_tokens)
             bucket["total_tokens"] += _to_int(row.total_tokens)
             bucket["input_cost_usd"] += _to_float(row.input_cost_usd)
             bucket["output_cost_usd"] += _to_float(row.output_cost_usd)
             bucket["cache_creation_cost_usd"] += _to_float(row.cache_creation_cost_usd)
-            bucket["cache_creation_cost_usd_5m"] += _to_float(row.cache_creation_cost_usd_5m)
-            bucket["cache_creation_cost_usd_1h"] += _to_float(row.cache_creation_cost_usd_1h)
             bucket["cache_read_cost_usd"] += _to_float(row.cache_read_cost_usd)
             bucket["cache_cost_usd"] += _to_float(row.cache_cost_usd)
             bucket["request_cost_usd"] += _to_float(row.request_cost_usd)
@@ -1136,16 +1120,20 @@ class AnalyticsQueryService:
                     "output_tokens": _to_int(usage.output_tokens),
                     "input_output_total_tokens": _to_int(usage.input_output_total_tokens),
                     "cache_creation_input_tokens": _to_int(usage.cache_creation_input_tokens),
-                    "cache_creation_input_tokens_5m": _to_int(usage.cache_creation_input_tokens_5m),
-                    "cache_creation_input_tokens_1h": _to_int(usage.cache_creation_input_tokens_1h),
+                    "cache_ttl_minutes": (
+                        _to_int(getattr(usage, "cache_ttl_minutes", 5))
+                        if (
+                            _to_int(usage.cache_creation_input_tokens) > 0
+                            or _to_int(usage.cache_read_input_tokens) > 0
+                        )
+                        else None
+                    ),
                     "cache_read_input_tokens": _to_int(usage.cache_read_input_tokens),
                     "input_context_tokens": _to_int(usage.input_context_tokens),
                     "total_tokens": _to_int(usage.total_tokens),
                     "input_cost_usd": _round2(_to_float(usage.input_cost_usd)),
                     "output_cost_usd": _round2(_to_float(usage.output_cost_usd)),
                     "cache_creation_cost_usd": _round2(_to_float(usage.cache_creation_cost_usd)),
-                    "cache_creation_cost_usd_5m": _round2(_to_float(usage.cache_creation_cost_usd_5m)),
-                    "cache_creation_cost_usd_1h": _round2(_to_float(usage.cache_creation_cost_usd_1h)),
                     "cache_read_cost_usd": _round2(_to_float(usage.cache_read_cost_usd)),
                     "cache_cost_usd": _round2(_to_float(usage.cache_cost_usd)),
                     "request_cost_usd": _round2(_to_float(usage.request_cost_usd)),
@@ -1647,16 +1635,12 @@ class AnalyticsQueryService:
             "output_tokens": _to_int(getattr(row, "output_tokens", 0)),
             "input_output_total_tokens": _to_int(getattr(row, "input_output_total_tokens", 0)),
             "cache_creation_input_tokens": _to_int(getattr(row, "cache_creation_input_tokens", 0)),
-            "cache_creation_input_tokens_5m": _to_int(getattr(row, "cache_creation_input_tokens_5m", 0)),
-            "cache_creation_input_tokens_1h": _to_int(getattr(row, "cache_creation_input_tokens_1h", 0)),
             "cache_read_input_tokens": _to_int(getattr(row, "cache_read_input_tokens", 0)),
             "input_context_tokens": _to_int(getattr(row, "input_context_tokens", 0)),
             "total_tokens": _to_int(getattr(row, "total_tokens", 0)),
             "input_cost_usd": _round2(_to_float(getattr(row, "input_cost_usd", 0))),
             "output_cost_usd": _round2(_to_float(getattr(row, "output_cost_usd", 0))),
             "cache_creation_cost_usd": _round2(_to_float(getattr(row, "cache_creation_cost_usd", 0))),
-            "cache_creation_cost_usd_5m": _round2(_to_float(getattr(row, "cache_creation_cost_usd_5m", 0))),
-            "cache_creation_cost_usd_1h": _round2(_to_float(getattr(row, "cache_creation_cost_usd_1h", 0))),
             "cache_read_cost_usd": _round2(_to_float(getattr(row, "cache_read_cost_usd", 0))),
             "cache_cost_usd": _round2(_to_float(getattr(row, "cache_cost_usd", 0))),
             "request_cost_usd": _round2(_to_float(getattr(row, "request_cost_usd", 0))),

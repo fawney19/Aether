@@ -14,6 +14,7 @@ import {
   MOCK_USER_PROFILE,
   MOCK_ALL_USERS,
   MOCK_USER_GROUPS,
+  MOCK_MODEL_GROUPS,
   MOCK_USER_API_KEYS,
   MOCK_ADMIN_API_KEYS,
   MOCK_PROVIDERS,
@@ -70,20 +71,106 @@ function getDefaultMockUserGroup() {
   return MOCK_USER_GROUPS.find(group => group.is_default) ?? MOCK_USER_GROUPS[0] ?? null
 }
 
+function getMockModelGroupById(modelGroupId: string | null | undefined) {
+  if (!modelGroupId) return null
+  return MOCK_MODEL_GROUPS.find(group => group.id === modelGroupId) ?? null
+}
+
+function normalizeMockUserGroupBindings(bindings: unknown): NonNullable<(typeof MOCK_USER_GROUPS)[number]['model_group_bindings']> {
+  if (!Array.isArray(bindings)) return []
+  return bindings
+    .map((binding, index) => {
+      const raw = (binding || {}) as Record<string, unknown>
+      const modelGroupId = String(raw.model_group_id ?? '').trim()
+      if (!modelGroupId) return null
+      const modelGroup = getMockModelGroupById(modelGroupId)
+      return {
+        model_group_id: modelGroupId,
+        priority: Number(raw.priority ?? (index + 1) * 10),
+        is_active: raw.is_active !== false,
+        model_group_name: modelGroup?.name ?? null,
+        model_group_display_name: modelGroup?.display_name ?? null,
+        model_group_is_default: modelGroup?.is_default ?? false,
+      }
+    })
+    .filter(Boolean) as NonNullable<(typeof MOCK_USER_GROUPS)[number]['model_group_bindings']>
+}
+
+function syncMockModelGroups() {
+  for (const group of MOCK_MODEL_GROUPS) {
+    const modelRefs = MOCK_GLOBAL_MODELS
+      .filter(model => (model.model_group_ids || []).includes(group.id))
+      .map(model => ({
+        id: `mgm-${group.id}-${model.id}`,
+        global_model_id: model.id,
+        model_name: model.name,
+        model_display_name: model.display_name,
+        is_active: model.is_active,
+      }))
+
+    const userGroupRefs = MOCK_USER_GROUPS
+      .flatMap((userGroup) =>
+        (userGroup.model_group_bindings || [])
+          .filter((binding) => binding.model_group_id === group.id)
+          .map((binding) => ({
+            user_group_id: userGroup.id,
+            user_group_name: userGroup.name,
+            priority: binding.priority,
+            is_active: binding.is_active,
+          })),
+      )
+      .sort((a, b) => a.priority - b.priority)
+
+    group.models = modelRefs
+    group.user_groups = userGroupRefs
+    group.model_count = modelRefs.length
+    group.user_group_count = userGroupRefs.length
+  }
+}
+
 function syncMockUserAccess(user: (typeof MOCK_ALL_USERS)[number]) {
   if (!user.group_id) {
     user.group_id = getDefaultMockUserGroup()?.id ?? null
   }
   const group = getMockUserGroupById(user.group_id)
+  const bindings = (group?.model_group_bindings || [])
+    .filter(binding => binding.is_active)
+    .sort((a, b) => a.priority - b.priority)
+  const linkedModelGroups = bindings
+    .map(binding => getMockModelGroupById(binding.model_group_id))
+    .filter(Boolean)
 
   user.group_name = group?.name ?? null
-  user.effective_allowed_providers = cloneNullableList(group?.allowed_providers ?? null)
   user.effective_allowed_api_formats = cloneNullableList(group?.allowed_api_formats ?? null)
-  user.effective_allowed_models = cloneNullableList(group?.allowed_models ?? null)
+  const effectiveModels = Array.from(
+    new Set(
+      linkedModelGroups.flatMap(modelGroup =>
+        (modelGroup?.models || []).map(model => model.model_name),
+      ),
+    ),
+  )
+  user.effective_allowed_models = effectiveModels.length > 0 ? effectiveModels : null
+
+  const hasInheritedRouting = linkedModelGroups.some(modelGroup => modelGroup?.routing_mode !== 'custom')
+  if (hasInheritedRouting) {
+    user.effective_allowed_providers = null
+  } else {
+    const providerIds = Array.from(
+      new Set(
+        linkedModelGroups.flatMap(modelGroup =>
+          (modelGroup?.routes || [])
+            .filter(route => route.is_active)
+            .map(route => route.provider_id),
+        ),
+      ),
+    )
+    user.effective_allowed_providers = providerIds.length > 0 ? providerIds : null
+  }
   user.effective_rate_limit = group?.rate_limit ?? null
 }
 
 function syncMockUserGroupsAndUsers() {
+  syncMockModelGroups()
   for (const user of MOCK_ALL_USERS) {
     syncMockUserAccess(user)
   }
@@ -93,6 +180,60 @@ function syncMockUserGroupsAndUsers() {
   }
 }
 
+function getMockModelGroupsList() {
+  syncMockModelGroups()
+  return MOCK_MODEL_GROUPS.map(group => ({
+    id: group.id,
+    name: group.name,
+    display_name: group.display_name,
+    description: group.description ?? null,
+    default_user_billing_multiplier: group.default_user_billing_multiplier,
+    routing_mode: group.routing_mode,
+    is_default: group.is_default,
+    is_active: group.is_active,
+    sort_order: group.sort_order,
+    model_count: group.model_count,
+    user_group_count: group.user_group_count,
+    created_at: group.created_at,
+    updated_at: group.updated_at ?? null,
+  }))
+}
+
+function getMockModelGroupDetail(groupId: string) {
+  syncMockModelGroups()
+  return MOCK_MODEL_GROUPS.find(group => group.id === groupId) ?? null
+}
+
+function replaceMockModelGroupMemberships(groupId: string, modelIds: string[]) {
+  const normalized = Array.from(new Set((modelIds || []).map((modelId: unknown) => String(modelId ?? '').trim()).filter(Boolean)))
+  for (const model of MOCK_GLOBAL_MODELS) {
+    const existing = new Set(model.model_group_ids || [])
+    if (normalized.includes(model.id)) {
+      existing.add(groupId)
+    } else {
+      existing.delete(groupId)
+    }
+    model.model_group_ids = Array.from(existing)
+  }
+  syncMockGlobalModelGroups()
+}
+
+function syncMockGlobalModelGroups() {
+  for (const model of MOCK_GLOBAL_MODELS) {
+    const groups = MOCK_MODEL_GROUPS
+      .filter(group => (model.model_group_ids || []).includes(group.id))
+      .map(group => ({
+        id: group.id,
+        name: group.name,
+        display_name: group.display_name,
+        is_default: group.is_default,
+      }))
+    model.model_groups = groups
+  }
+  syncMockModelGroups()
+}
+
+syncMockGlobalModelGroups()
 syncMockUserGroupsAndUsers()
 
 function sanitizePublicModelConfig(config: unknown): Record<string, unknown> | null {
@@ -574,8 +715,6 @@ function buildMockAnalyticsBreakdownRows(
       output_tokens: group.output_tokens,
       input_output_total_tokens: group.input_tokens + group.output_tokens,
       cache_creation_input_tokens: group.cache_creation_input_tokens,
-      cache_creation_input_tokens_5m: 0,
-      cache_creation_input_tokens_1h: group.cache_creation_input_tokens,
       cache_read_input_tokens: group.cache_read_input_tokens,
       input_context_tokens: inputContextTokens,
       total_tokens: group.total_tokens,
@@ -585,8 +724,6 @@ function buildMockAnalyticsBreakdownRows(
       input_cost_usd: 0,
       output_cost_usd: 0,
       cache_creation_cost_usd: 0,
-      cache_creation_cost_usd_5m: 0,
-      cache_creation_cost_usd_1h: 0,
       cache_read_cost_usd: 0,
       cache_cost_usd: 0,
       request_cost_usd: Number(group.total_cost_usd.toFixed(6)),
@@ -944,8 +1081,6 @@ function buildMockAnalyticsSummary(records: MockUsageRecord[]) {
     output_tokens: outputTokens,
     input_output_total_tokens: inputTokens + outputTokens,
     cache_creation_input_tokens: cacheCreationTokens,
-    cache_creation_input_tokens_5m: 0,
-    cache_creation_input_tokens_1h: cacheCreationTokens,
     cache_read_input_tokens: cacheReadTokens,
     input_context_tokens: inputContextTokens,
     total_tokens: totalTokens,
@@ -953,8 +1088,6 @@ function buildMockAnalyticsSummary(records: MockUsageRecord[]) {
     input_cost_usd: 0,
     output_cost_usd: 0,
     cache_creation_cost_usd: 0,
-    cache_creation_cost_usd_5m: 0,
-    cache_creation_cost_usd_1h: 0,
     cache_read_cost_usd: 0,
     cache_cost_usd: 0,
     request_cost_usd: roundNumber(totalCost),
@@ -1002,16 +1135,13 @@ function buildMockAnalyticsRecord(record: MockUsageRecord, includeAdminFields: b
     output_tokens: record.output_tokens,
     input_output_total_tokens: record.input_tokens + record.output_tokens,
     cache_creation_input_tokens: record.cache_creation_input_tokens || 0,
-    cache_creation_input_tokens_5m: 0,
-    cache_creation_input_tokens_1h: record.cache_creation_input_tokens || 0,
+    cache_ttl_minutes: record.cache_creation_input_tokens || record.cache_read_input_tokens ? 5 : null,
     cache_read_input_tokens: record.cache_read_input_tokens || 0,
     input_context_tokens: record.input_tokens + (record.cache_read_input_tokens || 0),
     total_tokens: record.total_tokens,
     input_cost_usd: 0,
     output_cost_usd: 0,
     cache_creation_cost_usd: 0,
-    cache_creation_cost_usd_5m: 0,
-    cache_creation_cost_usd_1h: 0,
     cache_read_cost_usd: 0,
     cache_cost_usd: 0,
     request_cost_usd: roundNumber(record.cost || 0),
@@ -1478,14 +1608,25 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     await delay()
     requireAdmin()
     const body = JSON.parse(config.data || '{}')
+    const defaultModelGroup = MOCK_MODEL_GROUPS.find(group => group.is_default)
     const newGroup = {
       id: `group-demo-${Date.now()}`,
       name: body.name,
       description: body.description ?? null,
       is_default: false,
-      allowed_providers: body.allowed_providers ?? null,
       allowed_api_formats: body.allowed_api_formats ?? null,
-      allowed_models: body.allowed_models ?? null,
+      model_group_bindings: Array.isArray(body.model_group_bindings) && body.model_group_bindings.length > 0
+        ? normalizeMockUserGroupBindings(body.model_group_bindings)
+        : (defaultModelGroup
+            ? [{
+              model_group_id: defaultModelGroup.id,
+              priority: 10,
+              is_active: true,
+              model_group_name: defaultModelGroup.name,
+              model_group_display_name: defaultModelGroup.display_name,
+              model_group_is_default: defaultModelGroup.is_default,
+            }]
+            : []),
       rate_limit: body.rate_limit ?? null,
       user_count: 0,
       created_at: new Date().toISOString(),
@@ -1811,9 +1952,59 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
   },
 
   // ========== Admin: Global Models ==========
+  'GET /api/admin/models/groups': async () => {
+    await delay()
+    requireAdmin()
+    return createMockResponse({ model_groups: getMockModelGroupsList(), total: MOCK_MODEL_GROUPS.length })
+  },
+
+  'POST /api/admin/models/groups': async (config) => {
+    await delay()
+    requireAdmin()
+    const body = JSON.parse(config.data || '{}')
+    const now = new Date().toISOString()
+    const newGroup = {
+      id: `mg-demo-${Date.now()}`,
+      name: body.name,
+      display_name: body.display_name || body.name,
+      description: body.description ?? null,
+      default_user_billing_multiplier: body.default_user_billing_multiplier ?? 1,
+      routing_mode: body.routing_mode ?? 'inherit',
+      is_default: false,
+      is_active: body.is_active !== false,
+      sort_order: body.sort_order ?? 100,
+      model_count: 0,
+      user_group_count: 0,
+      models: [],
+      routes: Array.isArray(body.routes)
+        ? body.routes.map((route: Record<string, unknown>, index: number) => ({
+          id: `mgr-demo-${Date.now()}-${index}`,
+          provider_id: String(route.provider_id ?? ''),
+          provider_name: MOCK_PROVIDERS.find(provider => provider.id === route.provider_id)?.name ?? null,
+          provider_api_key_id: route.provider_api_key_id ? String(route.provider_api_key_id) : null,
+          provider_api_key_name: route.provider_api_key_id
+            ? MOCK_ENDPOINT_KEYS.find(key => key.id === route.provider_api_key_id)?.name ?? null
+            : null,
+          priority: Number(route.priority ?? 50),
+          user_billing_multiplier_override: route.user_billing_multiplier_override == null ? null : Number(route.user_billing_multiplier_override),
+          is_active: route.is_active !== false,
+          notes: route.notes ? String(route.notes) : null,
+        }))
+        : [],
+      user_groups: [],
+      created_at: now,
+      updated_at: now,
+    }
+    MOCK_MODEL_GROUPS.push(newGroup)
+    replaceMockModelGroupMemberships(newGroup.id, Array.isArray(body.model_ids) ? body.model_ids : [])
+    syncMockUserGroupsAndUsers()
+    return createMockResponse(getMockModelGroupDetail(newGroup.id))
+  },
+
   'GET /api/admin/models/global': async () => {
     await delay()
     requireAdmin()
+    syncMockGlobalModelGroups()
     return createMockResponse({ models: MOCK_GLOBAL_MODELS, total: MOCK_GLOBAL_MODELS.length })
   },
 
@@ -1821,7 +2012,18 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
     await delay()
     requireAdmin()
     const body = JSON.parse(config.data || '{}')
-    return createMockResponse({ ...body, id: `gm-demo-${Date.now()}`, created_at: new Date().toISOString() })
+    const now = new Date().toISOString()
+    const newModel = {
+      ...body,
+      id: `gm-demo-${Date.now()}`,
+      model_group_ids: Array.isArray(body.model_group_ids) ? body.model_group_ids : [],
+      model_groups: [],
+      created_at: now,
+      updated_at: now,
+    }
+    MOCK_GLOBAL_MODELS.unshift(newModel)
+    syncMockGlobalModelGroups()
+    return createMockResponse(newModel)
   },
 
   // ========== Admin: Model Mappings / Aliases ==========
@@ -2988,6 +3190,7 @@ registerDynamicRoute('POST', '/api/admin/providers/:providerId/assign-global-mod
 registerDynamicRoute('GET', '/api/admin/models/global/:modelId', async (_config, params) => {
   await delay()
   requireAdmin()
+  syncMockGlobalModelGroups()
   const model = MOCK_GLOBAL_MODELS.find(m => m.id === params.modelId)
   if (!model) {
     throw { response: createMockResponse({ detail: '模型不存在' }, 404) }
@@ -3004,17 +3207,101 @@ registerDynamicRoute('PATCH', '/api/admin/models/global/:modelId', async (config
     throw { response: createMockResponse({ detail: '模型不存在' }, 404) }
   }
   const body = JSON.parse(config.data || '{}')
-  return createMockResponse({ ...model, ...body, updated_at: new Date().toISOString() })
+  Object.assign(model, {
+    ...body,
+    model_group_ids: Array.isArray(body.model_group_ids) ? body.model_group_ids : model.model_group_ids,
+    updated_at: new Date().toISOString(),
+  })
+  syncMockGlobalModelGroups()
+  return createMockResponse(model)
 })
 
 // GlobalModel 删除
 registerDynamicRoute('DELETE', '/api/admin/models/global/:modelId', async (_config, params) => {
   await delay()
   requireAdmin()
-  const model = MOCK_GLOBAL_MODELS.find(m => m.id === params.modelId)
-  if (!model) {
+  const modelIndex = MOCK_GLOBAL_MODELS.findIndex(m => m.id === params.modelId)
+  if (modelIndex === -1) {
     throw { response: createMockResponse({ detail: '模型不存在' }, 404) }
   }
+  MOCK_GLOBAL_MODELS.splice(modelIndex, 1)
+  syncMockGlobalModelGroups()
+  return createMockResponse({ message: '删除成功（演示模式）' })
+})
+
+registerDynamicRoute('GET', '/api/admin/models/groups/:groupId', async (_config, params) => {
+  await delay()
+  requireAdmin()
+  const group = getMockModelGroupDetail(params.groupId)
+  if (!group) {
+    throw { response: createMockResponse({ detail: '模型分组不存在' }, 404) }
+  }
+  return createMockResponse(group)
+})
+
+registerDynamicRoute('PATCH', '/api/admin/models/groups/:groupId', async (config, params) => {
+  await delay()
+  requireAdmin()
+  const group = getMockModelGroupDetail(params.groupId)
+  if (!group) {
+    throw { response: createMockResponse({ detail: '模型分组不存在' }, 404) }
+  }
+  const body = JSON.parse(config.data || '{}')
+  if ('name' in body && body.name != null) group.name = body.name
+  if ('display_name' in body && body.display_name != null) group.display_name = body.display_name
+  if ('description' in body) group.description = body.description ?? null
+  if ('default_user_billing_multiplier' in body && body.default_user_billing_multiplier != null) {
+    group.default_user_billing_multiplier = Number(body.default_user_billing_multiplier)
+  }
+  if ('routing_mode' in body && body.routing_mode != null) group.routing_mode = body.routing_mode
+  if ('is_active' in body && body.is_active != null) group.is_active = Boolean(body.is_active)
+  if ('sort_order' in body && body.sort_order != null) group.sort_order = Number(body.sort_order)
+  if ('routes' in body) {
+    group.routes = Array.isArray(body.routes)
+      ? body.routes.map((route: Record<string, unknown>, index: number) => ({
+        id: String(route.id ?? `mgr-demo-${Date.now()}-${index}`),
+        provider_id: String(route.provider_id ?? ''),
+        provider_name: MOCK_PROVIDERS.find(provider => provider.id === route.provider_id)?.name ?? null,
+        provider_api_key_id: route.provider_api_key_id ? String(route.provider_api_key_id) : null,
+        provider_api_key_name: route.provider_api_key_id
+          ? MOCK_ENDPOINT_KEYS.find(key => key.id === route.provider_api_key_id)?.name ?? null
+          : null,
+        priority: Number(route.priority ?? 50),
+        user_billing_multiplier_override: route.user_billing_multiplier_override == null ? null : Number(route.user_billing_multiplier_override),
+        is_active: route.is_active !== false,
+        notes: route.notes ? String(route.notes) : null,
+      }))
+      : []
+  }
+  if ('model_ids' in body) {
+    replaceMockModelGroupMemberships(group.id, Array.isArray(body.model_ids) ? body.model_ids : [])
+  } else {
+    syncMockGlobalModelGroups()
+  }
+  group.updated_at = new Date().toISOString()
+  syncMockUserGroupsAndUsers()
+  return createMockResponse(getMockModelGroupDetail(group.id))
+})
+
+registerDynamicRoute('DELETE', '/api/admin/models/groups/:groupId', async (_config, params) => {
+  await delay()
+  requireAdmin()
+  const groupIndex = MOCK_MODEL_GROUPS.findIndex(group => group.id === params.groupId)
+  if (groupIndex === -1) {
+    throw { response: createMockResponse({ detail: '模型分组不存在' }, 404) }
+  }
+  if (MOCK_MODEL_GROUPS[groupIndex]?.is_default) {
+    throw { response: createMockResponse({ detail: '默认模型分组不能删除' }, 400) }
+  }
+  if (MOCK_USER_GROUPS.some(group => (group.model_group_bindings || []).some(binding => binding.model_group_id === params.groupId))) {
+    throw { response: createMockResponse({ detail: '该模型分组仍有关联的用户分组，请先移除绑定' }, 400) }
+  }
+  for (const model of MOCK_GLOBAL_MODELS) {
+    model.model_group_ids = (model.model_group_ids || []).filter(id => id !== params.groupId)
+  }
+  MOCK_MODEL_GROUPS.splice(groupIndex, 1)
+  syncMockGlobalModelGroups()
+  syncMockUserGroupsAndUsers()
   return createMockResponse({ message: '删除成功（演示模式）' })
 })
 
@@ -3186,14 +3473,11 @@ registerDynamicRoute('PUT', '/api/admin/users/groups/:groupId', async (config, p
   if ('description' in body) {
     group.description = body.description ?? null
   }
-  if ('allowed_providers' in body) {
-    group.allowed_providers = body.allowed_providers ?? null
-  }
   if ('allowed_api_formats' in body) {
     group.allowed_api_formats = body.allowed_api_formats ?? null
   }
-  if ('allowed_models' in body) {
-    group.allowed_models = body.allowed_models ?? null
+  if ('model_group_bindings' in body) {
+    group.model_group_bindings = normalizeMockUserGroupBindings(body.model_group_bindings)
   }
   if ('rate_limit' in body) {
     group.rate_limit = body.rate_limit ?? null

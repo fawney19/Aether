@@ -9,6 +9,10 @@ from src.models.database import ApiKey, Usage, User
 from src.services.billing.precision import to_money_decimal
 from src.services.system.config import SystemConfigService
 from src.services.usage._types import UsageCostInfo
+from src.services.usage.upstream_usage_snapshot import (
+    build_upstream_usage_snapshot,
+    infer_cache_ttl_minutes,
+)
 from src.services.usage.error_classifier import classify_error
 
 
@@ -76,8 +80,6 @@ def build_usage_params(
     output_tokens: int,
     cache_creation_input_tokens: int,
     cache_read_input_tokens: int,
-    cache_creation_input_tokens_5m: int = 0,
-    cache_creation_input_tokens_1h: int = 0,
     request_type: str,
     api_format: str | None,
     api_family: str | None = None,
@@ -104,6 +106,8 @@ def build_usage_params(
     provider_id: str | None,
     provider_endpoint_id: str | None,
     provider_api_key_id: str | None,
+    model_group_id: str | None,
+    model_group_route_id: str | None,
     status: str,
     cache_ttl_minutes: int | None = None,
     target_model: str | None,
@@ -119,17 +123,14 @@ def build_usage_params(
     cache_cost = cost.cache_cost
     request_cost = cost.request_cost
     total_cost = cost.total_cost
-    explicit_cache_creation_cost_5m = cost.cache_creation_cost_5m
-    explicit_cache_creation_cost_1h = cost.cache_creation_cost_1h
     input_price = cost.input_price
     output_price = cost.output_price
     cache_creation_price = cost.cache_creation_price
-    explicit_cache_creation_price_5m = cost.cache_creation_price_5m
-    explicit_cache_creation_price_1h = cost.cache_creation_price_1h
     cache_read_price = cost.cache_read_price
     request_price = cost.request_price
     actual_rate_multiplier = cost.actual_rate_multiplier
     is_free_tier = cost.is_free_tier
+    user_billing_multiplier = cost.user_billing_multiplier
 
     # 根据配置决定是否记录请求详情
     should_log_headers = SystemConfigService.should_log_headers(db)
@@ -192,14 +193,43 @@ def build_usage_params(
         actual_cache_read_cost = 0.0
         actual_request_cost = 0.0
         actual_total_cost = 0.0
+        actual_cache_cost = 0.0
     else:
-        actual_input_cost = input_cost * actual_rate_multiplier
-        actual_output_cost = output_cost * actual_rate_multiplier
-        actual_cache_creation_cost = cache_creation_cost * actual_rate_multiplier
-        actual_cache_read_cost = cache_read_cost * actual_rate_multiplier
-        actual_request_cost = request_cost * actual_rate_multiplier
-        actual_total_cost = total_cost * actual_rate_multiplier
-    actual_cache_cost = actual_cache_creation_cost + actual_cache_read_cost
+        actual_input_cost = (
+            cost.actual_input_cost
+            if cost.actual_input_cost is not None
+            else input_cost * actual_rate_multiplier
+        )
+        actual_output_cost = (
+            cost.actual_output_cost
+            if cost.actual_output_cost is not None
+            else output_cost * actual_rate_multiplier
+        )
+        actual_cache_creation_cost = (
+            cost.actual_cache_creation_cost
+            if cost.actual_cache_creation_cost is not None
+            else cache_creation_cost * actual_rate_multiplier
+        )
+        actual_cache_read_cost = (
+            cost.actual_cache_read_cost
+            if cost.actual_cache_read_cost is not None
+            else cache_read_cost * actual_rate_multiplier
+        )
+        actual_request_cost = (
+            cost.actual_request_cost
+            if cost.actual_request_cost is not None
+            else request_cost * actual_rate_multiplier
+        )
+        actual_total_cost = (
+            cost.actual_total_cost
+            if cost.actual_total_cost is not None
+            else total_cost * actual_rate_multiplier
+        )
+        actual_cache_cost = (
+            cost.actual_cache_cost
+            if cost.actual_cache_cost is not None
+            else actual_cache_creation_cost + actual_cache_read_cost
+        )
 
     error_category = None
     if status_code >= 400 or error_message or status in {"failed", "cancelled"}:
@@ -223,58 +253,16 @@ def build_usage_params(
         + cache_creation_input_tokens
         + cache_read_input_tokens
     )
-
-    cache_creation_cost_5m = 0.0
-    cache_creation_cost_1h = 0.0
-    actual_cache_creation_cost_5m = 0.0
-    actual_cache_creation_cost_1h = 0.0
-    cache_creation_price_5m = None
-    cache_creation_price_1h = None
-    total_cache_creation_tokens = int(cache_creation_input_tokens or 0)
-    ttl_5m_tokens = int(cache_creation_input_tokens_5m or 0)
-    ttl_1h_tokens = int(cache_creation_input_tokens_1h or 0)
-
-    has_explicit_cache_creation_split = (
-        explicit_cache_creation_cost_5m > 0
-        or explicit_cache_creation_cost_1h > 0
-        or explicit_cache_creation_price_5m is not None
-        or explicit_cache_creation_price_1h is not None
+    upstream_usage_snapshot = build_upstream_usage_snapshot(
+        response_body,
+        api_family=ep_family or client_family,
+        is_stream=is_stream,
     )
-
-    if has_explicit_cache_creation_split:
-        cache_creation_cost_5m = explicit_cache_creation_cost_5m
-        cache_creation_cost_1h = explicit_cache_creation_cost_1h
-        cache_creation_price_5m = explicit_cache_creation_price_5m
-        cache_creation_price_1h = explicit_cache_creation_price_1h
-        if is_free_tier:
-            actual_cache_creation_cost_5m = 0.0
-            actual_cache_creation_cost_1h = 0.0
-        else:
-            actual_cache_creation_cost_5m = cache_creation_cost_5m * actual_rate_multiplier
-            actual_cache_creation_cost_1h = cache_creation_cost_1h * actual_rate_multiplier
-    elif total_cache_creation_tokens > 0:
-        if ttl_5m_tokens > 0 and ttl_1h_tokens > 0:
-            ttl_5m_ratio = ttl_5m_tokens / total_cache_creation_tokens
-            cache_creation_cost_5m = cache_creation_cost * ttl_5m_ratio
-            cache_creation_cost_1h = cache_creation_cost - cache_creation_cost_5m
-            actual_cache_creation_cost_5m = actual_cache_creation_cost * ttl_5m_ratio
-            actual_cache_creation_cost_1h = actual_cache_creation_cost - actual_cache_creation_cost_5m
-        elif ttl_5m_tokens > 0:
-            cache_creation_cost_5m = cache_creation_cost
-            actual_cache_creation_cost_5m = actual_cache_creation_cost
-            cache_creation_price_5m = cache_creation_price
-        elif ttl_1h_tokens > 0:
-            cache_creation_cost_1h = cache_creation_cost
-            actual_cache_creation_cost_1h = actual_cache_creation_cost
-            cache_creation_price_1h = cache_creation_price
-        elif cache_ttl_minutes is not None and cache_ttl_minutes <= 5:
-            cache_creation_cost_5m = cache_creation_cost
-            actual_cache_creation_cost_5m = actual_cache_creation_cost
-            cache_creation_price_5m = cache_creation_price
-        else:
-            cache_creation_cost_1h = cache_creation_cost
-            actual_cache_creation_cost_1h = actual_cache_creation_cost
-            cache_creation_price_1h = cache_creation_price
+    effective_cache_ttl_minutes = infer_cache_ttl_minutes(
+        snapshot=upstream_usage_snapshot,
+        has_cache_tokens=(cache_creation_input_tokens > 0 or cache_read_input_tokens > 0),
+        explicit_cache_ttl_minutes=cache_ttl_minutes,
+    )
 
     return {
         "user_id": user.id if user else None,
@@ -288,6 +276,8 @@ def build_usage_params(
         "provider_id": provider_id,
         "provider_endpoint_id": provider_endpoint_id,
         "provider_api_key_id": provider_api_key_id,
+        "model_group_id": model_group_id,
+        "model_group_route_id": model_group_route_id,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "input_output_total_tokens": input_output_total_tokens,
@@ -295,32 +285,26 @@ def build_usage_params(
         "total_tokens": tracked_total_tokens,
         "cache_creation_input_tokens": cache_creation_input_tokens,
         "cache_read_input_tokens": cache_read_input_tokens,
-        "cache_creation_input_tokens_5m": cache_creation_input_tokens_5m,
-        "cache_creation_input_tokens_1h": cache_creation_input_tokens_1h,
+        "cache_ttl_minutes": effective_cache_ttl_minutes if effective_cache_ttl_minutes is not None else 5,
         "input_cost_usd": to_money_decimal(input_cost),
         "output_cost_usd": to_money_decimal(output_cost),
         "cache_cost_usd": to_money_decimal(cache_cost),
         "cache_creation_cost_usd": to_money_decimal(cache_creation_cost),
-        "cache_creation_cost_usd_5m": to_money_decimal(cache_creation_cost_5m),
-        "cache_creation_cost_usd_1h": to_money_decimal(cache_creation_cost_1h),
         "cache_read_cost_usd": to_money_decimal(cache_read_cost),
         "request_cost_usd": to_money_decimal(request_cost),
         "total_cost_usd": to_money_decimal(total_cost),
         "actual_input_cost_usd": to_money_decimal(actual_input_cost),
         "actual_output_cost_usd": to_money_decimal(actual_output_cost),
         "actual_cache_creation_cost_usd": to_money_decimal(actual_cache_creation_cost),
-        "actual_cache_creation_cost_usd_5m": to_money_decimal(actual_cache_creation_cost_5m),
-        "actual_cache_creation_cost_usd_1h": to_money_decimal(actual_cache_creation_cost_1h),
         "actual_cache_read_cost_usd": to_money_decimal(actual_cache_read_cost),
         "actual_cache_cost_usd": to_money_decimal(actual_cache_cost),
         "actual_request_cost_usd": to_money_decimal(actual_request_cost),
         "actual_total_cost_usd": to_money_decimal(actual_total_cost),
         "rate_multiplier": actual_rate_multiplier,
+        "user_billing_multiplier": user_billing_multiplier,
         "input_price_per_1m": input_price,
         "output_price_per_1m": output_price,
         "cache_creation_price_per_1m": cache_creation_price,
-        "cache_creation_price_per_1m_5m": cache_creation_price_5m,
-        "cache_creation_price_per_1m_1h": cache_creation_price_1h,
         "cache_read_price_per_1m": cache_read_price,
         "price_per_request": request_price,
         "request_type": request_type,
@@ -347,6 +331,7 @@ def build_usage_params(
         "client_response_headers": processed_client_response_headers,
         "response_body": processed_response_body,
         "client_response_body": processed_client_response_body,
+        "upstream_usage_snapshot": upstream_usage_snapshot,
     }
 
 
@@ -397,37 +382,29 @@ def update_existing_usage(
     existing_usage.total_tokens = usage_params["total_tokens"]
     existing_usage.cache_creation_input_tokens = usage_params["cache_creation_input_tokens"]
     existing_usage.cache_read_input_tokens = usage_params["cache_read_input_tokens"]
-    existing_usage.cache_creation_input_tokens_5m = usage_params.get(
-        "cache_creation_input_tokens_5m", 0
-    )
-    existing_usage.cache_creation_input_tokens_1h = usage_params.get(
-        "cache_creation_input_tokens_1h", 0
-    )
+    existing_usage.cache_ttl_minutes = usage_params.get("cache_ttl_minutes", 5)
     existing_usage.input_cost_usd = usage_params["input_cost_usd"]
     existing_usage.output_cost_usd = usage_params["output_cost_usd"]
     existing_usage.cache_cost_usd = usage_params["cache_cost_usd"]
     existing_usage.cache_creation_cost_usd = usage_params["cache_creation_cost_usd"]
-    existing_usage.cache_creation_cost_usd_5m = usage_params["cache_creation_cost_usd_5m"]
-    existing_usage.cache_creation_cost_usd_1h = usage_params["cache_creation_cost_usd_1h"]
     existing_usage.cache_read_cost_usd = usage_params["cache_read_cost_usd"]
     existing_usage.request_cost_usd = usage_params["request_cost_usd"]
     existing_usage.total_cost_usd = usage_params["total_cost_usd"]
     existing_usage.actual_input_cost_usd = usage_params["actual_input_cost_usd"]
     existing_usage.actual_output_cost_usd = usage_params["actual_output_cost_usd"]
     existing_usage.actual_cache_creation_cost_usd = usage_params["actual_cache_creation_cost_usd"]
-    existing_usage.actual_cache_creation_cost_usd_5m = usage_params[
-        "actual_cache_creation_cost_usd_5m"
-    ]
-    existing_usage.actual_cache_creation_cost_usd_1h = usage_params[
-        "actual_cache_creation_cost_usd_1h"
-    ]
     existing_usage.actual_cache_read_cost_usd = usage_params["actual_cache_read_cost_usd"]
     existing_usage.actual_cache_cost_usd = usage_params["actual_cache_cost_usd"]
     existing_usage.actual_request_cost_usd = usage_params["actual_request_cost_usd"]
     existing_usage.actual_total_cost_usd = usage_params["actual_total_cost_usd"]
     existing_usage.rate_multiplier = usage_params["rate_multiplier"]
-    existing_usage.cache_creation_price_per_1m_5m = usage_params.get("cache_creation_price_per_1m_5m")
-    existing_usage.cache_creation_price_per_1m_1h = usage_params.get("cache_creation_price_per_1m_1h")
+    existing_usage.user_billing_multiplier = usage_params.get("user_billing_multiplier", 1.0)
+    existing_usage.input_price_per_1m = usage_params.get("input_price_per_1m")
+    existing_usage.output_price_per_1m = usage_params.get("output_price_per_1m")
+    existing_usage.cache_creation_price_per_1m = usage_params.get("cache_creation_price_per_1m")
+    existing_usage.cache_read_price_per_1m = usage_params.get("cache_read_price_per_1m")
+    existing_usage.price_per_request = usage_params.get("price_per_request")
+    existing_usage.upstream_usage_snapshot = usage_params.get("upstream_usage_snapshot")
 
     # 更新 Provider 侧追踪信息（仅在有新值时更新，避免覆盖已有数据）
     if usage_params.get("provider_id"):
@@ -436,6 +413,8 @@ def update_existing_usage(
         existing_usage.provider_endpoint_id = usage_params["provider_endpoint_id"]
     if usage_params.get("provider_api_key_id"):
         existing_usage.provider_api_key_id = usage_params["provider_api_key_id"]
+    existing_usage.model_group_id = usage_params.get("model_group_id")
+    existing_usage.model_group_route_id = usage_params.get("model_group_route_id")
 
     # 更新元数据（如 billing_snapshot/dimensions 等）
     if usage_params.get("request_metadata") is not None:

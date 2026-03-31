@@ -122,18 +122,11 @@ async def get_usage_detail(
     - `api_format`: API 格式
     - `model`: 请求的模型名称
     - `target_model`: 映射后的目标模型名称
-    - `tokens`: Token 统计（input, output, total）
-    - `cost`: 成本统计（input, output, total）
-    - `cache_creation_input_tokens`: 缓存创建输入 token 数
-    - `cache_read_input_tokens`: 缓存读取输入 token 数
-    - `cache_creation_cost`: 缓存创建成本
-    - `cache_read_cost`: 缓存读取成本
-    - `request_cost`: 请求成本
-    - `input_price_per_1m`: 输入价格（每百万 token）
-    - `output_price_per_1m`: 输出价格（每百万 token）
-    - `cache_creation_price_per_1m`: 缓存创建价格（每百万 token）
-    - `cache_read_price_per_1m`: 缓存读取价格（每百万 token）
-    - `price_per_request`: 每请求价格
+    - `tokens`: Token 统计（含 input/output/cache_creation/cache_read/total）
+    - `cost`: 成本统计（含 input/output/cache_creation/cache_read/request/total）
+    - `pricing`: 历史价格快照
+    - `cache`: 缓存账单结构（ttl_minutes/creation_input_tokens/read_input_tokens/...）
+    - `upstream_usage_snapshot`: 不可变上游 usage 快照
     - `request_type`: 请求类型
     - `is_stream`: 是否为流式请求
     - `status_code`: HTTP 状态码
@@ -312,65 +305,72 @@ class AdminUsageDetailAdapter(AdminApiAdapter):
             "tokens": {
                 "input": usage_record.input_tokens,
                 "output": usage_record.output_tokens,
+                "input_output_total": usage_record.input_output_total_tokens,
+                "input_context": usage_record.input_context_tokens,
+                "cache_creation": usage_record.cache_creation_input_tokens,
+                "cache_read": usage_record.cache_read_input_tokens,
                 "total": usage_record.total_tokens,
             },
             "cost": {
                 "input": float(usage_record.input_cost_usd or 0),
                 "output": float(usage_record.output_cost_usd or 0),
+                "cache_creation": float(getattr(usage_record, "cache_creation_cost_usd", 0) or 0),
+                "cache_read": float(getattr(usage_record, "cache_read_cost_usd", 0) or 0),
+                "request": float(getattr(usage_record, "request_cost_usd", 0) or 0),
                 "total": float(usage_record.total_cost_usd or 0),
             },
-            "cache_creation_input_tokens": usage_record.cache_creation_input_tokens,
-            "cache_read_input_tokens": usage_record.cache_read_input_tokens,
-            "cache_creation_input_tokens_5m": usage_record.cache_creation_input_tokens_5m or 0,
-            "cache_creation_input_tokens_1h": usage_record.cache_creation_input_tokens_1h or 0,
-            "cache_creation_cost": float(getattr(usage_record, "cache_creation_cost_usd", 0) or 0),
-            "cache_creation_cost_5m": (
-                float(usage_record.cache_creation_cost_usd_5m)
-                if getattr(usage_record, "cache_creation_cost_usd_5m", None) is not None
-                else None
-            ),
-            "cache_creation_cost_1h": (
-                float(usage_record.cache_creation_cost_usd_1h)
-                if getattr(usage_record, "cache_creation_cost_usd_1h", None) is not None
-                else None
-            ),
-            "cache_read_cost": float(getattr(usage_record, "cache_read_cost_usd", 0) or 0),
-            "request_cost": float(getattr(usage_record, "request_cost_usd", 0) or 0),
-            "input_price_per_1m": (
-                float(usage_record.input_price_per_1m)
-                if usage_record.input_price_per_1m is not None
-                else None
-            ),
-            "output_price_per_1m": (
-                float(usage_record.output_price_per_1m)
-                if usage_record.output_price_per_1m is not None
-                else None
-            ),
-            "cache_creation_price_per_1m": (
-                float(usage_record.cache_creation_price_per_1m)
-                if usage_record.cache_creation_price_per_1m is not None
-                else None
-            ),
-            "cache_creation_price_per_1m_5m": (
-                float(usage_record.cache_creation_price_per_1m_5m)
-                if getattr(usage_record, "cache_creation_price_per_1m_5m", None) is not None
-                else None
-            ),
-            "cache_creation_price_per_1m_1h": (
-                float(usage_record.cache_creation_price_per_1m_1h)
-                if getattr(usage_record, "cache_creation_price_per_1m_1h", None) is not None
-                else None
-            ),
-            "cache_read_price_per_1m": (
-                float(usage_record.cache_read_price_per_1m)
-                if usage_record.cache_read_price_per_1m is not None
-                else None
-            ),
-            "price_per_request": (
-                float(usage_record.price_per_request)
-                if usage_record.price_per_request is not None
-                else None
-            ),
+            "pricing": {
+                "input_price_per_1m": (
+                    float(usage_record.input_price_per_1m)
+                    if usage_record.input_price_per_1m is not None
+                    else None
+                ),
+                "output_price_per_1m": (
+                    float(usage_record.output_price_per_1m)
+                    if usage_record.output_price_per_1m is not None
+                    else None
+                ),
+                "cache_creation_price_per_1m": (
+                    float(usage_record.cache_creation_price_per_1m)
+                    if usage_record.cache_creation_price_per_1m is not None
+                    else None
+                ),
+                "cache_read_price_per_1m": (
+                    float(usage_record.cache_read_price_per_1m)
+                    if usage_record.cache_read_price_per_1m is not None
+                    else None
+                ),
+                "price_per_request": (
+                    float(usage_record.price_per_request)
+                    if usage_record.price_per_request is not None
+                    else None
+                ),
+            },
+            "cache": {
+                "ttl_minutes": (
+                    int(getattr(usage_record, "cache_ttl_minutes", 5) or 5)
+                    if (
+                        (usage_record.cache_creation_input_tokens or 0) > 0
+                        or (usage_record.cache_read_input_tokens or 0) > 0
+                    )
+                    else None
+                ),
+                "creation_input_tokens": usage_record.cache_creation_input_tokens or 0,
+                "read_input_tokens": usage_record.cache_read_input_tokens or 0,
+                "creation_cost": float(getattr(usage_record, "cache_creation_cost_usd", 0) or 0),
+                "read_cost": float(getattr(usage_record, "cache_read_cost_usd", 0) or 0),
+                "creation_price_per_1m": (
+                    float(usage_record.cache_creation_price_per_1m)
+                    if usage_record.cache_creation_price_per_1m is not None
+                    else None
+                ),
+                "read_price_per_1m": (
+                    float(usage_record.cache_read_price_per_1m)
+                    if usage_record.cache_read_price_per_1m is not None
+                    else None
+                ),
+            },
+            "upstream_usage_snapshot": usage_record.upstream_usage_snapshot,
             "request_type": usage_record.request_type,
             "is_stream": usage_record.is_stream,
             "status_code": usage_record.status_code,

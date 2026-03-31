@@ -239,9 +239,9 @@
           </div>
 
           <div class="space-y-2">
-            <Label class="text-sm font-medium">允许的 Provider</Label>
+            <Label class="text-sm font-medium">模型分组</Label>
             <span class="flex h-10 w-full items-center overflow-hidden whitespace-nowrap rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-80">
-              {{ formatProviderRestrictions(currentGroup?.allowed_providers) }}
+              {{ formatModelGroupBindings(currentGroup?.model_group_bindings) }}
             </span>
           </div>
 
@@ -253,9 +253,9 @@
           </div>
 
           <div class="space-y-2">
-            <Label class="text-sm font-medium">允许的模型</Label>
+            <Label class="text-sm font-medium">路由与计费</Label>
             <span class="flex h-10 w-full items-center overflow-hidden whitespace-nowrap rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-80">
-              {{ formatModelRestrictions(currentGroup?.allowed_models) }}
+              由命中的模型分组决定
             </span>
           </div>
 
@@ -306,13 +306,7 @@ import {
 import { SquarePen, UserPlus } from 'lucide-vue-next'
 import { useFormDialog } from '@/composables/useFormDialog'
 import { adminApi } from '@/api/admin'
-import { getProvidersSummary } from '@/api/endpoints/providers'
-import type {
-  ProviderWithEndpointsSummary,
-  GlobalModelResponse,
-} from '@/api/endpoints/types'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
-import { getGlobalModels } from '@/api/global-models'
 import { usersApi, type UserGroup } from '@/api/users'
 import { log } from '@/utils/logger'
 import { parseNumberInput } from '@/utils/form'
@@ -351,8 +345,6 @@ const saving = ref(false)
 const formNonce = ref(createFieldNonce())
 const passwordPolicyLevel = ref<PasswordPolicyLevel>('weak')
 const userGroups = ref<UserGroup[]>([])
-const providers = ref<ProviderWithEndpointsSummary[]>([])
-const globalModels = ref<GlobalModelResponse[]>([])
 const apiFormats = ref<Array<{ value: string; label: string }>>([])
 
 const form = ref({
@@ -375,16 +367,8 @@ const currentGroup = computed(() => {
   return userGroups.value.find(group => group.id === form.value.group_id) || defaultGroup.value
 })
 
-const providerNameMap = computed(() => new Map(
-  providers.value.map(provider => [provider.id, provider.name])
-))
-
 const apiFormatLabelMap = computed(() => new Map(
   apiFormats.value.map(format => [format.value, format.label])
-))
-
-const modelDisplayNameMap = computed(() => new Map(
-  globalModels.value.map(model => [model.name, model.display_name || model.name])
 ))
 
 const groupSelectValue = computed({
@@ -496,28 +480,24 @@ function formatRestrictionDisplay(
   return `${list.length} ${unitLabel}`
 }
 
-function formatProviderName(providerId: string): string {
-  return providerNameMap.value.get(providerId) || providerId
-}
-
 function formatApiFormatName(apiFormat: string): string {
   return apiFormatLabelMap.value.get(apiFormat) || formatApiFormat(apiFormat)
-}
-
-function formatModelName(modelName: string): string {
-  return modelDisplayNameMap.value.get(modelName) || modelName
-}
-
-function formatProviderRestrictions(list: string[] | null | undefined): string {
-  return formatRestrictionDisplay(list, '个供应商', formatProviderName)
 }
 
 function formatApiFormatRestrictions(list: string[] | null | undefined): string {
   return formatRestrictionDisplay(list, '个格式', formatApiFormatName)
 }
 
-function formatModelRestrictions(list: string[] | null | undefined): string {
-  return formatRestrictionDisplay(list, '个模型', formatModelName)
+function formatModelGroupBindings(bindings: UserGroup['model_group_bindings'] | null | undefined): string {
+  if (!bindings || bindings.length === 0) return '默认模型分组'
+  const activeBindings = bindings.filter((binding) => binding.is_active)
+  if (activeBindings.length === 0) return '全部停用'
+  if (activeBindings.length <= 2) {
+    return activeBindings
+      .map((binding) => binding.model_group_display_name || binding.model_group_name || binding.model_group_id)
+      .join('、')
+  }
+  return `${activeBindings.length} 个模型分组`
 }
 
 function formatRateLimitSummary(rateLimit: number | null | undefined): string {
@@ -528,25 +508,19 @@ function formatRateLimitSummary(rateLimit: number | null | undefined): string {
 
 async function loadFormOptions(): Promise<void> {
   try {
-    const [passwordPolicyResponse, groupsData, providersResponse, modelsData, formatsData] = await Promise.all([
+    const [passwordPolicyResponse, groupsData, formatsData] = await Promise.all([
       adminApi.getSystemConfig('password_policy_level').catch(() => ({ value: 'weak' })),
       usersApi.getAllUserGroups(),
-      getProvidersSummary({ page_size: 9999 }).catch(() => ({ items: [] } as { items: ProviderWithEndpointsSummary[] })),
-      getGlobalModels({ limit: 1000, is_active: true }).catch(() => ({ models: [] } as { models: GlobalModelResponse[] })),
       adminApi.getApiFormats().catch(() => ({ formats: [] } as { formats: Array<{ value: string; label: string }> })),
     ])
     passwordPolicyLevel.value = normalizePasswordPolicyLevel(passwordPolicyResponse.value)
     userGroups.value = groupsData
-    providers.value = providersResponse.items
-    globalModels.value = modelsData.models || []
     apiFormats.value = formatsData.formats || []
     syncFormGroupSelection()
   } catch (err) {
     log.error('加载用户表单选项失败:', err)
     passwordPolicyLevel.value = 'weak'
     userGroups.value = []
-    providers.value = []
-    globalModels.value = []
     apiFormats.value = []
   }
 }

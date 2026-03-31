@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # ========== 阶梯计费相关模型 ==========
 
@@ -77,7 +77,7 @@ class TieredPricingConfig(BaseModel):
                 prev_ttl = 0
                 for ttl_pricing in tier.cache_ttl_pricing:
                     if ttl_pricing.ttl_minutes <= prev_ttl:
-                        raise ValueError(f"cache_ttl_pricing 必须按 ttl_minutes 升序排列")
+                        raise ValueError("cache_ttl_pricing 必须按 ttl_minutes 升序排列")
                     prev_ttl = ttl_pricing.ttl_minutes
 
         # 最后一个阶梯必须是无上限的
@@ -198,6 +198,25 @@ class GlobalModelCreate(BaseModel):
         None, description="模型配置（streaming, vision, context_limit, description 等）"
     )
     is_active: bool | None = Field(True, description="是否激活")
+    model_group_ids: list[str] | None = Field(
+        default=None,
+        description="所属模型分组 ID 列表；一个模型可属于多个模型分组",
+    )
+
+    @field_validator("model_group_ids")
+    @classmethod
+    def validate_model_group_ids(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for model_group_id in v:
+            item = str(model_group_id or "").strip()
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            normalized.append(item)
+        return normalized
 
 
 class GlobalModelUpdate(BaseModel):
@@ -215,6 +234,34 @@ class GlobalModelUpdate(BaseModel):
     config: dict[str, Any] | None = Field(
         None, description="模型配置（streaming, vision, context_limit, description 等）"
     )
+    model_group_ids: list[str] | None = Field(
+        default=None,
+        description="所属模型分组 ID 列表；传 null 或空列表表示移除全部绑定",
+    )
+
+    @field_validator("model_group_ids")
+    @classmethod
+    def validate_model_group_ids(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for model_group_id in v:
+            item = str(model_group_id or "").strip()
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            normalized.append(item)
+        return normalized
+
+
+class GlobalModelGroupRef(BaseModel):
+    """GlobalModel 关联的模型分组摘要。"""
+
+    id: str
+    name: str
+    display_name: str
+    is_default: bool = False
 
 
 class GlobalModelResponse(BaseModel):
@@ -242,6 +289,11 @@ class GlobalModelResponse(BaseModel):
     provider_count: int | None = Field(default=0, description="支持的 Provider 总数量")
     active_provider_count: int | None = Field(default=0, description="可用的 Provider 数量")
     usage_count: int | None = Field(default=0, description="调用次数")
+    model_group_ids: list[str] = Field(default_factory=list, description="所属模型分组 ID 列表")
+    model_groups: list[GlobalModelGroupRef] = Field(
+        default_factory=list,
+        description="所属模型分组摘要",
+    )
     created_at: datetime
     updated_at: datetime | None
 
@@ -275,6 +327,115 @@ class BatchAssignToProvidersRequest(BaseModel):
 
     provider_ids: list[str] = Field(..., min_length=1, description="Provider ID 列表")
     create_models: bool = Field(default=False, description="是否自动创建 Model 记录")
+
+
+class ModelGroupRouteRequest(BaseModel):
+    """模型分组路由配置。"""
+
+    provider_id: str = Field(..., min_length=1, description="Provider ID")
+    provider_api_key_id: str | None = Field(
+        default=None,
+        description="Provider API Key ID；null 表示该 Provider 下全部 Key",
+    )
+    priority: int = Field(default=50, ge=0, le=999999, description="分组内优先级")
+    user_billing_multiplier_override: float | None = Field(
+        default=None,
+        ge=0,
+        description="用户计费倍率覆盖；null 表示使用模型分组默认倍率",
+    )
+    is_active: bool = Field(default=True, description="是否启用")
+    notes: str | None = Field(default=None, max_length=500, description="备注")
+
+
+class ModelGroupRouteResponse(ModelGroupRouteRequest):
+    """模型分组路由配置响应。"""
+
+    id: str
+    provider_name: str | None = None
+    provider_api_key_name: str | None = None
+
+
+class ModelGroupModelRef(BaseModel):
+    """模型分组中的模型摘要。"""
+
+    id: str
+    global_model_id: str
+    model_name: str
+    model_display_name: str
+    is_active: bool
+
+
+class ModelGroupUserGroupRef(BaseModel):
+    """模型分组被哪些用户分组引用。"""
+
+    user_group_id: str
+    user_group_name: str
+    priority: int
+    is_active: bool
+
+
+class ModelGroupCreate(BaseModel):
+    """创建模型分组请求。"""
+
+    name: str = Field(..., min_length=1, max_length=100)
+    display_name: str = Field(..., min_length=1, max_length=100)
+    description: str | None = Field(None, max_length=500)
+    default_user_billing_multiplier: float = Field(default=1.0, ge=0)
+    routing_mode: str = Field(default="inherit", pattern="^(inherit|custom)$")
+    is_active: bool = Field(default=True)
+    sort_order: int = Field(default=100, ge=0, le=999999)
+    model_ids: list[str] = Field(default_factory=list, description="绑定的 GlobalModel ID 列表")
+    routes: list[ModelGroupRouteRequest] = Field(default_factory=list, description="路由策略列表")
+
+
+class ModelGroupUpdate(BaseModel):
+    """更新模型分组请求。"""
+
+    name: str | None = Field(None, min_length=1, max_length=100)
+    display_name: str | None = Field(None, min_length=1, max_length=100)
+    description: str | None = Field(None, max_length=500)
+    default_user_billing_multiplier: float | None = Field(default=None, ge=0)
+    routing_mode: str | None = Field(default=None, pattern="^(inherit|custom)$")
+    is_active: bool | None = None
+    sort_order: int | None = Field(default=None, ge=0, le=999999)
+    model_ids: list[str] | None = Field(default=None, description="完整替换的 GlobalModel ID 列表")
+    routes: list[ModelGroupRouteRequest] | None = Field(
+        default=None,
+        description="完整替换的路由策略列表",
+    )
+
+
+class ModelGroupResponse(BaseModel):
+    """模型分组基础响应。"""
+
+    id: str
+    name: str
+    display_name: str
+    description: str | None = None
+    default_user_billing_multiplier: float
+    routing_mode: str
+    is_default: bool = False
+    is_active: bool = True
+    sort_order: int
+    model_count: int = 0
+    user_group_count: int = 0
+    created_at: datetime
+    updated_at: datetime | None
+
+
+class ModelGroupDetailResponse(ModelGroupResponse):
+    """模型分组详情响应。"""
+
+    models: list[ModelGroupModelRef] = Field(default_factory=list)
+    routes: list[ModelGroupRouteResponse] = Field(default_factory=list)
+    user_groups: list[ModelGroupUserGroupRef] = Field(default_factory=list)
+
+
+class ModelGroupListResponse(BaseModel):
+    """模型分组列表响应。"""
+
+    model_groups: list[ModelGroupResponse]
+    total: int
 
 
 class BatchAssignToProvidersResponse(BaseModel):
@@ -343,6 +504,7 @@ __all__ = [
     "BatchAssignToProvidersRequest",
     "BatchAssignToProvidersResponse",
     "GlobalModelCreate",
+    "GlobalModelGroupRef",
     "GlobalModelListResponse",
     "GlobalModelResponse",
     "GlobalModelUpdate",
@@ -355,7 +517,16 @@ __all__ = [
     "ModelCatalogItem",
     "ModelCatalogProviderDetail",
     "ModelCatalogResponse",
+    "ModelGroupCreate",
+    "ModelGroupDetailResponse",
+    "ModelGroupListResponse",
+    "ModelGroupModelRef",
     "ModelPriceRange",
+    "ModelGroupResponse",
+    "ModelGroupRouteRequest",
+    "ModelGroupRouteResponse",
+    "ModelGroupUpdate",
+    "ModelGroupUserGroupRef",
     "ProviderAvailableSourceModel",
     "ProviderAvailableSourceModelsResponse",
     "ProviderModelPriceInfo",
