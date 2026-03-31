@@ -61,6 +61,7 @@ from src.services.rate_limit.adaptive_reservation import (
     get_adaptive_reservation_manager,
 )
 from src.services.rate_limit.concurrency_manager import get_concurrency_manager
+from src.services.model.group_service import ModelGroupService
 from src.services.scheduling.affinity_manager import (
     get_affinity_manager,
 )
@@ -437,6 +438,12 @@ class CacheAwareScheduler:
         allowed_api_formats = restrictions["allowed_api_formats"]
         allowed_providers = restrictions["allowed_providers"]
         allowed_models = restrictions["allowed_models"]
+        user = None
+        if user_api_key is not None:
+            try:
+                user = user_api_key.user if hasattr(user_api_key, "user") else None
+            except Exception:
+                user = None
 
         # 0.1 检查 API 格式是否被允许
         if allowed_api_formats is not None:
@@ -462,95 +469,189 @@ class CacheAwareScheduler:
             )
             return [], global_model_id, queried_provider_count
 
-        # 1. 查询 Providers（委托给 CandidateBuilder）
-        providers = []
-        if allowed_providers is not None:
-            provider_refs = self._candidate_builder._query_provider_refs(
-                db=db,
-                provider_offset=provider_offset,
-                provider_limit=provider_limit,
+        matched_model_group_links = []
+        if user is not None and getattr(user, "group_id", None):
+            matched_model_group_links = ModelGroupService.get_matching_user_group_model_groups(
+                db,
+                user,
+                global_model_id,
             )
-            queried_provider_count = len(provider_refs)
-
-            allowed_values = {value for value in allowed_providers if value}
-            matched_provider_ids = [
-                provider_id
-                for provider_id, provider_name in provider_refs
-                if provider_id in allowed_values or provider_name in allowed_values
-            ]
-
-            if queried_provider_count != len(matched_provider_ids):
+            if not matched_model_group_links:
                 logger.debug(
-                    "用户/API Key 过滤 Provider 预加载范围: {} -> {}",
-                    queried_provider_count,
-                    len(matched_provider_ids),
+                    "[Scheduler] 用户 {} 未命中任何模型分组，拒绝模型 {}",
+                    getattr(user, "id", None),
+                    model_name,
                 )
-
-            if matched_provider_ids:
-                providers = self._candidate_builder._query_providers(
-                    db=db,
-                    provider_ids=matched_provider_ids,
-                )
-        else:
-            providers = self._candidate_builder._query_providers(
-                db=db,
-                provider_offset=provider_offset,
-                provider_limit=provider_limit,
-            )
-            queried_provider_count = len(providers)
-
-        # Provider query starts a transaction; release connection before entering async candidate build.
-        release_db_connection_before_await(db)
-
-        logger.debug(
-            "[Scheduler] Found {} active providers: {}",
-            len(providers),
-            ", ".join(p.name for p in providers),
-        )
-
-        if not providers:
-            return [], global_model_id, queried_provider_count
-
-        # 2. 构建候选列表（委托给 CandidateBuilder）
+                return [], global_model_id, queried_provider_count
 
         # 格式转换总开关（数据库配置）：关闭时禁止任何跨格式候选进入队列
         global_conversion_enabled = SystemConfigService.is_format_conversion_enabled(db)
+        group_attempts = matched_model_group_links or [None]
 
-        candidates = await self._candidate_builder._build_candidates(
-            db=db,
-            providers=providers,
-            client_format=target_format,
-            model_name=model_name,
-            model_mappings=model_mappings,
-            affinity_key=affinity_key,
-            max_candidates=max_candidates,
-            is_stream=is_stream,
-            capability_requirements=capability_requirements,
-            global_conversion_enabled=global_conversion_enabled,
-            request_body=request_body,
-        )
+        for group_link in group_attempts:
+            current_allowed_providers = allowed_providers
+            model_group_id: str | None = None
+            model_group_name: str | None = None
+            default_user_billing_multiplier = 1.0
+            model_group_routes_by_provider: dict[str, list[dict[str, Any]]] | None = None
 
-        # 3. 应用优先级模式排序 + 调度模式排序
-        candidates = await self.reorder_candidates(
-            candidates=candidates,
-            db=db,
-            affinity_key=affinity_key,
-            api_format=target_format,
-            global_model_id=global_model_id,
-        )
+            if group_link is not None:
+                model_group = group_link.model_group
+                model_group_id = str(model_group.id)
+                model_group_name = str(model_group.name)
+                default_user_billing_multiplier = float(
+                    getattr(model_group, "default_user_billing_multiplier", 1.0) or 1.0
+                )
 
-        # 更新指标
-        self._metrics["total_candidates"] += len(candidates)
-        self._metrics["last_candidate_count"] = len(candidates)
+                active_route_entries = [
+                    {
+                        "id": str(route.id),
+                        "provider_id": str(route.provider_id),
+                        "provider_api_key_id": (
+                            str(route.provider_api_key_id)
+                            if getattr(route, "provider_api_key_id", None)
+                            else None
+                        ),
+                        "priority": int(route.priority or 50),
+                        "user_billing_multiplier_override": (
+                            float(route.user_billing_multiplier_override)
+                            if route.user_billing_multiplier_override is not None
+                            else None
+                        ),
+                    }
+                    for route in list(getattr(model_group, "route_links", None) or [])
+                    if getattr(route, "is_active", True)
+                ]
 
-        logger.debug(
-            "预先获取到 {} 个可用组合 (api_format={}, model={})",
-            len(candidates),
-            target_format,
-            model_name,
-        )
+                if str(getattr(model_group, "routing_mode", "inherit")) == "custom":
+                    if not active_route_entries:
+                        logger.debug(
+                            "[Scheduler] 模型分组 {} 处于 custom 路由模式但没有有效 route，跳过",
+                            model_group_name,
+                        )
+                        continue
+                    model_group_routes_by_provider = {}
+                    for entry in active_route_entries:
+                        model_group_routes_by_provider.setdefault(entry["provider_id"], []).append(entry)
 
-        return candidates, global_model_id, queried_provider_count
+                    route_provider_ids = list(model_group_routes_by_provider.keys())
+                    if current_allowed_providers is not None:
+                        allowed_set = {value for value in current_allowed_providers if value}
+                        route_provider_ids = [
+                            provider_id for provider_id in route_provider_ids if provider_id in allowed_set
+                        ]
+                        model_group_routes_by_provider = {
+                            provider_id: model_group_routes_by_provider[provider_id]
+                            for provider_id in route_provider_ids
+                        }
+                    current_allowed_providers = route_provider_ids
+
+                    if not current_allowed_providers:
+                        logger.debug(
+                            "[Scheduler] 模型分组 {} 与 API Key Provider 限制交集为空，跳过",
+                            model_group_name,
+                        )
+                        continue
+
+                    current_allowed_providers = sorted(
+                        current_allowed_providers,
+                        key=lambda provider_id: min(
+                            entry["priority"]
+                            for entry in model_group_routes_by_provider.get(provider_id, [])
+                        ),
+                    )
+
+            # 1. 查询 Providers（委托给 CandidateBuilder）
+            providers = []
+            if current_allowed_providers is not None and model_group_routes_by_provider is not None:
+                queried_provider_count = len(current_allowed_providers)
+                providers = self._candidate_builder._query_providers(
+                    db=db,
+                    provider_ids=current_allowed_providers,
+                )
+            elif current_allowed_providers is not None:
+                provider_refs = self._candidate_builder._query_provider_refs(
+                    db=db,
+                    provider_offset=provider_offset,
+                    provider_limit=provider_limit,
+                )
+                queried_provider_count = len(provider_refs)
+
+                allowed_values = {value for value in current_allowed_providers if value}
+                matched_provider_ids = [
+                    provider_id
+                    for provider_id, provider_name in provider_refs
+                    if provider_id in allowed_values or provider_name in allowed_values
+                ]
+
+                if matched_provider_ids:
+                    providers = self._candidate_builder._query_providers(
+                        db=db,
+                        provider_ids=matched_provider_ids,
+                    )
+            else:
+                providers = self._candidate_builder._query_providers(
+                    db=db,
+                    provider_offset=provider_offset,
+                    provider_limit=provider_limit,
+                )
+                queried_provider_count = len(providers)
+
+            release_db_connection_before_await(db)
+
+            logger.debug(
+                "[Scheduler] Found {} active providers for model_group={}: {}",
+                len(providers),
+                model_group_name or "<default>",
+                ", ".join(p.name for p in providers),
+            )
+
+            if not providers:
+                continue
+
+            candidates = await self._candidate_builder._build_candidates(
+                db=db,
+                providers=providers,
+                client_format=target_format,
+                model_name=model_name,
+                model_mappings=model_mappings,
+                affinity_key=affinity_key,
+                max_candidates=max_candidates,
+                is_stream=is_stream,
+                capability_requirements=capability_requirements,
+                global_conversion_enabled=global_conversion_enabled,
+                request_body=request_body,
+                model_group_id=model_group_id,
+                model_group_name=model_group_name,
+                model_group_routes_by_provider=model_group_routes_by_provider,
+                default_user_billing_multiplier=default_user_billing_multiplier,
+            )
+
+            if not candidates:
+                continue
+
+            candidates = await self.reorder_candidates(
+                candidates=candidates,
+                db=db,
+                affinity_key=affinity_key,
+                api_format=target_format,
+                global_model_id=global_model_id,
+            )
+
+            self._metrics["total_candidates"] += len(candidates)
+            self._metrics["last_candidate_count"] = len(candidates)
+
+            logger.debug(
+                "预先获取到 {} 个可用组合 (api_format={}, model={}, model_group={})",
+                len(candidates),
+                target_format,
+                model_name,
+                model_group_name or "<default>",
+            )
+
+            return candidates, global_model_id, queried_provider_count
+
+        return [], global_model_id, queried_provider_count
 
     async def reorder_candidates(
         self,

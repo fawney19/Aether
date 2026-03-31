@@ -94,6 +94,9 @@ class CliSyncMixin:
         provider_id = None  # Provider ID（用于失败记录）
         endpoint_id = None  # Endpoint ID（用于失败记录）
         key_id = None  # Key ID（用于失败记录）
+        model_group_id = None  # ModelGroup ID（用于 Usage 记录）
+        model_group_route_id = None  # ModelGroup Route ID（用于 Usage 记录）
+        user_billing_multiplier = 1.0  # 命中的用户计费倍率
         exec_result = None
         mapped_model_result = None  # 映射后的目标模型名（用于 Usage 记录）
         response_metadata_result: dict[str, Any] = {}  # Provider 响应元数据
@@ -108,9 +111,14 @@ class CliSyncMixin:
             key: "ProviderAPIKey",
             candidate: ProviderCandidate,
         ) -> dict[str, Any]:
-            nonlocal provider_name, response_json, status_code, response_headers, provider_api_format, provider_request_headers, provider_request_body, mapped_model_result, response_metadata_result, needs_conversion, sync_proxy_info
+            nonlocal provider_name, response_json, status_code, response_headers, provider_api_format, provider_request_headers, provider_request_body, model_group_id, model_group_route_id, user_billing_multiplier, mapped_model_result, response_metadata_result, needs_conversion, sync_proxy_info
             provider_name = str(provider.name)
             provider_api_format = str(endpoint.api_format) if endpoint.api_format else ""
+            model_group_id = candidate.model_group_id if candidate else None
+            model_group_route_id = candidate.model_group_route_id if candidate else None
+            user_billing_multiplier = (
+                float(candidate.user_billing_multiplier or 1.0) if candidate else 1.0
+            )
 
             # 获取模型映射（优先使用映射匹配到的模型，其次是 Provider 级别的映射）
             mapped_model = candidate.mapping_matched_model if candidate else None
@@ -398,9 +406,7 @@ class CliSyncMixin:
                 # 预创建失败时，回退到 TaskService 侧创建，避免丢失 pending 状态。
                 create_pending_usage=not pending_usage_created,
             )
-            result = exec_result.response
             actual_provider_name = exec_result.provider_name or "unknown"
-            attempt_id = exec_result.request_candidate_id
             provider_id = exec_result.provider_id
             endpoint_id = exec_result.endpoint_id
             key_id = exec_result.key_id
@@ -443,8 +449,6 @@ class CliSyncMixin:
             cached_tokens = usage.get("cache_read_tokens", 0)
             cache_creation_tokens = usage.get("cache_creation_tokens", 0)
 
-            output_text = self.parser.extract_text_content(response_json)[:200]
-
             # 非流式成功时，返回给客户端的是提供商响应头（透传）
             client_response_headers = filter_proxy_response_headers(response_headers)
             client_response_headers["content-type"] = "application/json"
@@ -464,7 +468,7 @@ class CliSyncMixin:
                 exec_result=exec_result,
                 selected_key_id=key_id,
             )
-            total_cost = await self.telemetry.record_success(
+            await self.telemetry.record_success(
                 provider=provider_name,
                 model=model,
                 input_tokens=input_tokens,
@@ -492,6 +496,9 @@ class CliSyncMixin:
                 provider_id=provider_id,
                 provider_endpoint_id=endpoint_id,
                 provider_api_key_id=key_id,
+                model_group_id=model_group_id,
+                model_group_route_id=model_group_route_id,
+                user_billing_multiplier=user_billing_multiplier,
                 # 模型映射信息
                 target_model=mapped_model_result,
                 # Provider 响应元数据（如 Gemini 的 modelVersion）
@@ -530,6 +537,12 @@ class CliSyncMixin:
                 api_format=api_format,
                 api_family=self.api_family,
                 endpoint_kind=self.endpoint_kind,
+                provider_id=provider_id,
+                provider_endpoint_id=endpoint_id,
+                provider_api_key_id=key_id,
+                model_group_id=model_group_id,
+                model_group_route_id=model_group_route_id,
+                user_billing_multiplier=user_billing_multiplier,
                 request_metadata=request_metadata,
             )
             raise
@@ -578,6 +591,12 @@ class CliSyncMixin:
                 response_headers=error_response_headers,
                 # 非流式失败返回给客户端的是 JSON 错误响应
                 client_response_headers={"content-type": "application/json"},
+                provider_id=provider_id,
+                provider_endpoint_id=endpoint_id,
+                provider_api_key_id=key_id,
+                model_group_id=model_group_id,
+                model_group_route_id=model_group_route_id,
+                user_billing_multiplier=user_billing_multiplier,
                 # 格式转换追踪
                 endpoint_api_format=provider_api_format or None,
                 has_format_conversion=is_format_converted(provider_api_format, str(api_format)),

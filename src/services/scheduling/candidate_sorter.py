@@ -186,7 +186,11 @@ class CandidateSorter:
             else:
                 # 单个候选或没有 affinity_key，按次要排序条件排序
                 def secondary_sort(c: ProviderCandidate) -> tuple[int, int, str]:
-                    pp = c.provider.provider_priority
+                    pp = (
+                        c.effective_provider_priority
+                        if c.effective_provider_priority is not None
+                        else c.provider.provider_priority
+                    )
                     if isinstance(c, PoolCandidate):
                         ip = int(getattr(c, "pool_priority", 999999) or 999999)
                         key_id = str(getattr(c.provider, "id", "") or "")
@@ -248,7 +252,11 @@ class CandidateSorter:
         else:
             # 提供商优先模式：按 (provider_priority, internal_priority) 分组
             for candidate in candidates:
-                pp = candidate.provider.provider_priority
+                pp = (
+                    candidate.effective_provider_priority
+                    if candidate.effective_provider_priority is not None
+                    else candidate.provider.provider_priority
+                )
                 if isinstance(candidate, PoolCandidate):
                     # 号池候选独立成组，不与普通 key 候选混组打乱。
                     ip = -1

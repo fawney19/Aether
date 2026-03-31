@@ -6,9 +6,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
-from src.models.database import User, UserGroup
+from src.models.database import User, UserGroup, UserGroupModelGroup
+from src.services.model.group_service import ModelGroupBindingPayload, ModelGroupService
 from src.utils.transaction_manager import retry_on_database_error, transactional
 
 DEFAULT_USER_GROUP_NAME = "默认分组"
@@ -20,16 +21,33 @@ class UserGroupService:
 
     @staticmethod
     def get_group(db: Session, group_id: str) -> UserGroup | None:
-        return db.query(UserGroup).filter(UserGroup.id == group_id).first()
+        return (
+            db.query(UserGroup)
+            .options(
+                selectinload(UserGroup.model_group_links).selectinload(UserGroupModelGroup.model_group)
+            )
+            .filter(UserGroup.id == group_id)
+            .first()
+        )
 
     @staticmethod
     def get_group_by_name(db: Session, name: str) -> UserGroup | None:
-        return db.query(UserGroup).filter(UserGroup.name == name).first()
+        return (
+            db.query(UserGroup)
+            .options(
+                selectinload(UserGroup.model_group_links).selectinload(UserGroupModelGroup.model_group)
+            )
+            .filter(UserGroup.name == name)
+            .first()
+        )
 
     @staticmethod
     def get_default_group(db: Session) -> UserGroup | None:
         return (
             db.query(UserGroup)
+            .options(
+                selectinload(UserGroup.model_group_links).selectinload(UserGroupModelGroup.model_group)
+            )
             .filter(UserGroup.is_default.is_(True))
             .order_by(UserGroup.created_at.asc(), UserGroup.id.asc())
             .first()
@@ -47,17 +65,19 @@ class UserGroupService:
                 name=DEFAULT_USER_GROUP_NAME,
                 description=DEFAULT_USER_GROUP_DESCRIPTION,
                 is_default=True,
-                allowed_providers=None,
                 allowed_api_formats=None,
-                allowed_models=None,
                 rate_limit=None,
             )
             db.add(group)
+            db.flush()
+            ModelGroupService.ensure_user_group_default_binding(db, group, commit=False)
         else:
             group.is_default = True
             if not group.description:
                 group.description = DEFAULT_USER_GROUP_DESCRIPTION
             group.updated_at = datetime.now(timezone.utc)
+            db.flush()
+            ModelGroupService.ensure_user_group_default_binding(db, group, commit=False)
 
         if commit:
             db.commit()
@@ -86,10 +106,9 @@ class UserGroupService:
         *,
         name: str,
         description: str | None = None,
-        allowed_providers: list[str] | None = None,
         allowed_api_formats: list[str] | None = None,
-        allowed_models: list[str] | None = None,
         rate_limit: int | None = None,
+        model_group_bindings: list[ModelGroupBindingPayload] | None = None,
     ) -> UserGroup:
         if UserGroupService.get_group_by_name(db, name):
             raise ValueError(f"用户分组已存在: {name}")
@@ -98,12 +117,22 @@ class UserGroupService:
             name=name,
             description=description,
             is_default=False,
-            allowed_providers=allowed_providers,
             allowed_api_formats=allowed_api_formats,
-            allowed_models=allowed_models,
             rate_limit=rate_limit,
         )
         db.add(group)
+        db.flush()
+
+        if model_group_bindings:
+            ModelGroupService.replace_user_group_bindings(
+                db,
+                group.id,
+                model_group_bindings,
+                commit=False,
+            )
+        else:
+            ModelGroupService.ensure_user_group_default_binding(db, group, commit=False)
+
         db.commit()
         db.refresh(group)
         return group
@@ -121,21 +150,8 @@ class UserGroupService:
             if existing and existing.id != group_id:
                 raise ValueError(f"用户分组已存在: {kwargs['name']}")
 
-        updatable_fields = [
-            "name",
-            "description",
-            "allowed_providers",
-            "allowed_api_formats",
-            "allowed_models",
-            "rate_limit",
-        ]
-        nullable_fields = [
-            "description",
-            "allowed_providers",
-            "allowed_api_formats",
-            "allowed_models",
-            "rate_limit",
-        ]
+        updatable_fields = ["name", "description", "allowed_api_formats", "rate_limit"]
+        nullable_fields = ["description", "allowed_api_formats", "rate_limit"]
 
         for field, value in kwargs.items():
             if field not in updatable_fields:
@@ -144,6 +160,17 @@ class UserGroupService:
                 setattr(group, field, value)
             elif value is not None:
                 setattr(group, field, value)
+
+        bindings = kwargs.get("model_group_bindings")
+        if bindings is not None:
+            ModelGroupService.replace_user_group_bindings(
+                db,
+                group.id,
+                bindings,
+                commit=False,
+            )
+        elif group.is_default and not group.model_group_links:
+            ModelGroupService.ensure_user_group_default_binding(db, group, commit=False)
 
         group.updated_at = datetime.now(timezone.utc)
         db.commit()

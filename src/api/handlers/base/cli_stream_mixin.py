@@ -283,6 +283,9 @@ class CliStreamMixin:
         ctx.provider_type = str(getattr(provider, "provider_type", "") or "")
         ctx.endpoint_id = str(endpoint.id)
         ctx.key_id = str(key.id)
+        ctx.model_group_id = candidate.model_group_id if candidate else None
+        ctx.model_group_route_id = candidate.model_group_route_id if candidate else None
+        ctx.user_billing_multiplier = float(candidate.user_billing_multiplier or 1.0) if candidate else 1.0
 
         # 记录格式转换信息
         ctx.provider_api_format = str(endpoint.api_format) if endpoint.api_format else ""

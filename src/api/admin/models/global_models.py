@@ -22,6 +22,7 @@ from src.models.pydantic_models import (
     BatchAssignToProvidersRequest,
     BatchAssignToProvidersResponse,
     GlobalModelCreate,
+    GlobalModelGroupRef,
     GlobalModelListResponse,
     GlobalModelProvidersResponse,
     GlobalModelResponse,
@@ -33,6 +34,28 @@ from src.services.model.global_model import GlobalModelService
 
 router = APIRouter(prefix="/global", tags=["Admin - Global Models"])
 pipeline = get_pipeline()
+
+
+def _serialize_global_model_response(global_model: Any) -> GlobalModelResponse:
+    response = GlobalModelResponse.model_validate(global_model)
+    model_groups: list[GlobalModelGroupRef] = []
+    model_group_ids: list[str] = []
+    for link in list(getattr(global_model, "model_group_links", None) or []):
+        model_group = getattr(link, "model_group", None)
+        if model_group is None:
+            continue
+        model_group_ids.append(str(model_group.id))
+        model_groups.append(
+            GlobalModelGroupRef(
+                id=str(model_group.id),
+                name=str(model_group.name),
+                display_name=str(model_group.display_name),
+                is_default=bool(getattr(model_group, "is_default", False)),
+            )
+        )
+    response.model_group_ids = model_group_ids
+    response.model_groups = model_groups
+    return response
 
 
 @router.get("", response_model=GlobalModelListResponse)
@@ -331,7 +354,7 @@ class AdminListGlobalModelsAdapter(AdminApiAdapter):
         # 构建响应
         model_responses = []
         for gm in models:
-            response = GlobalModelResponse.model_validate(gm)
+            response = _serialize_global_model_response(gm)
             response.provider_count = provider_counts.get(gm.id, 0)
             response.active_provider_count = active_provider_counts.get(gm.id, 0)
             model_responses.append(response)
@@ -380,7 +403,7 @@ class AdminGetGlobalModelAdapter(AdminApiAdapter):
             or 0
         )
 
-        response = GlobalModelResponse.model_validate(global_model)
+        response = _serialize_global_model_response(global_model)
         response.provider_count = stats["total_providers"]
         response.active_provider_count = int(active_count)
 
@@ -423,6 +446,7 @@ class AdminCreateGlobalModelAdapter(AdminApiAdapter):
             supported_capabilities=self.payload.supported_capabilities,
             # 模型配置（JSON）
             config=self.payload.config,
+            model_group_ids=self.payload.model_group_ids,
         )
 
         logger.info(f"GlobalModel 已创建: id={global_model.id} name={global_model.name}")
@@ -433,7 +457,7 @@ class AdminCreateGlobalModelAdapter(AdminApiAdapter):
         cache_service = get_cache_invalidation_service()
         await cache_service.on_global_model_changed(global_model.name, str(global_model.id))
 
-        return GlobalModelResponse.model_validate(global_model)
+        return _serialize_global_model_response(global_model)
 
 
 @dataclass
@@ -493,7 +517,7 @@ class AdminUpdateGlobalModelAdapter(AdminApiAdapter):
         if old_model_name:
             await cache_service.on_global_model_changed(old_model_name, self.global_model_id)
 
-        return GlobalModelResponse.model_validate(global_model)
+        return _serialize_global_model_response(global_model)
 
 
 @dataclass

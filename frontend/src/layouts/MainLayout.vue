@@ -585,6 +585,7 @@ const navigation = computed(() => {
         { name: '用户分组', href: '/admin/user-groups', icon: Users },
         { name: '提供商', href: '/admin/providers', icon: FolderTree },
         { name: '模型管理', href: '/admin/models', icon: Layers },
+        { name: '模型分组', href: '/admin/model-groups', icon: Box },
         { name: '号池管理', href: '/admin/pool', icon: Database },
         { name: '独立密钥', href: '/admin/keys', icon: Key },
         { name: '钱包管理', href: '/admin/wallets', icon: Wallet },

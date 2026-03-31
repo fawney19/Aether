@@ -888,6 +888,11 @@ class ChatHandlerBase(BaseMessageHandler, ABC):
             endpoint_id=str(endpoint.id),
             key_id=str(key.id),
             provider_api_format=str(endpoint.api_format) if endpoint.api_format else None,
+            model_group_id=candidate.model_group_id if candidate else None,
+            model_group_route_id=candidate.model_group_route_id if candidate else None,
+            user_billing_multiplier=(
+                float(candidate.user_billing_multiplier or 1.0) if candidate else 1.0
+            ),
         )
         ctx.provider_type = str(getattr(provider, "provider_type", "") or "")
 
