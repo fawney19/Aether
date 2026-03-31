@@ -659,7 +659,6 @@ class Usage(Base):
 
     # 元数据
     request_metadata = Column(JSON, nullable=True)  # 存储额外信息
-    upstream_usage_snapshot = Column(JSONB, nullable=True)  # 不可变上游 usage 快照（原始 usage 或解析后的 usage chunks）
 
     # 时间戳
     created_at = Column(

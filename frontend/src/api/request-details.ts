@@ -66,7 +66,6 @@ export interface RequestDetail {
     creation_price_per_1m?: number | null
     read_price_per_1m?: number | null
   }
-  upstream_usage_snapshot?: Record<string, unknown> | null
   request_type: string
   is_stream: boolean
   status_code: number

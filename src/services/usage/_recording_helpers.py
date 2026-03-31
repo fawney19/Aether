@@ -253,13 +253,13 @@ def build_usage_params(
         + cache_creation_input_tokens
         + cache_read_input_tokens
     )
-    upstream_usage_snapshot = build_upstream_usage_snapshot(
+    usage_snapshot = build_upstream_usage_snapshot(
         response_body,
         api_family=ep_family or client_family,
         is_stream=is_stream,
     )
     effective_cache_ttl_minutes = infer_cache_ttl_minutes(
-        snapshot=upstream_usage_snapshot,
+        snapshot=usage_snapshot,
         has_cache_tokens=(cache_creation_input_tokens > 0 or cache_read_input_tokens > 0),
         explicit_cache_ttl_minutes=cache_ttl_minutes,
     )
@@ -331,7 +331,6 @@ def build_usage_params(
         "client_response_headers": processed_client_response_headers,
         "response_body": processed_response_body,
         "client_response_body": processed_client_response_body,
-        "upstream_usage_snapshot": upstream_usage_snapshot,
     }
 
 
@@ -404,7 +403,6 @@ def update_existing_usage(
     existing_usage.cache_creation_price_per_1m = usage_params.get("cache_creation_price_per_1m")
     existing_usage.cache_read_price_per_1m = usage_params.get("cache_read_price_per_1m")
     existing_usage.price_per_request = usage_params.get("price_per_request")
-    existing_usage.upstream_usage_snapshot = usage_params.get("upstream_usage_snapshot")
 
     # 更新 Provider 侧追踪信息（仅在有新值时更新，避免覆盖已有数据）
     if usage_params.get("provider_id"):

@@ -440,8 +440,6 @@ class HistoricalUsageRebillingService:
             "total_cost": float(total_cost),
         }
 
-        upstream_usage_snapshot = cls._build_or_get_upstream_usage_snapshot(usage)
-
         metadata["billing_snapshot"] = billing_snapshot_payload
         metadata["billing_updated_at"] = datetime.now(timezone.utc).isoformat()
         metadata["billing_recalc_version"] = cls.TARGET_VERSION
@@ -469,7 +467,6 @@ class HistoricalUsageRebillingService:
             "cache_read_price_per_1m": None,
             "price_per_request": request_cost,
             "request_metadata": sanitized_metadata,
-            "upstream_usage_snapshot": upstream_usage_snapshot,
         }
 
     @classmethod
@@ -483,8 +480,8 @@ class HistoricalUsageRebillingService:
             return None
 
         billing_api_format = cls._resolve_billing_api_format(usage)
-        upstream_usage_snapshot = cls._build_or_get_upstream_usage_snapshot(usage)
-        usage_metrics = extract_usage_metrics_from_snapshot(upstream_usage_snapshot)
+        usage_snapshot = cls._build_usage_snapshot(usage)
+        usage_metrics = extract_usage_metrics_from_snapshot(usage_snapshot)
 
         raw_input_tokens = (
             cls._to_int(usage_metrics.get("input_tokens"))
@@ -516,7 +513,7 @@ class HistoricalUsageRebillingService:
         request_count = 0 if is_failed_request else 1
         has_cache_tokens = bool(cache_creation_tokens > 0 or cache_read_tokens > 0)
         effective_cache_ttl_minutes = infer_cache_ttl_minutes(
-            snapshot=upstream_usage_snapshot,
+            snapshot=usage_snapshot,
             has_cache_tokens=has_cache_tokens,
             explicit_cache_ttl_minutes=getattr(usage, "cache_ttl_minutes", None),
         )
@@ -703,7 +700,6 @@ class HistoricalUsageRebillingService:
             "cache_read_price_per_1m": cache_read_price,
             "price_per_request": request_price,
             "request_metadata": sanitized_metadata,
-            "upstream_usage_snapshot": upstream_usage_snapshot,
         }
 
     @classmethod
@@ -718,7 +714,7 @@ class HistoricalUsageRebillingService:
     ) -> int | None:
         _ = (db, ttl_5m_tokens, ttl_1h_tokens)
         return infer_cache_ttl_minutes(
-            snapshot=cls._build_or_get_upstream_usage_snapshot(usage),
+            snapshot=cls._build_usage_snapshot(usage),
             has_cache_tokens=has_cache_tokens,
             explicit_cache_ttl_minutes=getattr(usage, "cache_ttl_minutes", None),
         )
@@ -767,11 +763,7 @@ class HistoricalUsageRebillingService:
         return data if isinstance(data, dict) else {}
 
     @classmethod
-    def _build_or_get_upstream_usage_snapshot(cls, usage: Usage) -> dict[str, Any] | None:
-        snapshot = getattr(usage, "upstream_usage_snapshot", None)
-        if isinstance(snapshot, dict):
-            return dict(snapshot)
-
+    def _build_usage_snapshot(cls, usage: Usage) -> dict[str, Any] | None:
         api_family = getattr(usage, "provider_api_family", None) or getattr(usage, "api_family", None)
         response_body = usage.get_response_body()
         built_snapshot = build_upstream_usage_snapshot(

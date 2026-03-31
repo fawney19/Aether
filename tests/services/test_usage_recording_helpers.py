@@ -7,7 +7,7 @@ from src.services.usage._recording_helpers import build_usage_params
 from src.services.usage._types import UsageCostInfo
 
 
-def test_build_usage_params_uses_single_cache_ttl_snapshot(
+def test_build_usage_params_uses_single_cache_ttl(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
@@ -75,6 +75,5 @@ def test_build_usage_params_uses_single_cache_ttl_snapshot(
     assert result["cache_creation_cost_usd"] == Decimal("1.35000000")
     assert result["actual_cache_creation_cost_usd"] == Decimal("2.70000000")
     assert result["cache_creation_price_per_1m"] == 4.5
-    assert result["upstream_usage_snapshot"]["snapshot_type"] == "response_usage"
     assert "cache_creation_cost_usd_5m" not in result
     assert "cache_creation_cost_usd_1h" not in result

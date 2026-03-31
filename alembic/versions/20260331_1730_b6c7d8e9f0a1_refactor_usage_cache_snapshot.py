@@ -11,7 +11,6 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from sqlalchemy import inspect
-from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
@@ -35,16 +34,6 @@ def upgrade() -> None:
                 sa.Column("cache_ttl_minutes", sa.Integer(), nullable=False, server_default="5")
             )
 
-    if not _column_exists("usage", "upstream_usage_snapshot"):
-        with op.batch_alter_table("usage") as batch_op:
-            batch_op.add_column(
-                sa.Column(
-                    "upstream_usage_snapshot",
-                    postgresql.JSONB(astext_type=sa.Text()),
-                    nullable=True,
-                )
-            )
-
     op.execute(
         sa.text(
             """
@@ -64,54 +53,24 @@ def upgrade() -> None:
                      OR COALESCE(cache_read_input_tokens, 0) > 0 THEN 5
                 ELSE 5
             END
+            WHERE
+                COALESCE(
+                    NULLIF(request_metadata->'billing_snapshot'->'resolved_dimensions'->>'cache_ttl_minutes', ''),
+                    NULLIF(request_metadata->'billing_snapshot'->'dimensions_used'->>'cache_ttl_minutes', '')
+                ) IS NOT NULL
+                OR COALESCE(cache_creation_input_tokens_1h, 0) > 0
+                OR COALESCE(cache_creation_cost_usd_1h, 0) > 0
+                OR cache_creation_price_per_1m_1h IS NOT NULL
             """
         )
     )
 
-    op.execute(
-        sa.text(
-            """
-            UPDATE usage
-            SET upstream_usage_snapshot = jsonb_build_object(
-                'snapshot_type', 'response_usage',
-                'api_family', NULLIF(LOWER(COALESCE(provider_api_family, api_family, '')), ''),
-                'usage', COALESCE(
-                    response_body::jsonb -> 'usage',
-                    response_body::jsonb -> 'message' -> 'usage',
-                    response_body::jsonb -> 'usageMetadata'
-                )
-            )
-            WHERE upstream_usage_snapshot IS NULL
-              AND response_body IS NOT NULL
-              AND (
-                    response_body::jsonb ? 'usage'
-                    OR (
-                        response_body::jsonb ? 'message'
-                        AND jsonb_typeof(response_body::jsonb -> 'message') = 'object'
-                        AND (response_body::jsonb -> 'message') ? 'usage'
-                    )
-                    OR response_body::jsonb ? 'usageMetadata'
-              )
-            """
-        )
-    )
-
-    op.execute(
-        sa.text(
-            """
-            UPDATE usage
-            SET upstream_usage_snapshot = jsonb_build_object(
-                'snapshot_type', 'parsed_stream_usage_events',
-                'api_family', NULLIF(LOWER(COALESCE(provider_api_family, api_family, '')), ''),
-                'events', response_body::jsonb -> 'chunks'
-            )
-            WHERE upstream_usage_snapshot IS NULL
-              AND response_body IS NOT NULL
-              AND jsonb_typeof(response_body::jsonb) = 'object'
-              AND jsonb_typeof(response_body::jsonb -> 'chunks') = 'array'
-            """
-        )
-    )
+    # NOTE:
+    # We intentionally do not add or backfill a dedicated upstream usage snapshot
+    # column here. The immutable source of truth remains response_body /
+    # client_response_body, and downstream recalculation reparses usage from that
+    # original stored upstream payload instead of duplicating it into another
+    # column.
 
     with op.batch_alter_table("usage") as batch_op:
         if _column_exists("usage", "cache_creation_input_tokens_5m"):
@@ -225,7 +184,5 @@ def downgrade() -> None:
     )
 
     with op.batch_alter_table("usage") as batch_op:
-        if _column_exists("usage", "upstream_usage_snapshot"):
-            batch_op.drop_column("upstream_usage_snapshot")
         if _column_exists("usage", "cache_ttl_minutes"):
             batch_op.drop_column("cache_ttl_minutes")

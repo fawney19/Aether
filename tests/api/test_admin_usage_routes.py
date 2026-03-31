@@ -118,7 +118,6 @@ async def test_admin_usage_detail_defers_large_body_columns_when_bodies_excluded
         cache_creation_price_per_1m = None
         cache_read_price_per_1m = None
         price_per_request = None
-        upstream_usage_snapshot = None
         request_type = "chat"
         is_stream = True
         status_code = 200
@@ -311,7 +310,6 @@ async def test_admin_usage_detail_returns_provider_key_and_deleted_fallbacks(
         cache_creation_price_per_1m = None
         cache_read_price_per_1m = None
         price_per_request = None
-        upstream_usage_snapshot = None
         request_type = "chat"
         is_stream = False
         status_code = 200
@@ -412,11 +410,6 @@ async def test_admin_usage_detail_returns_nested_cache_and_pricing(
         cache_creation_price_per_1m = Decimal("6")
         cache_read_price_per_1m = Decimal("0.3")
         price_per_request = None
-        upstream_usage_snapshot = {
-            "snapshot_type": "response_usage",
-            "api_family": "claude",
-            "usage": {"claude_cache_creation_5_m_tokens": 258},
-        }
         request_type = "chat"
         is_stream = False
         status_code = 200
@@ -471,4 +464,3 @@ async def test_admin_usage_detail_returns_nested_cache_and_pricing(
     assert result["cache"]["creation_input_tokens"] == 258
     assert result["cache"]["creation_cost"] == 0.001545
     assert result["pricing"]["cache_creation_price_per_1m"] == 6.0
-    assert result["upstream_usage_snapshot"]["snapshot_type"] == "response_usage"

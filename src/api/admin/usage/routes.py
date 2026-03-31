@@ -126,7 +126,6 @@ async def get_usage_detail(
     - `cost`: 成本统计（含 input/output/cache_creation/cache_read/request/total）
     - `pricing`: 历史价格快照
     - `cache`: 缓存账单结构（ttl_minutes/creation_input_tokens/read_input_tokens/...）
-    - `upstream_usage_snapshot`: 不可变上游 usage 快照
     - `request_type`: 请求类型
     - `is_stream`: 是否为流式请求
     - `status_code`: HTTP 状态码
@@ -370,7 +369,6 @@ class AdminUsageDetailAdapter(AdminApiAdapter):
                     else None
                 ),
             },
-            "upstream_usage_snapshot": usage_record.upstream_usage_snapshot,
             "request_type": usage_record.request_type,
             "is_stream": usage_record.is_stream,
             "status_code": usage_record.status_code,

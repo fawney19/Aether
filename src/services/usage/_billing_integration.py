@@ -81,13 +81,13 @@ class UsageBillingIntegrationMixin:
         has_cache_tokens = bool(
             params.cache_creation_input_tokens > 0 or params.cache_read_input_tokens > 0
         )
-        upstream_usage_snapshot = build_upstream_usage_snapshot(
+        usage_snapshot = build_upstream_usage_snapshot(
             response_body,
             api_family=params.api_family,
             is_stream=params.is_stream,
         )
         effective_cache_ttl_minutes = infer_cache_ttl_minutes(
-            snapshot=upstream_usage_snapshot,
+            snapshot=usage_snapshot,
             has_cache_tokens=has_cache_tokens,
             explicit_cache_ttl_minutes=params.cache_ttl_minutes,
         )
