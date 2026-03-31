@@ -203,7 +203,7 @@ async def _calculate_and_record_usage(
 
         return provider_api_key_local, provider_endpoint_local, user_api_key_local
 
-    provider_api_key, provider_endpoint, user_api_key = await asyncio.to_thread(_load_usage_context)
+    provider_api_key, provider_endpoint, user_api_key = _load_usage_context()
     if not provider_api_key:
         logger.warning(f"Provider API Key not found for usage calculation: {api_key_id}")
         return {"error": "Provider API Key not found"}

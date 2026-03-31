@@ -1840,6 +1840,7 @@ async def _run_concurrent_test(
                 endpoints_by_id = {
                     str(endpoint.id): endpoint
                     for endpoint in preload_db.query(ProviderEndpoint)
+                    .options(joinedload(ProviderEndpoint.provider))
                     .filter(ProviderEndpoint.id.in_(endpoint_ids))
                     .all()
                 }
@@ -1847,6 +1848,7 @@ async def _run_concurrent_test(
                 keys_by_id = {
                     str(key.id): key
                     for key in preload_db.query(ProviderAPIKey)
+                    .options(joinedload(ProviderAPIKey.provider))
                     .filter(ProviderAPIKey.id.in_(key_ids))
                     .all()
                 }
