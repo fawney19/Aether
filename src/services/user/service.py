@@ -8,15 +8,25 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import and_, func, or_
-from sqlalchemy.orm import Session, contains_eager
+from sqlalchemy.orm import Session, contains_eager, selectinload
 
 from src.core.logger import logger
 from src.core.validators import EmailValidator, PasswordValidator, UsernameValidator
-from src.models.database import ApiKey, GlobalModel, Model, Provider, Usage, User, UserRole
+from src.models.database import (
+    ApiKey,
+    GlobalModel,
+    Model,
+    Provider,
+    Usage,
+    User,
+    UserGroup,
+    UserRole,
+)
 from src.services.auth.session_service import SessionService
 from src.services.cache.user_cache import UserCacheService
 from src.services.system.config import SystemConfigService
 from src.services.user.bulk_cleanup import batch_nullify_fk, pre_clean_api_key
+from src.services.user.group_service import UserGroupService
 from src.utils.async_utils import safe_create_task
 from src.utils.transaction_manager import retry_on_database_error, transactional
 
@@ -36,10 +46,7 @@ class UserService:
         initial_gift_usd: float | None = 10.0,
         unlimited: bool = False,
         email_verified: bool = False,
-        allowed_providers: list[str] | None = None,
-        allowed_api_formats: list[str] | None = None,
-        allowed_models: list[str] | None = None,
-        rate_limit: int | None = None,
+        group_id: str | None = None,
     ) -> User:
         """创建新用户。"""
 
@@ -63,6 +70,14 @@ class UserService:
         if not valid:
             raise ValueError(error_msg)
 
+        if group_id:
+            group = db.query(UserGroup).filter(UserGroup.id == group_id).first()
+            if not group:
+                raise ValueError("用户分组不存在")
+        else:
+            group = UserGroupService.get_or_create_default_group(db)
+            group_id = group.id
+
         # 检查用户名是否已存在
         if db.query(User).filter(User.username == username).first():
             raise ValueError(f"用户名已存在: {username}")
@@ -73,10 +88,7 @@ class UserService:
             username=username,
             role=role,
             is_active=True,
-            allowed_providers=allowed_providers,
-            allowed_api_formats=allowed_api_formats,
-            allowed_models=allowed_models,
-            rate_limit=rate_limit,
+            group_id=group_id,
         )
         user.set_password(password)
 
@@ -193,6 +205,7 @@ class UserService:
     ) -> list[User]:
         """列出用户"""
         query = db.query(User)
+        query = query.options(selectinload(User.group))
 
         if role:
             query = query.filter(User.role == role)
@@ -217,27 +230,27 @@ class UserService:
             "username",
             "is_active",
             "role",
-            # 访问限制字段
-            "allowed_providers",
-            "allowed_api_formats",
-            "allowed_models",
-            "rate_limit",
+            "group_id",
         ]
 
-        # 允许设置为 None 的字段（表示无限制）
-        nullable_fields = [
-            "allowed_providers",
-            "allowed_api_formats",
-            "allowed_models",
-            "rate_limit",
-        ]
+        resolved_group: UserGroup | None = None
+        if "group_id" in kwargs:
+            next_group_id = kwargs.get("group_id")
+            if next_group_id:
+                resolved_group = db.query(UserGroup).filter(UserGroup.id == next_group_id).first()
+                if not resolved_group:
+                    raise ValueError("用户分组不存在")
+            else:
+                resolved_group = UserGroupService.get_or_create_default_group(db)
+                kwargs["group_id"] = resolved_group.id
 
         for field, value in kwargs.items():
             if field not in updatable_fields:
                 continue
-            # nullable_fields 中的字段允许设置为 None
-            if field in nullable_fields:
+            if field == "group_id":
                 setattr(user, field, value)
+                if resolved_group is not None:
+                    user.group = resolved_group
             elif value is not None:
                 setattr(user, field, value)
 
@@ -264,6 +277,97 @@ class UserService:
 
         logger.debug(f"更新用户信息: {user.email} (ID: {user_id})")
         return user
+
+    @staticmethod
+    @transactional()
+    @retry_on_database_error(max_retries=3)
+    def batch_update_user_group_binding(
+        db: Session,
+        *,
+        user_ids: list[str],
+        action: str,
+        group_id: str | None = None,
+        source_group_id: str | None = None,
+    ) -> tuple[list[User], int]:
+        """批量绑定或取消绑定用户分组。"""
+        normalized_user_ids = list(
+            dict.fromkeys(str(user_id).strip() for user_id in user_ids if user_id)
+        )
+        if not normalized_user_ids:
+            raise ValueError("至少需要提供一个用户 ID")
+        if action not in {"bind", "unbind"}:
+            raise ValueError("不支持的批量分组操作")
+
+        target_group: UserGroup | None = None
+        if action == "bind":
+            if not group_id:
+                raise ValueError("绑定用户到分组时必须提供 group_id")
+            target_group = db.query(UserGroup).filter(UserGroup.id == group_id).first()
+            if not target_group:
+                raise ValueError("用户分组不存在")
+
+        users = (
+            db.query(User)
+            .options(selectinload(User.group))
+            .filter(User.id.in_(normalized_user_ids), User.is_deleted.is_(False))
+            .all()
+        )
+        users_by_id = {user.id: user for user in users}
+
+        updated_users: list[User] = []
+        skipped_count = 0
+        now = datetime.now(timezone.utc)
+        default_group = UserGroupService.get_or_create_default_group(db)
+
+        for user_id in normalized_user_ids:
+            user = users_by_id.get(user_id)
+            if user is None:
+                skipped_count += 1
+                continue
+
+            changed = False
+
+            if action == "bind":
+                assert target_group is not None
+                if user.group_id != target_group.id:
+                    user.group_id = target_group.id
+                    user.group = target_group
+                    changed = True
+            else:
+                if source_group_id and user.group_id != source_group_id:
+                    skipped_count += 1
+                    continue
+
+                if user.group_id == default_group.id:
+                    skipped_count += 1
+                    continue
+
+                if user.group_id != default_group.id:
+                    user.group_id = default_group.id
+                    user.group = default_group
+                    changed = True
+
+            if not changed:
+                skipped_count += 1
+                continue
+
+            user.updated_at = now
+            updated_users.append(user)
+
+        db.commit()
+
+        for user in updated_users:
+            safe_create_task(UserCacheService.invalidate_user_cache(user.id, user.email))
+
+        logger.info(
+            "批量更新用户分组绑定: action={} target_group_id={} source_group_id={} updated={} skipped={}",
+            action,
+            group_id,
+            source_group_id,
+            len(updated_users),
+            skipped_count,
+        )
+        return updated_users, skipped_count
 
     @staticmethod
     def delete_user(db: Session, user_id: str) -> bool:

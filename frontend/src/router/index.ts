@@ -160,6 +160,11 @@ const routes: RouteRecordRaw[] = [
         component: () => importWithRetry(() => import('@/views/admin/Users.vue'))
       },
       {
+        path: 'user-groups',
+        name: 'UserGroups',
+        component: () => importWithRetry(() => import('@/views/admin/UserGroups.vue'))
+      },
+      {
         path: 'keys',
         name: 'ApiKeys',
         component: () => importWithRetry(() => import('@/views/admin/ApiKeys.vue'))

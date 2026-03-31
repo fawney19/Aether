@@ -7,9 +7,7 @@
     <template #header>
       <div class="border-b border-border px-6 py-4">
         <div class="flex items-center gap-3">
-          <div
-            class="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 flex-shrink-0"
-          >
+          <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10">
             <UserPlus
               v-if="!isEditMode"
               class="h-5 w-5 text-primary"
@@ -19,8 +17,8 @@
               class="h-5 w-5 text-primary"
             />
           </div>
-          <div class="flex-1 min-w-0">
-            <h3 class="text-lg font-semibold text-foreground leading-tight">
+          <div class="min-w-0 flex-1">
+            <h3 class="text-lg font-semibold leading-tight text-foreground">
               {{ isEditMode ? '编辑用户' : '新增用户' }}
             </h3>
             <p class="text-xs text-muted-foreground">
@@ -35,10 +33,9 @@
       autocomplete="off"
       @submit.prevent="handleSubmit"
     >
-      <div class="grid grid-cols-2 gap-0">
-        <!-- 左侧：基础设置 -->
-        <div class="pr-6 space-y-4">
-          <div class="flex items-center gap-2 pb-2 border-b border-border/60">
+      <div class="grid grid-cols-1 gap-0 lg:grid-cols-2">
+        <div class="space-y-4 lg:pr-6">
+          <div class="flex items-center gap-2 border-b border-border/60 pb-2">
             <span class="text-sm font-medium">基础设置</span>
           </div>
 
@@ -91,9 +88,7 @@
               minlength="6"
               :placeholder="isEditMode ? '留空保持原密码' : getPasswordPolicyPlaceholder(passwordPolicyLevel)"
               class="h-10"
-              :class="[
-                passwordError ? 'border-destructive' : '',
-              ]"
+              :class="passwordError ? 'border-destructive' : ''"
             />
             <p
               v-if="passwordError"
@@ -180,118 +175,11 @@
               </Select>
             </div>
           </div>
-        </div>
 
-        <!-- 右侧：访问限制 -->
-        <div class="pl-6 space-y-4 border-l border-border">
-          <div class="flex items-center gap-2 pb-2 border-b border-border/60">
-            <span class="text-sm font-medium">访问限制</span>
-          </div>
-
-          <!-- Provider -->
-          <div class="space-y-2">
-            <Label class="text-sm font-medium">允许的 Provider</Label>
-            <div class="flex items-center gap-3">
-              <div class="flex-1 min-w-0">
-                <MultiSelect
-                  v-model="form.allowed_providers"
-                  :options="providerOptions"
-                  :search-threshold="0"
-                  :disabled="form.provider_unrestricted"
-                  :placeholder="form.provider_unrestricted ? '不限制' : '未选择（全部禁用）'"
-                  empty-text="暂无可用 Provider"
-                  no-results-text="未找到匹配的 Provider"
-                  search-placeholder="搜索 Provider 名称..."
-                />
-              </div>
-              <Switch
-                v-model="form.provider_unrestricted"
-                class="shrink-0"
-              />
-            </div>
-          </div>
-
-          <!-- API 格式 -->
-          <div class="space-y-2">
-            <Label class="text-sm font-medium">允许的 API 格式</Label>
-            <div class="flex items-center gap-3">
-              <div class="flex-1 min-w-0">
-                <MultiSelect
-                  v-model="form.allowed_api_formats"
-                  :options="apiFormatOptions"
-                  :search-threshold="0"
-                  :disabled="form.api_format_unrestricted"
-                  :placeholder="form.api_format_unrestricted ? '不限制' : '未选择（全部禁用）'"
-                  empty-text="暂无可用 API 格式"
-                  no-results-text="未找到匹配的 API 格式"
-                  search-placeholder="搜索 API 格式..."
-                />
-              </div>
-              <Switch
-                v-model="form.api_format_unrestricted"
-                class="shrink-0"
-              />
-            </div>
-          </div>
-
-          <!-- 模型 -->
-          <div class="space-y-2">
-            <Label class="text-sm font-medium">允许的模型</Label>
-            <div class="flex items-center gap-3">
-              <div class="flex-1 min-w-0">
-                <MultiSelect
-                  v-model="form.allowed_models"
-                  :options="modelOptions"
-                  :search-threshold="0"
-                  :disabled="form.model_unrestricted"
-                  :placeholder="form.model_unrestricted ? '不限制' : '未选择（全部禁用）'"
-                  empty-text="暂无可用模型"
-                  no-results-text="未找到匹配的模型"
-                  search-placeholder="输入模型名搜索..."
-                />
-              </div>
-              <Switch
-                v-model="form.model_unrestricted"
-                class="shrink-0"
-              />
-            </div>
-          </div>
-
-          <div class="space-y-2">
-            <Label
-              for="form-rate-limit"
-              class="text-sm font-medium"
-            >速率限制 (请求/分钟)</Label>
-            <div class="flex items-center gap-3">
-              <div class="flex-1 min-w-0">
-                <Input
-                  v-if="!form.rate_limit_inherited"
-                  id="form-rate-limit"
-                  :model-value="form.rate_limit ?? ''"
-                  type="number"
-                  min="0"
-                  max="10000"
-                  placeholder="0 = 不限速"
-                  class="h-10"
-                  @update:model-value="(v) => form.rate_limit = parseNumberInput(v, { min: 0, max: 10000 })"
-                />
-                <span
-                  v-else
-                  class="flex h-10 w-full items-center rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-60"
-                >跟随系统默认</span>
-              </div>
-              <Switch
-                v-model="form.rate_limit_inherited"
-                class="shrink-0"
-              />
-            </div>
-          </div>
-
-          <!-- 额度 -->
           <div class="space-y-2">
             <Label class="text-sm font-medium">额度</Label>
             <div class="flex items-center gap-3">
-              <div class="flex-1 min-w-0">
+              <div class="min-w-0 flex-1">
                 <Input
                   v-if="!isEditMode && !form.unlimited"
                   id="form-initial-gift"
@@ -313,6 +201,69 @@
                 class="shrink-0"
               />
             </div>
+          </div>
+        </div>
+
+        <div class="space-y-4 border-t border-border pt-4 lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
+          <div class="flex items-center gap-2 border-b border-border/60 pb-2">
+            <span class="text-sm font-medium">访问限制</span>
+          </div>
+
+          <div class="space-y-2">
+            <Label
+              for="form-group"
+              class="text-sm font-medium"
+            >用户分组</Label>
+            <div class="w-full">
+              <Select v-model="groupSelectValue">
+                <SelectTrigger
+                  id="form-group"
+                  class="h-10 w-full text-sm"
+                >
+                  <SelectValue placeholder="选择用户分组" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem
+                    v-for="group in userGroups"
+                    :key="group.id"
+                    :value="group.id"
+                  >
+                    {{ group.name }}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <p class="text-xs text-muted-foreground">
+              保存后统一按所选分组默认限制生效。
+            </p>
+          </div>
+
+          <div class="space-y-2">
+            <Label class="text-sm font-medium">允许的 Provider</Label>
+            <span class="flex h-10 w-full items-center overflow-hidden whitespace-nowrap rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-80">
+              {{ formatProviderRestrictions(currentGroup?.allowed_providers) }}
+            </span>
+          </div>
+
+          <div class="space-y-2">
+            <Label class="text-sm font-medium">允许的 API 格式</Label>
+            <span class="flex h-10 w-full items-center overflow-hidden whitespace-nowrap rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-80">
+              {{ formatApiFormatRestrictions(currentGroup?.allowed_api_formats) }}
+            </span>
+          </div>
+
+          <div class="space-y-2">
+            <Label class="text-sm font-medium">允许的模型</Label>
+            <span class="flex h-10 w-full items-center overflow-hidden whitespace-nowrap rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-80">
+              {{ formatModelRestrictions(currentGroup?.allowed_models) }}
+            </span>
+          </div>
+
+          <div class="space-y-2">
+            <Label class="text-sm font-medium">速率限制 (请求/分钟)</Label>
+            <span class="flex h-10 w-full items-center overflow-hidden whitespace-nowrap rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-80">
+              {{ formatRateLimitSummary(currentGroup?.rate_limit) }}
+            </span>
           </div>
         </div>
       </div>
@@ -339,25 +290,30 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
-  Dialog,
   Button,
+  Dialog,
   Input,
   Label,
-  Switch,
   Select,
-  SelectTrigger,
-  SelectValue,
   SelectContent,
   SelectItem,
+  SelectTrigger,
+  SelectValue,
+  Switch,
 } from '@/components/ui'
-import { UserPlus, SquarePen } from 'lucide-vue-next'
+import { SquarePen, UserPlus } from 'lucide-vue-next'
 import { useFormDialog } from '@/composables/useFormDialog'
-import { MultiSelect } from '@/components/common'
-import { getProvidersSummary } from '@/api/endpoints/providers'
-import { getGlobalModels } from '@/api/global-models'
 import { adminApi } from '@/api/admin'
+import { getProvidersSummary } from '@/api/endpoints/providers'
+import type {
+  ProviderWithEndpointsSummary,
+  GlobalModelResponse,
+} from '@/api/endpoints/types'
+import { formatApiFormat } from '@/api/endpoints/types/api-format'
+import { getGlobalModels } from '@/api/global-models'
+import { usersApi, type UserGroup } from '@/api/users'
 import { log } from '@/utils/logger'
 import { parseNumberInput } from '@/utils/form'
 import {
@@ -367,10 +323,6 @@ import {
   validatePasswordByPolicy,
   type PasswordPolicyLevel,
 } from '@/utils/passwordPolicy'
-import type {
-  ProviderWithEndpointsSummary,
-  GlobalModelResponse,
-} from '@/api/endpoints/types'
 
 export interface UserFormData {
   id?: string
@@ -380,10 +332,8 @@ export interface UserFormData {
   unlimited?: boolean
   role: 'admin' | 'user'
   is_active?: boolean
-  allowed_providers?: string[] | null
-  allowed_api_formats?: string[] | null
-  allowed_models?: string[] | null
-  rate_limit?: number | null
+  group_id?: string | null
+  group_name?: string | null
 }
 
 const props = defineProps<{
@@ -400,32 +350,11 @@ const isOpen = computed(() => props.open)
 const saving = ref(false)
 const formNonce = ref(createFieldNonce())
 const passwordPolicyLevel = ref<PasswordPolicyLevel>('weak')
-
-// 选项数据
+const userGroups = ref<UserGroup[]>([])
 const providers = ref<ProviderWithEndpointsSummary[]>([])
 const globalModels = ref<GlobalModelResponse[]>([])
 const apiFormats = ref<Array<{ value: string; label: string }>>([])
 
-const providerOptions = computed(() =>
-  providers.value.map((provider) => ({
-    value: provider.id,
-    label: provider.name,
-  })),
-)
-const apiFormatOptions = computed(() =>
-  apiFormats.value.map((format) => ({
-    value: format.value,
-    label: format.label,
-  })),
-)
-const modelOptions = computed(() =>
-  globalModels.value.map((model) => ({
-    value: model.name,
-    label: model.name,
-  })),
-)
-
-// 表单数据
 const form = ref({
   username: '',
   password: '',
@@ -435,14 +364,34 @@ const form = ref({
   role: 'user' as 'admin' | 'user',
   unlimited: false,
   is_active: true,
-  provider_unrestricted: true,
-  api_format_unrestricted: true,
-  model_unrestricted: true,
-  rate_limit_inherited: true,
-  allowed_providers: [] as string[],
-  allowed_api_formats: [] as string[],
-  allowed_models: [] as string[],
-  rate_limit: undefined as number | undefined,
+  group_id: null as string | null,
+})
+
+const defaultGroup = computed(() => {
+  return userGroups.value.find(group => group.is_default) || userGroups.value[0] || null
+})
+
+const currentGroup = computed(() => {
+  return userGroups.value.find(group => group.id === form.value.group_id) || defaultGroup.value
+})
+
+const providerNameMap = computed(() => new Map(
+  providers.value.map(provider => [provider.id, provider.name])
+))
+
+const apiFormatLabelMap = computed(() => new Map(
+  apiFormats.value.map(format => [format.value, format.label])
+))
+
+const modelDisplayNameMap = computed(() => new Map(
+  globalModels.value.map(model => [model.name, model.display_name || model.name])
+))
+
+const groupSelectValue = computed({
+  get: () => form.value.group_id ?? defaultGroup.value?.id ?? '',
+  set: (value: string) => {
+    form.value.group_id = value || null
+  },
 })
 
 function createFieldNonce(): string {
@@ -460,21 +409,24 @@ function resetForm() {
     role: 'user',
     unlimited: false,
     is_active: true,
-    provider_unrestricted: true,
-    api_format_unrestricted: true,
-    model_unrestricted: true,
-    rate_limit_inherited: true,
-    allowed_providers: [],
-    allowed_api_formats: [],
-    allowed_models: [],
-    rate_limit: undefined,
+    group_id: null,
+  }
+}
+
+function syncFormGroupSelection() {
+  const fallbackGroupId = defaultGroup.value?.id ?? null
+  if (!fallbackGroupId) {
+    return
+  }
+  const hasSelectedGroup = !!form.value.group_id && userGroups.value.some(group => group.id === form.value.group_id)
+  if (!hasSelectedGroup) {
+    form.value.group_id = fallbackGroupId
   }
 }
 
 function loadUserData() {
   if (!props.user) return
   formNonce.value = createFieldNonce()
-  // 创建数组副本，避免与 props 数据共享引用
   form.value = {
     username: props.user.username,
     password: '',
@@ -484,15 +436,9 @@ function loadUserData() {
     role: props.user.role,
     unlimited: props.user.unlimited ?? false,
     is_active: props.user.is_active ?? true,
-    provider_unrestricted: props.user.allowed_providers == null,
-    api_format_unrestricted: props.user.allowed_api_formats == null,
-    model_unrestricted: props.user.allowed_models == null,
-    rate_limit_inherited: props.user.rate_limit == null,
-    allowed_providers: props.user.allowed_providers ? [...props.user.allowed_providers] : [],
-    allowed_api_formats: props.user.allowed_api_formats ? [...props.user.allowed_api_formats] : [],
-    allowed_models: props.user.allowed_models ? [...props.user.allowed_models] : [],
-    rate_limit: props.user.rate_limit ?? undefined,
+    group_id: props.user.group_id ?? null,
   }
+  syncFormGroupSelection()
 }
 
 const { isEditMode, handleDialogUpdate, handleCancel } = useFormDialog({
@@ -504,15 +450,15 @@ const { isEditMode, handleDialogUpdate, handleCancel } = useFormDialog({
   resetForm,
 })
 
-// 用户名验证
 const usernameRegex = /^[a-zA-Z0-9_.-]+$/
 const usernameError = computed(() => {
   const username = form.value.username.trim()
   if (!username) return ''
   if (username.length < 3) return '用户名长度至少为3个字符'
   if (username.length > 30) return '用户名长度不能超过30个字符'
-  if (!usernameRegex.test(username))
+  if (!usernameRegex.test(username)) {
     return '用户名只能包含字母、数字、下划线、连字符和点号'
+  }
   return ''
 })
 
@@ -525,15 +471,11 @@ const passwordError = computed(() => {
   return validatePasswordByPolicy(form.value.password, passwordPolicyLevel.value)
 })
 
-// 表单验证
 const isFormValid = computed(() => {
   const hasUsername = form.value.username.trim().length > 0
   const usernameValid = !usernameError.value
   const passwordFilled = form.value.password.length > 0
-  const passwordValid = passwordFilled
-    ? !passwordError.value
-    : isEditMode.value
-  // 编辑模式下可留空；填写时必须确认一致。创建模式不展示确认输入框。
+  const passwordValid = passwordFilled ? !passwordError.value : isEditMode.value
   const passwordConfirmed = isEditMode.value
     ? !passwordFilled || form.value.password === form.value.confirmPassword
     : true
@@ -543,27 +485,72 @@ const isFormValid = computed(() => {
   return hasUsername && usernameValid && passwordValid && passwordConfirmed && initialGiftValid
 })
 
+function formatRestrictionDisplay(
+  list: string[] | null | undefined,
+  unitLabel: string,
+  itemFormatter: (value: string) => string = value => value,
+): string {
+  if (list == null) return '不限制'
+  if (list.length === 0) return '未开放'
+  if (list.length <= 2) return list.map(itemFormatter).join('、')
+  return `${list.length} ${unitLabel}`
+}
 
-// 加载访问控制选项
-async function loadAccessControlOptions(): Promise<void> {
+function formatProviderName(providerId: string): string {
+  return providerNameMap.value.get(providerId) || providerId
+}
+
+function formatApiFormatName(apiFormat: string): string {
+  return apiFormatLabelMap.value.get(apiFormat) || formatApiFormat(apiFormat)
+}
+
+function formatModelName(modelName: string): string {
+  return modelDisplayNameMap.value.get(modelName) || modelName
+}
+
+function formatProviderRestrictions(list: string[] | null | undefined): string {
+  return formatRestrictionDisplay(list, '个供应商', formatProviderName)
+}
+
+function formatApiFormatRestrictions(list: string[] | null | undefined): string {
+  return formatRestrictionDisplay(list, '个格式', formatApiFormatName)
+}
+
+function formatModelRestrictions(list: string[] | null | undefined): string {
+  return formatRestrictionDisplay(list, '个模型', formatModelName)
+}
+
+function formatRateLimitSummary(rateLimit: number | null | undefined): string {
+  if (rateLimit == null) return '跟随系统默认'
+  if (rateLimit === 0) return '不限速'
+  return `${rateLimit} RPM`
+}
+
+async function loadFormOptions(): Promise<void> {
   try {
-    const [providersResponse, modelsData, formatsData, passwordPolicyResponse] = await Promise.all([
-      getProvidersSummary({ page_size: 9999 }),
-      getGlobalModels({ limit: 1000, is_active: true }),
-      adminApi.getApiFormats(),
+    const [passwordPolicyResponse, groupsData, providersResponse, modelsData, formatsData] = await Promise.all([
       adminApi.getSystemConfig('password_policy_level').catch(() => ({ value: 'weak' })),
+      usersApi.getAllUserGroups(),
+      getProvidersSummary({ page_size: 9999 }).catch(() => ({ items: [] } as { items: ProviderWithEndpointsSummary[] })),
+      getGlobalModels({ limit: 1000, is_active: true }).catch(() => ({ models: [] } as { models: GlobalModelResponse[] })),
+      adminApi.getApiFormats().catch(() => ({ formats: [] } as { formats: Array<{ value: string; label: string }> })),
     ])
+    passwordPolicyLevel.value = normalizePasswordPolicyLevel(passwordPolicyResponse.value)
+    userGroups.value = groupsData
     providers.value = providersResponse.items
     globalModels.value = modelsData.models || []
     apiFormats.value = formatsData.formats || []
-    passwordPolicyLevel.value = normalizePasswordPolicyLevel(passwordPolicyResponse.value)
+    syncFormGroupSelection()
   } catch (err) {
-    log.error('加载访问限制选项失败:', err)
+    log.error('加载用户表单选项失败:', err)
     passwordPolicyLevel.value = 'weak'
+    userGroups.value = []
+    providers.value = []
+    globalModels.value = []
+    apiFormats.value = []
   }
 }
 
-// 提交表单
 async function handleSubmit() {
   saving.value = true
   try {
@@ -572,16 +559,7 @@ async function handleSubmit() {
       email: form.value.email.trim() || '',
       unlimited: form.value.unlimited,
       role: form.value.role,
-      allowed_providers: form.value.provider_unrestricted
-        ? null
-        : [...form.value.allowed_providers],
-      allowed_api_formats: form.value.api_format_unrestricted
-        ? null
-        : [...form.value.allowed_api_formats],
-      allowed_models: form.value.model_unrestricted
-        ? null
-        : [...form.value.allowed_models],
-      rate_limit: form.value.rate_limit_inherited ? null : (form.value.rate_limit ?? 0),
+      group_id: form.value.group_id ?? defaultGroup.value?.id ?? null,
     }
 
     if (isEditMode.value && props.user?.id) {
@@ -598,7 +576,6 @@ async function handleSubmit() {
     if (form.value.password) {
       data.password = form.value.password
     } else if (!isEditMode.value) {
-      // 创建模式必须有密码
       return
     }
 
@@ -608,17 +585,25 @@ async function handleSubmit() {
   }
 }
 
-// 设置保存状态（供父组件调用）
 function setSaving(value: boolean) {
   saving.value = value
 }
 
-// 监听打开状态，加载选项数据
 watch(isOpen, (val) => {
   if (val) {
-    loadAccessControlOptions()
+    void loadFormOptions()
   }
 })
+
+watch(
+  [userGroups, () => props.open],
+  () => {
+    if (props.open) {
+      syncFormGroupSelection()
+    }
+  },
+  { deep: true }
+)
 
 watch(
   () => form.value.unlimited,

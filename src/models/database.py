@@ -70,6 +70,37 @@ class ExportMixin:
         )
 
 
+class UserGroup(Base):
+    """用户分组模型。"""
+
+    __tablename__ = "user_groups"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(100), unique=True, index=True, nullable=False)
+    description = Column(String(500), nullable=True)
+    is_default = Column(Boolean, default=False, nullable=False)
+
+    # 分组默认访问限制（NULL 表示不限制 / 跟随系统默认）
+    allowed_providers = Column(JSON, nullable=True)
+    allowed_api_formats = Column(JSON, nullable=True)
+    allowed_models = Column(JSON, nullable=True)
+    rate_limit = Column(
+        Integer, nullable=True, default=None
+    )  # NULL=继承系统默认，0=不限制，N=N RPM
+
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    users = relationship("User", back_populates="group", passive_deletes=True)
+
+
 class User(Base):
     """用户模型"""
 
@@ -108,13 +139,10 @@ class User(Base):
     ldap_dn = Column(String(512), nullable=True, index=True)
     ldap_username = Column(String(255), nullable=True, index=True)
 
-    # 访问限制（NULL 表示不限制，允许访问所有资源）
-    allowed_providers = Column(JSON, nullable=True)  # 允许使用的提供商 ID 列表
-    allowed_api_formats = Column(JSON, nullable=True)  # 允许使用的 API 格式列表
-    allowed_models = Column(JSON, nullable=True)  # 允许使用的模型名称列表
-    rate_limit = Column(
-        Integer, nullable=True, default=None
-    )  # 每分钟请求限制，NULL=继承系统默认，0=不限制，N=N RPM
+    # 用户分组（可选）
+    group_id = Column(
+        String(36), ForeignKey("user_groups.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     # Key 能力配置
     model_capability_settings = Column(JSON, nullable=True)  # 用户针对特定模型的能力配置
@@ -151,6 +179,7 @@ class User(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    group = relationship("UserGroup", back_populates="users")
 
     # 关系 - SET NULL: 保留历史记录，让数据库处理 SET NULL
     usage_records = relationship("Usage", back_populates="user", passive_deletes=True)
@@ -483,7 +512,9 @@ class Usage(Base):
     output_tokens = Column(Integer, default=0)
     input_output_total_tokens = Column(Integer, default=0)  # 输入 + 输出（旧 total_tokens 语义）
     input_context_tokens = Column(Integer, default=0)  # 输入上下文（input + cache_read）
-    total_tokens = Column(Integer, default=0)  # 真正总计 tokens（输入 + 输出 + 缓存创建 + 缓存读取）
+    total_tokens = Column(
+        Integer, default=0
+    )  # 真正总计 tokens（输入 + 输出 + 缓存创建 + 缓存读取）
 
     # 缓存相关 tokens (for Claude models)
     cache_creation_input_tokens = Column(Integer, default=0)
@@ -522,12 +553,8 @@ class Usage(Base):
     input_price_per_1m = Column(Numeric(20, 8), nullable=True)  # 输入单价
     output_price_per_1m = Column(Numeric(20, 8), nullable=True)  # 输出单价
     cache_creation_price_per_1m = Column(Numeric(20, 8), nullable=True)  # 缓存创建单价
-    cache_creation_price_per_1m_5m = Column(
-        Numeric(20, 8), nullable=True
-    )  # 5min TTL 缓存创建单价
-    cache_creation_price_per_1m_1h = Column(
-        Numeric(20, 8), nullable=True
-    )  # 1h TTL 缓存创建单价
+    cache_creation_price_per_1m_5m = Column(Numeric(20, 8), nullable=True)  # 5min TTL 缓存创建单价
+    cache_creation_price_per_1m_1h = Column(Numeric(20, 8), nullable=True)  # 1h TTL 缓存创建单价
     cache_read_price_per_1m = Column(Numeric(20, 8), nullable=True)  # 缓存读取单价
     price_per_request = Column(Numeric(20, 8), nullable=True)  # 按次计费单价（历史记录）
 

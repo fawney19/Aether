@@ -16,6 +16,7 @@ from src.config.settings import config
 from src.core.enums import UserRole
 from src.core.exceptions import BalanceInsufficientException
 from src.core.logger import logger
+from src.core.user_access import resolve_user_rate_limit
 from src.database.database import create_session
 from src.models.database import ApiKey, AuditEventType, User
 from src.services.auth.service import AuthService
@@ -315,8 +316,9 @@ class ApiRequestPipeline:
             user_rpm_key = limiter.get_standalone_rpm_key(api_key.id)
             key_rpm_limit = 0
         else:
+            user_rate_limit = resolve_user_rate_limit(user)
             effective_user_limit = (
-                max(int(user.rate_limit or 0), 0) if user.rate_limit is not None else system_default
+                max(int(user_rate_limit or 0), 0) if user_rate_limit is not None else system_default
             )
             user_rpm_key = limiter.get_user_rpm_key(user.id)
             key_rpm_limit = max(int(api_key.rate_limit or 0), 0)
