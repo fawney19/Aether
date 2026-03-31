@@ -274,10 +274,20 @@
                         </div>
                         <!-- 缓存创建 缓存读取 -->
                         <div class="flex items-center">
-                          <div class="flex items-center flex-1">
-                            <span class="text-xs text-muted-foreground w-[56px]">{{ cacheCreationSplitRows.length > 0 ? '创建合计' : '缓存创建' }}</span>
-                            <span class="text-sm font-semibold font-mono flex-1 text-center">{{ detail.cache_creation_input_tokens || 0 }}</span>
-                            <span class="text-xs font-mono">${{ (detail.cache_creation_cost || 0).toFixed(6) }}</span>
+                          <div class="flex items-center flex-1 min-w-0">
+                            <span class="text-xs text-muted-foreground w-[56px] shrink-0">缓存创建</span>
+                            <span
+                              class="text-sm font-semibold font-mono flex-1 text-center min-w-0 truncate px-2"
+                              :title="cacheCreationInlineTokenText"
+                            >
+                              {{ cacheCreationInlineTokenText }}
+                            </span>
+                            <span
+                              class="text-xs font-mono shrink-0 whitespace-nowrap"
+                              :title="cacheCreationInlineCostText"
+                            >
+                              {{ cacheCreationInlineCostText }}
+                            </span>
                           </div>
                           <Separator
                             orientation="vertical"
@@ -287,25 +297,6 @@
                             <span class="text-xs text-muted-foreground w-[56px]">缓存读取</span>
                             <span class="text-sm font-semibold font-mono flex-1 text-center">{{ detail.cache_read_input_tokens || 0 }}</span>
                             <span class="text-xs font-mono">${{ (detail.cache_read_cost || 0).toFixed(6) }}</span>
-                          </div>
-                        </div>
-                        <!-- 缓存创建 5m/1h 细分 -->
-                        <div
-                          v-if="cacheCreationSplitRows.length > 0"
-                          class="space-y-1 pl-[56px]"
-                        >
-                          <div
-                            v-for="row in cacheCreationSplitRows"
-                            :key="row.key"
-                            class="flex items-center gap-4 text-xs text-muted-foreground/70"
-                          >
-                            <span class="w-[72px]">{{ row.label }}</span>
-                            <span class="font-mono text-foreground/90">{{ formatNumber(row.tokens) }}</span>
-                            <span v-if="row.pricePer1M !== null">${{ formatPrice(row.pricePer1M) }}/M</span>
-                            <span
-                              v-if="row.cost !== null"
-                              class="font-mono"
-                            >${{ row.cost.toFixed(6) }}</span>
                           </div>
                         </div>
                       </template>
@@ -754,6 +745,20 @@ type PricingTierLike = {
   cache_read_price_per_1m?: number | null
   cache_ttl_pricing?: CacheTTLPriceEntry[] | null
 }
+
+type CacheCreationSplitRow = {
+  key: '5m' | '1h' | 'other'
+  ttlLabel: string
+  tokens: number
+  pricePer1M: number | null
+  cost: number | null
+}
+
+type BillingSnapshotCacheCreationSplitEntry = {
+  tokens?: unknown
+  price_per_1m?: unknown
+  cost?: unknown
+}
 const autoRefreshTimer = ref<ReturnType<typeof setInterval> | null>(null)
 const autoRefreshing = ref(false)
 const isPageVisible = ref(typeof document === 'undefined' ? true : !document.hidden)
@@ -1067,44 +1072,84 @@ const cacheCreationSummaryText = computed(() => {
 const cacheCreationSplitRows = computed(() => {
   if (!detail.value) return []
 
-  const rows: Array<{
-    key: string
-    label: string
-    tokens: number
-    pricePer1M: number | null
-    cost: number | null
-  }> = []
+  const rows: CacheCreationSplitRow[] = []
 
   const cache5m = detail.value.cache_creation_input_tokens_5m || 0
   const cache1h = detail.value.cache_creation_input_tokens_1h || 0
+  const cacheOther = getOtherCacheCreationTokens()
+  const cache5mSnapshot = getBillingSnapshotCacheCreationSplitEntry('5m')
+  const cache1hSnapshot = getBillingSnapshotCacheCreationSplitEntry('1h')
+  const cacheOtherSnapshot = getBillingSnapshotCacheCreationSplitEntry('other')
 
   if (cache5m > 0) {
     const pricePer1M = getRecordedCacheCreationPriceForTTL(5)
+      ?? toFiniteNumber(cache5mSnapshot?.price_per_1m)
       ?? getActiveCachePriceForTTL(5, 'cache_creation_price_per_1m')
     rows.push({
       key: '5m',
-      label: '5min 创建',
+      ttlLabel: '5m',
       tokens: cache5m,
       pricePer1M,
       cost: getRecordedCacheCreationCostForTTL(5)
+        ?? toFiniteNumber(cache5mSnapshot?.cost)
         ?? (pricePer1M !== null ? (cache5m * pricePer1M) / 1_000_000 : null),
     })
   }
 
   if (cache1h > 0) {
     const pricePer1M = getRecordedCacheCreationPriceForTTL(60)
+      ?? toFiniteNumber(cache1hSnapshot?.price_per_1m)
       ?? getActiveCachePriceForTTL(60, 'cache_creation_price_per_1m')
     rows.push({
       key: '1h',
-      label: '1h 创建',
+      ttlLabel: '1h',
       tokens: cache1h,
       pricePer1M,
       cost: getRecordedCacheCreationCostForTTL(60)
+        ?? toFiniteNumber(cache1hSnapshot?.cost)
         ?? (pricePer1M !== null ? (cache1h * pricePer1M) / 1_000_000 : null),
     })
   }
 
+  if (cacheOther > 0) {
+    const pricePer1M = toFiniteNumber(cacheOtherSnapshot?.price_per_1m)
+      ?? toFiniteNumber(detail.value.cache_creation_price_per_1m)
+    rows.push({
+      key: 'other',
+      ttlLabel: '其他',
+      tokens: cacheOther,
+      pricePer1M,
+      cost: toFiniteNumber(cacheOtherSnapshot?.cost)
+        ?? (pricePer1M !== null ? (cacheOther * pricePer1M) / 1_000_000 : null),
+    })
+  }
+
   return rows
+})
+
+const cacheCreationInlineTokenText = computed(() => {
+  if (!detail.value) return '0'
+  if (cacheCreationSplitRows.value.length === 0) {
+    return formatNumber(detail.value.cache_creation_input_tokens || 0)
+  }
+
+  return cacheCreationSplitRows.value
+    .map((row) => `${formatNumber(row.tokens)}（${row.ttlLabel}）`)
+    .join(' + ')
+})
+
+const cacheCreationInlineCostText = computed(() => {
+  if (!detail.value) return '$0.000000'
+  if (cacheCreationSplitRows.value.length === 0) {
+    return `$${(detail.value.cache_creation_cost || 0).toFixed(6)}`
+  }
+
+  return cacheCreationSplitRows.value
+    .map((row) => {
+      const costText = row.cost !== null ? `$${row.cost.toFixed(6)}` : 'N/A'
+      return `${costText}（${row.ttlLabel}）`
+    })
+    .join(' + ')
 })
 
 // 总输入上下文（输入 + 缓存创建 + 缓存读取）
@@ -1249,6 +1294,46 @@ function getRecordedCacheCreationCostForTTL(ttlMinutes: number): number | null {
     return toFiniteNumber(detail.value.cache_creation_cost_1h)
   }
   return toFiniteNumber(detail.value.cache_creation_cost_5m)
+}
+
+function getBillingSnapshotCacheCreationSplitEntry(
+  key: '5m' | '1h' | 'other',
+): BillingSnapshotCacheCreationSplitEntry | null {
+  const metadata = detail.value?.metadata
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null
+
+  const billingSnapshot = (metadata as Record<string, unknown>).billing_snapshot
+  if (!billingSnapshot || typeof billingSnapshot !== 'object' || Array.isArray(billingSnapshot)) {
+    return null
+  }
+
+  const cacheCreationSplit = (billingSnapshot as Record<string, unknown>).cache_creation_split
+  if (
+    !cacheCreationSplit
+    || typeof cacheCreationSplit !== 'object'
+    || Array.isArray(cacheCreationSplit)
+  ) {
+    return null
+  }
+
+  const entry = (cacheCreationSplit as Record<string, unknown>)[key]
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+    return null
+  }
+
+  return entry as BillingSnapshotCacheCreationSplitEntry
+}
+
+function getOtherCacheCreationTokens(): number {
+  if (!detail.value) return 0
+
+  const total = Number(detail.value.cache_creation_input_tokens || 0)
+  const known = Number(detail.value.cache_creation_input_tokens_5m || 0)
+    + Number(detail.value.cache_creation_input_tokens_1h || 0)
+  const fallback = Math.max(0, total - known)
+  const metadataTokens = toFiniteNumber(getBillingSnapshotCacheCreationSplitEntry('other')?.tokens)
+
+  return Math.max(0, Math.round(metadataTokens ?? fallback))
 }
 
 function getDefaultDataSourceForTab(tab: string): 'client' | 'provider' {
