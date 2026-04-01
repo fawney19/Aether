@@ -104,6 +104,7 @@ export interface UseReportsDataOptions {
   defaultPreset?: PeriodValue
   timeRange?: Ref<DateRangeParams>
   userFilter?: Ref<string[]>
+  providerFilter?: Ref<string[]>
   apiKeyFilter?: Ref<string[]>
   loadApiKeyOptions?: boolean
 }
@@ -114,6 +115,7 @@ export function useReportsData(options: UseReportsDataOptions = {}) {
     defaultPreset = 'today',
     timeRange: externalTimeRange,
     userFilter: externalUserFilter,
+    providerFilter: externalProviderFilter,
     apiKeyFilter: externalApiKeyFilter,
     loadApiKeyOptions = scope.kind === 'me',
   } = options
@@ -123,6 +125,7 @@ export function useReportsData(options: UseReportsDataOptions = {}) {
     granularity: 'auto',
   })
   const userFilter = externalUserFilter ?? ref<string[]>([])
+  const providerFilter = externalProviderFilter ?? ref<string[]>([])
   const apiKeyFilter = externalApiKeyFilter ?? ref<string[]>([])
   const apiKeyOptions = ref<AnalyticsFilterOption[]>([])
 
@@ -166,6 +169,7 @@ export function useReportsData(options: UseReportsDataOptions = {}) {
         time_range: params,
         filters: {
           user_ids: userFilter.value,
+          provider_names: providerFilter.value,
           api_key_ids: apiKeyFilter.value,
         },
       }
@@ -245,7 +249,7 @@ export function useReportsData(options: UseReportsDataOptions = {}) {
   )
 
   watch(
-    [userFilter, apiKeyFilter],
+    [userFilter, providerFilter, apiKeyFilter],
     () => {
       if (suppressNextApiKeyFilterLoad) {
         suppressNextApiKeyFilterLoad = false
