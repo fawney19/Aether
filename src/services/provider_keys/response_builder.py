@@ -10,6 +10,7 @@ from typing import Any
 
 from src.core.crypto import crypto_service
 from src.core.logger import logger
+from src.core.oauth_plan import resolve_oauth_plan_type
 from src.core.provider_oauth_utils import normalize_oauth_organizations
 from src.models.database import ProviderAPIKey
 from src.models.endpoint_models import EndpointAPIKeyResponse
@@ -91,6 +92,13 @@ def build_key_response(
             or str(getattr(provider_rel, "type", None) or "").strip()
             or None
         )
+
+    oauth_plan_type = resolve_oauth_plan_type(
+        persisted_plan_type=getattr(key, "oauth_plan_type", None),
+        auth_config=auth_config,
+        upstream_metadata=getattr(key, "upstream_metadata", None),
+        provider_type=provider_type,
+    )
 
     status_snapshot = resolve_provider_key_status_snapshot(
         key,

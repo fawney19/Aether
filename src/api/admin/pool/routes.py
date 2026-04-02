@@ -28,6 +28,7 @@ from src.api.base.pipeline import get_pipeline
 from src.core.crypto import crypto_service
 from src.core.exceptions import NotFoundException
 from src.core.logger import logger
+from src.core.oauth_plan import resolve_oauth_plan_type
 from src.core.provider_oauth_utils import normalize_oauth_organizations
 from src.database import get_db
 from src.models.database import Provider, ProviderAPIKey
@@ -264,23 +265,6 @@ def _is_known_banned_key(key: ProviderAPIKey, provider_type: str) -> bool:
 def _build_account_quota(provider_type: str, upstream_metadata: Any) -> str | None:
     return get_quota_reader(provider_type, upstream_metadata).display_summary()
 
-
-def _normalize_oauth_plan_type(plan_type: Any, provider_type: str) -> str | None:
-    if not isinstance(plan_type, str):
-        return None
-    text = plan_type.strip()
-    if not text:
-        return None
-
-    ptype = provider_type.strip().lower()
-    if ptype and text.lower().startswith(ptype):
-        trimmed = text[len(ptype) :].strip(" :-_")
-        if trimmed:
-            text = trimmed
-
-    return text or None
-
-
 def _extract_oauth_auth_config(key: ProviderAPIKey) -> dict[str, Any] | None:
     return extract_persisted_oauth_auth_config(key)
 
@@ -300,44 +284,16 @@ def _derive_oauth_plan_type(
     provider_type: str,
     auth_config: dict[str, Any] | None = None,
 ) -> str | None:
-    # Prefer persisted normalized field
-    persisted = _normalize_oauth_plan_type(getattr(key, "oauth_plan_type", None), provider_type)
-    if persisted:
-        return persisted
-
     if str(getattr(key, "auth_type", "") or "").strip().lower() != "oauth":
         return None
 
-    # Fallback 1: encrypted auth_config (common for Codex/Antigravity)
     cfg = auth_config if isinstance(auth_config, dict) else _extract_oauth_auth_config(key)
-    if cfg:
-        for plan_key in ("plan_type", "tier", "plan", "subscription_plan"):
-            normalized = _normalize_oauth_plan_type(cfg.get(plan_key), provider_type)
-            if normalized:
-                return normalized
-
-    # Fallback 2: upstream_metadata
-    upstream_metadata = getattr(key, "upstream_metadata", None)
-    if not isinstance(upstream_metadata, dict):
-        return None
-
-    provider_bucket = upstream_metadata.get(provider_type.strip().lower())
-    candidates: list[dict[str, Any]] = []
-    if isinstance(provider_bucket, dict):
-        candidates.append(provider_bucket)
-    candidates.append(upstream_metadata)
-
-    for source in candidates:
-        for plan_key in (
-            "plan_type",
-            "tier",
-            "subscription_title",
-            "subscription_plan",
-        ):
-            normalized = _normalize_oauth_plan_type(source.get(plan_key), provider_type)
-            if normalized:
-                return normalized
-    return None
+    return resolve_oauth_plan_type(
+        persisted_plan_type=getattr(key, "oauth_plan_type", None),
+        auth_config=cfg,
+        upstream_metadata=getattr(key, "upstream_metadata", None),
+        provider_type=provider_type,
+    )
 
 
 def _derive_oauth_account_id(auth_config: dict[str, Any] | None = None) -> str | None:

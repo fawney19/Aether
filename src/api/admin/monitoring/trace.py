@@ -17,6 +17,7 @@ from src.api.base.admin_adapter import AdminApiAdapter
 from src.api.base.context import ApiRequestContext
 from src.api.base.pipeline import get_pipeline
 from src.core.crypto import crypto_service
+from src.core.oauth_plan import resolve_oauth_plan_type
 from src.database import get_db
 from src.models.database import Provider, ProviderAPIKey, ProviderEndpoint
 from src.services.request.candidate import RequestCandidateService
@@ -278,13 +279,12 @@ class AdminGetRequestTraceAdapter(AdminApiAdapter):
                 if is_oauth:
                     # OAuth: auth_type 使用具体的 provider_type（如 kiro/codex/antigravity）
                     pid = key_provider_map.get(k.id)
+                    provider_type = provider_type_map.get(pid, "") if pid else ""
                     key_auth_type_map[k.id] = (
-                        provider_type_map.get(pid, "oauth") if pid else "oauth"
+                        provider_type if provider_type else "oauth"
                     )
-                    # 提取 plan_type（不同 provider 存储位置不同）
                     oauth_plan_type = None
-                    # 1. Codex: auth_config.plan_type
-                    # 2. Antigravity: auth_config.tier
+                    auth_config = None
                     if k.auth_config:
                         try:
                             decrypted_config = crypto_service.decrypt(k.auth_config)
@@ -292,27 +292,14 @@ class AdminGetRequestTraceAdapter(AdminApiAdapter):
                             email = auth_config.get("email")
                             if isinstance(email, str) and email.strip():
                                 key_account_label_map[k.id] = email.strip()
-                            oauth_plan_type = auth_config.get("plan_type")
-                            if not oauth_plan_type:
-                                ag_tier = auth_config.get("tier")
-                                if ag_tier and isinstance(ag_tier, str):
-                                    oauth_plan_type = ag_tier.lower()
                         except Exception:
                             pass
-                    # 3. Kiro: upstream_metadata.kiro.subscription_title
-                    #    subscription_title 通常为 "KIRO FREE" / "KIRO PRO+" 等，
-                    #    去掉 provider 名称前缀，只保留等级部分
-                    if not oauth_plan_type:
-                        um = getattr(k, "upstream_metadata", None) or {}
-                        kiro_meta = um.get("kiro") if isinstance(um, dict) else None
-                        if isinstance(kiro_meta, dict):
-                            sub_title = kiro_meta.get("subscription_title")
-                            if sub_title and isinstance(sub_title, str):
-                                # "KIRO FREE" -> "Free", "KIRO PRO+" -> "Pro+"
-                                ptype = provider_type_map.get(pid, "") if pid else ""
-                                if ptype and sub_title.upper().startswith(ptype.upper()):
-                                    sub_title = sub_title[len(ptype) :].strip()
-                                oauth_plan_type = sub_title
+                    oauth_plan_type = resolve_oauth_plan_type(
+                        persisted_plan_type=getattr(k, "oauth_plan_type", None),
+                        auth_config=auth_config,
+                        upstream_metadata=getattr(k, "upstream_metadata", None),
+                        provider_type=provider_type or None,
+                    )
                     key_oauth_plan_map[k.id] = oauth_plan_type
                     continue
                 else:

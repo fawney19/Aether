@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import src.services.provider.pool.dimensions  # noqa: F401
 from src.services.provider.pool.dimensions import get_preset_dimension, get_preset_names
+from src.services.provider.pool.dimensions._helpers import extract_plan_type
 
 
 def _key(metadata: dict, *, plan_type: str | None = None) -> SimpleNamespace:
@@ -91,3 +92,17 @@ def test_builtin_dimensions_compute_metric_in_range() -> None:
             mode=mode,
         )
         assert 0.0 <= metric <= 1.0
+
+
+def test_extract_plan_type_prefers_quota_metadata_over_stale_persisted_value() -> None:
+    key = _key(
+        {
+            "codex": {
+                "plan_type": "plus",
+                "primary_used_percent": 12,
+            }
+        },
+        plan_type="free",
+    )
+
+    assert extract_plan_type(key) == "plus"

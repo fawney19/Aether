@@ -96,17 +96,13 @@ def rank_descending(key_id: str, scores: dict[str, float], all_ids: list[str]) -
 
 
 def extract_plan_type(key_obj: Any) -> str | None:
-    direct = normalize_plan(getattr(key_obj, "oauth_plan_type", None))
-    if direct:
-        return direct
-
     metadata = safe_metadata(key_obj)
     for provider_type in (ProviderType.CODEX, ProviderType.KIRO, ProviderType.ANTIGRAVITY):
         plan_type = get_quota_reader(provider_type, metadata).plan_type()
         if plan_type:
             return plan_type
 
-    return None
+    return normalize_plan(getattr(key_obj, "oauth_plan_type", None))
 
 
 def _resolve_key_provider_type(key_obj: Any, provider_type: str | None = None) -> str | None:

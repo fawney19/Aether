@@ -15,17 +15,37 @@ def normalize_oauth_plan_type(plan_type: Any) -> str | None:
     return normalized
 
 
-def extract_oauth_plan_type_from_auth_config_data(auth_config: Any) -> str | None:
+def _normalize_oauth_plan_value(
+    plan_type: Any,
+    *,
+    provider_type: str | None = None,
+) -> str | None:
+    if not isinstance(plan_type, str):
+        return None
+    stripped = _strip_provider_prefix(plan_type, provider_type=provider_type)
+    if not stripped:
+        return None
+    return normalize_oauth_plan_type(stripped)
+
+
+def extract_oauth_plan_type_from_auth_config_data(
+    auth_config: Any,
+    *,
+    provider_type: str | None = None,
+) -> str | None:
     if not isinstance(auth_config, dict):
         return None
 
     # Codex: plan_type (free/plus/team/enterprise)
-    plan_type = normalize_oauth_plan_type(auth_config.get("plan_type"))
+    plan_type = _normalize_oauth_plan_value(
+        auth_config.get("plan_type"),
+        provider_type=provider_type,
+    )
     if plan_type:
         return plan_type
 
     # Antigravity: tier (PAID/FREE/...)
-    tier = normalize_oauth_plan_type(auth_config.get("tier"))
+    tier = _normalize_oauth_plan_value(auth_config.get("tier"), provider_type=provider_type)
     if tier:
         return tier
 
@@ -80,14 +100,69 @@ def extract_oauth_plan_type_from_upstream_metadata(
     if not isinstance(upstream_metadata, dict):
         return None
 
-    kiro_meta = upstream_metadata.get("kiro")
-    if isinstance(kiro_meta, dict):
-        subscription_title = kiro_meta.get("subscription_title")
-        if isinstance(subscription_title, str):
-            normalized = _strip_provider_prefix(subscription_title, provider_type=provider_type)
-            return normalize_oauth_plan_type(normalized)
+    normalized_provider = (
+        provider_type.strip().lower() if isinstance(provider_type, str) and provider_type.strip() else None
+    )
+    candidate_sources: list[tuple[dict[str, Any], str | None]] = []
+
+    def _append_bucket(bucket_key: str) -> None:
+        bucket = upstream_metadata.get(bucket_key)
+        if isinstance(bucket, dict):
+            candidate_sources.append((bucket, bucket_key))
+
+    if normalized_provider:
+        _append_bucket(normalized_provider)
+    else:
+        for bucket_key in ("codex", "kiro", "antigravity", "gemini_cli"):
+            _append_bucket(bucket_key)
+
+    candidate_sources.append((upstream_metadata, normalized_provider))
+
+    for source, source_provider in candidate_sources:
+        for key in ("plan_type", "tier", "plan", "subscription_plan"):
+            normalized = _normalize_oauth_plan_value(
+                source.get(key),
+                provider_type=source_provider,
+            )
+            if normalized:
+                return normalized
+
+        subscription_title = source.get("subscription_title")
+        normalized_subscription = _normalize_oauth_plan_value(
+            subscription_title,
+            provider_type=source_provider,
+        )
+        if normalized_subscription:
+            return normalized_subscription
 
     return None
+
+
+def resolve_oauth_plan_type(
+    *,
+    persisted_plan_type: Any = None,
+    auth_config: Any = None,
+    upstream_metadata: Any = None,
+    provider_type: str | None = None,
+) -> str | None:
+    upstream_plan = extract_oauth_plan_type_from_upstream_metadata(
+        upstream_metadata,
+        provider_type=provider_type,
+    )
+    if upstream_plan:
+        return upstream_plan
+
+    auth_plan = extract_oauth_plan_type_from_auth_config_data(
+        auth_config,
+        provider_type=provider_type,
+    )
+    if auth_plan:
+        return auth_plan
+
+    return _normalize_oauth_plan_value(
+        persisted_plan_type,
+        provider_type=provider_type,
+    )
 
 
 def extract_oauth_plan_type(
@@ -98,11 +173,10 @@ def extract_oauth_plan_type(
     silent: bool = True,
 ) -> str | None:
     auth_config = decrypt_auth_config_to_dict(encrypted_auth_config, silent=silent)
-    plan_type = extract_oauth_plan_type_from_auth_config_data(auth_config)
-    if plan_type:
-        return plan_type
-    return extract_oauth_plan_type_from_upstream_metadata(
-        upstream_metadata, provider_type=provider_type
+    return resolve_oauth_plan_type(
+        auth_config=auth_config,
+        upstream_metadata=upstream_metadata,
+        provider_type=provider_type,
     )
 
 
