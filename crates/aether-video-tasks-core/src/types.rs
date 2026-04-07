@@ -42,7 +42,7 @@ pub struct LocalVideoTaskReadRefreshPlan {
 #[derive(Debug, Clone, PartialEq)]
 pub enum LocalVideoTaskContentAction {
     Immediate { status_code: u16, body_json: Value },
-    StreamPlan(ExecutionPlan),
+    StreamPlan(Box<ExecutionPlan>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

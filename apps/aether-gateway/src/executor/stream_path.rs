@@ -170,8 +170,10 @@ async fn maybe_execute_local_video_task_content_stream(
             &body_json,
         )?)),
         crate::video_tasks::LocalVideoTaskContentAction::StreamPlan(plan) => {
-            execute_execution_runtime_stream(state, plan, trace_id, decision, plan_kind, None, None)
-                .await
+            execute_execution_runtime_stream(
+                state, *plan, trace_id, decision, plan_kind, None, None,
+            )
+            .await
         }
     }
 }

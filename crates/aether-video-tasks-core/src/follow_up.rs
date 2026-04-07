@@ -1,18 +1,35 @@
 use serde_json::{Map, Value};
 
-pub fn build_video_follow_up_report_context(
-    request_id: &str,
-    user_id: &str,
-    api_key_id: &str,
-    task_id: &str,
-    provider_id: &str,
-    endpoint_id: &str,
-    key_id: &str,
-    provider_name: Option<&str>,
-    model_name: Option<&str>,
-    client_api_format: &str,
-    provider_api_format: &str,
-) -> Value {
+#[derive(Clone, Copy, Debug)]
+pub struct VideoFollowUpReportContextInput<'a> {
+    pub request_id: &'a str,
+    pub user_id: &'a str,
+    pub api_key_id: &'a str,
+    pub task_id: &'a str,
+    pub provider_id: &'a str,
+    pub endpoint_id: &'a str,
+    pub key_id: &'a str,
+    pub provider_name: Option<&'a str>,
+    pub model_name: Option<&'a str>,
+    pub client_api_format: &'a str,
+    pub provider_api_format: &'a str,
+}
+
+pub fn build_video_follow_up_report_context(input: VideoFollowUpReportContextInput<'_>) -> Value {
+    let VideoFollowUpReportContextInput {
+        request_id,
+        user_id,
+        api_key_id,
+        task_id,
+        provider_id,
+        endpoint_id,
+        key_id,
+        provider_name,
+        model_name,
+        client_api_format,
+        provider_api_format,
+    } = input;
+
     let mut context = Map::new();
     context.insert(
         "request_id".to_string(),
@@ -84,23 +101,26 @@ pub fn resolve_follow_up_auth(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_video_follow_up_report_context, resolve_follow_up_auth};
+    use super::{
+        build_video_follow_up_report_context, resolve_follow_up_auth,
+        VideoFollowUpReportContextInput,
+    };
 
     #[test]
     fn builds_follow_up_report_context_with_transport_metadata() {
-        let context = build_video_follow_up_report_context(
-            "req_123",
-            "user_123",
-            "key_123",
-            "task_123",
-            "provider_123",
-            "endpoint_123",
-            "transport_key_123",
-            Some("provider-name"),
-            Some("model-name"),
-            "openai:video",
-            "openai:video",
-        );
+        let context = build_video_follow_up_report_context(VideoFollowUpReportContextInput {
+            request_id: "req_123",
+            user_id: "user_123",
+            api_key_id: "key_123",
+            task_id: "task_123",
+            provider_id: "provider_123",
+            endpoint_id: "endpoint_123",
+            key_id: "transport_key_123",
+            provider_name: Some("provider-name"),
+            model_name: Some("model-name"),
+            client_api_format: "openai:video",
+            provider_api_format: "openai:video",
+        });
 
         assert_eq!(context["request_id"].as_str(), Some("req_123"));
         assert_eq!(context["provider_id"].as_str(), Some("provider_123"));

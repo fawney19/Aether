@@ -8,7 +8,7 @@ use crate::{
     build_video_follow_up_report_context, current_unix_timestamp_secs, gemini_metadata_video_url,
     request_body_string, request_body_u32, resolve_follow_up_auth, GeminiVideoTaskSeed,
     LocalVideoTaskFollowUpPlan, LocalVideoTaskReadResponse, LocalVideoTaskSnapshot,
-    LocalVideoTaskStatus, DEFAULT_VIDEO_TASK_MAX_POLL_COUNT,
+    LocalVideoTaskStatus, VideoFollowUpReportContextInput, DEFAULT_VIDEO_TASK_MAX_POLL_COUNT,
     DEFAULT_VIDEO_TASK_POLL_INTERVAL_SECONDS,
 };
 
@@ -233,17 +233,19 @@ impl GeminiVideoTaskSeed {
             },
             report_kind: Some("gemini_video_cancel_sync_finalize".to_string()),
             report_context: Some(build_video_follow_up_report_context(
-                &self.persistence.request_id,
-                &user_id,
-                &api_key_id,
-                &self.local_short_id,
-                &self.transport.provider_id,
-                &self.transport.endpoint_id,
-                &self.transport.key_id,
-                self.transport.provider_name.as_deref(),
-                Some(self.model.as_str()),
-                "gemini:video",
-                "gemini:video",
+                VideoFollowUpReportContextInput {
+                    request_id: &self.persistence.request_id,
+                    user_id: &user_id,
+                    api_key_id: &api_key_id,
+                    task_id: &self.local_short_id,
+                    provider_id: &self.transport.provider_id,
+                    endpoint_id: &self.transport.endpoint_id,
+                    key_id: &self.transport.key_id,
+                    provider_name: self.transport.provider_name.as_deref(),
+                    model_name: Some(self.model.as_str()),
+                    client_api_format: "gemini:video",
+                    provider_api_format: "gemini:video",
+                },
             )),
         })
     }

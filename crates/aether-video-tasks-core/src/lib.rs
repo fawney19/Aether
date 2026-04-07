@@ -18,7 +18,9 @@ mod util;
 pub use body::{
     context_text, context_u64, request_body_string, request_body_text, request_body_u32,
 };
-pub use follow_up::{build_video_follow_up_report_context, resolve_follow_up_auth};
+pub use follow_up::{
+    build_video_follow_up_report_context, resolve_follow_up_auth, VideoFollowUpReportContextInput,
+};
 pub use gemini::map_gemini_stored_task_to_read_response;
 pub use openai::map_openai_stored_task_to_read_response;
 pub use path::{

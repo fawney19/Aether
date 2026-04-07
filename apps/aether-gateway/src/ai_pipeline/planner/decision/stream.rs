@@ -104,6 +104,7 @@ async fn maybe_build_local_video_task_content_stream_decision_payload(
     let crate::video_tasks::LocalVideoTaskContentAction::StreamPlan(plan) = action else {
         return Ok(None);
     };
+    let plan = *plan;
     let provider_contract = plan.provider_api_format.clone();
     let client_contract = plan.client_api_format.clone();
     let execution_strategy = if plan.provider_api_format == plan.client_api_format {

@@ -11,7 +11,8 @@ use crate::{
     parse_video_content_variant, request_body_string, request_body_u32, resolve_follow_up_auth,
     LocalVideoTaskContentAction, LocalVideoTaskFollowUpPlan, LocalVideoTaskReadResponse,
     LocalVideoTaskSnapshot, LocalVideoTaskStatus, OpenAiVideoTaskSeed,
-    DEFAULT_VIDEO_TASK_MAX_POLL_COUNT, DEFAULT_VIDEO_TASK_POLL_INTERVAL_SECONDS,
+    VideoFollowUpReportContextInput, DEFAULT_VIDEO_TASK_MAX_POLL_COUNT,
+    DEFAULT_VIDEO_TASK_POLL_INTERVAL_SECONDS,
 };
 
 pub fn map_openai_stored_task_to_read_response(
@@ -208,34 +209,36 @@ impl OpenAiVideoTaskSeed {
             )
         };
 
-        Some(LocalVideoTaskContentAction::StreamPlan(ExecutionPlan {
-            request_id: trace_id.to_string(),
-            candidate_id: None,
-            provider_name: self.transport.provider_name.clone(),
-            provider_id: self.transport.provider_id.clone(),
-            endpoint_id: self.transport.endpoint_id.clone(),
-            key_id: self.transport.key_id.clone(),
-            method: "GET".to_string(),
-            url,
-            headers,
-            content_type: None,
-            content_encoding: None,
-            body: RequestBody {
-                json_body: None,
-                body_bytes_b64: None,
-                body_ref: None,
+        Some(LocalVideoTaskContentAction::StreamPlan(Box::new(
+            ExecutionPlan {
+                request_id: trace_id.to_string(),
+                candidate_id: None,
+                provider_name: self.transport.provider_name.clone(),
+                provider_id: self.transport.provider_id.clone(),
+                endpoint_id: self.transport.endpoint_id.clone(),
+                key_id: self.transport.key_id.clone(),
+                method: "GET".to_string(),
+                url,
+                headers,
+                content_type: None,
+                content_encoding: None,
+                body: RequestBody {
+                    json_body: None,
+                    body_bytes_b64: None,
+                    body_ref: None,
+                },
+                stream: true,
+                client_api_format: "openai:video".to_string(),
+                provider_api_format: "openai:video".to_string(),
+                model_name: self
+                    .model
+                    .clone()
+                    .or_else(|| self.transport.model_name.clone()),
+                proxy: self.transport.proxy.clone(),
+                tls_profile: self.transport.tls_profile.clone(),
+                timeouts: self.transport.timeouts.clone(),
             },
-            stream: true,
-            client_api_format: "openai:video".to_string(),
-            provider_api_format: "openai:video".to_string(),
-            model_name: self
-                .model
-                .clone()
-                .or_else(|| self.transport.model_name.clone()),
-            proxy: self.transport.proxy.clone(),
-            tls_profile: self.transport.tls_profile.clone(),
-            timeouts: self.transport.timeouts.clone(),
-        }))
+        )))
     }
 
     pub fn client_body_json(&self) -> Value {
@@ -342,17 +345,19 @@ impl OpenAiVideoTaskSeed {
             },
             report_kind: Some("openai_video_delete_sync_finalize".to_string()),
             report_context: Some(build_video_follow_up_report_context(
-                &self.persistence.request_id,
-                &user_id,
-                &api_key_id,
-                &self.local_task_id,
-                &self.transport.provider_id,
-                &self.transport.endpoint_id,
-                &self.transport.key_id,
-                self.transport.provider_name.as_deref(),
-                model_name.as_deref(),
-                "openai:video",
-                "openai:video",
+                VideoFollowUpReportContextInput {
+                    request_id: &self.persistence.request_id,
+                    user_id: &user_id,
+                    api_key_id: &api_key_id,
+                    task_id: &self.local_task_id,
+                    provider_id: &self.transport.provider_id,
+                    endpoint_id: &self.transport.endpoint_id,
+                    key_id: &self.transport.key_id,
+                    provider_name: self.transport.provider_name.as_deref(),
+                    model_name: model_name.as_deref(),
+                    client_api_format: "openai:video",
+                    provider_api_format: "openai:video",
+                },
             )),
         })
     }
@@ -466,17 +471,19 @@ impl OpenAiVideoTaskSeed {
             },
             report_kind: Some("openai_video_cancel_sync_finalize".to_string()),
             report_context: Some(build_video_follow_up_report_context(
-                &self.persistence.request_id,
-                &user_id,
-                &api_key_id,
-                &self.local_task_id,
-                &self.transport.provider_id,
-                &self.transport.endpoint_id,
-                &self.transport.key_id,
-                self.transport.provider_name.as_deref(),
-                model_name.as_deref(),
-                "openai:video",
-                "openai:video",
+                VideoFollowUpReportContextInput {
+                    request_id: &self.persistence.request_id,
+                    user_id: &user_id,
+                    api_key_id: &api_key_id,
+                    task_id: &self.local_task_id,
+                    provider_id: &self.transport.provider_id,
+                    endpoint_id: &self.transport.endpoint_id,
+                    key_id: &self.transport.key_id,
+                    provider_name: self.transport.provider_name.as_deref(),
+                    model_name: model_name.as_deref(),
+                    client_api_format: "openai:video",
+                    provider_api_format: "openai:video",
+                },
             )),
         })
     }
@@ -513,19 +520,20 @@ impl OpenAiVideoTaskSeed {
             .entry("content-type".to_string())
             .or_insert_with(|| content_type.clone());
 
-        let mut report_context = build_video_follow_up_report_context(
-            &self.persistence.request_id,
-            &user_id,
-            &api_key_id,
-            &self.local_task_id,
-            &self.transport.provider_id,
-            &self.transport.endpoint_id,
-            &self.transport.key_id,
-            self.transport.provider_name.as_deref(),
-            model_name.as_deref(),
-            "openai:video",
-            "openai:video",
-        );
+        let mut report_context =
+            build_video_follow_up_report_context(VideoFollowUpReportContextInput {
+                request_id: &self.persistence.request_id,
+                user_id: &user_id,
+                api_key_id: &api_key_id,
+                task_id: &self.local_task_id,
+                provider_id: &self.transport.provider_id,
+                endpoint_id: &self.transport.endpoint_id,
+                key_id: &self.transport.key_id,
+                provider_name: self.transport.provider_name.as_deref(),
+                model_name: model_name.as_deref(),
+                client_api_format: "openai:video",
+                provider_api_format: "openai:video",
+            });
         if let Some(report_context_object) = report_context.as_object_mut() {
             report_context_object.insert("original_request_body".to_string(), body_json.clone());
         }
