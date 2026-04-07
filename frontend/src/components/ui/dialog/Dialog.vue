@@ -43,7 +43,7 @@
             <slot name="header">
               <div
                 v-if="title"
-                class="border-b border-border px-6 py-4"
+                class="border-b border-border px-4 py-4 sm:px-6"
               >
                 <div class="flex items-center gap-3">
                   <div
@@ -73,14 +73,14 @@
             </slot>
 
             <!-- 内容区域：可选添加 padding -->
-            <div :class="noPadding ? '' : 'px-6 py-3'">
+            <div :class="noPadding ? '' : 'px-4 py-3 sm:px-6'">
               <slot />
             </div>
 
             <!-- Footer 区域：如果有 footer 插槽，自动添加样式 -->
             <div
               v-if="slots.footer"
-              class="border-t border-border px-6 py-4 bg-muted/10 flex flex-row-reverse gap-3"
+              class="border-t border-border bg-muted/10 px-4 py-4 sm:px-6 flex flex-row-reverse gap-3"
             >
               <slot name="footer" />
             </div>
