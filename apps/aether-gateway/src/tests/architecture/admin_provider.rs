@@ -498,7 +498,8 @@ fn admin_provider_write_uses_specific_local_owners() {
     let endpoint_keys_mutations = read_workspace_file(
         "apps/aether-gateway/src/handlers/admin/provider/endpoint_keys/mutations.rs",
     );
-    for pattern in ["use super::super::write::keys::{"] {
+    {
+        let pattern = "use super::super::write::keys::{";
         assert!(
             endpoint_keys_mutations.contains(pattern),
             "handlers/admin/provider/endpoint_keys/mutations.rs should import explicit write owner {pattern}"

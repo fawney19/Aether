@@ -18,7 +18,8 @@ fn usage_runtime_paths_depend_on_shared_crates_not_app_runtime_shims() {
         );
     }
 
-    for path in ["apps/aether-gateway/src/async_task/runtime.rs"] {
+    {
+        let path = "apps/aether-gateway/src/async_task/runtime.rs";
         let source = read_workspace_file(path);
         assert!(
             source.contains("aether_billing"),
