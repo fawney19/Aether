@@ -2,18 +2,31 @@
   <TableCard>
     <template #header>
       <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div class="min-w-0">
-          <h3 class="text-sm font-semibold tracking-[0.01em]">
-            {{ title }}
-          </h3>
-          <p class="mt-1 text-[11px] text-muted-foreground">
-            {{ description }}
-          </p>
-        </div>
+        <button
+          type="button"
+          class="-m-2 flex min-w-0 flex-1 items-start gap-3 rounded-xl p-2 text-left transition-colors hover:bg-muted/35"
+          :aria-expanded="open"
+          @click="handleOpenToggle"
+        >
+          <span class="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/[0.18]">
+            <ChevronRight
+              class="h-4 w-4 text-muted-foreground transition-transform duration-200"
+              :class="{ 'rotate-90': open }"
+            />
+          </span>
+          <span class="min-w-0">
+            <span class="block text-sm font-semibold tracking-[0.01em]">
+              {{ title }}
+            </span>
+            <span class="mt-1 block text-[11px] text-muted-foreground">
+              {{ description }}
+            </span>
+          </span>
+        </button>
 
         <div class="flex flex-col items-start gap-2 lg:items-end">
           <Tabs
-            v-if="tabs.length > 0"
+            v-if="open && tabs.length > 0"
             :model-value="activeTabValue"
             class="w-full lg:w-auto"
             @update:model-value="handleTabChange"
@@ -31,7 +44,7 @@
           </Tabs>
 
           <div
-            v-if="isRefreshing"
+            v-if="open && isRefreshing"
             class="inline-flex h-7 items-center rounded-lg border border-border/70 bg-background px-2.5 text-[10px] text-muted-foreground"
           >
             更新中
@@ -41,7 +54,12 @@
     </template>
 
     <div
-      v-if="showLoadingState"
+      v-if="!open"
+      class="h-1"
+      aria-hidden="true"
+    />
+    <div
+      v-else-if="showLoadingState"
       class="p-6"
     >
       <LoadingState />
@@ -280,6 +298,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { ChevronRight } from 'lucide-vue-next'
 import type { AnalyticsBreakdownRow } from '@/api/analytics'
 import { EmptyState, LoadingState } from '@/components/common'
 import {
@@ -309,6 +328,7 @@ interface Props {
   rows: AnalyticsBreakdownRow[]
   tabs?: BreakdownTabOption[]
   activeTab?: string
+  open?: boolean
   loading?: boolean
   hasLoaded?: boolean
   error?: boolean
@@ -318,15 +338,14 @@ interface Props {
 const props = withDefaults(defineProps<Props>(), {
   tabs: () => [],
   activeTab: '',
+  open: false,
   loading: false,
   hasLoaded: false,
   error: false,
   showActualCost: false,
 })
 
-const emit = defineEmits<{
-  (e: 'update:activeTab', value: string): void
-}>()
+const emit = defineEmits(['update:open', 'update:activeTab'])
 
 const showLoadingState = computed(() => props.loading && (!props.hasLoaded || props.rows.length === 0))
 const showUnavailableState = computed(() => props.error && !props.loading && props.rows.length === 0)
@@ -348,6 +367,10 @@ function handleTabChange(value: string | number) {
   if (typeof value === 'string') {
     emit('update:activeTab', value)
   }
+}
+
+function handleOpenToggle() {
+  emit('update:open', !props.open)
 }
 
 function secondaryCostText(row: AnalyticsBreakdownRow): string {

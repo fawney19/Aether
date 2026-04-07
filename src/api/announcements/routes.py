@@ -137,6 +137,24 @@ async def mark_announcement_as_read(
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
+@router.post("/read-all")
+async def mark_all_announcements_as_read(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    """
+    标记全部公告为已读
+
+    将当前用户可见的全部有效公告标记为已读。需要登录。
+
+    **返回字段**:
+    - `message`: 操作结果信息
+    - `marked_count`: 本次新增的已读数量
+    """
+    adapter = MarkAllAnnouncementsReadAdapter()
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
 # ============== 管理员端点 ==============
 
 
@@ -331,6 +349,16 @@ class MarkAnnouncementReadAdapter(AnnouncementUserAdapter):
     async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
         AnnouncementService.mark_as_read(context.db, self.announcement_id, context.user.id)
         return {"message": "公告已标记为已读"}
+
+
+class MarkAllAnnouncementsReadAdapter(AnnouncementUserAdapter):
+    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
+        marked_count = AnnouncementService.mark_all_as_read(
+            context.db,
+            context.user.id,
+            active_only=True,
+        )
+        return {"message": "已全部标记为已读", "marked_count": marked_count}
 
 
 class UnreadAnnouncementCountAdapter(AnnouncementUserAdapter):
