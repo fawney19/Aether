@@ -11,6 +11,7 @@ OpenAI CLI / Responses Normalizer (OPENAI_CLI)
 """
 
 import json
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -403,6 +404,9 @@ class OpenAICliNormalizer(FormatNormalizer):
                     and key not in _HANDLED_KEYS
                 ):
                     result[key] = value
+
+        if str(target_variant or "").strip().lower() == "codex":
+            result = self._repair_codex_orphan_function_outputs(result)
 
         return result
 
@@ -1926,6 +1930,344 @@ class OpenAICliNormalizer(FormatNormalizer):
                 out.append({"type": "message", "role": role, "content": content_items})
 
         return out
+
+    def _repair_codex_orphan_function_outputs(self, request: dict[str, Any]) -> dict[str, Any]:
+        input_items = request.get("input")
+        if not isinstance(input_items, list):
+            return request
+
+        tool_catalog = self._collect_codex_tool_catalog(request.get("tools"))
+
+        next_auto_counter = self._detect_next_call_auto_counter(input_items)
+
+        def next_call_id() -> str:
+            nonlocal next_auto_counter
+            next_auto_counter += 1
+            return f"call_auto_{next_auto_counter}"
+
+        call_templates_by_id: dict[str, dict[str, Any]] = {}
+        for raw_item in input_items:
+            if not isinstance(raw_item, dict):
+                continue
+            if str(raw_item.get("type") or "") != "function_call":
+                continue
+            call_id = str(raw_item.get("call_id") or raw_item.get("id") or "").strip()
+            if not call_id:
+                continue
+            call_templates_by_id[call_id] = self._normalize_codex_function_call_item(
+                raw_item,
+                call_id=call_id,
+                tool_catalog=tool_catalog,
+                fallback_output=None,
+            )
+
+        repaired_input: list[dict[str, Any] | Any] = []
+        emitted_call_ids: set[str] = set()
+        repaired_orphans = 0
+
+        for raw_item in input_items:
+            if not isinstance(raw_item, dict):
+                repaired_input.append(raw_item)
+                continue
+
+            item_type = str(raw_item.get("type") or "")
+
+            if item_type == "function_call":
+                call_id = str(raw_item.get("call_id") or raw_item.get("id") or "").strip()
+                if not call_id:
+                    call_id = next_call_id()
+                normalized_call = self._normalize_codex_function_call_item(
+                    raw_item,
+                    call_id=call_id,
+                    tool_catalog=tool_catalog,
+                    fallback_output=None,
+                )
+                call_templates_by_id[call_id] = dict(normalized_call)
+                if call_id in emitted_call_ids:
+                    continue
+                emitted_call_ids.add(call_id)
+                repaired_input.append(normalized_call)
+                continue
+
+            if item_type == "function_call_output":
+                normalized_output = self._normalize_codex_function_call_output_item(
+                    raw_item,
+                    next_call_id=next_call_id,
+                )
+                call_id = str(normalized_output.get("call_id") or "").strip()
+                if call_id not in emitted_call_ids:
+                    template = call_templates_by_id.get(call_id)
+                    if template is None:
+                        template = self._build_synthetic_codex_function_call(
+                            call_id=call_id,
+                            output_item=normalized_output,
+                            tool_catalog=tool_catalog,
+                        )
+                        call_templates_by_id[call_id] = dict(template)
+                    repaired_input.append(dict(template))
+                    emitted_call_ids.add(call_id)
+                    repaired_orphans += 1
+                repaired_input.append(normalized_output)
+                continue
+
+            repaired_input.append(raw_item)
+
+        if repaired_orphans:
+            logger.debug(
+                "[OpenAICliNormalizer] repaired codex orphan function_call_output items: count={}",
+                repaired_orphans,
+            )
+
+        request["input"] = repaired_input
+        return request
+
+    def _collect_codex_tool_catalog(self, tools: Any) -> dict[str, dict[str, Any]]:
+        catalog: dict[str, dict[str, Any]] = {}
+        if not isinstance(tools, list):
+            return catalog
+
+        for raw_tool in tools:
+            if not isinstance(raw_tool, dict):
+                continue
+
+            name = ""
+            parameters: dict[str, Any] | None = None
+
+            if raw_tool.get("type") == "function" and isinstance(raw_tool.get("function"), dict):
+                fn = raw_tool["function"]
+                name = str(fn.get("name") or "").strip()
+                parameters = fn.get("parameters") if isinstance(fn.get("parameters"), dict) else None
+            else:
+                name = str(raw_tool.get("name") or "").strip()
+                parameters = (
+                    raw_tool.get("parameters")
+                    if isinstance(raw_tool.get("parameters"), dict)
+                    else None
+                )
+
+            if not name:
+                continue
+
+            properties = parameters.get("properties") if isinstance(parameters, dict) else None
+            property_names = (
+                {
+                    str(prop_name).strip()
+                    for prop_name in properties.keys()
+                    if isinstance(prop_name, str) and str(prop_name).strip()
+                }
+                if isinstance(properties, dict)
+                else set()
+            )
+            catalog[name.lower()] = {"name": name, "property_names": property_names}
+
+        return catalog
+
+    @staticmethod
+    def _detect_next_call_auto_counter(items: list[Any]) -> int:
+        next_counter = 0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            raw_call_id = str(item.get("call_id") or item.get("id") or "").strip()
+            if not raw_call_id.startswith("call_auto_"):
+                continue
+            try:
+                next_counter = max(next_counter, int(raw_call_id.removeprefix("call_auto_")))
+            except ValueError:
+                continue
+        return next_counter
+
+    def _normalize_codex_function_call_item(
+        self,
+        item: dict[str, Any],
+        *,
+        call_id: str,
+        tool_catalog: dict[str, dict[str, Any]],
+        fallback_output: str | None,
+    ) -> dict[str, Any]:
+        normalized = dict(item)
+        normalized["type"] = "function_call"
+        normalized["call_id"] = call_id
+
+        tool_name = str(normalized.get("name") or "").strip()
+        if not tool_name and fallback_output:
+            tool_name = self._infer_codex_tool_name_from_output(fallback_output, tool_catalog)
+        if not tool_name:
+            tool_name = self._fallback_codex_tool_name(tool_catalog)
+        normalized["name"] = tool_name
+
+        arguments = normalized.get("arguments")
+        if arguments is None:
+            normalized["arguments"] = "{}"
+        elif not isinstance(arguments, str):
+            normalized["arguments"] = _stable_json_dumps(arguments)
+
+        return normalized
+
+    def _normalize_codex_function_call_output_item(
+        self,
+        item: dict[str, Any],
+        *,
+        next_call_id: Callable[[], str],
+    ) -> dict[str, Any]:
+        normalized = dict(item)
+        call_id = str(normalized.get("call_id") or normalized.get("id") or "").strip()
+        if not call_id:
+            call_id = next_call_id()
+        normalized["call_id"] = call_id
+
+        output = normalized.get("output")
+        if isinstance(output, str):
+            normalized["output"] = output
+        elif output is None:
+            normalized["output"] = ""
+        else:
+            normalized["output"] = _stable_json_dumps(output)
+
+        return normalized
+
+    def _build_synthetic_codex_function_call(
+        self,
+        *,
+        call_id: str,
+        output_item: dict[str, Any],
+        tool_catalog: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        output_text = str(output_item.get("output") or "")
+        tool_name = str(output_item.get("name") or "").strip()
+        if not tool_name:
+            tool_name = self._infer_codex_tool_name_from_output(output_text, tool_catalog)
+        if not tool_name:
+            tool_name = self._fallback_codex_tool_name(tool_catalog)
+
+        arguments = self._infer_codex_tool_arguments(tool_name, output_text, tool_catalog)
+        return {
+            "type": "function_call",
+            "call_id": call_id,
+            "name": tool_name,
+            "arguments": _stable_json_dumps(arguments) if arguments else "{}",
+        }
+
+    def _infer_codex_tool_name_from_output(
+        self,
+        output_text: str,
+        tool_catalog: dict[str, dict[str, Any]],
+    ) -> str:
+        lowered_output = output_text.lower()
+        available = set(tool_catalog.keys())
+
+        if "skill" in available and "<skill_content" in lowered_output:
+            return str(tool_catalog["skill"]["name"])
+
+        if "read" in available and (
+            output_text.startswith("File not found: ") or "<path>" in lowered_output
+        ):
+            return str(tool_catalog["read"]["name"])
+
+        lines = [line.strip() for line in output_text.splitlines() if line.strip()]
+        if "grep" in available and any(re.match(r"^.+:\d+(?::\d+)?:", line) for line in lines[:10]):
+            return str(tool_catalog["grep"]["name"])
+
+        if "glob" in available and lines:
+            path_like = sum(
+                1
+                for line in lines[:20]
+                if "/" in line and not line.startswith("<") and ":" not in line.split("/", 1)[0]
+            )
+            if path_like >= min(3, len(lines[:20])):
+                return str(tool_catalog["glob"]["name"])
+
+        if "bash" in available and output_text:
+            return str(tool_catalog["bash"]["name"])
+
+        if len(tool_catalog) == 1:
+            return str(next(iter(tool_catalog.values()))["name"])
+
+        return ""
+
+    def _infer_codex_tool_arguments(
+        self,
+        tool_name: str,
+        output_text: str,
+        tool_catalog: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        lower_name = str(tool_name or "").strip().lower()
+        if not lower_name:
+            return {}
+
+        properties = tool_catalog.get(lower_name, {}).get("property_names", set())
+        if not isinstance(properties, set):
+            properties = set()
+
+        if lower_name == "read":
+            path = self._extract_codex_path_from_output(output_text)
+            if path:
+                param_name = self._pick_codex_parameter_name(
+                    properties,
+                    candidates=("filePath", "path", "file", "target"),
+                    default="filePath",
+                )
+                return {param_name: path}
+
+        if lower_name == "skill":
+            match = re.search(r'<skill_content\s+name="([^"]+)"', output_text)
+            if match:
+                param_name = self._pick_codex_parameter_name(
+                    properties,
+                    candidates=("name", "skill", "skillName"),
+                    default="name",
+                )
+                return {param_name: match.group(1)}
+
+        return {}
+
+    @staticmethod
+    def _extract_codex_path_from_output(output_text: str) -> str | None:
+        if output_text.startswith("File not found: "):
+            return output_text.removeprefix("File not found: ").strip() or None
+
+        match = re.search(r"<path>(.*?)</path>", output_text, flags=re.DOTALL)
+        if match:
+            return match.group(1).strip() or None
+
+        return None
+
+    @staticmethod
+    def _pick_codex_parameter_name(
+        properties: set[str],
+        *,
+        candidates: tuple[str, ...],
+        default: str,
+    ) -> str:
+        lowered = {prop.lower(): prop for prop in properties}
+        for candidate in candidates:
+            match = lowered.get(candidate.lower())
+            if match:
+                return match
+        return default
+
+    @staticmethod
+    def _fallback_codex_tool_name(tool_catalog: dict[str, dict[str, Any]]) -> str:
+        for preferred in (
+            "read",
+            "skill",
+            "grep",
+            "glob",
+            "bash",
+            "webfetch",
+            "question",
+            "apply_patch",
+            "preview",
+            "compress",
+            "task",
+        ):
+            if preferred in tool_catalog:
+                return str(tool_catalog[preferred]["name"])
+
+        if tool_catalog:
+            return str(next(iter(tool_catalog.values()))["name"])
+
+        return "read"
 
     def _tools_to_internal(self, tools: Any) -> list[ToolDefinition] | None:
         if not isinstance(tools, list):

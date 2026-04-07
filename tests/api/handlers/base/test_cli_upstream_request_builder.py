@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import hashlib
 from types import SimpleNamespace
 from typing import Any
@@ -262,3 +263,91 @@ async def test_build_upstream_request_codex_cli_preserves_explicit_prompt_cache_
     assert result.payload["prompt_cache_key"] == "client-cache-key"
     assert result.payload["stream"] is True
     _assert_common_codex_headers(result.headers)
+
+
+@pytest.mark.asyncio
+async def test_build_upstream_request_codex_cli_repairs_orphan_function_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_get_provider_auth(endpoint: Any, key: Any) -> _DummyAuthInfo:
+        return _DummyAuthInfo()
+
+    monkeypatch.setattr(mixmod, "get_provider_auth", _fake_get_provider_auth)
+
+    handler = _DummyCliRequestHandler()
+    endpoint = _build_codex_endpoint(api_format="openai:cli")
+    provider = endpoint.provider
+    key = _build_key()
+
+    result = await handler._build_upstream_request(
+        provider=provider,
+        endpoint=endpoint,
+        key=key,
+        request_body={
+            "model": "gpt-5.4",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "我先读一下项目。"}],
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_auto_1",
+                    "output": "File not found: /home/ubuntu/workspace/project/SOUL.md",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_auto_2",
+                    "output": '<skill_content name="frontend-design">demo</skill_content>',
+                },
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "read",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"filePath": {"type": "string"}},
+                    },
+                },
+                {
+                    "type": "function",
+                    "name": "skill",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}},
+                    },
+                },
+            ],
+        },
+        original_headers=_build_headers(),
+        query_params=None,
+        client_api_format="openai:cli",
+        provider_api_format="openai:cli",
+        fallback_model="gpt-5.4",
+        mapped_model=None,
+        client_is_stream=False,
+    )
+
+    repaired_input = result.payload["input"]
+    assert repaired_input[1]["type"] == "function_call"
+    assert repaired_input[1]["call_id"] == "call_auto_1"
+    assert repaired_input[1]["name"] == "read"
+    assert json.loads(repaired_input[1]["arguments"]) == {
+        "filePath": "/home/ubuntu/workspace/project/SOUL.md"
+    }
+    assert repaired_input[2] == {
+        "type": "function_call_output",
+        "call_id": "call_auto_1",
+        "output": "File not found: /home/ubuntu/workspace/project/SOUL.md",
+    }
+    assert repaired_input[3]["type"] == "function_call"
+    assert repaired_input[3]["call_id"] == "call_auto_2"
+    assert repaired_input[3]["name"] == "skill"
+    assert json.loads(repaired_input[3]["arguments"]) == {"name": "frontend-design"}
+    assert repaired_input[4] == {
+        "type": "function_call_output",
+        "call_id": "call_auto_2",
+        "output": '<skill_content name="frontend-design">demo</skill_content>',
+    }

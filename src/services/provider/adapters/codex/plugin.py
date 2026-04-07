@@ -341,7 +341,7 @@ async def enrich_codex(
 
 def register_all() -> None:
     """一次性注册 Codex 的所有 hooks 到各通用 registry。"""
-    from src.core.api_format.capabilities import register_provider_default_body_rules
+    from src.core.api_format.capabilities import register_provider_format_capability
     from src.core.provider_oauth_utils import register_auth_enricher
     from src.services.model.upstream_fetcher import UpstreamModelsFetcherRegistry
     from src.services.provider.transport import register_transport_hook
@@ -359,7 +359,20 @@ def register_all() -> None:
     # Provider Format Capability：默认 body_rules
     from src.core.api_format.metadata import CODEX_DEFAULT_BODY_RULES
 
-    register_provider_default_body_rules("codex", "openai:cli", CODEX_DEFAULT_BODY_RULES)
+    register_provider_format_capability(
+        "codex",
+        "openai:cli",
+        same_format_variant="codex",
+        cross_format_variant="codex",
+        default_body_rules=CODEX_DEFAULT_BODY_RULES,
+    )
+    register_provider_format_capability(
+        "codex",
+        "openai:compact",
+        same_format_variant="codex",
+        cross_format_variant="codex",
+        default_body_rules=CODEX_DEFAULT_BODY_RULES,
+    )
 
     # Export: Codex uses the default export builder (strip null + temp fields)
     # No need to register a custom one — the default in export.py suffices.

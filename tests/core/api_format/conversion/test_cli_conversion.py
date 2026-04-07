@@ -8,6 +8,7 @@ CLI 格式参与转换的单元测试
 
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 
 from src.core.api_format.conversion.normalizers.claude import ClaudeNormalizer
@@ -337,6 +338,49 @@ def test_openai_chat_empty_tool_call_id_repaired_when_convert_to_openai_cli() ->
     generated_id = str(function_call.get("call_id") or "")
     assert generated_id.startswith("call_auto_")
     assert function_call_output.get("call_id") == generated_id
+
+
+def test_openai_chat_orphan_tool_message_can_be_repaired_for_codex_variant() -> None:
+    reg = _make_registry_with_cli()
+
+    openai_chat_req = {
+        "model": "gpt-5",
+        "messages": [
+            {"role": "user", "content": "帮我读取 README"},
+            {"role": "tool", "tool_call_id": "call_auto_1", "content": "File not found: README.md"},
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"filePath": {"type": "string"}},
+                    },
+                },
+            }
+        ],
+    }
+
+    out = reg.convert_request(
+        openai_chat_req,
+        "openai:chat",
+        "openai:cli",
+        target_variant="codex",
+    )
+    input_items = cast(list[dict[str, Any]], out.get("input") or [])
+
+    assert input_items[0]["type"] == "message"
+    assert input_items[1]["type"] == "function_call"
+    assert input_items[1]["call_id"] == "call_auto_1"
+    assert input_items[1]["name"] == "read"
+    assert json.loads(input_items[1]["arguments"]) == {"filePath": "README.md"}
+    assert input_items[2] == {
+        "type": "function_call_output",
+        "call_id": "call_auto_1",
+        "output": "File not found: README.md",
+    }
 
 
 def test_openai_chat_prompt_cache_key_preserved_when_convert_to_openai_cli() -> None:
