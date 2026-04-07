@@ -1,30 +1,50 @@
 <template>
   <div class="space-y-6 pb-8">
     <Card class="overflow-hidden">
-      <div class="px-5 py-4 border-b border-border/60 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <h3 class="text-base font-semibold">
-            钱包管理
-          </h3>
-          <p class="text-xs text-muted-foreground mt-1">
-            统一管理资金流水、退款审批、充值订单与支付回调
-          </p>
+      <div class="border-b border-border/60 px-4 py-4 sm:px-5">
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h3 class="text-base font-semibold">
+              钱包管理
+            </h3>
+            <p class="text-xs text-muted-foreground mt-1">
+              统一管理资金流水、充值审批、退款审批、充值订单与支付回调
+            </p>
+          </div>
         </div>
       </div>
 
-      <div class="px-5 py-5">
+      <div class="px-4 py-4 sm:px-5 sm:py-5">
         <Tabs v-model="activeTab">
-          <TabsList class="tabs-button-list grid w-full max-w-[760px] grid-cols-4">
-            <TabsTrigger value="ledger">
+          <TabsList class="tabs-button-list grid w-full grid-cols-2 gap-1 sm:max-w-[940px] sm:grid-cols-5">
+            <TabsTrigger
+              value="ledger"
+              class="text-xs sm:text-sm"
+            >
               资金流水
             </TabsTrigger>
-            <TabsTrigger value="orders">
+            <TabsTrigger
+              value="orders"
+              class="text-xs sm:text-sm"
+            >
               充值订单
             </TabsTrigger>
-            <TabsTrigger value="refunds">
+            <TabsTrigger
+              value="reviews"
+              class="text-xs sm:text-sm"
+            >
+              充值审批
+            </TabsTrigger>
+            <TabsTrigger
+              value="refunds"
+              class="text-xs sm:text-sm"
+            >
               退款审批
             </TabsTrigger>
-            <TabsTrigger value="callbacks">
+            <TabsTrigger
+              value="callbacks"
+              class="text-xs sm:text-sm"
+            >
               回调日志
             </TabsTrigger>
           </TabsList>
@@ -34,9 +54,9 @@
             class="mt-5 space-y-4"
           >
             <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-              <div class="flex flex-wrap items-center gap-2">
+              <div class="grid grid-cols-1 gap-2 sm:flex sm:flex-wrap sm:items-center">
                 <Select v-model="ledgerCategoryFilter">
-                  <SelectTrigger class="w-[170px]">
+                  <SelectTrigger class="w-full sm:w-[170px]">
                     <SelectValue placeholder="一级分类" />
                   </SelectTrigger>
                   <SelectContent>
@@ -59,7 +79,7 @@
                 </Select>
 
                 <Select v-model="ledgerReasonFilter">
-                  <SelectTrigger class="w-[180px]">
+                  <SelectTrigger class="w-full sm:w-[180px]">
                     <SelectValue placeholder="二级分类" />
                   </SelectTrigger>
                   <SelectContent>
@@ -77,7 +97,7 @@
                 </Select>
 
                 <Select v-model="ledgerOwnerFilter">
-                  <SelectTrigger class="w-[170px]">
+                  <SelectTrigger class="w-full sm:w-[170px]">
                     <SelectValue placeholder="归属类型" />
                   </SelectTrigger>
                   <SelectContent>
@@ -105,79 +125,211 @@
               </div>
             </div>
 
-            <div class="rounded-2xl border border-border/60 overflow-hidden bg-background">
+            <div class="space-y-2.5 sm:hidden">
+              <div
+                v-for="tx in ledgerItems"
+                :key="tx.id"
+                class="rounded-2xl border border-border/60 bg-card/95 p-3.5 shadow-[0_16px_34px_-30px_hsl(var(--foreground))]"
+              >
+                <div class="flex items-start justify-between gap-3">
+                  <div class="min-w-0">
+                    <div
+                      class="truncate text-sm font-semibold text-foreground"
+                      :title="ownerDisplayName(tx.owner_name, tx.owner_type)"
+                    >
+                      {{ ownerDisplayName(tx.owner_name, tx.owner_type) }}
+                    </div>
+                    <div
+                      class="mt-1 truncate text-[11px] text-muted-foreground"
+                      :title="ledgerOwnerMetaLine(tx)"
+                    >
+                      {{ ledgerOwnerMetaLine(tx) }}
+                    </div>
+                  </div>
+                  <div class="shrink-0 text-right">
+                    <div
+                      class="text-sm font-semibold tabular-nums"
+                      :class="tx.amount >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'"
+                    >
+                      {{ tx.amount >= 0 ? '+' : '' }}{{ tx.amount.toFixed(4) }}
+                    </div>
+                    <div class="mt-1 text-[11px] text-muted-foreground">
+                      {{ formatDateLabel(tx.created_at) }}
+                    </div>
+                    <div class="text-[11px] text-muted-foreground">
+                      {{ formatTimeLabel(tx.created_at) }}
+                    </div>
+                  </div>
+                </div>
+
+                <div class="mt-2 flex flex-wrap gap-1.5">
+                  <Badge
+                    variant="outline"
+                    class="h-6 whitespace-nowrap px-2 py-0 text-[11px]"
+                  >
+                    {{ walletTransactionCategoryLabel(tx.category) }}
+                  </Badge>
+                  <Badge
+                    variant="outline"
+                    class="h-6 max-w-full px-2 py-0 text-[11px] text-muted-foreground"
+                  >
+                    <span class="truncate">{{ walletTransactionReasonLabel(tx.reason_code) }}</span>
+                  </Badge>
+                </div>
+
+                <div class="mt-3 grid gap-2">
+                  <div class="rounded-xl border border-border/50 bg-muted/[0.08] p-2.5">
+                    <div class="text-[11px] text-muted-foreground">
+                      余额变化
+                    </div>
+                    <div
+                      class="mt-1 truncate text-sm font-medium text-foreground tabular-nums"
+                      :title="`${tx.balance_before.toFixed(4)}→${tx.balance_after.toFixed(4)}`"
+                    >
+                      {{ tx.balance_before.toFixed(4) }}→{{ tx.balance_after.toFixed(4) }}
+                    </div>
+                    <div
+                      v-if="tx.recharge_balance_before !== null && tx.recharge_balance_before !== undefined && tx.gift_balance_before !== null && tx.gift_balance_before !== undefined"
+                      class="mt-1 truncate text-[11px] text-muted-foreground tabular-nums"
+                      :title="`充${Number(tx.recharge_balance_before).toFixed(4)}→${Number(tx.recharge_balance_after ?? 0).toFixed(4)} · 赠${Number(tx.gift_balance_before).toFixed(4)}→${Number(tx.gift_balance_after ?? 0).toFixed(4)}`"
+                    >
+                      充{{ Number(tx.recharge_balance_before).toFixed(4) }}→{{ Number(tx.recharge_balance_after ?? 0).toFixed(4) }}
+                      · 赠{{ Number(tx.gift_balance_before).toFixed(4) }}→{{ Number(tx.gift_balance_after ?? 0).toFixed(4) }}
+                    </div>
+                  </div>
+
+                  <div class="rounded-xl border border-border/50 bg-muted/[0.08] p-2.5">
+                    <div class="text-[11px] text-muted-foreground">
+                      说明
+                    </div>
+                    <div
+                      class="mt-1 text-sm text-foreground"
+                      :title="tx.description || '-'"
+                    >
+                      {{ tx.description || '-' }}
+                    </div>
+                  </div>
+                </div>
+
+                <div class="mt-3">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="h-8 w-full text-xs"
+                    @click="openLedgerDrawer(tx)"
+                  >
+                    查看详情
+                  </Button>
+                </div>
+              </div>
+
+              <EmptyState
+                v-if="!loadingLedger && ledgerItems.length === 0"
+                size="sm"
+                title="暂无资金流水"
+                description="当前筛选条件下没有资金动作记录"
+              />
+            </div>
+
+            <div class="hidden overflow-hidden rounded-2xl border border-border/60 bg-background sm:block">
               <div class="overflow-x-auto">
-                <Table>
+                <Table class="w-full table-auto">
                   <TableHeader>
                     <TableRow>
-                      <TableHead>时间</TableHead>
-                      <TableHead>归属</TableHead>
-                      <TableHead>类型</TableHead>
-                      <TableHead>金额</TableHead>
-                      <TableHead>余额变化</TableHead>
-                      <TableHead>说明</TableHead>
-                      <TableHead class="text-right">
-                        操作
-                      </TableHead>
+                      <TableHead class="h-10 px-2.5 py-2 whitespace-nowrap">时间</TableHead>
+                      <TableHead class="h-10 px-2.5 py-2 whitespace-nowrap">归属</TableHead>
+                      <TableHead class="h-10 px-2 py-2 whitespace-nowrap text-center">类型</TableHead>
+                      <TableHead class="h-10 px-2 py-2 whitespace-nowrap">金额</TableHead>
+                      <TableHead class="h-10 px-2.5 py-2 whitespace-nowrap">余额变化</TableHead>
+                      <TableHead class="h-10 px-2.5 py-2 whitespace-nowrap">说明</TableHead>
+                      <TableHead class="h-10 px-2.5 py-2 whitespace-nowrap">操作</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     <TableRow
                       v-for="tx in ledgerItems"
                       :key="tx.id"
-                      class="hover:bg-muted/20"
+                      class="border-b border-border/40 last:border-b-0"
                     >
-                      <TableCell class="text-xs text-muted-foreground whitespace-nowrap">
-                        {{ formatDateTime(tx.created_at) }}
+                      <TableCell class="px-2.5 py-2.5 align-top text-sm text-muted-foreground">
+                        <div class="whitespace-nowrap">
+                          {{ formatDateLabel(tx.created_at) }}
+                        </div>
+                        <div class="mt-1 whitespace-nowrap text-xs text-muted-foreground">
+                          {{ formatTimeLabel(tx.created_at) }}
+                        </div>
                       </TableCell>
-                      <TableCell class="min-w-[180px]">
-                        <div class="font-medium text-sm">
+                      <TableCell class="px-2.5 py-2.5 align-top">
+                        <div
+                          class="max-w-[140px] truncate font-medium"
+                          :title="ownerDisplayName(tx.owner_name, tx.owner_type)"
+                        >
                           {{ ownerDisplayName(tx.owner_name, tx.owner_type) }}
                         </div>
-                        <div class="text-xs text-muted-foreground mt-1 flex items-center gap-2">
-                          <span>{{ ownerTypeLabel(tx.owner_type) }}</span>
-                          <Badge
-                            v-if="tx.wallet_status"
-                            variant="outline"
-                            class="text-[10px]"
-                          >
-                            {{ walletStatusLabel(tx.wallet_status) }}
-                          </Badge>
+                        <div
+                          class="mt-1 max-w-[140px] truncate text-xs text-muted-foreground"
+                          :title="ledgerOwnerMetaLine(tx)"
+                        >
+                          {{ ledgerOwnerMetaLine(tx) }}
                         </div>
                       </TableCell>
-                      <TableCell>
-                        <div class="space-y-1">
+                      <TableCell class="px-2 py-2.5 align-top text-center">
+                        <div class="flex flex-col items-center gap-1">
                           <Badge
                             variant="outline"
-                            class="font-mono"
+                            class="h-8 whitespace-nowrap px-3 py-0"
                           >
                             {{ walletTransactionCategoryLabel(tx.category) }}
                           </Badge>
-                          <div class="text-[11px] text-muted-foreground">
+                          <div
+                            class="max-w-full truncate text-xs text-muted-foreground"
+                            :title="walletTransactionReasonLabel(tx.reason_code)"
+                          >
                             {{ walletTransactionReasonLabel(tx.reason_code) }}
                           </div>
                         </div>
                       </TableCell>
-                      <TableCell :class="tx.amount >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'">
+                      <TableCell
+                        class="px-2 py-2.5 align-top whitespace-nowrap text-sm font-medium tabular-nums"
+                        :class="tx.amount >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'"
+                      >
                         {{ tx.amount >= 0 ? '+' : '' }}{{ tx.amount.toFixed(4) }}
                       </TableCell>
-                      <TableCell class="text-xs tabular-nums whitespace-nowrap">
-                        <div>{{ tx.balance_before.toFixed(4) }} → {{ tx.balance_after.toFixed(4) }}</div>
+                      <TableCell class="px-2.5 py-2.5 align-top">
+                        <div
+                          class="max-w-full truncate text-sm font-medium text-muted-foreground tabular-nums"
+                          :title="`${tx.balance_before.toFixed(4)}→${tx.balance_after.toFixed(4)}`"
+                        >
+                          {{ tx.balance_before.toFixed(4) }}→{{ tx.balance_after.toFixed(4) }}
+                        </div>
                         <div
                           v-if="tx.recharge_balance_before !== null && tx.recharge_balance_before !== undefined && tx.gift_balance_before !== null && tx.gift_balance_before !== undefined"
-                          class="text-[11px] text-muted-foreground mt-0.5"
+                          class="mt-1 max-w-full truncate text-xs text-muted-foreground tabular-nums"
+                          :title="`充${Number(tx.recharge_balance_before).toFixed(4)}→${Number(tx.recharge_balance_after ?? 0).toFixed(4)} · 赠${Number(tx.gift_balance_before).toFixed(4)}→${Number(tx.gift_balance_after ?? 0).toFixed(4)}`"
                         >
-                          充 {{ Number(tx.recharge_balance_before).toFixed(4) }}→{{ Number(tx.recharge_balance_after ?? 0).toFixed(4) }}
-                          · 赠 {{ Number(tx.gift_balance_before).toFixed(4) }}→{{ Number(tx.gift_balance_after ?? 0).toFixed(4) }}
+                          充{{ Number(tx.recharge_balance_before).toFixed(4) }}→{{ Number(tx.recharge_balance_after ?? 0).toFixed(4) }}
+                          · 赠{{ Number(tx.gift_balance_before).toFixed(4) }}→{{ Number(tx.gift_balance_after ?? 0).toFixed(4) }}
                         </div>
                       </TableCell>
-                      <TableCell class="text-xs text-muted-foreground max-w-[280px] truncate">
-                        {{ tx.description || '-' }}
+                      <TableCell class="px-2.5 py-2.5 align-top">
+                        <div
+                          class="max-w-full truncate text-sm text-muted-foreground"
+                          :title="tx.description || '-'"
+                        >
+                          {{ tx.description || '-' }}
+                        </div>
+                        <div
+                          class="mt-1 max-w-full truncate text-xs text-muted-foreground"
+                          :title="walletTransactionReasonLabel(tx.reason_code)"
+                        >
+                          {{ walletTransactionReasonLabel(tx.reason_code) }}
+                        </div>
                       </TableCell>
-                      <TableCell class="text-right">
+                      <TableCell class="px-2.5 py-2.5 align-top">
                         <Button
                           size="sm"
                           variant="outline"
+                          class="h-8 min-w-[66px] whitespace-nowrap px-3"
                           @click="openLedgerDrawer(tx)"
                         >
                           详情
@@ -214,9 +366,9 @@
             class="mt-5 space-y-4"
           >
             <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-              <div class="flex flex-wrap items-center gap-2">
+              <div class="grid grid-cols-1 gap-2 sm:flex sm:flex-wrap sm:items-center">
                 <Select v-model="refundStatusFilter">
-                  <SelectTrigger class="w-[170px]">
+                  <SelectTrigger class="w-full sm:w-[170px]">
                     <SelectValue placeholder="退款状态" />
                   </SelectTrigger>
                   <SelectContent>
@@ -242,7 +394,7 @@
                 </Select>
 
                 <Select v-model="refundOwnerFilter">
-                  <SelectTrigger class="w-[170px]">
+                  <SelectTrigger class="w-full sm:w-[170px]">
                     <SelectValue placeholder="归属类型" />
                   </SelectTrigger>
                   <SelectContent>
@@ -267,19 +419,114 @@
               </div>
             </div>
 
-            <div class="rounded-2xl border border-border/60 overflow-hidden bg-background">
+            <div class="space-y-2.5 sm:hidden">
+              <div
+                v-for="refund in refundItems"
+                :key="refund.id"
+                class="rounded-2xl border border-border/60 bg-card/95 p-3.5 shadow-[0_16px_34px_-30px_hsl(var(--foreground))]"
+              >
+                <div class="flex items-start justify-between gap-3">
+                  <div class="min-w-0">
+                    <div class="truncate text-sm font-semibold text-foreground">
+                      {{ ownerDisplayName(refund.owner_name, refund.owner_type) }}
+                    </div>
+                    <div class="mt-1 truncate text-[11px] text-muted-foreground">
+                      {{ ownerTypeLabel(refund.owner_type) }}
+                    </div>
+                  </div>
+                  <div class="shrink-0 text-right">
+                    <div class="text-sm font-semibold tabular-nums text-foreground">
+                      {{ formatCurrency(refund.amount_usd) }}
+                    </div>
+                    <div class="mt-1 text-[11px] text-muted-foreground">
+                      {{ formatDateLabel(refund.created_at) }}
+                    </div>
+                    <div class="text-[11px] text-muted-foreground">
+                      {{ formatTimeLabel(refund.created_at) }}
+                    </div>
+                  </div>
+                </div>
+
+                <div class="mt-2 flex flex-wrap gap-1.5">
+                  <Badge
+                    :variant="refundStatusBadge(refund.status)"
+                    class="h-6 whitespace-nowrap px-2 py-0 text-[11px]"
+                  >
+                    {{ refundStatusLabel(refund.status) }}
+                  </Badge>
+                  <Badge
+                    variant="outline"
+                    class="h-6 whitespace-nowrap px-2 py-0 text-[11px]"
+                  >
+                    {{ refundModeLabel(refund.refund_mode) }}
+                  </Badge>
+                  <Badge
+                    v-if="refund.wallet_status"
+                    variant="outline"
+                    class="h-6 whitespace-nowrap px-2 py-0 text-[11px] text-muted-foreground"
+                  >
+                    {{ walletStatusLabel(refund.wallet_status) }}
+                  </Badge>
+                </div>
+
+                <div class="mt-3 grid gap-2">
+                  <div class="rounded-xl border border-border/50 bg-muted/[0.08] p-2.5">
+                    <div class="text-[11px] text-muted-foreground">
+                      退款单号
+                    </div>
+                    <div
+                      class="mt-1 truncate font-mono text-xs text-foreground"
+                      :title="refund.refund_no"
+                    >
+                      {{ refund.refund_no }}
+                    </div>
+                  </div>
+                  <div class="rounded-xl border border-border/50 bg-muted/[0.08] p-2.5">
+                    <div class="text-[11px] text-muted-foreground">
+                      原因
+                    </div>
+                    <div
+                      class="mt-1 text-sm text-foreground"
+                      :title="refund.reason || refund.failure_reason || '-'"
+                    >
+                      {{ refund.reason || refund.failure_reason || '-' }}
+                    </div>
+                  </div>
+                </div>
+
+                <div class="mt-3">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="h-8 w-full text-xs"
+                    @click="openRefundDrawer(refund)"
+                  >
+                    处理审批
+                  </Button>
+                </div>
+              </div>
+
+              <EmptyState
+                v-if="!loadingRefunds && refundItems.length === 0"
+                size="sm"
+                title="暂无退款申请"
+                description="当前筛选条件下没有退款单"
+              />
+            </div>
+
+            <div class="hidden overflow-hidden rounded-2xl border border-border/60 bg-background sm:block">
               <div class="overflow-x-auto">
-                <Table>
+                <Table class="w-full table-auto">
                   <TableHeader>
                     <TableRow>
-                      <TableHead>归属</TableHead>
-                      <TableHead>退款单号</TableHead>
-                      <TableHead>金额</TableHead>
-                      <TableHead>模式</TableHead>
-                      <TableHead>状态</TableHead>
-                      <TableHead>原因</TableHead>
-                      <TableHead>申请时间</TableHead>
-                      <TableHead class="text-right">
+                      <TableHead class="h-10 px-3 py-2">归属</TableHead>
+                      <TableHead class="h-10 px-2.5 py-2 whitespace-nowrap">退款单号</TableHead>
+                      <TableHead class="h-10 px-2 py-2 whitespace-nowrap">金额</TableHead>
+                      <TableHead class="h-10 px-2 py-2 whitespace-nowrap">模式</TableHead>
+                      <TableHead class="h-10 px-2 py-2 whitespace-nowrap">状态</TableHead>
+                      <TableHead class="h-10 px-2.5 py-2">原因</TableHead>
+                      <TableHead class="h-10 px-2.5 py-2 whitespace-nowrap">申请时间</TableHead>
+                      <TableHead class="h-10 px-3 py-2 text-right whitespace-nowrap">
                         操作
                       </TableHead>
                     </TableRow>
@@ -290,11 +537,11 @@
                       :key="refund.id"
                       class="hover:bg-muted/20"
                     >
-                      <TableCell class="min-w-[180px]">
+                      <TableCell class="px-3 py-2.5 align-top">
                         <div class="font-medium text-sm">
                           {{ ownerDisplayName(refund.owner_name, refund.owner_type) }}
                         </div>
-                        <div class="text-xs text-muted-foreground mt-1 flex items-center gap-2">
+                        <div class="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
                           <span>{{ ownerTypeLabel(refund.owner_type) }}</span>
                           <Badge
                             v-if="refund.wallet_status"
@@ -305,28 +552,38 @@
                           </Badge>
                         </div>
                       </TableCell>
-                      <TableCell class="font-mono text-xs whitespace-nowrap">
-                        {{ refund.refund_no }}
+                      <TableCell
+                        class="max-w-[180px] px-2.5 py-2.5 align-top font-mono text-xs"
+                        :title="refund.refund_no"
+                      >
+                        <div class="truncate">
+                          {{ refund.refund_no }}
+                        </div>
                       </TableCell>
-                      <TableCell class="tabular-nums whitespace-nowrap">
+                      <TableCell class="px-2 py-2.5 align-top tabular-nums whitespace-nowrap">
                         {{ formatCurrency(refund.amount_usd) }}
                       </TableCell>
-                      <TableCell>
+                      <TableCell class="px-2 py-2.5 align-top whitespace-nowrap">
                         {{ refundModeLabel(refund.refund_mode) }}
                       </TableCell>
-                      <TableCell>
+                      <TableCell class="px-2 py-2.5 align-top">
                         <Badge :variant="refundStatusBadge(refund.status)">
                           {{ refundStatusLabel(refund.status) }}
                         </Badge>
                       </TableCell>
-                      <TableCell class="text-xs text-muted-foreground max-w-[240px] truncate">
-                        {{ refund.reason || refund.failure_reason || '-' }}
+                      <TableCell
+                        class="max-w-[240px] px-2.5 py-2.5 align-top text-xs text-muted-foreground"
+                        :title="refund.reason || refund.failure_reason || '-'"
+                      >
+                        <div class="truncate">
+                          {{ refund.reason || refund.failure_reason || '-' }}
+                        </div>
                       </TableCell>
-                      <TableCell class="text-xs text-muted-foreground whitespace-nowrap">
+                      <TableCell class="px-2.5 py-2.5 align-top text-xs text-muted-foreground whitespace-nowrap">
                         {{ formatDateTime(refund.created_at) }}
                       </TableCell>
-                      <TableCell class="text-right">
-                        <div class="flex justify-end gap-2">
+                      <TableCell class="px-3 py-2.5 align-top text-right">
+                        <div class="flex justify-end gap-1">
                           <Button
                             size="sm"
                             variant="outline"
@@ -366,149 +623,230 @@
             value="orders"
             class="mt-5 space-y-4"
           >
-            <div class="flex flex-wrap items-center gap-2">
-              <Select v-model="orderStatusFilter">
-                <SelectTrigger class="w-[180px]">
-                  <SelectValue placeholder="订单状态" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">
-                    全部状态
-                  </SelectItem>
-                  <SelectItem value="pending">
-                    待支付
-                  </SelectItem>
-                  <SelectItem value="paid">
-                    已支付
-                  </SelectItem>
-                  <SelectItem value="credited">
-                    已到账
-                  </SelectItem>
-                  <SelectItem value="failed">
-                    支付失败
-                  </SelectItem>
-                  <SelectItem value="expired">
-                    已过期
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div class="grid grid-cols-1 gap-2 sm:flex sm:flex-wrap sm:items-center">
+                <Select v-model="orderStatusFilter">
+                  <SelectTrigger class="w-full sm:w-[180px]">
+                    <SelectValue placeholder="订单状态" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">
+                      全部状态
+                    </SelectItem>
+                    <SelectItem value="pending">
+                      待支付
+                    </SelectItem>
+                    <SelectItem value="pending_approval">
+                      待审核
+                    </SelectItem>
+                    <SelectItem value="paid">
+                      已支付
+                    </SelectItem>
+                    <SelectItem value="credited">
+                      已到账
+                    </SelectItem>
+                    <SelectItem value="failed">
+                      支付失败
+                    </SelectItem>
+                    <SelectItem value="expired">
+                      已过期
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
 
-              <Select v-model="orderMethodFilter">
-                <SelectTrigger class="w-[180px]">
-                  <SelectValue placeholder="支付方式" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">
-                    全部方式
-                  </SelectItem>
-                  <SelectItem value="alipay">
-                    支付宝
-                  </SelectItem>
-                  <SelectItem value="wechat">
-                    微信支付
-                  </SelectItem>
-                  <SelectItem value="admin_manual">
-                    人工充值
-                  </SelectItem>
-                  <SelectItem value="card_code">
-                    充值卡
-                  </SelectItem>
-                  <SelectItem value="gift_code">
-                    礼品卡
-                  </SelectItem>
-                  <SelectItem value="card_recharge">
-                    卡密充值
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+                <Select v-model="orderMethodFilter">
+                  <SelectTrigger class="w-full sm:w-[180px]">
+                    <SelectValue placeholder="支付方式" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">
+                      全部方式
+                    </SelectItem>
+                    <SelectItem value="alipay">
+                      支付宝
+                    </SelectItem>
+                    <SelectItem value="wechat">
+                      微信支付
+                    </SelectItem>
+                    <SelectItem value="manual_review">
+                      人工充值
+                    </SelectItem>
+                    <SelectItem value="admin_manual">
+                      人工充值
+                    </SelectItem>
+                    <SelectItem value="card_code">
+                      充值卡
+                    </SelectItem>
+                    <SelectItem value="gift_code">
+                      礼品卡
+                    </SelectItem>
+                    <SelectItem value="card_recharge">
+                      卡密充值
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
 
-              <RefreshButton
-                :loading="loadingOrders"
-                @click="loadOrders"
+              <div class="flex items-center justify-between gap-3">
+                <div class="text-sm text-muted-foreground">
+                  共 {{ orderTotal }} 条
+                </div>
+                <RefreshButton
+                  :loading="loadingOrders"
+                  @click="loadOrders"
+                />
+              </div>
+            </div>
+
+            <div class="space-y-2.5 sm:hidden">
+              <div
+                v-for="order in orders"
+                :key="order.id"
+                class="rounded-2xl border border-border/60 bg-card/95 p-3.5 shadow-[0_16px_34px_-30px_hsl(var(--foreground))]"
+              >
+                <div class="flex items-start justify-between gap-3">
+                  <div class="min-w-0">
+                    <div
+                      class="truncate text-sm font-semibold text-foreground"
+                      :title="order.order_no"
+                    >
+                      {{ compactOrderNo(order.order_no) }}
+                    </div>
+                    <div
+                      class="mt-1 truncate text-[11px] text-muted-foreground"
+                      :title="orderOwnerName(order.wallet_id)"
+                    >
+                      {{ orderOwnerName(order.wallet_id) }}
+                    </div>
+                  </div>
+                  <div class="shrink-0 text-right">
+                    <div class="text-sm font-semibold tabular-nums text-foreground">
+                      {{ formatCurrency(order.amount_usd) }}
+                    </div>
+                    <div class="mt-1 text-[11px] text-muted-foreground">
+                      {{ formatDateLabel(order.created_at) }}
+                    </div>
+                    <div class="text-[11px] text-muted-foreground">
+                      {{ formatTimeLabel(order.created_at) }}
+                    </div>
+                  </div>
+                </div>
+
+                <div class="mt-2 flex flex-wrap gap-1.5">
+                  <Badge
+                    variant="outline"
+                    class="h-6 whitespace-nowrap px-2 py-0 text-[11px]"
+                  >
+                    {{ paymentMethodLabel(order.payment_method) }}
+                  </Badge>
+                  <Badge
+                    :variant="paymentStatusBadge(order.status)"
+                    class="h-6 whitespace-nowrap px-2 py-0 text-[11px]"
+                  >
+                    {{ paymentStatusLabel(order.status) }}
+                  </Badge>
+                </div>
+
+                <div class="mt-3 rounded-xl border border-border/50 bg-muted/[0.08] p-2.5">
+                  <div class="text-[11px] text-muted-foreground">
+                    归属
+                  </div>
+                  <div class="mt-1 truncate text-sm text-foreground">
+                    {{ orderOwnerName(order.wallet_id) }}
+                  </div>
+                  <div class="mt-1 truncate text-[11px] text-muted-foreground">
+                    {{ orderOwnerMetaLine(order.wallet_id) }}
+                  </div>
+                </div>
+              </div>
+
+              <EmptyState
+                v-if="!loadingOrders && orders.length === 0"
+                size="sm"
+                title="暂无充值订单"
+                description="当前筛选条件下没有数据"
               />
             </div>
 
-            <div class="rounded-2xl border border-border/60 overflow-hidden bg-background">
+            <div class="hidden overflow-hidden rounded-2xl border border-border/60 bg-background sm:block">
               <div class="overflow-x-auto">
-                <Table>
+                <Table class="w-full table-auto">
                   <TableHeader>
                     <TableRow>
-                      <TableHead>订单号</TableHead>
-                      <TableHead>钱包名称</TableHead>
-                      <TableHead>金额</TableHead>
-                      <TableHead>支付方式</TableHead>
-                      <TableHead>状态</TableHead>
-                      <TableHead>创建时间</TableHead>
-                      <TableHead class="text-right">
-                        操作
-                      </TableHead>
+                      <TableHead class="h-10 px-3 py-2 whitespace-nowrap">订单</TableHead>
+                      <TableHead class="h-10 px-2.5 py-2 whitespace-nowrap">归属</TableHead>
+                      <TableHead class="h-10 px-2 py-2 whitespace-nowrap">金额</TableHead>
+                      <TableHead class="h-10 px-2 py-2 whitespace-nowrap text-center">支付方式</TableHead>
+                      <TableHead class="h-10 px-2 py-2 whitespace-nowrap text-center">状态</TableHead>
+                      <TableHead class="h-10 px-2.5 py-2 whitespace-nowrap">创建时间</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     <TableRow
                       v-for="order in orders"
                       :key="order.id"
+                      class="border-b border-border/40 last:border-b-0"
                     >
-                      <TableCell class="font-mono text-xs whitespace-nowrap">
-                        {{ order.order_no }}
-                      </TableCell>
-                      <TableCell class="min-w-[180px]">
-                        <div class="text-sm font-medium">
-                          {{ orderWalletName(order.wallet_id) }}
+                      <TableCell class="px-3 py-2.5 align-top">
+                        <div
+                          class="max-w-full truncate font-medium"
+                          :title="order.order_no"
+                        >
+                          {{ compactOrderNo(order.order_no) }}
                         </div>
-                        <div class="text-xs text-muted-foreground mt-1">
-                          {{ orderWalletTypeLabel(order.wallet_id) }}
+                        <div class="mt-1 truncate text-xs text-muted-foreground">
+                          充值订单
                         </div>
                       </TableCell>
-                      <TableCell class="tabular-nums">
+                      <TableCell class="px-2.5 py-2.5 align-top">
+                        <div
+                          class="max-w-full truncate font-medium"
+                          :title="orderOwnerName(order.wallet_id)"
+                        >
+                          {{ orderOwnerName(order.wallet_id) }}
+                        </div>
+                        <div
+                          class="mt-1 max-w-full truncate text-xs text-muted-foreground"
+                          :title="orderOwnerMetaLine(order.wallet_id)"
+                        >
+                          {{ orderOwnerMetaLine(order.wallet_id) }}
+                        </div>
+                      </TableCell>
+                      <TableCell class="px-2 py-2.5 align-top whitespace-nowrap text-sm font-medium tabular-nums">
                         {{ formatCurrency(order.amount_usd) }}
                       </TableCell>
-                      <TableCell>{{ paymentMethodLabel(order.payment_method) }}</TableCell>
-                      <TableCell>
-                        <Badge :variant="paymentStatusBadge(order.status)">
+                      <TableCell class="px-2 py-2.5 align-top text-center">
+                        <Badge
+                          variant="outline"
+                          class="h-8 whitespace-nowrap px-3 py-0"
+                        >
+                          {{ paymentMethodLabel(order.payment_method) }}
+                        </Badge>
+                      </TableCell>
+                      <TableCell class="px-2 py-2.5 align-top text-center">
+                        <Badge
+                          :variant="paymentStatusBadge(order.status)"
+                          class="h-8 whitespace-nowrap px-3 py-0"
+                        >
                           {{ paymentStatusLabel(order.status) }}
                         </Badge>
                       </TableCell>
-                      <TableCell class="text-xs text-muted-foreground whitespace-nowrap">
-                        {{ formatDateTime(order.created_at) }}
-                      </TableCell>
-                      <TableCell class="text-right">
-                        <div class="flex justify-end gap-2">
-                          <Button
-                            v-if="canCreditOrder(order.status)"
-                            size="sm"
-                            @click="openCreditDialog(order)"
-                          >
-                            到账
-                          </Button>
-                          <Button
-                            v-if="canExpireOrder(order.status)"
-                            size="sm"
-                            variant="outline"
-                            :disabled="submittingOrderAction"
-                            @click="expireOrder(order.id)"
-                          >
-                            过期
-                          </Button>
-                          <Button
-                            v-if="canFailOrder(order.status)"
-                            size="sm"
-                            variant="destructive"
-                            :disabled="submittingOrderAction"
-                            @click="failOrder(order.id)"
-                          >
-                            失败
-                          </Button>
+                      <TableCell class="px-2.5 py-2.5 align-top text-sm text-muted-foreground">
+                        <div class="whitespace-nowrap">
+                          {{ formatDateLabel(order.created_at) }}
+                        </div>
+                        <div class="mt-1 whitespace-nowrap text-xs text-muted-foreground">
+                          {{ formatTimeLabel(order.created_at) }}
                         </div>
                       </TableCell>
                     </TableRow>
-                    <TableRow v-if="!loadingOrders && orders.length === 0">
-                      <TableCell
-                        colspan="7"
-                        class="py-10"
-                      >
-                        <EmptyState
-                          title="暂无支付订单"
+                      <TableRow v-if="!loadingOrders && orders.length === 0">
+                        <TableCell
+                          colspan="6"
+                          class="py-12 text-center text-sm text-muted-foreground"
+                        >
+                          <EmptyState
+                            title="暂无充值订单"
                           description="当前筛选条件下没有数据"
                         />
                       </TableCell>
@@ -528,43 +866,341 @@
           </TabsContent>
 
           <TabsContent
-            value="callbacks"
+            value="reviews"
             class="mt-5 space-y-4"
           >
-            <div class="flex items-center gap-2">
-              <Select v-model="callbackMethodFilter">
-                <SelectTrigger class="w-[180px]">
-                  <SelectValue placeholder="支付方式" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">
-                    全部方式
-                  </SelectItem>
-                  <SelectItem value="alipay">
-                    支付宝
-                  </SelectItem>
-                  <SelectItem value="wechat">
-                    微信支付
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-              <RefreshButton
-                :loading="loadingCallbacks"
-                @click="loadCallbacks"
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <div class="text-sm font-medium">
+                  待审核充值订单
+                </div>
+                <p class="mt-1 text-xs text-muted-foreground">
+                  审核用户提交的人工充值订单，审批通过后会直接入账钱包余额。
+                </p>
+              </div>
+
+              <div class="flex items-center justify-between gap-3">
+                <div class="text-sm text-muted-foreground">
+                  共 {{ reviewTotal }} 条
+                </div>
+                <RefreshButton
+                  :loading="loadingReviewOrders"
+                  @click="loadReviewOrders"
+                />
+              </div>
+            </div>
+
+            <div class="space-y-2.5 sm:hidden">
+              <div
+                v-for="order in reviewOrders"
+                :key="order.id"
+                class="rounded-2xl border border-border/60 bg-card/95 p-3.5 shadow-[0_16px_34px_-30px_hsl(var(--foreground))]"
+              >
+                <div class="flex items-start justify-between gap-3">
+                  <div class="min-w-0">
+                    <div
+                      class="truncate text-sm font-semibold text-foreground"
+                      :title="order.order_no"
+                    >
+                      {{ compactOrderNo(order.order_no) }}
+                    </div>
+                    <div class="mt-1 truncate text-[11px] text-muted-foreground">
+                      {{ orderOwnerName(order.wallet_id) }}
+                    </div>
+                  </div>
+                  <div class="shrink-0 text-right">
+                    <div class="text-sm font-semibold tabular-nums text-foreground">
+                      {{ formatCurrency(order.amount_usd) }}
+                    </div>
+                    <div class="mt-1 text-[11px] text-muted-foreground">
+                      {{ formatDateLabel(order.created_at) }}
+                    </div>
+                    <div class="text-[11px] text-muted-foreground">
+                      {{ formatTimeLabel(order.created_at) }}
+                    </div>
+                  </div>
+                </div>
+
+                <div class="mt-2 flex flex-wrap gap-1.5">
+                  <Badge
+                    variant="outline"
+                    class="h-6 whitespace-nowrap px-2 py-0 text-[11px]"
+                  >
+                    {{ paymentMethodLabel(order.payment_method) }}
+                  </Badge>
+                  <Badge
+                    variant="outline"
+                    class="h-6 whitespace-nowrap px-2 py-0 text-[11px] text-muted-foreground"
+                  >
+                    待审核
+                  </Badge>
+                </div>
+
+                <div class="mt-3 rounded-xl border border-border/50 bg-muted/[0.08] p-2.5">
+                  <div class="text-[11px] text-muted-foreground">
+                    归属
+                  </div>
+                  <div class="mt-1 truncate text-sm text-foreground">
+                    {{ orderOwnerName(order.wallet_id) }}
+                  </div>
+                  <div class="mt-1 truncate text-[11px] text-muted-foreground">
+                    {{ orderOwnerMetaLine(order.wallet_id) }}
+                  </div>
+                </div>
+
+                <div class="mt-3 grid grid-cols-2 gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="h-8 text-xs"
+                    :disabled="submittingOrderAction"
+                    @click="openCreditDialog(order)"
+                  >
+                    <CheckCircle2 class="mr-1.5 h-3.5 w-3.5" />
+                    通过
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="h-8 border-rose-200 text-xs text-rose-600 hover:bg-rose-50 dark:border-rose-900/60 dark:hover:bg-rose-950/40"
+                    :disabled="submittingOrderAction"
+                    @click="rejectReviewOrder(order)"
+                  >
+                    <XCircle class="mr-1.5 h-3.5 w-3.5" />
+                    拒绝
+                  </Button>
+                </div>
+              </div>
+
+              <EmptyState
+                v-if="!loadingReviewOrders && reviewOrders.length === 0"
+                size="sm"
+                title="暂无待审核充值订单"
+                description="当前没有需要人工审批的钱包充值订单"
               />
             </div>
 
-            <div class="rounded-2xl border border-border/60 overflow-hidden bg-background">
+            <div class="hidden overflow-hidden rounded-2xl border border-border/60 bg-background sm:block">
               <div class="overflow-x-auto">
-                <Table>
+                <Table class="w-full table-auto">
                   <TableHeader>
                     <TableRow>
-                      <TableHead>回调键</TableHead>
-                      <TableHead>订单号</TableHead>
-                      <TableHead>方式</TableHead>
-                      <TableHead>验签</TableHead>
-                      <TableHead>状态</TableHead>
-                      <TableHead>时间</TableHead>
+                      <TableHead class="h-10 px-3 py-2 whitespace-nowrap">订单</TableHead>
+                      <TableHead class="h-10 px-2.5 py-2 whitespace-nowrap">归属</TableHead>
+                      <TableHead class="h-10 px-2 py-2 whitespace-nowrap">金额</TableHead>
+                      <TableHead class="h-10 px-2 py-2 whitespace-nowrap text-center">支付方式</TableHead>
+                      <TableHead class="h-10 px-2.5 py-2 whitespace-nowrap">提交时间</TableHead>
+                      <TableHead class="h-10 px-3 py-2 whitespace-nowrap text-right">
+                        审核
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    <TableRow
+                      v-for="order in reviewOrders"
+                      :key="order.id"
+                      class="border-b border-border/40 last:border-b-0"
+                    >
+                      <TableCell class="px-3 py-2.5 align-top">
+                        <div
+                          class="max-w-full truncate font-medium"
+                          :title="order.order_no"
+                        >
+                          {{ compactOrderNo(order.order_no) }}
+                        </div>
+                        <div class="mt-1 truncate text-xs text-muted-foreground">
+                          人工充值
+                        </div>
+                      </TableCell>
+                      <TableCell class="px-2.5 py-2.5 align-top">
+                        <div
+                          class="max-w-full truncate font-medium"
+                          :title="orderOwnerName(order.wallet_id)"
+                        >
+                          {{ orderOwnerName(order.wallet_id) }}
+                        </div>
+                        <div
+                          class="mt-1 max-w-full truncate text-xs text-muted-foreground"
+                          :title="orderOwnerMetaLine(order.wallet_id)"
+                        >
+                          {{ orderOwnerMetaLine(order.wallet_id) }}
+                        </div>
+                      </TableCell>
+                      <TableCell class="px-2 py-2.5 align-top whitespace-nowrap text-sm font-medium tabular-nums">
+                        {{ formatCurrency(order.amount_usd) }}
+                      </TableCell>
+                      <TableCell class="px-2 py-2.5 align-top text-center">
+                        <Badge
+                          variant="outline"
+                          class="h-8 whitespace-nowrap px-3 py-0"
+                        >
+                          {{ paymentMethodLabel(order.payment_method) }}
+                        </Badge>
+                      </TableCell>
+                      <TableCell class="px-2.5 py-2.5 align-top text-sm text-muted-foreground">
+                        <div class="whitespace-nowrap">
+                          {{ formatDateLabel(order.created_at) }}
+                        </div>
+                        <div class="mt-1 whitespace-nowrap text-xs text-muted-foreground">
+                          {{ formatTimeLabel(order.created_at) }}
+                        </div>
+                      </TableCell>
+                      <TableCell class="px-3 py-2.5 align-top text-right">
+                        <div class="flex justify-end gap-1.5 whitespace-nowrap">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            class="h-8 min-w-[66px] whitespace-nowrap px-3"
+                            :disabled="submittingOrderAction"
+                            @click="openCreditDialog(order)"
+                          >
+                            <CheckCircle2 class="mr-1.5 h-4 w-4" />
+                            通过
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            class="h-8 min-w-[66px] whitespace-nowrap border-rose-200 px-3 text-rose-600 hover:bg-rose-50 dark:border-rose-900/60 dark:hover:bg-rose-950/40"
+                            :disabled="submittingOrderAction"
+                            @click="rejectReviewOrder(order)"
+                          >
+                            <XCircle class="mr-1.5 h-4 w-4" />
+                            拒绝
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                      <TableRow v-if="!loadingReviewOrders && reviewOrders.length === 0">
+                        <TableCell
+                          colspan="6"
+                          class="py-12 text-center text-sm text-muted-foreground"
+                        >
+                          <EmptyState
+                            title="暂无待审核充值订单"
+                          description="当前没有需要人工审批的钱包充值订单"
+                        />
+                      </TableCell>
+                    </TableRow>
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+
+            <Pagination
+              :current="reviewPage"
+              :total="reviewTotal"
+              :page-size="reviewPageSize"
+              @update:current="handleReviewPageChange"
+              @update:page-size="handleReviewPageSizeChange"
+            />
+          </TabsContent>
+
+          <TabsContent
+            value="callbacks"
+            class="mt-5 space-y-4"
+          >
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div class="grid grid-cols-1 gap-2 sm:flex sm:flex-wrap sm:items-center">
+                <Select v-model="callbackMethodFilter">
+                  <SelectTrigger class="w-full sm:w-[180px]">
+                    <SelectValue placeholder="支付方式" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">
+                      全部方式
+                    </SelectItem>
+                    <SelectItem value="alipay">
+                      支付宝
+                    </SelectItem>
+                    <SelectItem value="wechat">
+                      微信支付
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div class="flex items-center justify-between gap-3">
+                <div class="text-sm text-muted-foreground">
+                  共 {{ callbackTotal }} 条
+                </div>
+                <RefreshButton
+                  :loading="loadingCallbacks"
+                  @click="loadCallbacks"
+                />
+              </div>
+            </div>
+
+            <div class="space-y-2.5 sm:hidden">
+              <div
+                v-for="callback in callbacks"
+                :key="callback.id"
+                class="rounded-2xl border border-border/60 bg-card/95 p-3.5 shadow-[0_16px_34px_-30px_hsl(var(--foreground))]"
+              >
+                <div class="flex items-start justify-between gap-3">
+                  <div class="min-w-0">
+                    <div
+                      class="truncate font-mono text-xs font-medium text-foreground"
+                      :title="callback.callback_key"
+                    >
+                      {{ callback.callback_key }}
+                    </div>
+                    <div
+                      class="mt-1 truncate text-[11px] text-muted-foreground"
+                      :title="callback.order_no || '-'"
+                    >
+                      订单 {{ callback.order_no || '-' }}
+                    </div>
+                  </div>
+                  <div class="shrink-0 text-right">
+                    <div class="text-[11px] text-muted-foreground">
+                      {{ formatDateLabel(callback.created_at) }}
+                    </div>
+                    <div class="text-[11px] text-muted-foreground">
+                      {{ formatTimeLabel(callback.created_at) }}
+                    </div>
+                  </div>
+                </div>
+
+                <div class="mt-2 flex flex-wrap gap-1.5">
+                  <Badge
+                    variant="outline"
+                    class="h-6 whitespace-nowrap px-2 py-0 text-[11px]"
+                  >
+                    {{ paymentMethodLabel(callback.payment_method) }}
+                  </Badge>
+                  <Badge
+                    :variant="callback.signature_valid ? 'success' : 'destructive'"
+                    class="h-6 whitespace-nowrap px-2 py-0 text-[11px]"
+                  >
+                    {{ callback.signature_valid ? '验签通过' : '验签失败' }}
+                  </Badge>
+                  <Badge
+                    :variant="callbackStatusBadge(callback.status)"
+                    class="h-6 whitespace-nowrap px-2 py-0 text-[11px]"
+                  >
+                    {{ callbackStatusLabel(callback.status) }}
+                  </Badge>
+                </div>
+              </div>
+
+              <EmptyState
+                v-if="!loadingCallbacks && callbacks.length === 0"
+                size="sm"
+                title="暂无充值回调"
+                description="当前筛选条件下没有数据"
+              />
+            </div>
+
+            <div class="hidden overflow-hidden rounded-2xl border border-border/60 bg-background sm:block">
+              <div class="overflow-x-auto">
+                <Table class="w-full table-auto">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead class="h-10 px-3 py-2">回调键</TableHead>
+                      <TableHead class="h-10 px-2.5 py-2 whitespace-nowrap">订单号</TableHead>
+                      <TableHead class="h-10 px-2 py-2 whitespace-nowrap">方式</TableHead>
+                      <TableHead class="h-10 px-2 py-2 whitespace-nowrap">验签</TableHead>
+                      <TableHead class="h-10 px-2 py-2 whitespace-nowrap">状态</TableHead>
+                      <TableHead class="h-10 px-2.5 py-2 whitespace-nowrap">时间</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -572,24 +1208,34 @@
                       v-for="callback in callbacks"
                       :key="callback.id"
                     >
-                      <TableCell class="font-mono text-xs">
-                        {{ callback.callback_key }}
+                      <TableCell
+                        class="max-w-[240px] px-3 py-2.5 align-top font-mono text-xs"
+                        :title="callback.callback_key"
+                      >
+                        <div class="truncate">
+                          {{ callback.callback_key }}
+                        </div>
                       </TableCell>
-                      <TableCell class="font-mono text-xs whitespace-nowrap">
-                        {{ callback.order_no || '-' }}
+                      <TableCell
+                        class="max-w-[180px] px-2.5 py-2.5 align-top font-mono text-xs"
+                        :title="callback.order_no || '-'"
+                      >
+                        <div class="truncate whitespace-nowrap">
+                          {{ callback.order_no || '-' }}
+                        </div>
                       </TableCell>
-                      <TableCell>{{ paymentMethodLabel(callback.payment_method) }}</TableCell>
-                      <TableCell>
+                      <TableCell class="px-2 py-2.5 align-top whitespace-nowrap">{{ paymentMethodLabel(callback.payment_method) }}</TableCell>
+                      <TableCell class="px-2 py-2.5 align-top">
                         <Badge :variant="callback.signature_valid ? 'success' : 'destructive'">
                           {{ callback.signature_valid ? '通过' : '失败' }}
                         </Badge>
                       </TableCell>
-                      <TableCell>
+                      <TableCell class="px-2 py-2.5 align-top">
                         <Badge :variant="callbackStatusBadge(callback.status)">
                           {{ callbackStatusLabel(callback.status) }}
                         </Badge>
                       </TableCell>
-                      <TableCell class="text-xs text-muted-foreground whitespace-nowrap">
+                      <TableCell class="px-2.5 py-2.5 align-top text-xs text-muted-foreground whitespace-nowrap">
                         {{ formatDateTime(callback.created_at) }}
                       </TableCell>
                     </TableRow>
@@ -599,7 +1245,7 @@
                         class="py-10"
                       >
                         <EmptyState
-                          title="暂无回调日志"
+                          title="暂无充值回调"
                           description="当前筛选条件下没有数据"
                         />
                       </TableCell>
@@ -951,7 +1597,7 @@
       <template #header>
         <div class="px-6 py-4 border-b border-border">
           <h3 class="text-lg font-semibold">
-            人工到账
+            {{ currentOrder?.status === 'pending_approval' ? '充值审批' : '人工到账' }}
           </h3>
           <p class="text-xs text-muted-foreground mt-1">
             订单: {{ currentOrder?.order_no || '-' }}
@@ -999,7 +1645,7 @@
           :disabled="submittingOrderAction"
           @click="submitCreditOrder"
         >
-          {{ submittingOrderAction ? '提交中...' : '确认到账' }}
+          {{ submittingOrderAction ? '提交中...' : currentOrder?.status === 'pending_approval' ? '审批通过并到账' : '确认到账' }}
         </Button>
       </template>
     </Dialog>
@@ -1035,7 +1681,7 @@ import {
   TabsTrigger,
 } from '@/components/ui'
 import { EmptyState } from '@/components/common'
-import { X } from 'lucide-vue-next'
+import { CheckCircle2, X, XCircle } from 'lucide-vue-next'
 import {
   adminWalletApi,
   type AdminGlobalRefund,
@@ -1043,6 +1689,7 @@ import {
 } from '@/api/admin-wallets'
 import { adminPaymentsApi, type PaymentCallbackRecord } from '@/api/admin-payments'
 import type { PaymentOrder } from '@/api/wallet'
+import { useConfirm } from '@/composables/useConfirm'
 import { parseApiError } from '@/utils/errorParser'
 import { useToast } from '@/composables/useToast'
 import { log } from '@/utils/logger'
@@ -1062,7 +1709,7 @@ import {
   walletTransactionReasonLabel,
 } from '@/utils/walletDisplay'
 
-type WalletManagementTab = 'ledger' | 'refunds' | 'orders' | 'callbacks'
+type WalletManagementTab = 'ledger' | 'refunds' | 'orders' | 'reviews' | 'callbacks'
 type LedgerCategory = 'recharge' | 'gift' | 'adjust' | 'refund'
 type LedgerReasonOption = {
   value: string
@@ -1084,6 +1731,7 @@ const LEDGER_REASON_OPTIONS: LedgerReasonOption[] = [
 ]
 
 const { success, error: showError } = useToast()
+const { confirmDanger } = useConfirm()
 const route = useRoute()
 
 const activeTab = ref<WalletManagementTab>('ledger')
@@ -1091,6 +1739,7 @@ const activeTab = ref<WalletManagementTab>('ledger')
 const loadingLedger = ref(false)
 const loadingRefunds = ref(false)
 const loadingOrders = ref(false)
+const loadingReviewOrders = ref(false)
 const loadingCallbacks = ref(false)
 const submittingRefundAction = ref(false)
 const submittingOrderAction = ref(false)
@@ -1123,13 +1772,24 @@ const orderPageSize = ref(20)
 const orderStatusFilter = ref('all')
 const orderMethodFilter = ref('all')
 
+const reviewOrders = ref<PaymentOrder[]>([])
+const reviewTotal = ref(0)
+const reviewPage = ref(1)
+const reviewPageSize = ref(20)
+
 const callbacks = ref<PaymentCallbackRecord[]>([])
 const callbackTotal = ref(0)
 const callbackPage = ref(1)
 const callbackPageSize = ref(20)
 const callbackMethodFilter = ref('all')
 
-const walletMetaMap = ref<Record<string, { ownerName: string; ownerType: 'user' | 'api_key' }>>({})
+type WalletOwnerMeta = {
+  ownerName: string
+  ownerType: 'user' | 'api_key'
+  ownerEmail: string | null
+}
+
+const walletMetaMap = ref<Record<string, WalletOwnerMeta>>({})
 
 const showLedgerDrawer = ref(false)
 const showRefundDrawer = ref(false)
@@ -1205,24 +1865,26 @@ onMounted(async () => {
     loadLedger(),
     loadRefunds(),
     loadOrders(),
+    loadReviewOrders(),
     loadCallbacks(),
   ])
 })
 
 function isValidTab(tab: unknown): tab is WalletManagementTab {
-  return tab === 'ledger' || tab === 'refunds' || tab === 'orders' || tab === 'callbacks'
+  return tab === 'ledger' || tab === 'refunds' || tab === 'orders' || tab === 'reviews' || tab === 'callbacks'
 }
 
 async function loadWalletMetaMap() {
   try {
     const wallets = await adminWalletApi.listAllWallets()
-    walletMetaMap.value = wallets.reduce<Record<string, { ownerName: string; ownerType: 'user' | 'api_key' }>>(
+    walletMetaMap.value = wallets.reduce<Record<string, WalletOwnerMeta>>(
       (acc, wallet) => {
         const ownerName =
           wallet.owner_name || (wallet.owner_type === 'user' ? '未命名用户' : '未命名密钥')
         acc[wallet.id] = {
           ownerName,
           ownerType: wallet.owner_type,
+          ownerEmail: wallet.owner_email ?? null,
         }
         return acc
       },
@@ -1290,10 +1952,29 @@ async function loadOrders() {
     orders.value = resp.items
     orderTotal.value = resp.total
   } catch (error) {
-    log.error('加载支付订单失败:', error)
-    showError(parseApiError(error, '加载支付订单失败'))
+    log.error('加载充值订单失败:', error)
+    showError(parseApiError(error, '加载充值订单失败'))
   } finally {
     loadingOrders.value = false
+  }
+}
+
+async function loadReviewOrders() {
+  loadingReviewOrders.value = true
+  try {
+    const offset = (reviewPage.value - 1) * reviewPageSize.value
+    const resp = await adminPaymentsApi.listOrders({
+      status: 'pending_approval',
+      limit: reviewPageSize.value,
+      offset,
+    })
+    reviewOrders.value = resp.items
+    reviewTotal.value = resp.total
+  } catch (error) {
+    log.error('加载待审核充值订单失败:', error)
+    showError(parseApiError(error, '加载待审核充值订单失败'))
+  } finally {
+    loadingReviewOrders.value = false
   }
 }
 
@@ -1309,21 +1990,25 @@ async function loadCallbacks() {
     callbacks.value = resp.items
     callbackTotal.value = resp.total
   } catch (error) {
-    log.error('加载支付回调失败:', error)
-    showError(parseApiError(error, '加载支付回调失败'))
+    log.error('加载充值回调失败:', error)
+    showError(parseApiError(error, '加载充值回调失败'))
   } finally {
     loadingCallbacks.value = false
   }
 }
 
-function orderWalletName(walletId: string) {
-  return walletMetaMap.value[walletId]?.ownerName || '未知钱包'
+function orderOwnerName(walletId: string) {
+  return walletMetaMap.value[walletId]?.ownerName || '未知归属'
 }
 
-function orderWalletTypeLabel(walletId: string) {
-  const ownerType = walletMetaMap.value[walletId]?.ownerType
-  if (!ownerType) return '未知归属'
-  return ownerType === 'user' ? '用户钱包' : '独立密钥钱包'
+function orderOwnerMetaLine(walletId: string) {
+  const owner = walletMetaMap.value[walletId]
+  if (!owner) return '未知归属'
+  const ownerTypeText = ownerTypeLabel(owner.ownerType)
+  if (owner.ownerType === 'user' && owner.ownerEmail) {
+    return `${ownerTypeText} · ${owner.ownerEmail}`
+  }
+  return ownerTypeText
 }
 
 function openLedgerDrawer(tx: AdminLedgerTransaction) {
@@ -1455,46 +2140,45 @@ async function submitCreditOrder() {
   if (!currentOrder.value) return
   submittingOrderAction.value = true
   try {
-    await adminPaymentsApi.creditOrder(currentOrder.value.id, {
+    const payload = {
       gateway_order_id: creditForm.gateway_order_id || undefined,
       pay_amount: creditForm.pay_amount,
       pay_currency: creditForm.pay_currency || undefined,
       exchange_rate: creditForm.exchange_rate,
-    })
-    success('订单已手动到账')
+    }
+    if (currentOrder.value.status === 'pending_approval') {
+      await adminPaymentsApi.approveOrder(currentOrder.value.id, payload)
+      success('充值审批已通过')
+    } else {
+      await adminPaymentsApi.creditOrder(currentOrder.value.id, payload)
+      success('充值订单已手动到账')
+    }
     showCreditDialog.value = false
-    await Promise.all([loadOrders(), loadLedger(), loadWalletMetaMap()])
+    await Promise.all([loadOrders(), loadReviewOrders(), loadLedger(), loadWalletMetaMap()])
   } catch (error) {
-    log.error('手动到账失败:', error)
-    showError(parseApiError(error, '手动到账失败'))
+    log.error('充值订单审批失败:', error)
+    showError(parseApiError(error, currentOrder.value.status === 'pending_approval' ? '通过充值审批失败' : '充值订单手动到账失败'))
   } finally {
     submittingOrderAction.value = false
   }
 }
 
-async function expireOrder(orderId: string) {
-  submittingOrderAction.value = true
-  try {
-    await adminPaymentsApi.expireOrder(orderId)
-    success('订单已标记过期')
-    await loadOrders()
-  } catch (error) {
-    log.error('标记过期失败:', error)
-    showError(parseApiError(error, '标记过期失败'))
-  } finally {
-    submittingOrderAction.value = false
-  }
-}
+async function rejectReviewOrder(order: PaymentOrder) {
+  const confirmed = await confirmDanger(
+    `确认拒绝订单 ${compactOrderNo(order.order_no)} 吗？拒绝后该充值申请将不会入账。`,
+    '拒绝充值审批',
+    '拒绝'
+  )
+  if (!confirmed) return
 
-async function failOrder(orderId: string) {
   submittingOrderAction.value = true
   try {
-    await adminPaymentsApi.failOrder(orderId)
-    success('订单已标记失败')
-    await loadOrders()
+    await adminPaymentsApi.rejectOrder(order.id)
+    success('充值审批已拒绝')
+    await Promise.all([loadOrders(), loadReviewOrders()])
   } catch (error) {
-    log.error('标记失败失败:', error)
-    showError(parseApiError(error, '标记失败失败'))
+    log.error('拒绝充值审批失败:', error)
+    showError(parseApiError(error, '拒绝充值审批失败'))
   } finally {
     submittingOrderAction.value = false
   }
@@ -1510,18 +2194,6 @@ function canFailRefund(status: string) {
 
 function canCompleteRefund(status: string) {
   return status === 'processing'
-}
-
-function canCreditOrder(status: string) {
-  return status === 'pending' || status === 'paid'
-}
-
-function canExpireOrder(status: string) {
-  return status === 'pending'
-}
-
-function canFailOrder(status: string) {
-  return status !== 'credited' && status !== 'refunded'
 }
 
 function handleLedgerPageChange(page: number) {
@@ -1557,6 +2229,17 @@ function handleOrderPageSizeChange(size: number) {
   void loadOrders()
 }
 
+function handleReviewPageChange(page: number) {
+  reviewPage.value = page
+  void loadReviewOrders()
+}
+
+function handleReviewPageSizeChange(size: number) {
+  reviewPageSize.value = size
+  reviewPage.value = 1
+  void loadReviewOrders()
+}
+
 function handleCallbackPageChange(page: number) {
   callbackPage.value = page
   void loadCallbacks()
@@ -1577,6 +2260,14 @@ function ownerDisplayName(name: string | null | undefined, ownerType: 'user' | '
   return ownerType === 'user' ? '未命名用户' : '未命名密钥'
 }
 
+function ledgerOwnerMetaLine(tx: AdminLedgerTransaction) {
+  const parts = [ownerTypeLabel(tx.owner_type)]
+  if (tx.wallet_status) {
+    parts.push(walletStatusLabel(tx.wallet_status))
+  }
+  return parts.join(' · ')
+}
+
 function formatDateTime(value: string | null | undefined) {
   if (!value) return '-'
   return new Date(value).toLocaleString('zh-CN', {
@@ -1586,6 +2277,30 @@ function formatDateTime(value: string | null | undefined) {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+function formatDateLabel(value: string | null | undefined) {
+  if (!value) return '-'
+  return new Date(value).toLocaleDateString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  })
+}
+
+function formatTimeLabel(value: string | null | undefined) {
+  if (!value) return '--:--'
+  return new Date(value).toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+}
+
+function compactOrderNo(orderNo: string | null | undefined): string {
+  if (!orderNo) return '-'
+  if (orderNo.length <= 26) return orderNo
+  return `${orderNo.slice(0, 18)}...${orderNo.slice(-8)}`
 }
 </script>
 

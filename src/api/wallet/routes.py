@@ -76,6 +76,7 @@ def _list_recharge_orders_sync(user_id: str, limit: int, offset: int) -> dict[st
             user_id=user_id,
             limit=limit,
             offset=offset,
+            order_types="topup",
         )
         return {
             "items": [
@@ -90,10 +91,32 @@ def _list_recharge_orders_sync(user_id: str, limit: int, offset: int) -> dict[st
 def _get_recharge_order_sync(user_id: str, order_id: str) -> dict[str, Any]:
     with get_db_context() as db:
         order = PaymentService.get_user_order(db, user_id=user_id, order_id=order_id)
-        if order is None:
-            raise NotFoundException("Payment order not found")
+        if order is None or str(getattr(order, "order_type", "")) != "topup":
+            raise NotFoundException("充值订单不存在", "payment_order")
         PaymentService.refresh_order_status(order)
         return {"order": serialize_payment_order(order, sanitize_gateway_response=True)}
+
+
+def _cancel_recharge_order_sync(user_id: str, order_id: str) -> dict[str, Any]:
+    with get_db_context() as db:
+        order = PaymentService.get_user_order(db, user_id=user_id, order_id=order_id)
+        if order is None or str(getattr(order, "order_type", "")) != "topup":
+            raise NotFoundException("充值订单不存在", "payment_order")
+        if str(getattr(order, "status", "")) not in {"pending", "pending_approval"}:
+            raise InvalidRequestException("仅待支付充值订单支持取消")
+
+        try:
+            updated, _changed = PaymentService.expire_order(
+                db,
+                order=order,
+                reason="user_cancelled",
+            )
+        except ValueError as exc:
+            raise InvalidRequestException(str(exc)) from exc
+
+        db.commit()
+        db.refresh(updated)
+        return {"order": serialize_payment_order(updated, sanitize_gateway_response=True)}
 
 
 def _list_refunds_sync(user_id: str, limit: int, offset: int) -> dict[str, Any]:
@@ -209,7 +232,14 @@ class CreateRechargePayload(BaseModel):
 
 
 def _default_refund_mode_for_order(order: PaymentOrder) -> str:
-    if order.payment_method in {"admin_manual", "card_recharge", "card_code", "gift_code"}:
+    if order.payment_method in {
+        "admin_manual",
+        "manual",
+        "manual_review",
+        "card_recharge",
+        "card_code",
+        "gift_code",
+    }:
         return "offline_payout"
     return "original_channel"
 
@@ -310,6 +340,16 @@ async def list_recharge_orders(
 @router.get("/recharge/{order_id}")
 async def get_recharge_order(order_id: str, request: Request, db: Session = Depends(get_db)) -> Any:
     adapter = WalletRechargeDetailAdapter(order_id=order_id)
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.post("/recharge/{order_id}/cancel")
+async def cancel_recharge_order(
+    order_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    adapter = WalletRechargeCancelAdapter(order_id=order_id)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
@@ -521,6 +561,18 @@ class WalletRechargeDetailAdapter(AuthenticatedApiAdapter):
             raise InvalidRequestException("未登录")
 
         return await run_in_threadpool(_get_recharge_order_sync, user.id, self.order_id)
+
+
+@dataclass
+class WalletRechargeCancelAdapter(AuthenticatedApiAdapter):
+    order_id: str
+
+    async def handle(self, context: ApiRequestContext) -> dict[str, Any]:
+        user = context.user
+        if user is None:
+            raise InvalidRequestException("未登录")
+
+        return await run_in_threadpool(_cancel_recharge_order_sync, user.id, self.order_id)
 
 
 @dataclass

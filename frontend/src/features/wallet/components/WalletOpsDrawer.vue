@@ -49,41 +49,41 @@
             </div>
           </div>
 
-          <div class="p-4 sm:p-6 space-y-5">
-            <div class="rounded-2xl border border-border/60 bg-muted/30 p-4">
-              <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                <div class="rounded-xl bg-background/80 p-3">
+          <div class="space-y-4 p-4 sm:p-6">
+            <div class="rounded-2xl border border-border/60 bg-muted/30 p-3.5">
+              <div class="grid grid-cols-2 gap-2 lg:grid-cols-4">
+                <div class="rounded-xl bg-background/80 p-2.5">
                   <div class="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
                     总可用余额
                   </div>
                   <div
-                    class="mt-1 text-lg font-semibold"
+                    class="mt-0.5 text-[15px] font-semibold sm:text-lg"
                     :class="localWallet.balance < 0 ? 'text-rose-600' : 'text-foreground'"
                   >
                     ${{ formatFixed(localWallet.balance, 2) }}
                   </div>
                 </div>
-                <div class="rounded-xl bg-background/80 p-3">
+                <div class="rounded-xl bg-background/80 p-2.5">
                   <div class="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
                     充值余额
                   </div>
-                  <div class="mt-1 text-lg font-semibold text-foreground">
+                  <div class="mt-0.5 text-[15px] font-semibold text-foreground sm:text-lg">
                     ${{ formatFixed(localWallet.recharge_balance, 2) }}
                   </div>
                 </div>
-                <div class="rounded-xl bg-background/80 p-3">
+                <div class="rounded-xl bg-background/80 p-2.5">
                   <div class="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
                     赠款余额
                   </div>
-                  <div class="mt-1 text-lg font-semibold text-foreground">
+                  <div class="mt-0.5 text-[15px] font-semibold text-foreground sm:text-lg">
                     {{ isApiKeyWallet ? '不支持' : `$${formatFixed(localWallet.gift_balance, 2)}` }}
                   </div>
                 </div>
-                <div class="rounded-xl bg-background/80 p-3">
+                <div class="rounded-xl bg-background/80 p-2.5">
                   <div class="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
                     累计消费
                   </div>
-                  <div class="mt-1 text-lg font-semibold text-foreground">
+                  <div class="mt-0.5 text-[15px] font-semibold text-foreground sm:text-lg">
                     ${{ formatFixed(localWallet.total_consumed, 2) }}
                   </div>
                 </div>
@@ -233,7 +233,96 @@
                   />
                 </div>
 
-                <div class="rounded-2xl border border-border/60 overflow-hidden bg-background">
+                <div class="space-y-2.5 sm:hidden">
+                  <div
+                    v-for="tx in txItems"
+                    :key="tx.id"
+                    class="rounded-2xl border border-border/60 bg-card/95 p-3.5 shadow-[0_16px_34px_-30px_hsl(var(--foreground))]"
+                  >
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="min-w-0">
+                        <div class="flex flex-wrap items-center gap-2">
+                          <Badge
+                            variant="outline"
+                            class="h-6 whitespace-nowrap px-2.5 py-0 text-[11px]"
+                          >
+                            {{ walletTransactionCategoryLabel(tx.category) }}
+                          </Badge>
+                          <span
+                            class="max-w-[11rem] truncate text-[11px] text-muted-foreground"
+                            :title="walletTransactionReasonLabel(tx.reason_code)"
+                          >
+                            {{ walletTransactionReasonLabel(tx.reason_code) }}
+                          </span>
+                        </div>
+                        <div class="mt-2.5 text-sm font-medium text-foreground">
+                          {{ formatDateLabel(tx.created_at) }}
+                        </div>
+                        <div class="mt-1 text-[11px] text-muted-foreground">
+                          {{ formatTimeLabel(tx.created_at) }}
+                        </div>
+                      </div>
+
+                      <div class="text-right">
+                        <div class="text-[11px] text-muted-foreground">
+                          金额
+                        </div>
+                        <div
+                          class="mt-0.5 text-base font-semibold tabular-nums"
+                          :class="toFiniteNumber(tx.amount) >= 0 ? 'text-emerald-600' : 'text-rose-600'"
+                        >
+                          {{ toFiniteNumber(tx.amount) >= 0 ? '+' : '' }}{{ formatFixed(tx.amount, 4) }}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="mt-3 grid grid-cols-2 gap-2 text-xs">
+                      <div class="rounded-xl border border-border/40 bg-muted/18 p-2.5">
+                        <div class="text-muted-foreground">
+                          总余额
+                        </div>
+                        <div class="mt-1 font-medium tabular-nums text-foreground">
+                          {{ formatFixed(tx.balance_before, 4) }} → {{ formatFixed(tx.balance_after, 4) }}
+                        </div>
+                      </div>
+                      <div
+                        v-if="tx.recharge_balance_before !== null && tx.recharge_balance_before !== undefined"
+                        class="rounded-xl border border-border/40 bg-muted/18 p-2.5"
+                      >
+                        <div class="text-muted-foreground">
+                          充值余额
+                        </div>
+                        <div class="mt-1 font-medium tabular-nums text-foreground">
+                          {{ formatFixed(tx.recharge_balance_before, 4) }} → {{ formatFixed(tx.recharge_balance_after, 4) }}
+                        </div>
+                      </div>
+                      <div
+                        v-if="tx.gift_balance_before !== null && tx.gift_balance_before !== undefined"
+                        class="rounded-xl border border-border/40 bg-muted/18 p-2.5"
+                        :class="tx.recharge_balance_before !== null && tx.recharge_balance_before !== undefined ? '' : 'col-span-2'"
+                      >
+                        <div class="text-muted-foreground">
+                          赠款余额
+                        </div>
+                        <div class="mt-1 font-medium tabular-nums text-foreground">
+                          {{ formatFixed(tx.gift_balance_before, 4) }} → {{ formatFixed(tx.gift_balance_after, 4) }}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="mt-2.5 rounded-xl border border-border/40 bg-background/85 px-3 py-2 text-xs leading-5 text-muted-foreground">
+                      {{ tx.description || '-' }}
+                    </div>
+                  </div>
+
+                  <EmptyState
+                    v-if="!loadingTx && txItems.length === 0"
+                    title="暂无资金流水"
+                    description="当前钱包没有资金动作记录"
+                  />
+                </div>
+
+                <div class="hidden overflow-hidden rounded-2xl border border-border/60 bg-background sm:block">
                   <div class="overflow-x-auto">
                     <Table>
                       <TableHeader>
@@ -377,7 +466,91 @@
                   </div>
                 </div>
 
-                <div class="rounded-2xl border border-border/60 overflow-hidden bg-background">
+                <div class="space-y-2.5 sm:hidden">
+                  <div
+                    v-for="refund in refundItems"
+                    :key="refund.id"
+                    class="rounded-2xl border border-border/60 bg-card/95 p-3.5 shadow-[0_16px_34px_-30px_hsl(var(--foreground))]"
+                  >
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="min-w-0">
+                        <div class="flex flex-wrap items-center gap-2">
+                          <Badge
+                            :variant="refundStatusBadge(refund.status)"
+                            class="h-6 whitespace-nowrap px-2.5 py-0 text-[11px]"
+                          >
+                            {{ refundStatusLabel(refund.status) }}
+                          </Badge>
+                          <Badge
+                            variant="outline"
+                            class="h-6 whitespace-nowrap px-2.5 py-0 text-[11px]"
+                          >
+                            {{ refundModeLabel(refund.refund_mode) }}
+                          </Badge>
+                        </div>
+                        <div class="mt-2.5 truncate font-mono text-xs text-foreground">
+                          {{ refund.refund_no }}
+                        </div>
+                        <div class="mt-1 text-[11px] text-muted-foreground">
+                          {{ formatDateLabel(refund.created_at) }} {{ formatTimeLabel(refund.created_at) }}
+                        </div>
+                      </div>
+
+                      <div class="text-right">
+                        <div class="text-[11px] text-muted-foreground">
+                          金额
+                        </div>
+                        <div class="mt-0.5 text-base font-semibold tabular-nums text-foreground">
+                          ${{ formatFixed(refund.amount_usd, 4) }}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="mt-2.5 rounded-xl border border-border/40 bg-background/85 px-3 py-2 text-xs leading-5 text-muted-foreground">
+                      {{ refund.reason || refund.failure_reason || '-' }}
+                    </div>
+
+                    <div class="mt-2.5 flex flex-wrap gap-2">
+                      <Button
+                        v-if="canProcessRefund(refund.status)"
+                        size="sm"
+                        variant="outline"
+                        class="h-8 px-3"
+                        :disabled="submittingRefundAction"
+                        @click="processRefund(refund)"
+                      >
+                        处理
+                      </Button>
+                      <Button
+                        v-if="canCompleteRefund(refund.status)"
+                        size="sm"
+                        class="h-8 px-3"
+                        :disabled="submittingRefundAction"
+                        @click="openCompleteRefund(refund)"
+                      >
+                        完成
+                      </Button>
+                      <Button
+                        v-if="canFailRefund(refund.status)"
+                        size="sm"
+                        variant="destructive"
+                        class="h-8 px-3"
+                        :disabled="submittingRefundAction"
+                        @click="openFailRefund(refund)"
+                      >
+                        驳回
+                      </Button>
+                    </div>
+                  </div>
+
+                  <EmptyState
+                    v-if="!loadingRefunds && refundItems.length === 0"
+                    title="暂无退款申请"
+                    description="当前钱包没有退款单"
+                  />
+                </div>
+
+                <div class="hidden overflow-hidden rounded-2xl border border-border/60 bg-background sm:block">
                   <div class="overflow-x-auto">
                     <Table>
                       <TableHeader>
@@ -985,6 +1158,23 @@ function formatDateTime(value: string | null | undefined) {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function formatDateLabel(value: string | null | undefined) {
+  if (!value) return '-'
+  return new Date(value).toLocaleDateString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  })
+}
+
+function formatTimeLabel(value: string | null | undefined) {
+  if (!value) return '-'
+  return new Date(value).toLocaleTimeString('zh-CN', {
     hour: '2-digit',
     minute: '2-digit',
   })
