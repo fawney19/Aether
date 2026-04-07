@@ -77,7 +77,7 @@ pub(crate) use self::fallback_metrics::{GatewayFallbackMetricKind, GatewayFallba
 pub use self::middleware::strip_cf_headers_middleware;
 pub use self::rate_limit::FrontdoorUserRpmConfig;
 pub(crate) use self::rate_limit::FrontdoorUserRpmOutcome;
-pub use self::router::{build_router, build_router_with_state, serve_tcp};
+pub use self::router::{attach_static_frontend, build_router, build_router_with_state, serve_tcp};
 pub(crate) use self::state::{
     AdminBillingCollectorRecord, AdminBillingCollectorWriteInput, AdminBillingRuleRecord,
     AdminBillingRuleWriteInput, AdminWalletMutationOutcome, AdminWalletPaymentOrderRecord,

@@ -5,8 +5,8 @@ use aether_crypto::warm_python_fernet_secret;
 use aether_data::postgres::PostgresPoolConfig;
 use aether_data::redis::RedisClientConfig;
 use aether_gateway::{
-    build_router_with_state, AppState, FrontdoorCorsConfig, FrontdoorUserRpmConfig,
-    GatewayDataConfig, UsageRuntimeConfig, VideoTaskTruthSourceMode,
+    attach_static_frontend, build_router_with_state, AppState, FrontdoorCorsConfig,
+    FrontdoorUserRpmConfig, GatewayDataConfig, UsageRuntimeConfig, VideoTaskTruthSourceMode,
 };
 use aether_runtime::{
     init_service_runtime, DistributedConcurrencyGate, FileLoggingConfig, LogDestination, LogFormat,
@@ -847,17 +847,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Compose the final router: API routes + optional static file serving + CF header stripping
     let router = if let Some(ref static_dir) = args.static_dir {
         use tower_http::compression::CompressionLayer;
-        use tower_http::services::{ServeDir, ServeFile};
-
-        let static_path = std::path::PathBuf::from(static_dir);
-        let index_html = static_path.join("index.html");
         info!(static_dir = %static_dir, "serving frontend static files");
 
-        // ServeDir with SPA fallback: if no static file matches, serve index.html
-        let serve_dir = ServeDir::new(&static_path).not_found_service(ServeFile::new(&index_html));
-
-        api_router
-            .fallback_service(serve_dir)
+        attach_static_frontend(api_router, static_dir)
             .layer(CompressionLayer::new())
             .layer(axum::middleware::from_fn(
                 aether_gateway::strip_cf_headers_middleware,
