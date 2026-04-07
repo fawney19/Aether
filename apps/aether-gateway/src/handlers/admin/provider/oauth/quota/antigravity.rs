@@ -1,9 +1,9 @@
-use super::{
+use super::shared::{
     coerce_json_f64, coerce_json_string, execute_provider_quota_plan,
     extract_execution_error_message, persist_provider_quota_refresh_state,
     quota_refresh_success_invalid_state, ProviderQuotaExecutionOutcome,
 };
-use crate::handlers::admin::provider::shared::ANTIGRAVITY_FETCH_AVAILABLE_MODELS_PATH;
+use crate::handlers::admin::provider::shared::payloads::ANTIGRAVITY_FETCH_AVAILABLE_MODELS_PATH;
 use crate::{AppState, GatewayError};
 use aether_contracts::{ExecutionPlan, ExecutionTimeouts, RequestBody};
 use aether_data_contracts::repository::provider_catalog::{

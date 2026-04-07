@@ -1,11 +1,11 @@
-use super::provider_oauth_quota::{
-    persist_provider_quota_refresh_state, refresh_antigravity_provider_quota_locally,
-    refresh_codex_provider_quota_locally, refresh_kiro_provider_quota_locally,
-};
-use super::provider_oauth_state::{
+use super::quota::antigravity::refresh_antigravity_provider_quota_locally;
+use super::quota::codex::refresh_codex_provider_quota_locally;
+use super::quota::kiro::refresh_kiro_provider_quota_locally;
+use super::quota::shared::persist_provider_quota_refresh_state;
+use super::state::{
     enrich_admin_provider_oauth_auth_config, json_non_empty_string, json_u64_value,
 };
-use crate::handlers::admin::provider::shared::{
+use crate::handlers::admin::provider::shared::payloads::{
     OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX, OAUTH_REFRESH_FAILED_PREFIX,
     OAUTH_REQUEST_FAILED_PREFIX,
 };

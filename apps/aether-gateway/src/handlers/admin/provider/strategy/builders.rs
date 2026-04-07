@@ -1,5 +1,6 @@
-use super::super::write::{normalize_provider_billing_type, parse_optional_rfc3339_unix_secs};
-use super::shared::admin_provider_strategy_provider_not_found_response;
+use crate::handlers::admin::provider::shared::support::{
+    normalize_provider_billing_type, parse_optional_rfc3339_unix_secs,
+};
 use crate::handlers::admin::shared::unix_secs_to_rfc3339;
 use crate::{AppState, GatewayError};
 use axum::{
@@ -256,4 +257,12 @@ pub(super) async fn build_provider_strategy_reset_quota_response(
         "current_used": 0.0,
     }))
     .into_response())
+}
+
+fn admin_provider_strategy_provider_not_found_response() -> Response<Body> {
+    (
+        http::StatusCode::NOT_FOUND,
+        Json(json!({ "detail": "Provider not found" })),
+    )
+        .into_response()
 }

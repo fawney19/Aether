@@ -1,7 +1,7 @@
-use super::super::super::model::build_admin_provider_models_payload;
+use super::payloads::build_admin_provider_models_payload;
 use crate::control::GatewayControlDecision;
 use crate::control::GatewayPublicRequestContext;
-use crate::handlers::admin::provider::shared::admin_provider_id_for_models_list;
+use crate::handlers::admin::provider::shared::paths::admin_provider_id_for_models_list;
 use crate::handlers::admin::shared::{query_param_optional_bool, query_param_value};
 use crate::{AppState, GatewayError};
 use axum::{

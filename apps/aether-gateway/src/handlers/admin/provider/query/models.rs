@@ -1,6 +1,6 @@
-use super::shared::{
+use super::payload::{provider_query_extract_api_key_id, provider_query_extract_provider_id};
+use super::response::{
     build_admin_provider_query_bad_request_response, build_admin_provider_query_not_found_response,
-    provider_query_extract_api_key_id, provider_query_extract_provider_id,
     ADMIN_PROVIDER_QUERY_API_KEY_NOT_FOUND_DETAIL, ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL,
     ADMIN_PROVIDER_QUERY_NO_LOCAL_MODELS_DETAIL, ADMIN_PROVIDER_QUERY_PROVIDER_ID_REQUIRED_DETAIL,
     ADMIN_PROVIDER_QUERY_PROVIDER_NOT_FOUND_DETAIL,

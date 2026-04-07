@@ -12,7 +12,7 @@ use crate::execution_runtime::{
     maybe_build_local_video_success_outcome, resolve_local_sync_error_background_report_kind,
     resolve_local_sync_success_background_report_kind,
 };
-use crate::handlers::admin::provider::oauth::build_internal_control_error_response;
+use crate::handlers::admin::provider::oauth::refresh::build_internal_control_error_response;
 use crate::handlers::shared::{
     unix_secs_to_rfc3339, InternalTunnelHeartbeatRequest, InternalTunnelNodeStatusRequest,
 };

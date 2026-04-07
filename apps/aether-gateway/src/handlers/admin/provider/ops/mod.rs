@@ -4,9 +4,7 @@ use axum::body::{Body, Bytes};
 use axum::http::Response;
 
 mod architectures;
-mod providers;
-
-pub(crate) use self::providers::admin_provider_ops_local_action_response;
+pub(crate) mod providers;
 
 pub(crate) async fn maybe_build_local_admin_provider_ops_response(
     state: &AppState,

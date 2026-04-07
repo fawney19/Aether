@@ -4,8 +4,8 @@ use axum::body::{Body, Bytes};
 use axum::http::Response;
 
 mod builders;
+mod responses;
 mod routes;
-mod shared;
 
 pub(crate) async fn maybe_build_local_admin_provider_strategy_response(
     state: &AppState,

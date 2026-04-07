@@ -1,4 +1,4 @@
-use super::{
+use super::support::{
     admin_pool_provider_id_from_path, build_admin_pool_error_response,
     ADMIN_POOL_BANNED_KEY_CLEANUP_EMPTY_MESSAGE,
     ADMIN_POOL_PROVIDER_CATALOG_READER_UNAVAILABLE_DETAIL,
@@ -6,7 +6,7 @@ use super::{
 };
 use super::{payloads as pool_payloads, selection as pool_selection};
 use crate::control::GatewayPublicRequestContext;
-use crate::handlers::admin::provider::pool::{
+use crate::handlers::admin::provider::pool::runtime::{
     clear_admin_provider_pool_cooldown, reset_admin_provider_pool_cost,
 };
 use crate::handlers::admin::shared::{

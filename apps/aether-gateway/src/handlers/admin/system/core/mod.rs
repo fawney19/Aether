@@ -5,7 +5,6 @@ use axum::{
     http,
     response::Response,
 };
-
 const ADMIN_AWS_REGIONS: &[&str] = &[
     "af-south-1",
     "ap-east-1",
@@ -37,10 +36,6 @@ const ADMIN_AWS_REGIONS: &[&str] = &[
     "us-west-1",
     "us-west-2",
 ];
-mod management_tokens_routes;
-mod model_routes;
-mod modules_routes;
-mod oauth_routes;
 mod system_routes;
 
 pub(crate) async fn maybe_build_local_admin_core_response(
@@ -49,7 +44,7 @@ pub(crate) async fn maybe_build_local_admin_core_response(
     request_body: Option<&Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     if let Some(response) =
-        management_tokens_routes::maybe_build_local_admin_core_management_tokens_response(
+        crate::handlers::admin::system::maybe_build_local_admin_management_tokens_response(
             state,
             request_context,
         )
@@ -57,7 +52,7 @@ pub(crate) async fn maybe_build_local_admin_core_response(
     {
         return Ok(Some(response));
     }
-    if let Some(response) = oauth_routes::maybe_build_local_admin_core_oauth_response(
+    if let Some(response) = crate::handlers::admin::auth::maybe_build_local_admin_oauth_response(
         state,
         request_context,
         request_body,
@@ -66,12 +61,13 @@ pub(crate) async fn maybe_build_local_admin_core_response(
     {
         return Ok(Some(response));
     }
-    if let Some(response) = modules_routes::maybe_build_local_admin_core_modules_response(
-        state,
-        request_context,
-        request_body,
-    )
-    .await?
+    if let Some(response) =
+        crate::handlers::admin::system::maybe_build_local_admin_modules_response(
+            state,
+            request_context,
+            request_body,
+        )
+        .await?
     {
         return Ok(Some(response));
     }
@@ -85,7 +81,11 @@ pub(crate) async fn maybe_build_local_admin_core_response(
         return Ok(Some(response));
     }
     if let Some(response) =
-        model_routes::maybe_build_local_admin_core_model_response(state, request_context).await?
+        crate::handlers::admin::model::maybe_build_local_admin_model_catalog_response(
+            state,
+            request_context,
+        )
+        .await?
     {
         return Ok(Some(response));
     }

@@ -1,9 +1,8 @@
-use super::super::super::model::build_admin_import_provider_models_payload;
+use super::write::build_admin_import_provider_models_payload;
 use crate::control::GatewayControlDecision;
 use crate::control::GatewayPublicRequestContext;
-use crate::handlers::admin::provider::shared::{
-    admin_provider_import_models_path, AdminImportProviderModelsRequest,
-};
+use crate::handlers::admin::provider::shared::paths::admin_provider_import_models_path;
+use crate::handlers::admin::provider::shared::payloads::AdminImportProviderModelsRequest;
 use crate::{AppState, GatewayError};
 use axum::{
     body::{Body, Bytes},

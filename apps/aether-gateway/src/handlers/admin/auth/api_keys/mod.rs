@@ -9,7 +9,7 @@ use crate::handlers::admin::shared::{
     decrypt_catalog_secret_with_fallbacks, encrypt_catalog_secret_with_fallbacks, query_param_bool,
     query_param_optional_bool, query_param_value,
 };
-use crate::handlers::admin::system::shared::serialize_admin_system_users_export_wallet;
+use crate::handlers::admin::system::shared::configs::serialize_admin_system_users_export_wallet;
 use crate::{AppState, GatewayError};
 use axum::{
     body::Body,

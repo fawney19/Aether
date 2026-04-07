@@ -1,7 +1,7 @@
-use super::super::provider_oauth_refresh::build_internal_control_error_response;
-use super::super::provider_oauth_state::read_provider_oauth_batch_task_payload;
+use super::super::refresh::build_internal_control_error_response;
+use super::super::state::read_provider_oauth_batch_task_payload;
 use crate::control::GatewayPublicRequestContext;
-use crate::handlers::admin::provider::shared::admin_provider_oauth_batch_import_task_path;
+use crate::handlers::admin::provider::shared::paths::admin_provider_oauth_batch_import_task_path;
 use crate::handlers::admin::shared::attach_admin_audit_response;
 use crate::{AppState, GatewayError};
 use axum::{

@@ -3,15 +3,13 @@ use super::builders::{
     build_provider_strategy_stats_response, build_provider_strategy_update_billing_response,
     AdminProviderStrategyBillingRequest,
 };
-use super::shared::{
+use super::responses::{
     admin_provider_strategy_data_unavailable_response,
-    admin_provider_strategy_dispatcher_not_found_response,
-    admin_provider_strategy_provider_not_found_response,
     ADMIN_PROVIDER_STRATEGY_DATA_UNAVAILABLE_DETAIL,
     ADMIN_PROVIDER_STRATEGY_STATS_DATA_UNAVAILABLE_DETAIL,
 };
 use crate::control::GatewayPublicRequestContext;
-use crate::handlers::admin::provider::shared::{
+use crate::handlers::admin::provider::shared::paths::{
     admin_provider_id_for_provider_strategy_billing, admin_provider_id_for_provider_strategy_quota,
     admin_provider_id_for_provider_strategy_stats, is_admin_provider_strategy_strategies_root,
 };
@@ -133,4 +131,20 @@ pub(super) async fn maybe_build_local_admin_provider_strategy_response(
     }
 
     Ok(Some(admin_provider_strategy_dispatcher_not_found_response()))
+}
+
+fn admin_provider_strategy_provider_not_found_response() -> Response<Body> {
+    (
+        http::StatusCode::NOT_FOUND,
+        Json(json!({ "detail": "Provider not found" })),
+    )
+        .into_response()
+}
+
+fn admin_provider_strategy_dispatcher_not_found_response() -> Response<Body> {
+    (
+        http::StatusCode::NOT_FOUND,
+        Json(json!({ "detail": "Provider strategy route not found" })),
+    )
+        .into_response()
 }

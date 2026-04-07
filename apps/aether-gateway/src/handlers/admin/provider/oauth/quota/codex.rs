@@ -1,11 +1,11 @@
-use super::{
+use super::shared::{
     coerce_json_bool, coerce_json_f64, coerce_json_string, coerce_json_u64,
     execute_provider_quota_plan, extract_execution_error_message, normalize_string_id_list,
     persist_provider_quota_refresh_state, provider_auto_remove_banned_keys,
     quota_refresh_success_invalid_state, should_auto_remove_structured_reason,
     ProviderQuotaExecutionOutcome,
 };
-use crate::handlers::admin::provider::shared::{
+use crate::handlers::admin::provider::shared::payloads::{
     CODEX_WHAM_USAGE_URL, OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_EXPIRED_PREFIX,
     OAUTH_REQUEST_FAILED_PREFIX,
 };

@@ -1,5 +1,5 @@
 use crate::control::GatewayPublicRequestContext;
-use crate::handlers::admin::provider::shared::{
+use crate::handlers::admin::provider::shared::paths::{
     admin_provider_ops_architecture_id_from_path, is_admin_provider_ops_architectures_root,
 };
 use crate::GatewayError;

@@ -1,7 +1,7 @@
-use super::super::super::model::build_admin_provider_available_source_models_payload;
+use super::write::build_admin_provider_available_source_models_payload;
 use crate::control::GatewayControlDecision;
 use crate::control::GatewayPublicRequestContext;
-use crate::handlers::admin::provider::shared::admin_provider_available_source_models_path;
+use crate::handlers::admin::provider::shared::paths::admin_provider_available_source_models_path;
 use crate::{AppState, GatewayError};
 use axum::{
     body::{Body, Bytes},

@@ -2,18 +2,24 @@ use super::ADMIN_AWS_REGIONS;
 use crate::control::GatewayPublicRequestContext;
 use crate::handlers::admin::shared::attach_admin_audit_response;
 use crate::handlers::admin::shared::build_proxy_error_response;
-use crate::handlers::admin::system::shared::{
+use crate::handlers::admin::system::shared::configs::{
+    apply_admin_system_config_update, build_admin_system_config_detail_payload,
+    build_admin_system_config_export_payload, build_admin_system_configs_payload,
+    build_admin_system_users_export_payload, delete_admin_system_config,
+};
+use crate::handlers::admin::system::shared::email_templates::{
+    apply_admin_email_template_update, build_admin_email_template_payload,
+    build_admin_email_templates_payload, preview_admin_email_template, reset_admin_email_template,
+};
+use crate::handlers::admin::system::shared::paths::{
     admin_system_config_key_from_path, admin_system_email_template_preview_type_from_path,
     admin_system_email_template_reset_type_from_path, admin_system_email_template_type_from_path,
-    apply_admin_email_template_update, apply_admin_system_config_update,
-    apply_admin_system_settings_update, build_admin_api_formats_payload,
-    build_admin_email_template_payload, build_admin_email_templates_payload,
-    build_admin_system_check_update_payload, build_admin_system_config_detail_payload,
-    build_admin_system_config_export_payload, build_admin_system_configs_payload,
-    build_admin_system_settings_payload, build_admin_system_stats_payload,
-    build_admin_system_users_export_payload, current_aether_version, delete_admin_system_config,
     is_admin_system_configs_root, is_admin_system_email_templates_root,
-    preview_admin_email_template, reset_admin_email_template,
+};
+use crate::handlers::admin::system::shared::settings::{
+    apply_admin_system_settings_update, build_admin_api_formats_payload,
+    build_admin_system_check_update_payload, build_admin_system_settings_payload,
+    build_admin_system_stats_payload, current_aether_version,
 };
 use crate::{AppState, GatewayError};
 use axum::{

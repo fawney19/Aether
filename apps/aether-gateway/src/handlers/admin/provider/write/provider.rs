@@ -1,11 +1,12 @@
-use super::{
-    normalize_json_object, normalize_provider_billing_type, normalize_provider_type_input,
-    parse_optional_rfc3339_unix_secs,
-};
+use super::normalize::normalize_provider_type_input;
 use crate::api::ai::{admin_default_body_rules_for_signature, admin_endpoint_signature_parts};
-use crate::handlers::admin::provider::shared::{
+use crate::handlers::admin::provider::shared::payloads::{
     AdminProviderCreateRequest, AdminProviderUpdateRequest,
 };
+use crate::handlers::admin::provider::shared::support::{
+    normalize_provider_billing_type, parse_optional_rfc3339_unix_secs,
+};
+use crate::handlers::admin::shared::normalize_json_object;
 use crate::handlers::public::normalize_admin_base_url;
 use crate::provider_transport::provider_types::provider_type_enables_format_conversion_by_default;
 use crate::AppState;

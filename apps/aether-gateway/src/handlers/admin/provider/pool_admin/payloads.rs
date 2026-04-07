@@ -1,4 +1,4 @@
-use crate::handlers::admin::provider::shared::{
+use crate::handlers::admin::provider::shared::support::{
     AdminProviderPoolConfig, AdminProviderPoolRuntimeState,
 };
 use crate::handlers::admin::shared::unix_secs_to_rfc3339;

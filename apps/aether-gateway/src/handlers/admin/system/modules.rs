@@ -1,9 +1,12 @@
 use crate::control::GatewayPublicRequestContext;
-use crate::handlers::admin::system::shared::{
+use crate::handlers::admin::system::shared::modules::{
     admin_module_by_name, admin_module_name_from_enabled_path, admin_module_name_from_status_path,
     build_admin_module_runtime_state, build_admin_module_status_payload,
     build_admin_module_validation_result, build_admin_modules_status_payload,
     AdminSetModuleEnabledRequest,
+};
+use crate::handlers::admin::system::shared::paths::{
+    is_admin_system_configs_root, is_admin_system_email_templates_root,
 };
 use crate::handlers::shared::module_available_from_env;
 use crate::{AppState, GatewayError};

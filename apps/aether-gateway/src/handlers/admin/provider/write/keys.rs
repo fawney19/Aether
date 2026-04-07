@@ -1,12 +1,11 @@
-use super::{
-    normalize_auth_type, normalize_json_object, normalize_string_list, validate_vertex_api_formats,
-};
-use crate::handlers::admin::provider::shared::{
+use super::normalize::{normalize_auth_type, validate_vertex_api_formats};
+use crate::handlers::admin::provider::shared::payloads::{
     AdminProviderKeyCreateRequest, AdminProviderKeyUpdateRequest,
 };
 use crate::handlers::admin::shared::{
     build_admin_provider_key_response, decrypt_catalog_secret_with_fallbacks,
-    encrypt_catalog_secret_with_fallbacks, json_string_list, parse_catalog_auth_config_json,
+    encrypt_catalog_secret_with_fallbacks, json_string_list, normalize_json_object,
+    normalize_string_list, parse_catalog_auth_config_json,
 };
 use crate::AppState;
 use aether_data_contracts::repository::provider_catalog::{

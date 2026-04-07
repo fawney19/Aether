@@ -1,11 +1,9 @@
-use super::super::super::model::{
-    build_admin_provider_model_create_record, build_admin_provider_model_response,
-};
+use super::payloads::build_admin_provider_model_response;
+use super::write::build_admin_provider_model_create_record;
 use crate::control::GatewayControlDecision;
 use crate::control::GatewayPublicRequestContext;
-use crate::handlers::admin::provider::shared::{
-    admin_provider_id_for_models_list, AdminProviderModelCreateRequest,
-};
+use crate::handlers::admin::provider::shared::paths::admin_provider_id_for_models_list;
+use crate::handlers::admin::provider::shared::payloads::AdminProviderModelCreateRequest;
 use crate::{AppState, GatewayError};
 use axum::{
     body::{Body, Bytes},

@@ -1,16 +1,15 @@
-use super::provider_oauth_state::{
+use super::state::{
     build_admin_provider_oauth_backend_unavailable_response,
     build_admin_provider_oauth_supported_types_payload,
 };
 use crate::control::GatewayPublicRequestContext;
-use crate::handlers::admin::provider::shared::{
+use crate::handlers::admin::provider::shared::paths::{
     admin_provider_oauth_batch_import_provider_id,
     admin_provider_oauth_batch_import_task_provider_id, admin_provider_oauth_complete_key_id,
     admin_provider_oauth_complete_provider_id, admin_provider_oauth_device_authorize_provider_id,
     admin_provider_oauth_import_provider_id, admin_provider_oauth_refresh_key_id,
     admin_provider_oauth_start_key_id, admin_provider_oauth_start_provider_id,
 };
-use crate::handlers::admin::shared::attach_admin_audit_response;
 use crate::{AppState, GatewayError};
 use axum::{
     body::{Body, Bytes},
@@ -22,6 +21,7 @@ use axum::{
 mod batch;
 mod complete;
 mod device;
+mod helpers;
 mod import;
 mod refresh;
 mod start;
@@ -53,7 +53,7 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
 
     if route_kind == Some("start_key_oauth") && *method == http::Method::POST {
         let response = start::handle_admin_provider_oauth_start_key(state, request_context).await?;
-        return Ok(Some(attach_admin_provider_oauth_audit_response(
+        return Ok(Some(helpers::attach_admin_provider_oauth_audit_response(
             response,
             "admin_provider_oauth_authorization_started",
             "start_provider_oauth_for_key",
@@ -65,7 +65,7 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
     if route_kind == Some("start_provider_oauth") && *method == http::Method::POST {
         let response =
             start::handle_admin_provider_oauth_start_provider(state, request_context).await?;
-        return Ok(Some(attach_admin_provider_oauth_audit_response(
+        return Ok(Some(helpers::attach_admin_provider_oauth_audit_response(
             response,
             "admin_provider_oauth_authorization_started",
             "start_provider_oauth_for_provider",
@@ -88,7 +88,7 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
             request_body,
         )
         .await?;
-        return Ok(Some(attach_admin_provider_oauth_audit_response(
+        return Ok(Some(helpers::attach_admin_provider_oauth_audit_response(
             response,
             "admin_provider_oauth_completed",
             "complete_provider_oauth_for_key",
@@ -100,7 +100,7 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
     if route_kind == Some("refresh_key_oauth") && *method == http::Method::POST {
         let response =
             refresh::handle_admin_provider_oauth_refresh_key(state, request_context).await?;
-        return Ok(Some(attach_admin_provider_oauth_audit_response(
+        return Ok(Some(helpers::attach_admin_provider_oauth_audit_response(
             response,
             "admin_provider_oauth_refreshed",
             "refresh_provider_oauth_for_key",
@@ -116,7 +116,7 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
             request_body,
         )
         .await?;
-        return Ok(Some(attach_admin_provider_oauth_audit_response(
+        return Ok(Some(helpers::attach_admin_provider_oauth_audit_response(
             response,
             "admin_provider_oauth_completed",
             "complete_provider_oauth_for_provider",
@@ -132,7 +132,7 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
             request_body,
         )
         .await?;
-        return Ok(Some(attach_admin_provider_oauth_audit_response(
+        return Ok(Some(helpers::attach_admin_provider_oauth_audit_response(
             response,
             "admin_provider_oauth_refresh_token_imported",
             "import_provider_oauth_refresh_token",
@@ -145,7 +145,7 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
         let response =
             batch::handle_admin_provider_oauth_batch_import(state, request_context, request_body)
                 .await?;
-        return Ok(Some(attach_admin_provider_oauth_audit_response(
+        return Ok(Some(helpers::attach_admin_provider_oauth_audit_response(
             response,
             "admin_provider_oauth_batch_import_completed",
             "batch_import_provider_oauth",
@@ -161,7 +161,7 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
             request_body,
         )
         .await?;
-        return Ok(Some(attach_admin_provider_oauth_audit_response(
+        return Ok(Some(helpers::attach_admin_provider_oauth_audit_response(
             response,
             "admin_provider_oauth_batch_import_started",
             "start_provider_oauth_batch_import",
@@ -177,7 +177,7 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
             request_body,
         )
         .await?;
-        return Ok(Some(attach_admin_provider_oauth_audit_response(
+        return Ok(Some(helpers::attach_admin_provider_oauth_audit_response(
             response,
             "admin_provider_oauth_device_authorization_started",
             "start_provider_oauth_device_authorization",
@@ -205,18 +205,4 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
     Ok(None)
 }
 
-fn attach_admin_provider_oauth_audit_response(
-    response: Response<Body>,
-    event_name: &'static str,
-    action: &'static str,
-    target_type: &'static str,
-    target_id: Option<String>,
-) -> Response<Body> {
-    if !response.status().is_success() {
-        return response;
-    }
-    let Some(target_id) = target_id else {
-        return response;
-    };
-    attach_admin_audit_response(response, event_name, action, target_type, &target_id)
-}
+// Dispatch-specific helpers have moved to helpers.rs, so nothing remains here.

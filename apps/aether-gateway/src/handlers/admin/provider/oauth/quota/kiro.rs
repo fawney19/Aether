@@ -1,9 +1,11 @@
-use super::{
+use super::shared::{
     coerce_json_f64, execute_provider_quota_plan, extract_execution_error_message,
     persist_provider_quota_refresh_state, quota_refresh_success_invalid_state,
     ProviderQuotaExecutionOutcome,
 };
-use crate::handlers::admin::provider::shared::{KIRO_USAGE_LIMITS_PATH, KIRO_USAGE_SDK_VERSION};
+use crate::handlers::admin::provider::shared::payloads::{
+    KIRO_USAGE_LIMITS_PATH, KIRO_USAGE_SDK_VERSION,
+};
 use crate::handlers::admin::shared::encrypt_catalog_secret_with_fallbacks;
 use crate::{AppState, GatewayError};
 use aether_contracts::{ExecutionPlan, ExecutionTimeouts, RequestBody};

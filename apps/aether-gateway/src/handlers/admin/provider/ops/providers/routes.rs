@@ -1,16 +1,22 @@
-use super::{
+use super::actions::{
+    admin_provider_ops_is_valid_action_type, admin_provider_ops_local_action_response,
+};
+use super::config::{
     admin_provider_ops_config_object, admin_provider_ops_connector_object,
-    admin_provider_ops_decrypted_credentials, admin_provider_ops_is_valid_action_type,
-    admin_provider_ops_local_action_response, admin_provider_ops_local_verify_response,
-    admin_provider_ops_merge_credentials, admin_provider_ops_normalized_verify_architecture_id,
-    admin_provider_ops_verify_failure, build_admin_provider_ops_config_payload,
-    build_admin_provider_ops_saved_config_value, build_admin_provider_ops_status_payload,
-    resolve_admin_provider_ops_base_url, AdminProviderOpsConnectRequest,
-    AdminProviderOpsExecuteActionRequest, AdminProviderOpsSaveConfigRequest,
-    ADMIN_PROVIDER_OPS_CONNECT_RUST_ONLY_MESSAGE,
+    admin_provider_ops_decrypted_credentials, admin_provider_ops_merge_credentials,
+    build_admin_provider_ops_config_payload, build_admin_provider_ops_saved_config_value,
+    build_admin_provider_ops_status_payload, resolve_admin_provider_ops_base_url,
+};
+use super::support::{
+    AdminProviderOpsConnectRequest, AdminProviderOpsExecuteActionRequest,
+    AdminProviderOpsSaveConfigRequest, ADMIN_PROVIDER_OPS_CONNECT_RUST_ONLY_MESSAGE,
+};
+use super::verify::{
+    admin_provider_ops_local_verify_response, admin_provider_ops_normalized_verify_architecture_id,
+    admin_provider_ops_verify_failure,
 };
 use crate::control::GatewayPublicRequestContext;
-use crate::handlers::admin::provider::shared::{
+use crate::handlers::admin::provider::shared::paths::{
     admin_provider_id_for_provider_ops_balance, admin_provider_id_for_provider_ops_checkin,
     admin_provider_id_for_provider_ops_config, admin_provider_id_for_provider_ops_connect,
     admin_provider_id_for_provider_ops_disconnect, admin_provider_id_for_provider_ops_status,

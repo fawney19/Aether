@@ -1,11 +1,11 @@
-use super::super::provider_oauth_refresh::build_internal_control_error_response;
-use super::super::provider_oauth_state::{
+use super::super::refresh::build_internal_control_error_response;
+use super::super::state::{
     admin_provider_oauth_template, build_provider_oauth_start_response,
     generate_provider_oauth_pkce_verifier, is_fixed_provider_type_for_provider_oauth,
     provider_oauth_pkce_s256, save_provider_oauth_state,
 };
 use crate::control::GatewayPublicRequestContext;
-use crate::handlers::admin::provider::shared::{
+use crate::handlers::admin::provider::shared::paths::{
     admin_provider_oauth_start_key_id, admin_provider_oauth_start_provider_id,
 };
 use crate::{AppState, GatewayError};

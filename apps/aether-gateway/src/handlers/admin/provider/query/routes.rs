@@ -3,11 +3,14 @@ use super::models::{
     build_admin_provider_query_test_model_failover_response,
     build_admin_provider_query_test_model_response,
 };
-use super::shared::{
-    build_admin_provider_query_bad_request_response, parse_admin_provider_query_body,
-    provider_query_extract_failover_models, provider_query_extract_model,
-    provider_query_extract_provider_id, provider_query_extract_request_id,
-    provider_query_payload_keys, ADMIN_PROVIDER_QUERY_FAILOVER_MODELS_REQUIRED_DETAIL,
+use super::payload::{
+    parse_admin_provider_query_body, provider_query_extract_failover_models,
+    provider_query_extract_model, provider_query_extract_provider_id,
+    provider_query_extract_request_id, provider_query_payload_keys,
+};
+use super::response::{
+    build_admin_provider_query_bad_request_response,
+    ADMIN_PROVIDER_QUERY_FAILOVER_MODELS_REQUIRED_DETAIL,
     ADMIN_PROVIDER_QUERY_MODEL_REQUIRED_DETAIL, ADMIN_PROVIDER_QUERY_PROVIDER_ID_REQUIRED_DETAIL,
 };
 use crate::control::GatewayPublicRequestContext;

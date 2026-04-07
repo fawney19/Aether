@@ -1,7 +1,7 @@
-use super::{
+use super::refresh::{
     build_internal_control_error_response, normalize_provider_oauth_refresh_error_message,
 };
-use crate::handlers::admin::provider::shared::ADMIN_PROVIDER_OAUTH_DATA_UNAVAILABLE_DETAIL;
+use crate::handlers::admin::provider::shared::support::ADMIN_PROVIDER_OAUTH_DATA_UNAVAILABLE_DETAIL;
 use crate::provider_transport::provider_types::{
     provider_type_admin_oauth_template, provider_type_is_fixed_for_admin_oauth,
     ProviderOAuthTemplate, ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES,

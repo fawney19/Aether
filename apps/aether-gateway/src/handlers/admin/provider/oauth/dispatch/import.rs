@@ -1,15 +1,15 @@
-use super::super::provider_oauth_refresh::{
+use super::super::refresh::{
     build_internal_control_error_response, build_provider_oauth_auth_config_from_token_payload,
     create_provider_oauth_catalog_key, find_duplicate_provider_oauth_key,
     provider_oauth_active_api_formats, provider_oauth_key_proxy_value,
     refresh_provider_oauth_account_state_after_update, update_existing_provider_oauth_catalog_key,
 };
-use super::super::provider_oauth_state::{
+use super::super::state::{
     admin_provider_oauth_template, build_admin_provider_oauth_backend_unavailable_response,
     exchange_admin_provider_oauth_refresh_token, is_fixed_provider_type_for_provider_oauth,
 };
 use crate::control::GatewayPublicRequestContext;
-use crate::handlers::admin::provider::shared::admin_provider_oauth_import_provider_id;
+use crate::handlers::admin::provider::shared::paths::admin_provider_oauth_import_provider_id;
 use crate::{AppState, GatewayError};
 use axum::{
     body::Body,

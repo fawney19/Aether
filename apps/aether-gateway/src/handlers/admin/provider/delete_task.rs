@@ -1,4 +1,4 @@
-use crate::handlers::admin::provider::shared::{
+use crate::handlers::admin::provider::shared::support::{
     put_admin_provider_delete_task, ADMIN_PROVIDER_MAPPING_PREVIEW_FETCH_LIMIT,
     ADMIN_PROVIDER_MAPPING_PREVIEW_MAX_KEYS, ADMIN_PROVIDER_MAPPING_PREVIEW_MAX_MODELS,
 };

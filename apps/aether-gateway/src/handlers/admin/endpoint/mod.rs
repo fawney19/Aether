@@ -1,4 +1,5 @@
 use crate::control::GatewayPublicRequestContext;
+use crate::handlers::admin::provider::{endpoint_keys, endpoints_admin};
 use crate::{AppState, GatewayError};
 use axum::body::{Body, Bytes};
 use axum::http::Response;
@@ -6,8 +7,6 @@ use axum::http::Response;
 mod extractors;
 mod health;
 mod health_builders;
-mod keys;
-mod routes;
 mod rpm;
 
 pub(crate) use self::health_builders::build_admin_endpoint_health_status_payload;
@@ -29,14 +28,17 @@ pub(crate) async fn maybe_build_local_admin_endpoints_response(
         return Ok(Some(response));
     }
 
-    if let Some(response) =
-        keys::maybe_build_local_admin_endpoints_keys_response(state, request_context, request_body)
-            .await?
+    if let Some(response) = endpoint_keys::maybe_build_local_admin_endpoints_keys_response(
+        state,
+        request_context,
+        request_body,
+    )
+    .await?
     {
         return Ok(Some(response));
     }
 
-    if let Some(response) = routes::maybe_build_local_admin_endpoints_routes_response(
+    if let Some(response) = endpoints_admin::maybe_build_local_admin_endpoints_routes_response(
         state,
         request_context,
         request_body,

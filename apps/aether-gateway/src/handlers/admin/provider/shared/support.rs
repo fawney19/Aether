@@ -48,3 +48,24 @@ pub(crate) fn put_admin_provider_delete_task(
 ) {
     state.put_provider_delete_task(task.clone());
 }
+
+pub(crate) fn normalize_provider_billing_type(value: &str) -> Result<String, String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "monthly_quota" | "pay_as_you_go" | "free_tier" => Ok(normalized),
+        _ => Err("billing_type 仅支持 monthly_quota / pay_as_you_go / free_tier".to_string()),
+    }
+}
+
+pub(crate) fn parse_optional_rfc3339_unix_secs(
+    value: &str,
+    field_name: &str,
+) -> Result<u64, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{field_name} 不能为空"));
+    }
+    let parsed = chrono::DateTime::parse_from_rfc3339(trimmed)
+        .map_err(|_| format!("{field_name} 必须是合法的 RFC3339 时间"))?;
+    u64::try_from(parsed.timestamp()).map_err(|_| format!("{field_name} 超出有效时间范围"))
+}

@@ -1,6 +1,6 @@
 use crate::control::GatewayControlDecision;
 use crate::control::GatewayPublicRequestContext;
-use crate::handlers::admin::provider::shared::admin_provider_model_route_parts;
+use crate::handlers::admin::provider::shared::paths::admin_provider_model_route_parts;
 use crate::{AppState, GatewayError};
 use axum::{
     body::{Body, Bytes},

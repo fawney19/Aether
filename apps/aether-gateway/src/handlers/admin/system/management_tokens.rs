@@ -1,6 +1,6 @@
 use crate::control::GatewayPublicRequestContext;
 use crate::handlers::admin::shared::{query_param_optional_bool, query_param_value};
-use crate::handlers::admin::system::shared::{
+use crate::handlers::admin::system::shared::paths::{
     admin_management_token_id_from_path, admin_management_token_status_id_from_path,
     is_admin_management_tokens_root,
 };

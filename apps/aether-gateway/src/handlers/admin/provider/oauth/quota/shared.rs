@@ -1,4 +1,4 @@
-use crate::handlers::admin::provider::shared::{
+use crate::handlers::admin::provider::shared::payloads::{
     OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_REFRESH_FAILED_PREFIX,
 };
 use crate::{AppState, GatewayError};

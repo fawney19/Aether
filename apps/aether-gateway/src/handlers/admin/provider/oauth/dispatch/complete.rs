@@ -1,18 +1,18 @@
-use super::super::provider_oauth_quota::refresh_codex_provider_quota_locally;
-use super::super::provider_oauth_refresh::{
+use super::super::quota::codex::refresh_codex_provider_quota_locally;
+use super::super::refresh::{
     build_internal_control_error_response, build_provider_oauth_auth_config_from_token_payload,
     create_provider_oauth_catalog_key, find_duplicate_provider_oauth_key,
     provider_oauth_active_api_formats, provider_oauth_key_proxy_value,
     refresh_provider_oauth_account_state_after_update, update_existing_provider_oauth_catalog_key,
 };
-use super::super::provider_oauth_state::{
+use super::super::state::{
     admin_provider_oauth_template, build_admin_provider_oauth_backend_unavailable_response,
     consume_provider_oauth_state, enrich_admin_provider_oauth_auth_config,
     exchange_admin_provider_oauth_code, is_fixed_provider_type_for_provider_oauth,
     json_non_empty_string, json_u64_value, parse_provider_oauth_callback_params,
 };
 use crate::control::GatewayPublicRequestContext;
-use crate::handlers::admin::provider::shared::{
+use crate::handlers::admin::provider::shared::paths::{
     admin_provider_oauth_complete_key_id, admin_provider_oauth_complete_provider_id,
 };
 use crate::handlers::admin::shared::encrypt_catalog_secret_with_fallbacks;

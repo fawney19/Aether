@@ -1,13 +1,14 @@
-use super::super::provider_oauth_quota::persist_provider_quota_refresh_state;
-use super::super::provider_oauth_refresh::{
+use super::super::quota::shared::persist_provider_quota_refresh_state;
+use super::super::refresh::{
     build_internal_control_error_response, merge_provider_oauth_refresh_failure_reason,
     normalize_provider_oauth_refresh_error_message, provider_oauth_runtime_endpoint_for_provider,
     refresh_provider_oauth_account_state_after_update,
 };
-use super::super::provider_oauth_state::is_fixed_provider_type_for_provider_oauth;
+use super::super::state::is_fixed_provider_type_for_provider_oauth;
 use crate::control::GatewayPublicRequestContext;
-use crate::handlers::admin::provider::shared::{
-    admin_provider_oauth_refresh_key_id, OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_REFRESH_FAILED_PREFIX,
+use crate::handlers::admin::provider::shared::paths::admin_provider_oauth_refresh_key_id;
+use crate::handlers::admin::provider::shared::payloads::{
+    OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_REFRESH_FAILED_PREFIX,
 };
 use crate::handlers::admin::shared::decrypt_catalog_secret_with_fallbacks;
 use crate::{AppState, GatewayError};

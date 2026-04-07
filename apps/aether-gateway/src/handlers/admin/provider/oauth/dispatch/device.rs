@@ -1,10 +1,10 @@
-use super::super::provider_oauth_refresh::{
+use super::super::refresh::{
     build_internal_control_error_response, build_provider_oauth_auth_config_from_token_payload,
     create_provider_oauth_catalog_key, find_duplicate_provider_oauth_key,
     provider_oauth_active_api_formats, provider_oauth_key_proxy_value,
     refresh_provider_oauth_account_state_after_update, update_existing_provider_oauth_catalog_key,
 };
-use super::super::provider_oauth_state::{
+use super::super::state::{
     build_admin_provider_oauth_backend_unavailable_response, build_kiro_device_key_name,
     current_unix_secs, decode_jwt_claims, default_kiro_device_region,
     default_kiro_device_start_url, generate_provider_oauth_nonce, json_non_empty_string,
@@ -13,7 +13,7 @@ use super::super::provider_oauth_state::{
     save_provider_oauth_device_session, start_admin_kiro_device_authorization,
 };
 use crate::control::GatewayPublicRequestContext;
-use crate::handlers::admin::provider::shared::{
+use crate::handlers::admin::provider::shared::paths::{
     admin_provider_oauth_device_authorize_provider_id, admin_provider_oauth_device_poll_provider_id,
 };
 use crate::handlers::admin::shared::attach_admin_audit_response;
