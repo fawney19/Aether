@@ -285,7 +285,7 @@ const { copyToClipboard } = useClipboard()
 const modelTest = useModelTest({ providerId: () => props.provider.id })
 
 // 状态
-const loading = ref(false)
+const localLoading = ref(false)
 const localModels = ref<Model[]>([])
 const togglingModelId = ref<string | null>(null)
 const pendingTestModel = ref<Model | null>(null)
@@ -301,7 +301,7 @@ const testRequestHeadersError = computed(() => parsedTestRequestHeaders.value.er
 const parsedTestRequestBody = computed(() => parseModelTestRequestBodyDraft(testRequestBodyDraft.value))
 const testRequestBodyError = computed(() => parsedTestRequestBody.value.error)
 const models = computed(() => props.models ?? localModels.value)
-const isLoading = computed(() => Boolean(props.loading) || loading.value)
+const isLoading = computed(() => Boolean(props.loading) || localLoading.value)
 // 按名称排序的模型列表
 const sortedModels = computed(() => {
   return [...models.value].sort((a, b) => {

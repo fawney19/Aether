@@ -12,12 +12,15 @@ COPY frontend/ ./
 RUN npm run build
 
 # ==================== Rust gateway 构建 ====================
-FROM rust:1.86-slim AS gateway-builder
+FROM rust:1.94.1-slim AS gateway-builder
 WORKDIR /build
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    ca-certificates \
+    libjemalloc2 \
+    libssl-dev \
     pkg-config \
     perl
 COPY Cargo.toml Cargo.lock ./
@@ -28,30 +31,71 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked -p aether-gateway && \
     cp target/release/aether-gateway /tmp/aether-gateway
 
-# ==================== 运行时镜像 ====================
-FROM debian:bookworm-slim
-
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    libjemalloc2 \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
+# ==================== 最小运行时打包 ====================
+FROM gateway-builder AS runtime-prep
 RUN set -eux; \
+    mkdir -p \
+    /runtime-root/app/data \
+    /runtime-root/app/logs \
+    /runtime-root/etc \
+    /runtime-root/etc/ssl \
+    /runtime-root/lib \
+    /runtime-root/lib64 \
+    /runtime-root/usr/local/bin \
+    /runtime-root/usr/local/lib; \
+    cp /tmp/aether-gateway /runtime-root/usr/local/bin/aether-gateway; \
+    : > /tmp/runtime-libs.txt; \
+    : > /tmp/runtime-scan-queue.txt; \
+    printf '%s\n' /tmp/aether-gateway >> /tmp/runtime-scan-queue.txt; \
     jemalloc_path="$(find /usr/lib -type f -name 'libjemalloc.so.2' | head -n1)"; \
     [ -n "$jemalloc_path" ]; \
-    ln -sf "$jemalloc_path" /usr/local/lib/libjemalloc.so.2
+    install -D "$jemalloc_path" /runtime-root/usr/local/lib/libjemalloc.so.2; \
+    printf '%s\n' "$jemalloc_path" >> /tmp/runtime-scan-queue.txt; \
+    while [ -s /tmp/runtime-scan-queue.txt ]; do \
+        current="$(head -n1 /tmp/runtime-scan-queue.txt)"; \
+        sed -i '1d' /tmp/runtime-scan-queue.txt; \
+        ldd "$current" | awk '/=>/ { print $3 } $1 ~ /^\// { print $1 }' | while read -r lib; do \
+            [ -n "$lib" ]; \
+            if ! grep -Fxq "$lib" /tmp/runtime-libs.txt; then \
+                printf '%s\n' "$lib" >> /tmp/runtime-libs.txt; \
+                printf '%s\n' "$lib" >> /tmp/runtime-scan-queue.txt; \
+            fi; \
+        done; \
+    done; \
+    sort -u /tmp/runtime-libs.txt -o /tmp/runtime-libs.txt; \
+    while read -r lib; do \
+        [ -n "$lib" ]; \
+        dest="/runtime-root$(dirname "$lib")"; \
+        mkdir -p "$dest"; \
+        cp -L "$lib" "$dest/"; \
+    done < /tmp/runtime-libs.txt; \
+    for lib in \
+        /lib/x86_64-linux-gnu/libnss_dns.so.2 \
+        /lib/x86_64-linux-gnu/libnss_files.so.2 \
+        /lib/x86_64-linux-gnu/libresolv.so.2; do \
+        if [ -f "$lib" ]; then \
+            dest="/runtime-root$(dirname "$lib")"; \
+            mkdir -p "$dest"; \
+            cp -L "$lib" "$dest/"; \
+        fi; \
+    done; \
+    cp -a /usr/lib/ssl /runtime-root/usr/lib/; \
+    cp -a /etc/ssl/certs /runtime-root/etc/ssl/; \
+    if [ -f /etc/ssl/openssl.cnf ]; then \
+        cp /etc/ssl/openssl.cnf /runtime-root/etc/ssl/openssl.cnf; \
+    fi; \
+    if [ -f /etc/nsswitch.conf ]; then \
+        cp /etc/nsswitch.conf /runtime-root/etc/nsswitch.conf; \
+    fi
+
+# ==================== 运行时镜像 ====================
+FROM scratch
 
 # 复制 gateway 二进制
-COPY --from=gateway-builder /tmp/aether-gateway /usr/local/bin/aether-gateway
+COPY --from=runtime-prep /runtime-root/ /
 
 # 复制前端构建产物
 COPY --from=frontend-builder /app/frontend/dist /srv/frontend
-RUN chmod -R 755 /srv/frontend
-
-RUN mkdir -p /app/logs /app/data
 WORKDIR /app
 
 ENV LANG=C.UTF-8 \
@@ -65,6 +109,6 @@ ENV LANG=C.UTF-8 \
 EXPOSE 80
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost/health || exit 1
+    CMD ["/usr/local/bin/aether-gateway", "--healthcheck"]
 
 ENTRYPOINT ["/usr/local/bin/aether-gateway"]

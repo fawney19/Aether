@@ -494,6 +494,18 @@ struct Args {
     #[arg(long, env = "AETHER_GATEWAY_BIND", default_value = "0.0.0.0:80")]
     bind: String,
 
+    /// 容器内健康检查入口：根据当前 bind 端口探测本地 /health。
+    #[arg(long, hide = true, default_value_t = false)]
+    healthcheck: bool,
+
+    #[arg(
+        long,
+        hide = true,
+        env = "AETHER_GATEWAY_HEALTHCHECK_TIMEOUT_MS",
+        default_value_t = 3_000
+    )]
+    healthcheck_timeout_ms: u64,
+
     #[arg(
         long,
         env = "AETHER_GATEWAY_DEPLOYMENT_TOPOLOGY",
@@ -609,6 +621,70 @@ fn resolve_gateway_log_instance_id() -> String {
         .unwrap_or_else(|| "local".to_string())
 }
 
+fn resolve_healthcheck_url(bind: &str) -> Result<String, std::io::Error> {
+    let trimmed = bind.trim();
+    if trimmed.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "AETHER_GATEWAY_BIND cannot be empty when --healthcheck is enabled",
+        ));
+    }
+
+    if let Ok(socket_addr) = trimmed.parse::<std::net::SocketAddr>() {
+        let host = match socket_addr.ip() {
+            std::net::IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_string(),
+            std::net::IpAddr::V4(ip) => ip.to_string(),
+            std::net::IpAddr::V6(ip) if ip.is_unspecified() => "[::1]".to_string(),
+            std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+        };
+        return Ok(format!("http://{host}:{}/health", socket_addr.port()));
+    }
+
+    let (host, port) = trimmed.rsplit_once(':').ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "AETHER_GATEWAY_BIND must include a port when --healthcheck is enabled: {trimmed}"
+            ),
+        )
+    })?;
+    let port = port.parse::<u16>().map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid healthcheck port in AETHER_GATEWAY_BIND={trimmed}: {error}"),
+        )
+    })?;
+
+    let host = host.trim();
+    if host.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid host in AETHER_GATEWAY_BIND={trimmed}"),
+        ));
+    }
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+
+    Ok(format!("http://{host}:{port}/health"))
+}
+
+async fn run_healthcheck(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let url = resolve_healthcheck_url(&args.bind)?;
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(
+            args.healthcheck_timeout_ms.max(1),
+        ))
+        .build()?
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
 fn validate_deployment_topology(
     args: &Args,
     data_postgres_url: Option<&str>,
@@ -685,6 +761,9 @@ fn validate_deployment_topology(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    if args.healthcheck {
+        return run_healthcheck(&args).await;
+    }
     init_service_runtime(args.runtime_config()?)?;
     let data_postgres_url = args.data.effective_postgres_url();
     let data_redis_url = args.data.effective_redis_url();
@@ -877,4 +956,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handle.abort();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_healthcheck_url;
+
+    #[test]
+    fn resolves_ipv4_healthcheck_url() {
+        assert_eq!(
+            resolve_healthcheck_url("0.0.0.0:80").unwrap(),
+            "http://127.0.0.1:80/health"
+        );
+    }
+
+    #[test]
+    fn resolves_ipv6_healthcheck_url() {
+        assert_eq!(
+            resolve_healthcheck_url("[::]:8080").unwrap(),
+            "http://[::1]:8080/health"
+        );
+    }
+
+    #[test]
+    fn preserves_explicit_ipv4_bind_for_healthcheck_url() {
+        assert_eq!(
+            resolve_healthcheck_url("172.18.0.2:9000").unwrap(),
+            "http://172.18.0.2:9000/health"
+        );
+    }
+
+    #[test]
+    fn preserves_explicit_ipv6_bind_for_healthcheck_url() {
+        assert_eq!(
+            resolve_healthcheck_url("[2001:db8::2]:9000").unwrap(),
+            "http://[2001:db8::2]:9000/health"
+        );
+    }
+
+    #[test]
+    fn preserves_hostname_healthcheck_url() {
+        assert_eq!(
+            resolve_healthcheck_url("gateway.internal:9000").unwrap(),
+            "http://gateway.internal:9000/health"
+        );
+    }
+
+    #[test]
+    fn rejects_bind_without_port() {
+        let error = resolve_healthcheck_url("not-a-socket").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
 }

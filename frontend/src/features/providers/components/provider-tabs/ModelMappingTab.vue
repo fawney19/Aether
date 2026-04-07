@@ -409,7 +409,7 @@ const { error: showError, success: showSuccess } = useToast()
 const modelTest = useModelTest({ providerId: () => props.provider.id })
 
 // 状态
-const loading = ref(false)
+const localLoading = ref(false)
 const dialogOpen = ref(false)
 const deleteConfirmOpen = ref(false)
 const editingGroup = ref<AliasGroup | null>(null)
@@ -429,7 +429,7 @@ const parsedTestRequestHeaders = computed(() => parseModelTestRequestHeadersDraf
 const testRequestHeadersError = computed(() => parsedTestRequestHeaders.value.error)
 const parsedTestRequestBody = computed(() => parseModelTestRequestBodyDraft(testRequestBodyDraft.value))
 const testRequestBodyError = computed(() => parsedTestRequestBody.value.error)
-const isLoading = computed(() => Boolean(props.loading) || loading.value)
+const isLoading = computed(() => Boolean(props.loading) || localLoading.value)
 
 // 使用 props 传入的数据
 const models = computed(() => props.models ?? [])
