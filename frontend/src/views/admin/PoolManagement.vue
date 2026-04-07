@@ -7,98 +7,27 @@
       <!-- Header -->
       <div class="px-4 sm:px-6 py-3 sm:py-3.5 border-b border-border/60">
         <!-- Mobile -->
-        <div class="flex flex-col gap-3 sm:hidden">
-          <div class="flex items-center justify-between">
-            <div class="flex items-center gap-2">
-              <h3 class="text-base font-semibold">
-                号池管理
-                <span
-                  v-if="poolHeaderMetaText"
-                  class="ml-2 text-xs font-normal text-muted-foreground"
-                >
-                  | {{ poolHeaderMetaText }}
-                </span>
-              </h3>
-            </div>
-            <div class="flex items-center gap-1.5">
-              <Button
-                v-if="selectedProviderId"
-                variant="ghost"
-                size="icon"
-                class="h-8 w-8"
-                title="添加账号"
-                @click="showImportDialog = true"
-              >
-                <Upload class="w-3.5 h-3.5" />
-              </Button>
-              <ProviderProxyPopover
-                v-if="selectedProviderId"
-                :open="providerProxyMobilePopoverOpen"
-                :node-id="selectedProviderData?.proxy?.node_id"
-                :saving="savingProviderProxy"
-                :title="getProviderProxyButtonTitle()"
-                @update:open="(open: boolean) => handleProviderProxyPopoverToggle('mobile', open)"
-                @select="setProviderProxy"
-                @clear="clearProviderProxy"
-              />
-              <Button
-                v-if="selectedProviderId"
-                variant="ghost"
-                size="icon"
-                class="h-8 w-8"
-                title="高级设置"
-                @click="showAdvancedDialog = true"
-              >
-                <Settings2 class="w-3.5 h-3.5" />
-              </Button>
-              <Button
-                v-if="selectedProviderId"
-                variant="outline"
-                size="sm"
-                class="h-8 px-2 text-xs gap-1"
-                title="号池调度"
-                @click="openSchedulingDialog()"
-              >
-                调度
-                <ChevronDown class="w-3 h-3 text-muted-foreground" />
-              </Button>
-              <Button
-                v-if="selectedProviderId"
-                variant="ghost"
-                size="icon"
-                class="h-8 w-8"
-                title="账号"
-                @click="showAccountBatchDialog = true"
-              >
-                <Users class="w-3.5 h-3.5" />
-              </Button>
-              <Button
-                v-if="selectedProviderId"
-                variant="ghost"
-                size="icon"
-                class="h-8 w-8"
-                :class="getProviderToggleButtonClass()"
-                :disabled="togglingProviderStatus"
-                :title="getProviderToggleButtonTitle()"
-                @click="toggleSelectedProviderStatus"
-              >
-                <Power class="w-3.5 h-3.5" />
-              </Button>
-              <RefreshButton
-                :loading="refreshCurrentPageLoading"
-                :title="refreshButtonTitle"
-                @click="refreshCurrentPage"
-              />
-            </div>
+        <div class="flex flex-col gap-3 xl:hidden">
+          <div class="min-w-0">
+            <h3 class="text-base font-semibold">
+              号池管理
+            </h3>
+            <p
+              v-if="poolHeaderMetaText"
+              class="mt-1 text-xs text-muted-foreground"
+            >
+              {{ poolHeaderMetaText }}
+            </p>
           </div>
-          <!-- Filters (mobile) -->
-          <div class="flex items-center gap-2">
+          <div
+            class="grid grid-cols-3 items-center gap-2"
+          >
             <Select
               v-model="selectedProviderIdProxy"
               :disabled="providerSelectDisabled"
             >
               <SelectTrigger
-                class="flex-1 h-8 text-xs border-border/60"
+                class="h-9 text-xs border-border/60"
                 :disabled="providerSelectDisabled"
               >
                 <SelectValue placeholder="选择 Provider" />
@@ -119,7 +48,7 @@
               </SelectContent>
             </Select>
             <Select v-model="statusFilter">
-              <SelectTrigger class="w-24 h-8 text-xs border-border/60">
+              <SelectTrigger class="h-9 w-full text-xs border-border/60">
                 <SelectValue placeholder="状态" />
               </SelectTrigger>
               <SelectContent>
@@ -137,23 +66,100 @@
                 </SelectItem>
               </SelectContent>
             </Select>
+            <div class="relative min-w-0">
+              <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground z-10 pointer-events-none" />
+              <Input
+                v-model="searchQuery"
+                type="text"
+                placeholder="搜索账号..."
+                class="w-full pl-8 pr-3 h-9 text-sm bg-background/50 border-border/60"
+              />
+            </div>
           </div>
           <div
             v-if="selectedProviderId"
-            class="relative"
+            class="flex items-center gap-1"
           >
-            <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground z-10 pointer-events-none" />
-            <Input
-              v-model="searchQuery"
-              type="text"
-              placeholder="搜索账号..."
-              class="w-full pl-8 pr-3 h-8 text-sm bg-background/50 border-border/60"
-            />
+            <div class="min-w-0 flex-1 flex justify-center">
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8 shrink-0"
+                title="添加账号"
+                @click="showImportDialog = true"
+              >
+                <Upload class="w-3.5 h-3.5" />
+              </Button>
+            </div>
+            <div class="min-w-0 flex-1 flex justify-center">
+              <ProviderProxyPopover
+                :open="providerProxyMobilePopoverOpen"
+                :node-id="selectedProviderData?.proxy?.node_id"
+                :saving="savingProviderProxy"
+                :title="getProviderProxyButtonTitle()"
+                @update:open="(open: boolean) => handleProviderProxyPopoverToggle('mobile', open)"
+                @select="setProviderProxy"
+                @clear="clearProviderProxy"
+              />
+            </div>
+            <div class="min-w-0 flex-1 flex justify-center">
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8 shrink-0"
+                title="号池调度"
+                @click="openSchedulingDialog()"
+              >
+                <SlidersHorizontal class="w-3.5 h-3.5" />
+              </Button>
+            </div>
+            <div class="min-w-0 flex-1 flex justify-center">
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8 shrink-0"
+                title="账号批量操作"
+                @click="showAccountBatchDialog = true"
+              >
+                <Users class="w-3.5 h-3.5" />
+              </Button>
+            </div>
+            <div class="min-w-0 flex-1 flex justify-center">
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8 shrink-0"
+                title="高级设置"
+                @click="showAdvancedDialog = true"
+              >
+                <Settings2 class="w-3.5 h-3.5" />
+              </Button>
+            </div>
+            <div class="min-w-0 flex-1 flex justify-center">
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8 shrink-0"
+                :class="getProviderToggleButtonClass()"
+                :disabled="togglingProviderStatus"
+                :title="getProviderToggleButtonTitle()"
+                @click="toggleSelectedProviderStatus"
+              >
+                <Power class="w-3.5 h-3.5" />
+              </Button>
+            </div>
+            <div class="min-w-0 flex-1 flex justify-center">
+              <RefreshButton
+                :loading="refreshCurrentPageLoading"
+                :title="refreshButtonTitle"
+                @click="refreshCurrentPage"
+              />
+            </div>
           </div>
         </div>
 
         <!-- Desktop -->
-        <div class="hidden sm:flex items-center justify-between gap-4">
+        <div class="hidden xl:flex items-center justify-between gap-4">
           <div class="flex items-center gap-2">
             <h3 class="text-base font-semibold">
               号池管理
@@ -715,251 +721,83 @@
             class="p-4 sm:p-5 hover:bg-muted/30 transition-colors"
             :class="getRowClass(key)"
           >
-            <div class="flex items-center gap-3">
-              <div class="flex-1 min-w-0">
-                <div class="flex items-center gap-2">
-                  <span class="text-sm font-medium truncate">
-                    {{ key.key_name || '未命名' }}
-                  </span>
-                  <Badge
-                    :variant="getSchedulingBadgeVariant(key)"
-                    class="text-[10px] shrink-0"
-                    :title="getSchedulingTitle(key)"
-                  >
-                    {{ getSchedulingBadgeLabel(key) }}
-                  </Badge>
-                  <span
-                    class="text-[10px] font-medium tabular-nums"
-                    :class="getHealthScoreColor(key.health_score ?? 1)"
-                  >
-                    {{ ((key.health_score ?? 1) * 100).toFixed(0) }}%
-                  </span>
-                </div>
-                <div class="flex items-center gap-1 text-[11px] text-muted-foreground mt-0.5 min-w-0">
+            <div class="space-y-3">
+              <div class="text-sm font-medium truncate">
+                {{ key.key_name || '未命名' }}
+              </div>
+
+              <div class="flex flex-wrap items-center gap-1.5">
+                <Badge
+                  :variant="getSchedulingBadgeVariant(key)"
+                  class="text-[10px] shrink-0"
+                  :title="getSchedulingTitle(key)"
+                >
+                  {{ getSchedulingBadgeLabel(key) }}
+                </Badge>
+                <span
+                  v-if="key.cooldown_ttl_seconds"
+                  class="inline-flex items-center rounded-full border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-[10px] font-medium leading-4 text-red-700 dark:text-red-300"
+                >
+                  冷却 {{ formatTTL(key.cooldown_ttl_seconds) }}
+                </span>
+                <template
+                  v-for="item in getMobileTagItems(key)"
+                  :key="`${key.key_id}-${item.key}`"
+                >
                   <button
+                    v-if="item.key === 'priority'"
                     type="button"
-                    class="h-4 px-1 rounded text-[10px] tabular-nums text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors shrink-0"
-                    title="点击修改优先级"
+                    class="inline-flex max-w-full items-center rounded-full border px-2 py-0.5 text-[10px] font-medium leading-4"
+                    :class="`${getMobileTagClass(item)} hover:border-primary/40 hover:text-foreground`"
+                    :title="`${item.label}，点击编辑优先级`"
                     @click="quickEditInternalPriority(key)"
                   >
-                    P{{ key.internal_priority ?? 50 }}
+                    {{ item.label }}
                   </button>
-                  <Button
-                    v-if="key.auth_type === 'oauth'"
-                    variant="ghost"
-                    size="icon"
-                    class="h-4 w-4 shrink-0"
-                    title="下载 OAuth 授权文件"
-                    @click.stop="downloadRefreshToken(key)"
-                  >
-                    <Download class="w-2.5 h-2.5" />
-                  </Button>
-                  <Button
-                    v-else
-                    variant="ghost"
-                    size="icon"
-                    class="h-4 w-4 shrink-0"
-                    title="复制密钥"
-                    @click.stop="copyFullKey(key)"
-                  >
-                    <Copy class="w-2.5 h-2.5" />
-                  </Button>
-                  <span class="font-mono">
-                    {{ key.auth_type === 'oauth' ? '[OAuth Token]' : (key.auth_type === 'service_account' ? '[Service Account]' : '[Key]') }}
-                  </span>
-                  <template v-if="key.auth_type === 'oauth'">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      class="h-4 w-4 shrink-0"
-                      :disabled="refreshingOAuthKeyId === key.key_id"
-                      :title="getOAuthRefreshButtonTitle(key)"
-                      @click.stop="handleRefreshOAuth(key)"
-                    >
-                      <RefreshCw
-                        class="w-2.5 h-2.5"
-                        :class="{ 'animate-spin': refreshingOAuthKeyId === key.key_id }"
-                      />
-                    </Button>
-                    <span
-                      v-if="getVisibleOAuthState(key)"
-                      class="text-[10px]"
-                      :class="{
-                        'text-destructive': getVisibleOAuthState(key)?.isInvalid || getVisibleOAuthState(key)?.isExpired,
-                        'text-warning': getVisibleOAuthState(key)?.isExpiringSoon && !getVisibleOAuthState(key)?.isExpired && !getVisibleOAuthState(key)?.isInvalid,
-                        'text-muted-foreground': !getVisibleOAuthState(key)?.isExpired && !getVisibleOAuthState(key)?.isExpiringSoon && !getVisibleOAuthState(key)?.isInvalid
-                      }"
-                      :title="getOAuthStatusTitle(key)"
-                    >
-                      {{ getVisibleOAuthState(key)?.text }}
-                    </span>
-                  </template>
                   <Badge
-                    v-if="key.oauth_plan_type"
+                    v-else-if="item.key === 'plan'"
                     variant="outline"
                     class="text-[9px] px-1 py-0 h-4 shrink-0"
-                    :class="getOAuthPlanTypeClass(key.oauth_plan_type)"
+                    :class="key.oauth_plan_type ? getOAuthPlanTypeClass(key.oauth_plan_type) : ''"
                   >
-                    {{ formatOAuthPlanType(key.oauth_plan_type) }}
+                    {{ item.label }}
                   </Badge>
                   <Badge
-                    v-if="getOAuthOrgBadge(key)"
+                    v-else-if="item.key === 'org'"
                     variant="secondary"
                     class="text-[9px] px-1 py-0 h-4 shrink-0"
                     :title="getOAuthOrgBadge(key)?.title"
                   >
-                    {{ getOAuthOrgBadge(key)?.label }}
+                    {{ item.label }}
                   </Badge>
-                </div>
-              </div>
-              <div class="flex items-center gap-0.5 shrink-0 flex-wrap justify-end max-w-[210px]">
-                <Button
-                  v-if="key.cooldown_reason"
-                  variant="ghost"
-                  size="icon"
-                  class="h-7 w-7 text-muted-foreground hover:text-green-600"
-                  title="清除冷却"
-                  @click="clearCooldown(key.key_id)"
-                >
-                  <RefreshCw class="w-3.5 h-3.5" />
-                </Button>
-                <Button
-                  v-if="key.circuit_breaker_open || (key.health_score ?? 1) < 0.5"
-                  variant="ghost"
-                  size="icon"
-                  class="h-7 w-7 text-green-600"
-                  :disabled="recoveringHealthKeyId === key.key_id"
-                  title="刷新健康状态"
-                  @click="handleRecoverKey(key)"
-                >
-                  <RefreshCw
-                    class="w-3.5 h-3.5"
-                    :class="{ 'animate-spin': recoveringHealthKeyId === key.key_id }"
-                  />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="h-7 w-7"
-                  title="模型权限"
-                  @click="handleKeyPermissions(key)"
-                >
-                  <Shield class="w-3.5 h-3.5" />
-                </Button>
-                <Popover
-                  :open="proxyMobilePopoverOpenKeyId === key.key_id"
-                  @update:open="(v: boolean) => handleProxyMobilePopoverToggle(key.key_id, v)"
-                >
-                  <PopoverTrigger as-child>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      class="h-7 w-7"
-                      :class="key.proxy?.node_id ? 'text-blue-500' : ''"
-                      :disabled="savingProxyKeyId === key.key_id"
-                      :title="key.proxy?.node_id ? `代理: ${getKeyProxyNodeName(key)}` : '设置代理节点'"
-                      @click.stop
-                    >
-                      <Globe class="w-3.5 h-3.5" />
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent
-                    class="w-72 p-3"
-                    side="bottom"
-                    align="end"
+                  <span
+                    v-else
+                    class="inline-flex max-w-full items-center rounded-full border px-2 py-0.5 text-[10px] font-medium leading-4"
+                    :class="getMobileTagClass(item)"
+                    :title="item.label"
                   >
-                    <div class="space-y-2">
-                      <div class="flex items-center justify-between">
-                        <span class="text-xs font-medium">代理节点</span>
-                        <Button
-                          v-if="key.proxy?.node_id"
-                          variant="ghost"
-                          size="sm"
-                          class="h-6 px-2 text-[10px] text-muted-foreground"
-                          :disabled="savingProxyKeyId === key.key_id"
-                          @click="clearKeyProxy(key)"
-                        >
-                          清除
-                        </Button>
-                      </div>
-                      <ProxyNodeSelect
-                        :model-value="key.proxy?.node_id || ''"
-                        trigger-class="h-8"
-                        @update:model-value="(v: string) => setKeyProxy(key, v)"
-                      />
-                      <p class="text-[10px] text-muted-foreground">
-                        {{ key.proxy?.node_id ? '当前使用独立代理' : '未设置，使用提供商级别代理' }}
-                      </p>
-                    </div>
-                  </PopoverContent>
-                </Popover>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="h-7 w-7"
-                  title="编辑账号"
-                  @click="handleEditKey(key)"
-                >
-                  <SquarePen class="w-3.5 h-3.5" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="h-7 w-7 text-foreground hover:text-foreground"
-                  :disabled="togglingKeyId === key.key_id"
-                  :title="key.is_active ? '禁用' : '启用'"
-                  @click="toggleKeyActive(key)"
-                >
-                  <Power class="w-3.5 h-3.5" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="h-7 w-7 text-destructive hover:text-destructive"
-                  :disabled="deletingKeyId === key.key_id"
-                  title="删除账号"
-                  @click="handleDeleteKey(key)"
-                >
-                  <Trash2 class="w-3.5 h-3.5" />
-                </Button>
+                    {{ item.label }}
+                  </span>
+                </template>
               </div>
-            </div>
-            <div
-              class="mt-2.5 grid gap-2"
-              :class="showAccountQuotaColumn ? 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-4' : 'grid-cols-2 sm:grid-cols-3'"
-            >
-              <div class="p-2 bg-muted/50 rounded-lg text-xs">
-                <div class="text-muted-foreground mb-0.5">
-                  最后使用
-                </div>
-                <div class="text-[11px]">
-                  {{ key.last_used_at ? formatRelativeTime(key.last_used_at) : '-' }}
+
+              <div class="overflow-x-auto rounded-xl border border-border/50 bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
+                <div class="flex min-w-max items-center justify-center whitespace-nowrap text-center">
+                  <span class="font-medium text-foreground/90">请求:{{ formatStatInteger(key.request_count) }}</span>
+                  <span class="mx-1.5 text-muted-foreground/40">|</span>
+                  <span class="font-medium text-foreground/90">Token:{{ formatTokenCount(key.total_tokens) }}</span>
+                  <span class="mx-1.5 text-muted-foreground/40">|</span>
+                  <span class="font-medium text-foreground/90">费用:{{ formatStatUsd(key.total_cost_usd) }}</span>
+                  <span class="mx-1.5 text-muted-foreground/40">|</span>
+                  <span class="font-medium text-foreground/90">最后使用:{{ key.last_used_at ? formatRelativeTime(key.last_used_at) : '-' }}</span>
                 </div>
               </div>
-              <div class="p-2 bg-muted/50 rounded-lg text-xs">
-                <div class="text-muted-foreground mb-0.5">
-                  统计
-                </div>
-                <div class="space-y-0.5 text-[10px]">
-                  <div class="flex items-center justify-between gap-2">
-                    <span class="text-muted-foreground">请求</span>
-                    <span class="tabular-nums">{{ formatStatInteger(key.request_count) }}</span>
-                  </div>
-                  <div class="flex items-center justify-between gap-2">
-                    <span class="text-muted-foreground">Token</span>
-                    <span class="tabular-nums">{{ formatTokenCount(key.total_tokens) }}</span>
-                  </div>
-                  <div class="flex items-center justify-between gap-2">
-                    <span class="text-muted-foreground">费用</span>
-                    <span class="tabular-nums">{{ formatStatUsd(key.total_cost_usd) }}</span>
-                  </div>
-                </div>
-              </div>
+
               <div
                 v-if="showAccountQuotaColumn"
-                class="p-2 bg-muted/50 rounded-lg text-xs"
+                class="rounded-xl border border-border/50 bg-muted/30 px-3 py-2 text-xs"
               >
-                <div class="text-muted-foreground mb-0.5">
+                <div class="text-muted-foreground mb-1">
                   配额
                 </div>
                 <div
@@ -1005,6 +843,163 @@
                   class="text-muted-foreground"
                 >
                   -
+                </div>
+              </div>
+
+              <div class="flex items-center gap-0.5">
+                <div
+                  v-for="actionId in getMobileActionIds(key)"
+                  :key="`${key.key_id}-${actionId}`"
+                  class="min-w-0 flex-1 flex justify-center"
+                >
+                  <Button
+                    v-if="actionId === 'copy_or_download' && key.auth_type === 'oauth'"
+                    variant="ghost"
+                    size="icon"
+                    class="h-7 w-7 shrink-0"
+                    title="下载 OAuth 授权文件"
+                    @click.stop="downloadRefreshToken(key)"
+                  >
+                    <Download class="w-3.5 h-3.5" />
+                  </Button>
+                  <Button
+                    v-else-if="actionId === 'copy_or_download'"
+                    variant="ghost"
+                    size="icon"
+                    class="h-7 w-7 shrink-0"
+                    title="复制密钥"
+                    @click.stop="copyFullKey(key)"
+                  >
+                    <Copy class="w-3.5 h-3.5" />
+                  </Button>
+                  <Button
+                    v-else-if="actionId === 'refresh_token'"
+                    variant="ghost"
+                    size="icon"
+                    class="h-7 w-7 shrink-0"
+                    :disabled="refreshingOAuthKeyId === key.key_id"
+                    :title="getOAuthRefreshButtonTitle(key)"
+                    @click.stop="handleRefreshOAuth(key)"
+                  >
+                    <RefreshCw
+                      class="w-3.5 h-3.5"
+                      :class="{ 'animate-spin': refreshingOAuthKeyId === key.key_id }"
+                    />
+                  </Button>
+                  <Button
+                    v-else-if="actionId === 'clear_cooldown'"
+                    variant="ghost"
+                    size="icon"
+                    class="h-7 w-7 shrink-0 text-muted-foreground hover:text-green-600"
+                    title="清除冷却"
+                    @click="clearCooldown(key.key_id)"
+                  >
+                    <RefreshCw class="w-3.5 h-3.5" />
+                  </Button>
+                  <Button
+                    v-else-if="actionId === 'recover_health'"
+                    variant="ghost"
+                    size="icon"
+                    class="h-7 w-7 shrink-0 text-green-600"
+                    :disabled="recoveringHealthKeyId === key.key_id"
+                    title="刷新健康状态"
+                    @click="handleRecoverKey(key)"
+                  >
+                    <RefreshCw
+                      class="w-3.5 h-3.5"
+                      :class="{ 'animate-spin': recoveringHealthKeyId === key.key_id }"
+                    />
+                  </Button>
+                  <Button
+                    v-else-if="actionId === 'permissions'"
+                    variant="ghost"
+                    size="icon"
+                    class="h-7 w-7 shrink-0"
+                    title="模型权限"
+                    @click="handleKeyPermissions(key)"
+                  >
+                    <Shield class="w-3.5 h-3.5" />
+                  </Button>
+                  <Popover
+                    v-else-if="actionId === 'proxy'"
+                    :open="proxyMobilePopoverOpenKeyId === key.key_id"
+                    @update:open="(v: boolean) => handleProxyMobilePopoverToggle(key.key_id, v)"
+                  >
+                    <PopoverTrigger as-child>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        class="h-7 w-7 shrink-0"
+                        :class="key.proxy?.node_id ? 'text-blue-500' : ''"
+                        :disabled="savingProxyKeyId === key.key_id"
+                        :title="key.proxy?.node_id ? `代理: ${getKeyProxyNodeName(key)}` : '设置代理节点'"
+                        @click.stop
+                      >
+                        <Globe class="w-3.5 h-3.5" />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent
+                      class="w-72 p-3"
+                      side="bottom"
+                      align="end"
+                    >
+                      <div class="space-y-2">
+                        <div class="flex items-center justify-between">
+                          <span class="text-xs font-medium">代理节点</span>
+                          <Button
+                            v-if="key.proxy?.node_id"
+                            variant="ghost"
+                            size="sm"
+                            class="h-6 px-2 text-[10px] text-muted-foreground"
+                            :disabled="savingProxyKeyId === key.key_id"
+                            @click="clearKeyProxy(key)"
+                          >
+                            清除
+                          </Button>
+                        </div>
+                        <ProxyNodeSelect
+                          :model-value="key.proxy?.node_id || ''"
+                          trigger-class="h-8"
+                          @update:model-value="(v: string) => setKeyProxy(key, v)"
+                        />
+                        <p class="text-[10px] text-muted-foreground">
+                          {{ key.proxy?.node_id ? '当前使用独立代理' : '未设置，使用提供商级别代理' }}
+                        </p>
+                      </div>
+                    </PopoverContent>
+                  </Popover>
+                  <Button
+                    v-else-if="actionId === 'edit'"
+                    variant="ghost"
+                    size="icon"
+                    class="h-7 w-7 shrink-0"
+                    title="编辑账号"
+                    @click="handleEditKey(key)"
+                  >
+                    <SquarePen class="w-3.5 h-3.5" />
+                  </Button>
+                  <Button
+                    v-else-if="actionId === 'toggle'"
+                    variant="ghost"
+                    size="icon"
+                    class="h-7 w-7 shrink-0 text-foreground hover:text-foreground"
+                    :disabled="togglingKeyId === key.key_id"
+                    :title="key.is_active ? '禁用' : '启用'"
+                    @click="toggleKeyActive(key)"
+                  >
+                    <Power class="w-3.5 h-3.5" />
+                  </Button>
+                  <Button
+                    v-else-if="actionId === 'delete'"
+                    variant="ghost"
+                    size="icon"
+                    class="h-7 w-7 shrink-0 text-destructive hover:text-destructive"
+                    :disabled="deletingKeyId === key.key_id"
+                    title="删除账号"
+                    @click="handleDeleteKey(key)"
+                  >
+                    <Trash2 class="w-3.5 h-3.5" />
+                  </Button>
                 </div>
               </div>
             </div>
@@ -1127,6 +1122,7 @@ import {
   Trash2,
   Users,
   Settings2,
+  SlidersHorizontal,
 } from 'lucide-vue-next'
 
 import {
@@ -1155,6 +1151,7 @@ import { useToast } from '@/composables/useToast'
 import { useClipboard } from '@/composables/useClipboard'
 import { useCountdownTimer, getCodexResetCountdown } from '@/composables/useCountdownTimer'
 import { useConfirm } from '@/composables/useConfirm'
+import { useRouteQuery } from '@/composables/useRouteQuery'
 import { parseApiError } from '@/utils/errorParser'
 import {
   getPoolOverview,
@@ -1194,6 +1191,19 @@ import KeyFormDialog from '@/features/providers/components/KeyFormDialog.vue'
 import OAuthKeyEditDialog from '@/features/providers/components/OAuthKeyEditDialog.vue'
 import OAuthAccountDialog from '@/features/providers/components/OAuthAccountDialog.vue'
 import ProxyNodeSelect from '@/features/providers/components/ProxyNodeSelect.vue'
+import {
+  buildPoolMobileTagItems,
+  splitPoolMobileActions,
+  type PoolMobileActionId,
+  type PoolMobileTagItem,
+  type PoolMobileTagTone,
+} from '@/features/pool/utils/poolMobilePresentation'
+import {
+  buildPoolManagementQueryPatch,
+  readPoolManagementViewState,
+  type PoolManagementViewState,
+  writePoolManagementViewState,
+} from '@/features/pool/utils/poolManagementState'
 import { getOAuthOrgBadge } from '@/utils/oauthIdentity'
 import { getOAuthRefreshFeedback } from '@/utils/oauthRefreshFeedback'
 import {
@@ -1209,6 +1219,19 @@ const { confirm } = useConfirm()
 const { copyToClipboard } = useClipboard()
 const { tick: countdownTick, start: startCountdownTimer } = useCountdownTimer()
 const proxyNodesStore = useProxyNodesStore()
+const { getQueryValue, patchQuery } = useRouteQuery()
+
+const poolManagementViewStorage = typeof window === 'undefined' ? undefined : window.sessionStorage
+const restoredViewState = readPoolManagementViewState(
+  {
+    providerId: getQueryValue('providerId'),
+    search: getQueryValue('search'),
+    status: getQueryValue('status'),
+    page: getQueryValue('page'),
+    pageSize: getQueryValue('pageSize'),
+  },
+  poolManagementViewStorage,
+)
 
 // --- Overview ---
 const poolProviders = ref<PoolOverviewItem[]>([])
@@ -1219,6 +1242,7 @@ let providerDataRequestId = 0
 let keysRequestId = 0
 let keysSearchDebounceTimer: number | null = null
 let suppressFiltersWatch = false
+let hasHydratedInitialProviderSelection = false
 
 async function loadOverview() {
   const requestId = ++overviewRequestId
@@ -1236,17 +1260,34 @@ async function loadOverview() {
       selectedId && enabledProviders.some(item => item.provider_id === selectedId),
     )
 
-    if (!selectedStillExists) {
-      if (enabledProviders.length > 0) {
-        // Do not block overview loading on key list fetch; keys area has its own loader.
-        void selectProvider(enabledProviders[0].provider_id)
-      } else {
-        selectedProviderId.value = null
-        selectedProviderData.value = null
-        showAccountBatchDialog.value = false
-        closeProviderProxyPopovers()
-        resetKeyPage()
+    if (selectedStillExists && selectedId) {
+      // 页面刷新时可能先恢复了选中的 Provider，但列表请求尚未触发；
+      // overview 回来后补一次初始化拉取，确保空态不会卡住。
+      if (!hasHydratedInitialProviderSelection) {
+        void selectProvider(selectedId, {
+          preserveSearch: true,
+          preserveStatus: true,
+          preservePagination: true,
+        })
       }
+      return
+    }
+
+    if (enabledProviders.length > 0) {
+      // Do not block overview loading on key list fetch; keys area has its own loader.
+      const fallbackProviderId = enabledProviders[0].provider_id
+      const shouldPreserveViewState = Boolean(selectedId)
+      void selectProvider(fallbackProviderId, {
+        preserveSearch: shouldPreserveViewState,
+        preserveStatus: shouldPreserveViewState,
+        preservePagination: shouldPreserveViewState,
+      })
+    } else {
+      selectedProviderId.value = null
+      selectedProviderData.value = null
+      showAccountBatchDialog.value = false
+      closeProviderProxyPopovers()
+      resetKeyPage()
     }
   } catch (err) {
     if (requestId !== overviewRequestId) return
@@ -1269,7 +1310,7 @@ async function handleSchedulingSaved(updatedProvider: ProviderWithEndpointsSumma
 }
 
 // --- Provider Selection ---
-const selectedProviderId = ref<string | null>(null)
+const selectedProviderId = ref<string | null>(restoredViewState.providerId)
 const selectedProviderData = ref<ProviderWithEndpointsSummary | null>(null)
 
 // Proxy for Select v-model (string, not string|null)
@@ -1430,8 +1471,16 @@ const desktopColumnWidths = computed(() => {
   }
 })
 
-async function selectProvider(id: string) {
+async function selectProvider(
+  id: string,
+  options: {
+    preserveSearch?: boolean
+    preserveStatus?: boolean
+    preservePagination?: boolean
+  } = {},
+) {
   const requestId = ++selectProviderRequestId
+  hasHydratedInitialProviderSelection = true
   selectedProviderId.value = id
   selectedProviderData.value = null
   editingKeyDetail.value = null
@@ -1443,15 +1492,21 @@ async function selectProvider(id: string) {
   proxyDesktopPopoverOpenKeyId.value = null
   proxyMobilePopoverOpenKeyId.value = null
   suppressFiltersWatch = true
-  currentPage.value = 1
-  searchQuery.value = ''
-  statusFilter.value = 'all'
+  if (!options.preservePagination) {
+    currentPage.value = 1
+  }
+  if (!options.preserveSearch) {
+    searchQuery.value = ''
+  }
+  if (!options.preserveStatus) {
+    statusFilter.value = 'all'
+  }
   suppressFiltersWatch = false
   if (keysSearchDebounceTimer !== null) {
     clearTimeout(keysSearchDebounceTimer)
     keysSearchDebounceTimer = null
   }
-  resetKeyPage(1, pageSize.value)
+  resetKeyPage(currentPage.value, pageSize.value)
   const keysTask = loadKeys()
   // Provider summary is non-blocking for key list rendering.
   void loadProviderData(id)
@@ -1483,10 +1538,10 @@ function createEmptyKeyPage(page = 1, pageSizeValue = 50): PoolKeysPageResponse 
 const keyPage = ref<PoolKeysPageResponse>(createEmptyKeyPage())
 const keysLoading = ref(false)
 const refreshingCurrentPageQuota = ref(false)
-const searchQuery = ref('')
-const statusFilter = ref('all')
-const currentPage = ref(1)
-const pageSize = ref(50)
+const searchQuery = ref(restoredViewState.search)
+const statusFilter = ref(restoredViewState.status)
+const currentPage = ref(restoredViewState.page)
+const pageSize = ref(restoredViewState.pageSize)
 const MANUAL_QUOTA_REFRESH_COOLDOWN_SECONDS = 5 * 60
 const refreshingOAuthKeyId = ref<string | null>(null)
 const recoveringHealthKeyId = ref<string | null>(null)
@@ -1504,6 +1559,72 @@ const keyFormDialogOpen = ref(false)
 const oauthKeyEditDialogOpen = ref(false)
 const editingKeyDetail = ref<PoolKeyDetail | null>(null)
 
+watch(
+  () => getQueryValue('search') ?? '',
+  (value) => {
+    if (searchQuery.value === value) return
+    searchQuery.value = value
+  },
+  { immediate: true },
+)
+
+watch(
+  () => readPoolManagementViewState({ status: getQueryValue('status') }).status,
+  (value) => {
+    if (statusFilter.value === value) return
+    suppressFiltersWatch = true
+    statusFilter.value = value
+    suppressFiltersWatch = false
+  },
+  { immediate: true },
+)
+
+watch(
+  () => readPoolManagementViewState({ page: getQueryValue('page') }).page,
+  (value) => {
+    if (currentPage.value === value) return
+    currentPage.value = value
+  },
+  { immediate: true },
+)
+
+watch(
+  () => readPoolManagementViewState({ pageSize: getQueryValue('pageSize') }).pageSize,
+  (value) => {
+    if (pageSize.value === value) return
+    pageSize.value = value
+  },
+  { immediate: true },
+)
+
+watch(
+  () => getQueryValue('providerId'),
+  (value) => {
+    if (!value || value === selectedProviderId.value) return
+    void selectProvider(value, {
+      preserveSearch: true,
+      preserveStatus: true,
+      preservePagination: true,
+    })
+  },
+  { immediate: true },
+)
+
+watch(
+  [selectedProviderId, searchQuery, statusFilter, currentPage, pageSize],
+  ([providerId, search, status, page, pageSizeValue]) => {
+    const nextState: PoolManagementViewState = {
+      providerId,
+      search,
+      status: status as PoolManagementViewState['status'],
+      page,
+      pageSize: pageSizeValue,
+    }
+    patchQuery(buildPoolManagementQueryPatch(nextState))
+    writePoolManagementViewState(nextState, poolManagementViewStorage)
+  },
+  { immediate: true },
+)
 interface QuotaProgressItem {
   label: string
   remainingPercent: number
@@ -2324,10 +2445,62 @@ function getRowClass(key: PoolKeyDetail): string {
   return ''
 }
 
-function getHealthScoreColor(score: number): string {
-  if (score >= 0.8) return 'text-green-600 dark:text-green-400'
-  if (score >= 0.5) return 'text-yellow-600 dark:text-yellow-400'
-  return 'text-red-600 dark:text-red-400'
+function getAuthTypeChipLabel(authType: string): string {
+  if (authType === 'oauth') return 'OAuth'
+  if (authType === 'service_account') return '服务账号'
+  return 'API Key'
+}
+
+function getMobileOAuthTone(key: PoolKeyDetail): PoolMobileTagTone | null {
+  const oauthState = getVisibleOAuthState(key)
+  if (!oauthState) return null
+  if (oauthState.isInvalid || oauthState.isExpired) return 'danger'
+  if (oauthState.isExpiringSoon) return 'warning'
+  return 'muted'
+}
+
+function getMobileTagItems(key: PoolKeyDetail): PoolMobileTagItem[] {
+  const accountAlert = getAccountAlertLabel(key)
+  const oauthState = getVisibleOAuthState(key)
+  const orgBadge = getOAuthOrgBadge(key)
+
+  return buildPoolMobileTagItems({
+    accountStatusLabel: accountAlert,
+    accountStatusTone: accountAlert ? 'danger' : null,
+    oauthStatusLabel: oauthState?.text ?? null,
+    oauthStatusTone: getMobileOAuthTone(key),
+    priorityLabel: `P${key.internal_priority ?? 50}`,
+    authLabel: getAuthTypeChipLabel(key.auth_type),
+    planLabel: key.oauth_plan_type ? formatOAuthPlanType(key.oauth_plan_type) : null,
+    orgLabel: orgBadge?.label ?? null,
+    proxyLabel: key.proxy?.node_id ? '独立代理' : null,
+  })
+}
+
+function getMobileActionIds(key: PoolKeyDetail): PoolMobileActionId[] {
+  return splitPoolMobileActions({
+    canDownloadOrCopy: true,
+    canRefreshToken: key.auth_type === 'oauth',
+    canClearCooldown: Boolean(key.cooldown_reason),
+    canRecoverHealth: key.circuit_breaker_open || (key.health_score ?? 1) < 0.5,
+    hasProxy: true,
+  }).primary
+}
+
+function getMobileTagClass(item: PoolMobileTagItem): string {
+  if (item.tone === 'danger') {
+    return 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300'
+  }
+  if (item.tone === 'warning') {
+    return 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+  }
+  if (item.tone === 'accent') {
+    return 'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300'
+  }
+  if (item.tone === 'muted') {
+    return 'border-border/60 bg-background/70 text-muted-foreground'
+  }
+  return 'border-border/60 bg-background/80 text-foreground/80'
 }
 
 function formatOAuthPlanType(planType: string): string {

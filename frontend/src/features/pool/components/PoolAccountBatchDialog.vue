@@ -3,224 +3,235 @@
     :model-value="modelValue"
     title="账号批量操作"
     :description="dialogDescription"
-    size="xl"
+    size="3xl"
     persistent
     @update:model-value="emit('update:modelValue', $event)"
   >
     <div class="space-y-4">
-      <div class="flex items-center gap-2">
-        <MultiSelect
-          :model-value="activeQuickSelectors"
-          :options="QUICK_SELECT_OPTIONS"
-          placeholder="快捷多选"
-          trigger-class="h-8 w-40"
-          dropdown-min-width="10rem"
-          :disabled="loading || executing"
-          @update:model-value="onQuickSelectChange"
-        />
-        <Input
-          :model-value="searchText"
-          placeholder="搜索账号名 / 套餐 / 额度 / 代理状态"
-          class="h-8 flex-1"
-          @update:model-value="(v) => searchText = String(v || '')"
-        />
-        <Button
-          variant="ghost"
-          size="icon"
-          class="h-8 w-8 shrink-0"
-          :disabled="loading || executing"
-          @click="loadKeysPage()"
-        >
-          <RefreshCw
-            class="h-3.5 w-3.5"
-            :class="loading ? 'animate-spin' : ''"
-          />
-        </Button>
-      </div>
+      <div class="space-y-3 rounded-lg border bg-muted/20 px-3 py-2.5">
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-xs font-medium text-foreground">快捷多选</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            class="h-7 px-2 text-[11px]"
+            :disabled="loading || executing || !hasActiveFilters"
+            @click="clearFilters"
+          >
+            重置筛选
+          </Button>
+        </div>
 
-      <div
-        v-if="activeQuickSelectors.length > 0"
-        class="flex flex-wrap gap-1"
-      >
-        <Badge
-          v-for="sel in activeQuickSelectors"
-          :key="sel"
-          variant="secondary"
-          class="text-[10px] px-1.5 py-0 h-5 cursor-pointer hover:bg-destructive/10 hover:text-destructive"
-          @click="removeQuickSelector(sel)"
-        >
-          {{ QUICK_SELECT_OPTIONS.find(s => s.value === sel)?.label }}
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="10"
-            height="10"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            class="ml-0.5"
-          ><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
-        </Badge>
-      </div>
+        <div class="flex flex-wrap gap-2">
+          <Button
+            v-for="option in QUICK_SELECT_OPTIONS"
+            :key="option.value"
+            variant="outline"
+            size="sm"
+            class="h-8 px-2.5 text-[11px]"
+            :class="activeQuickSelectorSet.has(option.value) ? 'border-primary/70 bg-primary/10 text-primary' : ''"
+            :disabled="loading || executing"
+            @click="toggleQuickSelector(option.value)"
+          >
+            {{ option.label }}
+          </Button>
+        </div>
 
-      <div class="flex items-center justify-between text-xs">
-        <div class="text-muted-foreground">
-          共 {{ filteredTotal }} 个匹配账号，当前页 {{ pageKeys.length }} 个，已选 {{ selectedCount }} 个
-        </div>
-        <div class="flex items-center gap-2">
-          <Checkbox
-            :checked="isAllFilteredSelected"
-            :indeterminate="isPartiallyFilteredSelected"
-            :disabled="filteredTotal === 0 || loading || executing"
-            @update:checked="toggleSelectFiltered"
-          />
-          <span class="text-muted-foreground">全选筛选结果</span>
-        </div>
-      </div>
+        <div class="space-y-3 rounded-md border bg-background/80 px-3 py-3">
+          <div class="flex items-center gap-2">
+            <Input
+              :model-value="searchText"
+              placeholder="搜索账号名 / 套餐 / 额度 / 代理状态"
+              class="h-8 flex-1"
+              @update:model-value="(v) => searchText = String(v || '')"
+            />
+            <Button
+              variant="ghost"
+              size="icon"
+              class="h-8 w-8 shrink-0"
+              :disabled="loading || executing"
+              @click="loadKeysPage()"
+            >
+              <RefreshCw
+                class="h-3.5 w-3.5"
+                :class="loading ? 'animate-spin' : ''"
+              />
+            </Button>
+          </div>
 
-      <div class="max-h-[380px] overflow-y-auto rounded-lg border">
-        <div
-          v-if="loading"
-          class="py-10 text-center text-sm text-muted-foreground"
-        >
-          正在加载账号列表...
-        </div>
-        <div
-          v-else-if="pageKeys.length === 0"
-          class="py-10 text-center text-sm text-muted-foreground"
-        >
-          无匹配账号
-        </div>
-        <label
-          v-for="key in pageKeys"
-          :key="key.key_id"
-          class="flex items-center gap-2.5 px-3 py-2 border-b last:border-b-0 cursor-pointer hover:bg-muted/30"
-        >
-          <Checkbox
-            :checked="selectAllFiltered || selectedIdSet.has(key.key_id)"
-            :disabled="executing || selectAllFiltered"
-            @update:checked="(checked) => toggleOne(key.key_id, checked === true)"
-          />
-          <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-1.5">
-              <span class="text-xs font-medium truncate">{{ key.key_name || '未命名' }}</span>
-              <Badge
-                variant="outline"
-                class="text-[10px] px-1 py-0 h-4 shrink-0"
-              >{{ normalizeAuthTypeLabel(key.auth_type) }}</Badge>
-              <Badge
-                v-if="getStatusBadgeLabel(key)"
-                variant="destructive"
-                class="text-[10px] px-1 py-0 h-4 shrink-0"
-                :title="getStatusBadgeTitle(key)"
-              >{{ getStatusBadgeLabel(key) }}</Badge>
-              <Badge
-                v-if="key.oauth_plan_type"
-                variant="outline"
-                class="text-[10px] px-1 py-0 h-4 shrink-0"
-              >{{ key.oauth_plan_type }}</Badge>
-              <Badge
-                v-if="getOAuthOrgBadge(key)"
-                variant="secondary"
-                class="text-[10px] px-1 py-0 h-4 shrink-0"
-                :title="getOAuthOrgBadge(key)?.title"
-              >{{ getOAuthOrgBadge(key)?.label }}</Badge>
+          <div class="flex flex-col gap-2 text-xs lg:flex-row lg:items-center lg:justify-between">
+            <div class="text-muted-foreground">
+              共 {{ filteredTotal }} 个匹配账号，当前页 {{ pageKeys.length }} 个，已选 {{ selectedCount }} 个
             </div>
-            <div class="flex items-center gap-1.5 mt-0.5 text-[11px] text-muted-foreground flex-wrap">
-              <span :class="key.is_active ? '' : 'text-destructive'">{{ key.is_active ? '启用' : '禁用' }}</span>
-              <span v-if="key.account_quota">{{ shortenQuota(key.account_quota) }}</span>
-              <span v-if="key.proxy?.node_id">独立代理</span>
-              <span
-                v-if="key.last_used_at"
-                class="ml-auto shrink-0"
-              >{{ formatRelativeTime(key.last_used_at) }}</span>
+            <div class="flex flex-wrap items-center gap-1">
+              <div class="mr-1 flex items-center gap-2">
+                <Checkbox
+                  :checked="isAllFilteredSelected"
+                  :indeterminate="isPartiallyFilteredSelected"
+                  :disabled="filteredTotal === 0 || loading || executing"
+                  @update:checked="toggleSelectFiltered"
+                />
+                <span class="text-muted-foreground">全选筛选结果</span>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                class="h-7 px-2 text-[11px]"
+                :disabled="pageKeys.length === 0 || loading || executing || selectAllFiltered"
+                @click="toggleSelectCurrentPage"
+              >
+                {{ isCurrentPageFullySelected ? '取消本页全选' : '本页全选' }}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                class="h-7 px-2 text-[11px]"
+                :disabled="!canClearSelection || loading || executing"
+                @click="clearSelection"
+              >
+                清空选择
+              </Button>
             </div>
           </div>
-        </label>
-      </div>
-
-      <div
-        v-if="totalPages > 1"
-        class="flex items-center justify-between text-xs text-muted-foreground"
-      >
-        <span>第 {{ currentPage }} / {{ totalPages }} 页</span>
-        <div class="flex items-center gap-1">
-          <Button
-            variant="ghost"
-            size="icon"
-            class="h-7 w-7"
-            :disabled="currentPage <= 1"
-            @click="goToPage(1)"
-          >
-            <ChevronsLeft class="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            class="h-7 w-7"
-            :disabled="currentPage <= 1"
-            @click="goToPage(currentPage - 1)"
-          >
-            <ChevronLeft class="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            class="h-7 w-7"
-            :disabled="currentPage >= totalPages"
-            @click="goToPage(currentPage + 1)"
-          >
-            <ChevronRight class="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            class="h-7 w-7"
-            :disabled="currentPage >= totalPages"
-            @click="goToPage(totalPages)"
-          >
-            <ChevronsRight class="h-3.5 w-3.5" />
-          </Button>
         </div>
       </div>
 
-      <div class="space-y-2">
-        <div class="flex items-center gap-2">
-          <Select v-model="selectedAction">
-            <SelectTrigger class="h-8 text-xs flex-1">
-              <SelectValue placeholder="选择动作" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem
+      <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_19rem]">
+        <div class="min-w-0 space-y-3">
+          <div class="max-h-[420px] overflow-y-auto rounded-lg border">
+            <div
+              v-if="loading"
+              class="py-10 text-center text-sm text-muted-foreground"
+            >
+              正在加载账号列表...
+            </div>
+            <div
+              v-else-if="pageKeys.length === 0"
+              class="py-10 text-center text-sm text-muted-foreground"
+            >
+              无匹配账号
+            </div>
+            <label
+              v-for="key in pageKeys"
+              :key="key.key_id"
+              class="flex items-center gap-2.5 px-3 py-2 border-b last:border-b-0 cursor-pointer hover:bg-muted/30"
+            >
+              <Checkbox
+                :checked="selectAllFiltered || selectedIdSet.has(key.key_id)"
+                :disabled="executing || selectAllFiltered"
+                @update:checked="(checked) => toggleOne(key.key_id, checked === true)"
+              />
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-1.5">
+                  <span class="text-xs font-medium truncate">{{ key.key_name || '未命名' }}</span>
+                  <Badge
+                    variant="outline"
+                    class="text-[10px] px-1 py-0 h-4 shrink-0"
+                  >{{ normalizeAuthTypeLabel(key.auth_type) }}</Badge>
+                  <Badge
+                    v-if="getStatusBadgeLabel(key)"
+                    variant="destructive"
+                    class="text-[10px] px-1 py-0 h-4 shrink-0"
+                    :title="getStatusBadgeTitle(key)"
+                  >{{ getStatusBadgeLabel(key) }}</Badge>
+                  <Badge
+                    v-if="key.oauth_plan_type"
+                    variant="outline"
+                    class="text-[10px] px-1 py-0 h-4 shrink-0"
+                  >{{ key.oauth_plan_type }}</Badge>
+                  <Badge
+                    v-if="getOAuthOrgBadge(key)"
+                    variant="secondary"
+                    class="text-[10px] px-1 py-0 h-4 shrink-0"
+                    :title="getOAuthOrgBadge(key)?.title"
+                  >{{ getOAuthOrgBadge(key)?.label }}</Badge>
+                </div>
+                <div class="flex items-center gap-1.5 mt-0.5 text-[11px] text-muted-foreground flex-wrap">
+                  <span :class="key.is_active ? '' : 'text-destructive'">{{ key.is_active ? '启用' : '禁用' }}</span>
+                  <span v-if="key.account_quota">{{ shortenQuota(key.account_quota) }}</span>
+                  <span v-if="key.proxy?.node_id">独立代理</span>
+                  <span
+                    v-if="key.last_used_at"
+                    class="ml-auto shrink-0"
+                  >{{ formatRelativeTime(key.last_used_at) }}</span>
+                </div>
+              </div>
+            </label>
+          </div>
+
+          <div
+            v-if="totalPages > 1"
+            class="flex items-center justify-between text-xs text-muted-foreground"
+          >
+            <span>第 {{ currentPage }} / {{ totalPages }} 页</span>
+            <div class="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-7 w-7"
+                :disabled="currentPage <= 1"
+                @click="goToPage(1)"
+              >
+                <ChevronsLeft class="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-7 w-7"
+                :disabled="currentPage <= 1"
+                @click="goToPage(currentPage - 1)"
+              >
+                <ChevronLeft class="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-7 w-7"
+                :disabled="currentPage >= totalPages"
+                @click="goToPage(currentPage + 1)"
+              >
+                <ChevronRight class="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-7 w-7"
+                :disabled="currentPage >= totalPages"
+                @click="goToPage(totalPages)"
+              >
+                <ChevronsRight class="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        <div class="space-y-3 lg:sticky lg:top-1 lg:self-start">
+          <div class="space-y-2 rounded-lg border bg-background px-3 py-3">
+            <div class="text-xs font-medium text-foreground">
+              执行动作
+            </div>
+            <div class="text-[11px] text-muted-foreground">
+              代理节点（仅“配置代理”动作生效）
+            </div>
+            <ProxyNodeSelect
+              :model-value="proxyNodeIdForAction"
+              trigger-class="h-8"
+              @update:model-value="(v: string) => proxyNodeIdForAction = v"
+            />
+            <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-1">
+              <Button
                 v-for="item in ACTION_OPTIONS"
                 :key="item.value"
-                :value="item.value"
+                class="h-8 w-full px-3 text-xs"
+                :variant="getActionButtonVariant(item)"
+                :disabled="!canExecuteSpecifiedAction(item.value)"
+                @click="confirmAndExecuteAction(item.value)"
               >
                 {{ item.label }}
-              </SelectItem>
-            </SelectContent>
-          </Select>
-          <Button
-            variant="ghost"
-            size="icon"
-            class="h-8 w-8 shrink-0"
-            :disabled="executing || selectedCount === 0 || loading"
-            @click="executeAction"
-          >
-            <Play
-              class="h-3.5 w-3.5"
-              :class="executing ? 'animate-pulse' : ''"
-            />
-          </Button>
+              </Button>
+            </div>
+          </div>
         </div>
-        <ProxyNodeSelect
-          v-if="selectedAction === 'set_proxy'"
-          :model-value="proxyNodeIdForAction"
-          trigger-class="h-8"
-          @update:model-value="(v: string) => proxyNodeIdForAction = v"
-        />
       </div>
 
       <div
@@ -260,10 +271,9 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { Dialog, Button, Input, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, Checkbox, Badge } from '@/components/ui'
-import { MultiSelect } from '@/components/common'
+import { Dialog, Button, Input, Checkbox, Badge } from '@/components/ui'
 import ProxyNodeSelect from '@/features/providers/components/ProxyNodeSelect.vue'
-import { RefreshCw, Play, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-vue-next'
+import { RefreshCw, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
 import { useConfirm } from '@/composables/useConfirm'
 import { parseApiError } from '@/utils/errorParser'
@@ -308,6 +318,13 @@ type BatchActionValue =
   | 'enable'
   | 'disable'
 
+type BatchActionOption = {
+  value: BatchActionValue
+  label: string
+  hint: string
+  destructive?: boolean
+}
+
 const props = defineProps<{
   modelValue: boolean
   providerId: string
@@ -323,26 +340,26 @@ const emit = defineEmits<{
 
 const QUICK_SELECT_OPTIONS: Array<{ value: QuickSelectorValue; label: string }> = [
   { value: 'banned', label: '账号异常' },
+  { value: 'oauth_invalid', label: 'Token 异常' },
   { value: 'no_5h_limit', label: '无5H限额' },
   { value: 'no_weekly_limit', label: '无周限额' },
   { value: 'plan_free', label: '全部 Free' },
   { value: 'plan_team', label: '全部 Team' },
-  { value: 'oauth_invalid', label: 'Token 异常' },
   { value: 'proxy_unset', label: '未配置代理' },
   { value: 'proxy_set', label: '已配置独立代理' },
   { value: 'disabled', label: '已禁用' },
   { value: 'enabled', label: '已启用' },
 ]
 
-const ACTION_OPTIONS: Array<{ value: BatchActionValue; label: string }> = [
-  { value: 'export', label: '导出凭据' },
-  { value: 'delete', label: '删除账号' },
-  { value: 'refresh_oauth', label: '刷新 OAuth' },
-  { value: 'refresh_quota', label: '刷新额度' },
-  { value: 'clear_proxy', label: '清除代理' },
-  { value: 'set_proxy', label: '配置代理' },
-  { value: 'enable', label: '启用' },
-  { value: 'disable', label: '禁用' },
+const ACTION_OPTIONS: BatchActionOption[] = [
+  { value: 'refresh_quota', label: '刷新额度', hint: '调用额度刷新接口，适合核对最新配额状态。' },
+  { value: 'refresh_oauth', label: '刷新 OAuth', hint: '仅对 OAuth 账号有效，非 OAuth 账号会自动跳过。' },
+  { value: 'set_proxy', label: '配置代理', hint: '为选中账号绑定独立代理节点。' },
+  { value: 'clear_proxy', label: '清除代理', hint: '移除账号独立代理，回退到提供商默认代理。' },
+  { value: 'enable', label: '启用', hint: '批量启用账号，恢复可调度状态。' },
+  { value: 'disable', label: '禁用', hint: '批量禁用账号，保留数据但停止调度。' },
+  { value: 'export', label: '导出凭据', hint: '仅导出 OAuth 凭据，其他类型账号将被跳过。' },
+  { value: 'delete', label: '删除账号', hint: '永久删除账号数据，执行后不可恢复。', destructive: true },
 ]
 
 const { success, warning, error: showError } = useToast()
@@ -357,7 +374,7 @@ const selectedKeyIds = ref<string[]>([])
 const knownKeysById = ref<Record<string, PoolKeyDetail>>({})
 const selectAllFiltered = ref(false)
 const searchText = ref('')
-const selectedAction = ref<BatchActionValue>('delete')
+const selectedAction = ref<BatchActionValue>('refresh_quota')
 const proxyNodeIdForAction = ref('')
 const lastResultMessage = ref('')
 const progressTotal = ref(0)
@@ -383,6 +400,21 @@ const selectedCount = computed(() => (selectAllFiltered.value ? filteredTotal.va
 const totalPages = computed(() => Math.max(1, Math.ceil(filteredTotal.value / PAGE_SIZE)))
 const isAllFilteredSelected = computed(() => selectAllFiltered.value && filteredTotal.value > 0)
 const isPartiallyFilteredSelected = computed(() => !selectAllFiltered.value && selectedKeyIds.value.length > 0)
+const hasActiveFilters = computed(() => searchText.value.trim().length > 0 || activeQuickSelectors.value.length > 0)
+const selectedOnCurrentPageCount = computed(() => {
+  if (selectAllFiltered.value) return pageKeys.value.length
+  let count = 0
+  for (const key of pageKeys.value) {
+    if (selectedIdSet.value.has(key.key_id)) count += 1
+  }
+  return count
+})
+const isCurrentPageFullySelected = computed(() => {
+  if (selectAllFiltered.value || pageKeys.value.length === 0) return false
+  return selectedOnCurrentPageCount.value === pageKeys.value.length
+})
+const canClearSelection = computed(() => selectAllFiltered.value || selectedKeyIds.value.length > 0)
+const activeQuickSelectorSet = computed(() => new Set(activeQuickSelectors.value))
 
 function normalizeText(value: unknown): string {
   return String(value || '').trim().toLowerCase()
@@ -592,17 +624,76 @@ function toggleSelectFiltered(checked: boolean | 'indeterminate'): void {
   }
 }
 
-function onQuickSelectChange(values: string[]): void {
-  activeQuickSelectors.value = values as QuickSelectorValue[]
+function toggleSelectCurrentPage(): void {
+  if (selectAllFiltered.value || pageKeys.value.length === 0) return
+  const set = new Set(selectedKeyIds.value)
+  const pageIds = pageKeys.value.map((key) => key.key_id)
+  const shouldUnselect = pageIds.every((id) => set.has(id))
+  for (const id of pageIds) {
+    if (shouldUnselect) set.delete(id)
+    else set.add(id)
+  }
+  selectedKeyIds.value = [...set]
+}
+
+function clearSelection(): void {
+  resetSelection()
+}
+
+function clearFilters(): void {
+  if (!hasActiveFilters.value) return
+  clearSearchDebounce()
+  suppressFilterWatch = true
+  searchText.value = ''
+  activeQuickSelectors.value = []
+  suppressFilterWatch = false
   requestFilteredReload()
 }
 
-function removeQuickSelector(selector: QuickSelectorValue): void {
+function toggleQuickSelector(selector: QuickSelectorValue): void {
   const idx = activeQuickSelectors.value.indexOf(selector)
   if (idx >= 0) {
     activeQuickSelectors.value.splice(idx, 1)
-    requestFilteredReload()
+  } else {
+    activeQuickSelectors.value.push(selector)
   }
+  requestFilteredReload()
+}
+
+function canExecuteSpecifiedAction(action: BatchActionValue): boolean {
+  if (executing.value || loading.value || selectedCount.value === 0) return false
+  if (action === 'set_proxy') return Boolean(proxyNodeIdForAction.value)
+  return true
+}
+
+function getActionButtonVariant(option: BatchActionOption): 'default' | 'destructive' | 'outline' {
+  if (option.destructive) return 'destructive'
+  return 'outline'
+}
+
+async function confirmAndExecuteAction(action: BatchActionValue): Promise<void> {
+  selectedAction.value = action
+  if (selectedCount.value === 0) {
+    warning('请先选择账号')
+    return
+  }
+  if (action === 'set_proxy' && !proxyNodeIdForAction.value) {
+    warning('请先选择代理节点')
+    return
+  }
+  if (!canExecuteSpecifiedAction(action)) return
+
+  const actionOption = ACTION_OPTIONS.find((item) => item.value === action)
+  const actionLabel = actionOption?.label || '执行动作'
+  const scopeLabel = selectAllFiltered.value ? '筛选结果' : '已选账号'
+  const confirmed = await confirm({
+    title: actionLabel,
+    message: `将对${scopeLabel}（${selectedCount.value} 个）执行：${actionLabel}，是否继续？`,
+    confirmText: actionOption?.destructive ? '确认删除' : '确认执行',
+    ...(actionOption?.destructive ? { variant: 'destructive' as const } : {}),
+  })
+  if (!confirmed) return
+  await executeAction(action)
 }
 
 const DELETE_POLL_INTERVAL_MS = 2000
@@ -654,24 +745,17 @@ async function resolveSelectedItems(): Promise<PoolKeySelectionItem[]> {
   })
 }
 
-async function executeAction(): Promise<void> {
+async function executeAction(actionOverride?: BatchActionValue): Promise<void> {
   if (executing.value) return
+  if (actionOverride) {
+    selectedAction.value = actionOverride
+  }
   if (selectedCount.value === 0) {
     warning('请先选择账号')
     return
   }
 
   const requestedCount = selectedCount.value
-  if (selectedAction.value === 'delete') {
-    const confirmed = await confirm({
-      title: '删除账号',
-      message: `将删除 ${requestedCount} 个账号，操作不可恢复，是否继续？`,
-      confirmText: '确认删除',
-      variant: 'destructive',
-    })
-    if (!confirmed) return
-  }
-
   if (selectedAction.value === 'set_proxy' && !proxyNodeIdForAction.value) {
     warning('请先选择代理节点')
     return
@@ -918,6 +1002,8 @@ watch(
     searchText.value = ''
     lastResultMessage.value = ''
     activeQuickSelectors.value = []
+    selectedAction.value = 'refresh_quota'
+    proxyNodeIdForAction.value = ''
     resetSelection(true)
     filteredTotal.value = 0
     pageKeys.value = []
