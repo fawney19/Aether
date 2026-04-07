@@ -184,7 +184,6 @@
                       {{ modeOpt.label }}
                     </button>
                   </div>
-
                 </div>
               </div>
             </div>
