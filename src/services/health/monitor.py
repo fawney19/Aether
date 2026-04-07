@@ -26,7 +26,9 @@ from src.config.constants import CircuitBreakerDefaults
 from src.core.batch_committer import get_batch_committer
 from src.core.logger import logger
 from src.core.metrics import health_open_circuits
+from src.database import create_session
 from src.models.database import Provider, ProviderAPIKey, ProviderEndpoint
+from src.services.usage._db_retry import apply_postgres_statement_timeouts, run_sync_db_retry
 
 
 class CircuitState:
@@ -217,110 +219,115 @@ class HealthMonitor:
             如果未提供，会尝试从 Key 的 api_formats 中获取第一个格式作为 fallback。
         """
         try:
-            if not key_id:
-                return
-
-            key = db.query(ProviderAPIKey).filter(ProviderAPIKey.id == key_id).first()
-            if not key:
-                return
-
-            # api_format 兼容处理：如果未提供，尝试使用 Key 的第一个格式
-            effective_api_format = api_format
-            if not effective_api_format:
-                if key.api_formats and len(key.api_formats) > 0:
-                    effective_api_format = key.api_formats[0]
-                    logger.debug(
-                        f"record_success: api_format 未提供，使用默认格式 {effective_api_format}"
+            def _write() -> None:
+                write_db = create_session()
+                try:
+                    apply_postgres_statement_timeouts(
+                        write_db,
+                        statement_timeout_ms=10000,
+                        lock_timeout_ms=2000,
                     )
-                else:
-                    logger.warning(
-                        f"record_success: api_format 未提供且 Key 无可用格式: key_id={key_id[:8]}..."
-                    )
-                    return
+                    if not key_id:
+                        return
 
-            now = datetime.now(timezone.utc)
-            now_ts = now.timestamp()
+                    key = write_db.query(ProviderAPIKey).filter(ProviderAPIKey.id == key_id).first()
+                    if not key:
+                        return
 
-            # 获取当前格式的健康度数据
-            health_data = cls._get_health_data(key, effective_api_format)
-            circuit_data = cls._get_circuit_data(key, effective_api_format)
+                    effective_api_format = api_format
+                    if not effective_api_format:
+                        if key.api_formats and len(key.api_formats) > 0:
+                            effective_api_format = key.api_formats[0]
+                            logger.debug(
+                                f"record_success: api_format 未提供，使用默认格式 {effective_api_format}"
+                            )
+                        else:
+                            logger.warning(
+                                f"record_success: api_format 未提供且 Key 无可用格式: key_id={key_id[:8]}..."
+                            )
+                            return
 
-            # 1. 更新滑动窗口（进程内存缓存，不持久化到 DB）
-            window = cls._get_window(key.id, effective_api_format)
-            window = list(window)  # 避免原地修改
-            window.append({"ts": now_ts, "ok": True})
-            cutoff_ts = now_ts - cls.WINDOW_SECONDS
-            window = [r for r in window if r["ts"] > cutoff_ts]
-            if len(window) > cls.WINDOW_SIZE:
-                window = window[-cls.WINDOW_SIZE :]
-            cls._set_window(key.id, effective_api_format, window)
+                    now = datetime.now(timezone.utc)
+                    now_ts = now.timestamp()
+                    health_data = cls._get_health_data(key, effective_api_format)
+                    circuit_data = cls._get_circuit_data(key, effective_api_format)
 
-            # 2. 更新健康度（用于展示）
-            current_score = float(health_data.get("health_score") or 0)
-            new_score = min(current_score + cls.SUCCESS_INCREMENT, 1.0)
-            health_data["health_score"] = new_score
+                    window = cls._get_window(key.id, effective_api_format)
+                    window = list(window)
+                    window.append({"ts": now_ts, "ok": True})
+                    cutoff_ts = now_ts - cls.WINDOW_SECONDS
+                    window = [r for r in window if r["ts"] > cutoff_ts]
+                    if len(window) > cls.WINDOW_SIZE:
+                        window = window[-cls.WINDOW_SIZE :]
+                    cls._set_window(key.id, effective_api_format, window)
 
-            # 3. 更新统计
-            health_data["consecutive_failures"] = 0
-            health_data["last_failure_at"] = None
+                    current_score = float(health_data.get("health_score") or 0)
+                    new_score = min(current_score + cls.SUCCESS_INCREMENT, 1.0)
+                    health_data["health_score"] = new_score
+                    health_data["consecutive_failures"] = 0
+                    health_data["last_failure_at"] = None
 
-            # 4. 处理熔断器状态
-            state = cls._get_circuit_state_from_data(circuit_data, now)
+                    state = cls._get_circuit_state_from_data(circuit_data, now)
 
-            if state == CircuitState.HALF_OPEN:
-                # 半开状态：记录成功
-                circuit_data["half_open_successes"] = (
-                    int(circuit_data.get("half_open_successes") or 0) + 1
-                )
+                    if state == CircuitState.HALF_OPEN:
+                        circuit_data["half_open_successes"] = (
+                            int(circuit_data.get("half_open_successes") or 0) + 1
+                        )
 
-                if circuit_data["half_open_successes"] >= cls.HALF_OPEN_SUCCESS_THRESHOLD:
-                    # 达到成功阈值，关闭熔断器
-                    cls._close_circuit_data(circuit_data, health_data, reason="半开状态验证成功")
-                    cls._push_circuit_event(
-                        {
-                            "event": "closed",
-                            "key_id": key.id,
-                            "api_format": effective_api_format,
-                            "reason": "半开状态验证成功",
-                            "timestamp": now.isoformat(),
-                        }
-                    )
-                    logger.info(
-                        f"[CLOSED] Key 熔断器关闭: {key.id[:8]}.../{effective_api_format} | 原因: 半开状态验证成功"
-                    )
+                        if (
+                            circuit_data["half_open_successes"]
+                            >= cls.HALF_OPEN_SUCCESS_THRESHOLD
+                        ):
+                            cls._close_circuit_data(
+                                circuit_data, health_data, reason="半开状态验证成功"
+                            )
+                            cls._push_circuit_event(
+                                {
+                                    "event": "closed",
+                                    "key_id": key.id,
+                                    "api_format": effective_api_format,
+                                    "reason": "半开状态验证成功",
+                                    "timestamp": now.isoformat(),
+                                }
+                            )
+                            logger.info(
+                                f"[CLOSED] Key 熔断器关闭: {key.id[:8]}.../{effective_api_format} | 原因: 半开状态验证成功"
+                            )
 
-            elif state == CircuitState.OPEN:
-                # 打开状态下的成功（探测成功），进入半开状态
-                cls._enter_half_open_data(circuit_data, now)
-                cls._push_circuit_event(
-                    {
-                        "event": "half_open",
-                        "key_id": key.id,
-                        "api_format": effective_api_format,
-                        "timestamp": now.isoformat(),
-                    }
-                )
-                logger.info(
-                    f"[HALF-OPEN] Key 进入半开状态: {key.id[:8]}.../{effective_api_format} | "
-                    f"需要 {cls.HALF_OPEN_SUCCESS_THRESHOLD} 次成功关闭熔断器"
-                )
+                    elif state == CircuitState.OPEN:
+                        cls._enter_half_open_data(circuit_data, now)
+                        cls._push_circuit_event(
+                            {
+                                "event": "half_open",
+                                "key_id": key.id,
+                                "api_format": effective_api_format,
+                                "timestamp": now.isoformat(),
+                            }
+                        )
+                        logger.info(
+                            f"[HALF-OPEN] Key 进入半开状态: {key.id[:8]}.../{effective_api_format} | "
+                            f"需要 {cls.HALF_OPEN_SUCCESS_THRESHOLD} 次成功关闭熔断器"
+                        )
 
-            # 保存数据
-            cls._set_health_data(key, effective_api_format, health_data)
-            cls._set_circuit_data(key, effective_api_format, circuit_data)
+                    cls._set_health_data(key, effective_api_format, health_data)
+                    cls._set_circuit_data(key, effective_api_format, circuit_data)
+                    key.success_count = int(key.success_count or 0) + 1  # type: ignore[assignment]
+                    key.request_count = int(key.request_count or 0) + 1  # type: ignore[assignment]
+                    if response_time_ms:
+                        key.total_response_time_ms = int(key.total_response_time_ms or 0) + response_time_ms  # type: ignore[assignment]
 
-            # 更新全局统计
-            key.success_count = int(key.success_count or 0) + 1  # type: ignore[assignment]
-            key.request_count = int(key.request_count or 0) + 1  # type: ignore[assignment]
-            if response_time_ms:
-                key.total_response_time_ms = int(key.total_response_time_ms or 0) + response_time_ms  # type: ignore[assignment]
+                    write_db.flush()
+                    write_db.commit()
+                except Exception:
+                    write_db.rollback()
+                    raise
+                finally:
+                    write_db.close()
 
-            db.flush()
-            get_batch_committer().mark_dirty(db)
+            run_sync_db_retry(_write, context=f"health.record_success:{key_id or 'unknown'}")
 
         except Exception as e:
             logger.error(f"记录成功请求失败: {e}")
-            db.rollback()
 
     @classmethod
     def record_failure(
@@ -343,133 +350,139 @@ class HealthMonitor:
             如果未提供，会尝试从 Key 的 api_formats 中获取第一个格式作为 fallback。
         """
         try:
-            if not key_id:
-                return
+            def _write() -> None:
+                write_db = create_session()
+                try:
+                    apply_postgres_statement_timeouts(
+                        write_db,
+                        statement_timeout_ms=10000,
+                        lock_timeout_ms=2000,
+                    )
+                    if not key_id:
+                        return
 
-            key = db.query(ProviderAPIKey).filter(ProviderAPIKey.id == key_id).first()
-            if not key:
-                return
+                    key = write_db.query(ProviderAPIKey).filter(ProviderAPIKey.id == key_id).first()
+                    if not key:
+                        return
 
-            # api_format 兼容处理：如果未提供，尝试使用 Key 的第一个格式
-            effective_api_format = api_format
-            if not effective_api_format:
-                if key.api_formats and len(key.api_formats) > 0:
-                    effective_api_format = key.api_formats[0]
+                    effective_api_format = api_format
+                    if not effective_api_format:
+                        if key.api_formats and len(key.api_formats) > 0:
+                            effective_api_format = key.api_formats[0]
+                            logger.debug(
+                                f"record_failure: api_format 未提供，使用默认格式 {effective_api_format}"
+                            )
+                        else:
+                            logger.warning(
+                                f"record_failure: api_format 未提供且 Key 无可用格式: key_id={key_id[:8]}..."
+                            )
+                            return
+
+                    now = datetime.now(timezone.utc)
+                    now_ts = now.timestamp()
+                    health_data = cls._get_health_data(key, effective_api_format)
+                    circuit_data = cls._get_circuit_data(key, effective_api_format)
+
+                    window = cls._get_window(key.id, effective_api_format)
+                    window = list(window)
+                    window.append({"ts": now_ts, "ok": False})
+                    cutoff_ts = now_ts - cls.WINDOW_SECONDS
+                    window = [r for r in window if r["ts"] > cutoff_ts]
+                    if len(window) > cls.WINDOW_SIZE:
+                        window = window[-cls.WINDOW_SIZE :]
+                    cls._set_window(key.id, effective_api_format, window)
+
+                    current_score = float(health_data.get("health_score") or 1)
+                    new_score = max(current_score - cls.FAILURE_DECREMENT, 0.0)
+                    health_data["health_score"] = new_score
+                    health_data["consecutive_failures"] = (
+                        int(health_data.get("consecutive_failures") or 0) + 1
+                    )
+                    health_data["last_failure_at"] = now.isoformat()
+
+                    state = cls._get_circuit_state_from_data(circuit_data, now)
+
+                    if state == CircuitState.HALF_OPEN:
+                        circuit_data["half_open_failures"] = (
+                            int(circuit_data.get("half_open_failures") or 0) + 1
+                        )
+
+                        if (
+                            circuit_data["half_open_failures"]
+                            >= cls.HALF_OPEN_FAILURE_THRESHOLD
+                        ):
+                            consecutive = int(health_data.get("consecutive_failures") or 0)
+                            recovery_seconds = cls._calculate_recovery_seconds(consecutive)
+                            cls._open_circuit_data(
+                                circuit_data, now, recovery_seconds, reason="半开状态验证失败"
+                            )
+                            cls._push_circuit_event(
+                                {
+                                    "event": "opened",
+                                    "key_id": key.id,
+                                    "api_format": effective_api_format,
+                                    "reason": "半开状态验证失败",
+                                    "recovery_seconds": recovery_seconds,
+                                    "timestamp": now.isoformat(),
+                                }
+                            )
+                            logger.warning(
+                                f"[OPEN] Key 熔断器打开: {key.id[:8]}.../{effective_api_format} | 原因: 半开状态验证失败 | "
+                                f"{recovery_seconds}秒后进入半开状态"
+                            )
+
+                    elif state == CircuitState.CLOSED:
+                        error_rate = cls._calculate_error_rate_from_window(window, now_ts)
+
+                        if len(window) >= cls.MIN_REQUESTS and error_rate >= cls.ERROR_RATE_THRESHOLD:
+                            consecutive = int(health_data.get("consecutive_failures") or 0)
+                            recovery_seconds = cls._calculate_recovery_seconds(consecutive)
+                            reason = (
+                                f"错误率 {error_rate:.0%} 超过阈值 {cls.ERROR_RATE_THRESHOLD:.0%}"
+                            )
+                            cls._open_circuit_data(
+                                circuit_data, now, recovery_seconds, reason=reason
+                            )
+                            cls._open_circuit_keys += 1
+                            health_open_circuits.set(cls._open_circuit_keys)
+                            cls._push_circuit_event(
+                                {
+                                    "event": "opened",
+                                    "key_id": key.id,
+                                    "api_format": effective_api_format,
+                                    "reason": reason,
+                                    "recovery_seconds": recovery_seconds,
+                                    "timestamp": now.isoformat(),
+                                }
+                            )
+                            logger.warning(
+                                f"[OPEN] Key 熔断器打开: {key.id[:8]}.../{effective_api_format} | 原因: {reason} | "
+                                f"{recovery_seconds}秒后进入半开状态"
+                            )
+
+                    cls._set_health_data(key, effective_api_format, health_data)
+                    cls._set_circuit_data(key, effective_api_format, circuit_data)
+                    key.error_count = int(key.error_count or 0) + 1  # type: ignore[assignment]
+                    key.request_count = int(key.request_count or 0) + 1  # type: ignore[assignment]
+                    key.last_error_at = now  # type: ignore[assignment]
+
                     logger.debug(
-                        f"record_failure: api_format 未提供，使用默认格式 {effective_api_format}"
-                    )
-                else:
-                    logger.warning(
-                        f"record_failure: api_format 未提供且 Key 无可用格式: key_id={key_id[:8]}..."
-                    )
-                    return
-
-            now = datetime.now(timezone.utc)
-            now_ts = now.timestamp()
-
-            # 获取当前格式的健康度数据
-            health_data = cls._get_health_data(key, effective_api_format)
-            circuit_data = cls._get_circuit_data(key, effective_api_format)
-
-            # 1. 更新滑动窗口（进程内存缓存，不持久化到 DB）
-            window = cls._get_window(key.id, effective_api_format)
-            window = list(window)  # 避免原地修改
-            window.append({"ts": now_ts, "ok": False})
-            cutoff_ts = now_ts - cls.WINDOW_SECONDS
-            window = [r for r in window if r["ts"] > cutoff_ts]
-            if len(window) > cls.WINDOW_SIZE:
-                window = window[-cls.WINDOW_SIZE :]
-            cls._set_window(key.id, effective_api_format, window)
-
-            # 2. 更新健康度（用于展示）
-            current_score = float(health_data.get("health_score") or 1)
-            new_score = max(current_score - cls.FAILURE_DECREMENT, 0.0)
-            health_data["health_score"] = new_score
-
-            # 3. 更新统计
-            health_data["consecutive_failures"] = (
-                int(health_data.get("consecutive_failures") or 0) + 1
-            )
-            health_data["last_failure_at"] = now.isoformat()
-
-            # 4. 处理熔断器状态
-            state = cls._get_circuit_state_from_data(circuit_data, now)
-
-            if state == CircuitState.HALF_OPEN:
-                # 半开状态：记录失败
-                circuit_data["half_open_failures"] = (
-                    int(circuit_data.get("half_open_failures") or 0) + 1
-                )
-
-                if circuit_data["half_open_failures"] >= cls.HALF_OPEN_FAILURE_THRESHOLD:
-                    # 达到失败阈值，重新打开熔断器
-                    # 注意：半开状态本身就是打开状态的子状态，不需要增加计数
-                    consecutive = int(health_data.get("consecutive_failures") or 0)
-                    recovery_seconds = cls._calculate_recovery_seconds(consecutive)
-                    cls._open_circuit_data(
-                        circuit_data, now, recovery_seconds, reason="半开状态验证失败"
-                    )
-                    cls._push_circuit_event(
-                        {
-                            "event": "opened",
-                            "key_id": key.id,
-                            "api_format": effective_api_format,
-                            "reason": "半开状态验证失败",
-                            "recovery_seconds": recovery_seconds,
-                            "timestamp": now.isoformat(),
-                        }
-                    )
-                    logger.warning(
-                        f"[OPEN] Key 熔断器打开: {key.id[:8]}.../{effective_api_format} | 原因: 半开状态验证失败 | "
-                        f"{recovery_seconds}秒后进入半开状态"
+                        f"[WARN] Key 健康度下降: {key_id[:8]}.../{effective_api_format} -> {new_score:.2f} "
+                        f"(连续失败 {health_data['consecutive_failures']} 次, error_type={error_type})"
                     )
 
-            elif state == CircuitState.CLOSED:
-                # 关闭状态：检查是否需要打开熔断器
-                error_rate = cls._calculate_error_rate_from_window(window, now_ts)
+                    write_db.flush()
+                    write_db.commit()
+                except Exception:
+                    write_db.rollback()
+                    raise
+                finally:
+                    write_db.close()
 
-                if len(window) >= cls.MIN_REQUESTS and error_rate >= cls.ERROR_RATE_THRESHOLD:
-                    consecutive = int(health_data.get("consecutive_failures") or 0)
-                    recovery_seconds = cls._calculate_recovery_seconds(consecutive)
-                    reason = f"错误率 {error_rate:.0%} 超过阈值 {cls.ERROR_RATE_THRESHOLD:.0%}"
-                    cls._open_circuit_data(circuit_data, now, recovery_seconds, reason=reason)
-                    cls._open_circuit_keys += 1
-                    health_open_circuits.set(cls._open_circuit_keys)
-                    cls._push_circuit_event(
-                        {
-                            "event": "opened",
-                            "key_id": key.id,
-                            "api_format": effective_api_format,
-                            "reason": reason,
-                            "recovery_seconds": recovery_seconds,
-                            "timestamp": now.isoformat(),
-                        }
-                    )
-                    logger.warning(
-                        f"[OPEN] Key 熔断器打开: {key.id[:8]}.../{effective_api_format} | 原因: {reason} | "
-                        f"{recovery_seconds}秒后进入半开状态"
-                    )
-
-            # 保存数据
-            cls._set_health_data(key, effective_api_format, health_data)
-            cls._set_circuit_data(key, effective_api_format, circuit_data)
-
-            # 更新全局统计
-            key.error_count = int(key.error_count or 0) + 1  # type: ignore[assignment]
-            key.request_count = int(key.request_count or 0) + 1  # type: ignore[assignment]
-            key.last_error_at = now  # type: ignore[assignment]
-
-            logger.debug(
-                f"[WARN] Key 健康度下降: {key_id[:8]}.../{effective_api_format} -> {new_score:.2f} "
-                f"(连续失败 {health_data['consecutive_failures']} 次, error_type={error_type})"
-            )
-
-            db.flush()
-            get_batch_committer().mark_dirty(db)
+            run_sync_db_retry(_write, context=f"health.record_failure:{key_id or 'unknown'}")
 
         except Exception as e:
             logger.error(f"记录失败请求失败: {e}")
-            db.rollback()
 
     # ==================== 滑动窗口方法 ====================
 

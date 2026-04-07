@@ -68,7 +68,7 @@ class AnalyticsFiltersPayload(BaseModel):
 class AnalyticsBaseRequest(BaseModel):
     scope: AnalyticsScopePayload = Field(default_factory=AnalyticsScopePayload)
     time_range: AnalyticsTimeRangePayload = Field(
-        default_factory=lambda: AnalyticsTimeRangePayload(preset="last30days")
+        default_factory=lambda: AnalyticsTimeRangePayload(preset="today")
     )
     filters: AnalyticsFiltersPayload = Field(default_factory=AnalyticsFiltersPayload)
 

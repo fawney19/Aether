@@ -712,6 +712,7 @@ const {
   scope: { kind: 'global' },
   timeRange: filters.timeRange,
   userFilter: filters.userFilter,
+  providerFilter: filters.providerFilter,
   apiKeyFilter: filters.apiKeyFilter,
   loadApiKeyOptions: false,
 })

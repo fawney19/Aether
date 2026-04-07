@@ -212,6 +212,104 @@ class TestDefaultBillingRuleGenerator:
         assert result_1h.status == "complete"
         assert abs(float(result_1h.cost) - 6.0) < 1e-9
 
+    def test_default_rule_cache_ttl_pricing_uses_base_price_for_5m_when_only_1h_override_exists(
+        self,
+    ) -> None:
+        global_model = GlobalModel(
+            name="ttl-creation-1h-only-model",
+            display_name="TTL Creation 1h Only Model",
+            is_active=True,
+            default_price_per_request=0.0,
+            default_tiered_pricing={
+                "tiers": [
+                    {
+                        "up_to": None,
+                        "input_price_per_1m": 3.0,
+                        "output_price_per_1m": 15.0,
+                        "cache_creation_price_per_1m": 3.75,
+                        "cache_ttl_pricing": [
+                            {"ttl_minutes": 60, "cache_creation_price_per_1m": 6.0},
+                        ],
+                    }
+                ]
+            },
+        )
+
+        rule = DefaultBillingRuleGenerator.generate_for_model(
+            global_model=global_model,
+            model=None,
+            task_type="chat",
+        )
+
+        engine = FormulaEngine()
+        result = engine.evaluate(
+            expression=rule.expression,
+            variables=rule.variables,
+            dimensions={
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_creation_tokens": 1_000_000,
+                "cache_read_tokens": 0,
+                "cache_ttl_minutes": 5,
+                "request_count": 1,
+                "total_input_context": 0,
+            },
+            dimension_mappings=rule.dimension_mappings,
+            strict_mode=True,
+        )
+
+        assert result.status == "complete"
+        assert abs(float(result.cost) - 3.75) < 1e-9
+
+    def test_default_rule_cache_ttl_pricing_uses_base_read_price_for_5m_when_only_1h_override_exists(
+        self,
+    ) -> None:
+        global_model = GlobalModel(
+            name="ttl-read-1h-only-model",
+            display_name="TTL Read 1h Only Model",
+            is_active=True,
+            default_price_per_request=0.0,
+            default_tiered_pricing={
+                "tiers": [
+                    {
+                        "up_to": None,
+                        "input_price_per_1m": 3.0,
+                        "output_price_per_1m": 15.0,
+                        "cache_read_price_per_1m": 0.3,
+                        "cache_ttl_pricing": [
+                            {"ttl_minutes": 60, "cache_read_price_per_1m": 0.5},
+                        ],
+                    }
+                ]
+            },
+        )
+
+        rule = DefaultBillingRuleGenerator.generate_for_model(
+            global_model=global_model,
+            model=None,
+            task_type="chat",
+        )
+
+        engine = FormulaEngine()
+        result = engine.evaluate(
+            expression=rule.expression,
+            variables=rule.variables,
+            dimensions={
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_creation_tokens": 0,
+                "cache_read_tokens": 1_000,
+                "cache_ttl_minutes": 5,
+                "request_count": 1,
+                "total_input_context": 1_000,
+            },
+            dimension_mappings=rule.dimension_mappings,
+            strict_mode=True,
+        )
+
+        assert result.status == "complete"
+        assert abs(float(result.cost) - 0.0003) < 1e-9
+
 
 class TestBillingRuleServiceDefaultFallback:
     def test_find_rule_returns_default_for_chat_when_no_db_rule(self) -> None:

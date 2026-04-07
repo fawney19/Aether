@@ -256,6 +256,96 @@ def test_apply_usage_charge_unlimited_wallet_keeps_balances() -> None:
     assert usage.wallet_gift_balance_after == Decimal("3")
 
 
+def test_reconcile_usage_charge_delta_deducts_additional_amount_from_current_wallet() -> None:
+    wallet = _build_wallet(recharge="10", gift="2", limit_mode="finite")
+    usage = SimpleNamespace(
+        wallet_id=None,
+        api_key_id=None,
+        user_id="user-1",
+        wallet_balance_before=Decimal("8"),
+        wallet_balance_after=Decimal("4"),
+        wallet_recharge_balance_before=Decimal("5"),
+        wallet_recharge_balance_after=Decimal("4"),
+        wallet_gift_balance_before=Decimal("3"),
+        wallet_gift_balance_after=Decimal("0"),
+    )
+    db = _build_locked_db(wallet)
+
+    with patch.object(WalletService, "_resolve_wallet_for_usage", return_value=wallet):
+        before, after = WalletService.reconcile_usage_charge_delta(
+            db,
+            usage=cast(Any, usage),
+            previous_amount_usd=Decimal("4"),
+            next_amount_usd=Decimal("6"),
+        )
+
+    assert before == Decimal("12.00000000")
+    assert after == Decimal("10.00000000")
+    assert wallet.balance == Decimal("10.00000000")
+    assert wallet.gift_balance == Decimal("0E-8")
+    assert wallet.total_consumed == Decimal("2.00000000")
+
+
+def test_reconcile_usage_charge_delta_refunds_recharge_first_then_gift() -> None:
+    wallet = _build_wallet(recharge="1", gift="0", limit_mode="finite")
+    usage = SimpleNamespace(
+        wallet_id=None,
+        api_key_id=None,
+        user_id="user-1",
+        wallet_balance_before=Decimal("8"),
+        wallet_balance_after=Decimal("0"),
+        wallet_recharge_balance_before=Decimal("5"),
+        wallet_recharge_balance_after=Decimal("0"),
+        wallet_gift_balance_before=Decimal("3"),
+        wallet_gift_balance_after=Decimal("0"),
+    )
+    db = _build_locked_db(wallet)
+
+    with patch.object(WalletService, "_resolve_wallet_for_usage", return_value=wallet):
+        before, after = WalletService.reconcile_usage_charge_delta(
+            db,
+            usage=cast(Any, usage),
+            previous_amount_usd=Decimal("8"),
+            next_amount_usd=Decimal("1"),
+        )
+
+    assert before == Decimal("1.00000000")
+    assert after == Decimal("8.00000000")
+    assert wallet.balance == Decimal("6.00000000")
+    assert wallet.gift_balance == Decimal("2.00000000")
+    assert wallet.total_consumed == Decimal("-7.00000000")
+
+
+def test_reconcile_usage_charge_delta_keeps_balances_for_historical_unlimited_usage() -> None:
+    wallet = _build_wallet(recharge="5", gift="3", limit_mode="finite")
+    usage = SimpleNamespace(
+        wallet_id=None,
+        api_key_id=None,
+        user_id="user-1",
+        wallet_balance_before=Decimal("8"),
+        wallet_balance_after=Decimal("8"),
+        wallet_recharge_balance_before=Decimal("5"),
+        wallet_recharge_balance_after=Decimal("5"),
+        wallet_gift_balance_before=Decimal("3"),
+        wallet_gift_balance_after=Decimal("3"),
+    )
+    db = _build_locked_db(wallet)
+
+    with patch.object(WalletService, "_resolve_wallet_for_usage", return_value=wallet):
+        before, after = WalletService.reconcile_usage_charge_delta(
+            db,
+            usage=cast(Any, usage),
+            previous_amount_usd=Decimal("4"),
+            next_amount_usd=Decimal("6"),
+        )
+
+    assert before == Decimal("8.00000000")
+    assert after == Decimal("8.00000000")
+    assert wallet.balance == Decimal("5")
+    assert wallet.gift_balance == Decimal("3")
+    assert wallet.total_consumed == Decimal("2.00000000")
+
+
 def test_complete_refund_requires_processing_status() -> None:
     refund = SimpleNamespace(id="refund-1", status="failed")
     db = MagicMock()

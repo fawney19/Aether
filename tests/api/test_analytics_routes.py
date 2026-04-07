@@ -27,6 +27,12 @@ from src.api.analytics.routes import (
 from src.core.enums import UserRole
 
 
+def test_analytics_base_request_defaults_to_today() -> None:
+    body = AnalyticsBaseRequest()
+
+    assert body.time_range.preset == "today"
+
+
 @pytest.mark.asyncio
 async def test_analytics_overview_wraps_query_context(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(

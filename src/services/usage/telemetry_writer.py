@@ -206,13 +206,9 @@ class QueueTelemetryWriter(TelemetryWriter):
         if cache_read:
             data["cache_read_input_tokens"] = cache_read
 
-        # 缓存 5m/1h 细分
-        cache_creation_5m = kwargs.get("cache_creation_tokens_5m", 0)
-        cache_creation_1h = kwargs.get("cache_creation_tokens_1h", 0)
-        if cache_creation_5m:
-            data["cache_creation_input_tokens_5m"] = cache_creation_5m
-        if cache_creation_1h:
-            data["cache_creation_input_tokens_1h"] = cache_creation_1h
+        cache_ttl_minutes = kwargs.get("cache_ttl_minutes")
+        if cache_ttl_minutes is not None:
+            data["cache_ttl_minutes"] = cache_ttl_minutes
 
         # 时间指标
         if kwargs.get("response_time_ms") is not None:

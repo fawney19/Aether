@@ -77,6 +77,31 @@
                 </SelectItem>
               </SelectContent>
             </Select>
+            <Select v-model="selectedProviderValue">
+              <SelectTrigger class="h-8 w-full text-xs sm:w-36">
+                <SelectValue placeholder="全部供应商">
+                  <span
+                    class="block min-w-0 truncate"
+                    :title="selectedProviderLabel"
+                  >
+                    {{ selectedProviderLabel }}
+                  </span>
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent class="w-[min(18rem,var(--radix-select-trigger-width))]">
+                <SelectItem value="__all__">
+                  全部供应商
+                </SelectItem>
+                <SelectItem
+                  v-for="option in providerOptions"
+                  :key="option.value"
+                  :value="option.value"
+                  :text-value="option.label"
+                >
+                  {{ option.label }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
             <Select v-model="selectedApiKeyValue">
               <SelectTrigger class="h-8 w-full text-xs sm:w-36">
                 <SelectValue placeholder="全部 Key">
@@ -138,6 +163,7 @@ const filters = useAnalyticsFilters()
 provide('analyticsFilters', filters)
 
 const userOptions = ref<AnalyticsFilterOption[]>([])
+const providerOptions = ref<AnalyticsFilterOption[]>([])
 const apiKeyOptions = ref<AnalyticsFilterOption[]>([])
 const leaderboardDimension = ref<LeaderboardDimension>('users')
 const supportedTabs = new Set(['detail', 'models', 'leaderboard', 'performance'])
@@ -147,6 +173,7 @@ const reportMode = computed<'detail' | 'models'>(() => (
   filters.activeTab.value === 'models' ? 'models' : 'detail'
 ))
 let suppressNextUserFilterLoad = false
+let suppressNextProviderFilterLoad = false
 let suppressNextApiKeyFilterLoad = false
 const selectedUserValue = computed({
   get: () => filters.userFilter.value[0] ?? '__all__',
@@ -158,6 +185,17 @@ const selectedUserLabel = computed(() => (
   selectedUserValue.value === '__all__'
     ? '全部用户'
     : userOptions.value.find(option => option.value === selectedUserValue.value)?.label || '全部用户'
+))
+const selectedProviderValue = computed({
+  get: () => filters.providerFilter.value[0] ?? '__all__',
+  set: (value: string) => {
+    filters.providerFilter.value = value && value !== '__all__' ? [value] : []
+  },
+})
+const selectedProviderLabel = computed(() => (
+  selectedProviderValue.value === '__all__'
+    ? '全部供应商'
+    : providerOptions.value.find(option => option.value === selectedProviderValue.value)?.label || '全部供应商'
 ))
 const selectedApiKeyValue = computed({
   get: () => filters.apiKeyFilter.value[0] ?? '__all__',
@@ -181,6 +219,10 @@ function hasOption(options: AnalyticsFilterOption[], value: string): boolean {
   return options.some(option => option.value === value)
 }
 
+function isSelectableProviderOption(option: AnalyticsFilterOption): boolean {
+  return option.value !== 'pending' && option.value !== 'unknown'
+}
+
 watch(
   () => filters.activeTab.value,
   (tab) => {
@@ -198,17 +240,23 @@ async function loadFilterOptions() {
     time_range: filters.getTimeRangeParams(),
     filters: {
       user_ids: filters.userFilter.value,
+      provider_names: filters.providerFilter.value,
       api_key_ids: filters.apiKeyFilter.value,
     },
   }).catch(() => null)
 
   if (!response) return
   userOptions.value = response.users ?? []
+  providerOptions.value = (response.providers ?? []).filter(isSelectableProviderOption)
   apiKeyOptions.value = response.api_keys ?? []
 
   if (filters.userFilter.value.length > 0 && !hasOption(userOptions.value, filters.userFilter.value[0])) {
     suppressNextUserFilterLoad = true
     filters.userFilter.value = []
+  }
+  if (filters.providerFilter.value.length > 0 && !hasOption(providerOptions.value, filters.providerFilter.value[0])) {
+    suppressNextProviderFilterLoad = true
+    filters.providerFilter.value = []
   }
   if (filters.apiKeyFilter.value.length > 0 && !hasOption(apiKeyOptions.value, filters.apiKeyFilter.value[0])) {
     suppressNextApiKeyFilterLoad = true
@@ -221,12 +269,17 @@ watch(
     showEntityFilters.value,
     filters.getTimeRangeParams(),
     filters.userFilter.value.slice(),
+    filters.providerFilter.value.slice(),
     filters.apiKeyFilter.value.slice(),
   ],
   ([shouldShow]) => {
     if (!shouldShow) return
     if (suppressNextUserFilterLoad) {
       suppressNextUserFilterLoad = false
+      return
+    }
+    if (suppressNextProviderFilterLoad) {
+      suppressNextProviderFilterLoad = false
       return
     }
     if (suppressNextApiKeyFilterLoad) {
