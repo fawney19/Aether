@@ -153,19 +153,14 @@ pub fn resolve_transport_tls_profile(
 }
 
 fn effective_proxy_config(transport: &GatewayProviderTransportSnapshot) -> Option<&Value> {
-    for candidate in [
+    [
         transport.key.proxy.as_ref(),
         transport.endpoint.proxy.as_ref(),
         transport.provider.proxy.as_ref(),
     ]
     .into_iter()
     .flatten()
-    {
-        if proxy_enabled(candidate) {
-            return Some(candidate);
-        }
-    }
-    None
+    .find(|candidate| proxy_enabled(candidate))
 }
 
 fn proxy_enabled(value: &Value) -> bool {

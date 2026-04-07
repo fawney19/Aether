@@ -85,13 +85,13 @@ impl RedisKvRunner {
                 .get_multiplexed_async_connection()
                 .await
                 .map_redis_err()?;
-            Ok(redis::cmd("SETEX")
+            redis::cmd("SETEX")
                 .arg(&namespaced_key)
                 .arg(resolved_ttl)
                 .arg(value)
                 .query_async(&mut connection)
                 .await
-                .map_redis_err()?)
+                .map_redis_err()
         })
         .await
     }
@@ -104,11 +104,11 @@ impl RedisKvRunner {
                 .get_multiplexed_async_connection()
                 .await
                 .map_redis_err()?;
-            Ok(redis::cmd("DEL")
+            redis::cmd("DEL")
                 .arg(&namespaced_key)
                 .query_async(&mut connection)
                 .await
-                .map_redis_err()?)
+                .map_redis_err()
         })
         .await
     }

@@ -7,7 +7,9 @@ use aether_scheduler_core::{
     build_report_request_candidate_status_record,
     finalize_execution_request_candidate_report_context, parse_request_candidate_report_context,
     resolve_report_request_candidate_slot as resolve_report_request_candidate_slot_from_candidates,
-    SchedulerMinimalCandidateSelectionCandidate, SchedulerResolvedReportRequestCandidateSlot,
+    LocalRequestCandidateStatusRecordInput, ReportRequestCandidateStatusRecordInput,
+    SchedulerMinimalCandidateSelectionCandidate, SchedulerRequestCandidateStatusUpdate,
+    SchedulerResolvedReportRequestCandidateSlot,
 };
 use aether_usage_runtime::build_locally_actionable_report_context_from_request_candidate;
 use async_trait::async_trait;
@@ -41,25 +43,15 @@ pub(crate) async fn record_local_request_candidate_status(
     state: &(impl RequestCandidateRuntimeWriter + ?Sized),
     plan: &ExecutionPlan,
     report_context: Option<&Value>,
-    status: RequestCandidateStatus,
-    status_code: Option<u16>,
-    error_type: Option<String>,
-    error_message: Option<String>,
-    latency_ms: Option<u64>,
-    started_at_unix_secs: Option<u64>,
-    finished_at_unix_secs: Option<u64>,
+    status_update: SchedulerRequestCandidateStatusUpdate,
 ) {
-    let Some(record) = build_local_request_candidate_status_record(
-        plan,
-        report_context,
-        status,
-        status_code,
-        error_type,
-        error_message,
-        latency_ms,
-        started_at_unix_secs,
-        finished_at_unix_secs,
-    ) else {
+    let Some(record) =
+        build_local_request_candidate_status_record(LocalRequestCandidateStatusRecordInput {
+            plan,
+            report_context,
+            status_update,
+        })
+    else {
         return;
     };
     let candidate_id = record.id.clone();
@@ -80,13 +72,7 @@ pub(crate) async fn record_local_request_candidate_status(
 pub(crate) async fn record_report_request_candidate_status(
     state: &(impl RequestCandidateRuntimeReader + RequestCandidateRuntimeWriter + ?Sized),
     report_context: Option<&Value>,
-    status: RequestCandidateStatus,
-    status_code: Option<u16>,
-    error_type: Option<String>,
-    error_message: Option<String>,
-    latency_ms: Option<u64>,
-    started_at_unix_secs: Option<u64>,
-    finished_at_unix_secs: Option<u64>,
+    status_update: SchedulerRequestCandidateStatusUpdate,
 ) {
     let Some(slot) = resolve_report_request_candidate_slot(state, report_context).await else {
         return;
@@ -95,17 +81,12 @@ pub(crate) async fn record_report_request_candidate_status(
     let request_id_for_log = short_request_id(request_id.as_str());
     let candidate_index = slot.candidate_index;
     let retry_index = slot.retry_index;
-    let record = build_report_request_candidate_status_record(
-        slot,
-        status,
-        status_code,
-        error_type,
-        error_message,
-        latency_ms,
-        started_at_unix_secs,
-        finished_at_unix_secs,
-        current_unix_secs(),
-    );
+    let record =
+        build_report_request_candidate_status_record(ReportRequestCandidateStatusRecordInput {
+            slot,
+            status_update,
+            now_unix_secs: current_unix_secs(),
+        });
 
     if let Err(err) = state.upsert_request_candidate(record).await {
         warn!(
@@ -326,7 +307,10 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::{ensure_execution_request_candidate_slot, record_report_request_candidate_status};
+    use super::{
+        ensure_execution_request_candidate_slot, record_report_request_candidate_status,
+        SchedulerRequestCandidateStatusUpdate,
+    };
     use crate::data::GatewayDataState;
     use crate::AppState;
 
@@ -494,13 +478,15 @@ mod tests {
         record_report_request_candidate_status(
             &state,
             Some(&report_context),
-            RequestCandidateStatus::Success,
-            Some(200),
-            None,
-            None,
-            Some(25),
-            Some(101),
-            Some(102),
+            SchedulerRequestCandidateStatusUpdate {
+                status: RequestCandidateStatus::Success,
+                status_code: Some(200),
+                error_type: None,
+                error_message: None,
+                latency_ms: Some(25),
+                started_at_unix_secs: Some(101),
+                finished_at_unix_secs: Some(102),
+            },
         )
         .await;
 

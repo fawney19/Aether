@@ -1,5 +1,12 @@
 use serde_json::{json, Map, Value};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenAiCliResponseUsage {
+    pub prompt_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+}
+
 pub fn build_openai_cli_response(
     response_id: &str,
     model: &str,
@@ -24,9 +31,11 @@ pub fn build_openai_cli_response(
         content,
         Vec::new(),
         function_calls,
-        prompt_tokens,
-        output_tokens,
-        total_tokens,
+        OpenAiCliResponseUsage {
+            prompt_tokens,
+            output_tokens,
+            total_tokens,
+        },
     )
 }
 
@@ -36,9 +45,7 @@ pub fn build_openai_cli_response_with_reasoning(
     text: &str,
     reasoning_summaries: Vec<String>,
     function_calls: Vec<Value>,
-    prompt_tokens: u64,
-    output_tokens: u64,
-    total_tokens: u64,
+    usage: OpenAiCliResponseUsage,
 ) -> Value {
     let content = if text.is_empty() {
         Vec::new()
@@ -55,9 +62,7 @@ pub fn build_openai_cli_response_with_reasoning(
         content,
         reasoning_summaries,
         function_calls,
-        prompt_tokens,
-        output_tokens,
-        total_tokens,
+        usage,
     )
 }
 
@@ -67,9 +72,7 @@ pub fn build_openai_cli_response_with_content(
     content: Vec<Value>,
     reasoning_summaries: Vec<String>,
     function_calls: Vec<Value>,
-    prompt_tokens: u64,
-    output_tokens: u64,
-    total_tokens: u64,
+    usage: OpenAiCliResponseUsage,
 ) -> Value {
     let mut output = Vec::new();
     for (index, summary) in reasoning_summaries.into_iter().enumerate() {
@@ -104,9 +107,9 @@ pub fn build_openai_cli_response_with_content(
         "model": model,
         "output": output,
         "usage": {
-            "input_tokens": prompt_tokens,
-            "output_tokens": output_tokens,
-            "total_tokens": total_tokens,
+            "input_tokens": usage.prompt_tokens,
+            "output_tokens": usage.output_tokens,
+            "total_tokens": usage.total_tokens,
         }
     })
 }

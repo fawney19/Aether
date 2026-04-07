@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use aether_contracts::{ExecutionPlan, ExecutionResult, ExecutionTelemetry};
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
-use aether_scheduler_core::execution_error_details;
+use aether_scheduler_core::{execution_error_details, SchedulerRequestCandidateStatusUpdate};
 use axum::body::Body;
 use axum::http::Response;
 use base64::Engine as _;
@@ -163,13 +163,15 @@ pub(crate) async fn execute_execution_runtime_sync(
             state,
             &plan,
             report_context.as_ref(),
-            RequestCandidateStatus::Failed,
-            Some(result.status_code),
-            result_error_type.clone(),
-            result_error_message.clone(),
-            result_latency_ms,
-            Some(terminal_unix_secs),
-            Some(terminal_unix_secs),
+            SchedulerRequestCandidateStatusUpdate {
+                status: RequestCandidateStatus::Failed,
+                status_code: Some(result.status_code),
+                error_type: result_error_type.clone(),
+                error_message: result_error_message.clone(),
+                latency_ms: result_latency_ms,
+                started_at_unix_secs: Some(terminal_unix_secs),
+                finished_at_unix_secs: Some(terminal_unix_secs),
+            },
         )
         .await;
         warn!(
@@ -229,13 +231,15 @@ pub(crate) async fn execute_execution_runtime_sync(
             state,
             &plan,
             report_context.as_ref(),
-            RequestCandidateStatus::Failed,
-            Some(result.status_code),
-            result_error_type.clone(),
-            result_error_message.clone(),
-            result_latency_ms,
-            Some(terminal_unix_secs),
-            Some(terminal_unix_secs),
+            SchedulerRequestCandidateStatusUpdate {
+                status: RequestCandidateStatus::Failed,
+                status_code: Some(result.status_code),
+                error_type: result_error_type.clone(),
+                error_message: result_error_message.clone(),
+                latency_ms: result_latency_ms,
+                started_at_unix_secs: Some(terminal_unix_secs),
+                finished_at_unix_secs: Some(terminal_unix_secs),
+            },
         )
         .await;
         return Ok(None);
@@ -250,17 +254,19 @@ pub(crate) async fn execute_execution_runtime_sync(
         state,
         &plan,
         report_context.as_ref(),
-        if result.status_code >= 400 {
-            RequestCandidateStatus::Failed
-        } else {
-            RequestCandidateStatus::Success
+        SchedulerRequestCandidateStatusUpdate {
+            status: if result.status_code >= 400 {
+                RequestCandidateStatus::Failed
+            } else {
+                RequestCandidateStatus::Success
+            },
+            status_code: Some(result.status_code),
+            error_type: result_error_type.clone(),
+            error_message: result_error_message.clone(),
+            latency_ms: result_latency_ms,
+            started_at_unix_secs: Some(terminal_unix_secs),
+            finished_at_unix_secs: Some(terminal_unix_secs),
         },
-        Some(result.status_code),
-        result_error_type.clone(),
-        result_error_message.clone(),
-        result_latency_ms,
-        Some(terminal_unix_secs),
-        Some(terminal_unix_secs),
     )
     .await;
 
@@ -601,16 +607,18 @@ async fn execute_sync_via_remote_execution_runtime(
             state,
             plan,
             report_context,
-            RequestCandidateStatus::Failed,
-            Some(response.status().as_u16()),
-            Some("execution_runtime_http_error".to_string()),
-            Some(format!(
-                "execution runtime returned HTTP {}",
-                response.status()
-            )),
-            None,
-            Some(terminal_unix_secs),
-            Some(terminal_unix_secs),
+            SchedulerRequestCandidateStatusUpdate {
+                status: RequestCandidateStatus::Failed,
+                status_code: Some(response.status().as_u16()),
+                error_type: Some("execution_runtime_http_error".to_string()),
+                error_message: Some(format!(
+                    "execution runtime returned HTTP {}",
+                    response.status()
+                )),
+                latency_ms: None,
+                started_at_unix_secs: Some(terminal_unix_secs),
+                finished_at_unix_secs: Some(terminal_unix_secs),
+            },
         )
         .await;
         return Ok(RemoteSyncFallbackOutcome::ClientResponse(

@@ -1,7 +1,6 @@
 #![allow(dead_code, unused_imports)]
 
-#[path = "../../../adaptation/kiro/mod.rs"]
-mod stream;
+pub(crate) use crate::ai_pipeline::adaptation::KiroToClaudeCliStreamState;
 pub(crate) use crate::ai_pipeline::provider_transport_facade::kiro::{
     apply_local_body_rules, apply_local_header_rules, body_rules_are_locally_supported,
     build_generate_assistant_headers, build_kiro_generate_assistant_response_url,
@@ -15,4 +14,3 @@ pub(crate) use crate::ai_pipeline::provider_transport_facade::kiro::{
     KiroOAuthRefreshAdapter, KiroRequestAuth, AWS_EVENTSTREAM_CONTENT_TYPE,
     GENERATE_ASSISTANT_RESPONSE_PATH, KIRO_AUTH_HEADER, KIRO_ENVELOPE_NAME, PROVIDER_TYPE,
 };
-pub(crate) use stream::KiroToClaudeCliStreamState;

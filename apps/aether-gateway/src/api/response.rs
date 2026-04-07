@@ -127,40 +127,6 @@ pub(crate) fn build_client_response_from_parts(
     Ok(response)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::build_client_response_from_parts;
-    use axum::body::Body;
-    use std::collections::BTreeMap;
-
-    #[test]
-    fn sse_responses_disable_proxy_buffering() {
-        let response = build_client_response_from_parts(
-            200,
-            &BTreeMap::from([("content-type".to_string(), "text/event-stream".to_string())]),
-            Body::from("data: hello\n\n"),
-            "trace-sse-buffering-1",
-            None,
-        )
-        .expect("response should build");
-
-        assert_eq!(
-            response
-                .headers()
-                .get(http::header::CACHE_CONTROL)
-                .and_then(|value| value.to_str().ok()),
-            Some("no-cache, no-transform")
-        );
-        assert_eq!(
-            response
-                .headers()
-                .get("x-accel-buffering")
-                .and_then(|value| value.to_str().ok()),
-            Some("no")
-        );
-    }
-}
-
 pub(crate) fn insert_candidate_id_header_if_present(
     headers: &mut http::HeaderMap,
     candidate_id: Option<&str>,
@@ -356,4 +322,38 @@ pub(crate) fn build_local_overloaded_response(
         trace_id,
         control_decision,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_client_response_from_parts;
+    use axum::body::Body;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn sse_responses_disable_proxy_buffering() {
+        let response = build_client_response_from_parts(
+            200,
+            &BTreeMap::from([("content-type".to_string(), "text/event-stream".to_string())]),
+            Body::from("data: hello\n\n"),
+            "trace-sse-buffering-1",
+            None,
+        )
+        .expect("response should build");
+
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-cache, no-transform")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-accel-buffering")
+                .and_then(|value| value.to_str().ok()),
+            Some("no")
+        );
+    }
 }

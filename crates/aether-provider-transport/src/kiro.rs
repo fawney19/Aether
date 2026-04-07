@@ -24,6 +24,7 @@ pub use request::{
     apply_local_body_rules, apply_local_header_rules, body_rules_are_locally_supported,
     build_kiro_provider_headers, build_kiro_provider_request_body,
     header_rules_are_locally_supported, supports_local_kiro_request_shape,
+    KiroProviderHeadersInput,
 };
 pub use url::{
     build_kiro_generate_assistant_response_url, resolve_kiro_base_url,

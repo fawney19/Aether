@@ -1,6 +1,8 @@
 use serde_json::{json, Value};
 
-use super::super::from_openai_chat::build_openai_cli_response_with_content;
+use super::super::from_openai_chat::{
+    build_openai_cli_response_with_content, OpenAiCliResponseUsage,
+};
 use super::shared::{
     build_generated_tool_call_id, canonicalize_tool_arguments, extract_gemini_image_url,
 };
@@ -99,8 +101,10 @@ pub fn convert_gemini_cli_response_to_openai_cli(
         message_content,
         reasoning_summaries,
         function_calls,
-        prompt_tokens,
-        output_tokens,
-        total_tokens,
+        OpenAiCliResponseUsage {
+            prompt_tokens,
+            output_tokens,
+            total_tokens,
+        },
     ))
 }

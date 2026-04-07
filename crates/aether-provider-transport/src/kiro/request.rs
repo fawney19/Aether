@@ -77,16 +77,32 @@ pub fn build_kiro_provider_request_body(
     Some(provider_request_body)
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct KiroProviderHeadersInput<'a> {
+    pub headers: &'a http::HeaderMap,
+    pub provider_request_body: &'a Value,
+    pub original_request_body: &'a Value,
+    pub header_rules: Option<&'a Value>,
+    pub auth_header: &'a str,
+    pub auth_value: &'a str,
+    pub auth_config: &'a KiroAuthConfig,
+    pub machine_id: &'a str,
+}
+
 pub fn build_kiro_provider_headers(
-    headers: &http::HeaderMap,
-    provider_request_body: &Value,
-    original_request_body: &Value,
-    header_rules: Option<&Value>,
-    auth_header: &str,
-    auth_value: &str,
-    auth_config: &KiroAuthConfig,
-    machine_id: &str,
+    input: KiroProviderHeadersInput<'_>,
 ) -> Option<BTreeMap<String, String>> {
+    let KiroProviderHeadersInput {
+        headers,
+        provider_request_body,
+        original_request_body,
+        header_rules,
+        auth_header,
+        auth_value,
+        auth_config,
+        machine_id,
+    } = input;
+
     let mut out = BTreeMap::new();
     for (name, value) in headers {
         let Ok(value) = value.to_str() else {
@@ -133,7 +149,7 @@ mod tests {
     use super::super::credentials::KiroAuthConfig;
     use super::{
         build_kiro_provider_headers, build_kiro_provider_request_body,
-        supports_local_kiro_request_shape,
+        supports_local_kiro_request_shape, KiroProviderHeadersInput,
     };
 
     #[test]
@@ -221,19 +237,19 @@ mod tests {
             node_version: None,
             access_token: Some("cached-token".to_string()),
         };
-        let headers = build_kiro_provider_headers(
-            &http::HeaderMap::new(),
-            &json!({"conversationState": {}}),
-            &json!({"messages": []}),
-            Some(&json!([
+        let headers = build_kiro_provider_headers(KiroProviderHeadersInput {
+            headers: &http::HeaderMap::new(),
+            provider_request_body: &json!({"conversationState": {}}),
+            original_request_body: &json!({"messages": []}),
+            header_rules: Some(&json!([
                 {"action":"set","key":"accept","value":"text/plain"},
                 {"action":"set","key":"x-endpoint-tag","value":"kiro-local"}
             ])),
-            "authorization",
-            "Bearer cached-token",
-            &auth_config,
-            "machine-123",
-        )
+            auth_header: "authorization",
+            auth_value: "Bearer cached-token",
+            auth_config: &auth_config,
+            machine_id: "machine-123",
+        })
         .expect("headers should build");
 
         assert_eq!(

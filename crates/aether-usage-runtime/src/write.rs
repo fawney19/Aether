@@ -58,6 +58,18 @@ pub struct TerminalUsageOutcome {
     pub audit_payload: Option<Value>,
 }
 
+struct TerminalUsageOutcomeBaseInput<'a> {
+    plan: &'a ExecutionPlan,
+    report_context: Option<&'a Value>,
+    terminal_state: UsageTerminalState,
+    status_code: u16,
+    telemetry: Option<&'a ExecutionTelemetry>,
+    provider_response: Option<Value>,
+    client_response: Option<Value>,
+    provider_response_headers: Option<Value>,
+    client_response_headers: Option<Value>,
+}
+
 pub fn build_pending_usage_record(
     plan: &ExecutionPlan,
     report_context: Option<&Value>,
@@ -132,17 +144,17 @@ pub fn build_sync_terminal_usage_outcome(
         .clone()
         .or_else(|| decode_body_for_storage(payload.body_base64.as_deref()));
     let client_response = payload.client_body_json.clone();
-    build_terminal_usage_outcome_base(
+    build_terminal_usage_outcome_base(TerminalUsageOutcomeBaseInput {
         plan,
         report_context,
-        infer_sync_terminal_state(payload, provider_response.as_ref()),
-        payload.status_code,
-        payload.telemetry.as_ref(),
+        terminal_state: infer_sync_terminal_state(payload, provider_response.as_ref()),
+        status_code: payload.status_code,
+        telemetry: payload.telemetry.as_ref(),
         provider_response,
         client_response,
-        Some(headers_to_json(&payload.headers)),
-        Some(headers_to_json(&payload.headers)),
-    )
+        provider_response_headers: Some(headers_to_json(&payload.headers)),
+        client_response_headers: Some(headers_to_json(&payload.headers)),
+    })
 }
 
 pub fn build_stream_terminal_usage_outcome(
@@ -152,17 +164,17 @@ pub fn build_stream_terminal_usage_outcome(
 ) -> TerminalUsageOutcome {
     let provider_response = decode_body_for_storage(payload.provider_body_base64.as_deref());
     let client_response = decode_body_for_storage(payload.client_body_base64.as_deref());
-    build_terminal_usage_outcome_base(
+    build_terminal_usage_outcome_base(TerminalUsageOutcomeBaseInput {
         plan,
         report_context,
-        infer_stream_terminal_state(payload),
-        payload.status_code,
-        payload.telemetry.as_ref(),
+        terminal_state: infer_stream_terminal_state(payload),
+        status_code: payload.status_code,
+        telemetry: payload.telemetry.as_ref(),
         provider_response,
         client_response,
-        Some(headers_to_json(&payload.headers)),
-        Some(headers_to_json(&payload.headers)),
-    )
+        provider_response_headers: Some(headers_to_json(&payload.headers)),
+        client_response_headers: Some(headers_to_json(&payload.headers)),
+    })
 }
 
 pub fn build_terminal_usage_event_from_outcome(
@@ -239,16 +251,19 @@ pub fn build_terminal_usage_event_from_outcome(
 }
 
 fn build_terminal_usage_outcome_base(
-    plan: &ExecutionPlan,
-    report_context: Option<&Value>,
-    terminal_state: UsageTerminalState,
-    status_code: u16,
-    telemetry: Option<&ExecutionTelemetry>,
-    provider_response: Option<Value>,
-    client_response: Option<Value>,
-    provider_response_headers: Option<Value>,
-    client_response_headers: Option<Value>,
+    input: TerminalUsageOutcomeBaseInput<'_>,
 ) -> TerminalUsageOutcome {
+    let TerminalUsageOutcomeBaseInput {
+        plan,
+        report_context,
+        terminal_state,
+        status_code,
+        telemetry,
+        provider_response,
+        client_response,
+        provider_response_headers,
+        client_response_headers,
+    } = input;
     let context = report_context.and_then(Value::as_object);
     let client_contract = context_string(context, "client_contract")
         .or_else(|| context_string(context, "client_api_format"))

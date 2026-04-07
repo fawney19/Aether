@@ -205,7 +205,7 @@ async fn compress_usage_body_fields(
 
     let mut total_compressed = 0usize;
     let mut no_progress_count = 0usize;
-    let batch_size = batch_size.max(1).min(25);
+    let batch_size = batch_size.clamp(1, 25);
     loop {
         let rows = sqlx::query(SELECT_USAGE_BODY_COMPRESSION_BATCH_SQL)
             .bind(cutoff_time)

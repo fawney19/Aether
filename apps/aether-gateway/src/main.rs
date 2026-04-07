@@ -776,7 +776,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .or_else(|| data_redis_url.as_deref())
+            .or(data_redis_url.as_deref())
             .ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,

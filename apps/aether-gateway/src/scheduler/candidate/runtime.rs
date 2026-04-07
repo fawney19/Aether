@@ -4,7 +4,8 @@ use aether_data_contracts::repository::candidates::StoredRequestCandidate;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use aether_scheduler_core::{
     auth_api_key_concurrency_limit_reached, build_provider_concurrent_limit_map,
-    candidate_is_selectable_with_runtime_state, SchedulerAffinityTarget,
+    candidate_is_selectable_with_runtime_state, CandidateRuntimeSelectabilityInput,
+    SchedulerAffinityTarget,
 };
 
 use crate::data::auth::GatewayAuthApiKeySnapshot;
@@ -87,16 +88,16 @@ pub(super) fn is_candidate_selectable(
         .copied()
         .flatten();
 
-    candidate_is_selectable_with_runtime_state(
+    candidate_is_selectable_with_runtime_state(CandidateRuntimeSelectabilityInput {
         candidate,
-        &snapshot.recent_candidates,
-        &snapshot.provider_concurrent_limits,
-        &snapshot.provider_key_rpm_states,
+        recent_candidates: &snapshot.recent_candidates,
+        provider_concurrent_limits: &snapshot.provider_concurrent_limits,
+        provider_key_rpm_states: &snapshot.provider_key_rpm_states,
         now_unix_secs,
         cached_affinity_target,
         provider_quota_blocks_requests,
         rpm_reset_at,
-    )
+    })
 }
 
 pub(super) async fn read_provider_concurrent_limits(

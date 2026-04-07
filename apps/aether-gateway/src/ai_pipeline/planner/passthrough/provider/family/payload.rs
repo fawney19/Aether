@@ -23,7 +23,7 @@ use crate::ai_pipeline::provider_transport_facade::claude_code::{
 };
 use crate::ai_pipeline::provider_transport_facade::kiro::{
     build_kiro_provider_headers, supports_local_kiro_request_transport_with_network,
-    KIRO_ENVELOPE_NAME,
+    KiroProviderHeadersInput, KIRO_ENVELOPE_NAME,
 };
 use crate::ai_pipeline::provider_transport_facade::policy::{
     supports_local_gemini_transport_with_network, supports_local_standard_transport_with_network,
@@ -367,16 +367,16 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
     };
 
     let Some(provider_request_headers) = (if let Some(kiro_auth) = kiro_auth.as_ref() {
-        build_kiro_provider_headers(
-            &parts.headers,
-            &provider_request_body,
-            body_json,
-            transport.endpoint.header_rules.as_ref(),
-            auth_header.as_deref().unwrap_or_default(),
-            auth_value.as_deref().unwrap_or_default(),
-            &kiro_auth.auth_config,
-            kiro_auth.machine_id.as_str(),
-        )
+        build_kiro_provider_headers(KiroProviderHeadersInput {
+            headers: &parts.headers,
+            provider_request_body: &provider_request_body,
+            original_request_body: body_json,
+            header_rules: transport.endpoint.header_rules.as_ref(),
+            auth_header: auth_header.as_deref().unwrap_or_default(),
+            auth_value: auth_value.as_deref().unwrap_or_default(),
+            auth_config: &kiro_auth.auth_config,
+            machine_id: kiro_auth.machine_id.as_str(),
+        })
     } else {
         let extra_headers = antigravity_auth
             .as_ref()

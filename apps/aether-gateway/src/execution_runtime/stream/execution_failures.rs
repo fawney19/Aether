@@ -1,5 +1,6 @@
 use aether_contracts::{ExecutionError, ExecutionPlan, ExecutionTelemetry};
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
+use aether_scheduler_core::SchedulerRequestCandidateStatusUpdate;
 use axum::body::Body;
 use axum::http::Response;
 use base64::Engine as _;
@@ -126,16 +127,18 @@ async fn record_stream_sync_failure(
     record_report_request_candidate_status(
         state,
         report_context,
-        RequestCandidateStatus::Failed,
-        Some(failure.status_code),
-        Some(failure.error_type.clone()),
-        Some(failure.error_message.clone()),
-        payload
-            .telemetry
-            .as_ref()
-            .and_then(|telemetry| telemetry.elapsed_ms),
-        started_at_unix_secs.or(Some(terminal_unix_secs)),
-        Some(terminal_unix_secs),
+        SchedulerRequestCandidateStatusUpdate {
+            status: RequestCandidateStatus::Failed,
+            status_code: Some(failure.status_code),
+            error_type: Some(failure.error_type.clone()),
+            error_message: Some(failure.error_message.clone()),
+            latency_ms: payload
+                .telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.elapsed_ms),
+            started_at_unix_secs: started_at_unix_secs.or(Some(terminal_unix_secs)),
+            finished_at_unix_secs: Some(terminal_unix_secs),
+        },
     )
     .await;
 }

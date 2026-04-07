@@ -125,12 +125,12 @@ impl GeminiProviderState {
                 tool_state.call_id = function_call
                     .get("id")
                     .and_then(Value::as_str)
-                    .unwrap_or_else(|| tool_state.call_id.as_str())
+                    .unwrap_or(tool_state.call_id.as_str())
                     .to_string();
                 tool_state.name = function_call
                     .get("name")
                     .and_then(Value::as_str)
-                    .unwrap_or_else(|| tool_state.name.as_str())
+                    .unwrap_or(tool_state.name.as_str())
                     .to_string();
                 if !tool_state.started_emitted {
                     out.push(CanonicalStreamFrame {

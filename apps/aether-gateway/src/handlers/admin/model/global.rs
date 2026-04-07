@@ -85,17 +85,22 @@ async fn admin_global_model_provider_models_by_global_model_id(
     global_model_ids: &[String],
 ) -> BTreeMap<String, Vec<StoredAdminProviderModel>> {
     let state = state.clone();
-    stream::iter(global_model_ids.iter().cloned().map(|global_model_id| {
-        let state = state.clone();
-        async move {
-            let provider_models = state
-                .list_admin_provider_models_by_global_model_id(&global_model_id)
-                .await
-                .ok()
-                .unwrap_or_default();
-            (global_model_id, provider_models)
-        }
-    }))
+    stream::iter(
+        global_model_ids
+            .iter()
+            .map(String::clone)
+            .map(|global_model_id| {
+                let state = state.clone();
+                async move {
+                    let provider_models = state
+                        .list_admin_provider_models_by_global_model_id(&global_model_id)
+                        .await
+                        .ok()
+                        .unwrap_or_default();
+                    (global_model_id, provider_models)
+                }
+            }),
+    )
     .buffer_unordered(32)
     .collect::<Vec<_>>()
     .await

@@ -388,7 +388,7 @@ impl RequestCandidateWriteRepository for InMemoryRequestCandidateRepository {
             .filter(|row| row.created_at_unix_secs < created_before_unix_secs)
             .map(|row| (row.created_at_unix_secs, row.id.clone()))
             .collect::<Vec<_>>();
-        ids.sort_by(|left, right| left.cmp(right));
+        ids.sort();
 
         let mut deleted = 0usize;
         for (_, id) in ids.into_iter().take(limit) {

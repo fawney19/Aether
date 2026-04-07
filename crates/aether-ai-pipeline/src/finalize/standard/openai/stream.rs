@@ -367,12 +367,12 @@ impl OpenAICliProviderState {
                     .get("call_id")
                     .or_else(|| item.get("id"))
                     .and_then(Value::as_str)
-                    .unwrap_or_else(|| state.call_id.as_str())
+                    .unwrap_or(state.call_id.as_str())
                     .to_string();
                 state.name = item
                     .get("name")
                     .and_then(Value::as_str)
-                    .unwrap_or_else(|| state.name.as_str())
+                    .unwrap_or(state.name.as_str())
                     .to_string();
                 if !state.started_emitted {
                     out.push(CanonicalStreamFrame {
@@ -525,12 +525,12 @@ impl OpenAICliProviderState {
                                 .get("call_id")
                                 .or_else(|| item.get("id"))
                                 .and_then(Value::as_str)
-                                .unwrap_or_else(|| state.call_id.as_str())
+                                .unwrap_or(state.call_id.as_str())
                                 .to_string();
                             state.name = item
                                 .get("name")
                                 .and_then(Value::as_str)
-                                .unwrap_or_else(|| state.name.as_str())
+                                .unwrap_or(state.name.as_str())
                                 .to_string();
                             if !state.started_emitted {
                                 out.push(CanonicalStreamFrame {
@@ -662,7 +662,7 @@ impl OpenAIChatClientEmitter {
             return Ok(Vec::new());
         }
         self.started = true;
-        Ok(encode_json_sse(
+        encode_json_sse(
             None,
             &build_openai_chat_role_chunk(
                 self.response_id
@@ -670,7 +670,7 @@ impl OpenAIChatClientEmitter {
                     .unwrap_or("chatcmpl-local-stream"),
                 self.model.as_deref().unwrap_or("unknown"),
             ),
-        )?)
+        )
     }
 
     pub fn emit(&mut self, frame: CanonicalStreamFrame) -> Result<Vec<u8>, PipelineFinalizeError> {

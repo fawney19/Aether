@@ -1,6 +1,8 @@
 use serde_json::{json, Value};
 
-use super::shared::{build_openai_cli_response_with_content, canonicalize_tool_arguments};
+use super::shared::{
+    build_openai_cli_response_with_content, canonicalize_tool_arguments, OpenAiCliResponseUsage,
+};
 
 pub fn convert_openai_chat_response_to_openai_cli(
     body_json: &Value,
@@ -143,8 +145,10 @@ pub fn convert_openai_chat_response_to_openai_cli(
         message_content,
         reasoning_summaries,
         function_calls,
-        prompt_tokens,
-        output_tokens,
-        total_tokens,
+        OpenAiCliResponseUsage {
+            prompt_tokens,
+            output_tokens,
+            total_tokens,
+        },
     ))
 }

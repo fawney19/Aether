@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use aether_contracts::ExecutionError;
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
-use aether_scheduler_core::execution_error_details;
+use aether_scheduler_core::{execution_error_details, SchedulerRequestCandidateStatusUpdate};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -203,13 +203,15 @@ async fn handle_local_sync_report(state: &AppState, payload: &GatewaySyncReportR
     record_report_request_candidate_status(
         state,
         payload.report_context.as_ref(),
-        status,
-        Some(payload.status_code),
-        error_type,
-        error_message,
-        latency_ms,
-        Some(terminal_unix_secs),
-        Some(terminal_unix_secs),
+        SchedulerRequestCandidateStatusUpdate {
+            status,
+            status_code: Some(payload.status_code),
+            error_type,
+            error_message,
+            latency_ms,
+            started_at_unix_secs: Some(terminal_unix_secs),
+            finished_at_unix_secs: Some(terminal_unix_secs),
+        },
     )
     .await;
 }
@@ -223,13 +225,15 @@ async fn handle_local_stream_report(state: &AppState, payload: &GatewayStreamRep
     record_report_request_candidate_status(
         state,
         payload.report_context.as_ref(),
-        RequestCandidateStatus::Success,
-        Some(payload.status_code),
-        None,
-        None,
-        latency_ms,
-        Some(terminal_unix_secs),
-        Some(terminal_unix_secs),
+        SchedulerRequestCandidateStatusUpdate {
+            status: RequestCandidateStatus::Success,
+            status_code: Some(payload.status_code),
+            error_type: None,
+            error_message: None,
+            latency_ms,
+            started_at_unix_secs: Some(terminal_unix_secs),
+            finished_at_unix_secs: Some(terminal_unix_secs),
+        },
     )
     .await;
 }

@@ -258,16 +258,32 @@ pub fn reorder_candidates_by_scheduler_health(
     });
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct CandidateRuntimeSelectabilityInput<'a> {
+    pub candidate: &'a SchedulerMinimalCandidateSelectionCandidate,
+    pub recent_candidates: &'a [StoredRequestCandidate],
+    pub provider_concurrent_limits: &'a BTreeMap<String, usize>,
+    pub provider_key_rpm_states: &'a BTreeMap<String, StoredProviderCatalogKey>,
+    pub now_unix_secs: u64,
+    pub cached_affinity_target: Option<&'a crate::SchedulerAffinityTarget>,
+    pub provider_quota_blocks_requests: bool,
+    pub rpm_reset_at: Option<u64>,
+}
+
 pub fn candidate_is_selectable_with_runtime_state(
-    candidate: &SchedulerMinimalCandidateSelectionCandidate,
-    recent_candidates: &[StoredRequestCandidate],
-    provider_concurrent_limits: &BTreeMap<String, usize>,
-    provider_key_rpm_states: &BTreeMap<String, StoredProviderCatalogKey>,
-    now_unix_secs: u64,
-    cached_affinity_target: Option<&crate::SchedulerAffinityTarget>,
-    provider_quota_blocks_requests: bool,
-    rpm_reset_at: Option<u64>,
+    input: CandidateRuntimeSelectabilityInput<'_>,
 ) -> bool {
+    let CandidateRuntimeSelectabilityInput {
+        candidate,
+        recent_candidates,
+        provider_concurrent_limits,
+        provider_key_rpm_states,
+        now_unix_secs,
+        cached_affinity_target,
+        provider_quota_blocks_requests,
+        rpm_reset_at,
+    } = input;
+
     if provider_quota_blocks_requests {
         return false;
     }
@@ -375,7 +391,7 @@ mod tests {
         candidate_is_selectable_with_runtime_state, candidate_supports_required_capability,
         collect_global_model_names_for_required_capability,
         collect_selectable_candidates_from_keys, reorder_candidates_by_scheduler_health,
-        SchedulerMinimalCandidateSelectionCandidate,
+        CandidateRuntimeSelectabilityInput, SchedulerMinimalCandidateSelectionCandidate,
     };
     use crate::SchedulerAuthConstraints;
 
@@ -627,14 +643,16 @@ mod tests {
         let provider_concurrent_limits = BTreeMap::from([("provider-1".to_string(), 1)]);
 
         assert!(!candidate_is_selectable_with_runtime_state(
-            &sample_candidate("1", None),
-            &recent_candidates,
-            &provider_concurrent_limits,
-            &BTreeMap::new(),
-            100,
-            None,
-            false,
-            None,
+            CandidateRuntimeSelectabilityInput {
+                candidate: &sample_candidate("1", None),
+                recent_candidates: &recent_candidates,
+                provider_concurrent_limits: &provider_concurrent_limits,
+                provider_key_rpm_states: &BTreeMap::new(),
+                now_unix_secs: 100,
+                cached_affinity_target: None,
+                provider_quota_blocks_requests: false,
+                rpm_reset_at: None,
+            },
         ));
     }
 
@@ -643,24 +661,28 @@ mod tests {
         let provider_key_rpm_states = BTreeMap::from([("key-1".to_string(), sample_key("1", 0.0))]);
 
         assert!(!candidate_is_selectable_with_runtime_state(
-            &sample_candidate("1", None),
-            &[],
-            &BTreeMap::new(),
-            &provider_key_rpm_states,
-            100,
-            None,
-            false,
-            None,
+            CandidateRuntimeSelectabilityInput {
+                candidate: &sample_candidate("1", None),
+                recent_candidates: &[],
+                provider_concurrent_limits: &BTreeMap::new(),
+                provider_key_rpm_states: &provider_key_rpm_states,
+                now_unix_secs: 100,
+                cached_affinity_target: None,
+                provider_quota_blocks_requests: false,
+                rpm_reset_at: None,
+            },
         ));
         assert!(!candidate_is_selectable_with_runtime_state(
-            &sample_candidate("1", None),
-            &[],
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            100,
-            None,
-            true,
-            None,
+            CandidateRuntimeSelectabilityInput {
+                candidate: &sample_candidate("1", None),
+                recent_candidates: &[],
+                provider_concurrent_limits: &BTreeMap::new(),
+                provider_key_rpm_states: &BTreeMap::new(),
+                now_unix_secs: 100,
+                cached_affinity_target: None,
+                provider_quota_blocks_requests: true,
+                rpm_reset_at: None,
+            },
         ));
     }
 

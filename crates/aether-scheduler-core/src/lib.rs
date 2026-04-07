@@ -18,7 +18,8 @@ pub use candidate::{
     auth_api_key_concurrency_limit_reached, build_minimal_candidate_selection,
     candidate_is_selectable_with_runtime_state, candidate_supports_required_capability,
     collect_global_model_names_for_required_capability, collect_selectable_candidates_from_keys,
-    reorder_candidates_by_scheduler_health, SchedulerMinimalCandidateSelectionCandidate,
+    reorder_candidates_by_scheduler_health, CandidateRuntimeSelectabilityInput,
+    SchedulerMinimalCandidateSelectionCandidate,
 };
 pub use health::{
     aggregate_provider_key_health_score, count_recent_active_requests_for_api_key,
@@ -40,6 +41,7 @@ pub use request_candidate::{
     build_report_request_candidate_status_record, execution_error_details,
     finalize_execution_request_candidate_report_context, is_terminal_candidate_status,
     parse_request_candidate_report_context, resolve_report_request_candidate_slot,
+    LocalRequestCandidateStatusRecordInput, ReportRequestCandidateStatusRecordInput,
     SchedulerExecutionRequestCandidateSeed, SchedulerRequestCandidateReportContext,
-    SchedulerResolvedReportRequestCandidateSlot,
+    SchedulerRequestCandidateStatusUpdate, SchedulerResolvedReportRequestCandidateSlot,
 };

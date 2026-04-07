@@ -160,7 +160,6 @@ impl AppState {
             page.items
                 .into_iter()
                 .map(stored_admin_payment_callback_to_gateway)
-                .map(Into::into)
                 .collect(),
             page.total,
         )))

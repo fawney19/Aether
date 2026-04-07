@@ -72,9 +72,7 @@ pub(super) fn classify_admin_route(
     } else if let Some(route) = classify_admin_model_provider_family_route(method, normalized_path)
     {
         Some(route)
-    } else if let Some(route) = classify_admin_endpoints_family_route(method, normalized_path) {
-        Some(route)
     } else {
-        None
+        classify_admin_endpoints_family_route(method, normalized_path)
     }
 }

@@ -459,6 +459,7 @@ pub struct CreateWalletRechargeOrderInput {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum CreateWalletRechargeOrderOutcome {
     Created(StoredAdminPaymentOrder),
     WalletInactive,
@@ -506,6 +507,7 @@ pub struct ProcessPaymentCallbackInput {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum ProcessPaymentCallbackOutcome {
     DuplicateProcessed {
         order_id: Option<String>,

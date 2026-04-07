@@ -164,7 +164,9 @@ pub(crate) fn apply_codex_openai_cli_special_headers(
         provider_request_headers.insert("session_id".to_string(), short_id.clone());
     }
 
-    if provider_api_format.trim().to_ascii_lowercase() != "openai:compact"
+    if !provider_api_format
+        .trim()
+        .eq_ignore_ascii_case("openai:compact")
         && !header_map_has_non_empty_value(original_headers, "conversation_id")
     {
         provider_request_headers.insert("conversation_id".to_string(), short_id);
@@ -395,7 +397,7 @@ mod tests {
             Some(&"kept-by-rule-request".to_string())
         );
         assert_eq!(headers.get("session_id"), Some(&"kept-by-rule".to_string()));
-        assert!(headers.get("conversation_id").is_none());
+        assert!(!headers.contains_key("conversation_id"));
     }
 
     #[test]
@@ -428,6 +430,6 @@ mod tests {
             headers.get("session_id"),
             Some(&"ab5ecce4f0d110fe".to_string())
         );
-        assert!(headers.get("conversation_id").is_none());
+        assert!(!headers.contains_key("conversation_id"));
     }
 }

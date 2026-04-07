@@ -672,8 +672,7 @@ pub(crate) async fn maybe_build_local_public_support_response(
                 providers.into_iter().next()
             } else {
                 None
-            }
-            .or_else(|| None);
+            };
             let provider = match provider {
                 Some(provider) => provider,
                 None => state

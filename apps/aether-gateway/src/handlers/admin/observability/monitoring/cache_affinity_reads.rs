@@ -252,9 +252,11 @@ pub(super) async fn build_admin_monitoring_cache_affinity_response(
             "缺少 user_identifier",
         ));
     };
-    let direct_api_key_by_id =
-        admin_monitoring_list_export_api_key_records_by_ids(state, &[user_identifier.clone()])
-            .await?;
+    let direct_api_key_by_id = admin_monitoring_list_export_api_key_records_by_ids(
+        state,
+        std::slice::from_ref(&user_identifier),
+    )
+    .await?;
     let direct_affinity_keys =
         std::iter::once(user_identifier.clone()).collect::<std::collections::BTreeSet<_>>();
     let direct_affinities =

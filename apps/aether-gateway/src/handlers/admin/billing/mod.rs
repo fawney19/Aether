@@ -283,7 +283,6 @@ pub(crate) async fn maybe_build_local_admin_billing_response(
         return Ok(Some(response));
     }
 
-    match decision.route_kind.as_deref() {
-        _ => Ok(Some(build_admin_billing_data_unavailable_response())),
-    }
+    let _ = decision.route_kind.as_deref();
+    Ok(Some(build_admin_billing_data_unavailable_response()))
 }

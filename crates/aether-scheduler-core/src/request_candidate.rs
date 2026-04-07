@@ -41,6 +41,31 @@ pub struct SchedulerExecutionRequestCandidateSeed {
     pub report_context: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchedulerRequestCandidateStatusUpdate {
+    pub status: RequestCandidateStatus,
+    pub status_code: Option<u16>,
+    pub error_type: Option<String>,
+    pub error_message: Option<String>,
+    pub latency_ms: Option<u64>,
+    pub started_at_unix_secs: Option<u64>,
+    pub finished_at_unix_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalRequestCandidateStatusRecordInput<'a> {
+    pub plan: &'a ExecutionPlan,
+    pub report_context: Option<&'a Value>,
+    pub status_update: SchedulerRequestCandidateStatusUpdate,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReportRequestCandidateStatusRecordInput {
+    pub slot: SchedulerResolvedReportRequestCandidateSlot,
+    pub status_update: SchedulerRequestCandidateStatusUpdate,
+    pub now_unix_secs: u64,
+}
+
 pub fn execution_error_details(
     error: Option<&ExecutionError>,
     body_json: Option<&Value>,
@@ -231,16 +256,23 @@ pub fn build_execution_request_candidate_seed(
 }
 
 pub fn build_local_request_candidate_status_record(
-    plan: &ExecutionPlan,
-    report_context: Option<&Value>,
-    status: RequestCandidateStatus,
-    status_code: Option<u16>,
-    error_type: Option<String>,
-    error_message: Option<String>,
-    latency_ms: Option<u64>,
-    started_at_unix_secs: Option<u64>,
-    finished_at_unix_secs: Option<u64>,
+    input: LocalRequestCandidateStatusRecordInput<'_>,
 ) -> Option<UpsertRequestCandidateRecord> {
+    let LocalRequestCandidateStatusRecordInput {
+        plan,
+        report_context,
+        status_update,
+    } = input;
+    let SchedulerRequestCandidateStatusUpdate {
+        status,
+        status_code,
+        error_type,
+        error_message,
+        latency_ms,
+        started_at_unix_secs,
+        finished_at_unix_secs,
+    } = status_update;
+
     let candidate_id = plan
         .candidate_id
         .as_deref()
@@ -278,16 +310,23 @@ pub fn build_local_request_candidate_status_record(
 }
 
 pub fn build_report_request_candidate_status_record(
-    slot: SchedulerResolvedReportRequestCandidateSlot,
-    status: RequestCandidateStatus,
-    status_code: Option<u16>,
-    error_type: Option<String>,
-    error_message: Option<String>,
-    latency_ms: Option<u64>,
-    started_at_unix_secs: Option<u64>,
-    finished_at_unix_secs: Option<u64>,
-    now_unix_secs: u64,
+    input: ReportRequestCandidateStatusRecordInput,
 ) -> UpsertRequestCandidateRecord {
+    let ReportRequestCandidateStatusRecordInput {
+        slot,
+        status_update,
+        now_unix_secs,
+    } = input;
+    let SchedulerRequestCandidateStatusUpdate {
+        status,
+        status_code,
+        error_type,
+        error_message,
+        latency_ms,
+        started_at_unix_secs,
+        finished_at_unix_secs,
+    } = status_update;
+
     let terminal_unix_secs = finished_at_unix_secs.unwrap_or(now_unix_secs);
     let started_at_unix_secs = started_at_unix_secs
         .or(slot.started_at_unix_secs)
@@ -454,7 +493,8 @@ mod tests {
         build_report_request_candidate_status_record, execution_error_details,
         finalize_execution_request_candidate_report_context,
         parse_request_candidate_report_context, resolve_report_request_candidate_slot,
-        SchedulerResolvedReportRequestCandidateSlot,
+        LocalRequestCandidateStatusRecordInput, ReportRequestCandidateStatusRecordInput,
+        SchedulerRequestCandidateStatusUpdate, SchedulerResolvedReportRequestCandidateSlot,
     };
 
     fn sample_candidate(
@@ -605,23 +645,26 @@ mod tests {
         let mut plan = sample_plan();
         plan.candidate_id = Some("cand-1".to_string());
 
-        let record = build_local_request_candidate_status_record(
-            &plan,
-            Some(&json!({
-                "candidate_index": 1,
-                "retry_index": 2,
-                "user_id": "user-1",
-                "api_key_id": "api-key-1"
-            })),
-            RequestCandidateStatus::Failed,
-            Some(500),
-            Some("Upstream5xx".to_string()),
-            Some("boom".to_string()),
-            Some(42),
-            Some(100),
-            Some(101),
-        )
-        .expect("record should build");
+        let record =
+            build_local_request_candidate_status_record(LocalRequestCandidateStatusRecordInput {
+                plan: &plan,
+                report_context: Some(&json!({
+                    "candidate_index": 1,
+                    "retry_index": 2,
+                    "user_id": "user-1",
+                    "api_key_id": "api-key-1"
+                })),
+                status_update: SchedulerRequestCandidateStatusUpdate {
+                    status: RequestCandidateStatus::Failed,
+                    status_code: Some(500),
+                    error_type: Some("Upstream5xx".to_string()),
+                    error_message: Some("boom".to_string()),
+                    latency_ms: Some(42),
+                    started_at_unix_secs: Some(100),
+                    finished_at_unix_secs: Some(101),
+                },
+            })
+            .expect("record should build");
 
         assert_eq!(record.id, "cand-1");
         assert_eq!(record.candidate_index, 1);
@@ -632,31 +675,34 @@ mod tests {
 
     #[test]
     fn builds_report_request_candidate_status_record_with_terminal_timestamps() {
-        let record = build_report_request_candidate_status_record(
-            SchedulerResolvedReportRequestCandidateSlot {
-                id: "cand-1".to_string(),
-                request_id: "req-1".to_string(),
-                user_id: Some("user-1".to_string()),
-                api_key_id: Some("api-key-1".to_string()),
-                candidate_index: 1,
-                retry_index: 0,
-                provider_id: Some("provider-1".to_string()),
-                endpoint_id: Some("endpoint-1".to_string()),
-                key_id: Some("key-1".to_string()),
-                extra_data: None,
-                created_at_unix_secs: 10,
-                started_at_unix_secs: None,
-                finished_at_unix_secs: None,
-            },
-            RequestCandidateStatus::Success,
-            Some(200),
-            None,
-            None,
-            Some(12),
-            None,
-            None,
-            123,
-        );
+        let record =
+            build_report_request_candidate_status_record(ReportRequestCandidateStatusRecordInput {
+                slot: SchedulerResolvedReportRequestCandidateSlot {
+                    id: "cand-1".to_string(),
+                    request_id: "req-1".to_string(),
+                    user_id: Some("user-1".to_string()),
+                    api_key_id: Some("api-key-1".to_string()),
+                    candidate_index: 1,
+                    retry_index: 0,
+                    provider_id: Some("provider-1".to_string()),
+                    endpoint_id: Some("endpoint-1".to_string()),
+                    key_id: Some("key-1".to_string()),
+                    extra_data: None,
+                    created_at_unix_secs: 10,
+                    started_at_unix_secs: None,
+                    finished_at_unix_secs: None,
+                },
+                status_update: SchedulerRequestCandidateStatusUpdate {
+                    status: RequestCandidateStatus::Success,
+                    status_code: Some(200),
+                    error_type: None,
+                    error_message: None,
+                    latency_ms: Some(12),
+                    started_at_unix_secs: None,
+                    finished_at_unix_secs: None,
+                },
+                now_unix_secs: 123,
+            });
 
         assert_eq!(record.started_at_unix_secs, Some(123));
         assert_eq!(record.finished_at_unix_secs, Some(123));

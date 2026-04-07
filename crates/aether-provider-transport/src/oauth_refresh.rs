@@ -16,6 +16,7 @@ use super::kiro::{
 use super::snapshot::GatewayProviderTransportSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum LocalResolvedOAuthRequestAuth {
     #[allow(dead_code)]
     Header {

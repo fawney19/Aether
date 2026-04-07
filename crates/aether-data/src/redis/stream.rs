@@ -214,10 +214,10 @@ impl RedisStreamRunner {
             for (key, value) in fields {
                 command.arg(key).arg(value);
             }
-            Ok(command
+            command
                 .query_async::<String>(&mut connection)
                 .await
-                .map_redis_err()?)
+                .map_redis_err()
         })
         .await
     }
@@ -323,10 +323,10 @@ impl RedisStreamRunner {
             for id in ids {
                 command.arg(id);
             }
-            Ok(command
+            command
                 .query_async::<usize>(&mut connection)
                 .await
-                .map_redis_err()?)
+                .map_redis_err()
         })
         .await
     }
@@ -352,10 +352,10 @@ impl RedisStreamRunner {
             for id in ids {
                 command.arg(id);
             }
-            Ok(command
+            command
                 .query_async::<usize>(&mut connection)
                 .await
-                .map_redis_err()?)
+                .map_redis_err()
         })
         .await
     }

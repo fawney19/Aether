@@ -53,9 +53,11 @@ pub(super) async fn build_admin_monitoring_cache_users_delete_response(
         return Ok(admin_monitoring_cache_affinity_unavailable_response());
     }
 
-    let direct_api_key_by_id =
-        admin_monitoring_list_export_api_key_records_by_ids(state, &[user_identifier.clone()])
-            .await?;
+    let direct_api_key_by_id = admin_monitoring_list_export_api_key_records_by_ids(
+        state,
+        std::slice::from_ref(&user_identifier),
+    )
+    .await?;
 
     if let Some(api_key) = direct_api_key_by_id.get(&user_identifier) {
         let target_affinity_keys =

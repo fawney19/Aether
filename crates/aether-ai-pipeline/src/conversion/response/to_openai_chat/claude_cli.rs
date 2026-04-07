@@ -1,6 +1,8 @@
 use serde_json::{json, Value};
 
-use super::super::from_openai_chat::build_openai_cli_response_with_reasoning;
+use super::super::from_openai_chat::{
+    build_openai_cli_response_with_reasoning, OpenAiCliResponseUsage,
+};
 use super::shared::{build_generated_tool_call_id, canonicalize_tool_arguments};
 
 pub fn convert_claude_cli_response_to_openai_cli(
@@ -76,8 +78,10 @@ pub fn convert_claude_cli_response_to_openai_cli(
         &text,
         reasoning_summaries,
         function_calls,
-        prompt_tokens,
-        output_tokens,
-        total_tokens,
+        OpenAiCliResponseUsage {
+            prompt_tokens,
+            output_tokens,
+            total_tokens,
+        },
     ))
 }

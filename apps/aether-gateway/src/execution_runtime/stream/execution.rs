@@ -2,6 +2,7 @@ use std::io::Error as IoError;
 
 use aether_contracts::{ExecutionPlan, ExecutionTelemetry, StreamFramePayload};
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
+use aether_scheduler_core::SchedulerRequestCandidateStatusUpdate;
 use async_stream::stream;
 use axum::body::{Body, Bytes};
 use axum::http::Response;
@@ -169,16 +170,18 @@ pub(crate) async fn execute_execution_runtime_stream(
                 state,
                 &plan,
                 report_context.as_ref(),
-                RequestCandidateStatus::Failed,
-                Some(response.status().as_u16()),
-                Some("execution_runtime_http_error".to_string()),
-                Some(format!(
-                    "execution runtime returned HTTP {}",
-                    response.status()
-                )),
-                None,
-                Some(terminal_unix_secs),
-                Some(terminal_unix_secs),
+                SchedulerRequestCandidateStatusUpdate {
+                    status: RequestCandidateStatus::Failed,
+                    status_code: Some(response.status().as_u16()),
+                    error_type: Some("execution_runtime_http_error".to_string()),
+                    error_message: Some(format!(
+                        "execution runtime returned HTTP {}",
+                        response.status()
+                    )),
+                    latency_ms: None,
+                    started_at_unix_secs: Some(terminal_unix_secs),
+                    finished_at_unix_secs: Some(terminal_unix_secs),
+                },
             )
             .await;
             return Ok(Some(attach_control_metadata_headers(
@@ -241,15 +244,17 @@ async fn execute_stream_from_frame_stream(
             state,
             &plan,
             report_context.as_ref(),
-            RequestCandidateStatus::Failed,
-            Some(status_code),
-            Some("retryable_upstream_status".to_string()),
-            Some(format!(
-                "execution runtime stream returned retryable status {status_code}"
-            )),
-            None,
-            Some(terminal_unix_secs),
-            Some(terminal_unix_secs),
+            SchedulerRequestCandidateStatusUpdate {
+                status: RequestCandidateStatus::Failed,
+                status_code: Some(status_code),
+                error_type: Some("retryable_upstream_status".to_string()),
+                error_message: Some(format!(
+                    "execution runtime stream returned retryable status {status_code}"
+                )),
+                latency_ms: None,
+                started_at_unix_secs: Some(terminal_unix_secs),
+                finished_at_unix_secs: Some(terminal_unix_secs),
+            },
         )
         .await;
         warn!(
@@ -276,15 +281,17 @@ async fn execute_stream_from_frame_stream(
             state,
             &plan,
             report_context.as_ref(),
-            RequestCandidateStatus::Failed,
-            Some(status_code),
-            Some("control_fallback".to_string()),
-            Some(format!(
-                "stream decision fell back to control after status {status_code}"
-            )),
-            None,
-            Some(terminal_unix_secs),
-            Some(terminal_unix_secs),
+            SchedulerRequestCandidateStatusUpdate {
+                status: RequestCandidateStatus::Failed,
+                status_code: Some(status_code),
+                error_type: Some("control_fallback".to_string()),
+                error_message: Some(format!(
+                    "stream decision fell back to control after status {status_code}"
+                )),
+                latency_ms: None,
+                started_at_unix_secs: Some(terminal_unix_secs),
+                finished_at_unix_secs: Some(terminal_unix_secs),
+            },
         )
         .await;
         return Ok(None);
@@ -322,15 +329,17 @@ async fn execute_stream_from_frame_stream(
             state,
             &plan,
             report_context.as_ref(),
-            RequestCandidateStatus::Failed,
-            Some(status_code),
-            Some("execution_runtime_stream_error".to_string()),
-            Some(format!(
-                "execution runtime stream returned error status {status_code}"
-            )),
-            None,
-            Some(terminal_unix_secs),
-            Some(terminal_unix_secs),
+            SchedulerRequestCandidateStatusUpdate {
+                status: RequestCandidateStatus::Failed,
+                status_code: Some(status_code),
+                error_type: Some("execution_runtime_stream_error".to_string()),
+                error_message: Some(format!(
+                    "execution runtime stream returned error status {status_code}"
+                )),
+                latency_ms: None,
+                started_at_unix_secs: Some(terminal_unix_secs),
+                finished_at_unix_secs: Some(terminal_unix_secs),
+            },
         )
         .await;
         if let Some(report_kind) = stream_error_finalize_kind {
@@ -632,15 +641,17 @@ async fn execute_stream_from_frame_stream(
         state,
         &plan,
         report_context.as_ref(),
-        RequestCandidateStatus::Streaming,
-        Some(status_code),
-        None,
-        None,
-        prefetched_telemetry
-            .as_ref()
-            .and_then(|telemetry| telemetry.elapsed_ms),
-        Some(candidate_started_unix_secs),
-        None,
+        SchedulerRequestCandidateStatusUpdate {
+            status: RequestCandidateStatus::Streaming,
+            status_code: Some(status_code),
+            error_type: None,
+            error_message: None,
+            latency_ms: prefetched_telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.elapsed_ms),
+            started_at_unix_secs: Some(candidate_started_unix_secs),
+            finished_at_unix_secs: None,
+        },
     )
     .await;
 
@@ -981,13 +992,15 @@ async fn execute_stream_from_frame_stream(
                 &state_for_report,
                 &plan_for_report,
                 report_context_owned.as_ref(),
-                RequestCandidateStatus::Cancelled,
-                Some(499),
-                Some("downstream_disconnect".to_string()),
-                Some("client disconnected before stream completion".to_string()),
-                telemetry.as_ref().and_then(|value| value.elapsed_ms),
-                Some(candidate_started_unix_secs_for_report),
-                Some(current_request_candidate_unix_secs()),
+                SchedulerRequestCandidateStatusUpdate {
+                    status: RequestCandidateStatus::Cancelled,
+                    status_code: Some(499),
+                    error_type: Some("downstream_disconnect".to_string()),
+                    error_message: Some("client disconnected before stream completion".to_string()),
+                    latency_ms: telemetry.as_ref().and_then(|value| value.elapsed_ms),
+                    started_at_unix_secs: Some(candidate_started_unix_secs_for_report),
+                    finished_at_unix_secs: Some(current_request_candidate_unix_secs()),
+                },
             )
             .await;
             return;
@@ -1036,13 +1049,15 @@ async fn execute_stream_from_frame_stream(
             &state_for_report,
             &plan_for_report,
             report_context_owned.as_ref(),
-            RequestCandidateStatus::Success,
-            Some(status_code),
-            None,
-            None,
-            telemetry.as_ref().and_then(|value| value.elapsed_ms),
-            Some(candidate_started_unix_secs_for_report),
-            Some(current_request_candidate_unix_secs()),
+            SchedulerRequestCandidateStatusUpdate {
+                status: RequestCandidateStatus::Success,
+                status_code: Some(status_code),
+                error_type: None,
+                error_message: None,
+                latency_ms: telemetry.as_ref().and_then(|value| value.elapsed_ms),
+                started_at_unix_secs: Some(candidate_started_unix_secs_for_report),
+                finished_at_unix_secs: Some(current_request_candidate_unix_secs()),
+            },
         )
         .await;
 

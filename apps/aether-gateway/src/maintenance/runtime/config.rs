@@ -88,8 +88,7 @@ pub(super) async fn pending_cleanup_batch_size(
 ) -> Result<usize, DataLayerError> {
     Ok(system_config_usize(data, "cleanup_batch_size", 1_000)
         .await?
-        .max(1)
-        .min(200))
+        .clamp(1, 200))
 }
 
 pub(super) async fn usage_cleanup_settings(

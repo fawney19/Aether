@@ -90,9 +90,7 @@ pub fn resolve_provider_model_name(
         }
     }
 
-    let Some(global_model_mappings) = row.global_model_mappings.as_ref() else {
-        return None;
-    };
+    let global_model_mappings = row.global_model_mappings.as_ref()?;
     for allowed_model in sorted_allowed_models {
         for pattern in global_model_mappings {
             if matches_model_mapping(pattern, &allowed_model) {
