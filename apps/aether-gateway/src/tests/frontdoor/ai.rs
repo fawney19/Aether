@@ -175,6 +175,85 @@ async fn gateway_handles_public_openai_models_without_hitting_fallback_probe() {
 }
 
 #[tokio::test]
+async fn gateway_handles_public_openai_models_with_cross_format_candidates_without_hitting_fallback_probe(
+) {
+    let fallback_probe_hits = Arc::new(Mutex::new(0usize));
+    let fallback_probe_hits_clone = Arc::clone(&fallback_probe_hits);
+    let fallback_probe = Router::new().route(
+        "/{*path}",
+        any(move |_request: Request| {
+            let fallback_probe_hits_inner = Arc::clone(&fallback_probe_hits_clone);
+            async move {
+                *fallback_probe_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("proxied"))
+            }
+        }),
+    );
+
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-openai-models-cross-format")),
+        unrestricted_models_snapshot("key-1", "user-1"),
+    )]));
+    let candidate_repository =
+        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            sample_models_candidate_row(
+                "provider-claude",
+                "claude",
+                "claude:chat",
+                "claude-3-7-sonnet",
+                10,
+            ),
+        ]));
+
+    let (_unused_fallback_probe_url, fallback_probe_handle) = start_server(fallback_probe).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_minimal_candidate_selection_and_auth_for_tests(
+                    candidate_repository,
+                    auth_repository,
+                ),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let client = reqwest::Client::new();
+    let list_response = client
+        .get(format!("{gateway_url}/v1/models"))
+        .header("authorization", "Bearer sk-openai-models-cross-format")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_payload: serde_json::Value =
+        list_response.json().await.expect("json body should parse");
+    assert_eq!(list_payload["object"], "list");
+    assert_eq!(list_payload["data"][0]["id"], "claude-3-7-sonnet");
+    assert_eq!(list_payload["data"][0]["owned_by"], "claude");
+
+    let detail_response = client
+        .get(format!("{gateway_url}/v1/models/claude-3-7-sonnet"))
+        .header("authorization", "Bearer sk-openai-models-cross-format")
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(detail_response.status(), StatusCode::OK);
+    let detail_payload: serde_json::Value = detail_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(detail_payload["id"], "claude-3-7-sonnet");
+    assert_eq!(detail_payload["owned_by"], "claude");
+
+    assert_eq!(*fallback_probe_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    fallback_probe_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_public_claude_models_without_hitting_fallback_probe() {
     let fallback_probe_hits = Arc::new(Mutex::new(0usize));
     let fallback_probe_hits_clone = Arc::clone(&fallback_probe_hits);

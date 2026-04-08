@@ -13,6 +13,23 @@ pub(crate) fn models_api_format(request_context: &GatewayPublicRequestContext) -
         .filter(|signature| matches!(*signature, "openai:chat" | "claude:chat" | "gemini:chat"))
 }
 
+const MODELS_CROSS_FORMAT_QUERY_API_FORMATS: &[&str] = &[
+    "openai:chat",
+    "openai:cli",
+    "openai:compact",
+    "claude:chat",
+    "claude:cli",
+    "gemini:chat",
+    "gemini:cli",
+];
+
+pub(super) fn models_query_api_formats(api_format: &str) -> &'static [&'static str] {
+    match api_format.trim().to_ascii_lowercase().as_str() {
+        "openai:chat" | "claude:chat" | "gemini:chat" => MODELS_CROSS_FORMAT_QUERY_API_FORMATS,
+        _ => &[],
+    }
+}
+
 pub(super) fn models_detail_id(request_path: &str) -> Option<String> {
     let raw = if let Some(value) = request_path.strip_prefix("/v1/models/") {
         value
