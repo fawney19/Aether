@@ -3871,14 +3871,15 @@ async fn gateway_handles_wallet_balance_locally_without_proxying_upstream() {
 
 #[tokio::test]
 async fn gateway_handles_wallet_today_cost_locally_without_proxying_upstream() {
-    let now = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
-        Utc::now()
+    let auth_now = Utc::now();
+    let usage_now = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+        auth_now
             .date_naive()
             .and_hms_opt(12, 0, 0)
             .expect("midday should be valid"),
         chrono::Utc,
     );
-    let user = sample_auth_user(now);
+    let user = sample_auth_user(auth_now);
     let access_token = build_test_auth_token(
         "access",
         serde_json::Map::from_iter([
@@ -3890,7 +3891,7 @@ async fn gateway_handles_wallet_today_cost_locally_without_proxying_upstream() {
             ),
             ("session_id".to_string(), json!("session-wallet-today-1")),
         ]),
-        now + chrono::Duration::hours(1),
+        auth_now + chrono::Duration::hours(1),
     );
     let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
         sample_user_usage_audit(
@@ -3900,7 +3901,7 @@ async fn gateway_handles_wallet_today_cost_locally_without_proxying_upstream() {
             "gpt-4.1",
             "OpenAI",
             "completed",
-            now - chrono::Duration::minutes(30),
+            usage_now - chrono::Duration::minutes(30),
         ),
         sample_user_usage_audit(
             "usage-wallet-old-1",
@@ -3909,19 +3910,19 @@ async fn gateway_handles_wallet_today_cost_locally_without_proxying_upstream() {
             "gpt-4.1",
             "OpenAI",
             "completed",
-            now - chrono::Duration::days(1),
+            usage_now - chrono::Duration::days(1),
         ),
     ]));
     let (gateway_url, upstream_hits, gateway_handle, upstream_handle) =
         start_auth_gateway_with_usage_state(
             user,
-            sample_auth_wallet("user-auth-1", now),
+            sample_auth_wallet("user-auth-1", auth_now),
             [sample_auth_session(
                 "user-auth-1",
                 "session-wallet-today-1",
                 "device-wallet-today-1",
                 "refresh-token-placeholder",
-                now,
+                auth_now,
             )],
             usage_repository,
         )
