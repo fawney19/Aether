@@ -402,6 +402,68 @@ async fn gateway_handles_admin_pool_trailing_slash_routes_locally_with_trusted_a
 }
 
 #[tokio::test]
+async fn gateway_pool_list_includes_usage_totals_and_nullable_lru_score() {
+    let provider = sample_provider("provider-openai", "openai", 10).with_transport_fields(
+        true,
+        false,
+        true,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(json!({
+            "pool_advanced": {
+                "enabled": true
+            }
+        })),
+    );
+    let mut key = sample_key(
+        "key-openai-usage",
+        "provider-openai",
+        "openai:chat",
+        "sk-usage",
+    );
+    key.name = "usage key".to_string();
+    key.request_count = Some(1566);
+    key.total_tokens = 187_327_321;
+    key.total_cost_usd = 93.1319297;
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![key],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+            provider_catalog_repository,
+        ));
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-openai/keys?page=1&page_size=50&status=all",
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    let keys = payload["keys"].as_array().expect("keys should be array");
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0]["request_count"], json!(1566));
+    assert_eq!(keys[0]["total_tokens"], json!(187_327_321u64));
+    assert_eq!(keys[0]["total_cost_usd"], json!("93.13192970"));
+    assert!(keys[0]["lru_score"].is_null());
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_pool_list_keys_locally_with_trusted_admin_principal() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);

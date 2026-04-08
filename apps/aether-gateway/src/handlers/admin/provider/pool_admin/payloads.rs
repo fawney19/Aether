@@ -787,8 +787,11 @@ pub(super) fn build_admin_pool_key_payload(
         "request_count".to_string(),
         json!(key.request_count.unwrap_or(0)),
     );
-    payload.insert("total_tokens".to_string(), json!(0));
-    payload.insert("total_cost_usd".to_string(), json!("0.00000000"));
+    payload.insert("total_tokens".to_string(), json!(key.total_tokens));
+    payload.insert(
+        "total_cost_usd".to_string(),
+        json!(format!("{:.8}", key.total_cost_usd)),
+    );
     payload.insert(
         "sticky_sessions".to_string(),
         json!(runtime
@@ -799,11 +802,7 @@ pub(super) fn build_admin_pool_key_payload(
     );
     payload.insert(
         "lru_score".to_string(),
-        json!(runtime
-            .lru_score_by_key
-            .get(&key.id)
-            .copied()
-            .unwrap_or(0.0)),
+        json!(runtime.lru_score_by_key.get(&key.id).copied()),
     );
     payload.insert(
         "created_at".to_string(),

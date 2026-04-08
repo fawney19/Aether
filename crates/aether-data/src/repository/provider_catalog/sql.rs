@@ -161,6 +161,8 @@ SELECT
   utilization_samples,
   EXTRACT(EPOCH FROM last_probe_increase_at)::bigint AS last_probe_increase_at_unix_secs,
   request_count,
+  total_tokens,
+  CAST(total_cost_usd AS DOUBLE PRECISION) AS total_cost_usd,
   success_count,
   error_count,
   total_response_time_ms,
@@ -214,6 +216,8 @@ SELECT
   utilization_samples,
   EXTRACT(EPOCH FROM last_probe_increase_at)::bigint AS last_probe_increase_at_unix_secs,
   request_count,
+  total_tokens,
+  CAST(total_cost_usd AS DOUBLE PRECISION) AS total_cost_usd,
   success_count,
   error_count,
   total_response_time_ms,
@@ -503,6 +507,8 @@ SELECT
   utilization_samples,
   EXTRACT(EPOCH FROM last_probe_increase_at)::bigint AS last_probe_increase_at_unix_secs,
   request_count,
+  total_tokens,
+  CAST(total_cost_usd AS DOUBLE PRECISION) AS total_cost_usd,
   success_count,
   error_count,
   total_response_time_ms,
@@ -1164,30 +1170,30 @@ INSERT INTO provider_api_keys (
     ELSE TO_TIMESTAMP($35::double precision)
   END,
   COALESCE($36, 0),
-  0,
-  0,
   COALESCE($37, 0),
   COALESCE($38, 0),
   COALESCE($39, 0),
+  COALESCE($40, 0),
+  COALESCE($41, 0),
   CASE
-    WHEN $40::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($40::double precision)
+    WHEN $42::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($42::double precision)
   END,
   CASE
-    WHEN $41::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($41::double precision)
+    WHEN $43::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($43::double precision)
   END,
-  $42,
-  $43,
   $44,
   $45,
+  $46,
+  $47,
   CASE
-    WHEN $46::double precision IS NULL THEN NOW()
-    ELSE TO_TIMESTAMP($46::double precision)
+    WHEN $48::double precision IS NULL THEN NOW()
+    ELSE TO_TIMESTAMP($48::double precision)
   END,
   CASE
-    WHEN $47::double precision IS NULL THEN NOW()
-    ELSE TO_TIMESTAMP($47::double precision)
+    WHEN $49::double precision IS NULL THEN NOW()
+    ELSE TO_TIMESTAMP($49::double precision)
   END
 )
 "#,
@@ -1231,6 +1237,13 @@ INSERT INTO provider_api_keys (
                 .map(|value| value as f64),
         )
         .bind(key.request_count.map(|value| value as i32))
+        .bind(Some(i64::try_from(key.total_tokens).map_err(|_| {
+            DataLayerError::InvalidInput(format!(
+                "provider catalog key.total_tokens exceeds i64: {}",
+                key.total_tokens
+            ))
+        })?))
+        .bind(key.total_cost_usd)
         .bind(key.success_count.map(|value| value as i32))
         .bind(key.error_count.map(|value| value as i32))
         .bind(key.total_response_time_ms.map(|value| value as i32))
@@ -2092,6 +2105,18 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
             })
         })
         .transpose()?;
+    let total_tokens = row_get::<Option<i64>>(row, "total_tokens")?
+        .unwrap_or(0)
+        .try_into()
+        .map_err(|_| {
+            DataLayerError::UnexpectedValue("invalid provider_api_keys.total_tokens".to_string())
+        })?;
+    let total_cost_usd = row_get::<Option<f64>>(row, "total_cost_usd")?.unwrap_or(0.0);
+    if !total_cost_usd.is_finite() {
+        return Err(DataLayerError::UnexpectedValue(
+            "invalid provider_api_keys.total_cost_usd".to_string(),
+        ));
+    }
     let success_count = row_get::<Option<i32>>(row, "success_count")?
         .map(|value| {
             u32::try_from(value).map_err(|_| {
@@ -2212,6 +2237,7 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
                 success_count,
             )
             .with_usage_fields(error_count, total_response_time_ms)
+            .with_usage_totals(total_tokens, total_cost_usd)
             .with_health_fields(
                 row.try_get("health_by_format").ok(),
                 row.try_get("circuit_breaker_by_format").ok(),
@@ -2262,5 +2288,16 @@ mod tests {
         let pool = factory.connect_lazy().expect("pool should build");
         let repository = SqlxProviderCatalogReadRepository::new(pool);
         let _ = repository.pool();
+    }
+
+    #[test]
+    fn key_queries_include_usage_totals() {
+        for sql in [
+            super::LIST_KEYS_BY_IDS_PREFIX,
+            super::LIST_KEYS_BY_PROVIDER_IDS_PREFIX,
+        ] {
+            assert!(sql.contains("total_tokens"));
+            assert!(sql.contains("total_cost_usd"));
+        }
     }
 }

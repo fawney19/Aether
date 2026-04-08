@@ -270,6 +270,8 @@ pub struct StoredProviderCatalogKey {
     pub utilization_samples: Option<serde_json::Value>,
     pub last_probe_increase_at_unix_secs: Option<u64>,
     pub request_count: Option<u32>,
+    pub total_tokens: u64,
+    pub total_cost_usd: f64,
     pub success_count: Option<u32>,
     pub error_count: Option<u32>,
     pub total_response_time_ms: Option<u32>,
@@ -340,6 +342,8 @@ impl StoredProviderCatalogKey {
             utilization_samples: None,
             last_probe_increase_at_unix_secs: None,
             request_count: None,
+            total_tokens: 0,
+            total_cost_usd: 0.0,
             success_count: None,
             error_count: None,
             total_response_time_ms: None,
@@ -422,6 +426,16 @@ impl StoredProviderCatalogKey {
     ) -> Self {
         self.error_count = error_count;
         self.total_response_time_ms = total_response_time_ms;
+        self
+    }
+
+    pub fn with_usage_totals(mut self, total_tokens: u64, total_cost_usd: f64) -> Self {
+        self.total_tokens = total_tokens;
+        self.total_cost_usd = if total_cost_usd.is_finite() {
+            total_cost_usd
+        } else {
+            0.0
+        };
         self
     }
 
