@@ -488,7 +488,14 @@ pub(crate) async fn build_admin_provider_keys_payload(
         keys.into_iter()
             .skip(skip)
             .take(limit)
-            .map(|key| build_admin_provider_key_response(state, &key, now_unix_secs))
+            .map(|key| {
+                build_admin_provider_key_response(
+                    state,
+                    &key,
+                    &provider.provider_type,
+                    now_unix_secs,
+                )
+            })
             .collect(),
     ))
 }

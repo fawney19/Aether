@@ -150,32 +150,37 @@ fn admin_pool_derive_oauth_plan_type(
         return None;
     }
 
-    if let Some(config) = auth_config {
-        for field in ["plan_type", "tier", "plan", "subscription_plan"] {
-            if let Some(value) = config.get(field).and_then(serde_json::Value::as_str) {
-                let normalized = admin_pool_normalize_oauth_plan_type(value, provider_type);
-                if normalized.is_some() {
-                    return normalized;
+    if let Some(upstream_metadata) = key
+        .upstream_metadata
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+    {
+        let provider_bucket = upstream_metadata
+            .get(&provider_type.trim().to_ascii_lowercase())
+            .and_then(serde_json::Value::as_object);
+        for source in provider_bucket
+            .into_iter()
+            .chain(std::iter::once(upstream_metadata))
+        {
+            for field in [
+                "plan_type",
+                "tier",
+                "subscription_title",
+                "subscription_plan",
+            ] {
+                if let Some(value) = source.get(field).and_then(serde_json::Value::as_str) {
+                    let normalized = admin_pool_normalize_oauth_plan_type(value, provider_type);
+                    if normalized.is_some() {
+                        return normalized;
+                    }
                 }
             }
         }
     }
 
-    let upstream_metadata = key.upstream_metadata.as_ref()?.as_object()?;
-    let provider_bucket = upstream_metadata
-        .get(&provider_type.trim().to_ascii_lowercase())
-        .and_then(serde_json::Value::as_object);
-    for source in provider_bucket
-        .into_iter()
-        .chain(std::iter::once(upstream_metadata))
-    {
-        for field in [
-            "plan_type",
-            "tier",
-            "subscription_title",
-            "subscription_plan",
-        ] {
-            if let Some(value) = source.get(field).and_then(serde_json::Value::as_str) {
+    if let Some(config) = auth_config {
+        for field in ["plan_type", "tier", "plan", "subscription_plan"] {
+            if let Some(value) = config.get(field).and_then(serde_json::Value::as_str) {
                 let normalized = admin_pool_normalize_oauth_plan_type(value, provider_type);
                 if normalized.is_some() {
                     return normalized;

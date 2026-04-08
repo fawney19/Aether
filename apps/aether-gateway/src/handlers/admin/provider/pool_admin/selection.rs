@@ -68,34 +68,39 @@ fn admin_pool_derive_oauth_plan_type(
         return None;
     }
 
+    if let Some(upstream_metadata) = key
+        .upstream_metadata
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+    {
+        let provider_bucket = upstream_metadata
+            .get(&provider_type.trim().to_ascii_lowercase())
+            .and_then(serde_json::Value::as_object);
+        for source in provider_bucket
+            .into_iter()
+            .chain(std::iter::once(upstream_metadata))
+        {
+            for plan_key in [
+                "plan_type",
+                "tier",
+                "subscription_title",
+                "subscription_plan",
+            ] {
+                if let Some(value) = source.get(plan_key).and_then(serde_json::Value::as_str) {
+                    if let Some(normalized) = normalize(value) {
+                        return Some(normalized);
+                    }
+                }
+            }
+        }
+    }
+
     if let Some(auth_config) = admin_pool_parse_auth_config_json(state, key) {
         for plan_key in ["plan_type", "tier", "plan", "subscription_plan"] {
             if let Some(value) = auth_config
                 .get(plan_key)
                 .and_then(serde_json::Value::as_str)
             {
-                if let Some(normalized) = normalize(value) {
-                    return Some(normalized);
-                }
-            }
-        }
-    }
-
-    let upstream_metadata = key.upstream_metadata.as_ref()?.as_object()?;
-    let provider_bucket = upstream_metadata
-        .get(&provider_type.trim().to_ascii_lowercase())
-        .and_then(serde_json::Value::as_object);
-    for source in provider_bucket
-        .into_iter()
-        .chain(std::iter::once(upstream_metadata))
-    {
-        for plan_key in [
-            "plan_type",
-            "tier",
-            "subscription_title",
-            "subscription_plan",
-        ] {
-            if let Some(value) = source.get(plan_key).and_then(serde_json::Value::as_str) {
                 if let Some(normalized) = normalize(value) {
                     return Some(normalized);
                 }

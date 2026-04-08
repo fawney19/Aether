@@ -864,9 +864,9 @@ async fn gateway_formats_codex_quota_countdown_from_reset_after_seconds() {
     ));
     let state = AppState::new()
         .expect("gateway should build")
-        .with_data_state_for_tests(
-            GatewayDataState::with_provider_catalog_reader_for_tests(provider_catalog_repository),
-        );
+        .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+            provider_catalog_repository,
+        ));
 
     let response = local_admin_pool_response(
         &state,
@@ -888,6 +888,163 @@ async fn gateway_formats_codex_quota_countdown_from_reset_after_seconds() {
     assert_eq!(
         keys[0]["account_quota"],
         "周剩余 90.0% (3天2小时后重置) | 5H剩余 67.0% (3小时50分钟后重置)"
+    );
+}
+
+#[tokio::test]
+async fn gateway_pool_prefers_upstream_plan_type_over_auth_config() {
+    let mut provider = sample_provider("provider-codex", "codex", 10).with_transport_fields(
+        true,
+        false,
+        true,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(json!({
+            "pool_advanced": {
+                "enabled": true
+            }
+        })),
+    );
+    provider.provider_type = "codex".to_string();
+    let mut key = sample_key(
+        "key-codex-precedence",
+        "provider-codex",
+        "openai:cli",
+        "oauth-placeholder",
+    );
+    key.auth_type = "oauth".to_string();
+    key.encrypted_auth_config = Some(
+        encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            &json!({
+                "plan_type": "free",
+                "account_id": "acct-codex-legacy"
+            })
+            .to_string(),
+        )
+        .expect("auth config should encrypt"),
+    );
+    key.upstream_metadata = Some(json!({
+        "codex": {
+            "plan_type": "plus",
+            "updated_at": 1_775_553_285u64
+        }
+    }));
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![key],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_reader_for_tests(provider_catalog_repository)
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-codex/keys?page=1&page_size=50&status=all",
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    let keys = payload["keys"].as_array().expect("keys should be array");
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0]["oauth_plan_type"], "plus");
+}
+
+#[tokio::test]
+async fn gateway_pool_plan_free_selector_prefers_upstream_plan_type() {
+    let mut provider = sample_provider("provider-codex", "codex", 10).with_transport_fields(
+        true,
+        false,
+        true,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(json!({
+            "pool_advanced": {
+                "enabled": true
+            }
+        })),
+    );
+    provider.provider_type = "codex".to_string();
+    let mut key = sample_key(
+        "key-codex-selector",
+        "provider-codex",
+        "openai:cli",
+        "oauth-placeholder",
+    );
+    key.auth_type = "oauth".to_string();
+    key.encrypted_auth_config = Some(
+        encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            &json!({
+                "plan_type": "free",
+                "account_id": "acct-codex-legacy"
+            })
+            .to_string(),
+        )
+        .expect("auth config should encrypt"),
+    );
+    key.upstream_metadata = Some(json!({
+        "codex": {
+            "plan_type": "plus",
+            "updated_at": 1_775_553_285u64
+        }
+    }));
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![key],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_reader_for_tests(provider_catalog_repository)
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/pool/provider-codex/keys/resolve-selection",
+        Some(json!({
+            "quick_selectors": ["plan_free"]
+        })),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    assert_eq!(payload["total"], json!(0));
+    assert_eq!(
+        payload["items"]
+            .as_array()
+            .expect("items should be array")
+            .len(),
+        0
     );
 }
 

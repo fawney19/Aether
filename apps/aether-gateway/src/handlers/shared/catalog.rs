@@ -231,9 +231,98 @@ pub(crate) fn provider_key_health_summary(
     )
 }
 
+fn normalize_catalog_oauth_plan_type(value: &str, provider_type: &str) -> Option<String> {
+    let mut normalized = value.trim().to_string();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    let provider_type = provider_type.trim().to_ascii_lowercase();
+    if !provider_type.is_empty() && normalized.to_ascii_lowercase().starts_with(&provider_type) {
+        normalized = normalized[provider_type.len()..]
+            .trim_matches(|ch: char| [' ', ':', '-', '_'].contains(&ch))
+            .to_string();
+    }
+
+    let normalized = normalized.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn catalog_oauth_plan_type_from_source(
+    source: &serde_json::Map<String, serde_json::Value>,
+    provider_type: &str,
+    fields: &[&str],
+) -> Option<String> {
+    for field in fields {
+        let Some(value) = source.get(*field).and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if let Some(normalized) = normalize_catalog_oauth_plan_type(value, provider_type) {
+            return Some(normalized);
+        }
+    }
+    None
+}
+
+fn derive_catalog_oauth_plan_type(
+    key: &StoredProviderCatalogKey,
+    provider_type: &str,
+    auth_config: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<String> {
+    if !key.auth_type.trim().eq_ignore_ascii_case("oauth") {
+        return None;
+    }
+
+    let provider_type_key = provider_type.trim().to_ascii_lowercase();
+    if let Some(upstream_metadata) = key
+        .upstream_metadata
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+    {
+        let provider_bucket = if provider_type_key.is_empty() {
+            None
+        } else {
+            upstream_metadata
+                .get(&provider_type_key)
+                .and_then(serde_json::Value::as_object)
+        };
+        for source in provider_bucket
+            .into_iter()
+            .chain(std::iter::once(upstream_metadata))
+        {
+            if let Some(plan_type) = catalog_oauth_plan_type_from_source(
+                source,
+                provider_type,
+                &[
+                    "plan_type",
+                    "tier",
+                    "subscription_title",
+                    "subscription_plan",
+                    "plan",
+                ],
+            ) {
+                return Some(plan_type);
+            }
+        }
+    }
+
+    auth_config.and_then(|source| {
+        catalog_oauth_plan_type_from_source(
+            source,
+            provider_type,
+            &["plan_type", "tier", "plan", "subscription_plan"],
+        )
+    })
+}
+
 pub(crate) fn build_admin_provider_key_response(
     state: &AppState,
     key: &StoredProviderCatalogKey,
+    provider_type: &str,
     now_unix_secs: u64,
 ) -> serde_json::Value {
     let request_count = u64::from(key.request_count.unwrap_or(0));
@@ -257,16 +346,7 @@ pub(crate) fn build_admin_provider_key_response(
         .and_then(serde_json::Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let oauth_plan_type = auth_config
-        .as_ref()
-        .and_then(|config| config.get("plan_type").and_then(serde_json::Value::as_str))
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            auth_config
-                .as_ref()
-                .and_then(|config| config.get("tier").and_then(serde_json::Value::as_str))
-                .map(|value| value.to_ascii_lowercase())
-        });
+    let oauth_plan_type = derive_catalog_oauth_plan_type(key, provider_type, auth_config.as_ref());
     let (
         health_score,
         consecutive_failures,

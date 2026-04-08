@@ -152,6 +152,7 @@ pub(super) async fn maybe_handle(
             Json(build_admin_provider_key_response(
                 state,
                 &updated,
+                &provider.provider_type,
                 now_unix_secs,
             ))
             .into_response(),
@@ -416,6 +417,7 @@ pub(super) async fn maybe_handle(
             Json(build_admin_provider_key_response(
                 state,
                 &created,
+                &provider.provider_type,
                 now_unix_secs,
             ))
             .into_response(),
