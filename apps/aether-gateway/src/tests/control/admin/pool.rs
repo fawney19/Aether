@@ -1,9 +1,9 @@
 use std::sync::{Arc, Mutex};
 
-use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
+use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
-use axum::body::{Body, Bytes};
+use axum::body::{to_bytes, Body, Bytes};
 use axum::routing::{any, get, post};
 use axum::{extract::Request, Router};
 use http::{HeaderMap, HeaderValue, StatusCode};
@@ -557,6 +557,266 @@ async fn gateway_handles_admin_pool_list_keys_locally_with_trusted_admin_princip
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_pool_list_keys_with_quota_compatibility_fields() {
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/api/admin/pool/provider-antigravity/keys",
+        any(move |_request: Request| {
+            let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+            async move {
+                *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("unexpected upstream hit"))
+            }
+        }),
+    );
+
+    let mut provider = sample_provider("provider-antigravity", "antigravity", 10)
+        .with_transport_fields(
+            true,
+            false,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(json!({
+                "pool_advanced": {
+                    "enabled": true
+                }
+            })),
+        );
+    provider.provider_type = "antigravity".to_string();
+
+    let mut key = sample_key(
+        "key-antigravity-a",
+        "provider-antigravity",
+        "gemini:chat",
+        "sk-antigravity",
+    );
+    key.name = "quota-key".to_string();
+    key.auth_type = "oauth".to_string();
+    key.expires_at_unix_secs = Some(1_775_556_730);
+    key.encrypted_auth_config = Some(
+        encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"plan_type":"pro","account_id":"acct-antigravity-1","account_name":"quota-user","account_user_id":"quota-user-1","organizations":[{"id":"org-1","name":"Org One"}]}"#,
+        )
+        .expect("auth config ciphertext should build"),
+    );
+    key.status_snapshot = Some(json!({
+        "oauth": {
+            "code": "expired",
+            "label": "已过期",
+            "reason": "Token 已过期，请重新授权",
+            "expires_at": 1775556730u64,
+            "invalid_at": null,
+            "source": "expires_at",
+            "requires_reauth": true,
+            "expiring_soon": false
+        },
+        "account": {
+            "code": "ok",
+            "label": null,
+            "reason": null,
+            "blocked": false,
+            "source": null,
+            "recoverable": false
+        },
+        "quota": {
+            "code": "ok",
+            "label": null,
+            "reason": null,
+            "exhausted": false,
+            "usage_ratio": 0.0,
+            "updated_at": 1775553285u64,
+            "reset_seconds": null,
+            "plan_type": null
+        }
+    }));
+    key.upstream_metadata = Some(json!({
+        "antigravity": {
+            "updated_at": 1775553285u64,
+            "quota_by_model": {
+                "gemini-2.5-flash": { "used_percent": 0.0 },
+                "gemini-2.5-pro": { "used_percent": 0.0 }
+            }
+        }
+    }));
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![key],
+    ));
+
+    let (_upstream_url, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+                provider_catalog_repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{gateway_url}/api/admin/pool/provider-antigravity/keys?page=1&page_size=10&status=all"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    let keys = payload["keys"].as_array().expect("keys should be array");
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0]["account_quota"], json!("最低剩余 100.0% (2 模型)"));
+    assert_eq!(keys[0]["quota_updated_at"], json!(1775553285u64));
+    assert_eq!(keys[0]["oauth_expires_at"], json!(1775556730u64));
+    assert_eq!(keys[0]["oauth_plan_type"], json!("pro"));
+    assert_eq!(keys[0]["oauth_account_id"], json!("acct-antigravity-1"));
+    assert_eq!(keys[0]["oauth_account_name"], json!("quota-user"));
+    assert_eq!(keys[0]["oauth_account_user_id"], json!("quota-user-1"));
+    assert_eq!(keys[0]["oauth_organizations"][0]["id"], json!("org-1"));
+    assert_eq!(keys[0]["account_status_code"], json!("ok"));
+    assert_eq!(keys[0]["account_status_blocked"], json!(false));
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_includes_pool_quota_and_compat_fields_in_list_keys_response() {
+    let mut provider = sample_provider("provider-antigravity", "antigravity", 10)
+        .with_transport_fields(
+            true,
+            false,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(json!({
+                "pool_advanced": {
+                    "enabled": true
+                }
+            })),
+        );
+    provider.provider_type = "antigravity".to_string();
+    let mut key = sample_key(
+        "key-antigravity-oauth",
+        "provider-antigravity",
+        "gemini:chat",
+        "oauth-placeholder",
+    );
+    key.name = "quota key".to_string();
+    key.auth_type = "oauth".to_string();
+    key.expires_at_unix_secs = Some(1_775_556_730);
+    key.encrypted_auth_config = Some(
+        encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            &json!({
+                "plan_type": "pro",
+                "account_id": "acct-demo-001",
+                "account_name": "Demo Account",
+                "account_user_id": "user-demo-001",
+                "organizations": [],
+            })
+            .to_string(),
+        )
+        .expect("auth config should encrypt"),
+    );
+    key.upstream_metadata = Some(json!({
+        "antigravity": {
+            "updated_at": 1_775_553_285u64,
+            "quota_by_model": {
+                "gemini-2.5-pro": { "used_percent": 0 },
+                "gemini-2.5-flash": { "used_percent": 0 }
+            }
+        }
+    }));
+    key.status_snapshot = Some(json!({
+        "oauth": {
+            "code": "expired",
+            "label": "已过期",
+            "reason": "Token 已过期，请重新授权",
+            "expires_at": 1_775_556_730u64,
+            "invalid_at": serde_json::Value::Null,
+            "source": "expires_at",
+            "requires_reauth": true,
+            "expiring_soon": false
+        },
+        "account": {
+            "code": "ok",
+            "label": serde_json::Value::Null,
+            "reason": serde_json::Value::Null,
+            "blocked": false,
+            "source": serde_json::Value::Null,
+            "recoverable": false
+        },
+        "quota": {
+            "code": "ok",
+            "label": serde_json::Value::Null,
+            "reason": serde_json::Value::Null,
+            "exhausted": false,
+            "usage_ratio": 0.0,
+            "updated_at": 1_775_553_285u64,
+            "reset_seconds": serde_json::Value::Null,
+            "plan_type": serde_json::Value::Null
+        }
+    }));
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![key],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_reader_for_tests(provider_catalog_repository)
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-antigravity/keys?page=1&page_size=50&status=all",
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    let keys = payload["keys"].as_array().expect("keys should be array");
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0]["account_quota"], "最低剩余 100.0% (2 模型)");
+    assert_eq!(keys[0]["quota_updated_at"], json!(1_775_553_285u64));
+    assert_eq!(keys[0]["oauth_expires_at"], json!(1_775_556_730u64));
+    assert_eq!(keys[0]["oauth_plan_type"], "pro");
+    assert_eq!(keys[0]["oauth_account_id"], "acct-demo-001");
+    assert_eq!(keys[0]["oauth_account_name"], "Demo Account");
+    assert_eq!(keys[0]["oauth_account_user_id"], "user-demo-001");
+    assert_eq!(keys[0]["oauth_organizations"], json!([]));
+    assert_eq!(keys[0]["account_status_code"], "ok");
+    assert_eq!(keys[0]["account_status_blocked"], json!(false));
 }
 
 #[tokio::test]

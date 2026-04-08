@@ -246,6 +246,12 @@ pub fn aggregate_models_for_cache(models: &[Value]) -> Vec<Value> {
                     .collect::<BTreeSet<_>>()
             })
             .unwrap_or_default();
+        let legacy_api_format = object
+            .get("api_format")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
         let existing_formats = entry
             .get("api_formats")
             .and_then(Value::as_array)
@@ -259,9 +265,15 @@ pub fn aggregate_models_for_cache(models: &[Value]) -> Vec<Value> {
                     .collect::<BTreeSet<_>>()
             })
             .unwrap_or_default();
-        let merged_formats = existing_formats
+        let mut merged_formats = existing_formats
             .union(&api_formats)
             .cloned()
+            .collect::<BTreeSet<_>>();
+        if let Some(api_format) = legacy_api_format {
+            merged_formats.insert(api_format);
+        }
+        let merged_formats = merged_formats
+            .into_iter()
             .map(Value::String)
             .collect::<Vec<_>>();
         entry.insert("api_formats".to_string(), Value::Array(merged_formats));
@@ -451,6 +463,17 @@ mod tests {
             aggregated[0]["api_formats"],
             json!(["openai:chat", "openai:cli"])
         );
+    }
+
+    #[test]
+    fn aggregate_models_for_cache_preserves_legacy_api_format_field() {
+        let aggregated = aggregate_models_for_cache(&[json!({
+            "id":"gpt-5",
+            "api_format":"openai:chat"
+        })]);
+        assert_eq!(aggregated.len(), 1);
+        assert_eq!(aggregated[0]["api_formats"], json!(["openai:chat"]));
+        assert!(aggregated[0].get("api_format").is_none());
     }
 
     #[test]

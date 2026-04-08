@@ -196,7 +196,15 @@ async fn build_admin_pool_list_keys_response(
 
     let items = keys
         .into_iter()
-        .map(|key| pool_payloads::build_admin_pool_key_payload(&key, &runtime, pool_config))
+        .map(|key| {
+            pool_payloads::build_admin_pool_key_payload(
+                state,
+                &provider.provider_type,
+                &key,
+                &runtime,
+                pool_config,
+            )
+        })
         .collect::<Vec<_>>();
 
     Ok(Json(json!({

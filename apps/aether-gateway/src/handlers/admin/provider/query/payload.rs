@@ -36,6 +36,13 @@ pub(super) fn provider_query_extract_api_key_id(payload: &serde_json::Value) -> 
         .map(ToOwned::to_owned)
 }
 
+pub(super) fn provider_query_extract_force_refresh(payload: &serde_json::Value) -> bool {
+    payload
+        .get("force_refresh")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 pub(super) fn provider_query_extract_model(payload: &serde_json::Value) -> Option<String> {
     payload
         .get("model")
