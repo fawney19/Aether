@@ -235,14 +235,34 @@ fn admin_pool_format_reset_after(seconds: f64) -> Option<String> {
 fn admin_pool_build_codex_account_quota(
     data: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<String> {
+    fn codex_reset_seconds(
+        data: &serde_json::Map<String, serde_json::Value>,
+        reset_seconds_key: &str,
+        reset_after_seconds_key: &str,
+        reset_at_key: &str,
+    ) -> Option<f64> {
+        admin_pool_json_to_f64(data.get(reset_seconds_key))
+            .or_else(|| admin_pool_json_to_f64(data.get(reset_after_seconds_key)))
+            .or_else(|| {
+                let reset_at = admin_pool_json_to_u64(data.get(reset_at_key))?;
+                let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
+                Some(reset_at.saturating_sub(now_unix_secs) as f64)
+            })
+    }
+
     let mut parts = Vec::new();
 
     let primary_used = admin_pool_json_to_f64(data.get("primary_used_percent"));
     if let Some(primary_used) = primary_used {
         let mut part = format!("周剩余 {}", admin_pool_format_percent(100.0 - primary_used));
         if admin_pool_has_quota_consumption(Some(primary_used)) {
-            if let Some(reset_text) = admin_pool_json_to_f64(data.get("primary_reset_seconds"))
-                .and_then(admin_pool_format_reset_after)
+            if let Some(reset_text) = codex_reset_seconds(
+                data,
+                "primary_reset_seconds",
+                "primary_reset_after_seconds",
+                "primary_reset_at",
+            )
+            .and_then(admin_pool_format_reset_after)
             {
                 part.push_str(&format!(" ({reset_text})"));
             }
@@ -257,8 +277,13 @@ fn admin_pool_build_codex_account_quota(
             admin_pool_format_percent(100.0 - secondary_used)
         );
         if admin_pool_has_quota_consumption(Some(secondary_used)) {
-            if let Some(reset_text) = admin_pool_json_to_f64(data.get("secondary_reset_seconds"))
-                .and_then(admin_pool_format_reset_after)
+            if let Some(reset_text) = codex_reset_seconds(
+                data,
+                "secondary_reset_seconds",
+                "secondary_reset_after_seconds",
+                "secondary_reset_at",
+            )
+            .and_then(admin_pool_format_reset_after)
             {
                 part.push_str(&format!(" ({reset_text})"));
             }

@@ -820,6 +820,78 @@ async fn gateway_includes_pool_quota_and_compat_fields_in_list_keys_response() {
 }
 
 #[tokio::test]
+async fn gateway_formats_codex_quota_countdown_from_reset_after_seconds() {
+    let mut provider = sample_provider("provider-codex", "codex", 10).with_transport_fields(
+        true,
+        false,
+        true,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(json!({
+            "pool_advanced": {
+                "enabled": true
+            }
+        })),
+    );
+    provider.provider_type = "codex".to_string();
+
+    let mut key = sample_key(
+        "key-codex-oauth",
+        "provider-codex",
+        "openai:cli",
+        "oauth-placeholder",
+    );
+    key.name = "codex quota key".to_string();
+    key.auth_type = "oauth".to_string();
+    key.upstream_metadata = Some(json!({
+        "codex": {
+            "plan_type": "plus",
+            "updated_at": 1_775_553_285u64,
+            "primary_used_percent": 10.0,
+            "primary_reset_after_seconds": 266_400,
+            "secondary_used_percent": 33.0,
+            "secondary_reset_after_seconds": 13_800
+        }
+    }));
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![key],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_reader_for_tests(provider_catalog_repository),
+        );
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-codex/keys?page=1&page_size=50&status=all",
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    let keys = payload["keys"].as_array().expect("keys should be array");
+    assert_eq!(keys.len(), 1);
+    assert_eq!(
+        keys[0]["account_quota"],
+        "周剩余 90.0% (3天2小时后重置) | 5H剩余 67.0% (3小时50分钟后重置)"
+    );
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_pool_resolve_selection_locally_with_trusted_admin_principal() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
