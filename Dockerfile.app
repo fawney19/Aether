@@ -12,8 +12,14 @@ COPY frontend/ ./
 RUN npm run build
 
 # ==================== Rust gateway 构建 ====================
-FROM rust:1.94.1-slim AS gateway-builder
+FROM rust:1.94.1-slim AS gateway-base
 WORKDIR /build
+
+# CI 镜像也采用同一套分层缓存策略，减少重复编译开销。
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
+    CARGO_PROFILE_RELEASE_LTO=thin \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
@@ -23,11 +29,30 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libssl-dev \
     pkg-config \
     perl
+
+RUN --mount=type=cache,id=aether-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=aether-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    cargo install cargo-chef --locked
+
+FROM gateway-base AS gateway-planner
 COPY Cargo.toml Cargo.lock ./
 COPY apps/ ./apps/
 COPY crates/ ./crates/
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM gateway-base AS gateway-builder
+COPY --from=gateway-planner /build/recipe.json ./recipe.json
+RUN --mount=type=cache,id=aether-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=aether-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=aether-cargo-target-ci,target=/build/target,sharing=locked \
+    cargo chef cook --release --locked --package aether-gateway --bin aether-gateway --recipe-path recipe.json
+
+COPY Cargo.toml Cargo.lock ./
+COPY apps/ ./apps/
+COPY crates/ ./crates/
+RUN --mount=type=cache,id=aether-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=aether-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=aether-cargo-target-ci,target=/build/target,sharing=locked \
     cargo build --release --locked -p aether-gateway && \
     cp target/release/aether-gateway /tmp/aether-gateway
 
