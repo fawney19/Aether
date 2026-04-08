@@ -8,9 +8,8 @@ use crate::AppState;
 use aether_data_contracts::repository::global_models::{
     AdminGlobalModelListQuery, StoredAdminGlobalModel, StoredAdminProviderModel,
 };
-use futures_util::stream::{self, StreamExt};
 use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) async fn resolve_admin_global_model_by_id_or_err(
@@ -22,24 +21,6 @@ pub(crate) async fn resolve_admin_global_model_by_id_or_err(
         .await
         .map_err(|err| format!("{err:?}"))?
         .ok_or_else(|| format!("GlobalModel {global_model_id} 不存在"))
-}
-
-fn admin_global_model_provider_counts(
-    provider_models: &[StoredAdminProviderModel],
-) -> (usize, usize, usize) {
-    let total_models = provider_models.len();
-    let total_providers = provider_models
-        .iter()
-        .map(|model| model.provider_id.clone())
-        .collect::<BTreeSet<_>>()
-        .len();
-    let active_provider_count = provider_models
-        .iter()
-        .filter(|model| model.is_active && model.is_available)
-        .map(|model| model.provider_id.clone())
-        .collect::<BTreeSet<_>>()
-        .len();
-    (total_models, total_providers, active_provider_count)
 }
 
 fn build_admin_global_model_price_range(
@@ -80,41 +61,10 @@ fn build_admin_global_model_price_range(
     })
 }
 
-async fn admin_global_model_provider_models_by_global_model_id(
-    state: &AppState,
-    global_model_ids: &[String],
-) -> BTreeMap<String, Vec<StoredAdminProviderModel>> {
-    let state = state.clone();
-    stream::iter(
-        global_model_ids
-            .iter()
-            .map(String::clone)
-            .map(|global_model_id| {
-                let state = state.clone();
-                async move {
-                    let provider_models = state
-                        .list_admin_provider_models_by_global_model_id(&global_model_id)
-                        .await
-                        .ok()
-                        .unwrap_or_default();
-                    (global_model_id, provider_models)
-                }
-            }),
-    )
-    .buffer_unordered(32)
-    .collect::<Vec<_>>()
-    .await
-    .into_iter()
-    .collect()
-}
-
 pub(crate) fn build_admin_global_model_response(
     global_model: &StoredAdminGlobalModel,
-    provider_models: &[StoredAdminProviderModel],
     now_unix_secs: u64,
 ) -> serde_json::Value {
-    let (_, provider_count, active_provider_count) =
-        admin_global_model_provider_counts(provider_models);
     json!({
         "id": &global_model.id,
         "name": &global_model.name,
@@ -124,8 +74,9 @@ pub(crate) fn build_admin_global_model_response(
         "default_tiered_pricing": global_model.default_tiered_pricing.clone(),
         "supported_capabilities": json_string_list(global_model.supported_capabilities.as_ref()),
         "config": global_model.config.clone(),
-        "provider_count": provider_count,
-        "active_provider_count": active_provider_count,
+        "provider_count": global_model.provider_count,
+        "active_provider_count": global_model.active_provider_count,
+        "usage_count": global_model.usage_count,
         "created_at": timestamp_or_now(global_model.created_at_unix_secs, now_unix_secs),
         "updated_at": timestamp_or_now(global_model.updated_at_unix_secs, now_unix_secs),
     })
@@ -161,22 +112,9 @@ pub(crate) async fn build_admin_global_models_payload(
             .cmp(&right.name)
             .then_with(|| left.id.cmp(&right.id))
     });
-    let global_model_ids = models
-        .iter()
-        .map(|model| model.id.clone())
-        .collect::<Vec<_>>();
-    let mut provider_models_by_global_model =
-        admin_global_model_provider_models_by_global_model_id(state, &global_model_ids).await;
     let mut payload_models = Vec::with_capacity(models.len());
     for model in models {
-        let provider_models = provider_models_by_global_model
-            .remove(&model.id)
-            .unwrap_or_default();
-        payload_models.push(build_admin_global_model_response(
-            &model,
-            &provider_models,
-            now_unix_secs,
-        ));
+        payload_models.push(build_admin_global_model_response(&model, now_unix_secs));
     }
     Some(json!({
         "models": payload_models,
@@ -205,11 +143,11 @@ pub(crate) async fn build_admin_global_model_payload(
         .ok()
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    let (total_models, total_providers, _) = admin_global_model_provider_counts(&provider_models);
-    let mut payload = build_admin_global_model_response(&model, &provider_models, now_unix_secs);
+    let total_models = provider_models.len();
+    let mut payload = build_admin_global_model_response(&model, now_unix_secs);
     if let Some(object) = payload.as_object_mut() {
         object.insert("total_models".to_string(), json!(total_models));
-        object.insert("total_providers".to_string(), json!(total_providers));
+        object.insert("total_providers".to_string(), json!(model.provider_count));
         object.insert(
             "price_range".to_string(),
             build_admin_global_model_price_range(&model, &provider_models),

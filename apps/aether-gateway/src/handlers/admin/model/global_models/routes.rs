@@ -164,10 +164,6 @@ pub(crate) async fn maybe_build_local_admin_global_models_response(
         return Ok(Some(
             match state.create_admin_global_model(&record).await? {
                 Some(created) => {
-                    let provider_models = state
-                        .list_admin_provider_models_by_global_model_id(&created.id)
-                        .await
-                        .unwrap_or_default();
                     let now_unix_secs = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .ok()
@@ -176,11 +172,7 @@ pub(crate) async fn maybe_build_local_admin_global_models_response(
                     attach_admin_audit_response(
                         (
                             http::StatusCode::CREATED,
-                            Json(build_admin_global_model_response(
-                                &created,
-                                &provider_models,
-                                now_unix_secs,
-                            )),
+                            Json(build_admin_global_model_response(&created, now_unix_secs)),
                         )
                             .into_response(),
                         "admin_global_model_created",
@@ -288,22 +280,14 @@ pub(crate) async fn maybe_build_local_admin_global_models_response(
         return Ok(Some(
             match state.update_admin_global_model(&record).await? {
                 Some(updated) => {
-                    let provider_models = state
-                        .list_admin_provider_models_by_global_model_id(&updated.id)
-                        .await
-                        .unwrap_or_default();
                     let now_unix_secs = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .ok()
                         .map(|duration| duration.as_secs())
                         .unwrap_or(0);
                     attach_admin_audit_response(
-                        Json(build_admin_global_model_response(
-                            &updated,
-                            &provider_models,
-                            now_unix_secs,
-                        ))
-                        .into_response(),
+                        Json(build_admin_global_model_response(&updated, now_unix_secs))
+                            .into_response(),
                         "admin_global_model_updated",
                         "update_global_model",
                         "global_model",

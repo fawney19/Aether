@@ -104,22 +104,39 @@ LEFT JOIN global_models gm ON gm.id = m.global_model_id
 
 const LIST_ADMIN_GLOBAL_MODELS_PREFIX: &str = r#"
 SELECT
-  id,
-  name,
-  COALESCE(NULLIF(display_name, ''), name) AS display_name,
-  is_active,
-  CAST(default_price_per_request AS DOUBLE PRECISION) AS default_price_per_request,
-  default_tiered_pricing,
-  supported_capabilities,
-  config,
-  EXTRACT(EPOCH FROM created_at)::bigint AS created_at_unix_secs,
-  EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_unix_secs
-FROM global_models
+  gm.id,
+  gm.name,
+  COALESCE(NULLIF(gm.display_name, ''), gm.name) AS display_name,
+  gm.is_active,
+  CAST(gm.default_price_per_request AS DOUBLE PRECISION) AS default_price_per_request,
+  gm.default_tiered_pricing,
+  gm.supported_capabilities,
+  gm.config,
+  COALESCE(gm_stats.provider_count, 0) AS provider_count,
+  COALESCE(gm_stats.active_provider_count, 0) AS active_provider_count,
+  COALESCE(gm.usage_count, 0)::bigint AS usage_count,
+  EXTRACT(EPOCH FROM gm.created_at)::bigint AS created_at_unix_secs,
+  EXTRACT(EPOCH FROM gm.updated_at)::bigint AS updated_at_unix_secs
+FROM global_models gm
+LEFT JOIN (
+  SELECT
+    m.global_model_id,
+    COUNT(DISTINCT m.provider_id)::bigint AS provider_count,
+    COUNT(
+      DISTINCT CASE
+        WHEN m.is_active = TRUE AND p.is_active = TRUE THEN m.provider_id
+        ELSE NULL
+      END
+    )::bigint AS active_provider_count
+  FROM models m
+  JOIN providers p ON p.id = m.provider_id
+  GROUP BY m.global_model_id
+) gm_stats ON gm_stats.global_model_id = gm.id
 "#;
 
 const COUNT_ADMIN_GLOBAL_MODELS_PREFIX: &str = r#"
 SELECT COUNT(id) AS total
-FROM global_models
+FROM global_models gm
 "#;
 
 const LIST_ACTIVE_GLOBAL_MODEL_IDS_BY_PROVIDER_IDS_PREFIX: &str = r#"
@@ -374,19 +391,35 @@ ORDER BY gm.name ASC, m.created_at DESC, m.id ASC
         let row = sqlx::query(
             r#"
 SELECT
-  id,
-  name,
-  COALESCE(NULLIF(display_name, ''), name) AS display_name,
-  is_active,
-  CAST(default_price_per_request AS DOUBLE PRECISION) AS default_price_per_request,
-  default_tiered_pricing,
-  supported_capabilities,
-  config
-  ,
-  EXTRACT(EPOCH FROM created_at)::bigint AS created_at_unix_secs,
-  EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_unix_secs
-FROM global_models
-WHERE id = $1
+  gm.id,
+  gm.name,
+  COALESCE(NULLIF(gm.display_name, ''), gm.name) AS display_name,
+  gm.is_active,
+  CAST(gm.default_price_per_request AS DOUBLE PRECISION) AS default_price_per_request,
+  gm.default_tiered_pricing,
+  gm.supported_capabilities,
+  gm.config,
+  COALESCE(gm_stats.provider_count, 0) AS provider_count,
+  COALESCE(gm_stats.active_provider_count, 0) AS active_provider_count,
+  COALESCE(gm.usage_count, 0)::bigint AS usage_count,
+  EXTRACT(EPOCH FROM gm.created_at)::bigint AS created_at_unix_secs,
+  EXTRACT(EPOCH FROM gm.updated_at)::bigint AS updated_at_unix_secs
+FROM global_models gm
+LEFT JOIN (
+  SELECT
+    m.global_model_id,
+    COUNT(DISTINCT m.provider_id)::bigint AS provider_count,
+    COUNT(
+      DISTINCT CASE
+        WHEN m.is_active = TRUE AND p.is_active = TRUE THEN m.provider_id
+        ELSE NULL
+      END
+    )::bigint AS active_provider_count
+  FROM models m
+  JOIN providers p ON p.id = m.provider_id
+  GROUP BY m.global_model_id
+) gm_stats ON gm_stats.global_model_id = gm.id
+WHERE gm.id = $1
 LIMIT 1
             "#,
         )
@@ -405,19 +438,35 @@ LIMIT 1
         let row = sqlx::query(
             r#"
 SELECT
-  id,
-  name,
-  COALESCE(NULLIF(display_name, ''), name) AS display_name,
-  is_active,
-  CAST(default_price_per_request AS DOUBLE PRECISION) AS default_price_per_request,
-  default_tiered_pricing,
-  supported_capabilities,
-  config
-  ,
-  EXTRACT(EPOCH FROM created_at)::bigint AS created_at_unix_secs,
-  EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_unix_secs
-FROM global_models
-WHERE name = $1
+  gm.id,
+  gm.name,
+  COALESCE(NULLIF(gm.display_name, ''), gm.name) AS display_name,
+  gm.is_active,
+  CAST(gm.default_price_per_request AS DOUBLE PRECISION) AS default_price_per_request,
+  gm.default_tiered_pricing,
+  gm.supported_capabilities,
+  gm.config,
+  COALESCE(gm_stats.provider_count, 0) AS provider_count,
+  COALESCE(gm_stats.active_provider_count, 0) AS active_provider_count,
+  COALESCE(gm.usage_count, 0)::bigint AS usage_count,
+  EXTRACT(EPOCH FROM gm.created_at)::bigint AS created_at_unix_secs,
+  EXTRACT(EPOCH FROM gm.updated_at)::bigint AS updated_at_unix_secs
+FROM global_models gm
+LEFT JOIN (
+  SELECT
+    m.global_model_id,
+    COUNT(DISTINCT m.provider_id)::bigint AS provider_count,
+    COUNT(
+      DISTINCT CASE
+        WHEN m.is_active = TRUE AND p.is_active = TRUE THEN m.provider_id
+        ELSE NULL
+      END
+    )::bigint AS active_provider_count
+  FROM models m
+  JOIN providers p ON p.id = m.provider_id
+  GROUP BY m.global_model_id
+) gm_stats ON gm_stats.global_model_id = gm.id
+WHERE gm.name = $1
 LIMIT 1
             "#,
         )
@@ -928,7 +977,7 @@ fn apply_admin_global_model_filters(
 ) {
     builder.push(" WHERE 1=1");
     if let Some(is_active) = query.is_active {
-        builder.push(" AND is_active = ").push_bind(is_active);
+        builder.push(" AND gm.is_active = ").push_bind(is_active);
     }
     if let Some(search) = query
         .search
@@ -938,9 +987,9 @@ fn apply_admin_global_model_filters(
     {
         let pattern = format!("%{search}%");
         builder
-            .push(" AND (name ILIKE ")
+            .push(" AND (gm.name ILIKE ")
             .push_bind(pattern.clone())
-            .push(" OR display_name ILIKE ")
+            .push(" OR gm.display_name ILIKE ")
             .push_bind(pattern)
             .push(")");
     }
@@ -1062,6 +1111,18 @@ fn map_admin_global_model_row(row: &PgRow) -> Result<StoredAdminGlobalModel, Dat
         .try_get::<Option<i64>, _>("updated_at_unix_secs")
         .map_postgres_err()?
         .map(|value| value.max(0) as u64);
+    let provider_count = row
+        .try_get::<i64, _>("provider_count")
+        .map_postgres_err()?
+        .max(0) as u64;
+    let active_provider_count = row
+        .try_get::<i64, _>("active_provider_count")
+        .map_postgres_err()?
+        .max(0) as u64;
+    let usage_count = row
+        .try_get::<i64, _>("usage_count")
+        .map_postgres_err()?
+        .max(0) as u64;
     StoredAdminGlobalModel::new(
         row.try_get("id").map_postgres_err()?,
         row.try_get("name").map_postgres_err()?,
@@ -1072,6 +1133,9 @@ fn map_admin_global_model_row(row: &PgRow) -> Result<StoredAdminGlobalModel, Dat
         row.try_get("default_tiered_pricing").map_postgres_err()?,
         row.try_get("supported_capabilities").map_postgres_err()?,
         row.try_get("config").map_postgres_err()?,
+        provider_count,
+        active_provider_count,
+        usage_count,
         created_at_unix_secs,
         updated_at_unix_secs,
     )

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
@@ -90,6 +91,35 @@ impl InMemoryGlobalModelReadRepository {
             .write()
             .expect("admin global model repository lock") = items.into_iter().collect();
         self
+    }
+
+    fn admin_global_model_provider_counts(&self, global_model_id: &str) -> (u64, u64) {
+        let items = self
+            .admin_provider_model_items
+            .read()
+            .expect("admin provider model repository lock");
+        let provider_count = items
+            .iter()
+            .filter(|item| item.global_model_id == global_model_id)
+            .map(|item| item.provider_id.clone())
+            .collect::<BTreeSet<_>>()
+            .len() as u64;
+        let active_provider_count = items
+            .iter()
+            .filter(|item| item.global_model_id == global_model_id && item.is_active)
+            .map(|item| item.provider_id.clone())
+            .collect::<BTreeSet<_>>()
+            .len() as u64;
+        (provider_count, active_provider_count)
+    }
+
+    fn enrich_admin_global_model(&self, item: &StoredAdminGlobalModel) -> StoredAdminGlobalModel {
+        let mut enriched = item.clone();
+        let (provider_count, active_provider_count) =
+            self.admin_global_model_provider_counts(&item.id);
+        enriched.provider_count = provider_count;
+        enriched.active_provider_count = active_provider_count;
+        enriched
     }
 }
 
@@ -260,6 +290,7 @@ impl GlobalModelReadRepository for InMemoryGlobalModelReadRepository {
             .into_iter()
             .skip(query.offset)
             .take(query.limit)
+            .map(|item| self.enrich_admin_global_model(&item))
             .collect();
         Ok(StoredAdminGlobalModelPage { items, total })
     }
@@ -354,7 +385,7 @@ impl GlobalModelReadRepository for InMemoryGlobalModelReadRepository {
         Ok(items
             .iter()
             .find(|item| item.id == global_model_id)
-            .cloned())
+            .map(|item| self.enrich_admin_global_model(item)))
     }
 
     async fn get_admin_global_model_by_name(
@@ -365,7 +396,10 @@ impl GlobalModelReadRepository for InMemoryGlobalModelReadRepository {
             .admin_global_model_items
             .read()
             .expect("admin global model repository lock");
-        Ok(items.iter().find(|item| item.name == model_name).cloned())
+        Ok(items
+            .iter()
+            .find(|item| item.name == model_name)
+            .map(|item| self.enrich_admin_global_model(item)))
     }
 
     async fn list_admin_provider_models_by_global_model_id(
@@ -537,35 +571,40 @@ impl GlobalModelWriteRepository for InMemoryGlobalModelReadRepository {
             record.default_tiered_pricing.clone(),
             record.supported_capabilities.clone(),
             record.config.clone(),
+            0,
+            0,
+            0,
             Some(1_711_000_000),
             Some(1_711_000_000),
         )?;
         self.admin_global_model_items
             .write()
             .expect("admin global model repository lock")
-            .push(stored.clone());
-        Ok(Some(stored))
+            .push(stored);
+        self.get_admin_global_model_by_id(&record.id).await
     }
 
     async fn update_admin_global_model(
         &self,
         record: &UpdateAdminGlobalModelRecord,
     ) -> Result<Option<StoredAdminGlobalModel>, DataLayerError> {
-        let mut items = self
-            .admin_global_model_items
-            .write()
-            .expect("admin global model repository lock");
-        let Some(existing) = items.iter_mut().find(|item| item.id == record.id) else {
-            return Ok(None);
-        };
-        existing.display_name = record.display_name.clone();
-        existing.is_active = record.is_active;
-        existing.default_price_per_request = record.default_price_per_request;
-        existing.default_tiered_pricing = record.default_tiered_pricing.clone();
-        existing.supported_capabilities = record.supported_capabilities.clone();
-        existing.config = record.config.clone();
-        existing.updated_at_unix_secs = Some(1_711_000_100);
-        Ok(Some(existing.clone()))
+        {
+            let mut items = self
+                .admin_global_model_items
+                .write()
+                .expect("admin global model repository lock");
+            let Some(existing) = items.iter_mut().find(|item| item.id == record.id) else {
+                return Ok(None);
+            };
+            existing.display_name = record.display_name.clone();
+            existing.is_active = record.is_active;
+            existing.default_price_per_request = record.default_price_per_request;
+            existing.default_tiered_pricing = record.default_tiered_pricing.clone();
+            existing.supported_capabilities = record.supported_capabilities.clone();
+            existing.config = record.config.clone();
+            existing.updated_at_unix_secs = Some(1_711_000_100);
+        }
+        self.get_admin_global_model_by_id(&record.id).await
     }
 
     async fn delete_admin_global_model(

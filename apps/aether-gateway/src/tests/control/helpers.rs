@@ -351,6 +351,9 @@ pub(super) fn sample_admin_global_model(
         })),
         Some(json!(["streaming", "vision"])),
         Some(json!({"streaming": true, "vision": false, "billing": {"currency": "USD"}})),
+        0,
+        0,
+        0,
         Some(1_711_000_000),
         Some(1_711_000_100),
     )

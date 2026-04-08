@@ -122,6 +122,9 @@ fn sample_global_model(id: &str, name: &str, mappings: &[&str]) -> StoredAdminGl
         None,
         None,
         Some(json!({ "model_mappings": mappings })),
+        0,
+        0,
+        0,
         Some(1_711_000_000),
         Some(1_711_000_000),
     )

@@ -184,6 +184,9 @@ pub struct StoredAdminGlobalModel {
     pub default_tiered_pricing: Option<Value>,
     pub supported_capabilities: Option<Value>,
     pub config: Option<Value>,
+    pub provider_count: u64,
+    pub active_provider_count: u64,
+    pub usage_count: u64,
     pub created_at_unix_secs: Option<u64>,
     pub updated_at_unix_secs: Option<u64>,
 }
@@ -199,6 +202,9 @@ impl StoredAdminGlobalModel {
         default_tiered_pricing: Option<Value>,
         supported_capabilities: Option<Value>,
         config: Option<Value>,
+        provider_count: u64,
+        active_provider_count: u64,
+        usage_count: u64,
         created_at_unix_secs: Option<u64>,
         updated_at_unix_secs: Option<u64>,
     ) -> Result<Self, crate::DataLayerError> {
@@ -227,6 +233,9 @@ impl StoredAdminGlobalModel {
             default_tiered_pricing,
             supported_capabilities,
             config,
+            provider_count,
+            active_provider_count,
+            usage_count,
             created_at_unix_secs,
             updated_at_unix_secs,
         })
