@@ -1,6 +1,6 @@
-use crate::control::GatewayPublicRequestContext;
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
-use crate::{AppState, GatewayError};
+use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -98,7 +98,7 @@ fn admin_security_validate_ip_or_cidr(value: &str) -> bool {
 }
 
 async fn build_admin_security_blacklist_add_response(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     request_body: Option<&Bytes>,
 ) -> Result<Response<Body>, GatewayError> {
     let Some(request_body) = request_body else {
@@ -113,7 +113,7 @@ async fn build_admin_security_blacklist_add_response(
         _ => {
             return Ok(build_admin_security_bad_request_response(
                 "请求数据验证失败",
-            ))
+            ));
         }
     };
 
@@ -148,11 +148,10 @@ async fn build_admin_security_blacklist_add_response(
 }
 
 async fn build_admin_security_blacklist_remove_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    let Some(ip_address) = admin_security_blacklist_ip_from_path(&request_context.request_path)
-    else {
+    let Some(ip_address) = admin_security_blacklist_ip_from_path(request_context.path()) else {
         return Ok(build_admin_security_bad_request_response("缺少 ip_address"));
     };
 
@@ -176,7 +175,7 @@ async fn build_admin_security_blacklist_remove_response(
 }
 
 async fn build_admin_security_blacklist_stats_response(
-    state: &AppState,
+    state: &AdminAppState<'_>,
 ) -> Result<Response<Body>, GatewayError> {
     let (available, total, error) = state.admin_security_blacklist_stats().await?;
     let mut payload = json!({
@@ -196,7 +195,7 @@ async fn build_admin_security_blacklist_stats_response(
 }
 
 async fn build_admin_security_blacklist_list_response(
-    state: &AppState,
+    state: &AdminAppState<'_>,
 ) -> Result<Response<Body>, GatewayError> {
     let entries = state.list_admin_security_blacklist().await?;
     let total = entries.len();
@@ -210,7 +209,7 @@ async fn build_admin_security_blacklist_list_response(
 }
 
 async fn build_admin_security_whitelist_add_response(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     request_body: Option<&Bytes>,
 ) -> Result<Response<Body>, GatewayError> {
     let Some(request_body) = request_body else {
@@ -223,7 +222,7 @@ async fn build_admin_security_whitelist_add_response(
         Err(_) => {
             return Ok(build_admin_security_bad_request_response(
                 "请求数据验证失败",
-            ))
+            ));
         }
     };
     let ip_address = payload.ip_address.trim();
@@ -249,11 +248,10 @@ async fn build_admin_security_whitelist_add_response(
 }
 
 async fn build_admin_security_whitelist_remove_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    let Some(ip_address) = admin_security_whitelist_ip_from_path(&request_context.request_path)
-    else {
+    let Some(ip_address) = admin_security_whitelist_ip_from_path(request_context.path()) else {
         return Ok(build_admin_security_bad_request_response("缺少 ip_address"));
     };
 
@@ -277,7 +275,7 @@ async fn build_admin_security_whitelist_remove_response(
 }
 
 async fn build_admin_security_whitelist_list_response(
-    state: &AppState,
+    state: &AdminAppState<'_>,
 ) -> Result<Response<Body>, GatewayError> {
     let whitelist = state.list_admin_security_whitelist().await?;
     let total = whitelist.len();
@@ -295,11 +293,11 @@ async fn build_admin_security_whitelist_list_response(
 }
 
 pub(crate) async fn maybe_build_local_admin_security_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
+    let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
 

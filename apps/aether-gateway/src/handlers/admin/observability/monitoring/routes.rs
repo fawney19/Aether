@@ -34,42 +34,15 @@ use super::trace::{
     build_admin_monitoring_trace_provider_stats_response,
     build_admin_monitoring_trace_request_response,
 };
-use crate::control::GatewayPublicRequestContext;
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
-use crate::{AppState, GatewayError};
+use crate::GatewayError;
+use aether_admin::observability::monitoring::{match_admin_monitoring_route, AdminMonitoringRoute};
 use axum::{body::Body, http, response::Response};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AdminMonitoringRoute {
-    AuditLogs,
-    SystemStatus,
-    SuspiciousActivities,
-    UserBehavior,
-    ResilienceStatus,
-    ResilienceErrorStats,
-    ResilienceCircuitHistory,
-    TraceRequest,
-    TraceProviderStats,
-    CacheStats,
-    CacheAffinity,
-    CacheAffinities,
-    CacheUsersDelete,
-    CacheAffinityDelete,
-    CacheFlush,
-    CacheProviderDelete,
-    CacheConfig,
-    CacheMetrics,
-    CacheModelMappingStats,
-    CacheModelMappingDelete,
-    CacheModelMappingDeleteModel,
-    CacheModelMappingDeleteProvider,
-    CacheRedisKeys,
-    CacheRedisKeysDelete,
-}
-
 pub(crate) async fn maybe_build_local_admin_monitoring_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     let Some(route) = match_admin_monitoring_route(
         &request_context.request_method,
@@ -185,120 +158,11 @@ pub(crate) async fn maybe_build_local_admin_monitoring_response(
     }
 }
 
-fn admin_monitoring_audit_target_id(request_context: &GatewayPublicRequestContext) -> String {
+fn admin_monitoring_audit_target_id(request_context: &AdminRequestContext<'_>) -> String {
     match request_context.request_query_string.as_deref() {
         Some(query) if !query.trim().is_empty() => {
             format!("{}?{query}", request_context.request_path)
         }
         _ => request_context.request_path.clone(),
     }
-}
-
-pub(crate) fn match_admin_monitoring_route(
-    method: &http::Method,
-    path: &str,
-) -> Option<AdminMonitoringRoute> {
-    let path = normalize_admin_monitoring_path(path);
-
-    match *method {
-        http::Method::GET => match path {
-            "/api/admin/monitoring/audit-logs" => Some(AdminMonitoringRoute::AuditLogs),
-            "/api/admin/monitoring/system-status" => Some(AdminMonitoringRoute::SystemStatus),
-            "/api/admin/monitoring/suspicious-activities" => {
-                Some(AdminMonitoringRoute::SuspiciousActivities)
-            }
-            "/api/admin/monitoring/resilience-status" => {
-                Some(AdminMonitoringRoute::ResilienceStatus)
-            }
-            "/api/admin/monitoring/resilience/circuit-history" => {
-                Some(AdminMonitoringRoute::ResilienceCircuitHistory)
-            }
-            "/api/admin/monitoring/cache/stats" => Some(AdminMonitoringRoute::CacheStats),
-            "/api/admin/monitoring/cache/affinities" => Some(AdminMonitoringRoute::CacheAffinities),
-            "/api/admin/monitoring/cache/config" => Some(AdminMonitoringRoute::CacheConfig),
-            "/api/admin/monitoring/cache/metrics" => Some(AdminMonitoringRoute::CacheMetrics),
-            "/api/admin/monitoring/cache/model-mapping/stats" => {
-                Some(AdminMonitoringRoute::CacheModelMappingStats)
-            }
-            "/api/admin/monitoring/cache/redis-keys" => Some(AdminMonitoringRoute::CacheRedisKeys),
-            _ if matches_dynamic_segments(path, "/api/admin/monitoring/user-behavior/", 1) => {
-                Some(AdminMonitoringRoute::UserBehavior)
-            }
-            _ if matches_dynamic_segments(
-                path,
-                "/api/admin/monitoring/trace/stats/provider/",
-                1,
-            ) =>
-            {
-                Some(AdminMonitoringRoute::TraceProviderStats)
-            }
-            _ if matches_dynamic_segments(path, "/api/admin/monitoring/trace/", 1) => {
-                Some(AdminMonitoringRoute::TraceRequest)
-            }
-            _ if matches_dynamic_segments(path, "/api/admin/monitoring/cache/affinity/", 1) => {
-                Some(AdminMonitoringRoute::CacheAffinity)
-            }
-            _ => None,
-        },
-        http::Method::DELETE => match path {
-            "/api/admin/monitoring/resilience/error-stats" => {
-                Some(AdminMonitoringRoute::ResilienceErrorStats)
-            }
-            "/api/admin/monitoring/cache" => Some(AdminMonitoringRoute::CacheFlush),
-            "/api/admin/monitoring/cache/model-mapping" => {
-                Some(AdminMonitoringRoute::CacheModelMappingDelete)
-            }
-            _ if matches_dynamic_segments(path, "/api/admin/monitoring/cache/users/", 1) => {
-                Some(AdminMonitoringRoute::CacheUsersDelete)
-            }
-            _ if matches_dynamic_segments(path, "/api/admin/monitoring/cache/providers/", 1) => {
-                Some(AdminMonitoringRoute::CacheProviderDelete)
-            }
-            _ if matches_dynamic_segments(path, "/api/admin/monitoring/cache/redis-keys/", 1) => {
-                Some(AdminMonitoringRoute::CacheRedisKeysDelete)
-            }
-            _ if matches_dynamic_segments(
-                path,
-                "/api/admin/monitoring/cache/model-mapping/provider/",
-                2,
-            ) =>
-            {
-                Some(AdminMonitoringRoute::CacheModelMappingDeleteProvider)
-            }
-            _ if matches_dynamic_segments(
-                path,
-                "/api/admin/monitoring/cache/model-mapping/",
-                1,
-            ) =>
-            {
-                Some(AdminMonitoringRoute::CacheModelMappingDeleteModel)
-            }
-            _ if matches_dynamic_segments(path, "/api/admin/monitoring/cache/affinity/", 4) => {
-                Some(AdminMonitoringRoute::CacheAffinityDelete)
-            }
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn normalize_admin_monitoring_path(path: &str) -> &str {
-    let normalized = path.trim_end_matches('/');
-    if normalized.is_empty() {
-        "/"
-    } else {
-        normalized
-    }
-}
-
-fn matches_dynamic_segments(path: &str, prefix: &str, dynamic_segments: usize) -> bool {
-    let Some(suffix) = path.strip_prefix(prefix) else {
-        return false;
-    };
-
-    let segments = suffix
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>();
-    segments.len() == dynamic_segments
 }

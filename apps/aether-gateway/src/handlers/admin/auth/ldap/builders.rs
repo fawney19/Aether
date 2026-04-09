@@ -1,8 +1,6 @@
 use super::shared::*;
-use crate::handlers::admin::shared::{
-    decrypt_catalog_secret_with_fallbacks, encrypt_catalog_secret_with_fallbacks,
-};
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::AdminAppState;
+use crate::GatewayError;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -69,7 +67,7 @@ pub(super) struct AdminLdapConnectionTestConfig {
 }
 
 pub(super) async fn build_admin_ldap_update_config(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     payload: AdminLdapConfigUpdateRequest,
 ) -> Result<aether_data::repository::auth_modules::StoredLdapModuleConfig, String> {
     let server_url = admin_ldap_trim_required(payload.server_url, "LDAP 服务器地址不能为空")?;
@@ -139,7 +137,7 @@ pub(super) async fn build_admin_ldap_update_config(
 
     let bind_password_encrypted = match bind_password {
         Some(value) if value.is_empty() => None,
-        Some(value) => encrypt_catalog_secret_with_fallbacks(state, &value),
+        Some(value) => state.encrypt_catalog_secret_with_fallbacks(&value),
         None => existing.and_then(|config| config.bind_password_encrypted),
     };
     if bind_password_update_requested && bind_password_encrypted.is_none() {
@@ -165,7 +163,7 @@ pub(super) async fn build_admin_ldap_update_config(
 }
 
 pub(super) async fn build_admin_ldap_test_config(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     payload: AdminLdapConfigTestRequest,
 ) -> Result<Option<AdminLdapConnectionTestConfig>, String> {
     if let Some(value) = payload.user_search_filter.as_deref() {
@@ -337,7 +335,7 @@ fn admin_ldap_validate_search_filter(value: &str) -> Result<(), String> {
 }
 
 fn admin_ldap_read_saved_bind_password(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     config: &aether_data::repository::auth_modules::StoredLdapModuleConfig,
 ) -> Option<String> {
     config
@@ -346,7 +344,8 @@ fn admin_ldap_read_saved_bind_password(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .and_then(|value| {
-            decrypt_catalog_secret_with_fallbacks(state.encryption_key(), value)
+            state
+                .decrypt_catalog_secret_with_fallbacks(value)
                 .or_else(|| Some(value.to_string()))
         })
         .filter(|value| !value.trim().is_empty())

@@ -191,7 +191,7 @@ mod tests {
     use serde_json::Value;
 
     use super::GatewayDataState;
-    use crate::usage::event::{UsageEvent, UsageEventData, UsageEventType};
+    use crate::usage::{UsageEvent, UsageEventData, UsageEventType};
 
     #[tokio::test]
     async fn enriches_completed_usage_event_with_billing_snapshot() {

@@ -1,15 +1,14 @@
-use crate::ai_pipeline::control_facade::GatewayControlDecision;
-use crate::{AppState, GatewayControlSyncDecisionResponse, GatewayError};
-
-use aether_ai_pipeline::planner::standard::gemini::{
-    resolve_stream_spec as resolve_pipeline_stream_spec,
-    resolve_sync_spec as resolve_pipeline_sync_spec,
+use crate::ai_pipeline::GatewayControlDecision;
+use crate::ai_pipeline::{
+    resolve_gemini_stream_spec as resolve_pipeline_stream_spec,
+    resolve_gemini_sync_spec as resolve_pipeline_sync_spec,
 };
+use crate::{AppState, GatewayControlSyncDecisionResponse, GatewayError};
 
 use super::family::{
     maybe_build_stream_via_standard_family_payload, maybe_build_sync_via_standard_family_payload,
 };
-pub(crate) use crate::ai_pipeline::conversion::request::normalize_gemini_request_to_openai_chat_request;
+pub(crate) use crate::ai_pipeline::normalize_gemini_request_to_openai_chat_request;
 
 pub(crate) fn resolve_sync_spec(plan_kind: &str) -> Option<super::family::LocalStandardSpec> {
     resolve_pipeline_sync_spec(plan_kind)

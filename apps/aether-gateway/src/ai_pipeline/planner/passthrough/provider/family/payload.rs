@@ -1,41 +1,23 @@
 use std::collections::BTreeMap;
 
 use serde_json::json;
-use tracing::warn;
 
-use crate::ai_pipeline::control_facade::collect_control_headers;
-use crate::ai_pipeline::execution_facade::{ConversionMode, ExecutionStrategy};
-use crate::ai_pipeline::planner::candidate_runtime_facade::persist_skipped_local_candidate;
-use crate::ai_pipeline::planner::transport_facade::{
-    read_provider_transport_snapshot, resolve_local_oauth_request_auth,
-    LocalResolvedOAuthRequestAuth,
-};
-use crate::ai_pipeline::provider_transport_facade::antigravity::{
+use crate::ai_pipeline::transport::antigravity::{
     build_antigravity_safe_v1internal_request, build_antigravity_static_identity_headers,
     classify_local_antigravity_request_support, AntigravityEnvelopeRequestType,
     AntigravityRequestEnvelopeSupport, AntigravityRequestSideSupport,
 };
-use crate::ai_pipeline::provider_transport_facade::auth::{
-    build_openai_passthrough_headers, resolve_local_gemini_auth, resolve_local_standard_auth,
+use crate::ai_pipeline::transport::auth::build_openai_passthrough_headers;
+use crate::ai_pipeline::transport::claude_code::build_claude_code_passthrough_headers;
+use crate::ai_pipeline::transport::kiro::{
+    build_kiro_provider_headers, KiroProviderHeadersInput, KIRO_ENVELOPE_NAME,
 };
-use crate::ai_pipeline::provider_transport_facade::claude_code::{
-    build_claude_code_passthrough_headers, supports_local_claude_code_transport_with_network,
+use crate::ai_pipeline::transport::{
+    apply_local_header_rules, ensure_upstream_auth_header, resolve_transport_execution_timeouts,
+    resolve_transport_proxy_snapshot_with_tunnel_affinity, resolve_transport_tls_profile,
 };
-use crate::ai_pipeline::provider_transport_facade::kiro::{
-    build_kiro_provider_headers, supports_local_kiro_request_transport_with_network,
-    KiroProviderHeadersInput, KIRO_ENVELOPE_NAME,
-};
-use crate::ai_pipeline::provider_transport_facade::policy::{
-    supports_local_gemini_transport_with_network, supports_local_standard_transport_with_network,
-};
-use crate::ai_pipeline::provider_transport_facade::vertex::{
-    resolve_local_vertex_api_key_query_auth,
-    supports_local_vertex_api_key_gemini_transport_with_network,
-};
-use crate::ai_pipeline::provider_transport_facade::{
-    apply_local_header_rules, build_passthrough_headers, ensure_upstream_auth_header,
-    resolve_transport_execution_timeouts, resolve_transport_proxy_snapshot_with_tunnel_affinity,
-    resolve_transport_tls_profile,
+use crate::ai_pipeline::{
+    collect_control_headers, ConversionMode, ExecutionStrategy, PlannerAppState,
 };
 use crate::clock::current_unix_secs;
 use crate::{
@@ -44,9 +26,15 @@ use crate::{
 };
 use aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate;
 
-use super::types::{
+#[path = "payload/prepare.rs"]
+mod prepare;
+
+use self::prepare::{
+    prepare_local_same_format_provider_candidate, PreparedSameFormatProviderCandidate,
+};
+use super::{
     LocalSameFormatProviderCandidateAttempt, LocalSameFormatProviderDecisionInput,
-    LocalSameFormatProviderFamily, LocalSameFormatProviderSpec,
+    LocalSameFormatProviderSpec,
 };
 
 pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_candidate(
@@ -58,205 +46,35 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
     attempt: LocalSameFormatProviderCandidateAttempt,
     spec: LocalSameFormatProviderSpec,
 ) -> Option<GatewayControlSyncDecisionResponse> {
+    let planner_state = PlannerAppState::new(state);
     let LocalSameFormatProviderCandidateAttempt {
         candidate,
         candidate_index,
         candidate_id,
     } = attempt;
 
-    let transport = match read_provider_transport_snapshot(
-        state,
-        &candidate.provider_id,
-        &candidate.endpoint_id,
-        &candidate.key_id,
+    let PreparedSameFormatProviderCandidate {
+        transport,
+        is_antigravity,
+        is_claude_code,
+        is_vertex,
+        is_kiro,
+        kiro_auth,
+        auth_header,
+        auth_value,
+        mapped_model,
+        report_kind,
+        upstream_is_stream,
+    } = prepare_local_same_format_provider_candidate(
+        planner_state.app(),
+        trace_id,
+        input,
+        &candidate,
+        candidate_index,
+        &candidate_id,
+        spec,
     )
-    .await
-    {
-        Ok(Some(snapshot)) => snapshot,
-        Ok(None) => {
-            mark_skipped_local_same_format_provider_candidate(
-                state,
-                input,
-                trace_id,
-                &candidate,
-                candidate_index,
-                &candidate_id,
-                "transport_snapshot_missing",
-            )
-            .await;
-            return None;
-        }
-        Err(err) => {
-            warn!(
-                trace_id = %trace_id,
-                api_format = spec.api_format,
-                error = ?err,
-                "gateway local same-format decision provider transport read failed"
-            );
-            mark_skipped_local_same_format_provider_candidate(
-                state,
-                input,
-                trace_id,
-                &candidate,
-                candidate_index,
-                &candidate_id,
-                "transport_snapshot_read_failed",
-            )
-            .await;
-            return None;
-        }
-    };
-
-    let is_antigravity = transport
-        .provider
-        .provider_type
-        .trim()
-        .eq_ignore_ascii_case("antigravity");
-    let is_claude_code = transport
-        .provider
-        .provider_type
-        .trim()
-        .eq_ignore_ascii_case("claude_code");
-    let is_vertex = transport
-        .provider
-        .provider_type
-        .trim()
-        .eq_ignore_ascii_case("vertex_ai");
-    let transport_supported = match spec.family {
-        _ if transport
-            .provider
-            .provider_type
-            .trim()
-            .eq_ignore_ascii_case("kiro") =>
-        {
-            supports_local_kiro_request_transport_with_network(&transport)
-        }
-        _ if is_antigravity => true,
-        _ if is_claude_code => {
-            supports_local_claude_code_transport_with_network(&transport, spec.api_format)
-        }
-        _ if is_vertex => supports_local_vertex_api_key_gemini_transport_with_network(&transport),
-        LocalSameFormatProviderFamily::Standard => {
-            supports_local_standard_transport_with_network(&transport, spec.api_format)
-        }
-        LocalSameFormatProviderFamily::Gemini => {
-            supports_local_gemini_transport_with_network(&transport, spec.api_format)
-        }
-    };
-    if !transport_supported {
-        mark_skipped_local_same_format_provider_candidate(
-            state,
-            input,
-            trace_id,
-            &candidate,
-            candidate_index,
-            &candidate_id,
-            "transport_unsupported",
-        )
-        .await;
-        return None;
-    }
-
-    let is_kiro = transport
-        .provider
-        .provider_type
-        .trim()
-        .eq_ignore_ascii_case("kiro");
-    let vertex_query_auth = if is_vertex {
-        resolve_local_vertex_api_key_query_auth(&transport)
-    } else {
-        None
-    };
-    let should_try_oauth_auth = is_kiro
-        || matches!(spec.family, LocalSameFormatProviderFamily::Standard)
-            && resolve_local_standard_auth(&transport).is_none()
-        || matches!(spec.family, LocalSameFormatProviderFamily::Gemini)
-            && !is_vertex
-            && resolve_local_gemini_auth(&transport).is_none();
-    let oauth_auth = if should_try_oauth_auth {
-        match resolve_local_oauth_request_auth(state, &transport).await {
-            Ok(Some(LocalResolvedOAuthRequestAuth::Kiro(auth))) => {
-                Some(LocalResolvedOAuthRequestAuth::Kiro(auth))
-            }
-            Ok(Some(LocalResolvedOAuthRequestAuth::Header { name, value })) => {
-                Some(LocalResolvedOAuthRequestAuth::Header { name, value })
-            }
-            Ok(None) => None,
-            Err(err) => {
-                warn!(
-                    trace_id = %trace_id,
-                    api_format = spec.api_format,
-                    provider_type = %transport.provider.provider_type,
-                    error = ?err,
-                    "gateway local same-format oauth auth resolution failed"
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let kiro_auth = match oauth_auth.as_ref() {
-        Some(LocalResolvedOAuthRequestAuth::Kiro(auth)) => Some(auth),
-        _ => None,
-    };
-    let auth = if let Some(auth) = kiro_auth.as_ref() {
-        Some((auth.name.to_string(), auth.value.clone()))
-    } else if let Some(LocalResolvedOAuthRequestAuth::Header { name, value }) = oauth_auth.as_ref()
-    {
-        Some((name.clone(), value.clone()))
-    } else if is_vertex {
-        None
-    } else {
-        match spec.family {
-            LocalSameFormatProviderFamily::Standard => resolve_local_standard_auth(&transport),
-            LocalSameFormatProviderFamily::Gemini => resolve_local_gemini_auth(&transport),
-        }
-    };
-    let (auth_header, auth_value) = match auth {
-        Some((name, value)) => (Some(name), Some(value)),
-        None if is_vertex && vertex_query_auth.is_some() => (None, None),
-        None => {
-            mark_skipped_local_same_format_provider_candidate(
-                state,
-                input,
-                trace_id,
-                &candidate,
-                candidate_index,
-                &candidate_id,
-                "transport_auth_unavailable",
-            )
-            .await;
-            return None;
-        }
-    };
-    if is_vertex && vertex_query_auth.is_none() {
-        mark_skipped_local_same_format_provider_candidate(
-            state,
-            input,
-            trace_id,
-            &candidate,
-            candidate_index,
-            &candidate_id,
-            "transport_auth_unavailable",
-        )
-        .await;
-        return None;
-    }
-    let mapped_model = candidate.selected_provider_model_name.trim().to_string();
-    if mapped_model.is_empty() {
-        mark_skipped_local_same_format_provider_candidate(
-            state,
-            input,
-            trace_id,
-            &candidate,
-            candidate_index,
-            &candidate_id,
-            "mapped_model_missing",
-        )
-        .await;
-        return None;
-    }
+    .await?;
 
     let Some(base_provider_request_body) =
         super::super::request::build_same_format_provider_request_body(
@@ -264,8 +82,8 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
             &mapped_model,
             spec,
             transport.endpoint.body_rules.as_ref(),
-            is_kiro || is_antigravity || spec.require_streaming,
-            kiro_auth,
+            upstream_is_stream,
+            kiro_auth.as_ref(),
             is_claude_code,
         )
     else {
@@ -332,18 +150,6 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
     } else {
         base_provider_request_body
     };
-    let upstream_is_stream = is_kiro || is_antigravity || spec.require_streaming;
-    let report_kind = if is_kiro && !spec.require_streaming {
-        "claude_cli_sync_finalize"
-    } else if is_antigravity && !spec.require_streaming {
-        match spec.api_format {
-            "gemini:chat" => "gemini_chat_sync_finalize",
-            "gemini:cli" => "gemini_cli_sync_finalize",
-            _ => spec.report_kind,
-        }
-    } else {
-        spec.report_kind
-    };
 
     let Some(upstream_url) = super::super::request::build_same_format_upstream_url(
         parts,
@@ -351,7 +157,7 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
         &mapped_model,
         spec,
         upstream_is_stream,
-        kiro_auth,
+        kiro_auth.as_ref(),
     ) else {
         mark_skipped_local_same_format_provider_candidate(
             state,
@@ -392,7 +198,11 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
                 transport.key.fingerprint.as_ref(),
             )
         } else if is_vertex {
-            build_passthrough_headers(&parts.headers, &extra_headers, Some("application/json"))
+            crate::ai_pipeline::transport::build_passthrough_headers(
+                &parts.headers,
+                &extra_headers,
+                Some("application/json"),
+            )
         } else {
             build_openai_passthrough_headers(
                 &parts.headers,
@@ -440,13 +250,16 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
         .await;
         return None;
     };
+
     let prompt_cache_key = provider_request_body
         .get("prompt_cache_key")
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
-    let proxy = resolve_transport_proxy_snapshot_with_tunnel_affinity(state, &transport).await;
+    let proxy =
+        resolve_transport_proxy_snapshot_with_tunnel_affinity(planner_state.app(), &transport)
+            .await;
     let tls_profile = resolve_transport_tls_profile(&transport);
     let report_context = append_execution_contract_fields_to_value(
         json!({
@@ -538,17 +351,17 @@ pub(super) async fn mark_skipped_local_same_format_provider_candidate(
     candidate_id: &str,
     skip_reason: &'static str,
 ) {
-    persist_skipped_local_candidate(
-        state,
-        trace_id,
-        &input.auth_context.user_id,
-        &input.auth_context.api_key_id,
-        candidate,
-        candidate_index,
-        candidate_id,
-        skip_reason,
-        current_unix_secs(),
-        "gateway local same-format decision failed to persist skipped candidate",
-    )
-    .await;
+    PlannerAppState::new(state)
+        .persist_skipped_local_candidate(
+            trace_id,
+            &input.auth_context.user_id,
+            &input.auth_context.api_key_id,
+            candidate,
+            candidate_index,
+            candidate_id,
+            skip_reason,
+            current_unix_secs(),
+            "gateway local same-format decision failed to persist skipped candidate",
+        )
+        .await;
 }

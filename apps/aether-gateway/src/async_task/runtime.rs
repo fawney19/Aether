@@ -11,7 +11,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::log_ids::short_request_id;
-use crate::usage::event::{UsageEvent, UsageEventData, UsageEventType};
+use crate::usage::{UsageEvent, UsageEventData, UsageEventType};
 use crate::video_tasks::{LocalVideoTaskReadRefreshPlan, LocalVideoTaskSnapshot};
 use crate::{AppState, GatewayError};
 

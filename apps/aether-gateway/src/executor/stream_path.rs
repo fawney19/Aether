@@ -2,10 +2,9 @@ use axum::body::{Body, Bytes};
 use axum::http::Response;
 use std::collections::BTreeMap;
 
-use crate::ai_pipeline::planner::common::OPENAI_VIDEO_CONTENT_PLAN_KIND;
-use crate::ai_pipeline::planner::{
+use crate::ai_pipeline_api::{
     is_matching_stream_request, resolve_execution_runtime_stream_plan_kind,
-    supports_stream_scheduler_decision_kind,
+    supports_stream_scheduler_decision_kind, OPENAI_VIDEO_CONTENT_PLAN_KIND,
 };
 use crate::api::response::build_client_response_from_parts;
 use crate::control::GatewayControlDecision;

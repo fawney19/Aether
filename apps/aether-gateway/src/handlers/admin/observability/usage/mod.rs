@@ -1,23 +1,19 @@
-use crate::control::GatewayPublicRequestContext;
-use crate::{AppState, GatewayError};
-use axum::{
-    body::Body,
-    response::{IntoResponse, Response},
-};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
+use axum::{body::Body, response::Response};
 
 mod analytics;
 mod analytics_routes;
 mod detail_routes;
-mod helpers;
 mod replay;
 mod summary_routes;
 
 pub(crate) async fn maybe_build_local_admin_usage_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&axum::body::Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
+    let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
 

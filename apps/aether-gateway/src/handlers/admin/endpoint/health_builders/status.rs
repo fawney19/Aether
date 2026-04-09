@@ -1,8 +1,8 @@
+use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::unix_secs_to_rfc3339;
 use crate::handlers::public::{
     api_format_display_name, build_public_health_timeline, provider_key_api_formats,
 };
-use crate::AppState;
 use aether_data_contracts::repository::candidates::PublicHealthTimelineBucket;
 use aether_scheduler_core::{is_provider_key_circuit_open, provider_key_health_score};
 use serde_json::json;
@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) async fn build_admin_endpoint_health_status_payload(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     lookback_hours: u64,
 ) -> Option<serde_json::Value> {
     if !state.has_provider_catalog_data_reader() || !state.has_request_candidate_data_reader() {
@@ -210,7 +210,7 @@ pub(crate) async fn build_admin_endpoint_health_status_payload(
 }
 
 pub(crate) async fn build_admin_health_summary_payload(
-    state: &AppState,
+    state: &AdminAppState<'_>,
 ) -> Option<serde_json::Value> {
     if !state.has_provider_catalog_data_reader() {
         return None;

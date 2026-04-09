@@ -1,6 +1,6 @@
-use crate::control::GatewayPublicRequestContext;
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{query_param_value, unix_secs_to_rfc3339};
-use crate::{AppState, GatewayError};
+use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -16,11 +16,13 @@ const ADMIN_BILLING_DATA_UNAVAILABLE_DETAIL: &str = "Admin billing data unavaila
 mod collectors;
 mod payments;
 mod presets;
+mod routes;
 mod rules;
 mod wallets;
 
-pub(crate) use self::payments::maybe_build_local_admin_payments_response;
-pub(crate) use self::wallets::maybe_build_local_admin_wallets_response;
+pub(super) use self::payments::maybe_build_local_admin_payments_response;
+pub(super) use self::routes::maybe_build_local_admin_billing_routes_response;
+pub(super) use self::wallets::maybe_build_local_admin_wallets_response;
 
 fn default_admin_billing_true() -> bool {
     true
@@ -198,11 +200,11 @@ fn admin_billing_optional_epoch_value(
 }
 
 pub(crate) async fn maybe_build_local_admin_billing_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
+    let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
 
@@ -210,47 +212,47 @@ pub(crate) async fn maybe_build_local_admin_billing_response(
         return Ok(None);
     }
 
-    let path = request_context.request_path.as_str();
-    let is_billing_route = (request_context.request_method == http::Method::GET
+    let path = request_context.path();
+    let is_billing_route = (request_context.method() == http::Method::GET
         && matches!(
             path,
             "/api/admin/billing/presets" | "/api/admin/billing/presets/"
         ))
-        || (request_context.request_method == http::Method::POST
+        || (request_context.method() == http::Method::POST
             && matches!(
                 path,
                 "/api/admin/billing/presets/apply" | "/api/admin/billing/presets/apply/"
             ))
-        || (request_context.request_method == http::Method::GET
+        || (request_context.method() == http::Method::GET
             && matches!(
                 path,
                 "/api/admin/billing/rules" | "/api/admin/billing/rules/"
             ))
-        || (request_context.request_method == http::Method::GET
+        || (request_context.method() == http::Method::GET
             && path.starts_with("/api/admin/billing/rules/")
             && path.matches('/').count() == 5)
-        || (request_context.request_method == http::Method::POST
+        || (request_context.method() == http::Method::POST
             && matches!(
                 path,
                 "/api/admin/billing/rules" | "/api/admin/billing/rules/"
             ))
-        || (request_context.request_method == http::Method::PUT
+        || (request_context.method() == http::Method::PUT
             && path.starts_with("/api/admin/billing/rules/")
             && path.matches('/').count() == 5)
-        || (request_context.request_method == http::Method::GET
+        || (request_context.method() == http::Method::GET
             && matches!(
                 path,
                 "/api/admin/billing/collectors" | "/api/admin/billing/collectors/"
             ))
-        || (request_context.request_method == http::Method::GET
+        || (request_context.method() == http::Method::GET
             && path.starts_with("/api/admin/billing/collectors/")
             && path.matches('/').count() == 5)
-        || (request_context.request_method == http::Method::POST
+        || (request_context.method() == http::Method::POST
             && matches!(
                 path,
                 "/api/admin/billing/collectors" | "/api/admin/billing/collectors/"
             ))
-        || (request_context.request_method == http::Method::PUT
+        || (request_context.method() == http::Method::PUT
             && path.starts_with("/api/admin/billing/collectors/")
             && path.matches('/').count() == 5);
 

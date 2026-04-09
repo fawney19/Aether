@@ -8,8 +8,10 @@ use axum::http::Response;
 use base64::Engine as _;
 use tracing::warn;
 
-use crate::ai_pipeline::contracts::implicit_sync_finalize_report_kind;
-use crate::ai_pipeline::finalize::maybe_build_sync_finalize_outcome;
+use crate::ai_pipeline_api::{
+    implicit_sync_finalize_report_kind, maybe_build_sync_finalize_outcome,
+    LocalCoreSyncFinalizeOutcome,
+};
 use crate::api::response::{
     attach_control_metadata_headers, build_client_response, build_client_response_from_parts,
 };
@@ -46,7 +48,7 @@ pub(crate) use response::{
 
 struct ImplicitSyncFinalizeOutcome {
     payload: GatewaySyncReportRequest,
-    outcome: crate::ai_pipeline::finalize::LocalCoreSyncFinalizeOutcome,
+    outcome: LocalCoreSyncFinalizeOutcome,
 }
 
 async fn record_sync_terminal_usage(

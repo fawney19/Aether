@@ -1,9 +1,10 @@
 use serde_json::Value;
 
 use crate::ai_pipeline::adaptation::private_envelope::transform_provider_private_stream_line as transform_envelope_line;
-use crate::ai_pipeline::adaptation::surfaces::provider_adaptation_should_unwrap_stream_envelope;
+use crate::ai_pipeline::{
+    provider_adaptation_should_unwrap_stream_envelope, StreamingStandardFormatMatrix,
+};
 use crate::GatewayError;
-use aether_ai_pipeline::finalize::standard::stream_core::StreamingStandardFormatMatrix;
 
 #[derive(Default)]
 pub(crate) struct StreamingStandardConversionState {
@@ -17,7 +18,8 @@ impl StreamingStandardConversionState {
         line: Vec<u8>,
     ) -> Result<Vec<u8>, GatewayError> {
         let line = if should_unwrap_envelope(report_context) {
-            transform_envelope_line(report_context, line)?
+            transform_envelope_line(report_context, line)
+                .map_err(|err| GatewayError::Internal(err.to_string()))?
         } else {
             line
         };

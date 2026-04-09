@@ -1,1 +1,1124 @@
-[{"architecture_id":"anyrouter","credentials_schema":{"properties":{"base_url":{"description":"API 基础地址","title":"站点地址","type":"string","x-default-value":"https://anyrouter.top"},"session_cookie":{"description":"从浏览器复制的 session Cookie 值","title":"Session Cookie","type":"string","x-input-type":"password","x-sensitive":true}},"required":["session_cookie"],"type":"object","x-auth-type":"cookie","x-currency":"USD","x-default-base-url":"https://anyrouter.top","x-field-groups":[{"fields":["base_url"]},{"fields":["session_cookie"]}],"x-quota-divisor":500000,"x-validation":[{"fields":["session_cookie"],"message":"请填写 Session Cookie","type":"required"}]},"default_connector":"cookie","description":"Anyrouter 中转站预设配置，使用 Cookie 认证","display_name":"Anyrouter","supported_actions":[{"config_schema":{"properties":{"currency":{"default":"USD","title":"货币单位","type":"string"}},"required":[],"type":"object"},"description":"查询账户余额，同时自动签到","display_name":"查询余额（含自动签到）","type":"query_balance"}],"supported_auth_types":[{"credentials_schema":{"properties":{"base_url":{"description":"API 基础地址","title":"站点地址","type":"string","x-default-value":"https://anyrouter.top"},"session_cookie":{"description":"从浏览器复制的 session Cookie 值","title":"Session Cookie","type":"string","x-input-type":"password","x-sensitive":true}},"required":["session_cookie"],"type":"object","x-auth-type":"cookie","x-currency":"USD","x-default-base-url":"https://anyrouter.top","x-field-groups":[{"fields":["base_url"]},{"fields":["session_cookie"]}],"x-quota-divisor":500000,"x-validation":[{"fields":["session_cookie"],"message":"请填写 Session Cookie","type":"required"}]},"display_name":"Anyrouter Cookie","type":"cookie"}]},{"architecture_id":"cubence","credentials_schema":{"properties":{"base_url":{"description":"API 基础地址","title":"站点地址","type":"string","x-default-value":"https://cubence.com"},"token_cookie":{"description":"从浏览器复制的 token Cookie 值（JWT 格式）","title":"Token Cookie","type":"string","x-input-type":"password","x-sensitive":true}},"required":["token_cookie"],"type":"object","x-auth-type":"cookie","x-balance-extra-format":[{"label":"5h","source":"five_hour_limit","type":"window_limit","unit_divisor":1000000},{"label":"周","source":"weekly_limit","type":"window_limit","unit_divisor":1000000}],"x-currency":"USD","x-default-base-url":"https://cubence.com","x-field-groups":[{"fields":["base_url"]},{"fields":["token_cookie"]}],"x-quota-divisor":null,"x-validation":[{"fields":["token_cookie"],"message":"请填写 Token Cookie","type":"required"}]},"default_connector":"cookie","description":"Cubence 中转站预设配置，使用 Cookie 认证","display_name":"Cubence","supported_actions":[{"config_schema":{"properties":{"currency":{"default":"USD","title":"货币单位","type":"string"}},"required":[],"type":"object"},"description":"查询账户余额和窗口限额信息","display_name":"查询余额（含窗口限额）","type":"query_balance"}],"supported_auth_types":[{"credentials_schema":{"properties":{"base_url":{"description":"API 基础地址","title":"站点地址","type":"string","x-default-value":"https://cubence.com"},"token_cookie":{"description":"从浏览器复制的 token Cookie 值（JWT 格式）","title":"Token Cookie","type":"string","x-input-type":"password","x-sensitive":true}},"required":["token_cookie"],"type":"object","x-auth-type":"cookie","x-balance-extra-format":[{"label":"5h","source":"five_hour_limit","type":"window_limit","unit_divisor":1000000},{"label":"周","source":"weekly_limit","type":"window_limit","unit_divisor":1000000}],"x-currency":"USD","x-default-base-url":"https://cubence.com","x-field-groups":[{"fields":["base_url"]},{"fields":["token_cookie"]}],"x-quota-divisor":null,"x-validation":[{"fields":["token_cookie"],"message":"请填写 Token Cookie","type":"required"}]},"display_name":"Cubence Cookie","type":"cookie"}]},{"architecture_id":"generic_api","credentials_schema":{"properties":{"api_key":{"description":"提供商的 API Key","title":"API Key","type":"string","x-input-type":"password","x-sensitive":true},"base_url":{"description":"API 基础地址","title":"站点地址","type":"string"}},"required":["api_key"],"type":"object","x-auth-method":"bearer","x-auth-type":"api_key","x-currency":"USD","x-field-groups":[{"fields":["base_url"]},{"fields":["api_key"]}],"x-quota-divisor":500000,"x-validation":[{"fields":["api_key"],"message":"请填写 API Key","type":"required"}]},"default_connector":"api_key","description":"可配置的通用 API 架构，适用于各种中转站","display_name":"通用 API","supported_actions":[{"config_schema":{"properties":{"currency":{"default":"USD","title":"货币单位","type":"string"},"endpoint":{"default":"/api/user/self","description":"余额查询 API 路径","title":"API 路径","type":"string"},"method":{"default":"GET","enum":["GET","POST"],"title":"请求方法","type":"string"},"quota_divisor":{"default":500000,"description":"将原始额度值转换为美元的除数","title":"额度除数","type":"number"}},"required":[],"type":"object"},"description":"查询 New API 账户余额信息","display_name":"查询余额","type":"query_balance"}],"supported_auth_types":[{"credentials_schema":{"properties":{"api_key":{"description":"提供商的 API Key","title":"API Key","type":"string","x-input-type":"password","x-sensitive":true},"base_url":{"description":"API 基础地址","title":"站点地址","type":"string"}},"required":["api_key"],"type":"object","x-auth-method":"bearer","x-auth-type":"api_key","x-currency":"USD","x-field-groups":[{"fields":["base_url"]},{"fields":["api_key"]}],"x-quota-divisor":500000,"x-validation":[{"fields":["api_key"],"message":"请填写 API Key","type":"required"}]},"display_name":"API Key","type":"api_key"}]},{"architecture_id":"nekocode","credentials_schema":{"properties":{"base_url":{"description":"API 基础地址","title":"站点地址","type":"string","x-default-value":"https://nekocode.ai"},"session_cookie":{"description":"从浏览器复制的 session Cookie 值","title":"Session Cookie","type":"string","x-input-type":"password","x-sensitive":true}},"required":["session_cookie"],"type":"object","x-auth-type":"cookie","x-balance-extra-format":[{"label":"天","source_limit":"daily_quota_limit","source_remaining":"daily_remaining_quota","source_start_date":"effective_start_date","type":"daily_quota"},{"label":"月","source_end_date":"effective_end_date","type":"monthly_expiry"}],"x-currency":"USD","x-default-base-url":"https://nekocode.ai","x-field-groups":[{"fields":["base_url"]},{"fields":["session_cookie"]}],"x-quota-divisor":null,"x-validation":[{"fields":["session_cookie"],"message":"请填写 Session Cookie","type":"required"}]},"default_connector":"cookie","description":"NekoCode 中转站预设配置，使用 Cookie 认证","display_name":"NekoCode","supported_actions":[{"config_schema":{"properties":{"endpoint":{"default":"/api/usage/summary","title":"API 端点","type":"string"}},"required":[],"type":"object"},"description":"查询 NekoCode 账户余额和订阅信息","display_name":"查询余额","type":"query_balance"}],"supported_auth_types":[{"credentials_schema":{"properties":{"base_url":{"description":"API 基础地址","title":"站点地址","type":"string","x-default-value":"https://nekocode.ai"},"session_cookie":{"description":"从浏览器复制的 session Cookie 值","title":"Session Cookie","type":"string","x-input-type":"password","x-sensitive":true}},"required":["session_cookie"],"type":"object","x-auth-type":"cookie","x-balance-extra-format":[{"label":"天","source_limit":"daily_quota_limit","source_remaining":"daily_remaining_quota","source_start_date":"effective_start_date","type":"daily_quota"},{"label":"月","source_end_date":"effective_end_date","type":"monthly_expiry"}],"x-currency":"USD","x-default-base-url":"https://nekocode.ai","x-field-groups":[{"fields":["base_url"]},{"fields":["session_cookie"]}],"x-quota-divisor":null,"x-validation":[{"fields":["session_cookie"],"message":"请填写 Session Cookie","type":"required"}]},"display_name":"NekoCode Cookie","type":"cookie"}]},{"architecture_id":"new_api","credentials_schema":{"properties":{"api_key":{"description":"New API 的访问令牌，与 Cookie 二选一","title":"访问令牌 (API Key)","type":"string","x-input-type":"password","x-sensitive":true},"base_url":{"description":"API 基础地址","title":"站点地址","type":"string"},"cookie":{"description":"用于 Cookie 认证，与访问令牌二选一","title":"Cookie","type":"string","x-input-type":"password","x-sensitive":true},"user_id":{"description":"使用访问令牌时必填，使用 Cookie 时可选","title":"用户 ID","type":"string"}},"required":[],"type":"object","x-auth-method":"bearer","x-auth-type":"api_key","x-currency":"USD","x-field-groups":[{"fields":["base_url"]},{"fields":["cookie"],"x-help":"从浏览器开发者工具复制完整 Cookie"},{"fields":["api_key","user_id"],"layout":"inline","x-flex":{"api_key":3,"user_id":1}}],"x-field-hooks":{"cookie":{"action":"parse_new_api_user_id","target":"user_id"}},"x-quota-divisor":500000,"x-validation":[{"fields":["api_key","cookie"],"message":"访问令牌和 Cookie 至少需要填写一个","type":"any_required"},{"if":"api_key","message":"使用访问令牌时，用户 ID 不能为空","then":["user_id"],"type":"conditional_required","unless":"cookie"}]},"default_connector":"api_key","description":"New API 风格中转站的预设配置","display_name":"New API","supported_actions":[{"config_schema":{"properties":{"currency":{"default":"USD","title":"货币单位","type":"string"},"endpoint":{"default":"/api/user/self","description":"余额查询 API 路径","title":"API 路径","type":"string"},"method":{"default":"GET","enum":["GET","POST"],"title":"请求方法","type":"string"},"quota_divisor":{"default":500000,"description":"将原始额度值转换为美元的除数","title":"额度除数","type":"number"}},"required":[],"type":"object"},"description":"查询 New API 账户余额信息","display_name":"查询余额","type":"query_balance"}],"supported_auth_types":[{"credentials_schema":{"properties":{"api_key":{"description":"New API 的访问令牌，与 Cookie 二选一","title":"访问令牌 (API Key)","type":"string","x-input-type":"password","x-sensitive":true},"base_url":{"description":"API 基础地址","title":"站点地址","type":"string"},"cookie":{"description":"用于 Cookie 认证，与访问令牌二选一","title":"Cookie","type":"string","x-input-type":"password","x-sensitive":true},"user_id":{"description":"使用访问令牌时必填，使用 Cookie 时可选","title":"用户 ID","type":"string"}},"required":[],"type":"object","x-auth-method":"bearer","x-auth-type":"api_key","x-currency":"USD","x-field-groups":[{"fields":["base_url"]},{"fields":["cookie"],"x-help":"从浏览器开发者工具复制完整 Cookie"},{"fields":["api_key","user_id"],"layout":"inline","x-flex":{"api_key":3,"user_id":1}}],"x-field-hooks":{"cookie":{"action":"parse_new_api_user_id","target":"user_id"}},"x-quota-divisor":500000,"x-validation":[{"fields":["api_key","cookie"],"message":"访问令牌和 Cookie 至少需要填写一个","type":"any_required"},{"if":"api_key","message":"使用访问令牌时，用户 ID 不能为空","then":["user_id"],"type":"conditional_required","unless":"cookie"}]},"display_name":"New API Key","type":"api_key"}]},{"architecture_id":"sub2api","credentials_schema":{"properties":{"base_url":{"description":"API 基础地址","title":"站点地址","type":"string"},"email":{"description":"Sub2API 登录邮箱","title":"邮箱","type":"string"},"password":{"description":"Sub2API 登录密码","title":"密码","type":"string","x-input-type":"password","x-sensitive":true}},"required":["email","password"],"type":"object","x-auth-method":"jwt","x-auth-type":"session_login","x-field-groups":[{"fields":["base_url"]},{"fields":["email"]},{"fields":["password"]}],"x-validation":[{"fields":["email","password"],"message":"请填写邮箱和密码","type":"required"}]},"default_connector":"session_login","description":"Sub2API 风格中转站的预设配置","display_name":"Sub2API","supported_actions":[{"config_schema":{"properties":{"currency":{"default":"USD","title":"货币单位","type":"string"}},"required":[],"type":"object"},"description":"查询 Sub2API 账户余额和订阅信息","display_name":"查询余额","type":"query_balance"}],"supported_auth_types":[{"credentials_schema":{"properties":{"base_url":{"description":"API 基础地址","title":"站点地址","type":"string"},"email":{"description":"Sub2API 登录邮箱","title":"邮箱","type":"string"},"password":{"description":"Sub2API 登录密码","title":"密码","type":"string","x-input-type":"password","x-sensitive":true}},"required":["email","password"],"type":"object","x-auth-method":"jwt","x-auth-type":"session_login","x-field-groups":[{"fields":["base_url"]},{"fields":["email"]},{"fields":["password"]}],"x-validation":[{"fields":["email","password"],"message":"请填写邮箱和密码","type":"required"}]},"display_name":"账号密码","type":"session_login"},{"credentials_schema":{"properties":{"base_url":{"description":"API 基础地址","title":"站点地址","type":"string"},"refresh_token":{"description":"从浏览器 F12 > Application > Local Storage 获取","title":"Refresh Token","type":"string","x-help":"浏览器控制台执行 localStorage.getItem('refresh_token') 获取","x-input-type":"password","x-sensitive":true}},"required":["refresh_token"],"type":"object","x-auth-method":"bearer","x-auth-type":"api_key","x-field-groups":[{"fields":["base_url"]},{"fields":["refresh_token"]}],"x-validation":[{"fields":["refresh_token"],"message":"请填写 Refresh Token","type":"required"}]},"display_name":"Refresh Token","type":"api_key"}]},{"architecture_id":"yescode","credentials_schema":{"properties":{"auth_cookie":{"description":"从浏览器复制的 Cookie（包含 yescode_auth 和 yescode_csrf）","title":"Auth Cookie","type":"string","x-input-type":"password","x-sensitive":true},"base_url":{"description":"API 基础地址","title":"站点地址","type":"string","x-default-value":"https://co.yes.vg"}},"required":["auth_cookie"],"type":"object","x-auth-type":"cookie","x-balance-extra-format":[{"label":"天","source_limit":"daily_limit","source_resets_at":"daily_resets_at","source_spent":"daily_spent","type":"weekly_spent"},{"label":"周","source_limit":"weekly_limit","source_resets_at":"weekly_resets_at","source_spent":"weekly_spent","type":"weekly_spent"}],"x-currency":"USD","x-default-base-url":"https://co.yes.vg","x-field-groups":[{"fields":["base_url"]},{"fields":["auth_cookie"]}],"x-quota-divisor":null,"x-validation":[{"fields":["auth_cookie"],"message":"请填写 Auth Cookie","type":"required"}]},"default_connector":"cookie","description":"YesCode 中转站预设配置，使用 Cookie 认证","display_name":"YesCode","supported_actions":[{"config_schema":{"properties":{"currency":{"default":"USD","title":"货币单位","type":"string"}},"required":[],"type":"object"},"description":"查询账户余额和每周限额信息","display_name":"查询余额（含每周限额）","type":"query_balance"}],"supported_auth_types":[{"credentials_schema":{"properties":{"auth_cookie":{"description":"从浏览器复制的 Cookie（包含 yescode_auth 和 yescode_csrf）","title":"Auth Cookie","type":"string","x-input-type":"password","x-sensitive":true},"base_url":{"description":"API 基础地址","title":"站点地址","type":"string","x-default-value":"https://co.yes.vg"}},"required":["auth_cookie"],"type":"object","x-auth-type":"cookie","x-balance-extra-format":[{"label":"天","source_limit":"daily_limit","source_resets_at":"daily_resets_at","source_spent":"daily_spent","type":"weekly_spent"},{"label":"周","source_limit":"weekly_limit","source_resets_at":"weekly_resets_at","source_spent":"weekly_spent","type":"weekly_spent"}],"x-currency":"USD","x-default-base-url":"https://co.yes.vg","x-field-groups":[{"fields":["base_url"]},{"fields":["auth_cookie"]}],"x-quota-divisor":null,"x-validation":[{"fields":["auth_cookie"],"message":"请填写 Auth Cookie","type":"required"}]},"display_name":"YesCode Cookie","type":"cookie"}]}]
+[
+    {
+        "architecture_id": "anyrouter",
+        "credentials_schema": {
+            "properties": {
+                "base_url": {
+                    "description": "API 基础地址",
+                    "title": "站点地址",
+                    "type": "string",
+                    "x-default-value": "https://anyrouter.top"
+                },
+                "session_cookie": {
+                    "description": "从浏览器复制的 session Cookie 值",
+                    "title": "Session Cookie",
+                    "type": "string",
+                    "x-input-type": "password",
+                    "x-sensitive": true
+                }
+            },
+            "required": [
+                "session_cookie"
+            ],
+            "type": "object",
+            "x-auth-type": "cookie",
+            "x-currency": "USD",
+            "x-default-base-url": "https://anyrouter.top",
+            "x-field-groups": [
+                {
+                    "fields": [
+                        "base_url"
+                    ]
+                },
+                {
+                    "fields": [
+                        "session_cookie"
+                    ]
+                }
+            ],
+            "x-quota-divisor": 500000,
+            "x-validation": [
+                {
+                    "fields": [
+                        "session_cookie"
+                    ],
+                    "message": "请填写 Session Cookie",
+                    "type": "required"
+                }
+            ]
+        },
+        "default_connector": "cookie",
+        "description": "Anyrouter 中转站预设配置，使用 Cookie 认证",
+        "display_name": "Anyrouter",
+        "supported_actions": [
+            {
+                "config_schema": {
+                    "properties": {
+                        "currency": {
+                            "default": "USD",
+                            "title": "货币单位",
+                            "type": "string"
+                        }
+                    },
+                    "required": [],
+                    "type": "object"
+                },
+                "description": "查询账户余额，同时自动签到",
+                "display_name": "查询余额（含自动签到）",
+                "type": "query_balance"
+            }
+        ],
+        "supported_auth_types": [
+            {
+                "credentials_schema": {
+                    "properties": {
+                        "base_url": {
+                            "description": "API 基础地址",
+                            "title": "站点地址",
+                            "type": "string",
+                            "x-default-value": "https://anyrouter.top"
+                        },
+                        "session_cookie": {
+                            "description": "从浏览器复制的 session Cookie 值",
+                            "title": "Session Cookie",
+                            "type": "string",
+                            "x-input-type": "password",
+                            "x-sensitive": true
+                        }
+                    },
+                    "required": [
+                        "session_cookie"
+                    ],
+                    "type": "object",
+                    "x-auth-type": "cookie",
+                    "x-currency": "USD",
+                    "x-default-base-url": "https://anyrouter.top",
+                    "x-field-groups": [
+                        {
+                            "fields": [
+                                "base_url"
+                            ]
+                        },
+                        {
+                            "fields": [
+                                "session_cookie"
+                            ]
+                        }
+                    ],
+                    "x-quota-divisor": 500000,
+                    "x-validation": [
+                        {
+                            "fields": [
+                                "session_cookie"
+                            ],
+                            "message": "请填写 Session Cookie",
+                            "type": "required"
+                        }
+                    ]
+                },
+                "display_name": "Anyrouter Cookie",
+                "type": "cookie"
+            }
+        ]
+    },
+    {
+        "architecture_id": "cubence",
+        "credentials_schema": {
+            "properties": {
+                "base_url": {
+                    "description": "API 基础地址",
+                    "title": "站点地址",
+                    "type": "string",
+                    "x-default-value": "https://cubence.com"
+                },
+                "token_cookie": {
+                    "description": "从浏览器复制的 token Cookie 值（JWT 格式）",
+                    "title": "Token Cookie",
+                    "type": "string",
+                    "x-input-type": "password",
+                    "x-sensitive": true
+                }
+            },
+            "required": [
+                "token_cookie"
+            ],
+            "type": "object",
+            "x-auth-type": "cookie",
+            "x-balance-extra-format": [
+                {
+                    "label": "5h",
+                    "source": "five_hour_limit",
+                    "type": "window_limit",
+                    "unit_divisor": 1000000
+                },
+                {
+                    "label": "周",
+                    "source": "weekly_limit",
+                    "type": "window_limit",
+                    "unit_divisor": 1000000
+                }
+            ],
+            "x-currency": "USD",
+            "x-default-base-url": "https://cubence.com",
+            "x-field-groups": [
+                {
+                    "fields": [
+                        "base_url"
+                    ]
+                },
+                {
+                    "fields": [
+                        "token_cookie"
+                    ]
+                }
+            ],
+            "x-quota-divisor": null,
+            "x-validation": [
+                {
+                    "fields": [
+                        "token_cookie"
+                    ],
+                    "message": "请填写 Token Cookie",
+                    "type": "required"
+                }
+            ]
+        },
+        "default_connector": "cookie",
+        "description": "Cubence 中转站预设配置，使用 Cookie 认证",
+        "display_name": "Cubence",
+        "supported_actions": [
+            {
+                "config_schema": {
+                    "properties": {
+                        "currency": {
+                            "default": "USD",
+                            "title": "货币单位",
+                            "type": "string"
+                        }
+                    },
+                    "required": [],
+                    "type": "object"
+                },
+                "description": "查询账户余额和窗口限额信息",
+                "display_name": "查询余额（含窗口限额）",
+                "type": "query_balance"
+            }
+        ],
+        "supported_auth_types": [
+            {
+                "credentials_schema": {
+                    "properties": {
+                        "base_url": {
+                            "description": "API 基础地址",
+                            "title": "站点地址",
+                            "type": "string",
+                            "x-default-value": "https://cubence.com"
+                        },
+                        "token_cookie": {
+                            "description": "从浏览器复制的 token Cookie 值（JWT 格式）",
+                            "title": "Token Cookie",
+                            "type": "string",
+                            "x-input-type": "password",
+                            "x-sensitive": true
+                        }
+                    },
+                    "required": [
+                        "token_cookie"
+                    ],
+                    "type": "object",
+                    "x-auth-type": "cookie",
+                    "x-balance-extra-format": [
+                        {
+                            "label": "5h",
+                            "source": "five_hour_limit",
+                            "type": "window_limit",
+                            "unit_divisor": 1000000
+                        },
+                        {
+                            "label": "周",
+                            "source": "weekly_limit",
+                            "type": "window_limit",
+                            "unit_divisor": 1000000
+                        }
+                    ],
+                    "x-currency": "USD",
+                    "x-default-base-url": "https://cubence.com",
+                    "x-field-groups": [
+                        {
+                            "fields": [
+                                "base_url"
+                            ]
+                        },
+                        {
+                            "fields": [
+                                "token_cookie"
+                            ]
+                        }
+                    ],
+                    "x-quota-divisor": null,
+                    "x-validation": [
+                        {
+                            "fields": [
+                                "token_cookie"
+                            ],
+                            "message": "请填写 Token Cookie",
+                            "type": "required"
+                        }
+                    ]
+                },
+                "display_name": "Cubence Cookie",
+                "type": "cookie"
+            }
+        ]
+    },
+    {
+        "architecture_id": "generic_api",
+        "credentials_schema": {
+            "properties": {
+                "api_key": {
+                    "description": "提供商的 API Key",
+                    "title": "API Key",
+                    "type": "string",
+                    "x-input-type": "password",
+                    "x-sensitive": true
+                },
+                "base_url": {
+                    "description": "API 基础地址",
+                    "title": "站点地址",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "api_key"
+            ],
+            "type": "object",
+            "x-auth-method": "bearer",
+            "x-auth-type": "api_key",
+            "x-currency": "USD",
+            "x-field-groups": [
+                {
+                    "fields": [
+                        "base_url"
+                    ]
+                },
+                {
+                    "fields": [
+                        "api_key"
+                    ]
+                }
+            ],
+            "x-quota-divisor": 500000,
+            "x-validation": [
+                {
+                    "fields": [
+                        "api_key"
+                    ],
+                    "message": "请填写 API Key",
+                    "type": "required"
+                }
+            ]
+        },
+        "default_connector": "api_key",
+        "description": "可配置的通用 API 架构，适用于各种中转站",
+        "display_name": "通用 API",
+        "supported_actions": [
+            {
+                "config_schema": {
+                    "properties": {
+                        "currency": {
+                            "default": "USD",
+                            "title": "货币单位",
+                            "type": "string"
+                        },
+                        "endpoint": {
+                            "default": "/api/user/self",
+                            "description": "余额查询 API 路径",
+                            "title": "API 路径",
+                            "type": "string"
+                        },
+                        "method": {
+                            "default": "GET",
+                            "enum": [
+                                "GET",
+                                "POST"
+                            ],
+                            "title": "请求方法",
+                            "type": "string"
+                        },
+                        "quota_divisor": {
+                            "default": 500000,
+                            "description": "将原始额度值转换为美元的除数",
+                            "title": "额度除数",
+                            "type": "number"
+                        }
+                    },
+                    "required": [],
+                    "type": "object"
+                },
+                "description": "查询 New API 账户余额信息",
+                "display_name": "查询余额",
+                "type": "query_balance"
+            }
+        ],
+        "supported_auth_types": [
+            {
+                "credentials_schema": {
+                    "properties": {
+                        "api_key": {
+                            "description": "提供商的 API Key",
+                            "title": "API Key",
+                            "type": "string",
+                            "x-input-type": "password",
+                            "x-sensitive": true
+                        },
+                        "base_url": {
+                            "description": "API 基础地址",
+                            "title": "站点地址",
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "api_key"
+                    ],
+                    "type": "object",
+                    "x-auth-method": "bearer",
+                    "x-auth-type": "api_key",
+                    "x-currency": "USD",
+                    "x-field-groups": [
+                        {
+                            "fields": [
+                                "base_url"
+                            ]
+                        },
+                        {
+                            "fields": [
+                                "api_key"
+                            ]
+                        }
+                    ],
+                    "x-quota-divisor": 500000,
+                    "x-validation": [
+                        {
+                            "fields": [
+                                "api_key"
+                            ],
+                            "message": "请填写 API Key",
+                            "type": "required"
+                        }
+                    ]
+                },
+                "display_name": "API Key",
+                "type": "api_key"
+            }
+        ]
+    },
+    {
+        "architecture_id": "nekocode",
+        "credentials_schema": {
+            "properties": {
+                "base_url": {
+                    "description": "API 基础地址",
+                    "title": "站点地址",
+                    "type": "string",
+                    "x-default-value": "https://nekocode.ai"
+                },
+                "session_cookie": {
+                    "description": "从浏览器复制的 session Cookie 值",
+                    "title": "Session Cookie",
+                    "type": "string",
+                    "x-input-type": "password",
+                    "x-sensitive": true
+                }
+            },
+            "required": [
+                "session_cookie"
+            ],
+            "type": "object",
+            "x-auth-type": "cookie",
+            "x-balance-extra-format": [
+                {
+                    "label": "天",
+                    "source_limit": "daily_quota_limit",
+                    "source_remaining": "daily_remaining_quota",
+                    "source_start_date": "effective_start_date",
+                    "type": "daily_quota"
+                },
+                {
+                    "label": "月",
+                    "source_end_date": "effective_end_date",
+                    "type": "monthly_expiry"
+                }
+            ],
+            "x-currency": "USD",
+            "x-default-base-url": "https://nekocode.ai",
+            "x-field-groups": [
+                {
+                    "fields": [
+                        "base_url"
+                    ]
+                },
+                {
+                    "fields": [
+                        "session_cookie"
+                    ]
+                }
+            ],
+            "x-quota-divisor": null,
+            "x-validation": [
+                {
+                    "fields": [
+                        "session_cookie"
+                    ],
+                    "message": "请填写 Session Cookie",
+                    "type": "required"
+                }
+            ]
+        },
+        "default_connector": "cookie",
+        "description": "NekoCode 中转站预设配置，使用 Cookie 认证",
+        "display_name": "NekoCode",
+        "supported_actions": [
+            {
+                "config_schema": {
+                    "properties": {
+                        "endpoint": {
+                            "default": "/api/usage/summary",
+                            "title": "API 端点",
+                            "type": "string"
+                        }
+                    },
+                    "required": [],
+                    "type": "object"
+                },
+                "description": "查询 NekoCode 账户余额和订阅信息",
+                "display_name": "查询余额",
+                "type": "query_balance"
+            }
+        ],
+        "supported_auth_types": [
+            {
+                "credentials_schema": {
+                    "properties": {
+                        "base_url": {
+                            "description": "API 基础地址",
+                            "title": "站点地址",
+                            "type": "string",
+                            "x-default-value": "https://nekocode.ai"
+                        },
+                        "session_cookie": {
+                            "description": "从浏览器复制的 session Cookie 值",
+                            "title": "Session Cookie",
+                            "type": "string",
+                            "x-input-type": "password",
+                            "x-sensitive": true
+                        }
+                    },
+                    "required": [
+                        "session_cookie"
+                    ],
+                    "type": "object",
+                    "x-auth-type": "cookie",
+                    "x-balance-extra-format": [
+                        {
+                            "label": "天",
+                            "source_limit": "daily_quota_limit",
+                            "source_remaining": "daily_remaining_quota",
+                            "source_start_date": "effective_start_date",
+                            "type": "daily_quota"
+                        },
+                        {
+                            "label": "月",
+                            "source_end_date": "effective_end_date",
+                            "type": "monthly_expiry"
+                        }
+                    ],
+                    "x-currency": "USD",
+                    "x-default-base-url": "https://nekocode.ai",
+                    "x-field-groups": [
+                        {
+                            "fields": [
+                                "base_url"
+                            ]
+                        },
+                        {
+                            "fields": [
+                                "session_cookie"
+                            ]
+                        }
+                    ],
+                    "x-quota-divisor": null,
+                    "x-validation": [
+                        {
+                            "fields": [
+                                "session_cookie"
+                            ],
+                            "message": "请填写 Session Cookie",
+                            "type": "required"
+                        }
+                    ]
+                },
+                "display_name": "NekoCode Cookie",
+                "type": "cookie"
+            }
+        ]
+    },
+    {
+        "architecture_id": "new_api",
+        "credentials_schema": {
+            "properties": {
+                "api_key": {
+                    "description": "New API 的访问令牌，与 Cookie 二选一",
+                    "title": "访问令牌 (API Key)",
+                    "type": "string",
+                    "x-input-type": "password",
+                    "x-sensitive": true
+                },
+                "base_url": {
+                    "description": "API 基础地址",
+                    "title": "站点地址",
+                    "type": "string"
+                },
+                "cookie": {
+                    "description": "用于 Cookie 认证，与访问令牌二选一",
+                    "title": "Cookie",
+                    "type": "string",
+                    "x-input-type": "password",
+                    "x-sensitive": true
+                },
+                "user_id": {
+                    "description": "使用访问令牌时必填，使用 Cookie 时可选",
+                    "title": "用户 ID",
+                    "type": "string"
+                }
+            },
+            "required": [],
+            "type": "object",
+            "x-auth-method": "bearer",
+            "x-auth-type": "api_key",
+            "x-currency": "USD",
+            "x-field-groups": [
+                {
+                    "fields": [
+                        "base_url"
+                    ]
+                },
+                {
+                    "fields": [
+                        "cookie"
+                    ],
+                    "x-help": "从浏览器开发者工具复制完整 Cookie"
+                },
+                {
+                    "fields": [
+                        "api_key",
+                        "user_id"
+                    ],
+                    "layout": "inline",
+                    "x-flex": {
+                        "api_key": 3,
+                        "user_id": 1
+                    }
+                }
+            ],
+            "x-field-hooks": {
+                "cookie": {
+                    "action": "parse_new_api_user_id",
+                    "target": "user_id"
+                }
+            },
+            "x-quota-divisor": 500000,
+            "x-validation": [
+                {
+                    "fields": [
+                        "api_key",
+                        "cookie"
+                    ],
+                    "message": "访问令牌和 Cookie 至少需要填写一个",
+                    "type": "any_required"
+                },
+                {
+                    "if": "api_key",
+                    "message": "使用访问令牌时，用户 ID 不能为空",
+                    "then": [
+                        "user_id"
+                    ],
+                    "type": "conditional_required",
+                    "unless": "cookie"
+                }
+            ]
+        },
+        "default_connector": "api_key",
+        "description": "New API 风格中转站的预设配置",
+        "display_name": "New API",
+        "supported_actions": [
+            {
+                "config_schema": {
+                    "properties": {
+                        "currency": {
+                            "default": "USD",
+                            "title": "货币单位",
+                            "type": "string"
+                        },
+                        "endpoint": {
+                            "default": "/api/user/self",
+                            "description": "余额查询 API 路径",
+                            "title": "API 路径",
+                            "type": "string"
+                        },
+                        "method": {
+                            "default": "GET",
+                            "enum": [
+                                "GET",
+                                "POST"
+                            ],
+                            "title": "请求方法",
+                            "type": "string"
+                        },
+                        "quota_divisor": {
+                            "default": 500000,
+                            "description": "将原始额度值转换为美元的除数",
+                            "title": "额度除数",
+                            "type": "number"
+                        }
+                    },
+                    "required": [],
+                    "type": "object"
+                },
+                "description": "查询 New API 账户余额信息",
+                "display_name": "查询余额",
+                "type": "query_balance"
+            }
+        ],
+        "supported_auth_types": [
+            {
+                "credentials_schema": {
+                    "properties": {
+                        "api_key": {
+                            "description": "New API 的访问令牌，与 Cookie 二选一",
+                            "title": "访问令牌 (API Key)",
+                            "type": "string",
+                            "x-input-type": "password",
+                            "x-sensitive": true
+                        },
+                        "base_url": {
+                            "description": "API 基础地址",
+                            "title": "站点地址",
+                            "type": "string"
+                        },
+                        "cookie": {
+                            "description": "用于 Cookie 认证，与访问令牌二选一",
+                            "title": "Cookie",
+                            "type": "string",
+                            "x-input-type": "password",
+                            "x-sensitive": true
+                        },
+                        "user_id": {
+                            "description": "使用访问令牌时必填，使用 Cookie 时可选",
+                            "title": "用户 ID",
+                            "type": "string"
+                        }
+                    },
+                    "required": [],
+                    "type": "object",
+                    "x-auth-method": "bearer",
+                    "x-auth-type": "api_key",
+                    "x-currency": "USD",
+                    "x-field-groups": [
+                        {
+                            "fields": [
+                                "base_url"
+                            ]
+                        },
+                        {
+                            "fields": [
+                                "cookie"
+                            ],
+                            "x-help": "从浏览器开发者工具复制完整 Cookie"
+                        },
+                        {
+                            "fields": [
+                                "api_key",
+                                "user_id"
+                            ],
+                            "layout": "inline",
+                            "x-flex": {
+                                "api_key": 3,
+                                "user_id": 1
+                            }
+                        }
+                    ],
+                    "x-field-hooks": {
+                        "cookie": {
+                            "action": "parse_new_api_user_id",
+                            "target": "user_id"
+                        }
+                    },
+                    "x-quota-divisor": 500000,
+                    "x-validation": [
+                        {
+                            "fields": [
+                                "api_key",
+                                "cookie"
+                            ],
+                            "message": "访问令牌和 Cookie 至少需要填写一个",
+                            "type": "any_required"
+                        },
+                        {
+                            "if": "api_key",
+                            "message": "使用访问令牌时，用户 ID 不能为空",
+                            "then": [
+                                "user_id"
+                            ],
+                            "type": "conditional_required",
+                            "unless": "cookie"
+                        }
+                    ]
+                },
+                "display_name": "New API Key",
+                "type": "api_key"
+            }
+        ]
+    },
+    {
+        "architecture_id": "sub2api",
+        "credentials_schema": {
+            "properties": {
+                "base_url": {
+                    "description": "API 基础地址",
+                    "title": "站点地址",
+                    "type": "string"
+                },
+                "email": {
+                    "description": "Sub2API 登录邮箱",
+                    "title": "邮箱",
+                    "type": "string"
+                },
+                "password": {
+                    "description": "Sub2API 登录密码",
+                    "title": "密码",
+                    "type": "string",
+                    "x-input-type": "password",
+                    "x-sensitive": true
+                }
+            },
+            "required": [
+                "email",
+                "password"
+            ],
+            "type": "object",
+            "x-auth-method": "jwt",
+            "x-auth-type": "session_login",
+            "x-field-groups": [
+                {
+                    "fields": [
+                        "base_url"
+                    ]
+                },
+                {
+                    "fields": [
+                        "email"
+                    ]
+                },
+                {
+                    "fields": [
+                        "password"
+                    ]
+                }
+            ],
+            "x-validation": [
+                {
+                    "fields": [
+                        "email",
+                        "password"
+                    ],
+                    "message": "请填写邮箱和密码",
+                    "type": "required"
+                }
+            ]
+        },
+        "default_connector": "session_login",
+        "description": "Sub2API 风格中转站的预设配置",
+        "display_name": "Sub2API",
+        "supported_actions": [
+            {
+                "config_schema": {
+                    "properties": {
+                        "currency": {
+                            "default": "USD",
+                            "title": "货币单位",
+                            "type": "string"
+                        }
+                    },
+                    "required": [],
+                    "type": "object"
+                },
+                "description": "查询 Sub2API 账户余额和订阅信息",
+                "display_name": "查询余额",
+                "type": "query_balance"
+            }
+        ],
+        "supported_auth_types": [
+            {
+                "credentials_schema": {
+                    "properties": {
+                        "base_url": {
+                            "description": "API 基础地址",
+                            "title": "站点地址",
+                            "type": "string"
+                        },
+                        "email": {
+                            "description": "Sub2API 登录邮箱",
+                            "title": "邮箱",
+                            "type": "string"
+                        },
+                        "password": {
+                            "description": "Sub2API 登录密码",
+                            "title": "密码",
+                            "type": "string",
+                            "x-input-type": "password",
+                            "x-sensitive": true
+                        }
+                    },
+                    "required": [
+                        "email",
+                        "password"
+                    ],
+                    "type": "object",
+                    "x-auth-method": "jwt",
+                    "x-auth-type": "session_login",
+                    "x-field-groups": [
+                        {
+                            "fields": [
+                                "base_url"
+                            ]
+                        },
+                        {
+                            "fields": [
+                                "email"
+                            ]
+                        },
+                        {
+                            "fields": [
+                                "password"
+                            ]
+                        }
+                    ],
+                    "x-validation": [
+                        {
+                            "fields": [
+                                "email",
+                                "password"
+                            ],
+                            "message": "请填写邮箱和密码",
+                            "type": "required"
+                        }
+                    ]
+                },
+                "display_name": "账号密码",
+                "type": "session_login"
+            },
+            {
+                "credentials_schema": {
+                    "properties": {
+                        "base_url": {
+                            "description": "API 基础地址",
+                            "title": "站点地址",
+                            "type": "string"
+                        },
+                        "refresh_token": {
+                            "description": "从浏览器 F12 > Application > Local Storage 获取",
+                            "title": "Refresh Token",
+                            "type": "string",
+                            "x-help": "浏览器控制台执行 localStorage.getItem('refresh_token') 获取",
+                            "x-input-type": "password",
+                            "x-sensitive": true
+                        }
+                    },
+                    "required": [
+                        "refresh_token"
+                    ],
+                    "type": "object",
+                    "x-auth-method": "bearer",
+                    "x-auth-type": "api_key",
+                    "x-field-groups": [
+                        {
+                            "fields": [
+                                "base_url"
+                            ]
+                        },
+                        {
+                            "fields": [
+                                "refresh_token"
+                            ]
+                        }
+                    ],
+                    "x-validation": [
+                        {
+                            "fields": [
+                                "refresh_token"
+                            ],
+                            "message": "请填写 Refresh Token",
+                            "type": "required"
+                        }
+                    ]
+                },
+                "display_name": "Refresh Token",
+                "type": "api_key"
+            }
+        ]
+    },
+    {
+        "architecture_id": "yescode",
+        "credentials_schema": {
+            "properties": {
+                "auth_cookie": {
+                    "description": "从浏览器复制的 Cookie（包含 yescode_auth 和 yescode_csrf）",
+                    "title": "Auth Cookie",
+                    "type": "string",
+                    "x-input-type": "password",
+                    "x-sensitive": true
+                },
+                "base_url": {
+                    "description": "API 基础地址",
+                    "title": "站点地址",
+                    "type": "string",
+                    "x-default-value": "https://co.yes.vg"
+                }
+            },
+            "required": [
+                "auth_cookie"
+            ],
+            "type": "object",
+            "x-auth-type": "cookie",
+            "x-balance-extra-format": [
+                {
+                    "label": "天",
+                    "source_limit": "daily_limit",
+                    "source_resets_at": "daily_resets_at",
+                    "source_spent": "daily_spent",
+                    "type": "weekly_spent"
+                },
+                {
+                    "label": "周",
+                    "source_limit": "weekly_limit",
+                    "source_resets_at": "weekly_resets_at",
+                    "source_spent": "weekly_spent",
+                    "type": "weekly_spent"
+                }
+            ],
+            "x-currency": "USD",
+            "x-default-base-url": "https://co.yes.vg",
+            "x-field-groups": [
+                {
+                    "fields": [
+                        "base_url"
+                    ]
+                },
+                {
+                    "fields": [
+                        "auth_cookie"
+                    ]
+                }
+            ],
+            "x-quota-divisor": null,
+            "x-validation": [
+                {
+                    "fields": [
+                        "auth_cookie"
+                    ],
+                    "message": "请填写 Auth Cookie",
+                    "type": "required"
+                }
+            ]
+        },
+        "default_connector": "cookie",
+        "description": "YesCode 中转站预设配置，使用 Cookie 认证",
+        "display_name": "YesCode",
+        "supported_actions": [
+            {
+                "config_schema": {
+                    "properties": {
+                        "currency": {
+                            "default": "USD",
+                            "title": "货币单位",
+                            "type": "string"
+                        }
+                    },
+                    "required": [],
+                    "type": "object"
+                },
+                "description": "查询账户余额和每周限额信息",
+                "display_name": "查询余额（含每周限额）",
+                "type": "query_balance"
+            }
+        ],
+        "supported_auth_types": [
+            {
+                "credentials_schema": {
+                    "properties": {
+                        "auth_cookie": {
+                            "description": "从浏览器复制的 Cookie（包含 yescode_auth 和 yescode_csrf）",
+                            "title": "Auth Cookie",
+                            "type": "string",
+                            "x-input-type": "password",
+                            "x-sensitive": true
+                        },
+                        "base_url": {
+                            "description": "API 基础地址",
+                            "title": "站点地址",
+                            "type": "string",
+                            "x-default-value": "https://co.yes.vg"
+                        }
+                    },
+                    "required": [
+                        "auth_cookie"
+                    ],
+                    "type": "object",
+                    "x-auth-type": "cookie",
+                    "x-balance-extra-format": [
+                        {
+                            "label": "天",
+                            "source_limit": "daily_limit",
+                            "source_resets_at": "daily_resets_at",
+                            "source_spent": "daily_spent",
+                            "type": "weekly_spent"
+                        },
+                        {
+                            "label": "周",
+                            "source_limit": "weekly_limit",
+                            "source_resets_at": "weekly_resets_at",
+                            "source_spent": "weekly_spent",
+                            "type": "weekly_spent"
+                        }
+                    ],
+                    "x-currency": "USD",
+                    "x-default-base-url": "https://co.yes.vg",
+                    "x-field-groups": [
+                        {
+                            "fields": [
+                                "base_url"
+                            ]
+                        },
+                        {
+                            "fields": [
+                                "auth_cookie"
+                            ]
+                        }
+                    ],
+                    "x-quota-divisor": null,
+                    "x-validation": [
+                        {
+                            "fields": [
+                                "auth_cookie"
+                            ],
+                            "message": "请填写 Auth Cookie",
+                            "type": "required"
+                        }
+                    ]
+                },
+                "display_name": "YesCode Cookie",
+                "type": "cookie"
+            }
+        ]
+    }
+]

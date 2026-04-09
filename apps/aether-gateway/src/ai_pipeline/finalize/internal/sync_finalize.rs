@@ -1,13 +1,9 @@
-use crate::ai_pipeline::control_facade::GatewayControlDecision;
+use crate::ai_pipeline::GatewayControlDecision;
+use crate::ai_pipeline::{build_generated_tool_call_id, canonicalize_tool_arguments};
 use crate::{usage::GatewaySyncReportRequest, GatewayError};
 
-pub(crate) use crate::ai_pipeline::conversion::response::{
-    convert_claude_chat_response_to_openai_chat, convert_claude_cli_response_to_openai_cli,
-    convert_gemini_chat_response_to_openai_chat, convert_gemini_cli_response_to_openai_cli,
-};
 pub(crate) use crate::ai_pipeline::finalize::common::{
-    build_generated_tool_call_id, build_local_success_outcome,
-    build_local_success_outcome_with_conversion_report, canonicalize_tool_arguments,
+    build_local_success_outcome, build_local_success_outcome_with_conversion_report,
     local_finalize_allows_envelope, unwrap_local_finalize_response_value,
     LocalCoreSyncFinalizeOutcome,
 };
@@ -15,9 +11,13 @@ pub(crate) use crate::ai_pipeline::finalize::standard::{
     maybe_build_standard_sync_finalize_product_from_normalized_payload,
     StandardSyncFinalizeNormalizedProduct,
 };
-pub(crate) use aether_ai_pipeline::finalize::sync_products::{
+pub(crate) use crate::ai_pipeline::{
     aggregate_claude_stream_sync_response, aggregate_gemini_stream_sync_response,
     aggregate_openai_chat_stream_sync_response, aggregate_openai_cli_stream_sync_response,
+};
+pub(crate) use crate::ai_pipeline::{
+    convert_claude_chat_response_to_openai_chat, convert_claude_cli_response_to_openai_cli,
+    convert_gemini_chat_response_to_openai_chat, convert_gemini_cli_response_to_openai_cli,
 };
 
 pub(crate) fn maybe_build_local_core_sync_finalize_response(
@@ -51,7 +51,7 @@ pub(crate) fn maybe_build_local_core_sync_finalize_response(
 
     match product {
         StandardSyncFinalizeNormalizedProduct::SuccessBody(body_json) => {
-            let Some(body_json) = unwrap_local_finalize_response_value(body_json, report_context)?
+            let Some(body_json) = unwrap_local_finalize_response_value(body_json, report_context)
             else {
                 return Ok(None);
             };
@@ -61,7 +61,7 @@ pub(crate) fn maybe_build_local_core_sync_finalize_response(
         }
         StandardSyncFinalizeNormalizedProduct::CrossFormat(product) => {
             let Some(provider_body_json) =
-                unwrap_local_finalize_response_value(product.provider_body_json, report_context)?
+                unwrap_local_finalize_response_value(product.provider_body_json, report_context)
             else {
                 return Ok(None);
             };

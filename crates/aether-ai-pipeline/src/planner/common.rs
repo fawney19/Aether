@@ -21,9 +21,19 @@ pub fn parse_direct_request_body(
     }
 }
 
+pub fn force_upstream_streaming_for_provider(
+    provider_type: &str,
+    provider_api_format: &str,
+) -> bool {
+    provider_type.trim().eq_ignore_ascii_case("codex")
+        && provider_api_format
+            .trim()
+            .eq_ignore_ascii_case("openai:cli")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_direct_request_body;
+    use super::{force_upstream_streaming_for_provider, parse_direct_request_body};
 
     #[test]
     fn parses_empty_json_body_as_empty_object() {
@@ -44,5 +54,22 @@ mod tests {
             parse_direct_request_body(false, b"hello"),
             Some((serde_json::json!({}), Some("aGVsbG8=".to_string())))
         );
+    }
+
+    #[test]
+    fn forces_streaming_for_codex_openai_cli() {
+        assert!(force_upstream_streaming_for_provider("codex", "openai:cli"));
+    }
+
+    #[test]
+    fn does_not_force_streaming_for_compact_or_other_provider_types() {
+        assert!(!force_upstream_streaming_for_provider(
+            "codex",
+            "openai:compact"
+        ));
+        assert!(!force_upstream_streaming_for_provider(
+            "openai",
+            "openai:cli"
+        ));
     }
 }

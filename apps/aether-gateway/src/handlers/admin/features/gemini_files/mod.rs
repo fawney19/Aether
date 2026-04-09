@@ -1,5 +1,5 @@
-use crate::control::GatewayPublicRequestContext;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use axum::body::{Body, Bytes};
 use axum::http::{self, Response};
@@ -18,11 +18,11 @@ mod read_routes;
 mod upload;
 
 pub(crate) async fn maybe_build_local_admin_gemini_files_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
+    let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
     if decision.route_family.as_deref() != Some("gemini_files_manage") {

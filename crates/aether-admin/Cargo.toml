@@ -1,0 +1,22 @@
+[package]
+name = "aether-admin"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared admin contracts and pure helpers for Aether"
+
+[dependencies]
+aether-contracts.workspace = true
+aether-data.workspace = true
+aether-data-contracts.workspace = true
+axum.workspace = true
+base64.workspace = true
+chrono.workspace = true
+http.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+url.workspace = true
+uuid.workspace = true

@@ -1,10 +1,8 @@
 use super::payloads::{admin_provider_model_name_exists, build_admin_provider_model_response};
-use super::write::build_admin_provider_model_create_record;
-use crate::control::GatewayControlDecision;
-use crate::control::GatewayPublicRequestContext;
 use crate::handlers::admin::provider::shared::paths::admin_provider_models_batch_path;
 use crate::handlers::admin::provider::shared::payloads::AdminProviderModelCreateRequest;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -16,18 +14,16 @@ use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) async fn maybe_handle(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&Bytes>,
-    decision: &GatewayControlDecision,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    if decision.route_family.as_deref() == Some("provider_models_manage")
-        && decision.route_kind.as_deref() == Some("batch_create_provider_models")
-        && request_context.request_method == http::Method::POST
-        && request_context.request_path.ends_with("/models/batch")
+    if request_context.route_family() == Some("provider_models_manage")
+        && request_context.route_kind() == Some("batch_create_provider_models")
+        && request_context.method() == http::Method::POST
+        && request_context.path().ends_with("/models/batch")
     {
-        let Some(provider_id) = admin_provider_models_batch_path(&request_context.request_path)
-        else {
+        let Some(provider_id) = admin_provider_models_batch_path(request_context.path()) else {
             return Ok(Some(
                 (
                     http::StatusCode::NOT_FOUND,
@@ -98,12 +94,9 @@ pub(super) async fn maybe_handle(
             {
                 continue;
             }
-            let record = match build_admin_provider_model_create_record(
-                state,
-                &provider_id,
-                payload,
-            )
-            .await
+            let record = match state
+                .build_admin_provider_model_create_record(&provider_id, payload)
+                .await
             {
                 Ok(record) => record,
                 Err(detail) => {

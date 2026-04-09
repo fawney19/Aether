@@ -2,7 +2,6 @@ use super::state::{
     build_admin_provider_oauth_backend_unavailable_response,
     build_admin_provider_oauth_supported_types_payload,
 };
-use crate::control::GatewayPublicRequestContext;
 use crate::handlers::admin::provider::shared::paths::{
     admin_provider_oauth_batch_import_provider_id,
     admin_provider_oauth_batch_import_task_provider_id, admin_provider_oauth_complete_key_id,
@@ -10,7 +9,8 @@ use crate::handlers::admin::provider::shared::paths::{
     admin_provider_oauth_import_provider_id, admin_provider_oauth_refresh_key_id,
     admin_provider_oauth_start_key_id, admin_provider_oauth_start_provider_id,
 };
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -28,11 +28,11 @@ mod start;
 mod tasks;
 
 pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
+    let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
     if decision.route_family.as_deref() != Some("provider_oauth_manage") {
@@ -40,11 +40,11 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
     }
 
     let route_kind = decision.route_kind.as_deref();
-    let method = &request_context.request_method;
+    let method = &request_context.method();
 
     if route_kind == Some("supported_types")
         && *method == http::Method::GET
-        && request_context.request_path == "/api/admin/provider-oauth/supported-types"
+        && request_context.path() == "/api/admin/provider-oauth/supported-types"
     {
         return Ok(Some(
             Json(build_admin_provider_oauth_supported_types_payload()).into_response(),
@@ -58,7 +58,7 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
             "admin_provider_oauth_authorization_started",
             "start_provider_oauth_for_key",
             "provider_key",
-            admin_provider_oauth_start_key_id(&request_context.request_path),
+            admin_provider_oauth_start_key_id(request_context.path()),
         )));
     }
 
@@ -70,7 +70,7 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
             "admin_provider_oauth_authorization_started",
             "start_provider_oauth_for_provider",
             "provider",
-            admin_provider_oauth_start_provider_id(&request_context.request_path),
+            admin_provider_oauth_start_provider_id(request_context.path()),
         )));
     }
 
@@ -93,7 +93,7 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
             "admin_provider_oauth_completed",
             "complete_provider_oauth_for_key",
             "provider_key",
-            admin_provider_oauth_complete_key_id(&request_context.request_path),
+            admin_provider_oauth_complete_key_id(request_context.path()),
         )));
     }
 
@@ -105,7 +105,7 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
             "admin_provider_oauth_refreshed",
             "refresh_provider_oauth_for_key",
             "provider_key",
-            admin_provider_oauth_refresh_key_id(&request_context.request_path),
+            admin_provider_oauth_refresh_key_id(request_context.path()),
         )));
     }
 
@@ -121,7 +121,7 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
             "admin_provider_oauth_completed",
             "complete_provider_oauth_for_provider",
             "provider",
-            admin_provider_oauth_complete_provider_id(&request_context.request_path),
+            admin_provider_oauth_complete_provider_id(request_context.path()),
         )));
     }
 
@@ -137,7 +137,7 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
             "admin_provider_oauth_refresh_token_imported",
             "import_provider_oauth_refresh_token",
             "provider",
-            admin_provider_oauth_import_provider_id(&request_context.request_path),
+            admin_provider_oauth_import_provider_id(request_context.path()),
         )));
     }
 
@@ -150,7 +150,7 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
             "admin_provider_oauth_batch_import_completed",
             "batch_import_provider_oauth",
             "provider",
-            admin_provider_oauth_batch_import_provider_id(&request_context.request_path),
+            admin_provider_oauth_batch_import_provider_id(request_context.path()),
         )));
     }
 
@@ -166,7 +166,7 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
             "admin_provider_oauth_batch_import_started",
             "start_provider_oauth_batch_import",
             "provider",
-            admin_provider_oauth_batch_import_task_provider_id(&request_context.request_path),
+            admin_provider_oauth_batch_import_task_provider_id(request_context.path()),
         )));
     }
 
@@ -182,7 +182,7 @@ pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
             "admin_provider_oauth_device_authorization_started",
             "start_provider_oauth_device_authorization",
             "provider",
-            admin_provider_oauth_device_authorize_provider_id(&request_context.request_path),
+            admin_provider_oauth_device_authorize_provider_id(request_context.path()),
         )));
     }
 

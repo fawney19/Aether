@@ -11,7 +11,8 @@ pub(crate) use http::{
 };
 pub(crate) use query::{
     read_video_task_detail, read_video_task_page, read_video_task_stats,
-    read_video_task_video_source,
+    read_video_task_video_source, VideoTaskPageResponse, VideoTaskStatsResponse,
+    VideoTaskVideoSource,
 };
 pub(crate) use runtime::{
     execute_video_task_refresh_plan, finalize_video_task_if_terminal, spawn_video_task_poller,

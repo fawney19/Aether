@@ -1,5 +1,6 @@
 use super::cache_types::AdminMonitoringCacheAffinityRecord;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::AdminAppState;
+use crate::GatewayError;
 
 fn parse_admin_monitoring_cache_affinity_key(raw_key: &str) -> Option<(String, String, String)> {
     let parts = raw_key.split(':').collect::<Vec<_>>();
@@ -92,7 +93,7 @@ pub(super) fn admin_monitoring_cache_affinity_record(
 }
 
 pub(super) fn clear_admin_monitoring_scheduler_affinity_entries(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     records: &[AdminMonitoringCacheAffinityRecord],
 ) {
     let scheduler_keys = records
@@ -100,28 +101,32 @@ pub(super) fn clear_admin_monitoring_scheduler_affinity_entries(
         .filter_map(admin_monitoring_scheduler_affinity_cache_key)
         .collect::<std::collections::BTreeSet<_>>();
     for scheduler_key in scheduler_keys {
-        let _ = state.remove_scheduler_affinity_cache_entry(&scheduler_key);
+        let _ = state
+            .as_ref()
+            .remove_scheduler_affinity_cache_entry(&scheduler_key);
     }
 }
 
 #[cfg(test)]
 pub(super) fn delete_admin_monitoring_cache_affinity_entries_for_tests(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     raw_keys: &[String],
 ) -> usize {
-    state.remove_admin_monitoring_cache_affinity_entries_for_tests(raw_keys)
+    state
+        .as_ref()
+        .remove_admin_monitoring_cache_affinity_entries_for_tests(raw_keys)
 }
 
 #[cfg(not(test))]
 pub(super) fn delete_admin_monitoring_cache_affinity_entries_for_tests(
-    _state: &AppState,
+    _state: &AdminAppState<'_>,
     _raw_keys: &[String],
 ) -> usize {
     0
 }
 
 pub(super) async fn delete_admin_monitoring_cache_affinity_raw_keys(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     raw_keys: &[String],
 ) -> Result<usize, GatewayError> {
     if raw_keys.is_empty() {

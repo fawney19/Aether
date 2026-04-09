@@ -253,6 +253,10 @@ impl AppState {
         self.data.has_auth_api_key_reader()
     }
 
+    pub(crate) fn has_proxy_node_reader(&self) -> bool {
+        self.data.has_proxy_node_reader()
+    }
+
     pub(crate) fn frontdoor_cors(&self) -> Option<Arc<FrontdoorCorsConfig>> {
         self.frontdoor_cors.clone()
     }

@@ -1,21 +1,9 @@
 use std::collections::BTreeMap;
 
-use aether_contracts::ExecutionPlan;
-
+use crate::ai_pipeline::augment_sync_report_context as augment_sync_report_context_impl;
 pub(crate) use crate::ai_pipeline::contracts::generic_decision_missing_exact_provider_request;
+pub(crate) use crate::ai_pipeline::{LocalStreamPlanAndReport, LocalSyncPlanAndReport};
 use crate::{GatewayControlSyncDecisionResponse, GatewayError};
-
-pub(crate) struct LocalSyncPlanAndReport {
-    pub(crate) plan: ExecutionPlan,
-    pub(crate) report_kind: Option<String>,
-    pub(crate) report_context: Option<serde_json::Value>,
-}
-
-pub(crate) struct LocalStreamPlanAndReport {
-    pub(crate) plan: ExecutionPlan,
-    pub(crate) report_kind: Option<String>,
-    pub(crate) report_context: Option<serde_json::Value>,
-}
 
 #[path = "standard/gemini/plan_builders.rs"]
 mod gemini_builders;
@@ -45,21 +33,10 @@ pub(super) fn augment_sync_report_context(
     provider_request_headers: &BTreeMap<String, String>,
     provider_request_body: &serde_json::Value,
 ) -> Result<Option<serde_json::Value>, GatewayError> {
-    let mut report_context = match report_context {
-        Some(serde_json::Value::Object(map)) => map,
-        Some(_) => serde_json::Map::new(),
-        None => serde_json::Map::new(),
-    };
-
-    report_context.insert(
-        "provider_request_headers".to_string(),
-        serde_json::to_value(provider_request_headers)
-            .map_err(|err| GatewayError::Internal(err.to_string()))?,
-    );
-    report_context.insert(
-        "provider_request_body".to_string(),
-        provider_request_body.clone(),
-    );
-
-    Ok(Some(serde_json::Value::Object(report_context)))
+    augment_sync_report_context_impl(
+        report_context,
+        provider_request_headers,
+        provider_request_body,
+    )
+    .map_err(|err| GatewayError::Internal(err.to_string()))
 }

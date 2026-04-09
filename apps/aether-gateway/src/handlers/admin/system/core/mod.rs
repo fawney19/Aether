@@ -1,5 +1,5 @@
-use crate::control::GatewayPublicRequestContext;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -39,12 +39,12 @@ const ADMIN_AWS_REGIONS: &[&str] = &[
 mod system_routes;
 
 pub(crate) async fn maybe_build_local_admin_core_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     if let Some(response) =
-        crate::handlers::admin::system::maybe_build_local_admin_management_tokens_response(
+        super::management_tokens::maybe_build_local_admin_management_tokens_response(
             state,
             request_context,
         )
@@ -61,13 +61,12 @@ pub(crate) async fn maybe_build_local_admin_core_response(
     {
         return Ok(Some(response));
     }
-    if let Some(response) =
-        crate::handlers::admin::system::maybe_build_local_admin_modules_response(
-            state,
-            request_context,
-            request_body,
-        )
-        .await?
+    if let Some(response) = super::modules::maybe_build_local_admin_modules_response(
+        state,
+        request_context,
+        request_body,
+    )
+    .await?
     {
         return Ok(Some(response));
     }

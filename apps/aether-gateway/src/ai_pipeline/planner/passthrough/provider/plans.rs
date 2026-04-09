@@ -1,7 +1,8 @@
 use tracing::warn;
 
-pub(crate) use aether_ai_pipeline::planner::passthrough::provider::{
-    resolve_stream_spec, resolve_sync_spec,
+pub(crate) use crate::ai_pipeline::{
+    resolve_local_same_format_stream_spec as resolve_stream_spec,
+    resolve_local_same_format_sync_spec as resolve_sync_spec,
 };
 
 use super::{

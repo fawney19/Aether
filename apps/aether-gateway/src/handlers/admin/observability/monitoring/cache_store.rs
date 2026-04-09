@@ -1,10 +1,11 @@
 use super::cache_affinity::admin_monitoring_cache_affinity_record;
 use super::cache_types::{AdminMonitoringCacheAffinityRecord, AdminMonitoringCacheSnapshot};
 use crate::handlers::admin::observability::stats::round_to;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::AdminAppState;
+use crate::GatewayError;
 use aether_data_contracts::repository::usage::UsageAuditListQuery;
 
-async fn count_admin_monitoring_cache_affinity_entries(state: &AppState) -> usize {
+async fn count_admin_monitoring_cache_affinity_entries(state: &AdminAppState<'_>) -> usize {
     let Some(runner) = state.redis_kv_runner() else {
         return 0;
     };
@@ -74,35 +75,45 @@ async fn scan_admin_monitoring_namespaced_keys(
 
 #[cfg(test)]
 pub(super) fn load_admin_monitoring_cache_affinity_entries_for_tests(
-    state: &AppState,
+    state: &AdminAppState<'_>,
 ) -> Vec<(String, String)> {
-    state.list_admin_monitoring_cache_affinity_entries_for_tests()
+    state
+        .as_ref()
+        .list_admin_monitoring_cache_affinity_entries_for_tests()
 }
 
 #[cfg(not(test))]
 pub(super) fn load_admin_monitoring_cache_affinity_entries_for_tests(
-    _state: &AppState,
+    _state: &AdminAppState<'_>,
 ) -> Vec<(String, String)> {
     Vec::new()
 }
 
 #[cfg(test)]
-fn load_admin_monitoring_redis_keys_for_tests(state: &AppState) -> Vec<String> {
-    state.list_admin_monitoring_redis_keys_for_tests()
+fn load_admin_monitoring_redis_keys_for_tests(state: &AdminAppState<'_>) -> Vec<String> {
+    state.as_ref().list_admin_monitoring_redis_keys_for_tests()
 }
 
 #[cfg(not(test))]
-fn load_admin_monitoring_redis_keys_for_tests(_state: &AppState) -> Vec<String> {
+fn load_admin_monitoring_redis_keys_for_tests(_state: &AdminAppState<'_>) -> Vec<String> {
     Vec::new()
 }
 
 #[cfg(test)]
-fn delete_admin_monitoring_redis_keys_for_tests(state: &AppState, raw_keys: &[String]) -> usize {
-    state.remove_admin_monitoring_redis_keys_for_tests(raw_keys)
+fn delete_admin_monitoring_redis_keys_for_tests(
+    state: &AdminAppState<'_>,
+    raw_keys: &[String],
+) -> usize {
+    state
+        .as_ref()
+        .remove_admin_monitoring_redis_keys_for_tests(raw_keys)
 }
 
 #[cfg(not(test))]
-fn delete_admin_monitoring_redis_keys_for_tests(_state: &AppState, _raw_keys: &[String]) -> usize {
+fn delete_admin_monitoring_redis_keys_for_tests(
+    _state: &AdminAppState<'_>,
+    _raw_keys: &[String],
+) -> usize {
     0
 }
 
@@ -113,12 +124,12 @@ fn admin_monitoring_test_key_matches_pattern(key: &str, pattern: &str) -> bool {
     }
 }
 
-pub(super) fn admin_monitoring_has_test_redis_keys(state: &AppState) -> bool {
+pub(super) fn admin_monitoring_has_test_redis_keys(state: &AdminAppState<'_>) -> bool {
     !load_admin_monitoring_redis_keys_for_tests(state).is_empty()
 }
 
 pub(super) async fn list_admin_monitoring_namespaced_keys(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     pattern: &str,
 ) -> Result<Vec<String>, GatewayError> {
     if let Some(runner) = state.redis_kv_runner() {
@@ -134,7 +145,7 @@ pub(super) async fn list_admin_monitoring_namespaced_keys(
 }
 
 pub(super) async fn delete_admin_monitoring_namespaced_keys(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     raw_keys: &[String],
 ) -> Result<usize, GatewayError> {
     if raw_keys.is_empty() {
@@ -165,13 +176,13 @@ pub(super) async fn delete_admin_monitoring_namespaced_keys(
 }
 
 pub(super) async fn list_admin_monitoring_cache_affinity_records(
-    state: &AppState,
+    state: &AdminAppState<'_>,
 ) -> Result<Vec<AdminMonitoringCacheAffinityRecord>, GatewayError> {
     list_admin_monitoring_cache_affinity_records_matching(state, None).await
 }
 
 pub(super) async fn list_admin_monitoring_cache_affinity_records_by_affinity_keys(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     affinity_keys: &std::collections::BTreeSet<String>,
 ) -> Result<Vec<AdminMonitoringCacheAffinityRecord>, GatewayError> {
     if affinity_keys.is_empty() {
@@ -181,7 +192,7 @@ pub(super) async fn list_admin_monitoring_cache_affinity_records_by_affinity_key
 }
 
 async fn list_admin_monitoring_cache_affinity_records_matching(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     affinity_keys: Option<&std::collections::BTreeSet<String>>,
 ) -> Result<Vec<AdminMonitoringCacheAffinityRecord>, GatewayError> {
     let mut records = Vec::new();
@@ -272,7 +283,7 @@ async fn list_admin_monitoring_cache_affinity_records_matching(
 }
 
 pub(super) async fn build_admin_monitoring_cache_snapshot(
-    state: &AppState,
+    state: &AdminAppState<'_>,
 ) -> Result<AdminMonitoringCacheSnapshot, GatewayError> {
     let scheduling_mode = state
         .read_system_config_json_value("scheduling_mode")

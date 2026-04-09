@@ -1,0 +1,47 @@
+use super::{health, rpm};
+use crate::handlers::admin::provider::{endpoint_keys, endpoints_admin};
+use crate::handlers::admin::request::{AdminRouteRequest, AdminRouteResult};
+
+pub(crate) async fn maybe_build_local_admin_endpoints_response(
+    request: AdminRouteRequest<'_>,
+) -> AdminRouteResult {
+    if let Some(response) = health::maybe_build_local_admin_endpoints_health_response(
+        &request.state(),
+        &request.request_context(),
+    )
+    .await?
+    {
+        return Ok(Some(response));
+    }
+
+    if let Some(response) = rpm::maybe_build_local_admin_endpoints_rpm_response(
+        &request.state(),
+        &request.request_context(),
+    )
+    .await?
+    {
+        return Ok(Some(response));
+    }
+
+    if let Some(response) = endpoint_keys::maybe_build_local_admin_endpoints_keys_response(
+        &request.state(),
+        &request.request_context(),
+        request.request_body(),
+    )
+    .await?
+    {
+        return Ok(Some(response));
+    }
+
+    if let Some(response) = endpoints_admin::maybe_build_local_admin_endpoints_routes_response(
+        &request.state(),
+        &request.request_context(),
+        request.request_body(),
+    )
+    .await?
+    {
+        return Ok(Some(response));
+    }
+
+    Ok(None)
+}

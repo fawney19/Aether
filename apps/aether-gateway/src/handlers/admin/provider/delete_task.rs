@@ -2,9 +2,10 @@ use crate::handlers::admin::provider::shared::support::{
     put_admin_provider_delete_task, ADMIN_PROVIDER_MAPPING_PREVIEW_FETCH_LIMIT,
     ADMIN_PROVIDER_MAPPING_PREVIEW_MAX_KEYS, ADMIN_PROVIDER_MAPPING_PREVIEW_MAX_MODELS,
 };
+use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{decrypt_catalog_secret_with_fallbacks, json_string_list};
 use crate::handlers::public::matches_model_mapping_for_models;
-use crate::{AppState, GatewayError, LocalProviderDeleteTaskState};
+use crate::{GatewayError, LocalProviderDeleteTaskState};
 use aether_data_contracts::repository::global_models::{
     AdminProviderModelListQuery, PublicGlobalModelQuery, StoredPublicGlobalModel,
 };
@@ -13,10 +14,11 @@ use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) async fn run_admin_provider_delete_task(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     provider_id: &str,
     task_id: &str,
 ) -> Result<LocalProviderDeleteTaskState, GatewayError> {
+    let app = state.as_ref();
     let Some(mut provider) = state
         .read_provider_catalog_providers_by_ids(&[provider_id.to_string()])
         .await?
@@ -70,7 +72,7 @@ pub(crate) async fn run_admin_provider_delete_task(
                 .map(|duration| duration.as_secs())
                 .unwrap_or(0),
         );
-        let _ = state.update_provider_catalog_provider(&provider).await?;
+        let _ = app.update_provider_catalog_provider(&provider).await?;
     }
     task.stage = "disabling".to_string();
     task.message = "provider disabled; starting cleanup".to_string();
@@ -81,8 +83,7 @@ pub(crate) async fn run_admin_provider_delete_task(
         .map(|item| item.id.clone())
         .collect::<Vec<_>>();
     let key_ids = keys.iter().map(|item| item.id.clone()).collect::<Vec<_>>();
-    state
-        .cleanup_deleted_provider_catalog_refs(&provider.id, &endpoint_ids, &key_ids)
+    app.cleanup_deleted_provider_catalog_refs(&provider.id, &endpoint_ids, &key_ids)
         .await?;
 
     task.stage = "deleting_models".to_string();
@@ -122,7 +123,7 @@ pub(crate) async fn run_admin_provider_delete_task(
     task.stage = "deleting_provider".to_string();
     task.message = "deleting provider record".to_string();
     put_admin_provider_delete_task(state, &task);
-    if !state.delete_provider_catalog_provider(&provider.id).await? {
+    if !app.delete_provider_catalog_provider(&provider.id).await? {
         task.status = "failed".to_string();
         task.stage = "failed".to_string();
         task.message = "provider delete failed".to_string();
@@ -155,7 +156,7 @@ pub(crate) fn public_global_model_mapping_patterns(model: &StoredPublicGlobalMod
 }
 
 pub(crate) fn mapping_preview_masked_catalog_api_key(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     key: &StoredProviderCatalogKey,
 ) -> String {
     let ciphertext = key.encrypted_api_key.trim();
@@ -181,20 +182,21 @@ pub(crate) fn mapping_preview_masked_catalog_api_key(
 }
 
 pub(crate) async fn build_admin_provider_mapping_preview_payload(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     provider_id: &str,
 ) -> Option<serde_json::Value> {
-    if !state.has_provider_catalog_data_reader() || !state.has_global_model_data_reader() {
+    let app = state.as_ref();
+    if !app.has_provider_catalog_data_reader() || !app.has_global_model_data_reader() {
         return None;
     }
 
-    let provider = state
+    let provider = app
         .read_provider_catalog_providers_by_ids(&[provider_id.to_string()])
         .await
         .ok()
         .and_then(|mut providers| providers.drain(..).next())?;
 
-    let mut keys = state
+    let mut keys = app
         .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
         .await
         .ok()
@@ -209,7 +211,7 @@ pub(crate) async fn build_admin_provider_mapping_preview_payload(
         keys.truncate(ADMIN_PROVIDER_MAPPING_PREVIEW_MAX_KEYS);
     }
 
-    let public_models = state
+    let public_models = app
         .list_public_global_models(&PublicGlobalModelQuery {
             offset: 0,
             limit: ADMIN_PROVIDER_MAPPING_PREVIEW_FETCH_LIMIT,

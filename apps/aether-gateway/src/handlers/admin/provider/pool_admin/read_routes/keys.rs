@@ -1,0 +1,154 @@
+use super::{
+    admin_pool_provider_id_from_path, admin_provider_pool_config, build_admin_pool_error_response,
+    parse_admin_pool_page, parse_admin_pool_page_size, parse_admin_pool_search,
+    parse_admin_pool_status_filter, pool_payloads, pool_selection,
+    read_admin_provider_pool_cooldown_key_ids, read_admin_provider_pool_runtime_state,
+    AdminProviderPoolRuntimeState, ProviderCatalogKeyListQuery,
+    ADMIN_POOL_PROVIDER_CATALOG_READER_UNAVAILABLE_DETAIL,
+};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
+use axum::{
+    body::Body,
+    http,
+    response::{IntoResponse, Response},
+    Json,
+};
+use serde_json::json;
+
+pub(super) async fn build_admin_pool_list_keys_response(
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
+) -> Result<Response<Body>, GatewayError> {
+    if !state.has_provider_catalog_data_reader() {
+        return Ok(build_admin_pool_error_response(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            ADMIN_POOL_PROVIDER_CATALOG_READER_UNAVAILABLE_DETAIL,
+        ));
+    }
+
+    let Some(provider_id) = admin_pool_provider_id_from_path(request_context.path()) else {
+        return Ok(build_admin_pool_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "provider_id 无效",
+        ));
+    };
+    let query = request_context.query_string();
+    let page = match parse_admin_pool_page(query) {
+        Ok(value) => value,
+        Err(detail) => {
+            return Ok(build_admin_pool_error_response(
+                http::StatusCode::BAD_REQUEST,
+                detail,
+            ));
+        }
+    };
+    let page_size = match parse_admin_pool_page_size(query) {
+        Ok(value) => value,
+        Err(detail) => {
+            return Ok(build_admin_pool_error_response(
+                http::StatusCode::BAD_REQUEST,
+                detail,
+            ));
+        }
+    };
+    let search = parse_admin_pool_search(query).map(|value| value.to_ascii_lowercase());
+    let status = match parse_admin_pool_status_filter(query) {
+        Ok(value) => value,
+        Err(detail) => {
+            return Ok(build_admin_pool_error_response(
+                http::StatusCode::BAD_REQUEST,
+                detail,
+            ));
+        }
+    };
+
+    let Some(provider) = state
+        .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id))
+        .await?
+        .into_iter()
+        .next()
+    else {
+        return Ok(build_admin_pool_error_response(
+            http::StatusCode::NOT_FOUND,
+            format!("Provider {provider_id} 不存在"),
+        ));
+    };
+
+    let pool_config = admin_provider_pool_config(&provider);
+    let page_offset = page.saturating_sub(1).saturating_mul(page_size);
+
+    let (keys, total) = if status == "cooldown" {
+        let cooldown_key_ids = if let Some(runner) = state.redis_kv_runner() {
+            read_admin_provider_pool_cooldown_key_ids(&runner, &provider.id).await
+        } else {
+            Vec::new()
+        };
+        let mut keys = if cooldown_key_ids.is_empty() {
+            Vec::new()
+        } else {
+            state
+                .read_provider_catalog_keys_by_ids(&cooldown_key_ids)
+                .await?
+        };
+        if let Some(keyword) = search.as_ref() {
+            keys.retain(|key| {
+                key.name.to_ascii_lowercase().contains(keyword)
+                    || key.id.to_ascii_lowercase().contains(keyword)
+            });
+        }
+        pool_selection::admin_pool_sort_keys(&mut keys);
+        let total = keys.len();
+        let keys = keys
+            .into_iter()
+            .skip(page_offset)
+            .take(page_size)
+            .collect::<Vec<_>>();
+        (keys, total)
+    } else {
+        let key_page = state
+            .list_provider_catalog_key_page(&ProviderCatalogKeyListQuery {
+                provider_id: provider.id.clone(),
+                search: search.clone(),
+                is_active: match status.as_str() {
+                    "active" => Some(true),
+                    "inactive" => Some(false),
+                    _ => None,
+                },
+                offset: page_offset,
+                limit: page_size,
+            })
+            .await?;
+        (key_page.items, key_page.total)
+    };
+
+    let key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
+    let runtime = match (state.redis_kv_runner(), pool_config) {
+        (Some(runner), Some(pool_config)) if !key_ids.is_empty() => {
+            read_admin_provider_pool_runtime_state(&runner, &provider.id, &key_ids, pool_config)
+                .await
+        }
+        _ => AdminProviderPoolRuntimeState::default(),
+    };
+
+    let items = keys
+        .into_iter()
+        .map(|key| {
+            pool_payloads::build_admin_pool_key_payload(
+                state,
+                &provider.provider_type,
+                &key,
+                &runtime,
+                pool_config,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    Ok(Json(json!({
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "keys": items,
+    }))
+    .into_response())
+}

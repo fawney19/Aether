@@ -2,7 +2,7 @@ use axum::body::Bytes;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
-pub(super) fn parse_admin_provider_query_body(
+pub(crate) fn parse_admin_provider_query_body(
     request_body: Option<&Bytes>,
 ) -> Result<serde_json::Value, Response<axum::body::Body>> {
     let Some(raw_body) = request_body else {
@@ -18,7 +18,7 @@ pub(super) fn parse_admin_provider_query_body(
     })
 }
 
-pub(super) fn provider_query_extract_provider_id(payload: &serde_json::Value) -> Option<String> {
+pub(crate) fn provider_query_extract_provider_id(payload: &serde_json::Value) -> Option<String> {
     payload
         .get("provider_id")
         .and_then(serde_json::Value::as_str)
@@ -27,7 +27,7 @@ pub(super) fn provider_query_extract_provider_id(payload: &serde_json::Value) ->
         .map(ToOwned::to_owned)
 }
 
-pub(super) fn provider_query_extract_api_key_id(payload: &serde_json::Value) -> Option<String> {
+pub(crate) fn provider_query_extract_api_key_id(payload: &serde_json::Value) -> Option<String> {
     payload
         .get("api_key_id")
         .and_then(serde_json::Value::as_str)
@@ -36,14 +36,14 @@ pub(super) fn provider_query_extract_api_key_id(payload: &serde_json::Value) -> 
         .map(ToOwned::to_owned)
 }
 
-pub(super) fn provider_query_extract_force_refresh(payload: &serde_json::Value) -> bool {
+pub(crate) fn provider_query_extract_force_refresh(payload: &serde_json::Value) -> bool {
     payload
         .get("force_refresh")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
 }
 
-pub(super) fn provider_query_extract_model(payload: &serde_json::Value) -> Option<String> {
+pub(crate) fn provider_query_extract_model(payload: &serde_json::Value) -> Option<String> {
     payload
         .get("model")
         .or_else(|| payload.get("model_name"))
@@ -53,7 +53,7 @@ pub(super) fn provider_query_extract_model(payload: &serde_json::Value) -> Optio
         .map(ToOwned::to_owned)
 }
 
-pub(super) fn provider_query_extract_failover_models(payload: &serde_json::Value) -> Vec<String> {
+pub(crate) fn provider_query_extract_failover_models(payload: &serde_json::Value) -> Vec<String> {
     if let Some(items) = payload
         .get("failover_models")
         .or_else(|| payload.get("models"))
@@ -73,7 +73,7 @@ pub(super) fn provider_query_extract_failover_models(payload: &serde_json::Value
         .collect::<Vec<_>>()
 }
 
-pub(super) fn provider_query_extract_request_id(payload: &serde_json::Value) -> Option<String> {
+pub(crate) fn provider_query_extract_request_id(payload: &serde_json::Value) -> Option<String> {
     payload
         .get("request_id")
         .and_then(serde_json::Value::as_str)
@@ -82,7 +82,7 @@ pub(super) fn provider_query_extract_request_id(payload: &serde_json::Value) -> 
         .map(ToOwned::to_owned)
 }
 
-pub(super) fn provider_query_payload_keys(payload: &serde_json::Value) -> Vec<String> {
+pub(crate) fn provider_query_payload_keys(payload: &serde_json::Value) -> Vec<String> {
     let Some(object) = payload.as_object() else {
         return Vec::new();
     };

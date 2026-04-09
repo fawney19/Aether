@@ -1,9 +1,8 @@
 use super::super::cache_config::ADMIN_MONITORING_REDIS_REQUIRED_DETAIL;
-use super::super::routes::{
-    match_admin_monitoring_route, maybe_build_local_admin_monitoring_response, AdminMonitoringRoute,
-};
 use super::super::test_support::{request_context, sample_key, sample_provider, sample_usage};
+use super::local_monitoring_response;
 use crate::AppState;
+use aether_admin::observability::monitoring::{match_admin_monitoring_route, AdminMonitoringRoute};
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::usage::InMemoryUsageReadRepository;
 use axum::body::to_bytes;
@@ -76,7 +75,7 @@ async fn admin_monitoring_model_mapping_delete_requires_redis_without_runtime_or
         http::Method::DELETE,
         "/api/admin/monitoring/cache/model-mapping",
     );
-    let response = maybe_build_local_admin_monitoring_response(&state, &context)
+    let response = local_monitoring_response(&state, &context)
         .await
         .expect("handler should not error")
         .expect("monitoring route should be handled locally");
@@ -100,7 +99,7 @@ async fn admin_monitoring_user_behavior_returns_empty_local_payload_without_post
         "/api/admin/monitoring/user-behavior/user-123?days=30",
     );
 
-    let response = maybe_build_local_admin_monitoring_response(&state, &context)
+    let response = local_monitoring_response(&state, &context)
         .await
         .expect("handler should not error")
         .expect("user behavior route should be handled locally");
@@ -128,7 +127,7 @@ async fn admin_monitoring_audit_logs_returns_empty_local_payload_without_postgre
         "/api/admin/monitoring/audit-logs?username=alice&event_type=login_failed&days=14&limit=20&offset=5",
     );
 
-    let response = maybe_build_local_admin_monitoring_response(&state, &context)
+    let response = local_monitoring_response(&state, &context)
         .await
         .expect("handler should not error")
         .expect("monitoring route should be handled locally");
@@ -156,7 +155,7 @@ async fn admin_monitoring_suspicious_activities_returns_empty_local_payload_with
         "/api/admin/monitoring/suspicious-activities?hours=48",
     );
 
-    let response = maybe_build_local_admin_monitoring_response(&state, &context)
+    let response = local_monitoring_response(&state, &context)
         .await
         .expect("handler should not error")
         .expect("monitoring route should be handled locally");
@@ -224,7 +223,7 @@ async fn admin_monitoring_resilience_status_returns_local_payload() {
         );
     let context = request_context(http::Method::GET, "/api/admin/monitoring/resilience-status");
 
-    let response = maybe_build_local_admin_monitoring_response(&state, &context)
+    let response = local_monitoring_response(&state, &context)
         .await
         .expect("handler should not error")
         .expect("route should be handled locally");
@@ -296,7 +295,7 @@ async fn admin_monitoring_cache_stats_returns_local_payload() {
         );
     let context = request_context(http::Method::GET, "/api/admin/monitoring/cache/stats");
 
-    let response = maybe_build_local_admin_monitoring_response(&state, &context)
+    let response = local_monitoring_response(&state, &context)
         .await
         .expect("handler should not error")
         .expect("route should be handled locally");

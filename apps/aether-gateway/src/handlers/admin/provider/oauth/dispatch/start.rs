@@ -1,14 +1,14 @@
-use super::super::refresh::build_internal_control_error_response;
+use super::super::errors::build_internal_control_error_response;
 use super::super::state::{
     admin_provider_oauth_template, build_provider_oauth_start_response,
     generate_provider_oauth_pkce_verifier, is_fixed_provider_type_for_provider_oauth,
-    provider_oauth_pkce_s256, save_provider_oauth_state,
+    provider_oauth_pkce_s256,
 };
-use crate::control::GatewayPublicRequestContext;
 use crate::handlers::admin::provider::shared::paths::{
     admin_provider_oauth_start_key_id, admin_provider_oauth_start_provider_id,
 };
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use axum::{
     body::Body,
     http,
@@ -17,10 +17,10 @@ use axum::{
 };
 
 pub(super) async fn handle_admin_provider_oauth_start_key(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    let Some(key_id) = admin_provider_oauth_start_key_id(&request_context.request_path) else {
+    let Some(key_id) = admin_provider_oauth_start_key_id(request_context.path()) else {
         return Ok(build_internal_control_error_response(
             http::StatusCode::NOT_FOUND,
             "Key 不存在",
@@ -74,14 +74,14 @@ pub(super) async fn handle_admin_provider_oauth_start_key(
         .use_pkce
         .then(generate_provider_oauth_pkce_verifier);
     let code_challenge = pkce_verifier.as_deref().map(provider_oauth_pkce_s256);
-    let nonce = match save_provider_oauth_state(
-        state,
-        &key_id,
-        &provider_id,
-        &provider_type,
-        pkce_verifier.as_deref(),
-    )
-    .await
+    let nonce = match state
+        .save_provider_oauth_state(
+            &key_id,
+            &provider_id,
+            &provider_type,
+            pkce_verifier.as_deref(),
+        )
+        .await
     {
         Ok(nonce) => nonce,
         Err(_) => {
@@ -101,11 +101,10 @@ pub(super) async fn handle_admin_provider_oauth_start_key(
 }
 
 pub(super) async fn handle_admin_provider_oauth_start_provider(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    let Some(provider_id) = admin_provider_oauth_start_provider_id(&request_context.request_path)
-    else {
+    let Some(provider_id) = admin_provider_oauth_start_provider_id(request_context.path()) else {
         return Ok(build_internal_control_error_response(
             http::StatusCode::NOT_FOUND,
             "Provider 不存在",
@@ -146,14 +145,9 @@ pub(super) async fn handle_admin_provider_oauth_start_provider(
         .use_pkce
         .then(generate_provider_oauth_pkce_verifier);
     let code_challenge = pkce_verifier.as_deref().map(provider_oauth_pkce_s256);
-    let nonce = match save_provider_oauth_state(
-        state,
-        "",
-        &provider_id,
-        &provider_type,
-        pkce_verifier.as_deref(),
-    )
-    .await
+    let nonce = match state
+        .save_provider_oauth_state("", &provider_id, &provider_type, pkce_verifier.as_deref())
+        .await
     {
         Ok(nonce) => nonce,
         Err(_) => {

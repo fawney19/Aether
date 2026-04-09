@@ -14,6 +14,9 @@ use super::super::{
     build_router_with_state, issue_test_admin_access_token, sample_endpoint, sample_key,
     sample_provider, start_server, AppState,
 };
+use crate::admin_api::{
+    maybe_build_local_admin_usage_response, AdminAppState, AdminRequestContext,
+};
 use crate::audit::AdminAuditEvent;
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_MANAGEMENT_TOKEN_ID_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER,
@@ -21,7 +24,6 @@ use crate::constants::{
 };
 use crate::control::resolve_public_request_context;
 use crate::data::GatewayDataState;
-use crate::handlers::admin::observability::maybe_build_local_admin_usage_response;
 
 const ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL: &str = "Admin usage data unavailable";
 const DAY_1_UNIX_SECS: i64 = 1_711_000_000;
@@ -74,10 +76,14 @@ async fn local_admin_usage_response(
     .await
     .expect("request context should resolve");
     let body_bytes = body.map(|value| Bytes::from(value.to_string()));
-    maybe_build_local_admin_usage_response(state, &request_context, body_bytes.as_ref())
-        .await
-        .expect("local usage response should build")
-        .expect("usage route should resolve locally")
+    maybe_build_local_admin_usage_response(
+        &AdminAppState::new(state),
+        &AdminRequestContext::new(&request_context),
+        body_bytes.as_ref(),
+    )
+    .await
+    .expect("local usage response should build")
+    .expect("usage route should resolve locally")
 }
 
 async fn start_usage_upstream(

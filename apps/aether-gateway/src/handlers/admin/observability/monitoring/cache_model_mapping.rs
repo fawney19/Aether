@@ -2,7 +2,7 @@ use super::cache_config::ADMIN_MONITORING_REDIS_CACHE_CATEGORIES;
 use super::cache_store::{
     admin_monitoring_has_test_redis_keys, list_admin_monitoring_namespaced_keys,
 };
-use crate::AppState;
+use crate::handlers::admin::request::AdminAppState;
 use crate::GatewayError;
 use axum::{
     body::Body,
@@ -12,7 +12,7 @@ use axum::{
 use serde_json::json;
 
 pub(super) async fn build_admin_monitoring_model_mapping_stats_response(
-    state: &AppState,
+    state: &AdminAppState<'_>,
 ) -> Result<Response<Body>, GatewayError> {
     if state.redis_kv_runner().is_none() && !admin_monitoring_has_test_redis_keys(state) {
         return Ok(Json(json!({
@@ -67,7 +67,7 @@ pub(super) async fn build_admin_monitoring_model_mapping_stats_response(
 }
 
 pub(super) async fn build_admin_monitoring_redis_cache_categories_response(
-    state: &AppState,
+    state: &AdminAppState<'_>,
 ) -> Result<Response<Body>, GatewayError> {
     if state.redis_kv_runner().is_none() && !admin_monitoring_has_test_redis_keys(state) {
         return Ok(Json(json!({

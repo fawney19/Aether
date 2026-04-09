@@ -1,4 +1,4 @@
-use crate::ai_pipeline::control_facade::GatewayControlDecision;
+use crate::ai_pipeline::GatewayControlDecision;
 use crate::{AppState, GatewayControlSyncDecisionResponse, GatewayError};
 
 use super::super::plans::{resolve_stream_spec, resolve_sync_spec};

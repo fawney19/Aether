@@ -1,9 +1,8 @@
-use super::builders::build_admin_create_provider_endpoint_record;
 use super::extractors::admin_provider_id_for_endpoints;
 use super::payloads::{build_admin_provider_endpoint_response, AdminProviderEndpointCreateRequest};
 use super::support::build_admin_endpoints_data_unavailable_response;
-use crate::control::GatewayPublicRequestContext;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -14,21 +13,21 @@ use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) async fn maybe_handle(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
+    let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
 
     if decision.route_family.as_deref() != Some("endpoints_manage")
         || decision.route_kind.as_deref() != Some("create_endpoint")
-        || request_context.request_method != http::Method::POST
+        || request_context.method() != http::Method::POST
         || !request_context
-            .request_path
+            .path()
             .starts_with("/api/admin/endpoints/providers/")
-        || !request_context.request_path.ends_with("/endpoints")
+        || !request_context.path().ends_with("/endpoints")
     {
         return Ok(None);
     }
@@ -37,7 +36,7 @@ pub(super) async fn maybe_handle(
         return Ok(Some(build_admin_endpoints_data_unavailable_response()));
     }
 
-    let Some(provider_id) = admin_provider_id_for_endpoints(&request_context.request_path) else {
+    let Some(provider_id) = admin_provider_id_for_endpoints(request_context.path()) else {
         return Ok(Some(
             (
                 http::StatusCode::NOT_FOUND,
@@ -81,7 +80,9 @@ pub(super) async fn maybe_handle(
                 .into_response(),
         ));
     };
-    let record = match build_admin_create_provider_endpoint_record(state, &provider, payload).await
+    let record = match state
+        .build_admin_create_provider_endpoint_record(&provider, payload)
+        .await
     {
         Ok(record) => record,
         Err(detail) => {

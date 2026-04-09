@@ -5,9 +5,9 @@ use super::shared::{
     build_admin_api_keys_data_unavailable_response, build_admin_api_keys_not_found_response,
 };
 use super::{decrypt_catalog_secret_with_fallbacks, query_param_bool, query_param_optional_bool};
-use crate::control::GatewayPublicRequestContext;
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
-use crate::{AppState, GatewayError};
+use crate::GatewayError;
 use axum::{
     body::Body,
     http,
@@ -19,11 +19,11 @@ use std::time::Instant;
 use tracing::info;
 
 pub(super) async fn build_admin_list_api_keys_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
     let handler_started_at = Instant::now();
-    let query = request_context.request_query_string.as_deref();
+    let query = request_context.query_string();
     let skip = match admin_api_keys_parse_skip(query) {
         Ok(value) => value,
         Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
@@ -109,18 +109,16 @@ pub(super) async fn build_admin_list_api_keys_response(
 }
 
 pub(super) async fn build_admin_api_key_detail_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    let Some(api_key_id) = admin_api_keys_id_from_path(&request_context.request_path) else {
+    let Some(api_key_id) = admin_api_keys_id_from_path(request_context.path()) else {
         return Ok(build_admin_api_keys_data_unavailable_response());
     };
 
     if state
-        .data
         .list_auth_api_key_snapshots_by_ids(std::slice::from_ref(&api_key_id))
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?
+        .await?
         .into_iter()
         .any(|snapshot| snapshot.api_key_id == api_key_id && !snapshot.api_key_is_standalone)
     {
@@ -136,11 +134,7 @@ pub(super) async fn build_admin_api_key_detail_response(
         return Ok(build_admin_api_keys_not_found_response());
     };
 
-    if query_param_bool(
-        request_context.request_query_string.as_deref(),
-        "include_key",
-        false,
-    ) {
+    if query_param_bool(request_context.query_string(), "include_key", false) {
         let Some(ciphertext) = record
             .key_encrypted
             .as_deref()

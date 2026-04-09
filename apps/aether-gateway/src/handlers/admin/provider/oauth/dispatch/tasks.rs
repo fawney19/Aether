@@ -1,9 +1,8 @@
-use super::super::refresh::build_internal_control_error_response;
-use super::super::state::read_provider_oauth_batch_task_payload;
-use crate::control::GatewayPublicRequestContext;
+use super::super::errors::build_internal_control_error_response;
 use crate::handlers::admin::provider::shared::paths::admin_provider_oauth_batch_import_task_path;
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
-use crate::{AppState, GatewayError};
+use crate::GatewayError;
 use axum::{
     body::Body,
     http,
@@ -12,18 +11,20 @@ use axum::{
 };
 
 pub(super) async fn handle_admin_provider_oauth_batch_import_task_status(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
     let Some((provider_id, task_id)) =
-        admin_provider_oauth_batch_import_task_path(&request_context.request_path)
+        admin_provider_oauth_batch_import_task_path(request_context.path())
     else {
         return Ok(build_internal_control_error_response(
             http::StatusCode::NOT_FOUND,
             "批量导入任务不存在",
         ));
     };
-    let payload = match read_provider_oauth_batch_task_payload(state, &provider_id, &task_id).await
+    let payload = match state
+        .read_provider_oauth_batch_task_payload(&provider_id, &task_id)
+        .await
     {
         Ok(Some(payload)) => payload,
         Ok(None) => {

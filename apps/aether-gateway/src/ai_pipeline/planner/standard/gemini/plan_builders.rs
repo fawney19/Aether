@@ -4,7 +4,7 @@ use super::{
     augment_sync_report_context, generic_decision_missing_exact_provider_request,
     LocalStreamPlanAndReport, LocalSyncPlanAndReport,
 };
-use crate::ai_pipeline::provider_transport_facade::ensure_upstream_auth_header;
+use crate::ai_pipeline::transport::ensure_upstream_auth_header;
 use crate::{GatewayControlSyncDecisionResponse, GatewayError};
 
 pub(crate) fn build_gemini_sync_plan_from_decision(

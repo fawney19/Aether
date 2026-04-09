@@ -15,6 +15,17 @@ const REQUIRED_BETA_TOKENS: &[&str] = &[
 ];
 const EXCLUDED_BETA_TOKENS: &[&str] = &["context-1m-2025-08-07"];
 
+/// Fingerprint field -> HTTP header mapping.
+/// Every stainless / identity dimension that can vary per-key is listed here.
+const FINGERPRINT_HEADER_MAP: &[(&str, &str)] = &[
+    ("stainless_package_version", "x-stainless-package-version"),
+    ("stainless_os", "x-stainless-os"),
+    ("stainless_arch", "x-stainless-arch"),
+    ("stainless_runtime_version", "x-stainless-runtime-version"),
+    ("stainless_timeout", "x-stainless-timeout"),
+    ("user_agent", "user-agent"),
+];
+
 pub fn build_claude_code_passthrough_headers(
     headers: &http::HeaderMap,
     auth_header: &str,
@@ -31,34 +42,46 @@ pub fn build_claude_code_passthrough_headers(
         Some("application/json"),
     );
 
+    // -- Anthropic protocol headers --
     out.insert("accept".to_string(), DEFAULT_ACCEPT.to_string());
     out.insert(
         "anthropic-version".to_string(),
         DEFAULT_ANTHROPIC_VERSION.to_string(),
     );
+    // Read incoming anthropic-beta directly from the original HeaderMap because the
+    // upstream passthrough filter now strips `anthropic-*` headers to avoid leaking
+    // them to non-Anthropic upstreams.
+    let incoming_anthropic_beta = headers
+        .get("anthropic-beta")
+        .and_then(|value| value.to_str().ok());
     out.insert(
         "anthropic-beta".to_string(),
-        merge_anthropic_beta_tokens(out.get("anthropic-beta").map(String::as_str)),
+        merge_anthropic_beta_tokens(incoming_anthropic_beta),
     );
+    out.insert(
+        "anthropic-dangerous-direct-browser-access".to_string(),
+        "true".to_string(),
+    );
+    out.insert("x-app".to_string(), "cli".to_string());
+
+    // -- Stainless SDK identity headers --
+    // Fixed values: these don't vary per fingerprint.
     out.insert("x-stainless-lang".to_string(), "js".to_string());
+    out.insert("x-stainless-runtime".to_string(), "node".to_string());
+    out.insert("x-stainless-retry-count".to_string(), "0".to_string());
+
+    // Defaults for fingerprint-overridable fields (used when no fingerprint is present).
     out.insert(
         "x-stainless-package-version".to_string(),
         "0.70.0".to_string(),
     );
     out.insert("x-stainless-os".to_string(), "Linux".to_string());
     out.insert("x-stainless-arch".to_string(), "arm64".to_string());
-    out.insert("x-stainless-runtime".to_string(), "node".to_string());
     out.insert(
         "x-stainless-runtime-version".to_string(),
         "v24.13.0".to_string(),
     );
-    out.insert("x-stainless-retry-count".to_string(), "0".to_string());
     out.insert("x-stainless-timeout".to_string(), "600".to_string());
-    out.insert("x-app".to_string(), "cli".to_string());
-    out.insert(
-        "anthropic-dangerous-direct-browser-access".to_string(),
-        "true".to_string(),
-    );
 
     if stream {
         out.insert(
@@ -69,33 +92,18 @@ pub fn build_claude_code_passthrough_headers(
         out.remove("x-stainless-helper-method");
     }
 
-    if let Some(fingerprint) = fingerprint.and_then(Value::as_object) {
-        override_header_from_fingerprint(
-            &mut out,
-            fingerprint,
-            "stainless_package_version",
-            "x-stainless-package-version",
-        );
-        override_header_from_fingerprint(&mut out, fingerprint, "stainless_os", "x-stainless-os");
-        override_header_from_fingerprint(
-            &mut out,
-            fingerprint,
-            "stainless_arch",
-            "x-stainless-arch",
-        );
-        override_header_from_fingerprint(
-            &mut out,
-            fingerprint,
-            "stainless_runtime_version",
-            "x-stainless-runtime-version",
-        );
-        override_header_from_fingerprint(
-            &mut out,
-            fingerprint,
-            "stainless_timeout",
-            "x-stainless-timeout",
-        );
-        override_header_from_fingerprint(&mut out, fingerprint, "user_agent", "user-agent");
+    // Override from fingerprint: all mapped fields are applied uniformly.
+    if let Some(fp) = fingerprint.and_then(Value::as_object) {
+        for &(fp_key, header_key) in FINGERPRINT_HEADER_MAP {
+            if let Some(value) = fp
+                .get(fp_key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                out.insert(header_key.to_string(), value.to_string());
+            }
+        }
     }
 
     out
@@ -208,23 +216,6 @@ fn append_beta_token(seen: &mut BTreeSet<String>, merged: &mut Vec<String>, toke
     if seen.insert(key) {
         merged.push(normalized.to_string());
     }
-}
-
-fn override_header_from_fingerprint(
-    headers: &mut BTreeMap<String, String>,
-    fingerprint: &Map<String, Value>,
-    fingerprint_key: &str,
-    header_key: &str,
-) {
-    let Some(value) = fingerprint
-        .get(fingerprint_key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return;
-    };
-    headers.insert(header_key.to_string(), value.to_string());
 }
 
 #[cfg(test)]

@@ -14,23 +14,27 @@ fn admin_system_and_endpoint_roots_stay_thin() {
         );
     }
     for pattern in [
-        "pub(crate) use self::adaptive::maybe_build_local_admin_adaptive_response;",
-        "pub(crate) use self::core::maybe_build_local_admin_core_response;",
-        "pub(crate) use self::management_tokens::maybe_build_local_admin_management_tokens_response;",
-        "pub(crate) use self::modules::maybe_build_local_admin_modules_response;",
-        "pub(crate) use self::proxy_nodes::maybe_build_local_admin_proxy_nodes_response;",
+        "mod routes;",
+        "pub(super) use self::routes::maybe_build_local_admin_system_response;",
     ] {
         assert!(
             system_mod.contains(pattern),
             "handlers/admin/system/mod.rs should stay as a thin system subdomain router for {pattern}"
         );
     }
-    assert!(
-        system_mod.contains(
-            "pub(crate) use crate::handlers::admin::provider::pool_admin::maybe_build_local_admin_pool_response;"
-        ),
-        "handlers/admin/system/mod.rs should delegate pool admin seam directly to provider::pool_admin"
-    );
+    for forbidden in [
+        "pub(crate) use self::adaptive::maybe_build_local_admin_adaptive_response;",
+        "pub(crate) use self::core::maybe_build_local_admin_core_response;",
+        "pub(crate) use self::management_tokens::maybe_build_local_admin_management_tokens_response;",
+        "pub(crate) use self::modules::maybe_build_local_admin_modules_response;",
+        "pub(crate) use self::proxy_nodes::maybe_build_local_admin_proxy_nodes_response;",
+        "pub(crate) use crate::handlers::admin::provider::pool_admin::maybe_build_local_admin_pool_response;",
+    ] {
+        assert!(
+            !system_mod.contains(forbidden),
+            "handlers/admin/system/mod.rs should not remain a public owner export hub for {forbidden}"
+        );
+    }
 
     assert!(
         !workspace_file_exists("apps/aether-gateway/src/handlers/admin/system/pool/mod.rs"),
@@ -39,6 +43,15 @@ fn admin_system_and_endpoint_roots_stay_thin() {
 
     let endpoint_mod =
         read_workspace_file("apps/aether-gateway/src/handlers/admin/endpoint/mod.rs");
+    for pattern in [
+        "mod routes;",
+        "pub(super) use self::routes::maybe_build_local_admin_endpoints_response;",
+    ] {
+        assert!(
+            endpoint_mod.contains(pattern),
+            "handlers/admin/endpoint/mod.rs should stay as a thin endpoint router for {pattern}"
+        );
+    }
     for pattern in [
         "use self::extractors::{",
         "use self::health_builders::{",
@@ -53,20 +66,34 @@ fn admin_system_and_endpoint_roots_stay_thin() {
         endpoint_mod.contains(
             "pub(crate) use self::health_builders::build_admin_endpoint_health_status_payload;"
         ),
-        "handlers/admin/endpoint/mod.rs should keep only the public health status payload seam"
+        "handlers/admin/endpoint/mod.rs should keep only the crate-facing health status payload seam"
     );
 
     let system_core_mod =
         read_workspace_file("apps/aether-gateway/src/handlers/admin/system/core/mod.rs");
     for pattern in [
-        "maybe_build_local_admin_management_tokens_response",
+        "super::management_tokens::maybe_build_local_admin_management_tokens_response",
         "maybe_build_local_admin_oauth_response",
-        "maybe_build_local_admin_modules_response",
+        "super::modules::maybe_build_local_admin_modules_response",
         "maybe_build_local_admin_model_catalog_response",
     ] {
         assert!(
             system_core_mod.contains(pattern),
             "handlers/admin/system/core/mod.rs should call the real owner {pattern}"
+        );
+    }
+
+    let system_routes =
+        read_workspace_file("apps/aether-gateway/src/handlers/admin/system/routes.rs");
+    for pattern in [
+        "core::maybe_build_local_admin_core_response(",
+        "adaptive::maybe_build_local_admin_adaptive_response(",
+        "pool_admin::maybe_build_local_admin_pool_response(",
+        "proxy_nodes::maybe_build_local_admin_proxy_nodes_response(",
+    ] {
+        assert!(
+            system_routes.contains(pattern),
+            "handlers/admin/system/routes.rs should dispatch through specific system owner {pattern}"
         );
     }
     for path in [
@@ -104,23 +131,22 @@ fn admin_system_and_endpoint_roots_stay_thin() {
         );
     }
 
+    let endpoint_routes =
+        read_workspace_file("apps/aether-gateway/src/handlers/admin/endpoint/routes.rs");
     assert!(
-        endpoint_mod.contains(
+        endpoint_routes.contains(
             "endpoint_keys::maybe_build_local_admin_endpoints_keys_response"
         ),
-        "handlers/admin/endpoint/mod.rs should dispatch provider key management directly to provider::endpoint_keys"
+        "handlers/admin/endpoint/routes.rs should dispatch provider key management directly to provider::endpoint_keys"
     );
 
     assert!(
-        endpoint_mod.contains(
+        endpoint_routes.contains(
             "endpoints_admin::maybe_build_local_admin_endpoints_routes_response"
         ),
-        "handlers/admin/endpoint/mod.rs should dispatch provider endpoint CRUD directly to provider::endpoints_admin"
+        "handlers/admin/endpoint/routes.rs should dispatch provider endpoint CRUD directly to provider::endpoints_admin"
     );
-    for path in [
-        "apps/aether-gateway/src/handlers/admin/endpoint/keys.rs",
-        "apps/aether-gateway/src/handlers/admin/endpoint/routes.rs",
-    ] {
+    for path in ["apps/aether-gateway/src/handlers/admin/endpoint/keys.rs"] {
         assert!(
             !workspace_file_exists(path),
             "{path} should be deleted once endpoint root dispatches directly to provider-owned handlers"
@@ -137,7 +163,7 @@ fn admin_model_root_owns_model_catalog_routes() {
     );
     assert!(
         model_mod.contains(
-            "pub(crate) use self::catalog_routes::maybe_build_local_admin_model_catalog_response;"
+            "pub(super) use self::catalog_routes::maybe_build_local_admin_model_catalog_response;"
         ),
         "handlers/admin/model/mod.rs should expose model catalog route seam"
     );
@@ -352,7 +378,7 @@ fn admin_system_owns_system_route_helpers() {
         read_workspace_file("apps/aether-gateway/src/handlers/admin/system/shared/mod.rs");
     for pattern in [
         "pub(crate) mod configs;",
-        "pub(crate) mod email_templates;",
+        "pub(crate) mod export;",
         "pub(crate) mod modules;",
         "pub(crate) mod paths;",
         "pub(crate) mod settings;",
@@ -399,9 +425,6 @@ fn admin_system_owns_system_route_helpers() {
     let system_shared_configs =
         read_workspace_file("apps/aether-gateway/src/handlers/admin/system/shared/configs.rs");
     for pattern in [
-        "pub(crate) async fn build_admin_system_config_export_payload",
-        "pub(crate) fn serialize_admin_system_users_export_wallet",
-        "pub(crate) async fn build_admin_system_users_export_payload",
         "pub(crate) fn build_admin_system_configs_payload",
         "pub(crate) async fn build_admin_system_config_detail_payload",
         "pub(crate) async fn apply_admin_system_config_update",
@@ -413,19 +436,98 @@ fn admin_system_owns_system_route_helpers() {
         );
     }
 
-    let system_shared_email_templates = read_workspace_file(
-        "apps/aether-gateway/src/handlers/admin/system/shared/email_templates.rs",
-    );
+    let request_system =
+        read_workspace_module_tree("apps/aether-gateway/src/handlers/admin/request/system/mod.rs");
     for pattern in [
         "pub(crate) async fn build_admin_email_templates_payload",
         "pub(crate) async fn build_admin_email_template_payload",
         "pub(crate) async fn apply_admin_email_template_update",
         "pub(crate) async fn preview_admin_email_template",
         "pub(crate) async fn reset_admin_email_template",
+        "pub(crate) async fn build_admin_system_config_export_payload",
+        "pub(crate) async fn build_admin_system_users_export_payload",
     ] {
         assert!(
-            system_shared_email_templates.contains(pattern),
-            "handlers/admin/system/shared/email_templates.rs should own {pattern}"
+            request_system.contains(pattern),
+            "handlers/admin/request/system/mod.rs should own {pattern}"
         );
     }
+    for path in [
+        "apps/aether-gateway/src/handlers/admin/system/shared/email_templates.rs",
+        "apps/aether-gateway/src/handlers/admin/system/shared/users_export.rs",
+    ] {
+        assert!(
+            !workspace_file_exists(path),
+            "{path} should be deleted once request/system/mod.rs owns system email/export route wrappers"
+        );
+    }
+}
+
+#[test]
+fn admin_system_shared_configs_split_export_owners() {
+    let system_shared_mod =
+        read_workspace_file("apps/aether-gateway/src/handlers/admin/system/shared/mod.rs");
+    for pattern in ["pub(crate) mod configs;", "pub(crate) mod export;"] {
+        assert!(
+            system_shared_mod.contains(pattern),
+            "handlers/admin/system/shared/mod.rs should register explicit system shared owner {pattern}"
+        );
+    }
+
+    let system_shared_configs =
+        read_workspace_file("apps/aether-gateway/src/handlers/admin/system/shared/configs.rs");
+    for forbidden in [
+        "build_admin_system_config_export_payload(",
+        "build_admin_system_users_export_payload(",
+        "serialize_admin_system_users_export_wallet(",
+    ] {
+        assert!(
+            !system_shared_configs.contains(forbidden),
+            "handlers/admin/system/shared/configs.rs should stay focused on config CRUD, not export owner {forbidden}"
+        );
+    }
+
+    assert!(
+        !workspace_file_exists("apps/aether-gateway/src/handlers/admin/system/shared/export.rs"),
+        "handlers/admin/system/shared/export.rs should be replaced by export/ directory owners"
+    );
+
+    let system_shared_export =
+        read_workspace_file("apps/aether-gateway/src/handlers/admin/system/shared/export/mod.rs");
+    for pattern in [
+        "pub(crate) use self::providers::build_admin_system_export_providers_payload;",
+        "decrypt_admin_system_export_secret",
+        "ADMIN_SYSTEM_CONFIG_EXPORT_VERSION",
+        "ADMIN_SYSTEM_EXPORT_PAGE_LIMIT",
+    ] {
+        assert!(
+            system_shared_export.contains(pattern),
+            "handlers/admin/system/shared/export/mod.rs should own {pattern}"
+        );
+    }
+    let request_system =
+        read_workspace_module_tree("apps/aether-gateway/src/handlers/admin/request/system/mod.rs");
+    for pattern in [
+        "pub(crate) async fn build_admin_system_config_export_payload(",
+        "pub(crate) async fn build_admin_system_users_export_payload(",
+    ] {
+        assert!(
+            request_system.contains(pattern),
+            "handlers/admin/request/system/mod.rs should own {pattern}"
+        );
+    }
+    for path in [
+        "apps/aether-gateway/src/handlers/admin/system/shared/export/support.rs",
+        "apps/aether-gateway/src/handlers/admin/system/shared/export/providers.rs",
+    ] {
+        assert!(
+            workspace_file_exists(path),
+            "{path} should exist once system export owner is split into specific modules"
+        );
+    }
+
+    assert!(
+        !workspace_file_exists("apps/aether-gateway/src/handlers/admin/system/shared/users_export.rs"),
+        "handlers/admin/system/shared/users_export.rs should be deleted once request/system/mod.rs owns users export wrapper"
+    );
 }

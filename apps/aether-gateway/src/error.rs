@@ -5,9 +5,9 @@ use axum::Json;
 use serde_json::json;
 use tracing::warn;
 
+use crate::ai_pipeline::PipelineFinalizeError;
 use crate::constants::*;
 use crate::insert_header_if_missing;
-use aether_ai_pipeline::finalize::PipelineFinalizeError;
 
 #[derive(Debug)]
 pub(crate) enum GatewayError {

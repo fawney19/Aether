@@ -2,13 +2,11 @@ use axum::body::{Body, Bytes};
 use axum::http::Response;
 use std::collections::BTreeMap;
 
-use crate::ai_pipeline::planner::common::{
-    GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND, OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND,
-    OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND, OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
-};
-use crate::ai_pipeline::planner::{
+use crate::ai_pipeline_api::{
     is_matching_stream_request, resolve_execution_runtime_stream_plan_kind,
     resolve_execution_runtime_sync_plan_kind, supports_sync_scheduler_decision_kind,
+    GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND, OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND,
+    OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND, OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
 };
 use crate::api::response::build_client_response_from_parts;
 use crate::control::resolve_execution_runtime_auth_context;

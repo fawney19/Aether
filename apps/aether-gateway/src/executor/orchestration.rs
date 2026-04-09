@@ -1,22 +1,22 @@
 use axum::body::Body;
 use axum::http::Response;
 
-use crate::ai_pipeline::planner;
-use crate::ai_pipeline::planner::common::{
-    parse_direct_request_body, EXECUTION_RUNTIME_STREAM_DECISION_ACTION,
-    EXECUTION_RUNTIME_SYNC_DECISION_ACTION,
+use crate::ai_pipeline_api::{
+    build_local_gemini_files_stream_plan_and_reports_for_kind,
+    build_local_gemini_files_sync_plan_and_reports_for_kind,
+    build_local_openai_chat_stream_plan_and_reports_for_kind,
+    build_local_openai_chat_sync_plan_and_reports_for_kind,
+    build_local_openai_cli_stream_plan_and_reports_for_kind,
+    build_local_openai_cli_sync_plan_and_reports_for_kind,
+    build_local_same_format_stream_plan_and_reports, build_local_same_format_sync_plan_and_reports,
+    build_local_video_sync_plan_and_reports_for_kind,
+    build_standard_family_stream_plan_and_reports, build_standard_family_sync_plan_and_reports,
+    parse_direct_request_body, resolve_claude_stream_spec, resolve_claude_sync_spec,
+    resolve_gemini_stream_spec, resolve_gemini_sync_spec, resolve_local_same_format_stream_spec,
+    resolve_local_same_format_sync_spec, set_local_openai_chat_execution_exhausted_diagnostic,
+    LocalStandardSpec, LocalStreamPlanAndReport, LocalSyncPlanAndReport,
+    EXECUTION_RUNTIME_STREAM_DECISION_ACTION, EXECUTION_RUNTIME_SYNC_DECISION_ACTION,
 };
-use crate::ai_pipeline::planner::passthrough::provider::plans::{
-    build_local_stream_plan_and_reports as build_same_format_stream_plan_and_reports,
-    build_local_sync_plan_and_reports as build_same_format_sync_plan_and_reports,
-    resolve_stream_spec as resolve_same_format_stream_spec,
-    resolve_sync_spec as resolve_same_format_sync_spec,
-};
-use crate::ai_pipeline::planner::standard::family::{
-    build_local_stream_plan_and_reports as build_standard_stream_plan_and_reports,
-    build_local_sync_plan_and_reports as build_standard_sync_plan_and_reports, LocalStandardSpec,
-};
-use crate::ai_pipeline::planner::standard::{claude, gemini, openai};
 use crate::control::GatewayControlDecision;
 use crate::executor::candidate_loop::{
     execute_stream_plan_and_reports, execute_sync_plan_and_reports,
@@ -52,7 +52,7 @@ pub(crate) async fn maybe_execute_sync_via_local_decision(
     body_json: &serde_json::Value,
     plan_kind: &str,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let plan_and_reports = openai::chat::build_local_openai_chat_sync_plan_and_reports_for_kind(
+    let plan_and_reports = build_local_openai_chat_sync_plan_and_reports_for_kind(
         state, parts, trace_id, decision, body_json, plan_kind,
     )
     .await?;
@@ -74,7 +74,7 @@ pub(crate) async fn maybe_execute_sync_via_local_decision(
         return Ok(Some(response));
     }
 
-    openai::chat::set_local_openai_chat_execution_exhausted_diagnostic(
+    set_local_openai_chat_execution_exhausted_diagnostic(
         state, trace_id, decision, plan_kind, body_json, plan_count,
     );
     Ok(None)
@@ -88,7 +88,7 @@ pub(crate) async fn maybe_execute_stream_via_local_decision(
     body_json: &serde_json::Value,
     plan_kind: &str,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let plan_and_reports = openai::chat::build_local_openai_chat_stream_plan_and_reports_for_kind(
+    let plan_and_reports = build_local_openai_chat_stream_plan_and_reports_for_kind(
         state, parts, trace_id, decision, body_json, plan_kind,
     )
     .await?;
@@ -104,7 +104,7 @@ pub(crate) async fn maybe_execute_stream_via_local_decision(
         return Ok(Some(response));
     }
 
-    openai::chat::set_local_openai_chat_execution_exhausted_diagnostic(
+    set_local_openai_chat_execution_exhausted_diagnostic(
         state, trace_id, decision, plan_kind, body_json, plan_count,
     );
     Ok(None)
@@ -118,10 +118,11 @@ pub(crate) async fn maybe_execute_sync_via_local_openai_cli_decision(
     body_json: &serde_json::Value,
     plan_kind: &str,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let plan_and_reports = openai::cli::build_local_openai_cli_sync_plan_and_reports_for_kind(
-        state, parts, trace_id, decision, body_json, plan_kind,
-    )
-    .await?;
+    let plan_and_reports: Vec<LocalSyncPlanAndReport> =
+        build_local_openai_cli_sync_plan_and_reports_for_kind(
+            state, parts, trace_id, decision, body_json, plan_kind,
+        )
+        .await?;
     if plan_and_reports.is_empty() {
         return Ok(None);
     }
@@ -145,10 +146,11 @@ pub(crate) async fn maybe_execute_stream_via_local_openai_cli_decision(
     body_json: &serde_json::Value,
     plan_kind: &str,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let plan_and_reports = openai::cli::build_local_openai_cli_stream_plan_and_reports_for_kind(
-        state, parts, trace_id, decision, body_json, plan_kind,
-    )
-    .await?;
+    let plan_and_reports: Vec<LocalStreamPlanAndReport> =
+        build_local_openai_cli_stream_plan_and_reports_for_kind(
+            state, parts, trace_id, decision, body_json, plan_kind,
+        )
+        .await?;
     if plan_and_reports.is_empty() {
         return Ok(None);
     }
@@ -169,9 +171,11 @@ pub(crate) async fn maybe_execute_sync_via_standard_family_decision(
         return Ok(None);
     };
 
-    let plan_and_reports =
-        build_standard_sync_plan_and_reports(state, parts, trace_id, decision, body_json, spec)
-            .await?;
+    let plan_and_reports: Vec<LocalSyncPlanAndReport> =
+        build_standard_family_sync_plan_and_reports(
+            state, parts, trace_id, decision, body_json, spec,
+        )
+        .await?;
     if plan_and_reports.is_empty() {
         return Ok(None);
     }
@@ -200,9 +204,11 @@ pub(crate) async fn maybe_execute_stream_via_standard_family_decision(
         return Ok(None);
     };
 
-    let plan_and_reports =
-        build_standard_stream_plan_and_reports(state, parts, trace_id, decision, body_json, spec)
-            .await?;
+    let plan_and_reports: Vec<LocalStreamPlanAndReport> =
+        build_standard_family_stream_plan_and_reports(
+            state, parts, trace_id, decision, body_json, spec,
+        )
+        .await?;
     if plan_and_reports.is_empty() {
         return Ok(None);
     }
@@ -225,7 +231,7 @@ pub(crate) async fn maybe_execute_sync_via_local_standard_decision(
         decision,
         body_json,
         plan_kind,
-        claude::resolve_sync_spec,
+        resolve_claude_sync_spec,
     )
     .await?
     {
@@ -239,7 +245,7 @@ pub(crate) async fn maybe_execute_sync_via_local_standard_decision(
         decision,
         body_json,
         plan_kind,
-        gemini::resolve_sync_spec,
+        resolve_gemini_sync_spec,
     )
     .await
 }
@@ -259,7 +265,7 @@ pub(crate) async fn maybe_execute_stream_via_local_standard_decision(
         decision,
         body_json,
         plan_kind,
-        claude::resolve_stream_spec,
+        resolve_claude_stream_spec,
     )
     .await?
     {
@@ -273,7 +279,7 @@ pub(crate) async fn maybe_execute_stream_via_local_standard_decision(
         decision,
         body_json,
         plan_kind,
-        gemini::resolve_stream_spec,
+        resolve_gemini_stream_spec,
     )
     .await
 }
@@ -286,13 +292,15 @@ pub(crate) async fn maybe_execute_sync_via_local_same_format_provider_decision(
     body_json: &serde_json::Value,
     plan_kind: &str,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(spec) = resolve_same_format_sync_spec(plan_kind) else {
+    let Some(spec) = resolve_local_same_format_sync_spec(plan_kind) else {
         return Ok(None);
     };
 
-    let plan_and_reports =
-        build_same_format_sync_plan_and_reports(state, parts, trace_id, decision, body_json, spec)
-            .await?;
+    let plan_and_reports: Vec<LocalSyncPlanAndReport> =
+        build_local_same_format_sync_plan_and_reports(
+            state, parts, trace_id, decision, body_json, spec,
+        )
+        .await?;
     if plan_and_reports.is_empty() {
         return Ok(None);
     }
@@ -316,14 +324,15 @@ pub(crate) async fn maybe_execute_stream_via_local_same_format_provider_decision
     body_json: &serde_json::Value,
     plan_kind: &str,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(spec) = resolve_same_format_stream_spec(plan_kind) else {
+    let Some(spec) = resolve_local_same_format_stream_spec(plan_kind) else {
         return Ok(None);
     };
 
-    let plan_and_reports = build_same_format_stream_plan_and_reports(
-        state, parts, trace_id, decision, body_json, spec,
-    )
-    .await?;
+    let plan_and_reports: Vec<LocalStreamPlanAndReport> =
+        build_local_same_format_stream_plan_and_reports(
+            state, parts, trace_id, decision, body_json, spec,
+        )
+        .await?;
     if plan_and_reports.is_empty() {
         return Ok(None);
     }
@@ -341,8 +350,8 @@ pub(crate) async fn maybe_execute_sync_via_local_gemini_files_decision(
     decision: &GatewayControlDecision,
     plan_kind: &str,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let plan_and_reports =
-        planner::specialized::files::build_local_gemini_files_sync_plan_and_reports_for_kind(
+    let plan_and_reports: Vec<LocalSyncPlanAndReport> =
+        build_local_gemini_files_sync_plan_and_reports_for_kind(
             state,
             parts,
             body_json,
@@ -375,8 +384,8 @@ pub(crate) async fn maybe_execute_stream_via_local_gemini_files_decision(
     decision: &GatewayControlDecision,
     plan_kind: &str,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let plan_and_reports =
-        planner::specialized::files::build_local_gemini_files_stream_plan_and_reports_for_kind(
+    let plan_and_reports: Vec<LocalStreamPlanAndReport> =
+        build_local_gemini_files_stream_plan_and_reports_for_kind(
             state, parts, trace_id, decision, plan_kind,
         )
         .await?;
@@ -395,8 +404,8 @@ pub(crate) async fn maybe_execute_sync_via_local_video_decision(
     decision: &GatewayControlDecision,
     plan_kind: &str,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let plan_and_reports =
-        planner::specialized::video::build_local_video_sync_plan_and_reports_for_kind(
+    let plan_and_reports: Vec<LocalSyncPlanAndReport> =
+        build_local_video_sync_plan_and_reports_for_kind(
             state, parts, body_json, trace_id, decision, plan_kind,
         )
         .await?;

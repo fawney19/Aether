@@ -1,10 +1,8 @@
 use super::payloads::build_admin_provider_model_response;
-use super::write::build_admin_provider_model_create_record;
-use crate::control::GatewayControlDecision;
-use crate::control::GatewayPublicRequestContext;
 use crate::handlers::admin::provider::shared::paths::admin_provider_id_for_models_list;
 use crate::handlers::admin::provider::shared::payloads::AdminProviderModelCreateRequest;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -15,18 +13,16 @@ use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) async fn maybe_handle(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&Bytes>,
-    decision: &GatewayControlDecision,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    if decision.route_family.as_deref() == Some("provider_models_manage")
-        && decision.route_kind.as_deref() == Some("create_provider_model")
-        && request_context.request_method == http::Method::POST
-        && request_context.request_path.ends_with("/models")
+    if request_context.route_family() == Some("provider_models_manage")
+        && request_context.route_kind() == Some("create_provider_model")
+        && request_context.method() == http::Method::POST
+        && request_context.path().ends_with("/models")
     {
-        let Some(provider_id) = admin_provider_id_for_models_list(&request_context.request_path)
-        else {
+        let Some(provider_id) = admin_provider_id_for_models_list(request_context.path()) else {
             return Ok(Some(
                 (
                     http::StatusCode::NOT_FOUND,
@@ -71,19 +67,21 @@ pub(super) async fn maybe_handle(
                 ));
             }
         };
-        let record =
-            match build_admin_provider_model_create_record(state, &provider_id, payload).await {
-                Ok(record) => record,
-                Err(detail) => {
-                    return Ok(Some(
-                        (
-                            http::StatusCode::BAD_REQUEST,
-                            Json(json!({ "detail": detail })),
-                        )
-                            .into_response(),
-                    ));
-                }
-            };
+        let record = match state
+            .build_admin_provider_model_create_record(&provider_id, payload)
+            .await
+        {
+            Ok(record) => record,
+            Err(detail) => {
+                return Ok(Some(
+                    (
+                        http::StatusCode::BAD_REQUEST,
+                        Json(json!({ "detail": detail })),
+                    )
+                        .into_response(),
+                ));
+            }
+        };
         return Ok(Some(
             match state.create_admin_provider_model(&record).await? {
                 Some(created) => {

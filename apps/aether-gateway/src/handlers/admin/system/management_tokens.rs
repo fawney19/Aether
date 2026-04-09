@@ -1,11 +1,11 @@
-use crate::control::GatewayPublicRequestContext;
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{query_param_optional_bool, query_param_value};
 use crate::handlers::admin::system::shared::paths::{
     admin_management_token_id_from_path, admin_management_token_status_id_from_path,
     is_admin_management_tokens_root,
 };
 use crate::handlers::internal::build_management_token_payload;
-use crate::{AppState, GatewayError};
+use crate::GatewayError;
 use aether_data::repository::management_tokens::ManagementTokenListQuery;
 use axum::{
     body::Body,
@@ -16,10 +16,10 @@ use axum::{
 use serde_json::json;
 
 pub(crate) async fn maybe_build_local_admin_management_tokens_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
+    let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
     if decision.route_family.as_deref() != Some("management_tokens_manage") {
@@ -44,19 +44,18 @@ pub(crate) async fn maybe_build_local_admin_management_tokens_response(
     }
 
     if decision.route_kind.as_deref() == Some("list_tokens")
-        && request_context.request_method == http::Method::GET
-        && is_admin_management_tokens_root(&request_context.request_path)
+        && request_context.method() == http::Method::GET
+        && is_admin_management_tokens_root(request_context.path())
     {
         if !state.has_management_token_reader() {
             return Ok(None);
         }
-        let user_id = query_param_value(request_context.request_query_string.as_deref(), "user_id");
-        let is_active =
-            query_param_optional_bool(request_context.request_query_string.as_deref(), "is_active");
-        let skip = query_param_value(request_context.request_query_string.as_deref(), "skip")
+        let user_id = query_param_value(request_context.query_string(), "user_id");
+        let is_active = query_param_optional_bool(request_context.query_string(), "is_active");
+        let skip = query_param_value(request_context.query_string(), "skip")
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
-        let limit = query_param_value(request_context.request_query_string.as_deref(), "limit")
+        let limit = query_param_value(request_context.query_string(), "limit")
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|value| *value > 0 && *value <= 100)
             .unwrap_or(50);
@@ -85,13 +84,12 @@ pub(crate) async fn maybe_build_local_admin_management_tokens_response(
     }
 
     if decision.route_kind.as_deref() == Some("get_token")
-        && request_context.request_method == http::Method::GET
+        && request_context.method() == http::Method::GET
     {
         if !state.has_management_token_reader() {
             return Ok(None);
         }
-        let Some(token_id) = admin_management_token_id_from_path(&request_context.request_path)
-        else {
+        let Some(token_id) = admin_management_token_id_from_path(request_context.path()) else {
             return Ok(Some(
                 (
                     http::StatusCode::NOT_FOUND,
@@ -117,13 +115,12 @@ pub(crate) async fn maybe_build_local_admin_management_tokens_response(
     }
 
     if decision.route_kind.as_deref() == Some("delete_token")
-        && request_context.request_method == http::Method::DELETE
+        && request_context.method() == http::Method::DELETE
     {
         if !state.has_management_token_writer() {
             return Ok(None);
         }
-        let Some(token_id) = admin_management_token_id_from_path(&request_context.request_path)
-        else {
+        let Some(token_id) = admin_management_token_id_from_path(request_context.path()) else {
             return Ok(Some(
                 (
                     http::StatusCode::NOT_FOUND,
@@ -157,13 +154,12 @@ pub(crate) async fn maybe_build_local_admin_management_tokens_response(
     }
 
     if decision.route_kind.as_deref() == Some("toggle_status")
-        && request_context.request_method == http::Method::PATCH
+        && request_context.method() == http::Method::PATCH
     {
         if !state.has_management_token_writer() {
             return Ok(None);
         }
-        let Some(token_id) =
-            admin_management_token_status_id_from_path(&request_context.request_path)
+        let Some(token_id) = admin_management_token_status_id_from_path(request_context.path())
         else {
             return Ok(Some(
                 (

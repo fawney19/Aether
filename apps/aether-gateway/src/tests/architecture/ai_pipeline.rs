@@ -1,6 +1,73 @@
 use super::*;
 
 #[test]
+fn ai_pipeline_crate_api_is_confined_to_root_seams() {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root should resolve");
+    let mut violations = Vec::new();
+
+    for file in collect_workspace_rust_files("apps/aether-gateway/src") {
+        let relative = file
+            .canonicalize()
+            .expect("workspace file should canonicalize")
+            .strip_prefix(&workspace_root)
+            .expect("workspace file should be under workspace root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if relative == "apps/aether-gateway/src/ai_pipeline/pure/mod.rs"
+            || relative == "apps/aether-gateway/src/ai_pipeline_api.rs"
+            || relative.starts_with("apps/aether-gateway/src/tests/")
+        {
+            continue;
+        }
+
+        let source = std::fs::read_to_string(&file).expect("source file should be readable");
+        if source.contains("aether_ai_pipeline::api") {
+            violations.push(relative);
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "gateway code should only depend on aether_ai_pipeline::api through ai_pipeline/pure/mod.rs or ai_pipeline_api.rs:\n{}",
+        violations.join("\n")
+    );
+
+    let mut crate_violations = Vec::new();
+    for file in collect_workspace_rust_files("apps/aether-gateway/src") {
+        let relative = file
+            .canonicalize()
+            .expect("workspace file should canonicalize")
+            .strip_prefix(&workspace_root)
+            .expect("workspace file should be under workspace root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if relative == "apps/aether-gateway/src/ai_pipeline/pure/mod.rs"
+            || relative == "apps/aether-gateway/src/ai_pipeline/transport.rs"
+            || relative == "apps/aether-gateway/src/ai_pipeline_api.rs"
+            || relative.ends_with("/tests.rs")
+            || relative.contains("/tests/")
+            || relative.starts_with("apps/aether-gateway/src/tests/")
+        {
+            continue;
+        }
+
+        let source = std::fs::read_to_string(&file).expect("source file should be readable");
+        if source.contains("aether_ai_pipeline::") {
+            crate_violations.push(relative);
+        }
+    }
+
+    assert!(
+        crate_violations.is_empty(),
+        "gateway code should only depend directly on aether_ai_pipeline through ai_pipeline root seams:\n{}",
+        crate_violations.join("\n")
+    );
+}
+
+#[test]
 fn ai_pipeline_routes_control_and_execution_deps_through_facades() {
     let patterns = [
         "use crate::control::",
@@ -14,6 +81,25 @@ fn ai_pipeline_routes_control_and_execution_deps_through_facades() {
     for root in ["src/ai_pipeline/planner", "src/ai_pipeline/finalize"] {
         assert_no_module_dependency_patterns(root, &patterns);
     }
+    assert_no_module_dependency_patterns(
+        "src/ai_pipeline",
+        &[
+            "crate::ai_pipeline::control_facade::",
+            "use crate::ai_pipeline::control_facade::",
+            "crate::ai_pipeline::execution_facade::",
+            "use crate::ai_pipeline::execution_facade::",
+            "crate::ai_pipeline::provider_transport_facade::",
+            "use crate::ai_pipeline::provider_transport_facade::",
+            "crate::ai_pipeline::planner::auth_snapshot_facade::",
+            "use crate::ai_pipeline::planner::auth_snapshot_facade::",
+            "crate::ai_pipeline::planner::scheduler_facade::",
+            "use crate::ai_pipeline::planner::scheduler_facade::",
+            "crate::ai_pipeline::planner::candidate_runtime_facade::",
+            "use crate::ai_pipeline::planner::candidate_runtime_facade::",
+            "crate::ai_pipeline::planner::transport_facade::",
+            "use crate::ai_pipeline::planner::transport_facade::",
+        ],
+    );
 
     let control_payloads =
         read_workspace_file("apps/aether-gateway/src/ai_pipeline/contracts/control_payloads.rs");
@@ -23,27 +109,160 @@ fn ai_pipeline_routes_control_and_execution_deps_through_facades() {
             "contracts/control_payloads.rs should route control/runtime dependencies through ai_pipeline facades, found {pattern}"
         );
     }
+    assert!(
+        !control_payloads.contains("GatewayControlAuthContext"),
+        "contracts/control_payloads.rs should not own GatewayControlAuthContext after execution auth DTO extraction"
+    );
+    for pattern in [
+        "struct GatewayControlPlanRequest",
+        "struct GatewayControlPlanResponse",
+        "struct GatewayControlSyncDecisionResponse",
+    ] {
+        assert!(
+            !control_payloads.contains(pattern),
+            "contracts/control_payloads.rs should not own {pattern} after DTO extraction"
+        );
+    }
+    assert!(
+        control_payloads.contains("crate::ai_pipeline::"),
+        "contracts/control_payloads.rs should consume pipeline-crate control DTOs through the ai_pipeline root seam after DTO extraction"
+    );
+    assert!(
+        control_payloads.contains(
+            "generic_decision_missing_exact_provider_request as generic_decision_missing_exact_provider_request_impl"
+        ),
+        "contracts/control_payloads.rs should delegate exact-request detection to the pipeline crate"
+    );
+    assert!(
+        !control_payloads.contains("GatewayControlPlanRequest {"),
+        "contracts/control_payloads.rs should not locally construct GatewayControlPlanRequest after helper extraction"
+    );
+    assert!(
+        !control_payloads.contains("pub(crate) async fn build_gateway_plan_request("),
+        "contracts/control_payloads.rs should not keep dead plan-request bridge after helper extraction"
+    );
 
-    let control_facade =
-        read_workspace_file("apps/aether-gateway/src/ai_pipeline/control_facade.rs");
+    let gateway_plan_builders =
+        read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/plan_builders.rs");
+    for pattern in [
+        "struct LocalSyncPlanAndReport",
+        "struct LocalStreamPlanAndReport",
+    ] {
+        assert!(
+            !gateway_plan_builders.contains(pattern),
+            "planner/plan_builders.rs should not own {pattern} after plan DTO extraction"
+        );
+    }
+    assert!(
+        gateway_plan_builders.contains("crate::ai_pipeline::"),
+        "planner/plan_builders.rs should consume pipeline-crate plan DTOs through the ai_pipeline root seam after extraction"
+    );
+    assert!(
+        gateway_plan_builders.contains(
+            "use crate::ai_pipeline::augment_sync_report_context as augment_sync_report_context_impl;"
+        ),
+        "planner/plan_builders.rs should delegate report-context augmentation through the ai_pipeline root seam"
+    );
+
+    let gateway_finalize_common =
+        read_workspace_file("apps/aether-gateway/src/ai_pipeline/finalize/common.rs");
+    assert!(
+        gateway_finalize_common
+            .contains("prepare_local_success_response_parts as prepare_local_success_response_parts_impl"),
+        "finalize/common.rs should delegate success response-part normalization to the pipeline crate"
+    );
+    assert!(
+        gateway_finalize_common
+            .contains("build_local_success_background_report as build_local_success_background_report_impl"),
+        "finalize/common.rs should delegate success background-report construction to the pipeline crate"
+    );
+    assert!(
+        gateway_finalize_common
+            .contains("build_local_success_conversion_background_report as build_local_success_conversion_background_report_impl"),
+        "finalize/common.rs should delegate conversion success background-report construction to the pipeline crate"
+    );
+
+    let ai_pipeline_mod = read_workspace_file("apps/aether-gateway/src/ai_pipeline/mod.rs");
     for pattern in [
         "crate::control::resolve_execution_runtime_auth_context",
         "crate::headers::collect_control_headers",
         "crate::headers::is_json_request",
     ] {
         assert!(
-            control_facade.contains(pattern),
-            "control_facade.rs should own {pattern}"
+            ai_pipeline_mod.contains(pattern),
+            "ai_pipeline/mod.rs should own {pattern}"
+        );
+    }
+    assert!(
+        ai_pipeline_mod.contains("ExecutionRuntimeAuthContext"),
+        "ai_pipeline/mod.rs should own ExecutionRuntimeAuthContext projection"
+    );
+
+    assert!(
+        ai_pipeline_mod
+            .contains("crate::execution_runtime::maybe_build_local_sync_finalize_response"),
+        "ai_pipeline/mod.rs should own local sync finalize response bridging"
+    );
+    assert!(
+        !workspace_file_exists("apps/aether-gateway/src/ai_pipeline/control.rs"),
+        "ai_pipeline/control.rs should stay removed after root seam consolidation"
+    );
+    assert!(
+        !workspace_file_exists("apps/aether-gateway/src/ai_pipeline/execution.rs"),
+        "ai_pipeline/execution.rs should stay removed after root seam consolidation"
+    );
+
+    assert!(
+        !ai_pipeline_mod.contains("pub(crate) use aether_ai_pipeline::api::*;"),
+        "ai_pipeline/mod.rs should not keep wildcard pipeline-crate exports after root-seam freeze"
+    );
+    for export in [
+        "PlannerAppState",
+        "GatewayAuthApiKeySnapshot",
+        "GatewayProviderTransportSnapshot",
+        "LocalResolvedOAuthRequestAuth",
+    ] {
+        assert!(
+            ai_pipeline_mod.contains(export),
+            "ai_pipeline/mod.rs should re-export {export} from the planner root seam"
         );
     }
 
-    let execution_facade =
-        read_workspace_file("apps/aether-gateway/src/ai_pipeline/execution_facade.rs");
     assert!(
-        execution_facade
-            .contains("crate::execution_runtime::maybe_build_local_sync_finalize_response"),
-        "execution_facade.rs should own local sync finalize response bridging"
+        !workspace_file_exists("apps/aether-gateway/src/ai_pipeline/pure.rs"),
+        "ai_pipeline/pure.rs should stay removed after pure seam directoryization"
     );
+    assert!(
+        workspace_file_exists("apps/aether-gateway/src/ai_pipeline/pure/mod.rs"),
+        "ai_pipeline/pure/mod.rs should exist after pure seam directoryization"
+    );
+    for path in [
+        "apps/aether-gateway/src/ai_pipeline/pure/adaptation.rs",
+        "apps/aether-gateway/src/ai_pipeline/pure/contracts.rs",
+        "apps/aether-gateway/src/ai_pipeline/pure/conversion.rs",
+        "apps/aether-gateway/src/ai_pipeline/pure/finalize.rs",
+        "apps/aether-gateway/src/ai_pipeline/pure/planner.rs",
+    ] {
+        assert!(
+            !workspace_file_exists(path),
+            "{path} should stay removed after pure seam collapse"
+        );
+    }
+
+    let pure_mod = read_workspace_file("apps/aether-gateway/src/ai_pipeline/pure/mod.rs");
+    for pattern in [
+        "pub(crate) use aether_ai_pipeline::api::{",
+        "ExecutionRuntimeAuthContext",
+        "ProviderAdaptationDescriptor",
+        "RequestConversionKind",
+        "PipelineFinalizeError",
+        "LocalStandardSpec",
+    ] {
+        assert!(
+            pure_mod.contains(pattern),
+            "ai_pipeline/pure/mod.rs should own {pattern}"
+        );
+    }
 }
 
 #[test]
@@ -53,31 +272,52 @@ fn ai_pipeline_routes_provider_transport_deps_through_facade() {
         "crate::provider_transport::",
     ];
 
-    for root in [
-        "src/ai_pipeline/planner",
-        "src/ai_pipeline/runtime",
-        "src/ai_pipeline/conversion",
-    ] {
+    for root in ["src/ai_pipeline/planner", "src/ai_pipeline/conversion"] {
         assert_no_module_dependency_patterns(root, &patterns);
     }
+    assert!(
+        !workspace_file_exists("apps/aether-gateway/src/ai_pipeline/runtime"),
+        "ai_pipeline/runtime should stay removed after facade cleanup"
+    );
+    assert!(
+        workspace_file_exists("crates/aether-ai-pipeline/src/transport.rs"),
+        "aether-ai-pipeline should own the transport root after provider-transport bridge extraction"
+    );
 
     let provider_transport_facade =
-        read_workspace_file("apps/aether-gateway/src/ai_pipeline/provider_transport_facade.rs");
+        read_workspace_file("apps/aether-gateway/src/ai_pipeline/transport.rs");
     for pattern in [
+        "aether_ai_pipeline::transport::auth",
+        "aether_ai_pipeline::transport::url",
+        "aether_ai_pipeline::transport::policy",
+        "aether_ai_pipeline::transport::snapshot",
+    ] {
+        assert!(
+            provider_transport_facade.contains(pattern),
+            "transport.rs should own {pattern}"
+        );
+    }
+    for forbidden in [
         "crate::provider_transport::auth",
         "crate::provider_transport::url",
         "crate::provider_transport::policy",
         "crate::provider_transport::snapshot",
     ] {
         assert!(
-            provider_transport_facade.contains(pattern),
-            "provider_transport_facade.rs should own {pattern}"
+            !provider_transport_facade.contains(forbidden),
+            "transport.rs should not keep gateway-local provider_transport owner {forbidden}"
         );
     }
+
+    let ai_pipeline_mod = read_workspace_file("apps/aether-gateway/src/ai_pipeline/mod.rs");
+    assert!(
+        ai_pipeline_mod.contains("pub(crate) mod transport;"),
+        "ai_pipeline/mod.rs should expose provider transport capabilities through the root seam module"
+    );
 }
 
 #[test]
-fn ai_pipeline_planner_gateway_facade_is_split_by_role() {
+fn ai_pipeline_planner_gateway_state_seam_is_split_by_role() {
     assert!(
         !workspace_file_exists("apps/aether-gateway/src/ai_pipeline/planner/gateway_facade.rs"),
         "planner/gateway_facade.rs should be removed after seam split"
@@ -91,60 +331,130 @@ fn ai_pipeline_planner_gateway_facade_is_split_by_role() {
         "apps/aether-gateway/src/ai_pipeline/planner/executor_facade.rs",
     ] {
         assert!(
-            workspace_file_exists(path),
-            "{path} should exist after planner seam split"
+            !workspace_file_exists(path),
+            "{path} should be removed after PlannerAppState absorbed the seam"
         );
     }
 
-    let auth_snapshot_facade =
-        read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/auth_snapshot_facade.rs");
+    for path in [
+        "apps/aether-gateway/src/ai_pipeline/planner/state/mod.rs",
+        "apps/aether-gateway/src/ai_pipeline/planner/state/auth.rs",
+        "apps/aether-gateway/src/ai_pipeline/planner/state/transport.rs",
+        "apps/aether-gateway/src/ai_pipeline/planner/state/scheduler.rs",
+        "apps/aether-gateway/src/ai_pipeline/planner/state/candidate_runtime.rs",
+        "apps/aether-gateway/src/ai_pipeline/planner/state/executor.rs",
+    ] {
+        assert!(
+            workspace_file_exists(path),
+            "{path} should exist after PlannerAppState directoryization"
+        );
+    }
+
+    let state_mod = read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/state/mod.rs");
+    for pattern in [
+        "mod auth;",
+        "mod transport;",
+        "mod scheduler;",
+        "mod candidate_runtime;",
+        "mod executor;",
+        "struct PlannerAppState",
+    ] {
+        assert!(
+            state_mod.contains(pattern),
+            "planner/state/mod.rs should own {pattern}"
+        );
+    }
+
+    let state_auth =
+        read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/state/auth.rs");
     assert!(
-        auth_snapshot_facade.contains("read_auth_api_key_snapshot("),
-        "auth_snapshot_facade.rs should own auth snapshot reads"
+        state_auth.contains("read_auth_api_key_snapshot("),
+        "planner/state/auth.rs should own auth snapshot reads"
     );
 
-    let transport_facade =
-        read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/transport_facade.rs");
+    let state_transport =
+        read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/state/transport.rs");
     for pattern in [
         "read_provider_transport_snapshot(",
         "resolve_local_oauth_request_auth(",
     ] {
         assert!(
-            transport_facade.contains(pattern),
-            "transport_facade.rs should own {pattern}"
+            state_transport.contains(pattern),
+            "planner/state/transport.rs should own {pattern}"
         );
     }
 
-    let scheduler_facade =
-        read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/scheduler_facade.rs");
+    let state_scheduler =
+        read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/state/scheduler.rs");
     for pattern in [
         "list_selectable_candidates(",
         "list_selectable_candidates_for_required_capability_without_requested_model(",
     ] {
         assert!(
-            scheduler_facade.contains(pattern),
-            "scheduler_facade.rs should own {pattern}"
+            state_scheduler.contains(pattern),
+            "planner/state/scheduler.rs should own {pattern}"
         );
     }
 
-    let candidate_runtime_facade = read_workspace_file(
-        "apps/aether-gateway/src/ai_pipeline/planner/candidate_runtime_facade.rs",
+    let state_candidate_runtime = read_workspace_file(
+        "apps/aether-gateway/src/ai_pipeline/planner/state/candidate_runtime.rs",
     );
     for pattern in [
         "persist_available_local_candidate(",
         "persist_skipped_local_candidate(",
     ] {
         assert!(
-            candidate_runtime_facade.contains(pattern),
-            "candidate_runtime_facade.rs should own {pattern}"
+            state_candidate_runtime.contains(pattern),
+            "planner/state/candidate_runtime.rs should own {pattern}"
         );
     }
 
-    let executor_facade =
-        read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/executor_facade.rs");
+    let state_executor =
+        read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/state/executor.rs");
     assert!(
-        executor_facade.contains("mark_unused_local_candidate_items("),
-        "executor_facade.rs should own mark_unused_local_candidate_items"
+        state_executor.contains("mark_unused_local_candidate_items("),
+        "planner/state/executor.rs should own mark_unused_local_candidate_items"
+    );
+}
+
+#[test]
+fn ai_pipeline_leaf_planner_owners_route_contract_specs_through_gateway_seams() {
+    for path in [
+        "apps/aether-gateway/src/ai_pipeline/planner/specialized/files/support.rs",
+        "apps/aether-gateway/src/ai_pipeline/planner/specialized/video/support.rs",
+        "apps/aether-gateway/src/ai_pipeline/planner/standard/openai/chat/decision/support.rs",
+        "apps/aether-gateway/src/ai_pipeline/planner/standard/openai/cli/decision/support.rs",
+    ] {
+        let source = read_workspace_file(path);
+        assert!(
+            !source.contains("aether_ai_pipeline::contracts::ExecutionRuntimeAuthContext"),
+            "{path} should consume ExecutionRuntimeAuthContext through gateway ai_pipeline seams"
+        );
+        assert!(
+            source.contains("crate::ai_pipeline::contracts::ExecutionRuntimeAuthContext"),
+            "{path} should use gateway contracts seam for ExecutionRuntimeAuthContext"
+        );
+    }
+
+    let specialized_files_decision = read_workspace_file(
+        "apps/aether-gateway/src/ai_pipeline/planner/specialized/files/decision.rs",
+    );
+    assert!(
+        !specialized_files_decision
+            .contains("aether_ai_pipeline::planner::specialized::files::LocalGeminiFilesSpec"),
+        "planner/specialized/files/decision.rs should consume LocalGeminiFilesSpec through the local specialized seam"
+    );
+    assert!(
+        specialized_files_decision.contains("use super::LocalGeminiFilesSpec;"),
+        "planner/specialized/files/decision.rs should use the local specialized seam for LocalGeminiFilesSpec"
+    );
+
+    let specialized_video_support = read_workspace_file(
+        "apps/aether-gateway/src/ai_pipeline/planner/specialized/video/support.rs",
+    );
+    assert!(
+        specialized_video_support.contains("use super::{LocalVideoCreateFamily, LocalVideoCreateSpec};"),
+        "planner/specialized/video/support.rs should use local video seams for LocalVideoCreate* types"
     );
 }
 
@@ -176,8 +486,8 @@ fn ai_pipeline_m5_moves_contracts_and_route_logic_into_pipeline_crate() {
     let gateway_contracts_mod =
         read_workspace_file("apps/aether-gateway/src/ai_pipeline/contracts/mod.rs");
     assert!(
-        gateway_contracts_mod.contains("aether_ai_pipeline::contracts"),
-        "gateway contracts/mod.rs should thinly re-export pipeline crate contracts"
+        gateway_contracts_mod.contains("pub(crate) use crate::ai_pipeline::{"),
+        "gateway contracts/mod.rs should thinly re-export pipeline crate contracts through the ai_pipeline root seam"
     );
 
     let gateway_route = read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/route.rs");
@@ -186,8 +496,8 @@ fn ai_pipeline_m5_moves_contracts_and_route_logic_into_pipeline_crate() {
         .next()
         .unwrap_or(gateway_route.as_str());
     assert!(
-        gateway_route_runtime.contains("aether_ai_pipeline::planner::route"),
-        "planner/route.rs should delegate route logic to the pipeline crate"
+        gateway_route_runtime.contains("crate::ai_pipeline::"),
+        "planner/route.rs should delegate route logic through the ai_pipeline root seam"
     );
     for legacy_literal in [
         "\"openai_chat_stream\"",
@@ -198,6 +508,90 @@ fn ai_pipeline_m5_moves_contracts_and_route_logic_into_pipeline_crate() {
         assert!(
             !gateway_route_runtime.contains(legacy_literal),
             "planner/route.rs should not own hardcoded route resolution literal {legacy_literal}"
+        );
+    }
+
+    let gateway_api = read_workspace_file("apps/aether-gateway/src/ai_pipeline_api.rs");
+    for pattern in [
+        "pub(crate) fn parse_direct_request_body(",
+        "pub(crate) fn resolve_execution_runtime_stream_plan_kind(",
+        "pub(crate) fn resolve_execution_runtime_sync_plan_kind(",
+        "pub(crate) fn is_matching_stream_request(",
+        "pub(crate) fn supports_sync_scheduler_decision_kind(",
+        "pub(crate) fn supports_stream_scheduler_decision_kind(",
+    ] {
+        assert!(
+            gateway_api.contains(pattern),
+            "ai_pipeline_api.rs should own facade wrapper {pattern}"
+        );
+    }
+
+    let planner_mod = read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/mod.rs");
+    for pattern in [
+        "pub(crate) use self::common::parse_direct_request_body;",
+        "pub(crate) use self::route::{",
+    ] {
+        assert!(
+            !planner_mod.contains(pattern),
+            "planner/mod.rs should not act as facade hub for {pattern}"
+        );
+    }
+
+    let finalize_mod = read_workspace_file("apps/aether-gateway/src/ai_pipeline/finalize/mod.rs");
+    for pattern in [
+        "pub(crate) use crate::api::response::{build_client_response, build_client_response_from_parts};",
+        "pub(crate) use common::build_local_success_outcome;",
+        "pub(crate) use internal::{",
+    ] {
+        assert!(
+            !finalize_mod.contains(pattern),
+            "finalize/mod.rs should not act as re-export hub for {pattern}"
+        );
+    }
+}
+
+#[test]
+fn ai_pipeline_m5_moves_kiro_stream_helpers_into_pipeline_crate() {
+    assert!(
+        workspace_file_exists("crates/aether-ai-pipeline/src/adaptation/kiro_stream.rs"),
+        "crates/aether-ai-pipeline/src/adaptation/kiro_stream.rs should exist after kiro helper extraction"
+    );
+    assert!(
+        !workspace_file_exists("apps/aether-gateway/src/ai_pipeline/adaptation/kiro/stream/util.rs"),
+        "apps/aether-gateway/src/ai_pipeline/adaptation/kiro/stream/util.rs should be removed after moving kiro helper ownership"
+    );
+}
+
+#[test]
+fn ai_pipeline_runtime_adapter_dead_duplicates_are_removed() {
+    for path in [
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/antigravity/auth.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/antigravity/policy.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/antigravity/request.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/antigravity/url.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/vertex/auth.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/vertex/policy.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/vertex/url.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/claude_code/auth.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/claude_code/policy.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/claude_code/request.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/claude_code/url.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/openai/auth.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/openai/policy.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/openai/request.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/openai/url.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/gemini/auth.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/gemini/policy.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/gemini/request.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/gemini/url.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/claude/auth.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/claude/policy.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/claude/request.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/claude/url.rs",
+    ] {
+        assert!(
+            !workspace_file_exists(path),
+            "{path} should be removed after provider-transport ownership consolidation"
         );
     }
 }
@@ -238,8 +632,8 @@ fn ai_pipeline_conversion_error_is_owned_by_pipeline_crate() {
     let conversion_mod =
         read_workspace_file("apps/aether-gateway/src/ai_pipeline/conversion/mod.rs");
     assert!(
-        conversion_mod.contains("aether_ai_pipeline::conversion"),
-        "gateway conversion/mod.rs should thinly re-export pipeline conversion"
+        conversion_mod.contains("crate::ai_pipeline::"),
+        "gateway conversion/mod.rs should thinly re-export pipeline conversion through the ai_pipeline root seam"
     );
 
     for forbidden in [
@@ -272,11 +666,15 @@ fn ai_pipeline_conversion_request_is_owned_by_pipeline_crate() {
         ),
         "ai_pipeline/conversion/request/to_openai_chat should not remain in gateway"
     );
-    let conversion_request =
-        read_workspace_file("apps/aether-gateway/src/ai_pipeline/conversion/request/mod.rs");
     assert!(
-        conversion_request.contains("aether_ai_pipeline::conversion::request"),
-        "gateway conversion/request/mod.rs should thinly re-export pipeline conversion request helpers"
+        !workspace_file_exists("apps/aether-gateway/src/ai_pipeline/conversion/request/mod.rs"),
+        "gateway conversion/request/mod.rs should be removed after root-seam consolidation"
+    );
+    let conversion_mod =
+        read_workspace_file("apps/aether-gateway/src/ai_pipeline/conversion/mod.rs");
+    assert!(
+        !conversion_mod.contains("pub(crate) mod request;"),
+        "gateway conversion/mod.rs should not keep request re-export shell after root-seam consolidation"
     );
 }
 
@@ -298,11 +696,15 @@ fn ai_pipeline_conversion_response_is_owned_by_pipeline_crate() {
         ),
         "ai_pipeline/conversion/response/to_openai_chat should not remain in gateway"
     );
-    let conversion_response =
-        read_workspace_file("apps/aether-gateway/src/ai_pipeline/conversion/response/mod.rs");
     assert!(
-        conversion_response.contains("aether_ai_pipeline::conversion::response"),
-        "gateway conversion/response/mod.rs should thinly re-export pipeline conversion response helpers"
+        !workspace_file_exists("apps/aether-gateway/src/ai_pipeline/conversion/response/mod.rs"),
+        "gateway conversion/response/mod.rs should be removed after root-seam consolidation"
+    );
+    let conversion_mod =
+        read_workspace_file("apps/aether-gateway/src/ai_pipeline/conversion/mod.rs");
+    assert!(
+        !conversion_mod.contains("pub(crate) mod response;"),
+        "gateway conversion/mod.rs should not keep response re-export shell after root-seam consolidation"
     );
 }
 
@@ -324,66 +726,39 @@ fn ai_pipeline_finalize_standard_sync_response_converters_are_owned_by_pipeline_
 
     for (candidate_paths, symbol) in [
         (
-            vec![
-                "apps/aether-gateway/src/ai_pipeline/finalize/standard/openai/mod.rs",
-                "apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs",
-            ],
+            vec!["apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs"],
             "convert_openai_cli_response_to_openai_chat",
         ),
         (
-            vec![
-                "apps/aether-gateway/src/ai_pipeline/finalize/standard/openai/mod.rs",
-                "apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs",
-            ],
+            vec!["apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs"],
             "build_openai_cli_response",
         ),
         (
-            vec![
-                "apps/aether-gateway/src/ai_pipeline/finalize/standard/openai/mod.rs",
-                "apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs",
-            ],
+            vec!["apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs"],
             "convert_openai_chat_response_to_openai_cli",
         ),
         (
-            vec![
-                "apps/aether-gateway/src/ai_pipeline/finalize/standard/claude/mod.rs",
-                "apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs",
-            ],
+            vec!["apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs"],
             "convert_claude_chat_response_to_openai_chat",
         ),
         (
-            vec![
-                "apps/aether-gateway/src/ai_pipeline/finalize/standard/claude/mod.rs",
-                "apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs",
-            ],
+            vec!["apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs"],
             "convert_openai_chat_response_to_claude_chat",
         ),
         (
-            vec![
-                "apps/aether-gateway/src/ai_pipeline/finalize/standard/claude/mod.rs",
-                "apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs",
-            ],
+            vec!["apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs"],
             "convert_claude_cli_response_to_openai_cli",
         ),
         (
-            vec![
-                "apps/aether-gateway/src/ai_pipeline/finalize/standard/gemini/mod.rs",
-                "apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs",
-            ],
+            vec!["apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs"],
             "convert_gemini_chat_response_to_openai_chat",
         ),
         (
-            vec![
-                "apps/aether-gateway/src/ai_pipeline/finalize/standard/gemini/mod.rs",
-                "apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs",
-            ],
+            vec!["apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs"],
             "convert_openai_chat_response_to_gemini_chat",
         ),
         (
-            vec![
-                "apps/aether-gateway/src/ai_pipeline/finalize/standard/gemini/mod.rs",
-                "apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs",
-            ],
+            vec!["apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs"],
             "convert_gemini_cli_response_to_openai_cli",
         ),
     ] {
@@ -392,11 +767,10 @@ fn ai_pipeline_finalize_standard_sync_response_converters_are_owned_by_pipeline_
             .map(|path| read_workspace_file(path))
             .collect::<Vec<_>>();
         assert!(
-            sources.iter().any(|source| {
-                source.contains("crate::ai_pipeline::conversion::response")
-                    && source.contains(symbol)
-            }),
-            "{symbol} should stay exposed through conversion::response from a sync/mod.rs or outer mod.rs"
+            sources
+                .iter()
+                .any(|source| source.contains("crate::ai_pipeline::{") && source.contains(symbol)),
+            "{symbol} should stay exposed through the ai_pipeline root seam from finalize/standard/mod.rs"
         );
     }
 }
@@ -417,60 +791,23 @@ fn ai_pipeline_finalize_stream_engine_is_owned_by_pipeline_crate() {
         );
     }
 
-    for (path, patterns) in [
-        (
-            "apps/aether-gateway/src/ai_pipeline/finalize/standard/openai/stream.rs",
-            vec![
-                "pub(crate) struct OpenAIChatProviderState",
-                "pub(crate) struct OpenAICliProviderState",
-                "pub(crate) struct OpenAIChatClientEmitter",
-                "pub(crate) struct OpenAICliClientEmitter",
-            ],
-        ),
-        (
-            "apps/aether-gateway/src/ai_pipeline/finalize/standard/claude/stream.rs",
-            vec![
-                "pub(crate) struct ClaudeProviderState",
-                "pub(crate) struct ClaudeClientEmitter",
-            ],
-        ),
-        (
-            "apps/aether-gateway/src/ai_pipeline/finalize/standard/gemini/stream.rs",
-            vec![
-                "pub(crate) struct GeminiProviderState",
-                "pub(crate) struct GeminiClientEmitter",
-            ],
-        ),
-    ] {
-        let source = read_workspace_file(path);
-        for pattern in patterns {
-            assert!(
-                !source.contains(pattern),
-                "{path} should not keep {pattern} after pipeline finalize stream takeover"
-            );
-        }
-    }
-
-    let stream_common = read_workspace_file(
-        "apps/aether-gateway/src/ai_pipeline/finalize/standard/stream_core/common.rs",
-    );
-    assert!(
-        stream_common.contains(
-            "pub(crate) use aether_ai_pipeline::finalize::standard::stream_core::common::*"
-        ),
-        "stream_core/common.rs should thinly re-export pipeline canonical stream helpers"
-    );
-    for pattern in [
-        "pub(crate) struct CanonicalUsage",
-        "pub(crate) enum CanonicalStreamEvent",
-        "pub(crate) struct CanonicalStreamFrame",
-        "pub(crate) fn decode_json_data_line",
+    for path in [
+        "apps/aether-gateway/src/ai_pipeline/finalize/standard/openai/stream.rs",
+        "apps/aether-gateway/src/ai_pipeline/finalize/standard/claude/stream.rs",
+        "apps/aether-gateway/src/ai_pipeline/finalize/standard/gemini/stream.rs",
     ] {
         assert!(
-            !stream_common.contains(pattern),
-            "stream_core/common.rs should not own {pattern} locally"
+            !workspace_file_exists(path),
+            "{path} should be removed after finalize stream wrapper collapse"
         );
     }
+
+    assert!(
+        !workspace_file_exists(
+            "apps/aether-gateway/src/ai_pipeline/finalize/standard/stream_core/common.rs"
+        ),
+        "stream_core/common.rs should be removed after canonical stream helper collapse"
+    );
 
     let pipeline_format_matrix = read_workspace_file(
         "crates/aether-ai-pipeline/src/finalize/standard/stream_core/format_matrix.rs",
@@ -548,8 +885,8 @@ fn ai_pipeline_finalize_standard_sync_products_are_owned_by_pipeline_crate() {
     let gateway_standard =
         read_workspace_file("apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs");
     assert!(
-        gateway_standard.contains("aether_ai_pipeline::finalize::sync_products"),
-        "gateway finalize/standard/mod.rs should thinly re-export sync_products from aether-ai-pipeline"
+        gateway_standard.contains("crate::ai_pipeline::"),
+        "gateway finalize/standard/mod.rs should thinly re-export sync_products through the gateway ai_pipeline root seam"
     );
     for forbidden in [
         "pub(crate) fn aggregate_standard_chat_stream_sync_response(",
@@ -583,22 +920,6 @@ fn ai_pipeline_finalize_standard_sync_products_are_owned_by_pipeline_crate() {
 
     for (path, forbidden) in [
         (
-            "apps/aether-gateway/src/ai_pipeline/finalize/standard/openai/mod.rs",
-            "aggregate_openai_chat_stream_sync_response",
-        ),
-        (
-            "apps/aether-gateway/src/ai_pipeline/finalize/standard/openai/mod.rs",
-            "build_openai_cli_response",
-        ),
-        (
-            "apps/aether-gateway/src/ai_pipeline/finalize/standard/claude/mod.rs",
-            "aggregate_claude_stream_sync_response",
-        ),
-        (
-            "apps/aether-gateway/src/ai_pipeline/finalize/standard/gemini/mod.rs",
-            "aggregate_gemini_stream_sync_response",
-        ),
-        (
             "apps/aether-gateway/src/ai_pipeline/finalize/standard/mod.rs",
             "pub(crate) use openai::*;",
         ),
@@ -611,11 +932,13 @@ fn ai_pipeline_finalize_standard_sync_products_are_owned_by_pipeline_crate() {
             "pub(crate) use gemini::*;",
         ),
     ] {
-        let source = read_workspace_file(path);
-        assert!(
-            !source.contains(forbidden),
-            "{path} should not keep dead standard re-export {forbidden}"
-        );
+        if workspace_file_exists(path) {
+            let source = read_workspace_file(path);
+            assert!(
+                !source.contains(forbidden),
+                "{path} should not keep dead standard re-export {forbidden}"
+            );
+        }
     }
 
     let gateway_internal_sync = read_workspace_file(
@@ -660,8 +983,8 @@ fn ai_pipeline_finalize_stream_rewrite_matrix_is_owned_by_pipeline_crate() {
         "apps/aether-gateway/src/ai_pipeline/finalize/internal/stream_rewrite.rs",
     );
     assert!(
-        gateway_stream_rewrite.contains("aether_ai_pipeline::finalize"),
-        "gateway internal stream_rewrite should delegate rewrite-mode resolution to aether-ai-pipeline"
+        gateway_stream_rewrite.contains("crate::ai_pipeline::"),
+        "gateway internal stream_rewrite should delegate rewrite-mode resolution through the gateway ai_pipeline root seam"
     );
     assert!(
         gateway_stream_rewrite.contains("resolve_finalize_stream_rewrite_mode"),
@@ -699,13 +1022,19 @@ fn ai_pipeline_planner_common_parser_is_owned_by_pipeline_crate() {
         .unwrap_or(gateway_common.as_str());
 
     assert!(
-        gateway_common_runtime.contains("aether_ai_pipeline::planner::common"),
-        "gateway planner/common.rs should delegate body parsing to the pipeline crate"
+        gateway_common_runtime.contains("crate::ai_pipeline::"),
+        "gateway planner/common.rs should delegate body parsing through the ai_pipeline root seam"
+    );
+    assert!(
+        gateway_common_runtime
+            .contains("force_upstream_streaming_for_provider as force_upstream_streaming_for_provider_impl"),
+        "gateway planner/common.rs should delegate upstream streaming policy through the ai_pipeline root seam"
     );
 
     for forbidden in [
         "serde_json::from_slice::<serde_json::Value>",
         "base64::engine::general_purpose::STANDARD.encode",
+        ".eq_ignore_ascii_case(\"codex\")",
     ] {
         assert!(
             !gateway_common_runtime.contains(forbidden),
@@ -723,9 +1052,16 @@ fn ai_pipeline_planner_standard_normalize_is_owned_by_pipeline_crate() {
 
     let gateway_normalize =
         read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/standard/normalize.rs");
+    let gateway_normalize_chat = read_workspace_file(
+        "apps/aether-gateway/src/ai_pipeline/planner/standard/normalize/chat.rs",
+    );
+    let gateway_normalize_cli = read_workspace_file(
+        "apps/aether-gateway/src/ai_pipeline/planner/standard/normalize/cli.rs",
+    );
     assert!(
-        gateway_normalize.contains("aether_ai_pipeline::planner::standard::normalize"),
-        "gateway normalize.rs should delegate to pipeline standard normalize helpers"
+        gateway_normalize_chat.contains("crate::ai_pipeline::")
+            && gateway_normalize_cli.contains("crate::ai_pipeline::"),
+        "gateway normalize chat/cli owners should delegate to pipeline standard normalize helpers through the ai_pipeline root seam"
     );
 
     for forbidden in [
@@ -750,8 +1086,8 @@ fn ai_pipeline_openai_helpers_are_owned_by_pipeline_crate() {
     let gateway_openai_mod =
         read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/standard/openai/mod.rs");
     assert!(
-        gateway_openai_mod.contains("aether_ai_pipeline::planner::openai"),
-        "gateway planner/standard/openai/mod.rs should thinly re-export pipeline openai helpers"
+        gateway_openai_mod.contains("pub(crate) use crate::ai_pipeline::{"),
+        "gateway planner/standard/openai/mod.rs should thinly re-export pipeline openai helpers through the ai_pipeline root seam"
     );
 
     let gateway_openai_chat = read_workspace_file(
@@ -784,21 +1120,32 @@ fn ai_pipeline_matrix_conversion_is_owned_by_pipeline_crate() {
         "planner/standard/matrix owner should live in aether-ai-pipeline"
     );
 
-    let matrix =
-        read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/standard/matrix.rs");
     assert!(
-        matrix.contains("aether_ai_pipeline::planner::matrix"),
-        "planner/standard/matrix.rs should delegate canonical conversion to the pipeline crate"
+        !workspace_file_exists("apps/aether-gateway/src/ai_pipeline/planner/standard/matrix.rs"),
+        "planner/standard/matrix.rs should stay removed after wrapper cleanup"
     );
-    for forbidden in [
-        "normalize_openai_cli_request_to_openai_chat_request",
-        "normalize_claude_request_to_openai_chat_request",
-        "normalize_gemini_request_to_openai_chat_request",
-        "serde_json::Map::from_iter",
-    ] {
+
+    let matrix = read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/standard/mod.rs");
+    assert!(
+        matrix.contains("crate::ai_pipeline::"),
+        "planner/standard/mod.rs should delegate canonical conversion through the ai_pipeline root seam after matrix wrapper cleanup"
+    );
+    assert!(
+        matrix.contains("build_standard_request_body"),
+        "planner/standard/mod.rs should still expose build_standard_request_body after matrix wrapper cleanup"
+    );
+    assert!(
+        matrix.contains("build_standard_upstream_url"),
+        "planner/standard/mod.rs should still expose build_standard_upstream_url after matrix wrapper cleanup"
+    );
+    assert!(
+        !matrix.contains("mod matrix;"),
+        "planner/standard/mod.rs should not keep a local matrix wrapper module"
+    );
+    for forbidden in ["serde_json::Map::from_iter"] {
         assert!(
             !matrix.contains(forbidden),
-            "planner/standard/matrix.rs should not keep conversion helper {forbidden}"
+            "planner/standard/mod.rs should not keep matrix conversion helper {forbidden}"
         );
     }
 }
@@ -826,11 +1173,18 @@ fn ai_pipeline_standard_family_specs_are_owned_by_pipeline_crate() {
         "planner/standard/gemini/cli pure spec resolver should live in aether-ai-pipeline"
     );
 
-    let family_types =
-        read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/standard/family/types.rs");
     assert!(
-        family_types.contains("aether_ai_pipeline::planner::standard::family"),
-        "gateway planner/standard/family/types.rs should re-export pure family spec types from the pipeline crate"
+        !workspace_file_exists(
+            "apps/aether-gateway/src/ai_pipeline/planner/standard/family/types.rs"
+        ),
+        "planner/standard/family/types.rs should stay removed after wrapper cleanup"
+    );
+
+    let family_types =
+        read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/standard/family/mod.rs");
+    assert!(
+        family_types.contains("pub(crate) use crate::ai_pipeline::{"),
+        "gateway planner/standard/family/mod.rs should re-export pure family spec types through the ai_pipeline root seam"
     );
     for forbidden in [
         "pub(crate) enum LocalStandardSourceFamily",
@@ -839,7 +1193,7 @@ fn ai_pipeline_standard_family_specs_are_owned_by_pipeline_crate() {
     ] {
         assert!(
             !family_types.contains(forbidden),
-            "gateway planner/standard/family/types.rs should not own pure spec type {forbidden}"
+            "gateway planner/standard/family/mod.rs should not own pure spec type {forbidden}"
         );
     }
 
@@ -855,20 +1209,14 @@ fn ai_pipeline_standard_family_specs_are_owned_by_pipeline_crate() {
         );
     }
 
-    for (path, expected) in [
-        (
-            "apps/aether-gateway/src/ai_pipeline/planner/standard/claude/mod.rs",
-            "aether_ai_pipeline::planner::standard::claude",
-        ),
-        (
-            "apps/aether-gateway/src/ai_pipeline/planner/standard/gemini/mod.rs",
-            "aether_ai_pipeline::planner::standard::gemini",
-        ),
+    for path in [
+        "apps/aether-gateway/src/ai_pipeline/planner/standard/claude/mod.rs",
+        "apps/aether-gateway/src/ai_pipeline/planner/standard/gemini/mod.rs",
     ] {
         let source = read_workspace_file(path);
         assert!(
-            source.contains(expected),
-            "{path} should delegate pure standard-family spec resolution to the pipeline crate"
+            source.contains("crate::ai_pipeline::"),
+            "{path} should delegate pure standard-family spec resolution through the ai_pipeline root seam"
         );
         for forbidden in [
             "LocalStandardSpec {",
@@ -892,12 +1240,19 @@ fn ai_pipeline_same_format_provider_specs_are_owned_by_pipeline_crate() {
         "planner/passthrough/provider pure spec owner should live in aether-ai-pipeline"
     );
 
+    assert!(
+        !workspace_file_exists(
+            "apps/aether-gateway/src/ai_pipeline/planner/passthrough/provider/family/types.rs"
+        ),
+        "planner/passthrough/provider/family/types.rs should stay removed after wrapper cleanup"
+    );
+
     let family_types = read_workspace_file(
-        "apps/aether-gateway/src/ai_pipeline/planner/passthrough/provider/family/types.rs",
+        "apps/aether-gateway/src/ai_pipeline/planner/passthrough/provider/family/mod.rs",
     );
     assert!(
-        family_types.contains("aether_ai_pipeline::planner::passthrough::provider"),
-        "gateway passthrough/provider/family/types.rs should re-export pure same-format provider spec types from the pipeline crate"
+        family_types.contains("pub(crate) use crate::ai_pipeline::"),
+        "gateway passthrough/provider/family/mod.rs should re-export pure same-format provider spec types through the ai_pipeline root seam"
     );
     for forbidden in [
         "pub(crate) enum LocalSameFormatProviderFamily",
@@ -905,7 +1260,7 @@ fn ai_pipeline_same_format_provider_specs_are_owned_by_pipeline_crate() {
     ] {
         assert!(
             !family_types.contains(forbidden),
-            "gateway passthrough/provider/family/types.rs should not own pure same-format type {forbidden}"
+            "gateway passthrough/provider/family/mod.rs should not own pure same-format type {forbidden}"
         );
     }
 
@@ -913,8 +1268,8 @@ fn ai_pipeline_same_format_provider_specs_are_owned_by_pipeline_crate() {
         "apps/aether-gateway/src/ai_pipeline/planner/passthrough/provider/plans.rs",
     );
     assert!(
-        plans.contains("aether_ai_pipeline::planner::passthrough::provider"),
-        "gateway passthrough/provider/plans.rs should delegate same-format spec resolution to the pipeline crate"
+        plans.contains("crate::ai_pipeline::"),
+        "gateway passthrough/provider/plans.rs should delegate same-format spec resolution through the ai_pipeline root seam"
     );
     for forbidden in [
         "claude_chat_sync_success",
@@ -937,11 +1292,11 @@ fn ai_pipeline_passthrough_provider_specs_are_owned_by_pipeline_crate() {
     );
 
     let family_types = read_workspace_file(
-        "apps/aether-gateway/src/ai_pipeline/planner/passthrough/provider/family/types.rs",
+        "apps/aether-gateway/src/ai_pipeline/planner/passthrough/provider/family/mod.rs",
     );
     assert!(
-        family_types.contains("aether_ai_pipeline::planner::passthrough::provider"),
-        "gateway passthrough/provider/family/types.rs should re-export pure spec types from the pipeline crate"
+        family_types.contains("pub(crate) use crate::ai_pipeline::"),
+        "gateway passthrough/provider/family/mod.rs should re-export pure spec types through the ai_pipeline root seam"
     );
     for forbidden in [
         "pub(crate) enum LocalSameFormatProviderFamily",
@@ -949,7 +1304,7 @@ fn ai_pipeline_passthrough_provider_specs_are_owned_by_pipeline_crate() {
     ] {
         assert!(
             !family_types.contains(forbidden),
-            "gateway passthrough/provider/family/types.rs should not own pure spec type {forbidden}"
+            "gateway passthrough/provider/family/mod.rs should not own pure spec type {forbidden}"
         );
     }
 
@@ -957,8 +1312,8 @@ fn ai_pipeline_passthrough_provider_specs_are_owned_by_pipeline_crate() {
         "apps/aether-gateway/src/ai_pipeline/planner/passthrough/provider/plans.rs",
     );
     assert!(
-        plans.contains("aether_ai_pipeline::planner::passthrough::provider"),
-        "gateway passthrough/provider/plans.rs should delegate same-format spec resolution to the pipeline crate"
+        plans.contains("crate::ai_pipeline::"),
+        "gateway passthrough/provider/plans.rs should delegate same-format spec resolution through the ai_pipeline root seam"
     );
     for forbidden in [
         "pub(crate) fn resolve_sync_spec(",
@@ -984,8 +1339,8 @@ fn ai_pipeline_specialized_files_specs_are_owned_by_pipeline_crate() {
     let files =
         read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/specialized/files.rs");
     assert!(
-        files.contains("aether_ai_pipeline::planner::specialized::files"),
-        "gateway planner/specialized/files.rs should delegate pure specialized-files spec resolution to the pipeline crate"
+        files.contains("crate::ai_pipeline::"),
+        "gateway planner/specialized/files.rs should delegate pure specialized-files spec resolution through the ai_pipeline root seam"
     );
     for forbidden in [
         "struct LocalGeminiFilesSpec",
@@ -1014,8 +1369,8 @@ fn ai_pipeline_specialized_video_specs_are_owned_by_pipeline_crate() {
     let video =
         read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/specialized/video.rs");
     assert!(
-        video.contains("aether_ai_pipeline::planner::specialized::video"),
-        "gateway planner/specialized/video.rs should delegate pure specialized-video spec resolution to the pipeline crate"
+        video.contains("crate::ai_pipeline::"),
+        "gateway planner/specialized/video.rs should delegate pure specialized-video spec resolution through the ai_pipeline root seam"
     );
     for forbidden in [
         "enum LocalVideoCreateFamily",
@@ -1043,8 +1398,8 @@ fn ai_pipeline_openai_cli_specs_are_owned_by_pipeline_crate() {
         "apps/aether-gateway/src/ai_pipeline/planner/standard/openai/cli/decision.rs",
     );
     assert!(
-        decision.contains("aether_ai_pipeline::planner::standard::openai_cli"),
-        "gateway planner/standard/openai/cli/decision.rs should re-export pure openai-cli spec type from the pipeline crate"
+        decision.contains("pub(super) use crate::ai_pipeline::LocalOpenAiCliSpec;"),
+        "gateway planner/standard/openai/cli/decision.rs should re-export pure openai-cli spec type through the ai_pipeline root seam"
     );
     assert!(
         !decision.contains("pub(super) struct LocalOpenAiCliSpec"),
@@ -1055,8 +1410,8 @@ fn ai_pipeline_openai_cli_specs_are_owned_by_pipeline_crate() {
         "apps/aether-gateway/src/ai_pipeline/planner/standard/openai/cli/plans.rs",
     );
     assert!(
-        plans.contains("aether_ai_pipeline::planner::standard::openai_cli"),
-        "gateway planner/standard/openai/cli/plans.rs should delegate openai-cli spec resolution to the pipeline crate"
+        plans.contains("crate::ai_pipeline::"),
+        "gateway planner/standard/openai/cli/plans.rs should delegate openai-cli spec resolution through the ai_pipeline root seam"
     );
     for forbidden in [
         "fn resolve_sync_spec(",

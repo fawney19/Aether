@@ -3,9 +3,9 @@ use super::oauth_config::{
     build_admin_oauth_provider_payload, build_admin_oauth_supported_types_payload,
     build_admin_oauth_upsert_record, AdminOAuthProviderUpsertRequest,
 };
-use crate::control::GatewayPublicRequestContext;
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{attach_admin_audit_response, build_proxy_error_response};
-use crate::{AppState, GatewayError};
+use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -15,11 +15,11 @@ use axum::{
 use serde_json::json;
 
 pub(crate) async fn maybe_build_local_admin_oauth_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
+    let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
     if decision.route_family.as_deref() != Some("oauth_manage") {
@@ -27,8 +27,8 @@ pub(crate) async fn maybe_build_local_admin_oauth_response(
     }
 
     if decision.route_kind.as_deref() == Some("supported_types")
-        && request_context.request_method == http::Method::GET
-        && request_context.request_path == "/api/admin/oauth/supported-types"
+        && request_context.method() == http::Method::GET
+        && request_context.path() == "/api/admin/oauth/supported-types"
     {
         return Ok(Some(
             Json(build_admin_oauth_supported_types_payload()).into_response(),
@@ -36,9 +36,9 @@ pub(crate) async fn maybe_build_local_admin_oauth_response(
     }
 
     if decision.route_kind.as_deref() == Some("list_providers")
-        && request_context.request_method == http::Method::GET
+        && request_context.method() == http::Method::GET
         && matches!(
-            request_context.request_path.as_str(),
+            request_context.path(),
             "/api/admin/oauth/providers" | "/api/admin/oauth/providers/"
         )
     {
@@ -59,10 +59,9 @@ pub(crate) async fn maybe_build_local_admin_oauth_response(
     }
 
     if decision.route_kind.as_deref() == Some("get_provider")
-        && request_context.request_method == http::Method::GET
+        && request_context.method() == http::Method::GET
     {
-        let Some(provider_type) =
-            admin_oauth_provider_type_from_path(&request_context.request_path)
+        let Some(provider_type) = admin_oauth_provider_type_from_path(request_context.path())
         else {
             return Ok(Some(
                 (
@@ -91,10 +90,9 @@ pub(crate) async fn maybe_build_local_admin_oauth_response(
     }
 
     if decision.route_kind.as_deref() == Some("upsert_provider")
-        && request_context.request_method == http::Method::PUT
+        && request_context.method() == http::Method::PUT
     {
-        let Some(provider_type) =
-            admin_oauth_provider_type_from_path(&request_context.request_path)
+        let Some(provider_type) = admin_oauth_provider_type_from_path(request_context.path())
         else {
             return Ok(Some(build_proxy_error_response(
                 http::StatusCode::BAD_REQUEST,
@@ -172,10 +170,9 @@ pub(crate) async fn maybe_build_local_admin_oauth_response(
     }
 
     if decision.route_kind.as_deref() == Some("delete_provider")
-        && request_context.request_method == http::Method::DELETE
+        && request_context.method() == http::Method::DELETE
     {
-        let Some(provider_type) =
-            admin_oauth_provider_type_from_path(&request_context.request_path)
+        let Some(provider_type) = admin_oauth_provider_type_from_path(request_context.path())
         else {
             return Ok(Some(build_proxy_error_response(
                 http::StatusCode::BAD_REQUEST,
@@ -229,10 +226,9 @@ pub(crate) async fn maybe_build_local_admin_oauth_response(
     }
 
     if decision.route_kind.as_deref() == Some("test_provider")
-        && request_context.request_method == http::Method::POST
+        && request_context.method() == http::Method::POST
     {
-        let Some(provider_type) =
-            admin_oauth_test_provider_type_from_path(&request_context.request_path)
+        let Some(provider_type) = admin_oauth_test_provider_type_from_path(request_context.path())
         else {
             return Ok(Some(
                 (

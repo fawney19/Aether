@@ -1,10 +1,17 @@
-use crate::ai_pipeline::control_facade::GatewayControlDecision;
+use crate::ai_pipeline::GatewayControlDecision;
+use crate::ai_pipeline::{
+    is_matching_stream_request as is_matching_stream_request_impl,
+    resolve_execution_runtime_stream_plan_kind as resolve_execution_runtime_stream_plan_kind_impl,
+    resolve_execution_runtime_sync_plan_kind as resolve_execution_runtime_sync_plan_kind_impl,
+    supports_stream_scheduler_decision_kind as supports_stream_scheduler_decision_kind_impl,
+    supports_sync_scheduler_decision_kind as supports_sync_scheduler_decision_kind_impl,
+};
 
 pub(crate) fn resolve_execution_runtime_stream_plan_kind(
     parts: &http::request::Parts,
     decision: &GatewayControlDecision,
 ) -> Option<&'static str> {
-    aether_ai_pipeline::planner::route::resolve_execution_runtime_stream_plan_kind(
+    resolve_execution_runtime_stream_plan_kind_impl(
         decision.route_class.as_deref(),
         decision.route_family.as_deref(),
         decision.route_kind.as_deref(),
@@ -17,7 +24,7 @@ pub(crate) fn resolve_execution_runtime_sync_plan_kind(
     parts: &http::request::Parts,
     decision: &GatewayControlDecision,
 ) -> Option<&'static str> {
-    aether_ai_pipeline::planner::route::resolve_execution_runtime_sync_plan_kind(
+    resolve_execution_runtime_sync_plan_kind_impl(
         decision.route_class.as_deref(),
         decision.route_family.as_deref(),
         decision.route_kind.as_deref(),
@@ -31,19 +38,15 @@ pub(crate) fn is_matching_stream_request(
     parts: &http::request::Parts,
     body_json: &serde_json::Value,
 ) -> bool {
-    aether_ai_pipeline::planner::route::is_matching_stream_request(
-        plan_kind,
-        parts.uri.path(),
-        body_json,
-    )
+    is_matching_stream_request_impl(plan_kind, parts.uri.path(), body_json)
 }
 
 pub(crate) fn supports_sync_scheduler_decision_kind(plan_kind: &str) -> bool {
-    aether_ai_pipeline::planner::route::supports_sync_scheduler_decision_kind(plan_kind)
+    supports_sync_scheduler_decision_kind_impl(plan_kind)
 }
 
 pub(crate) fn supports_stream_scheduler_decision_kind(plan_kind: &str) -> bool {
-    aether_ai_pipeline::planner::route::supports_stream_scheduler_decision_kind(plan_kind)
+    supports_stream_scheduler_decision_kind_impl(plan_kind)
 }
 
 #[cfg(test)]
@@ -55,7 +58,7 @@ mod tests {
         resolve_execution_runtime_sync_plan_kind, supports_stream_scheduler_decision_kind,
         supports_sync_scheduler_decision_kind,
     };
-    use crate::ai_pipeline::control_facade::GatewayControlDecision;
+    use crate::ai_pipeline::GatewayControlDecision;
 
     fn sample_decision(route_family: &str, route_kind: &str) -> GatewayControlDecision {
         GatewayControlDecision {

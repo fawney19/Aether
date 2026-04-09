@@ -1,4 +1,3 @@
-use super::responses::admin_monitoring_bad_request_response;
 use super::route_filters::{
     admin_monitoring_escape_like_pattern, parse_admin_monitoring_days,
     parse_admin_monitoring_event_type_filter, parse_admin_monitoring_hours,
@@ -7,102 +6,24 @@ use super::route_filters::{
 };
 use super::usage_helpers::admin_monitoring_usage_is_error;
 use crate::constants::INTERNAL_GATEWAY_PATH_PREFIXES;
-use crate::control::GatewayPublicRequestContext;
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::query::monitoring as monitoring_query;
-use crate::{AppState, GatewayError};
-use aether_data_contracts::repository::usage::UsageAuditListQuery;
-use axum::{
-    body::Body,
-    response::{IntoResponse, Response},
-    Json,
+use crate::GatewayError;
+use aether_admin::observability::monitoring::{
+    admin_monitoring_bad_request_response, admin_monitoring_user_behavior_user_id_from_path,
+    build_admin_monitoring_audit_logs_payload_response,
+    build_admin_monitoring_suspicious_activities_payload_response,
+    build_admin_monitoring_system_status_payload_response,
+    build_admin_monitoring_user_behavior_payload_response,
 };
-use serde_json::json;
-
-fn build_admin_monitoring_audit_logs_payload(
-    items: Vec<serde_json::Value>,
-    total: usize,
-    limit: usize,
-    offset: usize,
-    username: Option<String>,
-    event_type: Option<String>,
-    days: i64,
-) -> Response<Body> {
-    let count = items.len();
-    Json(json!({
-        "items": items,
-        "meta": {
-            "total": total,
-            "limit": limit,
-            "offset": offset,
-            "count": count,
-        },
-        "filters": {
-            "username": username,
-            "event_type": event_type,
-            "days": days,
-        },
-    }))
-    .into_response()
-}
-
-fn build_admin_monitoring_suspicious_activities_payload(
-    activities: Vec<serde_json::Value>,
-    hours: i64,
-) -> Response<Body> {
-    let count = activities.len();
-    Json(json!({
-        "activities": activities,
-        "count": count,
-        "time_range_hours": hours,
-    }))
-    .into_response()
-}
-
-fn build_admin_monitoring_user_behavior_payload(
-    user_id: String,
-    days: i64,
-    event_counts: std::collections::BTreeMap<String, u64>,
-    failed_requests: u64,
-    success_requests: u64,
-    suspicious_activities: u64,
-) -> Response<Body> {
-    let total_requests = success_requests.saturating_add(failed_requests);
-    let success_rate = if total_requests == 0 {
-        0.0
-    } else {
-        success_requests as f64 / total_requests as f64
-    };
-
-    Json(json!({
-        "user_id": user_id,
-        "period_days": days,
-        "event_counts": event_counts,
-        "failed_requests": failed_requests,
-        "success_requests": success_requests,
-        "success_rate": success_rate,
-        "suspicious_activities": suspicious_activities,
-        "analysis_time": chrono::Utc::now().to_rfc3339(),
-    }))
-    .into_response()
-}
-
-fn admin_monitoring_user_behavior_user_id_from_path(request_path: &str) -> Option<String> {
-    let value = request_path
-        .strip_prefix("/api/admin/monitoring/user-behavior/")?
-        .trim()
-        .trim_matches('/')
-        .to_string();
-    if value.is_empty() || value.contains('/') {
-        None
-    } else {
-        Some(value)
-    }
-}
+use aether_data_contracts::repository::usage::UsageAuditListQuery;
+use axum::{body::Body, response::Response};
 
 pub(super) async fn build_admin_monitoring_audit_logs_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
+    let state = state.as_ref();
     let query = request_context.request_query_string.as_deref();
     let username = parse_admin_monitoring_username_filter(query);
     let event_type = parse_admin_monitoring_event_type_filter(query);
@@ -120,7 +41,7 @@ pub(super) async fn build_admin_monitoring_audit_logs_response(
     };
 
     let Some(pool) = state.postgres_pool() else {
-        return Ok(build_admin_monitoring_audit_logs_payload(
+        return Ok(build_admin_monitoring_audit_logs_payload_response(
             Vec::new(),
             0,
             limit,
@@ -147,15 +68,16 @@ pub(super) async fn build_admin_monitoring_audit_logs_response(
     )
     .await?;
 
-    Ok(build_admin_monitoring_audit_logs_payload(
+    Ok(build_admin_monitoring_audit_logs_payload_response(
         items, total, limit, offset, username, event_type, days,
     ))
 }
 
 pub(super) async fn build_admin_monitoring_suspicious_activities_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
+    let state = state.as_ref();
     let query = request_context.request_query_string.as_deref();
     let hours = match parse_admin_monitoring_hours(query) {
         Ok(value) => value,
@@ -163,24 +85,22 @@ pub(super) async fn build_admin_monitoring_suspicious_activities_response(
     };
 
     let Some(pool) = state.postgres_pool() else {
-        return Ok(build_admin_monitoring_suspicious_activities_payload(
-            Vec::new(),
-            hours,
-        ));
+        return Ok(
+            build_admin_monitoring_suspicious_activities_payload_response(Vec::new(), hours),
+        );
     };
 
     let cutoff_time = chrono::Utc::now() - chrono::Duration::hours(hours);
     let activities = monitoring_query::list_admin_suspicious_activities(&pool, cutoff_time).await?;
 
-    Ok(build_admin_monitoring_suspicious_activities_payload(
-        activities, hours,
-    ))
+    Ok(build_admin_monitoring_suspicious_activities_payload_response(activities, hours))
 }
 
 pub(super) async fn build_admin_monitoring_user_behavior_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
+    let state = state.as_ref();
     let Some(user_id) =
         admin_monitoring_user_behavior_user_id_from_path(&request_context.request_path)
     else {
@@ -192,7 +112,7 @@ pub(super) async fn build_admin_monitoring_user_behavior_response(
     };
 
     let Some(pool) = state.postgres_pool() else {
-        return Ok(build_admin_monitoring_user_behavior_payload(
+        return Ok(build_admin_monitoring_user_behavior_payload_response(
             user_id,
             days,
             std::collections::BTreeMap::new(),
@@ -227,7 +147,7 @@ pub(super) async fn build_admin_monitoring_user_behavior_response(
                 .unwrap_or_default(),
         );
 
-    Ok(build_admin_monitoring_user_behavior_payload(
+    Ok(build_admin_monitoring_user_behavior_payload_response(
         user_id,
         days,
         event_counts,
@@ -238,8 +158,9 @@ pub(super) async fn build_admin_monitoring_user_behavior_response(
 }
 
 pub(super) async fn build_admin_monitoring_system_status_response(
-    state: &AppState,
+    state: &AdminAppState<'_>,
 ) -> Result<Response<Body>, GatewayError> {
+    let state = state.as_ref();
     let now = chrono::Utc::now();
     let today_start = now
         .date_naive()
@@ -301,35 +222,21 @@ pub(super) async fn build_admin_monitoring_system_status_response(
         .count();
     let tunnel = state.tunnel.stats();
 
-    Ok(Json(json!({
-        "timestamp": now.to_rfc3339(),
-        "users": {
-            "total": total_users,
-            "active": active_users,
-        },
-        "providers": {
-            "total": total_providers,
-            "active": active_providers,
-        },
-        "api_keys": {
-            "total": total_api_keys,
-            "active": active_api_keys,
-        },
-        "today_stats": {
-            "requests": today_requests,
-            "tokens": today_tokens,
-            "cost_usd": format!("${today_cost:.4}"),
-        },
-        "tunnel": {
-            "proxy_connections": tunnel.proxy_connections,
-            "nodes": tunnel.nodes,
-            "active_streams": tunnel.active_streams,
-        },
-        "internal_gateway": {
-            "status": "rust_native_control_plane",
-            "path_prefixes": INTERNAL_GATEWAY_PATH_PREFIXES,
-        },
-        "recent_errors": recent_errors,
-    }))
-    .into_response())
+    Ok(build_admin_monitoring_system_status_payload_response(
+        now,
+        total_users,
+        active_users,
+        total_providers,
+        active_providers,
+        total_api_keys,
+        active_api_keys,
+        today_requests,
+        today_tokens,
+        today_cost,
+        tunnel.proxy_connections,
+        tunnel.nodes,
+        tunnel.active_streams,
+        INTERNAL_GATEWAY_PATH_PREFIXES,
+        recent_errors,
+    ))
 }

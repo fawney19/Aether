@@ -11,8 +11,6 @@ use serde_json::{json, Value};
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::ai_pipeline::control_facade::{collect_control_headers, GatewayControlDecision};
-use crate::ai_pipeline::execution_facade::{ConversionMode, ExecutionStrategy};
 use crate::ai_pipeline::planner::candidate_affinity::prefer_local_tunnel_owner_candidates;
 use crate::ai_pipeline::planner::common::{
     EXECUTION_RUNTIME_STREAM_DECISION_ACTION, EXECUTION_RUNTIME_SYNC_DECISION_ACTION,
@@ -20,39 +18,42 @@ use crate::ai_pipeline::planner::common::{
 use crate::ai_pipeline::planner::plan_builders::{
     LocalStreamPlanAndReport, LocalSyncPlanAndReport,
 };
-use crate::ai_pipeline::provider_transport_facade::antigravity::{
+use crate::ai_pipeline::transport::antigravity::{
     build_antigravity_safe_v1internal_request, build_antigravity_static_identity_headers,
     build_antigravity_v1internal_url, classify_local_antigravity_request_support,
     AntigravityEnvelopeRequestType, AntigravityRequestEnvelopeSupport,
     AntigravityRequestSideSupport, AntigravityRequestUrlAction,
 };
-use crate::ai_pipeline::provider_transport_facade::auth::{
+use crate::ai_pipeline::transport::auth::{
     build_openai_passthrough_headers, resolve_local_gemini_auth, resolve_local_standard_auth,
 };
-use crate::ai_pipeline::provider_transport_facade::claude_code::{
+use crate::ai_pipeline::transport::claude_code::{
     build_claude_code_messages_url, build_claude_code_passthrough_headers,
     sanitize_claude_code_request_body, supports_local_claude_code_transport_with_network,
 };
-use crate::ai_pipeline::provider_transport_facade::kiro::{
+use crate::ai_pipeline::transport::kiro::{
     build_kiro_generate_assistant_response_url, build_kiro_provider_headers,
     build_kiro_provider_request_body, supports_local_kiro_request_transport_with_network,
     KIRO_ENVELOPE_NAME,
 };
-use crate::ai_pipeline::provider_transport_facade::policy::{
+use crate::ai_pipeline::transport::policy::{
     supports_local_gemini_transport_with_network, supports_local_standard_transport_with_network,
 };
-use crate::ai_pipeline::provider_transport_facade::url::{
+use crate::ai_pipeline::transport::url::{
     build_claude_messages_url, build_gemini_content_url, build_passthrough_path_url,
 };
-use crate::ai_pipeline::provider_transport_facade::vertex::{
+use crate::ai_pipeline::transport::vertex::{
     build_vertex_api_key_gemini_content_url, resolve_local_vertex_api_key_query_auth,
     supports_local_vertex_api_key_gemini_transport_with_network,
 };
-use crate::ai_pipeline::provider_transport_facade::{
+use crate::ai_pipeline::transport::{
     apply_local_body_rules, apply_local_header_rules, build_passthrough_headers,
     ensure_upstream_auth_header, resolve_transport_execution_timeouts,
     resolve_transport_proxy_snapshot_with_tunnel_affinity, resolve_transport_tls_profile,
     LocalResolvedOAuthRequestAuth,
+};
+use crate::ai_pipeline::{
+    collect_control_headers, ConversionMode, ExecutionStrategy, GatewayControlDecision,
 };
 use crate::clock::current_unix_secs;
 use crate::{
@@ -60,8 +61,8 @@ use crate::{
     GatewayError,
 };
 
-pub(crate) mod family;
-pub(crate) mod plans;
+mod family;
+mod plans;
 mod request;
 
 pub(super) use self::family::{
@@ -73,6 +74,9 @@ pub(super) use self::family::{
 pub(crate) use self::family::{
     maybe_build_stream_local_same_format_provider_decision_payload,
     maybe_build_sync_local_same_format_provider_decision_payload,
+};
+pub(crate) use self::plans::{
+    build_local_stream_plan_and_reports, build_local_sync_plan_and_reports,
 };
 use self::request::{
     build_same_format_provider_request_body, build_same_format_upstream_url,

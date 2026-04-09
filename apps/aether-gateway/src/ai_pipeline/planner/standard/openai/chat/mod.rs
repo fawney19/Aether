@@ -1,10 +1,10 @@
 use serde_json::Value;
 use tracing::warn;
 
-use crate::ai_pipeline::control_facade::GatewayControlDecision;
 use crate::ai_pipeline::planner::common::{
     OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_CHAT_SYNC_PLAN_KIND,
 };
+use crate::ai_pipeline::GatewayControlDecision;
 use crate::{
     AppState, GatewayControlSyncDecisionResponse, GatewayError, LocalExecutionRuntimeMissDiagnostic,
 };
@@ -18,9 +18,8 @@ use self::decision::{
 };
 use self::plans::{
     build_local_openai_chat_miss_diagnostic, build_local_openai_chat_stream_plan_and_reports,
-    build_local_openai_chat_sync_plan_and_reports, current_unix_secs,
-    list_local_openai_chat_candidates, resolve_local_openai_chat_decision_input,
-    set_local_openai_chat_miss_diagnostic,
+    build_local_openai_chat_sync_plan_and_reports, list_local_openai_chat_candidates,
+    resolve_local_openai_chat_decision_input, set_local_openai_chat_miss_diagnostic,
 };
 
 pub(crate) async fn build_local_openai_chat_sync_plan_and_reports_for_kind(

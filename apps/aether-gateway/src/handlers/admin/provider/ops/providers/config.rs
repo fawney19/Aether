@@ -1,8 +1,6 @@
 use super::support::{AdminProviderOpsSaveConfigRequest, ADMIN_PROVIDER_OPS_SENSITIVE_FIELDS};
-use crate::handlers::admin::shared::{
-    decrypt_catalog_secret_with_fallbacks, encrypt_catalog_secret_with_fallbacks,
-};
-use crate::AppState;
+use crate::handlers::admin::request::AdminAppState;
+use aether_admin::provider::ops as admin_provider_ops_pure;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogProvider,
 };
@@ -11,28 +9,22 @@ use serde_json::json;
 pub(super) fn admin_provider_ops_config_object(
     provider: &StoredProviderCatalogProvider,
 ) -> Option<&serde_json::Map<String, serde_json::Value>> {
-    provider
-        .config
-        .as_ref()
-        .and_then(serde_json::Value::as_object)
-        .and_then(|config| config.get("provider_ops"))
-        .and_then(serde_json::Value::as_object)
+    admin_provider_ops_pure::admin_provider_ops_config_object(provider)
 }
 
 pub(super) fn admin_provider_ops_connector_object(
     provider_ops_config: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<&serde_json::Map<String, serde_json::Value>> {
-    provider_ops_config
-        .get("connector")
-        .and_then(serde_json::Value::as_object)
+    admin_provider_ops_pure::admin_provider_ops_connector_object(provider_ops_config)
 }
 
 fn admin_provider_ops_masked_secret(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     field: &str,
     ciphertext: &str,
 ) -> serde_json::Value {
-    let plaintext = decrypt_catalog_secret_with_fallbacks(state.encryption_key(), ciphertext)
+    let plaintext = state
+        .decrypt_catalog_secret_with_fallbacks(ciphertext)
         .unwrap_or_else(|| ciphertext.to_string());
     if plaintext.is_empty() {
         return serde_json::Value::String(String::new());
@@ -60,7 +52,7 @@ fn admin_provider_ops_masked_secret(
 }
 
 fn admin_provider_ops_masked_credentials(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     raw_credentials: Option<&serde_json::Value>,
 ) -> serde_json::Value {
     let Some(credentials) = raw_credentials.and_then(serde_json::Value::as_object) else {
@@ -84,30 +76,18 @@ fn admin_provider_ops_masked_credentials(
 }
 
 fn admin_provider_ops_is_supported_auth_type(auth_type: &str) -> bool {
-    matches!(
-        auth_type,
-        "api_key" | "session_login" | "oauth" | "cookie" | "none"
-    )
+    admin_provider_ops_pure::admin_provider_ops_is_supported_auth_type(auth_type)
 }
 
 pub(super) fn admin_provider_ops_uses_python_verify_fallback(
     architecture_id: &str,
     config: &serde_json::Map<String, serde_json::Value>,
 ) -> bool {
-    let _ = architecture_id;
-    config
-        .get("proxy_enabled")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-        || config
-            .get("proxy_node_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .is_some_and(|value| !value.is_empty())
+    admin_provider_ops_pure::admin_provider_ops_uses_python_verify_fallback(architecture_id, config)
 }
 
 pub(super) fn admin_provider_ops_decrypted_credentials(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     raw_credentials: Option<&serde_json::Value>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let Some(credentials) = raw_credentials.and_then(serde_json::Value::as_object) else {
@@ -118,9 +98,9 @@ pub(super) fn admin_provider_ops_decrypted_credentials(
     for (key, value) in credentials {
         if ADMIN_PROVIDER_OPS_SENSITIVE_FIELDS.contains(&key.as_str()) {
             if let Some(ciphertext) = value.as_str() {
-                let plaintext =
-                    decrypt_catalog_secret_with_fallbacks(state.encryption_key(), ciphertext)
-                        .unwrap_or_else(|| ciphertext.to_string());
+                let plaintext = state
+                    .decrypt_catalog_secret_with_fallbacks(ciphertext)
+                    .unwrap_or_else(|| ciphertext.to_string());
                 decrypted.insert(key.clone(), serde_json::Value::String(plaintext));
                 continue;
             }
@@ -131,17 +111,11 @@ pub(super) fn admin_provider_ops_decrypted_credentials(
 }
 
 fn admin_provider_ops_sensitive_placeholder_or_empty(value: Option<&serde_json::Value>) -> bool {
-    match value {
-        None | Some(serde_json::Value::Null) => true,
-        Some(serde_json::Value::String(raw)) => raw.is_empty() || raw.chars().all(|ch| ch == '*'),
-        Some(serde_json::Value::Array(items)) => items.is_empty(),
-        Some(serde_json::Value::Object(map)) => map.is_empty(),
-        _ => false,
-    }
+    admin_provider_ops_pure::admin_provider_ops_sensitive_placeholder_or_empty(value)
 }
 
 pub(super) fn admin_provider_ops_merge_credentials(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     provider: &StoredProviderCatalogProvider,
     mut request_credentials: serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Map<String, serde_json::Value> {
@@ -172,7 +146,7 @@ pub(super) fn admin_provider_ops_merge_credentials(
 }
 
 fn admin_provider_ops_encrypt_credentials(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     credentials: serde_json::Map<String, serde_json::Value>,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     let mut encrypted = serde_json::Map::new();
@@ -182,7 +156,8 @@ fn admin_provider_ops_encrypt_credentials(
                 if plaintext.is_empty() {
                     encrypted.insert(key, value);
                 } else {
-                    let ciphertext = encrypt_catalog_secret_with_fallbacks(state, plaintext)
+                    let ciphertext = state
+                        .encrypt_catalog_secret_with_fallbacks(plaintext)
                         .ok_or_else(|| "gateway 未配置 Provider Ops 加密密钥".to_string())?;
                     encrypted.insert(key, serde_json::Value::String(ciphertext));
                 }
@@ -195,7 +170,7 @@ fn admin_provider_ops_encrypt_credentials(
 }
 
 pub(super) fn build_admin_provider_ops_saved_config_value(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     provider: &StoredProviderCatalogProvider,
     payload: AdminProviderOpsSaveConfigRequest,
 ) -> Result<serde_json::Value, String> {
@@ -240,101 +215,22 @@ pub(super) fn resolve_admin_provider_ops_base_url(
     endpoints: &[StoredProviderCatalogEndpoint],
     provider_ops_config: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Option<String> {
-    let from_saved_config = provider_ops_config
-        .and_then(|config| config.get("base_url"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
-    if from_saved_config.is_some() {
-        return from_saved_config;
-    }
-
-    if let Some(base_url) = endpoints.iter().find_map(|endpoint| {
-        let value = endpoint.base_url.trim();
-        (!value.is_empty()).then(|| value.to_string())
-    }) {
-        return Some(base_url);
-    }
-
-    let from_provider_config = provider
-        .config
-        .as_ref()
-        .and_then(serde_json::Value::as_object)
-        .and_then(|config| config.get("base_url"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
-    if from_provider_config.is_some() {
-        return from_provider_config;
-    }
-
-    provider
-        .website
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+    admin_provider_ops_pure::resolve_admin_provider_ops_base_url(
+        provider,
+        endpoints,
+        provider_ops_config,
+    )
 }
 
 pub(super) fn build_admin_provider_ops_status_payload(
     provider_id: &str,
     provider: Option<&StoredProviderCatalogProvider>,
 ) -> serde_json::Value {
-    let provider_ops_config = provider.and_then(admin_provider_ops_config_object);
-    let auth_type = provider_ops_config
-        .and_then(admin_provider_ops_connector_object)
-        .and_then(|connector| connector.get("auth_type"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_else(|| {
-            if provider_ops_config.is_some() {
-                "api_key"
-            } else {
-                "none"
-            }
-        });
-    let mut enabled_actions = provider_ops_config
-        .and_then(|config| config.get("actions"))
-        .and_then(serde_json::Value::as_object)
-        .map(|actions| {
-            actions
-                .iter()
-                .filter_map(|(action_type, config)| {
-                    let enabled = config
-                        .as_object()
-                        .and_then(|config| config.get("enabled"))
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(true);
-                    enabled.then(|| serde_json::Value::String(action_type.clone()))
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    enabled_actions.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
-
-    json!({
-        "provider_id": provider_id,
-        "is_configured": provider_ops_config.is_some(),
-        "architecture_id": provider_ops_config.map(|config| {
-            config
-                .get("architecture_id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("generic_api")
-        }),
-        "connection_status": {
-            "status": "disconnected",
-            "auth_type": auth_type,
-            "connected_at": serde_json::Value::Null,
-            "expires_at": serde_json::Value::Null,
-            "last_error": serde_json::Value::Null,
-        },
-        "enabled_actions": enabled_actions,
-    })
+    admin_provider_ops_pure::build_admin_provider_ops_status_payload(provider_id, provider)
 }
 
 pub(super) fn build_admin_provider_ops_config_payload(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     provider_id: &str,
     provider: Option<&StoredProviderCatalogProvider>,
     endpoints: &[StoredProviderCatalogEndpoint],

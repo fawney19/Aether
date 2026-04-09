@@ -1,11 +1,8 @@
 pub(crate) mod candidate_loop;
-mod diagnostics;
 mod orchestration;
 mod plan_fallback;
 mod policy;
 mod remote;
-mod reports;
-mod retries;
 mod stream_path;
 mod sync_path;
 

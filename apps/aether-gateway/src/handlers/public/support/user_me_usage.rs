@@ -10,6 +10,8 @@ use axum::{
 use chrono::Utc;
 use serde_json::json;
 
+use crate::admin_api::AdminAppState;
+
 use super::{
     admin_stats_bad_request_response, build_auth_error_response, build_auth_wallet_summary_payload,
     list_usage_for_optional_range, parse_bounded_u32, query_param_value,
@@ -561,7 +563,7 @@ pub(super) async fn handle_users_me_usage_get(
     };
 
     let usage = match list_usage_for_optional_range(
-        state,
+        &AdminAppState::new(state),
         time_range.as_ref(),
         &AdminStatsUsageFilter {
             user_id: Some(auth.user.id.clone()),

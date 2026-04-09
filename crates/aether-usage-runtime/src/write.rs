@@ -4,7 +4,7 @@ use aether_contracts::{ExecutionPlan, ExecutionTelemetry};
 use aether_data_contracts::repository::usage::UpsertUsageRecord;
 use aether_data_contracts::DataLayerError;
 use base64::Engine as _;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 use crate::{
     map_usage_from_response, GatewayStreamReportRequest, GatewaySyncReportRequest, UsageEvent,
@@ -307,11 +307,16 @@ fn build_terminal_usage_outcome_base(
         is_stream: plan.stream,
         response_time_ms: telemetry.and_then(|value| value.elapsed_ms),
         first_byte_time_ms: telemetry.and_then(|value| value.ttfb_ms),
-        request_headers: context_value(context, "original_headers"),
+        request_headers: mask_sensitive_headers_in_json_value(context_value(
+            context,
+            "original_headers",
+        )),
         request_body: context_value(context, "original_request_body")
             .or_else(|| plan.body.json_body.clone()),
-        provider_request_headers: context_value(context, "provider_request_headers")
-            .or_else(|| Some(headers_to_json(&plan.headers))),
+        provider_request_headers: mask_sensitive_headers_in_json_value(
+            context_value(context, "provider_request_headers")
+                .or_else(|| Some(headers_to_json(&plan.headers))),
+        ),
         provider_request: context_value(context, "provider_request_body")
             .or_else(|| plan.body.json_body.clone()),
         provider_response_headers,
@@ -701,11 +706,75 @@ fn apply_standardized_usage(
 }
 
 fn headers_to_json(headers: &BTreeMap<String, String>) -> Value {
-    Value::Object(Map::from_iter(
-        headers
-            .iter()
-            .map(|(key, value)| (key.clone(), Value::String(value.clone()))),
-    ))
+    Value::Object(Map::from_iter(headers.iter().map(|(key, value)| {
+        (key.clone(), Value::String(mask_header_value(key, value)))
+    })))
+}
+
+/// 默认敏感请求头清单。与
+/// `apps/aether-gateway/src/handlers/admin/system/shared/configs.rs` 中
+/// `sensitive_headers` 系统配置默认值保持一致。
+const DEFAULT_SENSITIVE_HEADERS: &[&str] = &[
+    "authorization",
+    "x-api-key",
+    "api-key",
+    "x-goog-api-key",
+    "cookie",
+    "set-cookie",
+    "proxy-authorization",
+];
+
+/// 判断 header 名是否属于敏感字段（大小写不敏感）。
+fn is_sensitive_header(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    DEFAULT_SENSITIVE_HEADERS
+        .iter()
+        .any(|candidate| *candidate == lower.as_str())
+}
+
+/// 对单个 header value 进行脱敏：保留前 4 + 后 4 字符，中间替换为 `****`。
+/// 长度小于等于 8 时整体替换为 `****`。
+fn mask_header_value(name: &str, value: &str) -> String {
+    if !is_sensitive_header(name) {
+        return value.to_string();
+    }
+    if value.len() <= 8 {
+        return "****".to_string();
+    }
+    let prefix: String = value.chars().take(4).collect();
+    let suffix: String = value
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{prefix}****{suffix}")
+}
+
+/// 对 JSON 形式的 headers 做就地脱敏。仅当 value 是 Object 时才会处理；
+/// 其它形式的值保持不变。
+fn mask_sensitive_headers_in_json_value(value: Option<Value>) -> Option<Value> {
+    let value = value?;
+    let Value::Object(map) = value else {
+        return Some(value);
+    };
+    let masked = map
+        .into_iter()
+        .map(|(key, val)| {
+            if !is_sensitive_header(&key) {
+                return (key, val);
+            }
+            let masked_val = match val {
+                Value::String(text) => Value::String(mask_header_value(&key, &text)),
+                Value::Null => Value::Null,
+                other => Value::String(mask_header_value(&key, &other.to_string())),
+            };
+            (key, masked_val)
+        })
+        .collect::<Map<_, _>>();
+    Some(Value::Object(masked))
 }
 
 fn resolve_error_category(status_code: u16, event_type: UsageEventType) -> Option<String> {
@@ -773,9 +842,86 @@ fn decode_body_for_storage(body_base64: Option<&str>) -> Option<Value> {
         return Some(json_body);
     }
     if let Ok(text) = String::from_utf8(bytes) {
+        if let Some(stream_body) = parse_sse_body_for_storage(&text) {
+            return Some(stream_body);
+        }
         return Some(Value::String(text));
     }
     Some(Value::String(body_base64.to_string()))
+}
+
+fn parse_sse_body_for_storage(text: &str) -> Option<Value> {
+    if !text.contains("data:") {
+        return None;
+    }
+
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut chunks = Vec::new();
+    let mut total_chunks = 0_u64;
+    let mut saw_done = false;
+
+    for block in normalized.split("\n\n") {
+        let data_lines = block
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("data:"))
+            .map(|line| line.trim_start_matches("data:").trim())
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+
+        if data_lines.is_empty() {
+            continue;
+        }
+
+        let payload = data_lines.join("\n");
+        if payload == "[DONE]" {
+            saw_done = true;
+            continue;
+        }
+
+        total_chunks += 1;
+        if let Ok(json_body) = serde_json::from_str::<Value>(&payload) {
+            chunks.push(json_body);
+        }
+    }
+
+    if total_chunks == 0 && !saw_done {
+        return None;
+    }
+
+    let stored_chunks = chunks.len() as u64;
+    let mut metadata = Map::from_iter([
+        ("stream".to_string(), Value::Bool(true)),
+        ("total_chunks".to_string(), json!(total_chunks)),
+        ("stored_chunks".to_string(), json!(stored_chunks)),
+        ("content_length".to_string(), json!(text.len())),
+    ]);
+    if saw_done {
+        metadata.insert("has_completion".to_string(), Value::Bool(true));
+    }
+    if stored_chunks < total_chunks {
+        metadata.insert(
+            "dropped_chunks".to_string(),
+            json!(total_chunks - stored_chunks),
+        );
+    }
+
+    if chunks.is_empty() {
+        metadata.insert(
+            "parse_error".to_string(),
+            Value::String("Failed to parse response as SSE JSON format".to_string()),
+        );
+        return Some(json!({
+            "chunks": [],
+            "raw_response": text,
+            "metadata": metadata,
+        }));
+    }
+
+    Some(json!({
+        "chunks": chunks,
+        "metadata": metadata,
+    }))
 }
 
 fn extract_token_counts_from_sse_text(text: &str) -> Option<(u64, u64, u64)> {
@@ -840,6 +986,18 @@ fn extract_token_counts_from_json(value: &Value) -> Option<(u64, u64, u64)> {
         return Some((input, output, total));
     }
 
+    if let Some(chunks) = value.get("chunks").and_then(Value::as_array) {
+        let mut last_seen = None;
+        for chunk in chunks {
+            if let Some(tokens) = extract_token_counts_from_json(chunk) {
+                last_seen = Some(tokens);
+            }
+        }
+        if last_seen.is_some() {
+            return last_seen;
+        }
+    }
+
     if let Some(response) = value.get("response") {
         return extract_token_counts_from_json(response);
     }
@@ -857,7 +1015,8 @@ fn empty_to_none(value: Option<String>) -> Option<String> {
 mod tests {
     use super::{
         build_stream_terminal_usage_event, build_sync_terminal_usage_event,
-        extract_token_counts_from_json,
+        extract_token_counts_from_json, headers_to_json, mask_header_value,
+        mask_sensitive_headers_in_json_value,
     };
     use crate::{
         build_upsert_usage_record_from_event, GatewayStreamReportRequest, GatewaySyncReportRequest,
@@ -865,7 +1024,7 @@ mod tests {
     };
     use aether_contracts::{ExecutionPlan, RequestBody};
     use base64::Engine as _;
-    use serde_json::{json, Value};
+    use serde_json::json;
     use std::collections::BTreeMap;
 
     #[test]
@@ -985,9 +1144,132 @@ mod tests {
         );
         assert_eq!(
             event.data.client_response_body,
-            Some(Value::String(
-                "data: {\"id\":\"chatcmpl_123\"}\n\ndata: [DONE]\n".to_string()
-            ))
+            Some(json!({
+                "chunks": [
+                    {
+                        "id": "chatcmpl_123"
+                    }
+                ],
+                "metadata": {
+                    "stream": true,
+                    "total_chunks": 1,
+                    "stored_chunks": 1,
+                    "content_length": 42,
+                    "has_completion": true
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn builds_stream_terminal_usage_from_sse_chunks_and_extracts_usage() {
+        let plan = ExecutionPlan {
+            request_id: "req-stream-usage-2".to_string(),
+            candidate_id: Some("cand-stream-usage-2".to_string()),
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/responses".to_string(),
+            headers: BTreeMap::new(),
+            content_type: None,
+            content_encoding: None,
+            body: RequestBody {
+                json_body: None,
+                body_bytes_b64: None,
+                body_ref: None,
+            },
+            stream: true,
+            client_api_format: "openai:cli".to_string(),
+            provider_api_format: "openai:cli".to_string(),
+            model_name: Some("gpt-5.4".to_string()),
+            proxy: None,
+            tls_profile: None,
+            timeouts: None,
+        };
+        let sse_body = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_123\",\"object\":\"response\",\"model\":\"gpt-5.4\",\"status\":\"in_progress\"}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello from CLI stream\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_123\",\"object\":\"response\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello from CLI stream\"}]}],\"usage\":{\"input_tokens\":3,\"output_tokens\":5,\"total_tokens\":8}}}\n\n",
+            "data: [DONE]\n",
+        );
+        let payload = GatewayStreamReportRequest {
+            trace_id: "trace-stream-usage-2".to_string(),
+            report_kind: "openai_cli_stream_success".to_string(),
+            report_context: Some(json!({
+                "client_api_format": "openai:cli",
+                "provider_api_format": "openai:cli",
+            })),
+            status_code: 200,
+            headers: BTreeMap::new(),
+            provider_body_base64: Some(base64::engine::general_purpose::STANDARD.encode(sse_body)),
+            client_body_base64: None,
+            telemetry: None,
+        };
+
+        let event =
+            build_stream_terminal_usage_event(&plan, payload.report_context.as_ref(), &payload)
+                .expect("usage event should build");
+
+        assert_eq!(event.data.input_tokens, Some(3));
+        assert_eq!(event.data.output_tokens, Some(5));
+        assert_eq!(event.data.total_tokens, Some(8));
+        assert_eq!(
+            event.data.response_body,
+            Some(json!({
+                "chunks": [
+                    {
+                        "type": "response.created",
+                        "response": {
+                            "id": "resp_123",
+                            "object": "response",
+                            "model": "gpt-5.4",
+                            "status": "in_progress"
+                        }
+                    },
+                    {
+                        "type": "response.output_text.delta",
+                        "delta": "Hello from CLI stream"
+                    },
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_123",
+                            "object": "response",
+                            "model": "gpt-5.4",
+                            "status": "completed",
+                            "output": [
+                                {
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [
+                                        {
+                                            "type": "output_text",
+                                            "text": "Hello from CLI stream"
+                                        }
+                                    ]
+                                }
+                            ],
+                            "usage": {
+                                "input_tokens": 3,
+                                "output_tokens": 5,
+                                "total_tokens": 8
+                            }
+                        }
+                    }
+                ],
+                "metadata": {
+                    "stream": true,
+                    "total_chunks": 3,
+                    "stored_chunks": 3,
+                    "content_length": sse_body.len(),
+                    "has_completion": true
+                }
+            }))
         );
     }
 
@@ -1067,5 +1349,107 @@ mod tests {
                 "object": "chat.completion"
             }))
         );
+    }
+
+    #[test]
+    fn masks_known_sensitive_header_values() {
+        let token = "Bearer eyJhbGciOiJSUzI1NiJ9.payload-here.signature-tail";
+        let masked = mask_header_value("authorization", token);
+        assert!(masked.starts_with("Bear"));
+        assert!(masked.ends_with("tail"));
+        assert!(masked.contains("****"));
+        assert!(!masked.contains("payload-here"));
+
+        // 大小写不敏感
+        assert_eq!(
+            mask_header_value("Authorization", "12345678"),
+            "****",
+            "短值整体替换为 ****",
+        );
+        assert_eq!(mask_header_value("X-Api-Key", "abcdefghij"), "abcd****ghij",);
+
+        // 非敏感头保持原样
+        assert_eq!(
+            mask_header_value("user-agent", "codex-tui/0.1"),
+            "codex-tui/0.1",
+        );
+    }
+
+    #[test]
+    fn headers_to_json_masks_sensitive_headers_at_source() {
+        let mut headers = BTreeMap::new();
+        headers.insert(
+            "authorization".to_string(),
+            "Bearer eyJhbGciOiJSUzI1NiJ9.body.signature".to_string(),
+        );
+        headers.insert("user-agent".to_string(), "codex-tui/0.1".to_string());
+        headers.insert(
+            "x-api-key".to_string(),
+            "sk-proj-1234567890abcdef".to_string(),
+        );
+
+        let value = headers_to_json(&headers);
+        let object = value.as_object().expect("expected object");
+
+        let auth = object
+            .get("authorization")
+            .and_then(|v| v.as_str())
+            .expect("authorization should be string");
+        assert!(auth.starts_with("Bear"));
+        assert!(auth.contains("****"));
+        assert!(!auth.contains("eyJhbGciOiJSUzI1NiJ9"));
+
+        let api_key = object
+            .get("x-api-key")
+            .and_then(|v| v.as_str())
+            .expect("x-api-key should be string");
+        assert!(api_key.starts_with("sk-p"));
+        assert!(api_key.contains("****"));
+        assert!(!api_key.contains("1234567890"));
+
+        assert_eq!(
+            object.get("user-agent").and_then(|v| v.as_str()),
+            Some("codex-tui/0.1"),
+        );
+    }
+
+    #[test]
+    fn mask_sensitive_headers_in_json_value_handles_object_form() {
+        let value = json!({
+            "Authorization": "Bearer eyJhbGciOiJSUzI1NiJ9.body.signature",
+            "Cookie": "session=verylongcookievalue1234",
+            "Accept": "application/json",
+        });
+        let masked =
+            mask_sensitive_headers_in_json_value(Some(value)).expect("masked value should exist");
+        let object = masked.as_object().expect("expected object");
+
+        let auth = object
+            .get("Authorization")
+            .and_then(|v| v.as_str())
+            .expect("Authorization should be string");
+        assert!(auth.contains("****"));
+        assert!(!auth.contains("eyJhbGciOiJSUzI1NiJ9"));
+
+        let cookie = object
+            .get("Cookie")
+            .and_then(|v| v.as_str())
+            .expect("Cookie should be string");
+        assert!(cookie.contains("****"));
+        assert!(!cookie.contains("verylongcookievalue"));
+
+        assert_eq!(
+            object.get("Accept").and_then(|v| v.as_str()),
+            Some("application/json"),
+        );
+    }
+
+    #[test]
+    fn mask_sensitive_headers_passthrough_for_non_object() {
+        // None 输入返回 None
+        assert!(mask_sensitive_headers_in_json_value(None).is_none());
+        // 非 object 输入原样返回
+        let masked = mask_sensitive_headers_in_json_value(Some(json!("not an object")));
+        assert_eq!(masked, Some(json!("not an object")));
     }
 }

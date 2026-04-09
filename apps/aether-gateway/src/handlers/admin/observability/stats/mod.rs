@@ -1,29 +1,26 @@
-use crate::control::GatewayPublicRequestContext;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use axum::{body::Body, response::Response};
 
 mod analytics_routes;
 mod cost_routes;
-mod helpers;
 mod leaderboard;
 mod leaderboard_routes;
 mod provider_quota_routes;
 mod range;
-mod responses;
-mod timeseries;
-pub(crate) use self::helpers::{round_to, AdminStatsTimeRange, AdminStatsUsageFilter};
-pub(crate) use self::range::{list_usage_for_optional_range, parse_bounded_u32};
-pub(crate) use self::responses::admin_stats_bad_request_response;
-pub(crate) use self::timeseries::aggregate_usage_stats;
+pub(crate) use self::range::{
+    list_usage_for_optional_range, list_usage_for_range, parse_bounded_u32,
+};
+pub(crate) use aether_admin::observability::stats::{
+    admin_stats_bad_request_response, aggregate_usage_stats, round_to, AdminStatsTimeRange,
+    AdminStatsUsageFilter,
+};
 
 pub(crate) async fn maybe_build_local_admin_stats_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
-        return Ok(None);
-    };
-    if decision.route_family.as_deref() != Some("stats_manage") {
+    if request_context.route_family() != Some("stats_manage") {
         return Ok(None);
     }
 
@@ -31,19 +28,15 @@ pub(crate) async fn maybe_build_local_admin_stats_response(
         provider_quota_routes::maybe_build_local_admin_stats_provider_quota_response(
             state,
             request_context,
-            decision,
         )
         .await?
     {
         return Ok(Some(response));
     }
 
-    if let Some(response) = analytics_routes::maybe_build_local_admin_stats_analytics_response(
-        state,
-        request_context,
-        decision,
-    )
-    .await?
+    if let Some(response) =
+        analytics_routes::maybe_build_local_admin_stats_analytics_response(state, request_context)
+            .await?
     {
         return Ok(Some(response));
     }

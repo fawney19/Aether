@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
-use super::util::crc32;
 use super::{
     AwsEventFrame, AwsHeaderValue, AwsHeaders, EventStreamDecoder, FrameParseError,
     MAX_BUFFER_SIZE, MAX_ERRORS, MAX_MESSAGE_SIZE,
 };
+use crate::ai_pipeline::kiro_crc32 as crc32;
 
 impl EventStreamDecoder {
     pub(super) fn feed(&mut self, data: &[u8]) -> Result<(), String> {

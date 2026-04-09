@@ -1,7 +1,7 @@
 use axum::body::Body;
 use axum::http::Response;
 
-use crate::ai_pipeline::planner::{maybe_build_stream_plan_payload, maybe_build_sync_plan_payload};
+use crate::ai_pipeline_api::{maybe_build_stream_plan_payload, maybe_build_sync_plan_payload};
 use crate::control::GatewayControlDecision;
 use crate::execution_runtime::{execute_execution_runtime_stream, execute_execution_runtime_sync};
 use crate::{AppState, GatewayControlPlanResponse, GatewayError, GatewayFallbackReason};

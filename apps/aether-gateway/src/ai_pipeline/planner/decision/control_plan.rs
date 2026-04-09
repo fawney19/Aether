@@ -1,4 +1,4 @@
-use crate::ai_pipeline::control_facade::{GatewayControlAuthContext, GatewayControlDecision};
+use crate::ai_pipeline::contracts::ExecutionRuntimeAuthContext;
 use crate::ai_pipeline::planner::common::{
     CLAUDE_CHAT_STREAM_PLAN_KIND, CLAUDE_CHAT_SYNC_PLAN_KIND, CLAUDE_CLI_STREAM_PLAN_KIND,
     CLAUDE_CLI_SYNC_PLAN_KIND, EXECUTION_RUNTIME_STREAM_ACTION, EXECUTION_RUNTIME_SYNC_ACTION,
@@ -19,6 +19,11 @@ use crate::ai_pipeline::planner::plan_builders::{
     build_standard_stream_plan_from_decision, build_standard_sync_plan_from_decision,
     LocalStreamPlanAndReport, LocalSyncPlanAndReport,
 };
+use crate::ai_pipeline::planner::route::{
+    resolve_execution_runtime_stream_plan_kind as resolve_stream_plan_kind,
+    resolve_execution_runtime_sync_plan_kind as resolve_sync_plan_kind,
+};
+use crate::ai_pipeline::GatewayControlDecision;
 use crate::{
     AppState, GatewayControlPlanResponse, GatewayControlSyncDecisionResponse, GatewayError,
 };
@@ -32,7 +37,7 @@ pub(crate) async fn maybe_build_sync_plan_payload_impl(
     body_base64: Option<&str>,
     body_is_empty: bool,
 ) -> Result<Option<GatewayControlPlanResponse>, GatewayError> {
-    let Some(plan_kind) = super::resolve_sync_plan_kind(parts, decision) else {
+    let Some(plan_kind) = resolve_sync_plan_kind(parts, decision) else {
         return Ok(None);
     };
     let Some(payload) = super::maybe_build_sync_decision_payload(
@@ -59,7 +64,7 @@ pub(crate) async fn maybe_build_stream_plan_payload_impl(
     decision: &GatewayControlDecision,
     body_json: &serde_json::Value,
 ) -> Result<Option<GatewayControlPlanResponse>, GatewayError> {
-    let Some(plan_kind) = super::resolve_stream_plan_kind(parts, decision) else {
+    let Some(plan_kind) = resolve_stream_plan_kind(parts, decision) else {
         return Ok(None);
     };
     let Some(payload) =
@@ -147,7 +152,7 @@ fn build_stream_plan_payload_from_decision(
 fn build_sync_plan_response(
     plan_kind: &str,
     value: LocalSyncPlanAndReport,
-    auth_context: Option<GatewayControlAuthContext>,
+    auth_context: Option<ExecutionRuntimeAuthContext>,
 ) -> GatewayControlPlanResponse {
     GatewayControlPlanResponse {
         action: EXECUTION_RUNTIME_SYNC_ACTION.to_string(),
@@ -162,7 +167,7 @@ fn build_sync_plan_response(
 fn build_stream_plan_response(
     plan_kind: &str,
     value: LocalStreamPlanAndReport,
-    auth_context: Option<GatewayControlAuthContext>,
+    auth_context: Option<ExecutionRuntimeAuthContext>,
 ) -> GatewayControlPlanResponse {
     GatewayControlPlanResponse {
         action: EXECUTION_RUNTIME_STREAM_ACTION.to_string(),

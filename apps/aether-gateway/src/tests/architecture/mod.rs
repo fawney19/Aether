@@ -115,6 +115,16 @@ pub(super) fn workspace_file_exists(root_relative_path: &str) -> bool {
         .exists()
 }
 
+pub(super) fn collect_workspace_rust_files(root_relative_path: &str) -> Vec<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(root_relative_path);
+    let mut files = Vec::new();
+    collect_rust_files(&root, &mut files);
+    files.sort();
+    files
+}
+
 pub(super) fn read_workspace_file(path: &str) -> String {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -123,10 +133,44 @@ pub(super) fn read_workspace_file(path: &str) -> String {
     fs::read_to_string(workspace_root.join(path)).expect("source file should be readable")
 }
 
+pub(super) fn read_workspace_module_tree(path: &str) -> String {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root should resolve");
+    let root_path = workspace_root.join(path);
+    let mut contents =
+        vec![fs::read_to_string(&root_path).expect("source file should be readable")];
+
+    let module_dir = if root_path.file_name().and_then(|value| value.to_str()) == Some("mod.rs") {
+        root_path
+            .parent()
+            .expect("mod.rs should have parent module directory")
+            .to_path_buf()
+    } else if root_path.extension().and_then(|value| value.to_str()) == Some("rs") {
+        root_path.with_extension("")
+    } else {
+        root_path.clone()
+    };
+    if module_dir.is_dir() {
+        let mut files = Vec::new();
+        collect_rust_files(&module_dir, &mut files);
+        files.sort();
+        for file in files {
+            contents.push(fs::read_to_string(file).expect("source file should be readable"));
+        }
+    }
+
+    contents.join("\n")
+}
+
+mod admin_billing;
+mod admin_model;
 mod admin_observability;
 mod admin_provider;
 mod admin_shared;
 mod admin_system;
+mod admin_users;
 mod ai_pipeline;
 mod runtime_and_security;
 mod sql_and_data;

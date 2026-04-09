@@ -6,9 +6,9 @@ use super::{
     default_admin_billing_json_object, default_admin_billing_true,
     normalize_admin_billing_optional_text, normalize_admin_billing_required_text,
 };
-use crate::control::GatewayPublicRequestContext;
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::unix_secs_to_rfc3339;
-use crate::{AppState, GatewayError};
+use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -170,10 +170,10 @@ fn parse_admin_billing_rule_request(
 }
 
 async fn build_admin_list_billing_rules_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    let query = request_context.request_query_string.as_deref();
+    let query = request_context.query_string();
     let page = match admin_billing_parse_page(query) {
         Ok(value) => value,
         Err(detail) => return Ok(build_admin_billing_bad_request_response(detail)),
@@ -214,10 +214,10 @@ async fn build_admin_list_billing_rules_response(
 }
 
 async fn build_admin_get_billing_rule_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    let Some(rule_id) = admin_billing_rule_id_from_path(&request_context.request_path) else {
+    let Some(rule_id) = admin_billing_rule_id_from_path(request_context.path()) else {
         return Ok(build_admin_billing_bad_request_response("缺少 rule_id"));
     };
     match state.read_admin_billing_rule(&rule_id).await? {
@@ -231,7 +231,7 @@ async fn build_admin_get_billing_rule_response(
 }
 
 async fn build_admin_create_billing_rule_response(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     request_body: Option<&Bytes>,
 ) -> Result<Response<Body>, GatewayError> {
     let input = match parse_admin_billing_rule_request(request_body) {
@@ -255,11 +255,11 @@ async fn build_admin_create_billing_rule_response(
 }
 
 async fn build_admin_update_billing_rule_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&Bytes>,
 ) -> Result<Response<Body>, GatewayError> {
-    let Some(rule_id) = admin_billing_rule_id_from_path(&request_context.request_path) else {
+    let Some(rule_id) = admin_billing_rule_id_from_path(request_context.path()) else {
         return Ok(build_admin_billing_bad_request_response("缺少 rule_id"));
     };
     let input = match parse_admin_billing_rule_request(request_body) {
@@ -283,18 +283,18 @@ async fn build_admin_update_billing_rule_response(
 }
 
 pub(super) async fn maybe_build_local_admin_billing_rules_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
+    let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
-    let path = request_context.request_path.as_str();
+    let path = request_context.path();
 
     match decision.route_kind.as_deref() {
         Some("list_rules")
-            if request_context.request_method == http::Method::GET
+            if request_context.method() == http::Method::GET
                 && matches!(
                     path,
                     "/api/admin/billing/rules" | "/api/admin/billing/rules/"
@@ -305,7 +305,7 @@ pub(super) async fn maybe_build_local_admin_billing_rules_response(
             ))
         }
         Some("get_rule")
-            if request_context.request_method == http::Method::GET
+            if request_context.method() == http::Method::GET
                 && path.starts_with("/api/admin/billing/rules/") =>
         {
             Ok(Some(
@@ -313,7 +313,7 @@ pub(super) async fn maybe_build_local_admin_billing_rules_response(
             ))
         }
         Some("create_rule")
-            if request_context.request_method == http::Method::POST
+            if request_context.method() == http::Method::POST
                 && matches!(
                     path,
                     "/api/admin/billing/rules" | "/api/admin/billing/rules/"
@@ -324,7 +324,7 @@ pub(super) async fn maybe_build_local_admin_billing_rules_response(
             ))
         }
         Some("update_rule")
-            if request_context.request_method == http::Method::PUT
+            if request_context.method() == http::Method::PUT
                 && path.starts_with("/api/admin/billing/rules/") =>
         {
             Ok(Some(

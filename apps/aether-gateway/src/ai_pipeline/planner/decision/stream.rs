@@ -1,12 +1,14 @@
 use std::collections::BTreeMap;
 
-use crate::ai_pipeline::control_facade::GatewayControlDecision;
-use crate::ai_pipeline::execution_facade::{ConversionMode, ExecutionStrategy};
 use crate::ai_pipeline::planner::common::{
     EXECUTION_RUNTIME_STREAM_DECISION_ACTION, OPENAI_VIDEO_CONTENT_PLAN_KIND,
 };
-use crate::ai_pipeline::planner::{
+use crate::ai_pipeline::planner::route::{
     is_matching_stream_request, resolve_execution_runtime_stream_plan_kind,
+};
+use crate::ai_pipeline::{
+    resolve_decision_execution_runtime_auth_context, ConversionMode, ExecutionStrategy,
+    GatewayControlDecision,
 };
 use crate::{AppState, GatewayControlSyncDecisionResponse, GatewayError};
 
@@ -152,6 +154,6 @@ async fn maybe_build_local_video_task_content_stream_decision_payload(
         upstream_is_stream: true,
         report_kind: None,
         report_context: None,
-        auth_context: decision.auth_context.clone(),
+        auth_context: resolve_decision_execution_runtime_auth_context(decision),
     }))
 }

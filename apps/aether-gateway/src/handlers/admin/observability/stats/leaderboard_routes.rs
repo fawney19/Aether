@@ -1,38 +1,31 @@
-use super::helpers::{
-    round_to, AdminStatsLeaderboardMetric, AdminStatsSortOrder, AdminStatsTimeRange,
-    AdminStatsUsageFilter,
-};
 use super::leaderboard::{
-    build_api_key_leaderboard_items, build_model_leaderboard_items, build_user_leaderboard_items,
-    compare_leaderboard_items, compute_dense_rank, load_user_leaderboard_metadata,
+    build_admin_stats_leaderboard_response, build_api_key_leaderboard_items,
+    build_model_leaderboard_items, build_user_leaderboard_items, compare_leaderboard_items,
+    load_user_leaderboard_metadata, AdminStatsLeaderboardNameMode,
 };
-use super::range::{list_usage_for_optional_range, parse_bounded_u32, parse_nonnegative_usize};
-use super::responses::{admin_stats_bad_request_response, admin_stats_leaderboard_empty_response};
-use crate::control::GatewayPublicRequestContext;
+use super::range::{parse_bounded_u32, parse_nonnegative_usize};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{query_param_bool, query_param_value};
-use crate::{AppState, GatewayError};
-use axum::{
-    body::Body,
-    http,
-    response::{IntoResponse, Response},
-    Json,
+use crate::GatewayError;
+use aether_admin::observability::stats::{
+    admin_stats_bad_request_response, admin_stats_leaderboard_empty_response,
+    AdminStatsLeaderboardMetric, AdminStatsSortOrder, AdminStatsTimeRange, AdminStatsUsageFilter,
 };
-use serde_json::json;
+use axum::{body::Body, http, response::Response};
 
 pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let query = request_context.request_query_string.as_deref();
+    let query = request_context.query_string();
 
     if request_context
-        .control_decision
-        .as_ref()
+        .decision()
         .and_then(|decision| decision.route_kind.as_deref())
         == Some("leaderboard_models")
-        && request_context.request_method == http::Method::GET
+        && request_context.method() == http::Method::GET
         && matches!(
-            request_context.request_path.as_str(),
+            request_context.path(),
             "/api/admin/stats/leaderboard/models" | "/api/admin/stats/leaderboard/models/"
         )
     {
@@ -71,55 +64,29 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
             )));
         }
         let filters = AdminStatsUsageFilter::from_query(query);
-        let usage = list_usage_for_optional_range(state, time_range.as_ref(), &filters).await?;
+        let usage = state
+            .list_admin_usage_for_optional_range(time_range.as_ref(), &filters)
+            .await?;
         let mut leaderboard = build_model_leaderboard_items(&usage);
         leaderboard.sort_by(|left, right| compare_leaderboard_items(metric, order, left, right));
 
-        let total = leaderboard.len();
-        let items: Vec<_> = leaderboard
-            .iter()
-            .enumerate()
-            .skip(offset)
-            .take(limit)
-            .map(|(index, item)| {
-                let rank = compute_dense_rank(metric, &leaderboard, index);
-                let value = match metric {
-                    AdminStatsLeaderboardMetric::Requests => json!(item.requests),
-                    AdminStatsLeaderboardMetric::Tokens => json!(item.tokens),
-                    AdminStatsLeaderboardMetric::Cost => json!(round_to(item.cost, 6)),
-                };
-                json!({
-                    "rank": rank,
-                    "id": item.id,
-                    "name": item.id,
-                    "value": value,
-                    "requests": item.requests,
-                    "tokens": item.tokens,
-                    "cost": round_to(item.cost, 6),
-                })
-            })
-            .collect();
-
-        return Ok(Some(
-            Json(json!({
-                "items": items,
-                "total": total,
-                "metric": metric.as_str(),
-                "start_date": time_range.as_ref().map(|value| value.start_date.to_string()),
-                "end_date": time_range.as_ref().map(|value| value.end_date.to_string()),
-            }))
-            .into_response(),
-        ));
+        return Ok(Some(build_admin_stats_leaderboard_response(
+            metric,
+            time_range.as_ref(),
+            &leaderboard,
+            offset,
+            limit,
+            AdminStatsLeaderboardNameMode::Id,
+        )));
     }
 
     if request_context
-        .control_decision
-        .as_ref()
+        .decision()
         .and_then(|decision| decision.route_kind.as_deref())
         == Some("leaderboard_api_keys")
-        && request_context.request_method == http::Method::GET
+        && request_context.method() == http::Method::GET
         && matches!(
-            request_context.request_path.as_str(),
+            request_context.path(),
             "/api/admin/stats/leaderboard/api-keys" | "/api/admin/stats/leaderboard/api-keys/"
         )
     {
@@ -160,7 +127,9 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
         let include_inactive = query_param_bool(query, "include_inactive", false);
         let exclude_admin = query_param_bool(query, "exclude_admin", false);
         let filters = AdminStatsUsageFilter::from_query(query);
-        let usage = list_usage_for_optional_range(state, time_range.as_ref(), &filters).await?;
+        let usage = state
+            .list_admin_usage_for_optional_range(time_range.as_ref(), &filters)
+            .await?;
         let snapshots = if state.has_auth_api_key_data_reader() {
             let api_key_ids: Vec<String> = usage
                 .iter()
@@ -170,10 +139,8 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
                 .collect();
             Some(
                 state
-                    .data
                     .list_auth_api_key_snapshots_by_ids(&api_key_ids)
-                    .await
-                    .map_err(|err| GatewayError::Internal(err.to_string()))?,
+                    .await?,
             )
         } else {
             None
@@ -186,51 +153,23 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
         );
         leaderboard.sort_by(|left, right| compare_leaderboard_items(metric, order, left, right));
 
-        let total = leaderboard.len();
-        let items: Vec<_> = leaderboard
-            .iter()
-            .enumerate()
-            .skip(offset)
-            .take(limit)
-            .map(|(index, item)| {
-                let rank = compute_dense_rank(metric, &leaderboard, index);
-                let value = match metric {
-                    AdminStatsLeaderboardMetric::Requests => json!(item.requests),
-                    AdminStatsLeaderboardMetric::Tokens => json!(item.tokens),
-                    AdminStatsLeaderboardMetric::Cost => json!(round_to(item.cost, 6)),
-                };
-                json!({
-                    "rank": rank,
-                    "id": item.id,
-                    "name": item.name,
-                    "value": value,
-                    "requests": item.requests,
-                    "tokens": item.tokens,
-                    "cost": round_to(item.cost, 6),
-                })
-            })
-            .collect();
-
-        return Ok(Some(
-            Json(json!({
-                "items": items,
-                "total": total,
-                "metric": metric.as_str(),
-                "start_date": time_range.as_ref().map(|value| value.start_date.to_string()),
-                "end_date": time_range.as_ref().map(|value| value.end_date.to_string()),
-            }))
-            .into_response(),
-        ));
+        return Ok(Some(build_admin_stats_leaderboard_response(
+            metric,
+            time_range.as_ref(),
+            &leaderboard,
+            offset,
+            limit,
+            AdminStatsLeaderboardNameMode::Name,
+        )));
     }
 
     if request_context
-        .control_decision
-        .as_ref()
+        .decision()
         .and_then(|decision| decision.route_kind.as_deref())
         == Some("leaderboard_users")
-        && request_context.request_method == http::Method::GET
+        && request_context.method() == http::Method::GET
         && matches!(
-            request_context.request_path.as_str(),
+            request_context.path(),
             "/api/admin/stats/leaderboard/users" | "/api/admin/stats/leaderboard/users/"
         )
     {
@@ -271,7 +210,9 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
         let include_inactive = query_param_bool(query, "include_inactive", false);
         let exclude_admin = query_param_bool(query, "exclude_admin", false);
         let filters = AdminStatsUsageFilter::from_query(query);
-        let usage = list_usage_for_optional_range(state, time_range.as_ref(), &filters).await?;
+        let usage = state
+            .list_admin_usage_for_optional_range(time_range.as_ref(), &filters)
+            .await?;
         let user_ids: Vec<String> = usage
             .iter()
             .filter_map(|item| item.user_id.clone())
@@ -283,41 +224,14 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
             build_user_leaderboard_items(&usage, &user_metadata, include_inactive, exclude_admin);
         leaderboard.sort_by(|left, right| compare_leaderboard_items(metric, order, left, right));
 
-        let total = leaderboard.len();
-        let items: Vec<_> = leaderboard
-            .iter()
-            .enumerate()
-            .skip(offset)
-            .take(limit)
-            .map(|(index, item)| {
-                let rank = compute_dense_rank(metric, &leaderboard, index);
-                let value = match metric {
-                    AdminStatsLeaderboardMetric::Requests => json!(item.requests),
-                    AdminStatsLeaderboardMetric::Tokens => json!(item.tokens),
-                    AdminStatsLeaderboardMetric::Cost => json!(round_to(item.cost, 6)),
-                };
-                json!({
-                    "rank": rank,
-                    "id": item.id,
-                    "name": item.name,
-                    "value": value,
-                    "requests": item.requests,
-                    "tokens": item.tokens,
-                    "cost": round_to(item.cost, 6),
-                })
-            })
-            .collect();
-
-        return Ok(Some(
-            Json(json!({
-                "items": items,
-                "total": total,
-                "metric": metric.as_str(),
-                "start_date": time_range.as_ref().map(|value| value.start_date.to_string()),
-                "end_date": time_range.as_ref().map(|value| value.end_date.to_string()),
-            }))
-            .into_response(),
-        ));
+        return Ok(Some(build_admin_stats_leaderboard_response(
+            metric,
+            time_range.as_ref(),
+            &leaderboard,
+            offset,
+            limit,
+            AdminStatsLeaderboardNameMode::Name,
+        )));
     }
 
     Ok(None)

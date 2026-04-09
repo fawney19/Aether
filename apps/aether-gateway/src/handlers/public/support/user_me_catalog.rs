@@ -402,7 +402,10 @@ pub(super) async fn handle_users_me_endpoint_status_get(
         Err(response) => return response,
     };
 
-    let Some(payload) = build_admin_endpoint_health_status_payload(state, 6).await else {
+    let Some(payload) =
+        build_admin_endpoint_health_status_payload(&crate::admin_api::AdminAppState::new(state), 6)
+            .await
+    else {
         return build_auth_error_response(
             http::StatusCode::SERVICE_UNAVAILABLE,
             USERS_ME_ENDPOINT_STATUS_UNAVAILABLE_DETAIL,

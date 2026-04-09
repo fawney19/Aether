@@ -3,12 +3,11 @@ use axum::http::Request;
 use base64::Engine as _;
 use serde_json::json;
 
-use crate::ai_pipeline::contracts::GatewayControlSyncDecisionResponse;
-use crate::ai_pipeline::planner::plan_builders::{
+use crate::ai_pipeline_api::{
     build_gemini_stream_plan_from_decision, build_gemini_sync_plan_from_decision,
     build_openai_cli_stream_plan_from_decision, build_openai_cli_sync_plan_from_decision,
     build_passthrough_sync_plan_from_decision, build_standard_stream_plan_from_decision,
-    build_standard_sync_plan_from_decision,
+    build_standard_sync_plan_from_decision, GatewayControlSyncDecisionResponse,
 };
 use crate::execution_runtime::submission::{
     build_best_effort_local_core_error_body, resolve_core_error_background_report_kind,

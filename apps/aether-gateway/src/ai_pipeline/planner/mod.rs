@@ -1,27 +1,45 @@
 use crate::ai_pipeline::contracts::{
     GatewayControlPlanResponse, GatewayControlSyncDecisionResponse,
 };
-use crate::ai_pipeline::control_facade::GatewayControlDecision;
+use crate::ai_pipeline::GatewayControlDecision;
 use crate::{AppState, GatewayError};
 
-pub(crate) mod auth_snapshot_facade;
-pub(crate) mod candidate_affinity;
-pub(crate) mod candidate_runtime_facade;
-pub(crate) mod common;
+mod candidate_affinity;
+mod common;
 mod decision;
-pub(crate) mod executor_facade;
-pub(crate) mod passthrough;
-pub(crate) mod plan_builders;
+mod passthrough;
+mod plan_builders;
 mod route;
-pub(crate) mod scheduler_facade;
-pub(crate) mod specialized;
-pub(crate) mod standard;
-pub(crate) mod transport_facade;
+mod specialized;
+mod standard;
+mod state;
 
-pub(crate) use self::route::{
-    is_matching_stream_request, resolve_execution_runtime_stream_plan_kind,
-    resolve_execution_runtime_sync_plan_kind, supports_stream_scheduler_decision_kind,
-    supports_sync_scheduler_decision_kind,
+pub(crate) use self::passthrough::{
+    build_local_same_format_stream_plan_and_reports, build_local_same_format_sync_plan_and_reports,
+};
+pub(crate) use self::plan_builders::{
+    build_gemini_stream_plan_from_decision, build_gemini_sync_plan_from_decision,
+    build_openai_cli_stream_plan_from_decision, build_openai_cli_sync_plan_from_decision,
+    build_passthrough_sync_plan_from_decision, build_standard_stream_plan_from_decision,
+    build_standard_sync_plan_from_decision, LocalStreamPlanAndReport, LocalSyncPlanAndReport,
+};
+pub(crate) use self::specialized::{
+    build_local_gemini_files_stream_plan_and_reports_for_kind,
+    build_local_gemini_files_sync_plan_and_reports_for_kind,
+    build_local_video_sync_plan_and_reports_for_kind,
+};
+pub(crate) use self::standard::{
+    build_local_openai_chat_stream_plan_and_reports_for_kind,
+    build_local_openai_chat_sync_plan_and_reports_for_kind,
+    build_local_openai_cli_stream_plan_and_reports_for_kind,
+    build_local_openai_cli_sync_plan_and_reports_for_kind,
+    build_local_stream_plan_and_reports as build_standard_family_stream_plan_and_reports,
+    build_local_sync_plan_and_reports as build_standard_family_sync_plan_and_reports,
+    set_local_openai_chat_execution_exhausted_diagnostic,
+};
+pub(crate) use self::state::{
+    GatewayAuthApiKeySnapshot, GatewayProviderTransportSnapshot, LocalResolvedOAuthRequestAuth,
+    PlannerAppState,
 };
 
 pub(crate) async fn maybe_build_sync_decision_payload(

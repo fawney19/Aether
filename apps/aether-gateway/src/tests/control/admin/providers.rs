@@ -27,6 +27,9 @@ use super::super::{
     sample_provider_model_stats, sample_provider_quota, sample_public_global_model_with_mappings,
     sample_request_candidate, start_server, AppState,
 };
+use crate::admin_api::{
+    maybe_build_local_admin_providers_response, AdminAppState, AdminRequestContext,
+};
 use crate::audit::AdminAuditEvent;
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_MANAGEMENT_TOKEN_ID_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER,
@@ -34,7 +37,6 @@ use crate::constants::{
 };
 use crate::control::resolve_public_request_context;
 use crate::data::GatewayDataState;
-use crate::handlers::admin::provider::maybe_build_local_admin_providers_response;
 
 const ADMIN_PROVIDERS_DATA_UNAVAILABLE_DETAIL: &str = "Admin provider catalog data unavailable";
 
@@ -77,10 +79,14 @@ async fn local_admin_providers_response(
     .await
     .expect("request context should resolve");
     let body_bytes = body.map(|value| Bytes::from(value.to_string()));
-    maybe_build_local_admin_providers_response(state, &request_context, body_bytes.as_ref())
-        .await
-        .expect("local providers response should build")
-        .expect("providers route should resolve locally")
+    maybe_build_local_admin_providers_response(
+        &AdminAppState::new(state),
+        &AdminRequestContext::new(&request_context),
+        body_bytes.as_ref(),
+    )
+    .await
+    .expect("local providers response should build")
+    .expect("providers route should resolve locally")
 }
 
 #[tokio::test]

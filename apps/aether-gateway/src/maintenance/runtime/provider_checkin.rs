@@ -6,7 +6,7 @@ use aether_data_contracts::repository::provider_catalog::{
 use futures_util::stream::{self, StreamExt};
 use tracing::{debug, warn};
 
-use crate::handlers::admin::provider::ops::providers::actions::admin_provider_ops_local_action_response;
+use crate::admin_api::{admin_provider_ops_local_action_response, AdminAppState};
 use crate::{AppState, GatewayError};
 
 use super::{system_config_bool, PROVIDER_CHECKIN_CONCURRENCY};
@@ -135,8 +135,9 @@ async fn run_provider_checkin_for_provider(
     endpoints: Vec<StoredProviderCatalogEndpoint>,
 ) -> ProviderCheckinOutcome {
     let provider_id = provider.id.clone();
+    let admin_state = AdminAppState::new(state);
     let payload = admin_provider_ops_local_action_response(
-        state,
+        &admin_state,
         &provider_id,
         Some(&provider),
         &endpoints,

@@ -1,9 +1,9 @@
-use crate::control::GatewayPublicRequestContext;
 use crate::handlers::admin::provider::shared::paths::admin_provider_id_for_refresh_quota;
 use crate::handlers::admin::provider::shared::payloads::{
     AdminProviderQuotaRefreshRequest, OAUTH_ACCOUNT_BLOCK_PREFIX,
 };
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -19,27 +19,26 @@ use super::super::oauth::quota::kiro::refresh_kiro_provider_quota_locally;
 use super::super::oauth::quota::shared::normalize_string_id_list;
 
 pub(super) async fn maybe_handle(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
+    let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
 
     if decision.route_family.as_deref() != Some("endpoints_manage")
         || decision.route_kind.as_deref() != Some("refresh_quota")
-        || request_context.request_method != http::Method::POST
+        || request_context.method() != http::Method::POST
         || !request_context
-            .request_path
+            .path()
             .starts_with("/api/admin/endpoints/providers/")
-        || !request_context.request_path.ends_with("/refresh-quota")
+        || !request_context.path().ends_with("/refresh-quota")
     {
         return Ok(None);
     }
 
-    let Some(provider_id) = admin_provider_id_for_refresh_quota(&request_context.request_path)
-    else {
+    let Some(provider_id) = admin_provider_id_for_refresh_quota(request_context.path()) else {
         return Ok(Some(
             (
                 http::StatusCode::NOT_FOUND,

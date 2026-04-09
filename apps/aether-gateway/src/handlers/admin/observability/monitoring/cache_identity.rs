@@ -1,8 +1,9 @@
 use super::cache_types::AdminMonitoringCacheAffinityRecord;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::AdminAppState;
+use crate::GatewayError;
 
 pub(super) async fn admin_monitoring_list_export_api_key_records_by_ids(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     api_key_ids: &[String],
 ) -> Result<
     std::collections::BTreeMap<String, aether_data::repository::auth::StoredAuthApiKeyExportRecord>,
@@ -21,7 +22,7 @@ pub(super) async fn admin_monitoring_list_export_api_key_records_by_ids(
 }
 
 async fn admin_monitoring_list_user_summaries_by_ids(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     user_ids: &[String],
 ) -> Result<
     std::collections::BTreeMap<String, aether_data::repository::users::StoredUserSummary>,
@@ -40,7 +41,7 @@ async fn admin_monitoring_list_user_summaries_by_ids(
 }
 
 pub(super) async fn admin_monitoring_load_affinity_identity_maps(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     affinities: &[AdminMonitoringCacheAffinityRecord],
 ) -> Result<
     (
@@ -71,7 +72,7 @@ pub(super) async fn admin_monitoring_load_affinity_identity_maps(
 }
 
 pub(super) async fn admin_monitoring_find_user_summary_by_id(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     user_id: &str,
 ) -> Result<Option<aether_data::repository::users::StoredUserSummary>, GatewayError> {
     if user_id.trim().is_empty() {

@@ -1,5 +1,4 @@
-use crate::handlers::admin::shared::encrypt_catalog_secret_with_fallbacks;
-use crate::AppState;
+use crate::handlers::admin::request::AdminAppState;
 use aether_data::repository::oauth_providers::{
     EncryptedSecretUpdate, UpsertOAuthProviderConfigRecord,
 };
@@ -10,31 +9,31 @@ use url::Url;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct AdminOAuthProviderUpsertRequest {
-    pub(crate) display_name: String,
-    pub(crate) client_id: String,
+    pub(super) display_name: String,
+    pub(super) client_id: String,
     #[serde(default)]
-    pub(crate) client_secret: Option<String>,
+    pub(super) client_secret: Option<String>,
     #[serde(default)]
-    pub(crate) authorization_url_override: Option<String>,
+    pub(super) authorization_url_override: Option<String>,
     #[serde(default)]
-    pub(crate) token_url_override: Option<String>,
+    pub(super) token_url_override: Option<String>,
     #[serde(default)]
-    pub(crate) userinfo_url_override: Option<String>,
+    pub(super) userinfo_url_override: Option<String>,
     #[serde(default)]
-    pub(crate) scopes: Option<Vec<String>>,
-    pub(crate) redirect_uri: String,
-    pub(crate) frontend_callback_url: String,
+    pub(super) scopes: Option<Vec<String>>,
+    pub(super) redirect_uri: String,
+    pub(super) frontend_callback_url: String,
     #[serde(default)]
-    pub(crate) attribute_mapping: Option<serde_json::Value>,
+    pub(super) attribute_mapping: Option<serde_json::Value>,
     #[serde(default)]
-    pub(crate) extra_config: Option<serde_json::Value>,
+    pub(super) extra_config: Option<serde_json::Value>,
     #[serde(default)]
-    pub(crate) is_enabled: bool,
+    pub(super) is_enabled: bool,
     #[serde(default)]
-    pub(crate) force: bool,
+    pub(super) force: bool,
 }
 
-pub(crate) fn build_admin_oauth_supported_types_payload() -> Vec<serde_json::Value> {
+pub(super) fn build_admin_oauth_supported_types_payload() -> Vec<serde_json::Value> {
     vec![json!({
         "provider_type": "linuxdo",
         "display_name": "Linux Do",
@@ -45,7 +44,7 @@ pub(crate) fn build_admin_oauth_supported_types_payload() -> Vec<serde_json::Val
     })]
 }
 
-pub(crate) fn build_admin_oauth_provider_payload(
+pub(super) fn build_admin_oauth_provider_payload(
     provider: &aether_data::repository::oauth_providers::StoredOAuthProviderConfig,
 ) -> serde_json::Value {
     json!({
@@ -135,8 +134,8 @@ fn validate_admin_oauth_url_override(url: &str, allowed_domains: &[&str]) -> Res
     Ok(())
 }
 
-pub(crate) fn build_admin_oauth_upsert_record(
-    state: &AppState,
+pub(super) fn build_admin_oauth_upsert_record(
+    state: &AdminAppState<'_>,
     provider_type: &str,
     payload: AdminOAuthProviderUpsertRequest,
 ) -> Result<UpsertOAuthProviderConfigRecord, String> {
@@ -213,7 +212,8 @@ pub(crate) fn build_admin_oauth_upsert_record(
             } else if secret.is_empty() {
                 EncryptedSecretUpdate::Preserve
             } else {
-                let encrypted = encrypt_catalog_secret_with_fallbacks(state, secret)
+                let encrypted = state
+                    .encrypt_catalog_secret_with_fallbacks(secret)
                     .ok_or_else(|| "gateway 未配置 OAuth provider 加密密钥".to_string())?;
                 EncryptedSecretUpdate::Set(encrypted)
             }

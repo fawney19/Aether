@@ -9,6 +9,8 @@ pub use error::{
     is_core_error_finalize_kind, LocalCoreSyncErrorKind,
 };
 pub use registry::{
-    request_conversion_kind, sync_chat_response_conversion_kind, sync_cli_response_conversion_kind,
-    RequestConversionKind, SyncChatResponseConversionKind, SyncCliResponseConversionKind,
+    request_conversion_direct_auth, request_conversion_kind,
+    request_conversion_transport_supported, sync_chat_response_conversion_kind,
+    sync_cli_response_conversion_kind, RequestConversionKind, SyncChatResponseConversionKind,
+    SyncCliResponseConversionKind,
 };

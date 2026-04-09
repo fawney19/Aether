@@ -8,7 +8,8 @@ use super::cache_config::{
     ADMIN_MONITORING_DYNAMIC_RESERVATION_STABLE_MIN_RESERVATION,
 };
 use super::cache_store::build_admin_monitoring_cache_snapshot;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::AdminAppState;
+use crate::GatewayError;
 use axum::{
     body::Body,
     http,
@@ -18,7 +19,7 @@ use axum::{
 use serde_json::json;
 
 pub(super) async fn build_admin_monitoring_cache_stats_response(
-    state: &AppState,
+    state: &AdminAppState<'_>,
 ) -> Result<Response<Body>, GatewayError> {
     let snapshot = build_admin_monitoring_cache_snapshot(state).await?;
 
@@ -64,7 +65,7 @@ pub(super) async fn build_admin_monitoring_cache_stats_response(
 }
 
 pub(super) async fn build_admin_monitoring_cache_metrics_response(
-    state: &AppState,
+    state: &AdminAppState<'_>,
 ) -> Result<Response<Body>, GatewayError> {
     let snapshot = build_admin_monitoring_cache_snapshot(state).await?;
     let metrics = [

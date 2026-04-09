@@ -1,8 +1,6 @@
-use super::write::build_admin_provider_available_source_models_payload;
-use crate::control::GatewayControlDecision;
-use crate::control::GatewayPublicRequestContext;
 use crate::handlers::admin::provider::shared::paths::admin_provider_available_source_models_path;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -12,17 +10,15 @@ use axum::{
 use serde_json::json;
 
 pub(super) async fn maybe_handle(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     _request_body: Option<&Bytes>,
-    decision: &GatewayControlDecision,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    if decision.route_family.as_deref() == Some("provider_models_manage")
-        && decision.route_kind.as_deref() == Some("available_source_models")
-        && request_context.request_method == http::Method::GET
+    if request_context.route_family() == Some("provider_models_manage")
+        && request_context.route_kind() == Some("available_source_models")
+        && request_context.method() == http::Method::GET
     {
-        let Some(provider_id) =
-            admin_provider_available_source_models_path(&request_context.request_path)
+        let Some(provider_id) = admin_provider_available_source_models_path(request_context.path())
         else {
             return Ok(Some(
                 (
@@ -33,7 +29,10 @@ pub(super) async fn maybe_handle(
             ));
         };
         return Ok(Some(
-            match build_admin_provider_available_source_models_payload(state, &provider_id).await {
+            match state
+                .build_admin_provider_available_source_models_payload(&provider_id)
+                .await
+            {
                 Some(payload) => Json(payload).into_response(),
                 None => (
                     http::StatusCode::NOT_FOUND,

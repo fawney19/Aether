@@ -6,29 +6,27 @@ fn normalize_reveal_auth_type(value: &str) -> &str {
     }
 }
 
-use crate::handlers::admin::shared::{
-    decrypt_catalog_secret_with_fallbacks, parse_catalog_auth_config_json,
-};
-use crate::AppState;
+use crate::handlers::admin::request::AdminAppState;
+use crate::handlers::admin::shared::parse_catalog_auth_config_json;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use chrono::{SecondsFormat, Utc};
 use serde_json::json;
 
 pub(crate) fn build_admin_reveal_key_payload(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     key: &StoredProviderCatalogKey,
 ) -> Result<serde_json::Value, String> {
     let auth_type = normalize_reveal_auth_type(&key.auth_type);
     if matches!(auth_type, "service_account") {
-        if let Some(auth_config) = parse_catalog_auth_config_json(state, key) {
+        if let Some(auth_config) = state.parse_catalog_auth_config_json(key) {
             return Ok(json!({
                 "auth_type": auth_type,
                 "auth_config": auth_config,
             }));
         }
-        let decrypted =
-            decrypt_catalog_secret_with_fallbacks(state.encryption_key(), &key.encrypted_api_key)
-                .ok_or_else(|| {
+        let decrypted = state
+            .decrypt_catalog_secret_with_fallbacks(&key.encrypted_api_key)
+            .ok_or_else(|| {
                 "无法解密认证配置，可能是加密密钥已更改。请重新添加该密钥。".to_string()
             })?;
         if decrypted == "__placeholder__" {
@@ -40,11 +38,9 @@ pub(crate) fn build_admin_reveal_key_payload(
         }));
     }
 
-    let decrypted =
-        decrypt_catalog_secret_with_fallbacks(state.encryption_key(), &key.encrypted_api_key)
-            .ok_or_else(|| {
-                "无法解密 API Key，可能是加密密钥已更改。请重新添加该密钥。".to_string()
-            })?;
+    let decrypted = state
+        .decrypt_catalog_secret_with_fallbacks(&key.encrypted_api_key)
+        .ok_or_else(|| "无法解密 API Key，可能是加密密钥已更改。请重新添加该密钥。".to_string())?;
     Ok(json!({
         "auth_type": auth_type,
         "api_key": decrypted,
@@ -93,7 +89,7 @@ fn provider_oauth_export_payload(
 }
 
 pub(crate) async fn build_admin_export_key_payload(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     key: &StoredProviderCatalogKey,
 ) -> Result<serde_json::Value, String> {
     let auth_type = normalize_reveal_auth_type(&key.auth_type);
@@ -107,7 +103,8 @@ pub(crate) async fn build_admin_export_key_payload(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "缺少认证配置，无法导出".to_string())?;
-    let plaintext = decrypt_catalog_secret_with_fallbacks(state.encryption_key(), ciphertext)
+    let plaintext = state
+        .decrypt_catalog_secret_with_fallbacks(ciphertext)
         .ok_or_else(|| "无法解密认证配置".to_string())?;
     let auth_config = serde_json::from_str::<serde_json::Value>(&plaintext)
         .ok()

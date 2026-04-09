@@ -1,4 +1,5 @@
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::AdminAppState;
+use crate::GatewayError;
 use aether_data_contracts::repository::video_tasks::{StoredVideoTask, VideoTaskStatus};
 use axum::http;
 use chrono::{SecondsFormat, Utc};
@@ -41,7 +42,7 @@ pub(super) fn truncate_admin_video_task_prompt(prompt: Option<&str>) -> Option<S
 }
 
 pub(super) async fn build_admin_video_task_provider_names(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     tasks: &[StoredVideoTask],
 ) -> Result<BTreeMap<String, String>, GatewayError> {
     let provider_ids = tasks
@@ -55,6 +56,7 @@ pub(super) async fn build_admin_video_task_provider_names(
         return Ok(BTreeMap::new());
     }
     Ok(state
+        .app()
         .read_provider_catalog_providers_by_ids(&provider_ids)
         .await?
         .into_iter()

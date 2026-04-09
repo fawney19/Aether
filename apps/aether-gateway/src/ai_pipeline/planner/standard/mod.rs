@@ -3,21 +3,19 @@
 //! This groups the standard planning surface in one place:
 //! request-side conversion, matrix registry, and decision payload builders.
 
-use crate::ai_pipeline::control_facade::GatewayControlDecision;
+use crate::ai_pipeline::GatewayControlDecision;
 use crate::{AppState, GatewayControlSyncDecisionResponse, GatewayError};
 
-pub(crate) mod claude;
+mod claude;
 mod codex;
-pub(crate) mod family;
-pub(crate) mod gemini;
-mod matrix;
+mod family;
+mod gemini;
 mod normalize;
-pub(crate) mod openai;
+mod openai;
 
 pub(crate) use self::codex::apply_codex_openai_cli_special_headers;
-pub(crate) use self::matrix::{
-    build_standard_request_body, build_standard_upstream_url,
-    normalize_standard_request_to_openai_chat_request,
+pub(crate) use self::family::{
+    build_local_stream_plan_and_reports, build_local_sync_plan_and_reports,
 };
 pub(crate) use self::normalize::{
     build_cross_format_openai_chat_request_body, build_cross_format_openai_chat_upstream_url,
@@ -26,23 +24,29 @@ pub(crate) use self::normalize::{
     build_local_openai_cli_request_body, build_local_openai_cli_upstream_url,
 };
 pub(crate) use self::openai::{
-    copy_request_number_field, copy_request_number_field_as,
-    map_openai_reasoning_effort_to_claude_output, map_openai_reasoning_effort_to_gemini_budget,
-    maybe_build_stream_local_decision_payload,
+    build_local_openai_chat_stream_plan_and_reports_for_kind,
+    build_local_openai_chat_sync_plan_and_reports_for_kind,
+    build_local_openai_cli_stream_plan_and_reports_for_kind,
+    build_local_openai_cli_sync_plan_and_reports_for_kind, copy_request_number_field,
+    copy_request_number_field_as, map_openai_reasoning_effort_to_claude_output,
+    map_openai_reasoning_effort_to_gemini_budget, maybe_build_stream_local_decision_payload,
     maybe_build_stream_local_openai_cli_decision_payload, maybe_build_sync_local_decision_payload,
     maybe_build_sync_local_openai_cli_decision_payload, parse_openai_stop_sequences,
-    resolve_openai_chat_max_tokens, value_as_u64,
-};
-pub(crate) use crate::ai_pipeline::conversion::request::{
-    convert_openai_chat_request_to_claude_request, convert_openai_chat_request_to_gemini_request,
-    convert_openai_chat_request_to_openai_cli_request, extract_openai_text_content,
-    normalize_openai_cli_request_to_openai_chat_request, parse_openai_tool_result_content,
+    resolve_openai_chat_max_tokens, set_local_openai_chat_execution_exhausted_diagnostic,
+    value_as_u64,
 };
 pub(crate) use crate::ai_pipeline::conversion::{
     build_core_error_body_for_client_format, request_conversion_kind,
     request_conversion_transport_supported, sync_chat_response_conversion_kind,
     sync_cli_response_conversion_kind, RequestConversionKind, SyncChatResponseConversionKind,
     SyncCliResponseConversionKind,
+};
+pub(crate) use crate::ai_pipeline::normalize_standard_request_to_openai_chat_request;
+pub(crate) use crate::ai_pipeline::{
+    build_standard_request_body, build_standard_upstream_url,
+    convert_openai_chat_request_to_claude_request, convert_openai_chat_request_to_gemini_request,
+    convert_openai_chat_request_to_openai_cli_request, extract_openai_text_content,
+    normalize_openai_cli_request_to_openai_chat_request, parse_openai_tool_result_content,
 };
 
 pub(crate) async fn maybe_build_sync_local_standard_decision_payload(
@@ -87,4 +91,180 @@ pub(crate) async fn maybe_build_stream_local_standard_decision_payload(
         state, parts, trace_id, decision, body_json, plan_kind,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_standard_request_body;
+    use serde_json::json;
+
+    #[test]
+    fn builds_openai_chat_request_from_claude_chat_source() {
+        let request = json!({
+            "model": "claude-3-7-sonnet",
+            "system": "You are concise.",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Hello from Claude"}]
+                }
+            ],
+            "max_tokens": 128
+        });
+
+        let converted = build_standard_request_body(
+            &request,
+            "claude:chat",
+            "gpt-5",
+            "openai",
+            "openai:chat",
+            "/v1/messages",
+            false,
+            None,
+            None,
+        )
+        .expect("claude chat should convert to openai chat");
+
+        assert_eq!(converted["model"], "gpt-5");
+        assert_eq!(converted["messages"][0]["role"], "system");
+        assert_eq!(converted["messages"][0]["content"], "You are concise.");
+        assert_eq!(converted["messages"][1]["role"], "user");
+        assert_eq!(converted["messages"][1]["content"], "Hello from Claude");
+    }
+
+    #[test]
+    fn builds_claude_chat_request_from_gemini_chat_source() {
+        let request = json!({
+            "systemInstruction": {
+                "parts": [{"text": "Be brief."}]
+            },
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": "Hello from Gemini"}]
+                }
+            ]
+        });
+
+        let converted = build_standard_request_body(
+            &request,
+            "gemini:chat",
+            "claude-sonnet-4-5",
+            "anthropic",
+            "claude:chat",
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+            false,
+            None,
+            None,
+        )
+        .expect("gemini chat should convert to claude chat");
+
+        assert_eq!(converted["model"], "claude-sonnet-4-5");
+        assert_eq!(converted["messages"][0]["role"], "user");
+        assert!(
+            converted["messages"]
+                .to_string()
+                .contains("Hello from Gemini"),
+            "converted claude payload should retain the gemini user text: {converted}"
+        );
+    }
+
+    #[test]
+    fn builds_gemini_cli_request_from_claude_cli_source() {
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Need CLI output"}]
+                }
+            ],
+            "max_tokens": 64
+        });
+
+        let converted = build_standard_request_body(
+            &request,
+            "claude:cli",
+            "gemini-2.5-pro",
+            "google",
+            "gemini:cli",
+            "/v1/messages",
+            false,
+            None,
+            None,
+        )
+        .expect("claude cli should convert to gemini cli");
+
+        assert_eq!(converted["contents"][0]["role"], "user");
+        assert_eq!(
+            converted["contents"][0]["parts"][0]["text"],
+            "Need CLI output"
+        );
+    }
+
+    #[test]
+    fn builds_openai_cli_request_from_claude_cli_source_with_forced_stream() {
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Need OpenAI CLI output"}]
+                }
+            ],
+            "max_tokens": 64
+        });
+
+        let converted = build_standard_request_body(
+            &request,
+            "claude:cli",
+            "gpt-5",
+            "openai",
+            "openai:cli",
+            "/v1/messages",
+            true,
+            None,
+            None,
+        )
+        .expect("claude cli should convert to openai cli");
+
+        assert_eq!(converted["model"], "gpt-5");
+        assert_eq!(converted["input"][0]["role"], "user");
+        assert_eq!(converted["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(
+            converted["input"][0]["content"][0]["text"],
+            "Need OpenAI CLI output"
+        );
+        assert_eq!(converted["stream"], true);
+    }
+
+    #[test]
+    fn strips_metadata_for_codex_openai_cli_requests() {
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "metadata": {"trace_id": "abc"},
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "Need OpenAI CLI output"}]
+            }],
+            "max_tokens": 64
+        });
+
+        let converted = build_standard_request_body(
+            &request,
+            "claude:cli",
+            "gpt-5",
+            "codex",
+            "openai:cli",
+            "/v1/messages",
+            false,
+            None,
+            None,
+        )
+        .expect("claude cli should convert to codex request");
+
+        assert!(converted.get("metadata").is_none());
+        assert_eq!(converted["store"], false);
+        assert_eq!(converted["instructions"], "You are GPT-5.");
+    }
 }

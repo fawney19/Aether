@@ -1,75 +1,25 @@
-use super::responses::admin_monitoring_bad_request_response;
 use super::route_filters::parse_admin_monitoring_limit;
-use crate::control::GatewayPublicRequestContext;
-use crate::handlers::admin::shared::{query_param_value, unix_secs_to_rfc3339};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::log_ids::short_request_id;
-use crate::{AppState, GatewayError};
+use crate::GatewayError;
+use aether_admin::observability::monitoring::{
+    admin_monitoring_bad_request_response, admin_monitoring_trace_not_found_response,
+    admin_monitoring_trace_provider_id_from_path, admin_monitoring_trace_request_id_from_path,
+    build_admin_monitoring_trace_provider_stats_payload_response,
+    build_admin_monitoring_trace_request_payload_response, parse_admin_monitoring_attempted_only,
+};
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
 use axum::{
     body::Body,
-    http,
     response::{IntoResponse, Response},
-    Json,
 };
-use serde_json::json;
 use tracing::warn;
 
-fn admin_monitoring_trace_request_id_from_path(request_path: &str) -> Option<String> {
-    let value = request_path
-        .strip_prefix("/api/admin/monitoring/trace/")?
-        .trim()
-        .trim_matches('/')
-        .to_string();
-    if value.is_empty() || value.contains('/') {
-        None
-    } else {
-        Some(value)
-    }
-}
-
-fn admin_monitoring_trace_provider_id_from_path(request_path: &str) -> Option<String> {
-    let value = request_path
-        .strip_prefix("/api/admin/monitoring/trace/stats/provider/")?
-        .trim()
-        .trim_matches('/')
-        .to_string();
-    if value.is_empty() || value.contains('/') {
-        None
-    } else {
-        Some(value)
-    }
-}
-
-fn parse_admin_monitoring_attempted_only(query: Option<&str>) -> Result<bool, String> {
-    match query_param_value(query, "attempted_only") {
-        None => Ok(false),
-        Some(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" | "yes" => Ok(true),
-            "false" | "0" | "no" => Ok(false),
-            _ => Err("attempted_only must be a boolean".to_string()),
-        },
-    }
-}
-
-fn admin_monitoring_trace_not_found_response(
-    request_id: &str,
-    attempted_only: bool,
-) -> Response<Body> {
-    (
-        http::StatusCode::NOT_FOUND,
-        Json(json!({
-            "detail": "Request trace not found",
-            "request_id": request_id,
-            "attempted_only": attempted_only,
-        })),
-    )
-        .into_response()
-}
-
 pub(super) async fn build_admin_monitoring_trace_request_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
+    let state = state.as_ref();
     let Some(request_id) =
         admin_monitoring_trace_request_id_from_path(&request_context.request_path)
     else {
@@ -102,59 +52,16 @@ pub(super) async fn build_admin_monitoring_trace_request_response(
         ));
     };
 
-    let candidates = trace
-        .candidates
-        .iter()
-        .map(|item| {
-            let candidate = &item.candidate;
-            json!({
-                "id": candidate.id,
-                "request_id": candidate.request_id,
-                "candidate_index": candidate.candidate_index,
-                "retry_index": candidate.retry_index,
-                "provider_id": candidate.provider_id,
-                "provider_name": item.provider_name,
-                "provider_website": item.provider_website,
-                "endpoint_id": candidate.endpoint_id,
-                "endpoint_name": item.endpoint_api_format,
-                "key_id": candidate.key_id,
-                "key_name": item.provider_key_name,
-                "key_account_label": serde_json::Value::Null,
-                "key_preview": serde_json::Value::Null,
-                "key_auth_type": item.provider_key_auth_type,
-                "key_oauth_plan_type": serde_json::Value::Null,
-                "key_capabilities": item.provider_key_capabilities,
-                "required_capabilities": candidate.required_capabilities,
-                "status": candidate.status,
-                "skip_reason": candidate.skip_reason,
-                "is_cached": candidate.is_cached,
-                "status_code": candidate.status_code,
-                "error_type": candidate.error_type,
-                "error_message": candidate.error_message,
-                "latency_ms": candidate.latency_ms,
-                "concurrent_requests": candidate.concurrent_requests,
-                "extra_data": candidate.extra_data,
-                "created_at": unix_secs_to_rfc3339(candidate.created_at_unix_secs),
-                "started_at": candidate.started_at_unix_secs.and_then(unix_secs_to_rfc3339),
-                "finished_at": candidate.finished_at_unix_secs.and_then(unix_secs_to_rfc3339),
-            })
-        })
-        .collect::<Vec<_>>();
-
-    Ok(Json(json!({
-        "request_id": trace.request_id,
-        "total_candidates": trace.total_candidates,
-        "final_status": trace.final_status,
-        "total_latency_ms": trace.total_latency_ms,
-        "candidates": candidates,
-    }))
-    .into_response())
+    Ok(build_admin_monitoring_trace_request_payload_response(
+        &trace,
+    ))
 }
 
 pub(super) async fn build_admin_monitoring_trace_provider_stats_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
+    let state = state.as_ref();
     let Some(provider_id) =
         admin_monitoring_trace_provider_id_from_path(&request_context.request_path)
     else {
@@ -215,18 +122,19 @@ pub(super) async fn build_admin_monitoring_trace_provider_stats_response(
         ((total / latency_values.len() as f64) * 100.0).round() / 100.0
     };
 
-    Ok(Json(json!({
-        "provider_id": provider_id,
-        "total_attempts": total_attempts,
-        "success_count": success_count,
-        "failed_count": failed_count,
-        "cancelled_count": cancelled_count,
-        "skipped_count": skipped_count,
-        "pending_count": pending_count,
-        "available_count": available_count,
-        "unused_count": unused_count,
-        "failure_rate": failure_rate,
-        "avg_latency_ms": avg_latency_ms,
-    }))
-    .into_response())
+    Ok(
+        build_admin_monitoring_trace_provider_stats_payload_response(
+            provider_id,
+            total_attempts,
+            success_count,
+            failed_count,
+            cancelled_count,
+            skipped_count,
+            pending_count,
+            available_count,
+            unused_count,
+            failure_rate,
+            avg_latency_ms,
+        ),
+    )
 }

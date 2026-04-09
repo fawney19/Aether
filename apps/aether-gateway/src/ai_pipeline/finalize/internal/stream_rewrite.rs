@@ -1,12 +1,10 @@
 use serde_json::Value;
 
 use crate::ai_pipeline::adaptation::private_envelope::transform_provider_private_stream_line as transform_envelope_line;
+use crate::ai_pipeline::adaptation::KiroToClaudeCliStreamState;
 use crate::ai_pipeline::finalize::standard::StreamingStandardConversionState;
-use crate::ai_pipeline::runtime::adapters::kiro::KiroToClaudeCliStreamState;
+use crate::ai_pipeline::{resolve_finalize_stream_rewrite_mode, FinalizeStreamRewriteMode};
 use crate::GatewayError;
-use aether_ai_pipeline::finalize::{
-    resolve_finalize_stream_rewrite_mode, FinalizeStreamRewriteMode,
-};
 
 enum RewriteMode {
     EnvelopeUnwrap,
@@ -81,7 +79,8 @@ impl LocalStreamRewriter {
 
     fn transform_line(&mut self, line: Vec<u8>) -> Result<Vec<u8>, GatewayError> {
         match &mut self.mode {
-            RewriteMode::EnvelopeUnwrap => transform_envelope_line(&self.report_context, line),
+            RewriteMode::EnvelopeUnwrap => transform_envelope_line(&self.report_context, line)
+                .map_err(|err| GatewayError::Internal(err.to_string())),
             RewriteMode::Standard(state) => state.transform_line(&self.report_context, line),
             RewriteMode::KiroToClaudeCli(_) => Ok(Vec::new()),
         }

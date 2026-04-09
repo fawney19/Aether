@@ -1,9 +1,19 @@
-use super::ADMIN_API_KEYS_DATA_UNAVAILABLE_DETAIL;
-use super::{
-    format_optional_unix_secs_iso8601, http, json, masked_user_api_key_display, query_param_value,
-    serialize_admin_system_users_export_wallet, AppState, Body, GatewayError,
-    GatewayPublicRequestContext, IntoResponse, Json, Response,
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::handlers::admin::shared::query_param_value;
+use crate::handlers::admin::users::{
+    format_optional_unix_secs_iso8601, masked_user_api_key_display,
 };
+use crate::GatewayError;
+use aether_admin::system::serialize_admin_system_users_export_wallet;
+use axum::{
+    body::Body,
+    http,
+    response::{IntoResponse, Response},
+    Json,
+};
+use serde_json::json;
+
+const ADMIN_API_KEYS_DATA_UNAVAILABLE_DETAIL: &str = "Admin standalone API key data unavailable";
 
 #[derive(Debug, Default, serde::Deserialize)]
 pub(super) struct AdminStandaloneApiKeyCreateRequest {
@@ -85,11 +95,10 @@ pub(super) fn admin_api_keys_id_from_path(request_path: &str) -> Option<String> 
 }
 
 pub(super) fn admin_api_keys_operator_id(
-    request_context: &GatewayPublicRequestContext,
+    request_context: &AdminRequestContext<'_>,
 ) -> Option<String> {
     request_context
-        .control_decision
-        .as_ref()
+        .decision()
         .and_then(|decision| decision.admin_principal.as_ref())
         .map(|principal| principal.user_id.clone())
 }
@@ -118,8 +127,12 @@ pub(super) fn admin_api_keys_parse_limit(query: Option<&str>) -> Result<usize, S
     }
 }
 
+fn masked_admin_api_key_display(state: &AdminAppState<'_>, ciphertext: Option<&str>) -> String {
+    masked_user_api_key_display(state, ciphertext)
+}
+
 pub(super) fn build_admin_api_key_list_item_payload(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     record: &aether_data::repository::auth::StoredAuthApiKeyExportRecord,
     total_tokens: Option<u64>,
     wallet: Option<&aether_data::repository::wallet::StoredWalletSnapshot>,
@@ -128,7 +141,7 @@ pub(super) fn build_admin_api_key_list_item_payload(
         "id": record.api_key_id,
         "user_id": record.user_id,
         "name": record.name,
-        "key_display": masked_user_api_key_display(state, record.key_encrypted.as_deref()),
+        "key_display": masked_admin_api_key_display(state, record.key_encrypted.as_deref()),
         "is_active": record.is_active,
         "is_standalone": true,
         "total_requests": record.total_requests,
@@ -148,7 +161,7 @@ pub(super) fn build_admin_api_key_list_item_payload(
 }
 
 pub(super) fn build_admin_api_key_detail_payload(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     record: &aether_data::repository::auth::StoredAuthApiKeyExportRecord,
     total_tokens: u64,
     wallet: Option<&aether_data::repository::wallet::StoredWalletSnapshot>,
@@ -157,7 +170,7 @@ pub(super) fn build_admin_api_key_detail_payload(
         "id": record.api_key_id,
         "user_id": record.user_id,
         "name": record.name,
-        "key_display": masked_user_api_key_display(state, record.key_encrypted.as_deref()),
+        "key_display": masked_admin_api_key_display(state, record.key_encrypted.as_deref()),
         "is_active": record.is_active,
         "is_standalone": true,
         "total_requests": record.total_requests,
@@ -176,7 +189,7 @@ pub(super) fn build_admin_api_key_detail_payload(
 }
 
 pub(super) async fn admin_api_key_total_tokens_by_ids(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     api_key_ids: &[String],
 ) -> Result<std::collections::BTreeMap<String, u64>, GatewayError> {
     if api_key_ids.is_empty() || !state.has_usage_data_reader() {

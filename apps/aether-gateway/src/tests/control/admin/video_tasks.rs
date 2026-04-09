@@ -18,6 +18,9 @@ use super::super::{
     build_router_with_state, build_state_with_execution_runtime_override, sample_endpoint,
     sample_key, sample_provider, start_server, AppState,
 };
+use crate::admin_api::{
+    maybe_build_local_admin_video_tasks_response, AdminAppState, AdminRequestContext,
+};
 use crate::audit::AdminAuditEvent;
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_MANAGEMENT_TOKEN_ID_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER,
@@ -25,7 +28,6 @@ use crate::constants::{
 };
 use crate::control::resolve_public_request_context;
 use crate::data::GatewayDataState;
-use crate::handlers::admin::features::maybe_build_local_admin_video_tasks_response;
 
 fn trusted_admin_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -65,10 +67,13 @@ async fn local_admin_video_tasks_response(
     )
     .await
     .expect("request context should resolve");
-    maybe_build_local_admin_video_tasks_response(state, &request_context)
-        .await
-        .expect("local video tasks response should build")
-        .expect("video tasks route should resolve locally")
+    maybe_build_local_admin_video_tasks_response(
+        &AdminAppState::new(state),
+        &AdminRequestContext::new(&request_context),
+    )
+    .await
+    .expect("local video tasks response should build")
+    .expect("video tasks route should resolve locally")
 }
 
 fn sample_admin_video_task(

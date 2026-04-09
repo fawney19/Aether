@@ -1,11 +1,11 @@
+use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::public::provider_key_api_formats;
-use crate::AppState;
 use aether_scheduler_core::count_recent_rpm_requests_for_provider_key_since;
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) async fn build_admin_key_health_payload(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     key_id: &str,
     api_format: Option<&str>,
 ) -> Option<serde_json::Value> {
@@ -172,7 +172,7 @@ pub(crate) async fn build_admin_key_health_payload(
 }
 
 pub(crate) async fn build_admin_key_rpm_payload(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     key_id: &str,
 ) -> Option<serde_json::Value> {
     if !state.has_provider_catalog_data_reader() {
@@ -225,7 +225,7 @@ fn default_key_circuit_payload() -> serde_json::Value {
 }
 
 pub(crate) async fn recover_admin_key_health(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     key_id: &str,
     api_format: Option<&str>,
 ) -> Option<serde_json::Value> {
@@ -295,7 +295,9 @@ pub(crate) async fn recover_admin_key_health(
     }))
 }
 
-pub(crate) async fn recover_all_admin_key_health(state: &AppState) -> Option<serde_json::Value> {
+pub(crate) async fn recover_all_admin_key_health(
+    state: &AdminAppState<'_>,
+) -> Option<serde_json::Value> {
     if !state.has_provider_catalog_data_reader() {
         return None;
     }

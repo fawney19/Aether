@@ -5,15 +5,15 @@ use super::shared::{
     AdminStandaloneApiKeyCreateRequest, AdminStandaloneApiKeyFieldPresence,
     AdminStandaloneApiKeyToggleRequest, AdminStandaloneApiKeyUpdateRequest,
 };
-use super::{
-    default_admin_user_api_key_name, encrypt_catalog_secret_with_fallbacks,
-    format_optional_unix_secs_iso8601, generate_admin_user_api_key_plaintext,
-    hash_admin_user_api_key, masked_user_api_key_display, normalize_admin_optional_api_key_name,
-    normalize_admin_user_api_formats, normalize_admin_user_string_list,
-};
-use crate::control::GatewayPublicRequestContext;
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::users::{
+    default_admin_user_api_key_name, format_optional_unix_secs_iso8601,
+    generate_admin_user_api_key_plaintext, hash_admin_user_api_key, masked_user_api_key_display,
+    normalize_admin_optional_api_key_name, normalize_admin_user_api_formats,
+    normalize_admin_user_string_list,
+};
+use crate::GatewayError;
 use axum::{
     body::Body,
     http,
@@ -23,11 +23,11 @@ use axum::{
 use serde_json::json;
 
 pub(super) async fn build_admin_create_api_key_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&axum::body::Bytes>,
 ) -> Result<Response<Body>, GatewayError> {
-    if !state.data.has_auth_api_key_writer() {
+    if !state.has_auth_api_key_writer() {
         return Ok(build_admin_api_keys_data_unavailable_response());
     }
 
@@ -44,7 +44,7 @@ pub(super) async fn build_admin_create_api_key_response(
         Err(_) => {
             return Ok(build_admin_api_keys_bad_request_response(
                 "请求数据验证失败",
-            ))
+            ));
         }
     };
     if payload.initial_balance_usd.is_some()
@@ -85,7 +85,7 @@ pub(super) async fn build_admin_create_api_key_response(
     }
 
     let plaintext_key = generate_admin_user_api_key_plaintext();
-    let Some(key_encrypted) = encrypt_catalog_secret_with_fallbacks(state, &plaintext_key) else {
+    let Some(key_encrypted) = state.encrypt_catalog_secret_with_fallbacks(&plaintext_key) else {
         return Ok((
             http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "detail": "API密钥加密失败" })),
@@ -138,15 +138,15 @@ pub(super) async fn build_admin_create_api_key_response(
 }
 
 pub(super) async fn build_admin_update_api_key_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&axum::body::Bytes>,
 ) -> Result<Response<Body>, GatewayError> {
-    if !state.data.has_auth_api_key_writer() {
+    if !state.has_auth_api_key_writer() {
         return Ok(build_admin_api_keys_data_unavailable_response());
     }
 
-    let Some(api_key_id) = admin_api_keys_id_from_path(&request_context.request_path) else {
+    let Some(api_key_id) = admin_api_keys_id_from_path(request_context.path()) else {
         return Ok(build_admin_api_keys_data_unavailable_response());
     };
     let Some(request_body) = request_body else {
@@ -159,7 +159,7 @@ pub(super) async fn build_admin_update_api_key_response(
         _ => {
             return Ok(build_admin_api_keys_bad_request_response(
                 "请求数据验证失败",
-            ))
+            ));
         }
     };
     let field_presence = AdminStandaloneApiKeyFieldPresence {
@@ -174,7 +174,7 @@ pub(super) async fn build_admin_update_api_key_response(
         Err(_) => {
             return Ok(build_admin_api_keys_bad_request_response(
                 "请求数据验证失败",
-            ))
+            ));
         }
     };
     if payload.initial_balance_usd.is_some()
@@ -262,15 +262,15 @@ pub(super) async fn build_admin_update_api_key_response(
 }
 
 pub(super) async fn build_admin_toggle_api_key_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&axum::body::Bytes>,
 ) -> Result<Response<Body>, GatewayError> {
-    if !state.data.has_auth_api_key_writer() {
+    if !state.has_auth_api_key_writer() {
         return Ok(build_admin_api_keys_data_unavailable_response());
     }
 
-    let Some(api_key_id) = admin_api_keys_id_from_path(&request_context.request_path) else {
+    let Some(api_key_id) = admin_api_keys_id_from_path(request_context.path()) else {
         return Ok(build_admin_api_keys_data_unavailable_response());
     };
 
@@ -283,17 +283,15 @@ pub(super) async fn build_admin_toggle_api_key_response(
                 Err(_) => {
                     return Ok(build_admin_api_keys_bad_request_response(
                         "请求数据验证失败",
-                    ))
+                    ));
                 }
             }
         }
     };
 
     let Some(snapshot) = state
-        .data
         .list_auth_api_key_snapshots_by_ids(std::slice::from_ref(&api_key_id))
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?
+        .await?
         .into_iter()
         .find(|snapshot| snapshot.api_key_id == api_key_id)
     else {
@@ -326,14 +324,14 @@ pub(super) async fn build_admin_toggle_api_key_response(
 }
 
 pub(super) async fn build_admin_delete_api_key_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    if !state.data.has_auth_api_key_writer() {
+    if !state.has_auth_api_key_writer() {
         return Ok(build_admin_api_keys_data_unavailable_response());
     }
 
-    let Some(api_key_id) = admin_api_keys_id_from_path(&request_context.request_path) else {
+    let Some(api_key_id) = admin_api_keys_id_from_path(request_context.path()) else {
         return Ok(build_admin_api_keys_data_unavailable_response());
     };
 

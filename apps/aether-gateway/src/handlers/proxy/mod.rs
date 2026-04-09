@@ -5,9 +5,9 @@ use self::local::{
 };
 use super::internal::resolve_local_proxy_execution_path;
 pub(crate) use super::public::matches_model_mapping_for_models;
-use crate::ai_pipeline::finalize as ai_finalize;
+use crate::ai_pipeline_api;
 use crate::api::response::{
-    build_local_auth_rejection_response, build_local_http_error_response,
+    build_client_response, build_local_auth_rejection_response, build_local_http_error_response,
     build_local_overloaded_response, build_local_user_rpm_limited_response,
 };
 use crate::constants::{
@@ -241,11 +241,8 @@ async fn maybe_forward_public_request_to_tunnel_owner(
             message: format!("owner gateway affinity forward failed: {err}"),
         })?;
 
-    let mut response = ai_finalize::build_client_response(
-        upstream_response,
-        &request_context.trace_id,
-        Some(decision),
-    )?;
+    let mut response =
+        build_client_response(upstream_response, &request_context.trace_id, Some(decision))?;
     response.headers_mut().insert(
         HeaderName::from_static(TUNNEL_AFFINITY_OWNER_INSTANCE_HEADER),
         HeaderValue::from_str(owner.gateway_instance_id.as_str())

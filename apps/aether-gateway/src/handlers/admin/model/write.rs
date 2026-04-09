@@ -2,8 +2,8 @@ use super::payloads::{normalize_optional_price, normalize_required_trimmed_strin
 use crate::handlers::admin::model::shared::{
     AdminGlobalModelCreateRequest, AdminGlobalModelUpdateRequest,
 };
+use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{normalize_json_object, normalize_string_list};
-use crate::AppState;
 use aether_data_contracts::repository::global_models::{
     CreateAdminGlobalModelRecord, StoredAdminGlobalModel, UpdateAdminGlobalModelRecord,
 };
@@ -11,7 +11,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 pub(crate) async fn build_admin_global_model_create_record(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     payload: AdminGlobalModelCreateRequest,
 ) -> Result<CreateAdminGlobalModelRecord, String> {
     let name = normalize_required_trimmed_string(&payload.name, "name")?;
@@ -47,7 +47,7 @@ pub(crate) async fn build_admin_global_model_create_record(
 }
 
 pub(crate) async fn build_admin_global_model_update_record(
-    _state: &AppState,
+    _state: &AdminAppState<'_>,
     existing: &StoredAdminGlobalModel,
     raw_payload: &serde_json::Map<String, serde_json::Value>,
     payload: AdminGlobalModelUpdateRequest,

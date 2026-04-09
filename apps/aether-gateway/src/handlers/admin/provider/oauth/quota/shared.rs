@@ -1,10 +1,11 @@
 use crate::handlers::admin::provider::shared::payloads::{
     OAUTH_ACCOUNT_BLOCK_PREFIX, OAUTH_REFRESH_FAILED_PREFIX,
 };
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
+use crate::GatewayError;
+use aether_admin::provider::quota as admin_provider_quota_pure;
 use aether_contracts::{ExecutionPlan, ExecutionResult};
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
-use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
@@ -14,59 +15,27 @@ pub(super) enum ProviderQuotaExecutionOutcome {
 }
 
 pub(super) fn provider_auto_remove_banned_keys(config: Option<&serde_json::Value>) -> bool {
-    config
-        .and_then(|value| value.get("pool_advanced"))
-        .and_then(serde_json::Value::as_object)
-        .and_then(|object| object.get("auto_remove_banned_keys"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
+    admin_provider_quota_pure::provider_auto_remove_banned_keys(config)
 }
 
 pub(super) fn should_auto_remove_structured_reason(reason: Option<&str>) -> bool {
-    reason
-        .map(str::trim)
-        .is_some_and(|value| value.starts_with(OAUTH_ACCOUNT_BLOCK_PREFIX))
+    admin_provider_quota_pure::should_auto_remove_structured_reason(reason)
 }
 
 pub(crate) fn normalize_string_id_list(values: Option<Vec<String>>) -> Option<Vec<String>> {
-    let mut out = Vec::new();
-    let mut seen = BTreeSet::new();
-    for value in values.into_iter().flatten() {
-        let trimmed = value.trim();
-        if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
-            continue;
-        }
-        out.push(trimmed.to_string());
-    }
-    (!out.is_empty()).then_some(out)
+    admin_provider_quota_pure::normalize_string_id_list(values)
 }
 
 pub(super) fn coerce_json_u64(value: &serde_json::Value) -> Option<u64> {
-    match value {
-        serde_json::Value::Number(number) => number.as_u64(),
-        serde_json::Value::String(text) => text.trim().parse::<u64>().ok(),
-        _ => None,
-    }
+    admin_provider_quota_pure::coerce_json_u64(value)
 }
 
 pub(super) fn coerce_json_f64(value: &serde_json::Value) -> Option<f64> {
-    match value {
-        serde_json::Value::Number(number) => number.as_f64(),
-        serde_json::Value::String(text) => text.trim().parse::<f64>().ok(),
-        _ => None,
-    }
+    admin_provider_quota_pure::coerce_json_f64(value)
 }
 
 pub(super) fn coerce_json_bool(value: &serde_json::Value) -> Option<bool> {
-    match value {
-        serde_json::Value::Bool(value) => Some(*value),
-        serde_json::Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" => Some(true),
-            "false" | "0" => Some(false),
-            _ => None,
-        },
-        _ => None,
-    }
+    admin_provider_quota_pure::coerce_json_bool(value)
 }
 
 fn merge_upstream_metadata(
@@ -86,65 +55,21 @@ fn merge_upstream_metadata(
 }
 
 pub(super) fn extract_execution_error_message(result: &ExecutionResult) -> Option<String> {
-    if let Some(body_json) = result
-        .body
-        .as_ref()
-        .and_then(|body| body.json_body.as_ref())
-        .and_then(serde_json::Value::as_object)
-    {
-        if let Some(error) = body_json
-            .get("error")
-            .and_then(serde_json::Value::as_object)
-        {
-            if let Some(message) = error.get("message").and_then(serde_json::Value::as_str) {
-                let trimmed = message.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
-                }
-            }
-        }
-        if let Some(message) = body_json.get("message").and_then(serde_json::Value::as_str) {
-            let trimmed = message.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-
-    result
-        .error
-        .as_ref()
-        .map(|error| error.message.trim().to_string())
-        .filter(|value| !value.is_empty())
+    admin_provider_quota_pure::extract_execution_error_message(result)
 }
 
 pub(super) fn quota_refresh_success_invalid_state(
     key: &StoredProviderCatalogKey,
 ) -> (Option<u64>, Option<String>) {
-    let current_reason = key
-        .oauth_invalid_reason
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or_default();
-    if current_reason.starts_with(OAUTH_REFRESH_FAILED_PREFIX) {
-        return (
-            key.oauth_invalid_at_unix_secs,
-            (!current_reason.is_empty()).then_some(current_reason.to_string()),
-        );
-    }
-    (None, None)
+    admin_provider_quota_pure::quota_refresh_success_invalid_state(key)
 }
 
 pub(super) fn coerce_json_string(value: Option<&serde_json::Value>) -> Option<String> {
-    value
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+    admin_provider_quota_pure::coerce_json_string(value)
 }
 
 pub(crate) async fn persist_provider_quota_refresh_state(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     key_id: &str,
     metadata_update: Option<&serde_json::Value>,
     oauth_invalid_at_unix_secs: Option<u64>,
@@ -182,12 +107,12 @@ pub(crate) async fn persist_provider_quota_refresh_state(
 }
 
 pub(super) async fn execute_provider_quota_plan(
-    state: &AppState,
-    transport: &crate::provider_transport::GatewayProviderTransportSnapshot,
+    state: &AdminAppState<'_>,
+    transport: &AdminGatewayProviderTransportSnapshot,
     plan: ExecutionPlan,
     quota_kind: &str,
 ) -> Result<ProviderQuotaExecutionOutcome, GatewayError> {
-    match crate::execution_runtime::execute_execution_runtime_sync_plan(state, None, &plan).await {
+    match state.execute_execution_runtime_sync_plan(None, &plan).await {
         Ok(result) => Ok(ProviderQuotaExecutionOutcome::Response(result)),
         Err(err) => {
             let error = match err {

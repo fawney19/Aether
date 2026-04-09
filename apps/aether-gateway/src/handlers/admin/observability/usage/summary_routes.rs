@@ -1,33 +1,23 @@
-use super::super::stats::{
-    aggregate_usage_stats, list_usage_for_optional_range, round_to, AdminStatsTimeRange,
-    AdminStatsUsageFilter,
-};
-use super::analytics::{
+use super::super::stats::{AdminStatsTimeRange, AdminStatsUsageFilter};
+use super::analytics::admin_usage_provider_key_names;
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::handlers::admin::shared::query_param_value;
+use crate::GatewayError;
+use aether_admin::observability::usage::{
+    admin_usage_bad_request_response, admin_usage_data_unavailable_response,
     admin_usage_matches_api_format, admin_usage_matches_eq, admin_usage_matches_search,
     admin_usage_matches_status, admin_usage_matches_username, admin_usage_parse_ids,
-    admin_usage_parse_limit, admin_usage_parse_offset, admin_usage_provider_key_name,
-    admin_usage_provider_key_names, admin_usage_record_json, admin_usage_total_tokens,
-};
-use super::helpers::{
-    admin_usage_bad_request_response, admin_usage_data_unavailable_response,
+    admin_usage_parse_limit, admin_usage_parse_offset, build_admin_usage_active_requests_response,
+    build_admin_usage_records_response, build_admin_usage_summary_stats_response,
     ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL,
 };
-use crate::control::GatewayPublicRequestContext;
-use crate::handlers::admin::shared::query_param_value;
-use crate::{AppState, GatewayError};
 use aether_data_contracts::repository::usage::UsageAuditListQuery;
-use axum::{
-    body::Body,
-    http,
-    response::{IntoResponse, Response},
-    Json,
-};
-use serde_json::json;
+use axum::{body::Body, http, response::Response};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) async fn maybe_build_local_admin_usage_summary_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     let route_kind = request_context
         .control_decision
@@ -53,51 +43,13 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                 Ok(value) => value,
                 Err(detail) => return Ok(Some(admin_usage_bad_request_response(detail))),
             };
-            let usage = list_usage_for_optional_range(
-                state,
-                time_range.as_ref(),
-                &AdminStatsUsageFilter::default(),
-            )
-            .await?;
-            let aggregate = aggregate_usage_stats(&usage);
-            let cache_creation_tokens: u64 = usage
-                .iter()
-                .map(|item| item.cache_creation_input_tokens)
-                .sum();
-            let cache_read_tokens: u64 =
-                usage.iter().map(|item| item.cache_read_input_tokens).sum();
-            let cache_creation_cost: f64 =
-                usage.iter().map(|item| item.cache_creation_cost_usd).sum();
-            let cache_read_cost: f64 = usage.iter().map(|item| item.cache_read_cost_usd).sum();
-            let total_tokens: u64 = usage.iter().map(admin_usage_total_tokens).sum();
-            let avg_response_time = round_to(aggregate.avg_response_time_ms() / 1000.0, 2);
-            let error_rate = if aggregate.total_requests == 0 {
-                0.0
-            } else {
-                round_to(
-                    (aggregate.error_requests as f64 / aggregate.total_requests as f64) * 100.0,
-                    2,
+            let usage = state
+                .list_admin_usage_for_optional_range(
+                    time_range.as_ref(),
+                    &AdminStatsUsageFilter::default(),
                 )
-            };
-
-            return Ok(Some(
-                Json(json!({
-                    "total_requests": aggregate.total_requests,
-                    "total_tokens": total_tokens,
-                    "total_cost": round_to(aggregate.total_cost, 6),
-                    "total_actual_cost": round_to(aggregate.actual_total_cost, 6),
-                    "avg_response_time": avg_response_time,
-                    "error_count": aggregate.error_requests,
-                    "error_rate": error_rate,
-                    "cache_stats": {
-                        "cache_creation_tokens": cache_creation_tokens,
-                        "cache_read_tokens": cache_read_tokens,
-                        "cache_creation_cost": round_to(cache_creation_cost, 6),
-                        "cache_read_cost": round_to(cache_read_cost, 6),
-                    }
-                }))
-                .into_response(),
-            ));
+                .await?;
+            return Ok(Some(build_admin_usage_summary_stats_response(&usage)));
         }
         Some("active")
             if request_context.request_method == http::Method::GET
@@ -135,41 +87,10 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
             }
             let provider_key_names = admin_usage_provider_key_names(state, &items).await?;
 
-            let payload: Vec<_> = items
-                .into_iter()
-                .map(|item| {
-                    let provider_key_name =
-                        admin_usage_provider_key_name(&item, &provider_key_names);
-                    let mut value = json!({
-                        "id": item.id,
-                        "status": item.status,
-                        "input_tokens": item.input_tokens,
-                        "output_tokens": item.output_tokens,
-                        "cache_creation_input_tokens": item.cache_creation_input_tokens,
-                        "cache_read_input_tokens": item.cache_read_input_tokens,
-                        "cost": round_to(item.total_cost_usd, 6),
-                        "actual_cost": round_to(item.actual_total_cost_usd, 6),
-                        "response_time_ms": item.response_time_ms,
-                        "first_byte_time_ms": item.first_byte_time_ms,
-                        "provider": item.provider_name,
-                        "api_key_name": item.api_key_name,
-                        "provider_key_name": provider_key_name,
-                    });
-                    if let Some(api_format) = item.api_format {
-                        value["api_format"] = json!(api_format);
-                    }
-                    if let Some(endpoint_api_format) = item.endpoint_api_format {
-                        value["endpoint_api_format"] = json!(endpoint_api_format);
-                    }
-                    value["has_format_conversion"] = json!(item.has_format_conversion);
-                    if let Some(target_model) = item.target_model {
-                        value["target_model"] = json!(target_model);
-                    }
-                    value
-                })
-                .collect();
-
-            return Ok(Some(Json(json!({ "requests": payload })).into_response()));
+            return Ok(Some(build_admin_usage_active_requests_response(
+                &items,
+                &provider_key_names,
+            )));
         }
         Some("records")
             if request_context.request_method == http::Method::GET
@@ -194,8 +115,9 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                 provider_name: None,
                 model: None,
             };
-            let mut usage =
-                list_usage_for_optional_range(state, time_range.as_ref(), &filters).await?;
+            let mut usage = state
+                .list_admin_usage_for_optional_range(time_range.as_ref(), &filters)
+                .await?;
 
             let search = query_param_value(query, "search");
             let username_filter = query_param_value(query, "username");
@@ -251,26 +173,20 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
 
             let provider_key_names = admin_usage_provider_key_names(state, &usage).await?;
 
-            let records: Vec<_> = usage
+            let records = usage
                 .into_iter()
                 .skip(offset)
                 .take(limit)
-                .map(|item| {
-                    let provider_key_name =
-                        admin_usage_provider_key_name(&item, &provider_key_names);
-                    admin_usage_record_json(&item, &users_by_id, provider_key_name.as_deref())
-                })
-                .collect();
+                .collect::<Vec<_>>();
 
-            return Ok(Some(
-                Json(json!({
-                    "records": records,
-                    "total": total,
-                    "limit": limit,
-                    "offset": offset,
-                }))
-                .into_response(),
-            ));
+            return Ok(Some(build_admin_usage_records_response(
+                &records,
+                &users_by_id,
+                &provider_key_names,
+                total,
+                limit,
+                offset,
+            )));
         }
         _ => {}
     }

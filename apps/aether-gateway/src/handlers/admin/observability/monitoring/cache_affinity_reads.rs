@@ -15,10 +15,10 @@ use super::cache_store::{
     list_admin_monitoring_cache_affinity_records,
     list_admin_monitoring_cache_affinity_records_by_affinity_keys,
 };
-use super::responses::admin_monitoring_bad_request_response;
 use super::route_filters::{parse_admin_monitoring_limit, parse_admin_monitoring_offset};
-use crate::control::GatewayPublicRequestContext;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
+use aether_admin::observability::monitoring::admin_monitoring_bad_request_response;
 use axum::{
     body::Body,
     response::{IntoResponse, Response},
@@ -31,8 +31,8 @@ fn normalize_keyword<'a>(keyword: Option<&'a String>) -> Option<String> {
 }
 
 pub(super) async fn build_admin_monitoring_cache_affinities_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
     let limit = match parse_admin_monitoring_limit(request_context.request_query_string.as_deref())
     {
@@ -106,26 +106,20 @@ pub(super) async fn build_admin_monitoring_cache_affinities_response(
         .collect::<Vec<_>>();
 
     let provider_by_id = state
-        .data
-        .list_provider_catalog_providers_by_ids(&provider_ids)
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?
+        .read_provider_catalog_providers_by_ids(&provider_ids)
+        .await?
         .into_iter()
         .map(|item| (item.id.clone(), item))
         .collect::<std::collections::BTreeMap<_, _>>();
     let endpoint_by_id = state
-        .data
-        .list_provider_catalog_endpoints_by_ids(&endpoint_ids)
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?
+        .read_provider_catalog_endpoints_by_ids(&endpoint_ids)
+        .await?
         .into_iter()
         .map(|item| (item.id.clone(), item))
         .collect::<std::collections::BTreeMap<_, _>>();
     let key_by_id = state
-        .data
         .list_provider_catalog_keys_by_ids(&key_ids)
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?
+        .await?
         .into_iter()
         .map(|item| (item.id.clone(), item))
         .collect::<std::collections::BTreeMap<_, _>>();
@@ -242,8 +236,8 @@ pub(super) async fn build_admin_monitoring_cache_affinities_response(
 }
 
 pub(super) async fn build_admin_monitoring_cache_affinity_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
     let Some(user_identifier) =
         admin_monitoring_cache_affinity_user_identifier_from_path(&request_context.request_path)

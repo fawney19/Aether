@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Rust ingress gateway for Aether phase 3a transparent proxy"
 
 [dependencies]
+aether-admin.workspace = true
 aether-ai-pipeline.workspace = true
 aether-billing.workspace = true
 aether-cache.workspace = true

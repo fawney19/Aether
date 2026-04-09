@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "apps/aether-proxy",
+    "crates/aether-admin",
     "crates/aether-ai-pipeline",
     "crates/aether-data-contracts",
     "crates/aether-cache",
@@ -27,6 +28,7 @@ license = "LicenseRef-Aether-NonCommercial"
 repository = "https://github.com/fawney19/Aether.git"
 
 [workspace.dependencies]
+aether-admin = { path = "crates/aether-admin" }
 aether-ai-pipeline = { path = "crates/aether-ai-pipeline" }
 aether-data-contracts = { path = "crates/aether-data-contracts" }
 aether-cache = { path = "crates/aether-cache" }
@@ -72,7 +74,7 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal
 tokio-util = { version = "0.7", features = ["codec", "io-util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-uuid = { version = "1", features = ["serde", "v4"] }
+uuid = { version = "1", features = ["serde", "v4", "v5"] }
 webpki-roots = "0.26"
 url = "2"
 

@@ -7,9 +7,9 @@ use super::{
     normalize_admin_payment_positive_number, parse_admin_payments_limit,
     parse_admin_payments_offset, AdminPaymentOrderCreditRequest,
 };
-use crate::control::GatewayPublicRequestContext;
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{attach_admin_audit_response, query_param_value};
-use crate::{AppState, GatewayError};
+use crate::GatewayError;
 use axum::{
     body::Body,
     response::{IntoResponse, Response},
@@ -18,8 +18,8 @@ use axum::{
 use serde_json::json;
 
 pub(super) async fn maybe_build_local_admin_payment_orders_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&axum::body::Bytes>,
     route_kind: Option<&str>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
@@ -44,10 +44,10 @@ pub(super) async fn maybe_build_local_admin_payment_orders_response(
 }
 
 async fn build_admin_payment_list_orders_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    let query = request_context.request_query_string.as_deref();
+    let query = request_context.query_string();
     let limit = match parse_admin_payments_limit(query) {
         Ok(value) => value,
         Err(detail) => return Ok(build_admin_payments_bad_request_response(detail)),
@@ -83,11 +83,10 @@ async fn build_admin_payment_list_orders_response(
 }
 
 async fn build_admin_payment_get_order_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    let Some(order_id) = admin_payment_order_id_from_detail_path(&request_context.request_path)
-    else {
+    let Some(order_id) = admin_payment_order_id_from_detail_path(request_context.path()) else {
         return Ok(build_admin_payment_order_not_found_response());
     };
     match state.read_admin_payment_order(&order_id).await? {
@@ -110,11 +109,10 @@ async fn build_admin_payment_get_order_response(
 }
 
 async fn build_admin_payment_expire_order_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    let Some(order_id) =
-        admin_payment_order_id_from_suffix_path(&request_context.request_path, "/expire")
+    let Some(order_id) = admin_payment_order_id_from_suffix_path(request_context.path(), "/expire")
     else {
         return Ok(build_admin_payment_order_not_found_response());
     };
@@ -147,12 +145,11 @@ async fn build_admin_payment_expire_order_response(
 }
 
 async fn build_admin_payment_credit_order_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&axum::body::Bytes>,
 ) -> Result<Response<Body>, GatewayError> {
-    let Some(order_id) =
-        admin_payment_order_id_from_suffix_path(&request_context.request_path, "/credit")
+    let Some(order_id) = admin_payment_order_id_from_suffix_path(request_context.path(), "/credit")
     else {
         return Ok(build_admin_payment_order_not_found_response());
     };
@@ -241,11 +238,10 @@ async fn build_admin_payment_credit_order_response(
 }
 
 async fn build_admin_payment_fail_order_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    let Some(order_id) =
-        admin_payment_order_id_from_suffix_path(&request_context.request_path, "/fail")
+    let Some(order_id) = admin_payment_order_id_from_suffix_path(request_context.path(), "/fail")
     else {
         return Ok(build_admin_payment_order_not_found_response());
     };

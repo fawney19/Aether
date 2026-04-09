@@ -2,9 +2,9 @@ use crate::handlers::admin::provider::shared::support::{
     AdminProviderPoolConfig, AdminProviderPoolRuntimeState,
 };
 use crate::handlers::admin::shared::{
-    parse_catalog_auth_config_json, provider_key_status_snapshot_payload, unix_secs_to_rfc3339,
+    provider_key_status_snapshot_payload, unix_secs_to_rfc3339,
 };
-use crate::AppState;
+use crate::handlers::admin::request::AdminAppState;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use serde_json::json;
 
@@ -595,9 +595,8 @@ fn admin_pool_scheduling_payload(
         Vec::new(),
     )
 }
-
 pub(super) fn build_admin_pool_key_payload(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     provider_type: &str,
     key: &StoredProviderCatalogKey,
     runtime: &AdminProviderPoolRuntimeState,
@@ -617,7 +616,7 @@ pub(super) fn build_admin_pool_key_payload(
             health_score,
             circuit_breaker_open,
         );
-    let auth_config = parse_catalog_auth_config_json(state, key);
+    let auth_config = state.parse_catalog_auth_config_json(key);
     let oauth_expires_at = admin_pool_derive_oauth_expires_at(key, auth_config.as_ref());
     let oauth_plan_type =
         admin_pool_derive_oauth_plan_type(key, provider_type, auth_config.as_ref());

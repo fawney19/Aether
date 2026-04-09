@@ -1,6 +1,5 @@
-use crate::control::GatewayControlDecision;
-use crate::control::GatewayPublicRequestContext;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use axum::body::{Body, Bytes};
 use axum::http::Response;
 
@@ -14,68 +13,53 @@ mod import;
 mod list;
 mod payloads;
 mod update;
-mod write;
 
 pub(crate) async fn maybe_build_local_admin_provider_models_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
+    if request_context.route_family() != Some("provider_models_manage") {
         return Ok(None);
-    };
+    }
+
+    if let Some(response) = list::maybe_handle(state, request_context, request_body).await? {
+        return Ok(Some(response));
+    }
+
+    if let Some(response) = detail::maybe_handle(state, request_context, request_body).await? {
+        return Ok(Some(response));
+    }
+
+    if let Some(response) = create::maybe_handle(state, request_context, request_body).await? {
+        return Ok(Some(response));
+    }
+
+    if let Some(response) = update::maybe_handle(state, request_context, request_body).await? {
+        return Ok(Some(response));
+    }
+
+    if let Some(response) = delete::maybe_handle(state, request_context, request_body).await? {
+        return Ok(Some(response));
+    }
+
+    if let Some(response) = batch::maybe_handle(state, request_context, request_body).await? {
+        return Ok(Some(response));
+    }
 
     if let Some(response) =
-        list::maybe_handle(state, request_context, request_body, decision).await?
+        available_source::maybe_handle(state, request_context, request_body).await?
     {
         return Ok(Some(response));
     }
 
     if let Some(response) =
-        detail::maybe_handle(state, request_context, request_body, decision).await?
+        assign_global::maybe_handle(state, request_context, request_body).await?
     {
         return Ok(Some(response));
     }
 
-    if let Some(response) =
-        create::maybe_handle(state, request_context, request_body, decision).await?
-    {
-        return Ok(Some(response));
-    }
-
-    if let Some(response) =
-        update::maybe_handle(state, request_context, request_body, decision).await?
-    {
-        return Ok(Some(response));
-    }
-
-    if let Some(response) =
-        delete::maybe_handle(state, request_context, request_body, decision).await?
-    {
-        return Ok(Some(response));
-    }
-
-    if let Some(response) =
-        batch::maybe_handle(state, request_context, request_body, decision).await?
-    {
-        return Ok(Some(response));
-    }
-
-    if let Some(response) =
-        available_source::maybe_handle(state, request_context, request_body, decision).await?
-    {
-        return Ok(Some(response));
-    }
-
-    if let Some(response) =
-        assign_global::maybe_handle(state, request_context, request_body, decision).await?
-    {
-        return Ok(Some(response));
-    }
-
-    if let Some(response) =
-        import::maybe_handle(state, request_context, request_body, decision).await?
-    {
+    if let Some(response) = import::maybe_handle(state, request_context, request_body).await? {
         return Ok(Some(response));
     }
 

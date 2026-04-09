@@ -24,7 +24,9 @@
     clippy::useless_concat
 )]
 
-pub(crate) mod ai_pipeline;
+mod admin_api;
+mod ai_pipeline;
+mod ai_pipeline_api;
 mod api;
 mod async_task;
 mod audit;
@@ -57,7 +59,7 @@ mod usage;
 mod video_tasks;
 mod wallet_runtime;
 
-pub(crate) use self::ai_pipeline::contracts::{
+pub(crate) use self::ai_pipeline_api::{
     GatewayControlPlanRequest, GatewayControlPlanResponse, GatewayControlSyncDecisionResponse,
     EXECUTION_RUNTIME_STREAM_DECISION_ACTION, EXECUTION_RUNTIME_SYNC_DECISION_ACTION,
     GEMINI_FILES_DOWNLOAD_PLAN_KIND, OPENAI_VIDEO_CONTENT_PLAN_KIND,

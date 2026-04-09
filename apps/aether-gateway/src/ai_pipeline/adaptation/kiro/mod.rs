@@ -1,11 +1,8 @@
 use std::collections::BTreeMap;
 
-const CONTEXT_WINDOW_TOKENS: f64 = 200_000.0;
-const MAX_THINKING_BUFFER: usize = 1024 * 1024;
 const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 const MAX_BUFFER_SIZE: usize = MAX_MESSAGE_SIZE;
 const MAX_ERRORS: usize = 5;
-const QUOTE_CHARS: &str = "`\"'\\#!@$%^&*()-_=+[]{};:<>,.?/";
 
 #[derive(Default)]
 pub(crate) struct KiroToClaudeCliStreamState {
@@ -68,8 +65,6 @@ enum FrameParseError {
 mod decoder;
 #[path = "stream/state.rs"]
 mod state;
-#[path = "stream/util.rs"]
-mod util;
 
 #[cfg(test)]
 #[path = "stream/tests.rs"]

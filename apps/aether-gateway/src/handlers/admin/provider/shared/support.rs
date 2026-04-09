@@ -1,4 +1,5 @@
-use crate::{AppState, LocalProviderDeleteTaskState};
+use crate::handlers::admin::request::AdminAppState;
+use crate::LocalProviderDeleteTaskState;
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -43,10 +44,10 @@ pub(crate) fn build_admin_provider_delete_task_payload(
 }
 
 pub(crate) fn put_admin_provider_delete_task(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     task: &LocalProviderDeleteTaskState,
 ) {
-    state.put_provider_delete_task(task.clone());
+    state.as_ref().put_provider_delete_task(task.clone());
 }
 
 pub(crate) fn normalize_provider_billing_type(value: &str) -> Result<String, String> {

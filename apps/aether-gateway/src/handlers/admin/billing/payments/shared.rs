@@ -1,4 +1,4 @@
-use crate::control::GatewayPublicRequestContext;
+use crate::handlers::admin::request::AdminRequestContext;
 use crate::handlers::admin::shared::{query_param_value, unix_secs_to_rfc3339};
 use crate::{GatewayAdminPaymentCallbackView, GatewayError};
 use axum::{
@@ -175,11 +175,10 @@ pub(super) fn normalize_admin_payment_positive_number(
 }
 
 pub(super) fn admin_payment_operator_id(
-    request_context: &GatewayPublicRequestContext,
+    request_context: &AdminRequestContext<'_>,
 ) -> Option<String> {
     request_context
-        .control_decision
-        .as_ref()
+        .decision()
         .and_then(|decision| decision.admin_principal.as_ref())
         .map(|principal| principal.user_id.clone())
 }

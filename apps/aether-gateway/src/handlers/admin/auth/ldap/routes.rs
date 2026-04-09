@@ -3,9 +3,9 @@ use super::builders::{
     AdminLdapConfigTestRequest, AdminLdapConfigUpdateRequest,
 };
 use super::shared::*;
-use crate::control::GatewayPublicRequestContext;
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
-use crate::{AppState, GatewayError};
+use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -15,11 +15,11 @@ use axum::{
 use serde_json::json;
 
 pub(super) async fn maybe_build_local_admin_ldap_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
+    let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
     if decision.route_family.as_deref() != Some("ldap_manage") {
@@ -28,8 +28,8 @@ pub(super) async fn maybe_build_local_admin_ldap_response(
 
     match decision.route_kind.as_deref() {
         Some("get_config")
-            if request_context.request_method == http::Method::GET
-                && is_admin_ldap_config_root(&request_context.request_path) =>
+            if request_context.method() == http::Method::GET
+                && is_admin_ldap_config_root(request_context.path()) =>
         {
             return Ok(Some(attach_admin_audit_response(
                 Json(build_admin_ldap_config_payload(
@@ -43,8 +43,8 @@ pub(super) async fn maybe_build_local_admin_ldap_response(
             )));
         }
         Some("set_config")
-            if request_context.request_method == http::Method::PUT
-                && is_admin_ldap_config_root(&request_context.request_path) =>
+            if request_context.method() == http::Method::PUT
+                && is_admin_ldap_config_root(request_context.path()) =>
         {
             if !state.has_auth_module_writer() {
                 return Ok(Some(admin_ldap_unavailable_response()));
@@ -70,8 +70,8 @@ pub(super) async fn maybe_build_local_admin_ldap_response(
             ));
         }
         Some("test_connection")
-            if request_context.request_method == http::Method::POST
-                && is_admin_ldap_test_root(&request_context.request_path) =>
+            if request_context.method() == http::Method::POST
+                && is_admin_ldap_test_root(request_context.path()) =>
         {
             let payload = match request_body {
                 Some(body) if !body.is_empty() => match serde_json::from_slice::<

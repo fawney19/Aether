@@ -1,8 +1,9 @@
 use crate::handlers::admin::provider::shared::support::{
     normalize_provider_billing_type, parse_optional_rfc3339_unix_secs,
 };
+use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::unix_secs_to_rfc3339;
-use crate::{AppState, GatewayError};
+use crate::GatewayError;
 use axum::{
     body::Body,
     http,
@@ -14,7 +15,7 @@ use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Deserialize)]
-pub(super) struct AdminProviderStrategyBillingRequest {
+pub(crate) struct AdminProviderStrategyBillingRequest {
     pub(super) billing_type: String,
     #[serde(default)]
     pub(super) monthly_quota_usd: Option<f64>,
@@ -38,7 +39,7 @@ fn default_provider_strategy_provider_priority() -> i32 {
     100
 }
 
-pub(super) fn build_provider_strategy_list_response() -> Response<Body> {
+pub(crate) fn build_provider_strategy_list_response() -> Response<Body> {
     Json(json!({
         "strategies": [{
             "name": "sticky_priority",
@@ -52,12 +53,13 @@ pub(super) fn build_provider_strategy_list_response() -> Response<Body> {
     .into_response()
 }
 
-pub(super) async fn build_provider_strategy_update_billing_response(
-    state: &AppState,
+pub(crate) async fn build_provider_strategy_update_billing_response(
+    state: &AdminAppState<'_>,
     provider_id: String,
     payload: AdminProviderStrategyBillingRequest,
 ) -> Result<Response<Body>, GatewayError> {
     let Some(existing) = state
+        .app()
         .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id))
         .await?
         .into_iter()
@@ -131,6 +133,7 @@ pub(super) async fn build_provider_strategy_update_billing_response(
     let synced_monthly_used_usd = match quota_last_reset_at_unix_secs {
         Some(quota_last_reset_at_unix_secs) if state.has_usage_data_reader() => Some(
             state
+                .app()
                 .summarize_provider_usage_since(&provider_id, quota_last_reset_at_unix_secs)
                 .await?
                 .total_cost_usd,
@@ -150,7 +153,11 @@ pub(super) async fn build_provider_strategy_update_billing_response(
             quota_expires_at_unix_secs,
         )
         .with_routing_fields(payload.provider_priority);
-    let Some(updated) = state.update_provider_catalog_provider(&updated).await? else {
+    let Some(updated) = state
+        .app()
+        .update_provider_catalog_provider(&updated)
+        .await?
+    else {
         return Ok(admin_provider_strategy_provider_not_found_response());
     };
 
@@ -166,8 +173,8 @@ pub(super) async fn build_provider_strategy_update_billing_response(
     .into_response())
 }
 
-pub(super) async fn build_provider_strategy_stats_response(
-    state: &AppState,
+pub(crate) async fn build_provider_strategy_stats_response(
+    state: &AdminAppState<'_>,
     provider_id: String,
     hours: u64,
 ) -> Result<Response<Body>, GatewayError> {
@@ -178,6 +185,7 @@ pub(super) async fn build_provider_strategy_stats_response(
     let since_unix_secs = now_unix_secs.saturating_sub(hours.saturating_mul(3600));
 
     let Some(provider) = state
+        .app()
         .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id))
         .await?
         .into_iter()
@@ -187,6 +195,7 @@ pub(super) async fn build_provider_strategy_stats_response(
     };
 
     let summary = state
+        .app()
         .summarize_provider_usage_since(&provider_id, since_unix_secs)
         .await?;
     let monthly_used_usd = provider.monthly_used_usd.unwrap_or(0.0);
@@ -222,11 +231,12 @@ pub(super) async fn build_provider_strategy_stats_response(
     .into_response())
 }
 
-pub(super) async fn build_provider_strategy_reset_quota_response(
-    state: &AppState,
+pub(crate) async fn build_provider_strategy_reset_quota_response(
+    state: &AdminAppState<'_>,
     provider_id: String,
 ) -> Result<Response<Body>, GatewayError> {
     let Some(provider) = state
+        .app()
         .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id))
         .await?
         .into_iter()
@@ -246,7 +256,11 @@ pub(super) async fn build_provider_strategy_reset_quota_response(
     let previous_used = provider.monthly_used_usd.unwrap_or(0.0);
     let mut updated = provider.clone();
     updated.monthly_used_usd = Some(0.0);
-    let Some(updated) = state.update_provider_catalog_provider(&updated).await? else {
+    let Some(updated) = state
+        .app()
+        .update_provider_catalog_provider(&updated)
+        .await?
+    else {
         return Ok(admin_provider_strategy_provider_not_found_response());
     };
 

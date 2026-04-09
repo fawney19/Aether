@@ -1,8 +1,6 @@
 use super::resolve_admin_global_model_by_id_or_err;
-use crate::handlers::admin::shared::{
-    json_string_list, masked_catalog_api_key, provider_catalog_key_supports_format,
-};
-use crate::AppState;
+use crate::handlers::admin::request::AdminAppState;
+use crate::handlers::admin::shared::{json_string_list, provider_catalog_key_supports_format};
 use aether_data_contracts::repository::global_models::{
     AdminProviderModelListQuery, UpsertAdminProviderModelRecord,
 };
@@ -15,7 +13,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 pub(crate) async fn build_admin_global_model_routing_payload(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     global_model_id: &str,
 ) -> Option<serde_json::Value> {
     if !state.has_global_model_data_reader() || !state.has_provider_catalog_data_reader() {
@@ -155,7 +153,7 @@ pub(crate) async fn build_admin_global_model_routing_payload(
                     let payload = json!({
                         "id": key.id,
                         "name": key.name,
-                        "masked_key": masked_catalog_api_key(state, key),
+                        "masked_key": state.masked_catalog_api_key(key),
                         "is_active": key.is_active,
                         "is_adaptive": is_adaptive,
                         "effective_rpm": effective_rpm,
@@ -168,7 +166,7 @@ pub(crate) async fn build_admin_global_model_routing_payload(
                     all_keys_whitelist.push(json!({
                         "key_id": &key.id,
                         "key_name": &key.name,
-                        "masked_key": masked_catalog_api_key(state, key),
+                        "masked_key": state.masked_catalog_api_key(key),
                         "provider_id": &provider.id,
                         "provider_name": &provider.name,
                         "allowed_models": json_string_list(key.allowed_models.as_ref()),
@@ -249,7 +247,7 @@ pub(crate) async fn build_admin_global_model_routing_payload(
 }
 
 pub(crate) async fn build_admin_assign_global_model_to_providers_payload(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     global_model_id: &str,
     provider_ids: Vec<String>,
     create_models: bool,

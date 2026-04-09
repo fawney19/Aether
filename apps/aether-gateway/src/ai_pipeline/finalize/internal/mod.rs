@@ -2,7 +2,7 @@ use axum::body::Body;
 use axum::http::Response;
 use serde_json::Value;
 
-use crate::ai_pipeline::control_facade::GatewayControlDecision;
+use crate::ai_pipeline::GatewayControlDecision;
 use crate::{usage::GatewaySyncReportRequest, GatewayError};
 
 #[path = "stream_rewrite.rs"]

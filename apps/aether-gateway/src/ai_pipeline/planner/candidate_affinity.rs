@@ -1,7 +1,7 @@
 use tracing::warn;
 
-use crate::ai_pipeline::planner::transport_facade::read_provider_transport_snapshot;
-use crate::ai_pipeline::provider_transport_facade::resolve_transport_proxy_snapshot;
+use crate::ai_pipeline::transport::resolve_transport_proxy_snapshot;
+use crate::ai_pipeline::PlannerAppState;
 use crate::AppState;
 use aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate;
 
@@ -13,7 +13,7 @@ enum TunnelOwnerAffinityBucket {
 }
 
 pub(crate) async fn prefer_local_tunnel_owner_candidates(
-    state: &AppState,
+    state: PlannerAppState<'_>,
     candidates: Vec<SchedulerMinimalCandidateSelectionCandidate>,
 ) -> Vec<SchedulerMinimalCandidateSelectionCandidate> {
     let mut ranked = Vec::with_capacity(candidates.len());
@@ -29,16 +29,16 @@ pub(crate) async fn prefer_local_tunnel_owner_candidates(
 }
 
 async fn resolve_candidate_tunnel_owner_affinity(
-    state: &AppState,
+    state: PlannerAppState<'_>,
     candidate: &SchedulerMinimalCandidateSelectionCandidate,
 ) -> TunnelOwnerAffinityBucket {
-    let transport = match read_provider_transport_snapshot(
-        state,
-        &candidate.provider_id,
-        &candidate.endpoint_id,
-        &candidate.key_id,
-    )
-    .await
+    let transport = match state
+        .read_provider_transport_snapshot(
+            &candidate.provider_id,
+            &candidate.endpoint_id,
+            &candidate.key_id,
+        )
+        .await
     {
         Ok(Some(transport)) => transport,
         Ok(None) => return TunnelOwnerAffinityBucket::Neutral,
@@ -71,16 +71,17 @@ async fn resolve_candidate_tunnel_owner_affinity(
         return TunnelOwnerAffinityBucket::Neutral;
     };
 
-    if state.tunnel.has_local_proxy(node_id) {
+    if state.app().tunnel.has_local_proxy(node_id) {
         return TunnelOwnerAffinityBucket::LocalTunnel;
     }
 
     match state
+        .app()
         .tunnel
-        .lookup_attachment_owner(state.data.as_ref(), node_id)
+        .lookup_attachment_owner(state.app().data.as_ref(), node_id)
         .await
     {
-        Ok(Some(owner)) if owner.gateway_instance_id == state.tunnel.local_instance_id() => {
+        Ok(Some(owner)) if owner.gateway_instance_id == state.app().tunnel.local_instance_id() => {
             TunnelOwnerAffinityBucket::LocalTunnel
         }
         Ok(Some(_)) => TunnelOwnerAffinityBucket::RemoteTunnel,
@@ -109,7 +110,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        prefer_local_tunnel_owner_candidates, AppState, SchedulerMinimalCandidateSelectionCandidate,
+        prefer_local_tunnel_owner_candidates, AppState, PlannerAppState,
+        SchedulerMinimalCandidateSelectionCandidate,
     };
     use crate::data::GatewayDataState;
     use crate::tunnel::TunnelAttachmentRecord;
@@ -258,7 +260,7 @@ mod tests {
             .with_tunnel_identity_for_tests("gateway-a", Some("http://gateway-a:8080"));
 
         let reordered = prefer_local_tunnel_owner_candidates(
-            &state,
+            PlannerAppState::new(&state),
             vec![
                 sample_candidate("endpoint-remote", "key-remote"),
                 sample_candidate("endpoint-local", "key-local"),
@@ -287,7 +289,7 @@ mod tests {
             .with_tunnel_identity_for_tests("gateway-a", Some("http://gateway-a:8080"));
 
         let reordered = prefer_local_tunnel_owner_candidates(
-            &state,
+            PlannerAppState::new(&state),
             vec![
                 sample_candidate("endpoint-a", "key-a"),
                 sample_candidate("endpoint-b", "key-b"),

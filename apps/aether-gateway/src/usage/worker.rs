@@ -9,7 +9,7 @@ mod tests {
 
     use super::write_event_record;
     use crate::data::GatewayDataState;
-    use crate::usage::event::{UsageEvent, UsageEventData, UsageEventType};
+    use crate::usage::{UsageEvent, UsageEventData, UsageEventType};
 
     #[tokio::test]
     async fn worker_writes_usage_record_from_terminal_event() {

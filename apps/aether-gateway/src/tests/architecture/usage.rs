@@ -2,8 +2,23 @@ use super::*;
 
 #[test]
 fn usage_runtime_paths_depend_on_shared_crates_not_app_runtime_shims() {
+    assert!(
+        !workspace_file_exists("apps/aether-gateway/src/usage/runtime.rs"),
+        "usage/runtime.rs should stay removed after collapsing the runtime shim into usage/mod.rs"
+    );
     for path in [
-        "apps/aether-gateway/src/usage/runtime.rs",
+        "apps/aether-gateway/src/usage/config.rs",
+        "apps/aether-gateway/src/usage/queue.rs",
+        "apps/aether-gateway/src/usage/event.rs",
+    ] {
+        assert!(
+            !workspace_file_exists(path),
+            "{path} should stay removed after collapsing usage shim modules into usage/mod.rs"
+        );
+    }
+
+    for path in [
+        "apps/aether-gateway/src/usage/mod.rs",
         "apps/aether-gateway/src/usage/worker.rs",
         "apps/aether-gateway/src/async_task/runtime.rs",
     ] {
@@ -35,19 +50,47 @@ fn usage_runtime_paths_depend_on_shared_crates_not_app_runtime_shims() {
         );
     }
 
-    let usage_runtime = read_workspace_file("apps/aether-gateway/src/usage/runtime.rs");
+    let usage_runtime = read_workspace_file("apps/aether-gateway/src/usage/mod.rs");
     assert!(
         !usage_runtime.contains("GatewayDataState"),
-        "usage/runtime.rs should not own GatewayDataState integration impls anymore"
+        "usage/mod.rs should not own GatewayDataState integration impls anymore"
     );
     assert!(
         !usage_runtime.contains("UsageBillingEventEnricher"),
-        "usage/runtime.rs should not own UsageBillingEventEnricher impl anymore"
+        "usage/mod.rs should not own UsageBillingEventEnricher impl anymore"
     );
     assert!(
         !usage_runtime.contains("UsageRuntimeAccess"),
-        "usage/runtime.rs should not own UsageRuntimeAccess impl anymore"
+        "usage/mod.rs should not own UsageRuntimeAccess impl anymore"
     );
+    assert!(
+        usage_runtime.contains("pub(crate) use aether_usage_runtime::UsageRuntime;"),
+        "usage/mod.rs should expose UsageRuntime directly from aether_usage_runtime"
+    );
+    for pattern in [
+        "UsageRuntimeConfig",
+        "UsageQueue",
+        "UsageEvent",
+        "UsageEventData",
+        "UsageEventType",
+        "USAGE_EVENT_VERSION",
+        "now_ms",
+    ] {
+        assert!(
+            usage_runtime.contains(pattern),
+            "usage/mod.rs should expose usage runtime seam {pattern} directly"
+        );
+    }
+    assert!(
+        !usage_runtime.contains("mod runtime;"),
+        "usage/mod.rs should not keep a local runtime shim module"
+    );
+    for forbidden in ["mod config;", "mod queue;", "mod event;"] {
+        assert!(
+            !usage_runtime.contains(forbidden),
+            "usage/mod.rs should not keep deleted shim module {forbidden}"
+        );
+    }
 
     let usage_worker = read_workspace_file("apps/aether-gateway/src/usage/worker.rs");
     let runtime_usage_worker = usage_worker

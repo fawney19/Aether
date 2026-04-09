@@ -1,9 +1,10 @@
-use crate::async_task;
-use crate::control::GatewayPublicRequestContext;
+use crate::handlers::admin::request::{
+    AdminAppState, AdminCancelVideoTaskError, AdminRequestContext,
+};
 use crate::handlers::admin::shared::{
     attach_admin_audit_response, build_proxy_error_response, query_param_value,
 };
-use crate::{AppState, GatewayError};
+use crate::GatewayError;
 use aether_data_contracts::repository::video_tasks::{VideoTaskQueryFilter, VideoTaskStatus};
 use axum::{
     body::Body,
@@ -20,54 +21,46 @@ use super::builders::{
 };
 
 pub(super) async fn maybe_build_local_admin_video_tasks_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
-        return Ok(None);
-    };
-    if decision.route_family.as_deref() != Some("video_tasks_manage") {
+    if request_context.route_family() != Some("video_tasks_manage") {
         return Ok(None);
     }
 
-    if request_context.request_method == http::Method::GET
+    if request_context.method() == http::Method::GET
         && matches!(
-            request_context.request_path.as_str(),
+            request_context.path(),
             "/api/admin/video-tasks" | "/api/admin/video-tasks/"
         )
     {
-        let status =
-            match query_param_value(request_context.request_query_string.as_deref(), "status") {
-                Some(value) => match VideoTaskStatus::from_database(&value) {
-                    Ok(status) => Some(status),
-                    Err(err) => {
-                        return Ok(Some(build_proxy_error_response(
-                            http::StatusCode::BAD_REQUEST,
-                            "invalid_request",
-                            err.to_string(),
-                            None,
-                        )));
-                    }
-                },
-                None => None,
-            };
+        let status = match query_param_value(request_context.query_string(), "status") {
+            Some(value) => match VideoTaskStatus::from_database(&value) {
+                Ok(status) => Some(status),
+                Err(err) => {
+                    return Ok(Some(build_proxy_error_response(
+                        http::StatusCode::BAD_REQUEST,
+                        "invalid_request",
+                        err.to_string(),
+                        None,
+                    )));
+                }
+            },
+            None => None,
+        };
         let filter = VideoTaskQueryFilter {
-            user_id: query_param_value(request_context.request_query_string.as_deref(), "user_id"),
+            user_id: query_param_value(request_context.query_string(), "user_id"),
             status,
-            model_substring: query_param_value(
-                request_context.request_query_string.as_deref(),
-                "model",
-            ),
+            model_substring: query_param_value(request_context.query_string(), "model"),
             client_api_format: None,
         };
-        let page = query_param_value(request_context.request_query_string.as_deref(), "page")
+        let page = query_param_value(request_context.query_string(), "page")
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(1);
-        let page_size =
-            query_param_value(request_context.request_query_string.as_deref(), "page_size")
-                .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(20);
-        let response = async_task::read_video_task_page(state, &filter, page, page_size).await?;
+        let page_size = query_param_value(request_context.query_string(), "page_size")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(20);
+        let response = state.read_video_task_page(&filter, page, page_size).await?;
         let provider_names = build_admin_video_task_provider_names(state, &response.items).await?;
         return Ok(Some(
             Json(json!({
@@ -85,9 +78,9 @@ pub(super) async fn maybe_build_local_admin_video_tasks_response(
         ));
     }
 
-    if request_context.request_method == http::Method::GET
+    if request_context.method() == http::Method::GET
         && matches!(
-            request_context.request_path.as_str(),
+            request_context.path(),
             "/api/admin/video-tasks/stats" | "/api/admin/video-tasks/stats/"
         )
     {
@@ -97,9 +90,9 @@ pub(super) async fn maybe_build_local_admin_video_tasks_response(
             model_substring: None,
             client_api_format: None,
         };
-        let stats =
-            async_task::read_video_task_stats(state, &filter, current_admin_video_task_unix_secs())
-                .await?;
+        let stats = state
+            .read_video_task_stats(&filter, current_admin_video_task_unix_secs())
+            .await?;
         let active_users = state.count_distinct_video_task_users(&filter).await?;
         return Ok(Some(
             Json(json!({
@@ -114,15 +107,14 @@ pub(super) async fn maybe_build_local_admin_video_tasks_response(
         ));
     }
 
-    if request_context.request_method == http::Method::POST {
-        let Some(task_id) =
-            admin_video_task_nested_id_from_path(&request_context.request_path, "/cancel")
+    if request_context.method() == http::Method::POST {
+        let Some(task_id) = admin_video_task_nested_id_from_path(request_context.path(), "/cancel")
         else {
             return Ok(None);
         };
-        let stored = match async_task::cancel_video_task_record(state, task_id).await {
+        let stored = match state.cancel_video_task_record(task_id).await {
             Ok(stored) => stored,
-            Err(async_task::CancelVideoTaskError::NotFound) => {
+            Err(AdminCancelVideoTaskError::NotFound) => {
                 return Ok(Some(
                     (
                         http::StatusCode::NOT_FOUND,
@@ -131,7 +123,7 @@ pub(super) async fn maybe_build_local_admin_video_tasks_response(
                         .into_response(),
                 ));
             }
-            Err(async_task::CancelVideoTaskError::InvalidStatus(status)) => {
+            Err(AdminCancelVideoTaskError::InvalidStatus(status)) => {
                 return Ok(Some(
                     (
                         http::StatusCode::BAD_REQUEST,
@@ -145,10 +137,10 @@ pub(super) async fn maybe_build_local_admin_video_tasks_response(
                         .into_response(),
                 ));
             }
-            Err(async_task::CancelVideoTaskError::Response(response)) => {
+            Err(AdminCancelVideoTaskError::Response(response)) => {
                 return Ok(Some(response));
             }
-            Err(async_task::CancelVideoTaskError::Gateway(err)) => {
+            Err(AdminCancelVideoTaskError::Gateway(err)) => {
                 return Err(err);
             }
         };
@@ -166,15 +158,13 @@ pub(super) async fn maybe_build_local_admin_video_tasks_response(
         )));
     }
 
-    if request_context.request_method == http::Method::GET {
-        let Some(task_id) =
-            admin_video_task_nested_id_from_path(&request_context.request_path, "/video")
+    if request_context.method() == http::Method::GET {
+        let Some(task_id) = admin_video_task_nested_id_from_path(request_context.path(), "/video")
         else {
-            let Some(task_id) = admin_video_task_detail_id_from_path(&request_context.request_path)
-            else {
+            let Some(task_id) = admin_video_task_detail_id_from_path(request_context.path()) else {
                 return Ok(None);
             };
-            let Some(task) = async_task::read_video_task_detail(state, task_id).await? else {
+            let Some(task) = state.read_video_task_detail(task_id).await? else {
                 return Ok(Some(
                     (
                         http::StatusCode::NOT_FOUND,
@@ -306,7 +296,7 @@ pub(super) async fn maybe_build_local_admin_video_tasks_response(
                 &task.id,
             )));
         };
-        let Some(task) = async_task::read_video_task_detail(state, task_id).await? else {
+        let Some(task) = state.read_video_task_detail(task_id).await? else {
             return Ok(Some(
                 (
                     http::StatusCode::NOT_FOUND,
@@ -330,7 +320,7 @@ pub(super) async fn maybe_build_local_admin_video_tasks_response(
                     .into_response(),
             ));
         }
-        let Some(source) = async_task::read_video_task_video_source(state, task_id).await? else {
+        let Some(source) = state.read_video_task_video_source(task_id).await? else {
             return Ok(Some(
                 (
                     http::StatusCode::NOT_FOUND,
@@ -340,7 +330,9 @@ pub(super) async fn maybe_build_local_admin_video_tasks_response(
             ));
         };
         return Ok(Some(attach_admin_audit_response(
-            async_task::build_video_task_video_response(state, task_id, source).await?,
+            state
+                .build_video_task_video_response(task_id, source)
+                .await?,
             "admin_video_task_video_viewed",
             "view_video_task_video",
             "video_task_video",

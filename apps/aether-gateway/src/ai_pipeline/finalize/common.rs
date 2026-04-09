@@ -4,12 +4,18 @@ use axum::body::Body;
 use axum::http::Response;
 use serde_json::Value;
 
-pub(crate) use crate::ai_pipeline::adaptation::private_envelope::{
+use crate::ai_pipeline::{
+    build_generated_tool_call_id,
+    build_local_success_background_report as build_local_success_background_report_impl,
+    build_local_success_conversion_background_report as build_local_success_conversion_background_report_impl,
+    canonicalize_tool_arguments,
+    prepare_local_success_response_parts as prepare_local_success_response_parts_impl,
+    GatewayControlDecision,
+};
+pub(crate) use crate::ai_pipeline_api::{
     normalize_provider_private_response_value as unwrap_local_finalize_response_value,
     provider_private_response_allows_sync_finalize as local_finalize_allows_envelope,
 };
-use crate::ai_pipeline::contracts::core_success_background_report_kind;
-use crate::ai_pipeline::control_facade::GatewayControlDecision;
 use crate::api::response::build_client_response_from_parts;
 use crate::{usage::GatewaySyncReportRequest, GatewayError};
 
@@ -26,7 +32,7 @@ pub(crate) fn build_local_success_outcome(
 ) -> Result<LocalCoreSyncFinalizeOutcome, GatewayError> {
     let headers = payload.headers.clone();
     let background_report =
-        map_local_finalize_to_success_report(payload, body_json.clone(), headers.clone());
+        build_local_success_background_report_impl(payload, body_json.clone(), headers.clone());
     build_local_success_outcome_with_report(
         trace_id,
         decision,
@@ -42,15 +48,11 @@ pub(crate) fn build_local_success_outcome_with_report(
     decision: &GatewayControlDecision,
     status_code: u16,
     body_json: Value,
-    mut headers: BTreeMap<String, String>,
+    headers: BTreeMap<String, String>,
     background_report: Option<GatewaySyncReportRequest>,
 ) -> Result<LocalCoreSyncFinalizeOutcome, GatewayError> {
-    headers.remove("content-encoding");
-    headers.remove("content-length");
-    headers.insert("content-type".to_string(), "application/json".to_string());
-    let body_bytes =
-        serde_json::to_vec(&body_json).map_err(|err| GatewayError::Internal(err.to_string()))?;
-    headers.insert("content-length".to_string(), body_bytes.len().to_string());
+    let (body_bytes, headers) = prepare_local_success_response_parts_impl(&headers, &body_json)
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
     let response = build_client_response_from_parts(
         status_code,
         &headers,
@@ -71,30 +73,11 @@ pub(crate) fn build_local_success_outcome_with_conversion_report(
     client_body_json: Value,
     provider_body_json: Value,
 ) -> Result<LocalCoreSyncFinalizeOutcome, GatewayError> {
-    let Some(report_kind) =
-        map_local_finalize_kind_to_success_report_kind(payload.report_kind.as_str())
-    else {
-        return build_local_success_outcome_with_report(
-            trace_id,
-            decision,
-            payload.status_code,
-            client_body_json,
-            payload.headers.clone(),
-            None,
-        );
-    };
-
-    let report_payload = GatewaySyncReportRequest {
-        trace_id: payload.trace_id.clone(),
-        report_kind: report_kind.to_string(),
-        report_context: payload.report_context.clone(),
-        status_code: payload.status_code,
-        headers: payload.headers.clone(),
-        body_json: Some(provider_body_json),
-        client_body_json: Some(client_body_json.clone()),
-        body_base64: None,
-        telemetry: payload.telemetry.clone(),
-    };
+    let report_payload = build_local_success_conversion_background_report_impl(
+        payload,
+        client_body_json.clone(),
+        provider_body_json,
+    );
 
     build_local_success_outcome_with_report(
         trace_id,
@@ -102,42 +85,6 @@ pub(crate) fn build_local_success_outcome_with_conversion_report(
         payload.status_code,
         client_body_json,
         payload.headers.clone(),
-        Some(report_payload),
+        report_payload,
     )
-}
-
-fn map_local_finalize_to_success_report(
-    payload: &GatewaySyncReportRequest,
-    body_json: Value,
-    headers: BTreeMap<String, String>,
-) -> Option<GatewaySyncReportRequest> {
-    let report_kind = map_local_finalize_kind_to_success_report_kind(payload.report_kind.as_str())?;
-
-    Some(GatewaySyncReportRequest {
-        trace_id: payload.trace_id.clone(),
-        report_kind: report_kind.to_string(),
-        report_context: payload.report_context.clone(),
-        status_code: payload.status_code,
-        headers,
-        body_json: Some(body_json),
-        client_body_json: None,
-        body_base64: None,
-        telemetry: payload.telemetry.clone(),
-    })
-}
-
-fn map_local_finalize_kind_to_success_report_kind(report_kind: &str) -> Option<&'static str> {
-    core_success_background_report_kind(report_kind)
-}
-
-pub(crate) fn canonicalize_tool_arguments(value: Option<Value>) -> String {
-    match value {
-        Some(Value::String(text)) => text,
-        Some(other) => serde_json::to_string(&other).unwrap_or_else(|_| "null".to_string()),
-        None => "{}".to_string(),
-    }
-}
-
-pub(crate) fn build_generated_tool_call_id(index: usize) -> String {
-    format!("call_auto_{index}")
 }

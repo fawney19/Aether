@@ -25,10 +25,10 @@ use self::execution_failures::{
     build_stream_failure_from_execution_error, build_stream_failure_report,
     handle_prefetch_stream_failure, submit_midstream_stream_failure, StreamFailureReport,
 };
-use crate::ai_pipeline::adaptation::private_envelope::{
-    maybe_build_provider_private_stream_normalizer, normalize_provider_private_report_context,
+use crate::ai_pipeline_api::{
+    maybe_build_provider_private_stream_normalizer, maybe_build_stream_response_rewriter,
+    normalize_provider_private_report_context,
 };
-use crate::ai_pipeline::finalize::maybe_build_stream_response_rewriter;
 use crate::api::response::{
     attach_control_metadata_headers, build_client_response, build_client_response_from_parts,
 };

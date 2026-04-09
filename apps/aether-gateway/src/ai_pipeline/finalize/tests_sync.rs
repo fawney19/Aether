@@ -10,8 +10,8 @@ use super::{
     convert_gemini_chat_response_to_openai_chat, convert_gemini_cli_response_to_openai_cli,
     maybe_build_local_core_sync_finalize_response,
 };
-use crate::ai_pipeline::control_facade::GatewayControlDecision;
-use crate::ai_pipeline::conversion::response::{
+use crate::ai_pipeline::GatewayControlDecision;
+use crate::ai_pipeline::{
     convert_openai_chat_response_to_openai_cli, convert_openai_cli_response_to_openai_chat,
 };
 use crate::usage::GatewaySyncReportRequest;

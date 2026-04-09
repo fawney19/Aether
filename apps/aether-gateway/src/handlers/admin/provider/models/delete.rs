@@ -1,7 +1,6 @@
-use crate::control::GatewayControlDecision;
-use crate::control::GatewayPublicRequestContext;
 use crate::handlers::admin::provider::shared::paths::admin_provider_model_route_parts;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -11,18 +10,17 @@ use axum::{
 use serde_json::json;
 
 pub(super) async fn maybe_handle(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     _request_body: Option<&Bytes>,
-    decision: &GatewayControlDecision,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    if decision.route_family.as_deref() == Some("provider_models_manage")
-        && decision.route_kind.as_deref() == Some("delete_provider_model")
-        && request_context.request_method == http::Method::DELETE
-        && request_context.request_path.contains("/models/")
+    if request_context.route_family() == Some("provider_models_manage")
+        && request_context.route_kind() == Some("delete_provider_model")
+        && request_context.method() == http::Method::DELETE
+        && request_context.path().contains("/models/")
     {
         let Some((provider_id, model_id)) =
-            admin_provider_model_route_parts(&request_context.request_path)
+            admin_provider_model_route_parts(request_context.path())
         else {
             return Ok(Some(
                 (

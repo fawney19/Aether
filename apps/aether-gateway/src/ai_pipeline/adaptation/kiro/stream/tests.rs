@@ -1,4 +1,4 @@
-use super::util::crc32;
+use aether_ai_pipeline::adaptation::kiro_stream::kiro_crc32 as crc32;
 use serde_json::{json, Value};
 
 use super::KiroToClaudeCliStreamState;

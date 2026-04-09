@@ -3,6 +3,87 @@ use std::path::{Path, PathBuf};
 use super::*;
 
 #[test]
+fn gateway_small_runtime_shims_stay_deleted() {
+    for path in [
+        "apps/aether-gateway/src/hooks/audit.rs",
+        "apps/aether-gateway/src/hooks/shadow.rs",
+        "apps/aether-gateway/src/auth/runtime.rs",
+        "apps/aether-gateway/src/auth/trusted.rs",
+        "apps/aether-gateway/src/usage/runtime.rs",
+        "apps/aether-gateway/src/usage/config.rs",
+        "apps/aether-gateway/src/usage/queue.rs",
+        "apps/aether-gateway/src/usage/event.rs",
+        "apps/aether-gateway/src/executor/diagnostics.rs",
+        "apps/aether-gateway/src/executor/reports.rs",
+        "apps/aether-gateway/src/executor/retries.rs",
+        "apps/aether-gateway/src/query/billing/mod.rs",
+        "apps/aether-gateway/src/query/monitoring/mod.rs",
+        "apps/aether-gateway/src/state/runtime/security/mod.rs",
+        "apps/aether-gateway/src/state/runtime/payments/mod.rs",
+    ] {
+        assert!(
+            !workspace_file_exists(path),
+            "{path} should stay removed after M6 shim cleanup"
+        );
+    }
+
+    let hooks_mod = read_workspace_file("apps/aether-gateway/src/hooks/mod.rs");
+    assert!(
+        hooks_mod.contains("pub(crate) use crate::audit::record_shadow_result_non_blocking;"),
+        "hooks/mod.rs should re-export shadow audit directly from crate::audit"
+    );
+    assert!(
+        hooks_mod.contains("pub(crate) use crate::usage::http::{get_request_audit_bundle, get_request_usage_audit};"),
+        "hooks/mod.rs should re-export request audit helpers directly from usage/http"
+    );
+
+    let auth_mod = read_workspace_file("apps/aether-gateway/src/auth/mod.rs");
+    for pattern in [
+        "resolve_execution_runtime_auth_context",
+        "should_buffer_request_for_local_auth",
+        "GatewayControlAuthContext",
+        "request_model_local_rejection",
+        "trusted_auth_local_rejection",
+        "GatewayLocalAuthRejection",
+    ] {
+        assert!(
+            auth_mod.contains(pattern),
+            "auth/mod.rs should expose control-owned auth seam {pattern}"
+        );
+    }
+    for forbidden in ["mod runtime;", "mod trusted;"] {
+        assert!(
+            !auth_mod.contains(forbidden),
+            "auth/mod.rs should not keep local shim {forbidden}"
+        );
+    }
+
+    let usage_mod = read_workspace_file("apps/aether-gateway/src/usage/mod.rs");
+    assert!(
+        usage_mod.contains("pub(crate) use aether_usage_runtime::UsageRuntime;"),
+        "usage/mod.rs should expose UsageRuntime directly from aether_usage_runtime"
+    );
+    assert!(
+        !usage_mod.contains("mod runtime;"),
+        "usage/mod.rs should not keep a local runtime shim"
+    );
+    for forbidden in ["mod config;", "mod queue;", "mod event;"] {
+        assert!(
+            !usage_mod.contains(forbidden),
+            "usage/mod.rs should not keep deleted shim module {forbidden}"
+        );
+    }
+
+    let executor_mod = read_workspace_file("apps/aether-gateway/src/executor/mod.rs");
+    for forbidden in ["mod diagnostics;", "mod reports;", "mod retries;"] {
+        assert!(
+            !executor_mod.contains(forbidden),
+            "executor/mod.rs should not keep deleted shim module {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn gateway_request_candidate_trace_type_is_owned_by_aether_data_contracts() {
     let gateway_candidates = read_workspace_file("apps/aether-gateway/src/data/candidates.rs");
     assert!(
@@ -1239,5 +1320,42 @@ fn execution_runtime_video_finalize_paths_depend_on_shared_video_task_core() {
     assert!(
         !internal_gateway.contains("fn infer_internal_finalize_signature("),
         "internal gateway finalize path should not own local finalize signature inference"
+    );
+}
+
+#[test]
+fn ai_pipeline_runtime_kiro_wrapper_is_facade_only() {
+    for path in [
+        "apps/aether-gateway/src/ai_pipeline/runtime/mod.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/provider_types.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/mod.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/antigravity/mod.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/claude/mod.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/claude_code/mod.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/gemini/mod.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/generic_oauth.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/kiro/mod.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/openai/mod.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/vertex/mod.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/kiro/auth.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/kiro/converter.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/kiro/credentials.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/kiro/headers.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/kiro/policy.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/kiro/refresh.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/kiro/request.rs",
+        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/kiro/url.rs",
+    ] {
+        assert!(
+            !workspace_file_exists(path),
+            "{path} should be removed once gateway ai_pipeline runtime adapter ownership is flattened into adaptation/provider_transport facades"
+        );
+    }
+
+    let adaptation_mod =
+        read_workspace_file("apps/aether-gateway/src/ai_pipeline/adaptation/mod.rs");
+    assert!(
+        adaptation_mod.contains("pub(crate) use kiro::KiroToClaudeCliStreamState;"),
+        "adaptation/mod.rs should own KiroToClaudeCliStreamState export after runtime facade removal"
     );
 }

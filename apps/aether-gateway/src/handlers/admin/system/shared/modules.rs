@@ -1,5 +1,7 @@
+use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::shared::{module_available_from_env, system_config_bool};
-use crate::{AppState, GatewayError};
+use crate::GatewayError;
+use aether_admin::system as admin_system_kernel;
 use serde_json::json;
 
 pub(crate) struct AdminModuleDefinition {
@@ -109,57 +111,27 @@ pub(crate) fn admin_module_by_name(name: &str) -> Option<&'static AdminModuleDef
 }
 
 pub(crate) fn admin_module_name_from_status_path(request_path: &str) -> Option<String> {
-    request_path
-        .strip_prefix("/api/admin/modules/status/")
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && !value.contains('/'))
-        .map(ToOwned::to_owned)
+    admin_system_kernel::admin_module_name_from_status_path(request_path)
 }
 
 pub(crate) fn admin_module_name_from_enabled_path(request_path: &str) -> Option<String> {
-    request_path
-        .strip_prefix("/api/admin/modules/status/")
-        .and_then(|value| value.strip_suffix("/enabled"))
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && !value.contains('/'))
-        .map(ToOwned::to_owned)
+    admin_system_kernel::admin_module_name_from_enabled_path(request_path)
 }
 
 pub(crate) fn oauth_module_config_is_valid(
     providers: &[aether_data::repository::auth_modules::StoredOAuthProviderModuleConfig],
 ) -> bool {
-    !providers.is_empty()
-        && providers.iter().all(|provider| {
-            !provider.client_id.trim().is_empty()
-                && provider
-                    .client_secret_encrypted
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .is_some()
-                && !provider.redirect_uri.trim().is_empty()
-        })
+    admin_system_kernel::oauth_module_config_is_valid(providers)
 }
 
 pub(crate) fn ldap_module_config_is_valid(
     config: Option<&aether_data::repository::auth_modules::StoredLdapModuleConfig>,
 ) -> bool {
-    let Some(config) = config else {
-        return false;
-    };
-    !config.server_url.trim().is_empty()
-        && !config.bind_dn.trim().is_empty()
-        && !config.base_dn.trim().is_empty()
-        && config
-            .bind_password_encrypted
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_some()
+    admin_system_kernel::ldap_module_config_is_valid(config)
 }
 
 pub(crate) async fn build_admin_module_runtime_state(
-    state: &AppState,
+    state: &AdminAppState<'_>,
 ) -> Result<AdminModuleRuntimeState, GatewayError> {
     let oauth_providers = state.list_enabled_oauth_module_providers().await?;
     let ldap_config = state.get_ldap_module_config().await?;
@@ -221,116 +193,27 @@ pub(crate) fn build_admin_module_validation_result(
     module: &AdminModuleDefinition,
     runtime: &AdminModuleRuntimeState,
 ) -> (bool, Option<String>) {
-    match module.name {
-        "oauth" => {
-            if runtime.oauth_providers.is_empty() {
-                return (
-                    false,
-                    Some("请先配置并启用至少一个 OAuth Provider".to_string()),
-                );
-            }
-            for provider in &runtime.oauth_providers {
-                if provider.client_id.trim().is_empty() {
-                    return (
-                        false,
-                        Some(format!(
-                            "Provider [{}] 未配置 Client ID",
-                            provider.display_name
-                        )),
-                    );
-                }
-                if provider
-                    .client_secret_encrypted
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .is_none()
-                {
-                    return (
-                        false,
-                        Some(format!(
-                            "Provider [{}] 未配置 Client Secret",
-                            provider.display_name
-                        )),
-                    );
-                }
-                if provider.redirect_uri.trim().is_empty() {
-                    return (
-                        false,
-                        Some(format!(
-                            "Provider [{}] 未配置回调地址",
-                            provider.display_name
-                        )),
-                    );
-                }
-            }
-            (true, None)
-        }
-        "ldap" => {
-            let Some(config) = runtime.ldap_config.as_ref() else {
-                return (false, Some("请先配置 LDAP 连接信息".to_string()));
-            };
-            if config.server_url.trim().is_empty() {
-                return (false, Some("请配置 LDAP 服务器地址".to_string()));
-            }
-            if config.bind_dn.trim().is_empty() {
-                return (false, Some("请配置绑定 DN".to_string()));
-            }
-            if config.base_dn.trim().is_empty() {
-                return (false, Some("请配置搜索基准 DN".to_string()));
-            }
-            if config
-                .bind_password_encrypted
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .is_none()
-            {
-                return (false, Some("请配置绑定密码".to_string()));
-            }
-            (true, None)
-        }
-        "notification_email" => {
-            if runtime.smtp_configured {
-                (true, None)
-            } else {
-                (false, Some("请先完成邮件配置（SMTP）".to_string()))
-            }
-        }
-        "gemini_files" => {
-            if runtime.gemini_files_has_capable_key {
-                (true, None)
-            } else {
-                (
-                    false,
-                    Some("至少启用一个具有「Gemini 文件 API」能力的 Key".to_string()),
-                )
-            }
-        }
-        "management_tokens" | "proxy_nodes" => (true, None),
-        _ => (true, None),
-    }
+    admin_system_kernel::build_admin_module_validation_result(
+        module.name,
+        &runtime.oauth_providers,
+        runtime.ldap_config.as_ref(),
+        runtime.gemini_files_has_capable_key,
+        runtime.smtp_configured,
+    )
 }
 
 pub(crate) fn build_admin_module_health(
     module: &AdminModuleDefinition,
     runtime: &AdminModuleRuntimeState,
 ) -> &'static str {
-    match module.name {
-        "management_tokens" | "proxy_nodes" => "healthy",
-        "gemini_files" => {
-            if runtime.gemini_files_has_capable_key {
-                "healthy"
-            } else {
-                "degraded"
-            }
-        }
-        _ => "unknown",
-    }
+    admin_system_kernel::build_admin_module_health(
+        module.name,
+        runtime.gemini_files_has_capable_key,
+    )
 }
 
 pub(crate) async fn build_admin_module_status_payload(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     module: &AdminModuleDefinition,
     runtime: &AdminModuleRuntimeState,
 ) -> Result<serde_json::Value, GatewayError> {
@@ -348,32 +231,30 @@ pub(crate) async fn build_admin_module_status_payload(
     } else {
         (false, None)
     };
-    let active = available && enabled && config_validated;
     let health = if available {
         build_admin_module_health(module, runtime)
     } else {
         "unknown"
     };
-    Ok(json!({
-        "name": module.name,
-        "available": available,
-        "enabled": enabled,
-        "active": active,
-        "config_validated": config_validated,
-        "config_error": if config_validated { serde_json::Value::Null } else { json!(config_error) },
-        "display_name": module.display_name,
-        "description": module.description,
-        "category": module.category,
-        "admin_route": if available { json!(module.admin_route) } else { serde_json::Value::Null },
-        "admin_menu_icon": module.admin_menu_icon,
-        "admin_menu_group": module.admin_menu_group,
-        "admin_menu_order": module.admin_menu_order,
-        "health": health,
-    }))
+    Ok(admin_system_kernel::build_admin_module_status_payload(
+        module.name,
+        module.display_name,
+        module.description,
+        module.category,
+        module.admin_route,
+        module.admin_menu_icon,
+        module.admin_menu_group,
+        module.admin_menu_order,
+        available,
+        enabled,
+        config_validated,
+        config_error,
+        health,
+    ))
 }
 
 pub(crate) async fn build_admin_modules_status_payload(
-    state: &AppState,
+    state: &AdminAppState<'_>,
 ) -> Result<serde_json::Value, GatewayError> {
     let runtime = build_admin_module_runtime_state(state).await?;
     let mut payload = serde_json::Map::new();

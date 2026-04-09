@@ -10,6 +10,7 @@ use super::response::{
 };
 use crate::execution_runtime;
 use crate::model_fetch::ModelFetchRuntimeState;
+use crate::handlers::admin::request::AdminAppState;
 use crate::{AppState, GatewayError};
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
@@ -22,9 +23,9 @@ use axum::{body::Body, http::Response, response::IntoResponse, Json};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
-pub(super) const ADMIN_PROVIDER_QUERY_LOCAL_TEST_MODEL_MESSAGE: &str =
+pub(crate) const ADMIN_PROVIDER_QUERY_LOCAL_TEST_MODEL_MESSAGE: &str =
     "Rust local provider-query model test is not configured";
-pub(super) const ADMIN_PROVIDER_QUERY_LOCAL_TEST_MODEL_FAILOVER_MESSAGE: &str =
+pub(crate) const ADMIN_PROVIDER_QUERY_LOCAL_TEST_MODEL_FAILOVER_MESSAGE: &str =
     "Rust local provider-query failover simulation is not configured";
 const ADMIN_PROVIDER_QUERY_NO_ACTIVE_ENDPOINT_DETAIL: &str =
     "No active endpoints found for this provider";
@@ -219,8 +220,8 @@ async fn provider_query_fetch_models_for_key(
     })
 }
 
-pub(super) async fn build_admin_provider_query_models_response(
-    state: &AppState,
+pub(crate) async fn build_admin_provider_query_models_response(
+    state: &AdminAppState<'_>,
     payload: &serde_json::Value,
 ) -> Result<Response<Body>, GatewayError> {
     let Some(provider_id) = provider_query_extract_provider_id(payload) else {
@@ -230,6 +231,7 @@ pub(super) async fn build_admin_provider_query_models_response(
     };
 
     let Some(provider) = state
+        .app()
         .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id))
         .await?
         .into_iter()
@@ -242,9 +244,11 @@ pub(super) async fn build_admin_provider_query_models_response(
 
     let provider_ids = vec![provider.id.clone()];
     let endpoints = state
+        .app()
         .list_provider_catalog_endpoints_by_provider_ids(&provider_ids)
         .await?;
     let keys = state
+        .app()
         .list_provider_catalog_keys_by_provider_ids(&provider_ids)
         .await?;
     let force_refresh = provider_query_extract_force_refresh(payload);
@@ -257,7 +261,7 @@ pub(super) async fn build_admin_provider_query_models_response(
         };
 
         let result = provider_query_fetch_models_for_key(
-            state,
+            state.app(),
             &provider,
             &endpoints,
             selected_key,
@@ -291,7 +295,7 @@ pub(super) async fn build_admin_provider_query_models_response(
     let mut fetch_count = 0usize;
     for key in active_keys {
         let result =
-            provider_query_fetch_models_for_key(state, &provider, &endpoints, key, force_refresh)
+            provider_query_fetch_models_for_key(state.app(), &provider, &endpoints, key, force_refresh)
                 .await?;
         all_models.extend(result.models);
         if let Some(error) = result.error {
@@ -334,7 +338,7 @@ pub(super) async fn build_admin_provider_query_models_response(
     .into_response())
 }
 
-pub(super) fn build_admin_provider_query_test_model_response(
+pub(crate) fn build_admin_provider_query_test_model_response(
     provider_id: String,
     model: String,
 ) -> Response<Body> {
@@ -353,7 +357,7 @@ pub(super) fn build_admin_provider_query_test_model_response(
     .into_response()
 }
 
-pub(super) fn build_admin_provider_query_test_model_failover_response(
+pub(crate) fn build_admin_provider_query_test_model_failover_response(
     provider_id: String,
     failover_models: Vec<String>,
 ) -> Response<Body> {

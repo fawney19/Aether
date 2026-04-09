@@ -1,11 +1,11 @@
-use crate::AppState;
+use crate::handlers::admin::request::AdminAppState;
 use aether_crypto::decrypt_python_fernet_ciphertext;
 #[cfg(test)]
 use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 
 pub(super) fn admin_monitoring_masked_user_api_key_prefix(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     ciphertext: Option<&str>,
 ) -> Option<String> {
     let Some(ciphertext) = ciphertext.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -23,7 +23,7 @@ pub(super) fn admin_monitoring_masked_user_api_key_prefix(
 }
 
 pub(super) fn admin_monitoring_masked_provider_key_prefix(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     key: &StoredProviderCatalogKey,
 ) -> Option<String> {
     match key.auth_type.trim() {
@@ -44,7 +44,10 @@ pub(super) fn admin_monitoring_masked_provider_key_prefix(
     }
 }
 
-fn admin_monitoring_try_decrypt_secret(state: &AppState, ciphertext: &str) -> Option<String> {
+fn admin_monitoring_try_decrypt_secret(
+    state: &AdminAppState<'_>,
+    ciphertext: &str,
+) -> Option<String> {
     let ciphertext = ciphertext.trim();
     if ciphertext.is_empty() {
         return None;

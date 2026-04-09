@@ -1,7 +1,7 @@
 use super::{build_admin_users_bad_request_response, format_optional_datetime_iso8601};
-use crate::control::GatewayPublicRequestContext;
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
-use crate::{AppState, GatewayError, GatewayUserSessionView};
+use crate::{GatewayError, GatewayUserSessionView};
 use axum::{
     body::Body,
     http,
@@ -44,10 +44,10 @@ fn format_required_session_datetime_iso8601(session: &GatewayUserSessionView) ->
 }
 
 pub(super) async fn build_admin_list_user_sessions_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    let Some(user_id) = admin_user_id_from_sessions_path(&request_context.request_path) else {
+    let Some(user_id) = admin_user_id_from_sessions_path(request_context.path()) else {
         return Ok(build_admin_users_bad_request_response("缺少 user_id"));
     };
 
@@ -89,11 +89,10 @@ pub(super) async fn build_admin_list_user_sessions_response(
 }
 
 pub(super) async fn build_admin_delete_user_session_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    let Some((user_id, session_id)) = admin_user_session_parts(&request_context.request_path)
-    else {
+    let Some((user_id, session_id)) = admin_user_session_parts(request_context.path()) else {
         return Ok(build_admin_users_bad_request_response(
             "缺少 user_id 或 session_id",
         ));
@@ -138,10 +137,10 @@ pub(super) async fn build_admin_delete_user_session_response(
 }
 
 pub(super) async fn build_admin_delete_user_sessions_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    let Some(user_id) = admin_user_id_from_sessions_path(&request_context.request_path) else {
+    let Some(user_id) = admin_user_id_from_sessions_path(request_context.path()) else {
         return Ok(build_admin_users_bad_request_response("缺少 user_id"));
     };
 

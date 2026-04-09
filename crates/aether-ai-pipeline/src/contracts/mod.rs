@@ -1,10 +1,19 @@
 mod actions;
+mod auth_context;
+mod control_payloads;
 mod plan_kinds;
 mod report_kinds;
 
 pub use actions::{
     EXECUTION_RUNTIME_STREAM_ACTION, EXECUTION_RUNTIME_STREAM_DECISION_ACTION,
     EXECUTION_RUNTIME_SYNC_ACTION, EXECUTION_RUNTIME_SYNC_DECISION_ACTION,
+};
+pub use auth_context::ExecutionRuntimeAuthContext;
+pub use control_payloads::{
+    augment_sync_report_context, build_gateway_control_plan_request,
+    generic_decision_missing_exact_provider_request, GatewayControlPlanRequest,
+    GatewayControlPlanResponse, GatewayControlSyncDecisionResponse, LocalStreamPlanAndReport,
+    LocalSyncPlanAndReport,
 };
 pub use plan_kinds::{
     CLAUDE_CHAT_STREAM_PLAN_KIND, CLAUDE_CHAT_SYNC_PLAN_KIND, CLAUDE_CLI_STREAM_PLAN_KIND,

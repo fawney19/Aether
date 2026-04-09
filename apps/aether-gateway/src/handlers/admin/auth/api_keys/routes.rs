@@ -4,16 +4,16 @@ use super::mutation_routes::{
 };
 use super::read_routes::{build_admin_api_key_detail_response, build_admin_list_api_keys_response};
 use super::shared::build_admin_api_keys_data_unavailable_response;
-use crate::control::GatewayPublicRequestContext;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use axum::{body::Body, http, response::Response};
 
 pub(super) async fn maybe_build_local_admin_api_keys_routes_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&axum::body::Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
+    let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
 
@@ -21,7 +21,7 @@ pub(super) async fn maybe_build_local_admin_api_keys_routes_response(
         return Ok(None);
     }
 
-    let path = request_context.request_path.as_str();
+    let path = request_context.path();
     let is_api_keys_route = matches!(path, "/api/admin/api-keys" | "/api/admin/api-keys/")
         || (path.starts_with("/api/admin/api-keys/") && path.matches('/').count() == 4);
 
@@ -31,7 +31,7 @@ pub(super) async fn maybe_build_local_admin_api_keys_routes_response(
 
     match decision.route_kind.as_deref() {
         Some("list_api_keys")
-            if request_context.request_method == http::Method::GET
+            if request_context.method() == http::Method::GET
                 && matches!(path, "/api/admin/api-keys" | "/api/admin/api-keys/") =>
         {
             Ok(Some(
@@ -39,7 +39,7 @@ pub(super) async fn maybe_build_local_admin_api_keys_routes_response(
             ))
         }
         Some("api_key_detail")
-            if request_context.request_method == http::Method::GET
+            if request_context.method() == http::Method::GET
                 && path.starts_with("/api/admin/api-keys/") =>
         {
             Ok(Some(
@@ -47,7 +47,7 @@ pub(super) async fn maybe_build_local_admin_api_keys_routes_response(
             ))
         }
         Some("create_api_key")
-            if request_context.request_method == http::Method::POST
+            if request_context.method() == http::Method::POST
                 && matches!(path, "/api/admin/api-keys" | "/api/admin/api-keys/") =>
         {
             Ok(Some(
@@ -55,7 +55,7 @@ pub(super) async fn maybe_build_local_admin_api_keys_routes_response(
             ))
         }
         Some("update_api_key")
-            if request_context.request_method == http::Method::PUT
+            if request_context.method() == http::Method::PUT
                 && path.starts_with("/api/admin/api-keys/") =>
         {
             Ok(Some(
@@ -63,7 +63,7 @@ pub(super) async fn maybe_build_local_admin_api_keys_routes_response(
             ))
         }
         Some("toggle_api_key")
-            if request_context.request_method == http::Method::PATCH
+            if request_context.method() == http::Method::PATCH
                 && path.starts_with("/api/admin/api-keys/") =>
         {
             Ok(Some(
@@ -71,7 +71,7 @@ pub(super) async fn maybe_build_local_admin_api_keys_routes_response(
             ))
         }
         Some("delete_api_key")
-            if request_context.request_method == http::Method::DELETE
+            if request_context.method() == http::Method::DELETE
                 && path.starts_with("/api/admin/api-keys/") =>
         {
             Ok(Some(

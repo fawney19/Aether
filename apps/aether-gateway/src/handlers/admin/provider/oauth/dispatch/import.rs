@@ -1,16 +1,18 @@
-use super::super::refresh::{
-    build_internal_control_error_response, build_provider_oauth_auth_config_from_token_payload,
-    create_provider_oauth_catalog_key, find_duplicate_provider_oauth_key,
+use super::super::duplicates::find_duplicate_provider_oauth_key;
+use super::super::errors::build_internal_control_error_response;
+use super::super::provisioning::{
+    build_provider_oauth_auth_config_from_token_payload, create_provider_oauth_catalog_key,
     provider_oauth_active_api_formats, provider_oauth_key_proxy_value,
-    refresh_provider_oauth_account_state_after_update, update_existing_provider_oauth_catalog_key,
+    update_existing_provider_oauth_catalog_key,
 };
+use super::super::runtime::refresh_provider_oauth_account_state_after_update;
 use super::super::state::{
     admin_provider_oauth_template, build_admin_provider_oauth_backend_unavailable_response,
     exchange_admin_provider_oauth_refresh_token, is_fixed_provider_type_for_provider_oauth,
 };
-use crate::control::GatewayPublicRequestContext;
 use crate::handlers::admin::provider::shared::paths::admin_provider_oauth_import_provider_id;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use axum::{
     body::Body,
     http,
@@ -21,15 +23,14 @@ use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&axum::body::Bytes>,
 ) -> Result<Response<Body>, GatewayError> {
     if !state.has_provider_catalog_data_reader() {
         return Ok(build_admin_provider_oauth_backend_unavailable_response());
     }
-    let Some(provider_id) = admin_provider_oauth_import_provider_id(&request_context.request_path)
-    else {
+    let Some(provider_id) = admin_provider_oauth_import_provider_id(request_context.path()) else {
         return Ok(build_internal_control_error_response(
             http::StatusCode::NOT_FOUND,
             "Provider 不存在",
@@ -96,13 +97,13 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
         return Ok(build_admin_provider_oauth_backend_unavailable_response());
     };
 
-    let token_payload =
-        match exchange_admin_provider_oauth_refresh_token(state, template, refresh_token_input)
-            .await
-        {
-            Ok(payload) => payload,
-            Err(response) => return Ok(response),
-        };
+    let token_payload = match state
+        .exchange_admin_provider_oauth_refresh_token(template, refresh_token_input)
+        .await
+    {
+        Ok(payload) => payload,
+        Err(response) => return Ok(response),
+    };
 
     let (mut auth_config, access_token, returned_refresh_token, expires_at) =
         build_provider_oauth_auth_config_from_token_payload(&provider_type, &token_payload);
@@ -124,28 +125,30 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
         .await?;
     let api_formats = provider_oauth_active_api_formats(&endpoints);
     let key_proxy = provider_oauth_key_proxy_value(proxy_node_id.as_deref());
-    let duplicate =
-        match find_duplicate_provider_oauth_key(state, &provider_id, &auth_config, None).await {
-            Ok(duplicate) => duplicate,
-            Err(detail) => {
-                return Ok(build_internal_control_error_response(
-                    http::StatusCode::BAD_REQUEST,
-                    detail,
-                ));
-            }
-        };
+    let duplicate = match state
+        .find_duplicate_provider_oauth_key(&provider_id, &auth_config, None)
+        .await
+    {
+        Ok(duplicate) => duplicate,
+        Err(detail) => {
+            return Ok(build_internal_control_error_response(
+                http::StatusCode::BAD_REQUEST,
+                detail,
+            ));
+        }
+    };
 
     let replaced = duplicate.is_some();
     let persisted_key = if let Some(existing_key) = duplicate {
-        match update_existing_provider_oauth_catalog_key(
-            state,
-            &existing_key,
-            &access_token,
-            &auth_config,
-            key_proxy.clone(),
-            expires_at,
-        )
-        .await?
+        match state
+            .update_existing_provider_oauth_catalog_key(
+                &existing_key,
+                &access_token,
+                &auth_config,
+                key_proxy.clone(),
+                expires_at,
+            )
+            .await?
         {
             Some(key) => key,
             None => {
@@ -175,17 +178,17 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
                         .unwrap_or(0)
                 )
             });
-        match create_provider_oauth_catalog_key(
-            state,
-            &provider_id,
-            &name,
-            &access_token,
-            &auth_config,
-            &api_formats,
-            key_proxy.clone(),
-            expires_at,
-        )
-        .await?
+        match state
+            .create_provider_oauth_catalog_key(
+                &provider_id,
+                &name,
+                &access_token,
+                &auth_config,
+                &api_formats,
+                key_proxy.clone(),
+                expires_at,
+            )
+            .await?
         {
             Some(key) => key,
             None => {
@@ -197,7 +200,8 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
         }
     };
 
-    let _ = refresh_provider_oauth_account_state_after_update(state, &provider, &persisted_key.id)
+    let _ = state
+        .refresh_provider_oauth_account_state_after_update(&provider, &persisted_key.id)
         .await;
 
     Ok(Json(json!({

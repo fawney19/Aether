@@ -20,13 +20,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-admin"
+version = "0.1.0"
+dependencies = [
+ "aether-contracts",
+ "aether-data",
+ "aether-data-contracts",
+ "axum",
+ "base64",
+ "chrono",
+ "http",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "aether-ai-pipeline"
 version = "0.1.0"
 dependencies = [
+ "aether-contracts",
  "aether-provider-transport",
+ "aether-usage-runtime",
  "base64",
  "http",
+ "serde",
  "serde_json",
+ "sha1",
+ "sha2",
  "uuid",
 ]
 
@@ -107,6 +131,7 @@ dependencies = [
 name = "aether-gateway"
 version = "0.1.0"
 dependencies = [
+ "aether-admin",
  "aether-ai-pipeline",
  "aether-billing",
  "aether-cache",
@@ -4358,6 +4383,7 @@ dependencies = [
  "getrandom 0.4.2",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 

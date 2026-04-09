@@ -1,7 +1,6 @@
 use axum::body::Bytes;
 
-use crate::ai_pipeline::control_facade::is_json_request;
-pub(crate) use aether_ai_pipeline::contracts::{
+pub(crate) use crate::ai_pipeline::contracts::{
     CLAUDE_CHAT_STREAM_PLAN_KIND, CLAUDE_CHAT_SYNC_PLAN_KIND, CLAUDE_CLI_STREAM_PLAN_KIND,
     CLAUDE_CLI_SYNC_PLAN_KIND, EXECUTION_RUNTIME_STREAM_ACTION,
     EXECUTION_RUNTIME_STREAM_DECISION_ACTION, EXECUTION_RUNTIME_SYNC_ACTION,
@@ -15,25 +14,23 @@ pub(crate) use aether_ai_pipeline::contracts::{
     OPENAI_VIDEO_CONTENT_PLAN_KIND, OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND,
     OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND, OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
 };
+use crate::ai_pipeline::{
+    force_upstream_streaming_for_provider as force_upstream_streaming_for_provider_impl,
+    is_json_request, parse_direct_request_body as parse_direct_request_body_impl,
+};
 
 pub(crate) fn parse_direct_request_body(
     parts: &http::request::Parts,
     body_bytes: &Bytes,
 ) -> Option<(serde_json::Value, Option<String>)> {
-    aether_ai_pipeline::planner::common::parse_direct_request_body(
-        is_json_request(&parts.headers),
-        body_bytes.as_ref(),
-    )
+    parse_direct_request_body_impl(is_json_request(&parts.headers), body_bytes.as_ref())
 }
 
 pub(crate) fn force_upstream_streaming_for_provider(
     provider_type: &str,
     provider_api_format: &str,
 ) -> bool {
-    provider_type.trim().eq_ignore_ascii_case("codex")
-        && provider_api_format
-            .trim()
-            .eq_ignore_ascii_case("openai:cli")
+    force_upstream_streaming_for_provider_impl(provider_type, provider_api_format)
 }
 
 #[cfg(test)]

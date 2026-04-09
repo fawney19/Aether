@@ -3,9 +3,9 @@ use super::{
     build_admin_payments_bad_request_response, parse_admin_payments_limit,
     parse_admin_payments_offset,
 };
-use crate::control::GatewayPublicRequestContext;
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::query_param_value;
-use crate::{AppState, GatewayError};
+use crate::GatewayError;
 use axum::{
     body::Body,
     response::{IntoResponse, Response},
@@ -14,8 +14,8 @@ use axum::{
 use serde_json::json;
 
 pub(super) async fn maybe_build_local_admin_payment_callbacks_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     route_kind: Option<&str>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     match route_kind {
@@ -27,10 +27,10 @@ pub(super) async fn maybe_build_local_admin_payment_callbacks_response(
 }
 
 async fn build_admin_payment_callbacks_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    let query = request_context.request_query_string.as_deref();
+    let query = request_context.query_string();
     let limit = match parse_admin_payments_limit(query) {
         Ok(value) => value,
         Err(detail) => return Ok(build_admin_payments_bad_request_response(detail)),

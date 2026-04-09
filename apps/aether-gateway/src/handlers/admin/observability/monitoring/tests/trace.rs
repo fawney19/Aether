@@ -1,7 +1,7 @@
-use super::super::routes::maybe_build_local_admin_monitoring_response;
 use super::super::test_support::{
     request_context, sample_candidate, sample_endpoint, sample_key, sample_provider,
 };
+use super::local_monitoring_response;
 use crate::AppState;
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
 use axum::body::to_bytes;
@@ -46,7 +46,7 @@ async fn admin_monitoring_trace_request_returns_local_payload() {
         "/api/admin/monitoring/trace/request-1?attempted_only=true",
     );
 
-    let response = maybe_build_local_admin_monitoring_response(&state, &context)
+    let response = local_monitoring_response(&state, &context)
         .await
         .expect("handler should not error")
         .expect("route should be handled locally");
@@ -132,7 +132,7 @@ async fn admin_monitoring_trace_provider_stats_returns_local_payload() {
         "/api/admin/monitoring/trace/stats/provider/provider-1?limit=10",
     );
 
-    let response = maybe_build_local_admin_monitoring_response(&state, &context)
+    let response = local_monitoring_response(&state, &context)
         .await
         .expect("handler should not error")
         .expect("route should be handled locally");
@@ -163,7 +163,7 @@ async fn admin_monitoring_trace_request_returns_contextual_not_found_payload() {
         "/api/admin/monitoring/trace/provider-test-missing?attempted_only=false",
     );
 
-    let response = maybe_build_local_admin_monitoring_response(&state, &context)
+    let response = local_monitoring_response(&state, &context)
         .await
         .expect("handler should not error")
         .expect("route should be handled locally");

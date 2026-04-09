@@ -1,10 +1,8 @@
 use super::payloads::build_admin_provider_model_response;
-use super::write::build_admin_provider_model_update_record;
-use crate::control::GatewayControlDecision;
-use crate::control::GatewayPublicRequestContext;
 use crate::handlers::admin::provider::shared::paths::admin_provider_model_route_parts;
 use crate::handlers::admin::provider::shared::payloads::AdminProviderModelUpdateRequest;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -15,18 +13,17 @@ use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) async fn maybe_handle(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&Bytes>,
-    decision: &GatewayControlDecision,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    if decision.route_family.as_deref() == Some("provider_models_manage")
-        && decision.route_kind.as_deref() == Some("update_provider_model")
-        && request_context.request_method == http::Method::PATCH
-        && request_context.request_path.contains("/models/")
+    if request_context.route_family() == Some("provider_models_manage")
+        && request_context.route_kind() == Some("update_provider_model")
+        && request_context.method() == http::Method::PATCH
+        && request_context.path().contains("/models/")
     {
         let Some((provider_id, model_id)) =
-            admin_provider_model_route_parts(&request_context.request_path)
+            admin_provider_model_route_parts(request_context.path())
         else {
             return Ok(Some(
                 (
@@ -90,21 +87,21 @@ pub(super) async fn maybe_handle(
                 ));
             }
         };
-        let record =
-            match build_admin_provider_model_update_record(state, &existing, &raw_payload, payload)
-                .await
-            {
-                Ok(record) => record,
-                Err(detail) => {
-                    return Ok(Some(
-                        (
-                            http::StatusCode::BAD_REQUEST,
-                            Json(json!({ "detail": detail })),
-                        )
-                            .into_response(),
-                    ));
-                }
-            };
+        let record = match state
+            .build_admin_provider_model_update_record(&existing, &raw_payload, payload)
+            .await
+        {
+            Ok(record) => record,
+            Err(detail) => {
+                return Ok(Some(
+                    (
+                        http::StatusCode::BAD_REQUEST,
+                        Json(json!({ "detail": detail })),
+                    )
+                        .into_response(),
+                ));
+            }
+        };
         return Ok(Some(
             match state.update_admin_provider_model(&record).await? {
                 Some(updated) => {

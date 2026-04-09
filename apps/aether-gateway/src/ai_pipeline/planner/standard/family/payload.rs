@@ -3,29 +3,24 @@ use std::collections::BTreeMap;
 use serde_json::json;
 use tracing::warn;
 
-use crate::ai_pipeline::control_facade::collect_control_headers;
-use crate::ai_pipeline::execution_facade::{ConversionMode, ExecutionStrategy};
-use crate::ai_pipeline::planner::candidate_runtime_facade::persist_skipped_local_candidate;
 use crate::ai_pipeline::planner::common::force_upstream_streaming_for_provider;
 use crate::ai_pipeline::planner::standard::apply_codex_openai_cli_special_headers;
-use crate::ai_pipeline::planner::transport_facade::{
-    read_provider_transport_snapshot, resolve_local_oauth_request_auth,
-    LocalResolvedOAuthRequestAuth,
-};
-use crate::ai_pipeline::provider_transport_facade::auth::{
+use crate::ai_pipeline::transport::auth::{
     build_openai_passthrough_headers, ensure_upstream_auth_header,
 };
-use crate::ai_pipeline::provider_transport_facade::{
+use crate::ai_pipeline::transport::{
     apply_local_header_rules, resolve_transport_execution_timeouts,
     resolve_transport_proxy_snapshot_with_tunnel_affinity, resolve_transport_tls_profile,
 };
+use crate::ai_pipeline::{collect_control_headers, ConversionMode, ExecutionStrategy};
+use crate::ai_pipeline::{LocalResolvedOAuthRequestAuth, PlannerAppState};
 use crate::clock::current_unix_secs;
 use crate::{
     append_execution_contract_fields_to_value, AppState, GatewayControlSyncDecisionResponse,
     EXECUTION_RUNTIME_STREAM_DECISION_ACTION, EXECUTION_RUNTIME_SYNC_DECISION_ACTION,
 };
 
-use super::types::{LocalStandardCandidateAttempt, LocalStandardDecisionInput, LocalStandardSpec};
+use super::{LocalStandardCandidateAttempt, LocalStandardDecisionInput, LocalStandardSpec};
 
 pub(super) async fn maybe_build_local_standard_decision_payload_for_candidate(
     state: &AppState,
@@ -36,6 +31,7 @@ pub(super) async fn maybe_build_local_standard_decision_payload_for_candidate(
     attempt: LocalStandardCandidateAttempt,
     spec: LocalStandardSpec,
 ) -> Option<GatewayControlSyncDecisionResponse> {
+    let planner_state = PlannerAppState::new(state);
     let LocalStandardCandidateAttempt {
         candidate,
         candidate_index,
@@ -52,13 +48,13 @@ pub(super) async fn maybe_build_local_standard_decision_payload_for_candidate(
         return None;
     };
 
-    let transport = match read_provider_transport_snapshot(
-        state,
-        &candidate.provider_id,
-        &candidate.endpoint_id,
-        &candidate.key_id,
-    )
-    .await
+    let transport = match planner_state
+        .read_provider_transport_snapshot(
+            &candidate.provider_id,
+            &candidate.endpoint_id,
+            &candidate.key_id,
+        )
+        .await
     {
         Ok(Some(snapshot)) => snapshot,
         Ok(None) => {
@@ -115,7 +111,10 @@ pub(super) async fn maybe_build_local_standard_decision_payload_for_candidate(
     let resolved_auth =
         crate::ai_pipeline::conversion::request_conversion_direct_auth(&transport, conversion_kind);
     let oauth_auth = if resolved_auth.is_none() {
-        match resolve_local_oauth_request_auth(state, &transport).await {
+        match planner_state
+            .resolve_local_oauth_request_auth(&transport)
+            .await
+        {
             Ok(Some(LocalResolvedOAuthRequestAuth::Header { name, value })) => Some((name, value)),
             Ok(Some(LocalResolvedOAuthRequestAuth::Kiro(_))) => None,
             Ok(None) => None,
@@ -342,17 +341,17 @@ pub(super) async fn mark_skipped_local_standard_candidate(
     candidate_id: &str,
     skip_reason: &'static str,
 ) {
-    persist_skipped_local_candidate(
-        state,
-        trace_id,
-        &input.auth_context.user_id,
-        &input.auth_context.api_key_id,
-        candidate,
-        candidate_index,
-        candidate_id,
-        skip_reason,
-        current_unix_secs(),
-        "gateway local standard decision failed to persist skipped candidate",
-    )
-    .await;
+    PlannerAppState::new(state)
+        .persist_skipped_local_candidate(
+            trace_id,
+            &input.auth_context.user_id,
+            &input.auth_context.api_key_id,
+            candidate,
+            candidate_index,
+            candidate_id,
+            skip_reason,
+            current_unix_secs(),
+            "gateway local standard decision failed to persist skipped candidate",
+        )
+        .await;
 }

@@ -1,0 +1,191 @@
+use super::responses::build_admin_providers_data_unavailable_response;
+use crate::handlers::admin::provider::shared::paths::{
+    admin_provider_id_for_manage_path, is_admin_providers_root,
+};
+use crate::handlers::admin::provider::shared::payloads::{
+    AdminProviderCreateRequest, AdminProviderUpdateRequest,
+};
+use crate::handlers::admin::provider::write::provider::build_admin_fixed_provider_endpoint_record;
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::handlers::admin::shared::attach_admin_audit_response;
+use crate::GatewayError;
+use axum::{
+    body::{Body, Bytes},
+    http,
+    response::{IntoResponse, Response},
+    Json,
+};
+use serde_json::json;
+
+fn build_admin_provider_bad_request_response(detail: impl Into<String>) -> Response<Body> {
+    (
+        http::StatusCode::BAD_REQUEST,
+        Json(json!({ "detail": detail.into() })),
+    )
+        .into_response()
+}
+
+fn build_admin_provider_not_found_response(detail: impl Into<String>) -> Response<Body> {
+    (
+        http::StatusCode::NOT_FOUND,
+        Json(json!({ "detail": detail.into() })),
+    )
+        .into_response()
+}
+
+pub(crate) async fn maybe_build_local_admin_provider_writes_response(
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
+    request_body: Option<&Bytes>,
+    route_kind: Option<&str>,
+) -> Result<Option<Response<Body>>, GatewayError> {
+    if route_kind == Some("create_provider")
+        && request_context.method() == http::Method::POST
+        && is_admin_providers_root(request_context.path())
+    {
+        let Some(request_body) = request_body else {
+            return Ok(Some(build_admin_provider_bad_request_response(
+                "请求体不能为空",
+            )));
+        };
+        if !state.has_provider_catalog_data_reader() || !state.has_provider_catalog_data_writer() {
+            return Ok(Some(build_admin_providers_data_unavailable_response()));
+        }
+        let payload = match serde_json::from_slice::<AdminProviderCreateRequest>(request_body) {
+            Ok(payload) => payload,
+            Err(_) => {
+                return Ok(Some(build_admin_provider_bad_request_response(
+                    "请求体必须是合法的 JSON 对象",
+                )));
+            }
+        };
+        let (record, shift_existing_priorities_from) =
+            match state.build_admin_create_provider_record(payload).await {
+                Ok(record) => record,
+                Err(message) => {
+                    return Ok(Some(build_admin_provider_bad_request_response(message)));
+                }
+            };
+        let Some(created_provider) = state
+            .create_provider_catalog_provider(&record, shift_existing_priorities_from)
+            .await?
+        else {
+            return Ok(Some(build_admin_providers_data_unavailable_response()));
+        };
+
+        if let Some((base_url, endpoint_signatures)) =
+            state.fixed_provider_template(&created_provider.provider_type)
+        {
+            for endpoint_signature in endpoint_signatures {
+                let endpoint = match build_admin_fixed_provider_endpoint_record(
+                    &created_provider,
+                    endpoint_signature,
+                    base_url,
+                ) {
+                    Ok(endpoint) => endpoint,
+                    Err(message) => {
+                        return Ok(Some(build_admin_provider_bad_request_response(message)));
+                    }
+                };
+                let Some(_) = state.create_provider_catalog_endpoint(&endpoint).await? else {
+                    return Ok(Some(build_admin_providers_data_unavailable_response()));
+                };
+            }
+        }
+
+        return Ok(Some(attach_admin_audit_response(
+            Json(json!({
+                "id": created_provider.id,
+                "name": created_provider.name,
+                "message": "提供商创建成功",
+            }))
+            .into_response(),
+            "admin_provider_created",
+            "create_provider",
+            "provider",
+            &created_provider.id,
+        )));
+    }
+
+    if route_kind == Some("update_provider")
+        && request_context.method() == http::Method::PATCH
+        && request_context.path().starts_with("/api/admin/providers/")
+    {
+        let Some(provider_id) = admin_provider_id_for_manage_path(request_context.path()) else {
+            return Ok(Some(build_admin_provider_not_found_response(
+                "Provider 不存在",
+            )));
+        };
+        let Some(request_body) = request_body else {
+            return Ok(Some(build_admin_provider_bad_request_response(
+                "请求体不能为空",
+            )));
+        };
+        if !state.has_provider_catalog_data_reader() || !state.has_provider_catalog_data_writer() {
+            return Ok(Some(build_admin_providers_data_unavailable_response()));
+        }
+        let raw_value = match serde_json::from_slice::<serde_json::Value>(request_body) {
+            Ok(value) => value,
+            Err(_) => {
+                return Ok(Some(build_admin_provider_bad_request_response(
+                    "请求体必须是合法的 JSON 对象",
+                )));
+            }
+        };
+        let Some(raw_payload) = raw_value.as_object().cloned() else {
+            return Ok(Some(build_admin_provider_bad_request_response(
+                "请求体必须是合法的 JSON 对象",
+            )));
+        };
+        let payload = match serde_json::from_value::<AdminProviderUpdateRequest>(raw_value) {
+            Ok(payload) => payload,
+            Err(_) => {
+                return Ok(Some(build_admin_provider_bad_request_response(
+                    "请求体必须是合法的 JSON 对象",
+                )));
+            }
+        };
+        let Some(existing_provider) = state
+            .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id))
+            .await?
+            .into_iter()
+            .next()
+        else {
+            return Ok(Some(build_admin_provider_not_found_response(format!(
+                "Provider {provider_id} 不存在"
+            ))));
+        };
+        let updated_record = match state
+            .build_admin_update_provider_record(&existing_provider, &raw_payload, payload)
+            .await
+        {
+            Ok(record) => record,
+            Err(detail) => return Ok(Some(build_admin_provider_bad_request_response(detail))),
+        };
+        let Some(_updated) = state
+            .update_provider_catalog_provider(&updated_record)
+            .await?
+        else {
+            return Ok(Some(build_admin_providers_data_unavailable_response()));
+        };
+        return Ok(Some(
+            match state
+                .build_admin_provider_summary_payload(&provider_id)
+                .await
+            {
+                Some(payload) => attach_admin_audit_response(
+                    Json(payload).into_response(),
+                    "admin_provider_updated",
+                    "update_provider",
+                    "provider",
+                    &provider_id,
+                ),
+                None => build_admin_provider_not_found_response(format!(
+                    "Provider {provider_id} 不存在"
+                )),
+            },
+        ));
+    }
+
+    Ok(None)
+}

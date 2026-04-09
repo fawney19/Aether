@@ -1,9 +1,12 @@
-use crate::ai_pipeline::adaptation::private_envelope::normalize_provider_private_response_value as unwrap_local_finalize_response_value;
-use crate::ai_pipeline::conversion::{
+#[cfg(test)]
+use crate::ai_pipeline_api::core_success_background_report_kind;
+use crate::ai_pipeline_api::{
     build_core_error_body_for_client_format, core_error_background_report_kind,
-    core_error_default_client_api_format, is_core_error_finalize_kind, LocalCoreSyncErrorKind,
+    core_error_default_client_api_format, is_core_error_finalize_kind,
+    maybe_compile_sync_finalize_response,
+    normalize_provider_private_response_value as unwrap_local_finalize_response_value,
+    LocalCoreSyncErrorKind,
 };
-use crate::ai_pipeline::finalize::maybe_compile_sync_finalize_response;
 use crate::api::response::build_client_response_from_parts;
 use crate::control::GatewayControlDecision;
 use crate::usage::spawn_sync_report;
@@ -240,7 +243,7 @@ fn resolve_local_sync_source_body_json(
 
     if let Some(report_context) = payload.report_context.as_ref() {
         if let Some(unwrapped) =
-            unwrap_local_finalize_response_value(body_json.clone(), report_context)?
+            unwrap_local_finalize_response_value(body_json.clone(), report_context)
         {
             return Ok(Some(unwrapped));
         }
@@ -286,8 +289,7 @@ pub(crate) fn resolve_core_error_background_report_kind(report_kind: &str) -> Op
 
 #[cfg(test)]
 pub(crate) fn resolve_core_success_background_report_kind(report_kind: &str) -> Option<String> {
-    crate::ai_pipeline::conversion::core_success_background_report_kind(report_kind)
-        .map(ToOwned::to_owned)
+    core_success_background_report_kind(report_kind).map(ToOwned::to_owned)
 }
 
 fn resolve_local_sync_error_status_code(status_code: u16, body_json: &serde_json::Value) -> u16 {

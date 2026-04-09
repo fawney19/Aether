@@ -1,5 +1,6 @@
+use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::shared::mark_external_models_official_providers;
-use crate::{AppState, GatewayError};
+use crate::GatewayError;
 use serde_json::json;
 use tracing::warn;
 
@@ -21,7 +22,7 @@ fn normalize_admin_external_models_payload(payload: serde_json::Value) -> serde_
 }
 
 async fn store_admin_external_models_cache(
-    state: &AppState,
+    state: &AdminAppState<'_>,
     payload: &serde_json::Value,
 ) -> Result<(), GatewayError> {
     let Some(runner) = state.redis_kv_runner() else {
@@ -41,11 +42,11 @@ async fn store_admin_external_models_cache(
 }
 
 async fn fetch_admin_external_models_from_source(
-    state: &AppState,
+    state: &AdminAppState<'_>,
 ) -> Result<serde_json::Value, GatewayError> {
     let url = admin_external_models_source_url();
     let response = state
-        .client
+        .http_client()
         .get(&url)
         .send()
         .await
@@ -61,7 +62,7 @@ async fn fetch_admin_external_models_from_source(
 }
 
 pub(crate) async fn read_admin_external_models_cache(
-    state: &AppState,
+    state: &AdminAppState<'_>,
 ) -> Result<Option<serde_json::Value>, GatewayError> {
     if let Some(runner) = state.redis_kv_runner() {
         match runner.client().get_multiplexed_async_connection().await {
@@ -113,7 +114,7 @@ pub(crate) async fn read_admin_external_models_cache(
 }
 
 pub(crate) async fn clear_admin_external_models_cache(
-    state: &AppState,
+    state: &AdminAppState<'_>,
 ) -> Result<serde_json::Value, GatewayError> {
     let Some(runner) = state.redis_kv_runner() else {
         return Ok(json!({
@@ -137,14 +138,22 @@ mod tests {
         admin_external_models_source_url, normalize_admin_external_models_payload,
         read_admin_external_models_cache, ADMIN_EXTERNAL_MODELS_SOURCE_URL_ENV,
     };
+    use crate::handlers::admin::request::AdminAppState;
     use crate::tests::{start_server, AppState};
     use axum::routing::get;
     use axum::{Json, Router};
     use serde_json::json;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn admin_external_models_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     struct TestEnvVarGuard {
         key: &'static str,
         previous: Option<String>,
+        _lock: Option<MutexGuard<'static, ()>>,
     }
 
     impl Drop for TestEnvVarGuard {
@@ -158,9 +167,14 @@ mod tests {
     }
 
     fn set_test_env_var(key: &'static str, value: &str) -> TestEnvVarGuard {
+        let lock = admin_external_models_env_lock().lock().ok();
         let previous = std::env::var(key).ok();
         std::env::set_var(key, value);
-        TestEnvVarGuard { key, previous }
+        TestEnvVarGuard {
+            key,
+            previous,
+            _lock: lock,
+        }
     }
 
     #[test]
@@ -218,7 +232,7 @@ mod tests {
         );
 
         let state = AppState::new().expect("gateway should build");
-        let payload = read_admin_external_models_cache(&state)
+        let payload = read_admin_external_models_cache(&AdminAppState::new(&state))
             .await
             .expect("external models read should succeed")
             .expect("payload should be fetched");

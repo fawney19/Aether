@@ -1,7 +1,6 @@
 use super::extractors::admin_rpm_key_id;
-use super::health_builders::build_admin_key_rpm_payload;
-use crate::control::GatewayPublicRequestContext;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use axum::{
     body::Body,
     http,
@@ -12,20 +11,20 @@ use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) async fn maybe_build_local_admin_endpoints_rpm_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
+    let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
 
     if decision.route_family.as_deref() == Some("endpoints_rpm")
         && decision.route_kind.as_deref() == Some("key_rpm")
         && request_context
-            .request_path
+            .path()
             .starts_with("/api/admin/endpoints/rpm/key/")
     {
-        let Some(key_id) = admin_rpm_key_id(&request_context.request_path) else {
+        let Some(key_id) = admin_rpm_key_id(request_context.path()) else {
             return Ok(Some(
                 (
                     http::StatusCode::NOT_FOUND,
@@ -35,7 +34,7 @@ pub(super) async fn maybe_build_local_admin_endpoints_rpm_response(
             ));
         };
         return Ok(Some(
-            match build_admin_key_rpm_payload(state, &key_id).await {
+            match state.build_admin_key_rpm_payload(&key_id).await {
                 Some(payload) => Json(payload).into_response(),
                 None => (
                     http::StatusCode::NOT_FOUND,
@@ -48,12 +47,12 @@ pub(super) async fn maybe_build_local_admin_endpoints_rpm_response(
 
     if decision.route_family.as_deref() == Some("endpoints_rpm")
         && decision.route_kind.as_deref() == Some("reset_key_rpm")
-        && request_context.request_method == http::Method::DELETE
+        && request_context.method() == http::Method::DELETE
         && request_context
-            .request_path
+            .path()
             .starts_with("/api/admin/endpoints/rpm/key/")
     {
-        let Some(key_id) = admin_rpm_key_id(&request_context.request_path) else {
+        let Some(key_id) = admin_rpm_key_id(request_context.path()) else {
             return Ok(Some(
                 (
                     http::StatusCode::NOT_FOUND,

@@ -3,16 +3,16 @@ use super::{
     callbacks::maybe_build_local_admin_payment_callbacks_response,
     orders::maybe_build_local_admin_payment_orders_response,
 };
-use crate::control::GatewayPublicRequestContext;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use axum::{body::Body, http, response::Response};
 
 pub(super) async fn maybe_build_local_admin_payments_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&axum::body::Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
+    let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
 
@@ -20,30 +20,30 @@ pub(super) async fn maybe_build_local_admin_payments_response(
         return Ok(None);
     }
 
-    let normalized_path = request_context.request_path.trim_end_matches('/');
+    let normalized_path = request_context.path().trim_end_matches('/');
     let path = if normalized_path.is_empty() {
-        request_context.request_path.as_str()
+        request_context.path()
     } else {
         normalized_path
     };
-    let is_payments_route = (request_context.request_method == http::Method::GET
+    let is_payments_route = (request_context.method() == http::Method::GET
         && path == "/api/admin/payments/orders")
-        || (request_context.request_method == http::Method::GET
+        || (request_context.method() == http::Method::GET
             && path.starts_with("/api/admin/payments/orders/")
             && path.matches('/').count() == 5)
-        || (request_context.request_method == http::Method::POST
+        || (request_context.method() == http::Method::POST
             && path.starts_with("/api/admin/payments/orders/")
             && path.ends_with("/expire")
             && path.matches('/').count() == 6)
-        || (request_context.request_method == http::Method::POST
+        || (request_context.method() == http::Method::POST
             && path.starts_with("/api/admin/payments/orders/")
             && path.ends_with("/credit")
             && path.matches('/').count() == 6)
-        || (request_context.request_method == http::Method::POST
+        || (request_context.method() == http::Method::POST
             && path.starts_with("/api/admin/payments/orders/")
             && path.ends_with("/fail")
             && path.matches('/').count() == 6)
-        || (request_context.request_method == http::Method::GET
+        || (request_context.method() == http::Method::GET
             && path == "/api/admin/payments/callbacks");
 
     if !is_payments_route {

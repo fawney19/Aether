@@ -7,13 +7,15 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use serde_json::json;
 
 use super::super::{build_router_with_state, start_server, AppState};
+use crate::admin_api::{
+    maybe_build_local_admin_security_response, AdminAppState, AdminRequestContext,
+};
 use crate::audit::AdminAuditEvent;
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_MANAGEMENT_TOKEN_ID_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER,
     TRUSTED_ADMIN_USER_ID_HEADER, TRUSTED_ADMIN_USER_ROLE_HEADER,
 };
 use crate::control::resolve_public_request_context;
-use crate::handlers::admin::auth::maybe_build_local_admin_security_response;
 
 async fn send_admin_security_request(
     gateway: Router,
@@ -98,10 +100,14 @@ async fn local_admin_security_response(
     .await
     .expect("request context should resolve");
     let body_bytes = body.map(|value| Bytes::from(value.to_string()));
-    maybe_build_local_admin_security_response(state, &request_context, body_bytes.as_ref())
-        .await
-        .expect("local security response should build")
-        .expect("security route should resolve locally")
+    maybe_build_local_admin_security_response(
+        &AdminAppState::new(state),
+        &AdminRequestContext::new(&request_context),
+        body_bytes.as_ref(),
+    )
+    .await
+    .expect("local security response should build")
+    .expect("security route should resolve locally")
 }
 
 #[tokio::test]

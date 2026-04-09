@@ -4,9 +4,7 @@ use axum::http::Response;
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
 use aether_scheduler_core::SchedulerRequestCandidateStatusUpdate;
 
-use crate::ai_pipeline::planner::plan_builders::{
-    LocalStreamPlanAndReport, LocalSyncPlanAndReport,
-};
+use crate::ai_pipeline_api::{LocalStreamPlanAndReport, LocalSyncPlanAndReport};
 use crate::control::GatewayControlDecision;
 use crate::execution_runtime::{execute_execution_runtime_stream, execute_execution_runtime_sync};
 use crate::request_candidate_runtime::record_local_request_candidate_status;

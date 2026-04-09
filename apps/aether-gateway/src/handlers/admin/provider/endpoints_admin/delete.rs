@@ -1,8 +1,8 @@
 use super::extractors::admin_endpoint_id;
 use super::payloads::key_api_formats_without_entry;
 use super::support::build_admin_endpoints_data_unavailable_response;
-use crate::control::GatewayPublicRequestContext;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -13,20 +13,18 @@ use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) async fn maybe_handle(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     _request_body: Option<&Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
+    let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
 
     if decision.route_family.as_deref() != Some("endpoints_manage")
         || decision.route_kind.as_deref() != Some("delete_endpoint")
-        || request_context.request_method != http::Method::DELETE
-        || !request_context
-            .request_path
-            .starts_with("/api/admin/endpoints/")
+        || request_context.method() != http::Method::DELETE
+        || !request_context.path().starts_with("/api/admin/endpoints/")
     {
         return Ok(None);
     }
@@ -35,7 +33,7 @@ pub(super) async fn maybe_handle(
         return Ok(Some(build_admin_endpoints_data_unavailable_response()));
     }
 
-    let Some(endpoint_id) = admin_endpoint_id(&request_context.request_path) else {
+    let Some(endpoint_id) = admin_endpoint_id(request_context.path()) else {
         return Ok(Some(
             (
                 http::StatusCode::NOT_FOUND,

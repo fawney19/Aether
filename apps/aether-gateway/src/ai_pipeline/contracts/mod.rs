@@ -1,11 +1,13 @@
 pub(crate) mod control_payloads;
 
-pub(crate) use aether_ai_pipeline::contracts::{
+pub(crate) use crate::ai_pipeline::{
     core_error_background_report_kind, core_error_default_client_api_format,
     core_success_background_report_kind, implicit_sync_finalize_report_kind,
-    CLAUDE_CHAT_STREAM_PLAN_KIND, CLAUDE_CHAT_STREAM_SUCCESS_REPORT_KIND,
-    CLAUDE_CHAT_SYNC_ERROR_REPORT_KIND, CLAUDE_CHAT_SYNC_FINALIZE_REPORT_KIND,
-    CLAUDE_CHAT_SYNC_PLAN_KIND, CLAUDE_CHAT_SYNC_SUCCESS_REPORT_KIND, CLAUDE_CLI_STREAM_PLAN_KIND,
+    ExecutionRuntimeAuthContext, GatewayControlPlanRequest, GatewayControlPlanResponse,
+    GatewayControlSyncDecisionResponse, CLAUDE_CHAT_STREAM_PLAN_KIND,
+    CLAUDE_CHAT_STREAM_SUCCESS_REPORT_KIND, CLAUDE_CHAT_SYNC_ERROR_REPORT_KIND,
+    CLAUDE_CHAT_SYNC_FINALIZE_REPORT_KIND, CLAUDE_CHAT_SYNC_PLAN_KIND,
+    CLAUDE_CHAT_SYNC_SUCCESS_REPORT_KIND, CLAUDE_CLI_STREAM_PLAN_KIND,
     CLAUDE_CLI_STREAM_SUCCESS_REPORT_KIND, CLAUDE_CLI_SYNC_ERROR_REPORT_KIND,
     CLAUDE_CLI_SYNC_FINALIZE_REPORT_KIND, CLAUDE_CLI_SYNC_PLAN_KIND,
     CLAUDE_CLI_SYNC_SUCCESS_REPORT_KIND, EXECUTION_RUNTIME_STREAM_ACTION,
@@ -32,7 +34,4 @@ pub(crate) use aether_ai_pipeline::contracts::{
     OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND,
     OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
 };
-pub(crate) use control_payloads::{
-    build_gateway_plan_request, generic_decision_missing_exact_provider_request,
-    GatewayControlPlanRequest, GatewayControlPlanResponse, GatewayControlSyncDecisionResponse,
-};
+pub(crate) use control_payloads::generic_decision_missing_exact_provider_request;

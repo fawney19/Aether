@@ -5,18 +5,16 @@ use serde_json::json;
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::ai_pipeline::control_facade::GatewayControlDecision;
-use crate::ai_pipeline::execution_facade::{ConversionMode, ExecutionStrategy};
-use crate::ai_pipeline::planner::auth_snapshot_facade::{
-    read_auth_api_key_snapshot, GatewayAuthApiKeySnapshot,
-};
 use crate::ai_pipeline::planner::candidate_affinity::prefer_local_tunnel_owner_candidates;
-use crate::ai_pipeline::planner::candidate_runtime_facade::persist_available_local_candidate;
-use crate::ai_pipeline::planner::scheduler_facade::list_selectable_candidates;
+use crate::ai_pipeline::{
+    resolve_local_decision_execution_runtime_auth_context, ConversionMode, ExecutionStrategy,
+    GatewayControlDecision,
+};
+use crate::ai_pipeline::{GatewayAuthApiKeySnapshot, PlannerAppState};
 use crate::clock::current_unix_secs;
 use crate::{append_execution_contract_fields_to_value, AppState, GatewayError};
 
-use super::types::{
+use super::{
     LocalStandardCandidateAttempt, LocalStandardDecisionInput, LocalStandardSourceFamily,
     LocalStandardSourceMode, LocalStandardSpec,
 };
@@ -29,9 +27,8 @@ pub(super) async fn resolve_local_standard_decision_input(
     body_json: &serde_json::Value,
     spec: LocalStandardSpec,
 ) -> Option<LocalStandardDecisionInput> {
-    let Some(auth_context) = decision.auth_context.clone().filter(|auth_context| {
-        !auth_context.user_id.trim().is_empty() && !auth_context.api_key_id.trim().is_empty()
-    }) else {
+    let planner_state = PlannerAppState::new(state);
+    let Some(auth_context) = resolve_local_decision_execution_runtime_auth_context(decision) else {
         return None;
     };
 
@@ -45,13 +42,13 @@ pub(super) async fn resolve_local_standard_decision_input(
         LocalStandardSourceFamily::Gemini => extract_gemini_model_from_path(parts.uri.path())?,
     };
 
-    let auth_snapshot = match read_auth_api_key_snapshot(
-        state,
-        &auth_context.user_id,
-        &auth_context.api_key_id,
-        current_unix_secs(),
-    )
-    .await
+    let auth_snapshot = match planner_state
+        .read_auth_api_key_snapshot(
+            &auth_context.user_id,
+            &auth_context.api_key_id,
+            current_unix_secs(),
+        )
+        .await
     {
         Ok(Some(snapshot)) => snapshot,
         Ok(None) => return None,
@@ -79,6 +76,7 @@ pub(super) async fn materialize_local_standard_candidate_attempts(
     input: &LocalStandardDecisionInput,
     spec: LocalStandardSpec,
 ) -> Result<Vec<LocalStandardCandidateAttempt>, GatewayError> {
+    let planner_state = PlannerAppState::new(state);
     let mut seen_candidates = BTreeSet::new();
     let mut candidates = Vec::new();
     for candidate_api_format in candidate_api_formats_for_spec(spec) {
@@ -87,15 +85,15 @@ pub(super) async fn materialize_local_standard_candidate_attempts(
         } else {
             None
         };
-        let mut selected_candidates = list_selectable_candidates(
-            state,
-            candidate_api_format,
-            &input.requested_model,
-            spec.require_streaming,
-            auth_snapshot,
-            current_unix_secs(),
-        )
-        .await?;
+        let mut selected_candidates = planner_state
+            .list_selectable_candidates(
+                candidate_api_format,
+                &input.requested_model,
+                spec.require_streaming,
+                auth_snapshot,
+                current_unix_secs(),
+            )
+            .await?;
         if auth_snapshot.is_none() {
             selected_candidates.retain(|candidate| {
                 auth_snapshot_allows_cross_format_candidate(
@@ -120,7 +118,7 @@ pub(super) async fn materialize_local_standard_candidate_attempts(
             }
         }
     }
-    let candidates = prefer_local_tunnel_owner_candidates(state, candidates).await;
+    let candidates = prefer_local_tunnel_owner_candidates(planner_state, candidates).await;
 
     let created_at_unix_secs = current_unix_secs();
     let mut attempts = Vec::with_capacity(candidates.len());
@@ -160,19 +158,19 @@ pub(super) async fn materialize_local_standard_candidate_attempts(
             candidate.endpoint_api_format.as_str(),
         );
 
-        let stored_candidate_id = persist_available_local_candidate(
-            state,
-            trace_id,
-            &input.auth_context.user_id,
-            &input.auth_context.api_key_id,
-            &candidate,
-            candidate_index as u32,
-            &candidate_id,
-            Some(extra_data),
-            created_at_unix_secs,
-            "gateway local standard decision request candidate upsert failed",
-        )
-        .await;
+        let stored_candidate_id = planner_state
+            .persist_available_local_candidate(
+                trace_id,
+                &input.auth_context.user_id,
+                &input.auth_context.api_key_id,
+                &candidate,
+                candidate_index as u32,
+                &candidate_id,
+                Some(extra_data),
+                created_at_unix_secs,
+                "gateway local standard decision request candidate upsert failed",
+            )
+            .await;
 
         attempts.push(LocalStandardCandidateAttempt {
             candidate,

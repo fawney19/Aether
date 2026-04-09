@@ -1,9 +1,7 @@
-use super::write::build_admin_import_provider_models_payload;
-use crate::control::GatewayControlDecision;
-use crate::control::GatewayPublicRequestContext;
 use crate::handlers::admin::provider::shared::paths::admin_provider_import_models_path;
 use crate::handlers::admin::provider::shared::payloads::AdminImportProviderModelsRequest;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -13,17 +11,15 @@ use axum::{
 use serde_json::json;
 
 pub(super) async fn maybe_handle(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&Bytes>,
-    decision: &GatewayControlDecision,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    if decision.route_family.as_deref() == Some("provider_models_manage")
-        && decision.route_kind.as_deref() == Some("import_from_upstream")
-        && request_context.request_method == http::Method::POST
+    if request_context.route_family() == Some("provider_models_manage")
+        && request_context.route_kind() == Some("import_from_upstream")
+        && request_context.method() == http::Method::POST
     {
-        let Some(provider_id) = admin_provider_import_models_path(&request_context.request_path)
-        else {
+        let Some(provider_id) = admin_provider_import_models_path(request_context.path()) else {
             return Ok(Some(
                 (
                     http::StatusCode::NOT_FOUND,
@@ -68,19 +64,21 @@ pub(super) async fn maybe_handle(
                 ));
             }
         };
-        let payload =
-            match build_admin_import_provider_models_payload(state, &provider_id, payload).await {
-                Ok(payload) => payload,
-                Err(detail) => {
-                    return Ok(Some(
-                        (
-                            http::StatusCode::BAD_REQUEST,
-                            Json(json!({ "detail": detail })),
-                        )
-                            .into_response(),
-                    ));
-                }
-            };
+        let payload = match state
+            .build_admin_import_provider_models_payload(&provider_id, payload)
+            .await
+        {
+            Ok(payload) => payload,
+            Err(detail) => {
+                return Ok(Some(
+                    (
+                        http::StatusCode::BAD_REQUEST,
+                        Json(json!({ "detail": detail })),
+                    )
+                        .into_response(),
+                ));
+            }
+        };
         return Ok(Some(Json(payload).into_response()));
     }
 

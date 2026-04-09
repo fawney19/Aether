@@ -1,3 +1,4 @@
+use crate::admin_api::build_internal_control_error_response;
 use crate::constants::{
     CONTROL_ACTION_HEADER, CONTROL_ACTION_PROXY_PUBLIC, CONTROL_EXECUTED_HEADER,
     CONTROL_EXECUTION_RUNTIME_CANDIDATE_KEY, EXECUTION_PATH_CONTROL_EXECUTE_STREAM,
@@ -12,7 +13,6 @@ use crate::execution_runtime::{
     maybe_build_local_video_success_outcome, resolve_local_sync_error_background_report_kind,
     resolve_local_sync_success_background_report_kind,
 };
-use crate::handlers::admin::provider::oauth::refresh::build_internal_control_error_response;
 use crate::handlers::shared::{
     unix_secs_to_rfc3339, InternalTunnelHeartbeatRequest, InternalTunnelNodeStatusRequest,
 };

@@ -1,8 +1,8 @@
 use super::extractors::admin_default_body_rules_api_format;
 use crate::api::ai::admin_default_body_rules_for_signature;
-use crate::control::GatewayPublicRequestContext;
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::query_param_value;
-use crate::{AppState, GatewayError};
+use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -12,26 +12,25 @@ use axum::{
 use serde_json::json;
 
 pub(super) async fn maybe_handle(
-    _state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    _state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     _request_body: Option<&Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
+    let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
 
     if decision.route_family.as_deref() != Some("endpoints_manage")
         || decision.route_kind.as_deref() != Some("default_body_rules")
         || !request_context
-            .request_path
+            .path()
             .starts_with("/api/admin/endpoints/defaults/")
-        || !request_context.request_path.ends_with("/body-rules")
+        || !request_context.path().ends_with("/body-rules")
     {
         return Ok(None);
     }
 
-    let Some(api_format) = admin_default_body_rules_api_format(&request_context.request_path)
-    else {
+    let Some(api_format) = admin_default_body_rules_api_format(request_context.path()) else {
         return Ok(Some(
             (
                 http::StatusCode::BAD_REQUEST,
@@ -40,10 +39,7 @@ pub(super) async fn maybe_handle(
                 .into_response(),
         ));
     };
-    let provider_type = query_param_value(
-        request_context.request_query_string.as_deref(),
-        "provider_type",
-    );
+    let provider_type = query_param_value(request_context.query_string(), "provider_type");
 
     Ok(Some(
         match admin_default_body_rules_for_signature(&api_format, provider_type.as_deref()) {

@@ -8,65 +8,65 @@ use super::{
     build_admin_update_user_api_key_response, build_admin_update_user_response,
     build_admin_users_data_unavailable_response,
 };
-use crate::control::GatewayPublicRequestContext;
-use crate::{AppState, GatewayError};
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::GatewayError;
 use axum::{body::Body, http, response::Response};
 
-fn is_admin_users_route(request_context: &GatewayPublicRequestContext) -> bool {
-    let path = request_context.request_path.as_str();
-    (request_context.request_method == http::Method::GET
+fn is_admin_users_route(request_context: &AdminRequestContext<'_>) -> bool {
+    let path = request_context.path();
+    (request_context.method() == http::Method::GET
         && matches!(path, "/api/admin/users" | "/api/admin/users/"))
-        || (request_context.request_method == http::Method::POST
+        || (request_context.method() == http::Method::POST
             && matches!(path, "/api/admin/users" | "/api/admin/users/"))
-        || ((request_context.request_method == http::Method::GET
-            || request_context.request_method == http::Method::PUT
-            || request_context.request_method == http::Method::DELETE)
+        || ((request_context.method() == http::Method::GET
+            || request_context.method() == http::Method::PUT
+            || request_context.method() == http::Method::DELETE)
             && path.starts_with("/api/admin/users/")
             && !path.ends_with("/sessions")
             && !path.contains("/sessions/")
             && !path.ends_with("/api-keys")
             && !path.contains("/api-keys/")
             && path.matches('/').count() == 4)
-        || (request_context.request_method == http::Method::GET
+        || (request_context.method() == http::Method::GET
             && path.starts_with("/api/admin/users/")
             && path.ends_with("/sessions")
             && path.matches('/').count() == 5)
-        || (request_context.request_method == http::Method::DELETE
+        || (request_context.method() == http::Method::DELETE
             && path.starts_with("/api/admin/users/")
             && path.ends_with("/sessions")
             && path.matches('/').count() == 5)
-        || (request_context.request_method == http::Method::DELETE
+        || (request_context.method() == http::Method::DELETE
             && path.starts_with("/api/admin/users/")
             && path.contains("/sessions/")
             && path.matches('/').count() == 6)
-        || ((request_context.request_method == http::Method::GET
-            || request_context.request_method == http::Method::POST)
+        || ((request_context.method() == http::Method::GET
+            || request_context.method() == http::Method::POST)
             && path.starts_with("/api/admin/users/")
             && path.ends_with("/api-keys")
             && path.matches('/').count() == 5)
-        || ((request_context.request_method == http::Method::DELETE
-            || request_context.request_method == http::Method::PUT)
+        || ((request_context.method() == http::Method::DELETE
+            || request_context.method() == http::Method::PUT)
             && path.starts_with("/api/admin/users/")
             && path.contains("/api-keys/")
             && !path.ends_with("/lock")
             && !path.ends_with("/full-key")
             && path.matches('/').count() == 6)
-        || (request_context.request_method == http::Method::PATCH
+        || (request_context.method() == http::Method::PATCH
             && path.starts_with("/api/admin/users/")
             && path.ends_with("/lock")
             && path.matches('/').count() == 7)
-        || (request_context.request_method == http::Method::GET
+        || (request_context.method() == http::Method::GET
             && path.starts_with("/api/admin/users/")
             && path.ends_with("/full-key")
             && path.matches('/').count() == 7)
 }
 
 pub(super) async fn maybe_build_local_admin_users_routes_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     request_body: Option<&axum::body::Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
+    let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
 

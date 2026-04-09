@@ -1,7 +1,7 @@
-use crate::ai_pipeline::control_facade::GatewayControlDecision;
 use crate::ai_pipeline::planner::plan_builders::{
     LocalStreamPlanAndReport, LocalSyncPlanAndReport,
 };
+use crate::ai_pipeline::GatewayControlDecision;
 use crate::{AppState, GatewayControlSyncDecisionResponse, GatewayError};
 
 mod decision;

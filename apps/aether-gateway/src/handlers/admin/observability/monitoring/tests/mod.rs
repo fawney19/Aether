@@ -1,5 +1,8 @@
+use super::maybe_build_local_admin_monitoring_response;
 use super::test_support::*;
-use super::{maybe_build_local_admin_monitoring_response, AppState};
+use crate::control::GatewayPublicRequestContext;
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::AppState;
 use aether_data_contracts::repository::{
     candidates::{RequestCandidateStatus, StoredRequestCandidate},
     provider_catalog::{
@@ -23,12 +26,23 @@ use aether_data::repository::users::{
 
 mod basics;
 
+pub(super) async fn local_monitoring_response(
+    state: &AppState,
+    context: &GatewayPublicRequestContext,
+) -> crate::handlers::admin::request::AdminRouteResult {
+    maybe_build_local_admin_monitoring_response(
+        &AdminAppState::new(state),
+        &AdminRequestContext::new(context),
+    )
+    .await
+}
+
 #[tokio::test]
 async fn admin_monitoring_cache_affinities_returns_empty_payload_without_runtime_or_test_entries() {
     let state = AppState::new().expect("state should build");
     let context = request_context(http::Method::GET, "/api/admin/monitoring/cache/affinities");
 
-    let response = maybe_build_local_admin_monitoring_response(&state, &context)
+    let response = local_monitoring_response(&state, &context)
         .await
         .expect("handler should not error")
         .expect("route should be handled locally");
@@ -67,7 +81,7 @@ async fn admin_monitoring_cache_affinity_returns_not_found_without_runtime_or_te
         "/api/admin/monitoring/cache/affinity/alice",
     );
 
-    let response = maybe_build_local_admin_monitoring_response(&state, &context)
+    let response = local_monitoring_response(&state, &context)
         .await
         .expect("handler should not error")
         .expect("route should be handled locally");
@@ -136,7 +150,7 @@ async fn admin_monitoring_cache_affinities_and_affinity_return_local_payload_fro
         http::Method::GET,
         "/api/admin/monitoring/cache/affinities?keyword=alice&limit=20&offset=0",
     );
-    let list_response = maybe_build_local_admin_monitoring_response(&state, &list_context)
+    let list_response = local_monitoring_response(&state, &list_context)
         .await
         .expect("handler should not error")
         .expect("route should be handled locally");
@@ -172,7 +186,7 @@ async fn admin_monitoring_cache_affinities_and_affinity_return_local_payload_fro
         http::Method::GET,
         "/api/admin/monitoring/cache/affinity/alice",
     );
-    let detail_response = maybe_build_local_admin_monitoring_response(&state, &detail_context)
+    let detail_response = local_monitoring_response(&state, &detail_context)
         .await
         .expect("handler should not error")
         .expect("route should be handled locally");
@@ -235,7 +249,7 @@ async fn admin_monitoring_cache_users_delete_returns_local_payload_from_test_sto
             }),
         );
 
-    let response = maybe_build_local_admin_monitoring_response(
+    let response = local_monitoring_response(
         &state,
         &request_context(
             http::Method::DELETE,
@@ -280,7 +294,7 @@ async fn admin_monitoring_cache_users_delete_returns_not_found_for_unknown_ident
             }),
         );
 
-    let response = maybe_build_local_admin_monitoring_response(
+    let response = local_monitoring_response(
         &state,
         &request_context(
             http::Method::DELETE,
@@ -329,7 +343,7 @@ async fn admin_monitoring_cache_flush_returns_local_payload_from_test_store() {
             }),
         );
 
-    let response = maybe_build_local_admin_monitoring_response(
+    let response = local_monitoring_response(
         &state,
         &request_context(http::Method::DELETE, "/api/admin/monitoring/cache"),
     )
@@ -377,7 +391,7 @@ async fn admin_monitoring_cache_provider_delete_returns_local_payload_from_test_
             }),
         );
 
-    let response = maybe_build_local_admin_monitoring_response(
+    let response = local_monitoring_response(
         &state,
         &request_context(
             http::Method::DELETE,
@@ -426,7 +440,7 @@ async fn admin_monitoring_model_mapping_delete_returns_local_payload_from_test_s
             json!({"id": "model-alpha"}),
         );
 
-    let response = maybe_build_local_admin_monitoring_response(
+    let response = local_monitoring_response(
         &state,
         &request_context(
             http::Method::DELETE,
@@ -467,7 +481,7 @@ async fn admin_monitoring_model_mapping_delete_model_returns_local_payload_from_
             json!({"name": "model-beta"}),
         );
 
-    let response = maybe_build_local_admin_monitoring_response(
+    let response = local_monitoring_response(
         &state,
         &request_context(
             http::Method::DELETE,
@@ -515,7 +529,7 @@ async fn admin_monitoring_model_mapping_delete_provider_returns_local_payload_fr
             json!({"provider_id": "provider-2"}),
         );
 
-    let response = maybe_build_local_admin_monitoring_response(
+    let response = local_monitoring_response(
         &state,
         &request_context(
             http::Method::DELETE,
@@ -555,7 +569,7 @@ async fn admin_monitoring_redis_keys_delete_returns_local_payload_from_test_stor
         .with_admin_monitoring_redis_key_for_tests("dashboard:stats:user-1", json!({"ok": true}))
         .with_admin_monitoring_redis_key_for_tests("user:user-1", json!({"ok": true}));
 
-    let response = maybe_build_local_admin_monitoring_response(
+    let response = local_monitoring_response(
         &state,
         &request_context(
             http::Method::DELETE,
@@ -621,7 +635,7 @@ async fn admin_monitoring_cache_affinity_delete_returns_local_payload_from_test_
             }),
         );
 
-    let response = maybe_build_local_admin_monitoring_response(
+    let response = local_monitoring_response(
         &state,
         &request_context(
             http::Method::DELETE,
@@ -665,7 +679,7 @@ async fn admin_monitoring_cache_affinity_delete_returns_not_found_for_mismatched
             }),
         );
 
-    let response = maybe_build_local_admin_monitoring_response(
+    let response = local_monitoring_response(
         &state,
         &request_context(
             http::Method::DELETE,
@@ -721,7 +735,7 @@ async fn admin_monitoring_cache_metrics_returns_local_payload() {
         );
     let context = request_context(http::Method::GET, "/api/admin/monitoring/cache/metrics");
 
-    let response = maybe_build_local_admin_monitoring_response(&state, &context)
+    let response = local_monitoring_response(&state, &context)
         .await
         .expect("handler should not error")
         .expect("route should be handled locally");
@@ -752,7 +766,7 @@ async fn admin_monitoring_cache_config_returns_local_payload() {
     let state = AppState::new().expect("state should build");
     let context = request_context(http::Method::GET, "/api/admin/monitoring/cache/config");
 
-    let response = maybe_build_local_admin_monitoring_response(&state, &context)
+    let response = local_monitoring_response(&state, &context)
         .await
         .expect("handler should not error")
         .expect("route should be handled locally");
@@ -791,7 +805,7 @@ async fn admin_monitoring_model_mapping_stats_returns_local_payload_without_redi
         "/api/admin/monitoring/cache/model-mapping/stats",
     );
 
-    let response = maybe_build_local_admin_monitoring_response(&state, &context)
+    let response = local_monitoring_response(&state, &context)
         .await
         .expect("handler should not error")
         .expect("route should be handled locally");
@@ -853,7 +867,7 @@ async fn admin_monitoring_reset_error_stats_returns_local_payload_and_clears_fut
         http::Method::DELETE,
         "/api/admin/monitoring/resilience/error-stats",
     );
-    let reset_response = maybe_build_local_admin_monitoring_response(&state, &reset_context)
+    let reset_response = local_monitoring_response(&state, &reset_context)
         .await
         .expect("handler should not error")
         .expect("route should be handled locally");
@@ -875,7 +889,7 @@ async fn admin_monitoring_reset_error_stats_returns_local_payload_and_clears_fut
 
     let status_context =
         request_context(http::Method::GET, "/api/admin/monitoring/resilience-status");
-    let status_response = maybe_build_local_admin_monitoring_response(&state, &status_context)
+    let status_response = local_monitoring_response(&state, &status_context)
         .await
         .expect("handler should not error")
         .expect("route should be handled locally");
@@ -898,7 +912,7 @@ async fn admin_monitoring_redis_keys_returns_local_payload_without_redis() {
     let state = AppState::new().expect("state should build");
     let context = request_context(http::Method::GET, "/api/admin/monitoring/cache/redis-keys");
 
-    let response = maybe_build_local_admin_monitoring_response(&state, &context)
+    let response = local_monitoring_response(&state, &context)
         .await
         .expect("handler should not error")
         .expect("route should be handled locally");
@@ -921,7 +935,7 @@ async fn admin_monitoring_redis_keys_delete_returns_unavailable_without_redis() 
         "/api/admin/monitoring/cache/redis-keys/upstream_models",
     );
 
-    let response = maybe_build_local_admin_monitoring_response(&state, &context)
+    let response = local_monitoring_response(&state, &context)
         .await
         .expect("handler should not error")
         .expect("route should be handled locally");
@@ -967,7 +981,7 @@ async fn admin_monitoring_circuit_history_returns_local_payload() {
         "/api/admin/monitoring/resilience/circuit-history?limit=10",
     );
 
-    let response = maybe_build_local_admin_monitoring_response(&state, &context)
+    let response = local_monitoring_response(&state, &context)
         .await
         .expect("handler should not error")
         .expect("route should be handled locally");

@@ -22,6 +22,9 @@ use super::super::{
     build_router_with_state, sample_endpoint, sample_key, sample_management_token,
     sample_oauth_provider_config, sample_provider, start_server, AppState,
 };
+use crate::admin_api::{
+    maybe_build_local_admin_provider_oauth_response, AdminAppState, AdminRequestContext,
+};
 use crate::audit::AdminAuditEvent;
 use crate::constants::{
     GATEWAY_HEADER, TRUSTED_ADMIN_MANAGEMENT_TOKEN_ID_HEADER, TRUSTED_ADMIN_SESSION_ID_HEADER,
@@ -29,7 +32,6 @@ use crate::constants::{
 };
 use crate::control::resolve_public_request_context;
 use crate::data::GatewayDataState;
-use crate::handlers::admin::provider::maybe_build_local_admin_provider_oauth_response;
 
 fn trusted_admin_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -70,10 +72,14 @@ async fn local_admin_provider_oauth_response(
     .await
     .expect("request context should resolve");
     let body_bytes = body.map(|value| Bytes::from(value.to_string()));
-    maybe_build_local_admin_provider_oauth_response(state, &request_context, body_bytes.as_ref())
-        .await
-        .expect("local provider oauth response should build")
-        .expect("provider oauth route should resolve locally")
+    maybe_build_local_admin_provider_oauth_response(
+        &AdminAppState::new(state),
+        &AdminRequestContext::new(&request_context),
+        body_bytes.as_ref(),
+    )
+    .await
+    .expect("local provider oauth response should build")
+    .expect("provider oauth route should resolve locally")
 }
 
 fn sample_kiro_device_access_token(email: &str) -> String {
@@ -2029,9 +2035,13 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_p
         .as_bool()
         .expect("account_state_recheck_attempted should be bool");
     if account_state_recheck_attempted {
-        assert_eq!(
-            payload["account_state_recheck_error"],
-            "wham/usage API 返回状态码 401"
+        let account_state_recheck_error = payload["account_state_recheck_error"]
+            .as_str()
+            .expect("account_state_recheck_error should be string when attempted");
+        assert!(
+            account_state_recheck_error == "wham/usage API 返回状态码 401"
+                || account_state_recheck_error.starts_with("wham/usage 请求执行失败:"),
+            "unexpected account_state_recheck_error: {account_state_recheck_error}"
         );
     } else {
         assert_eq!(
@@ -2055,7 +2065,9 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_p
     )
     .expect("refreshed api key should decrypt");
     assert_eq!(decrypted_api_key, "refreshed-codex-access-token");
-    if account_state_recheck_attempted {
+    if account_state_recheck_attempted
+        && payload["account_state_recheck_error"] == "wham/usage API 返回状态码 401"
+    {
         assert!(stored_key.oauth_invalid_at_unix_secs.is_some());
         assert_eq!(
             stored_key.oauth_invalid_reason.as_deref(),

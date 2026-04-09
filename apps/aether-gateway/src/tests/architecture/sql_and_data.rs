@@ -200,11 +200,14 @@ fn gateway_auth_data_layer_does_not_keep_ldap_row_wrapper() {
 
 #[test]
 fn gateway_provider_oauth_storage_types_are_owned_by_aether_data() {
-    let provider_oauth_state =
-        read_workspace_file("apps/aether-gateway/src/handlers/admin/provider/oauth/state.rs");
+    let provider_oauth_storage = read_workspace_file(
+        "apps/aether-gateway/src/handlers/admin/provider/oauth/state/storage.rs",
+    );
+    let request_provider_oauth =
+        read_workspace_file("apps/aether-gateway/src/handlers/admin/request/provider/oauth.rs");
     assert!(
-        provider_oauth_state.contains("aether_data::repository::provider_oauth"),
-        "provider_oauth/state.rs should depend on aether-data provider oauth storage types"
+        request_provider_oauth.contains("aether_data::repository::provider_oauth"),
+        "request/provider/oauth.rs should depend on aether-data provider oauth storage types"
     );
     for pattern in [
         "pub(crate) struct StoredAdminProviderOAuthDeviceSession",
@@ -217,17 +220,38 @@ fn gateway_provider_oauth_storage_types_are_owned_by_aether_data() {
         "format!(\"provider_oauth_state:{nonce}\")",
     ] {
         assert!(
-            !provider_oauth_state.contains(pattern),
-            "provider_oauth/state.rs should not own local storage helper {pattern}"
+            !provider_oauth_storage.contains(pattern),
+            "provider_oauth/state/storage.rs should not own local storage helper {pattern}"
+        );
+    }
+    for pattern in [
+        "StoredAdminProviderOAuthDeviceSession",
+        "StoredAdminProviderOAuthState",
+        "provider_oauth_batch_task_storage_key",
+        "build_provider_oauth_batch_task_status_payload",
+        "PROVIDER_OAUTH_BATCH_TASK_TTL_SECS",
+    ] {
+        assert!(
+            request_provider_oauth.contains(pattern),
+            "request/provider/oauth.rs should own aether-data provider oauth storage boundary {pattern}"
         );
     }
 
-    let dispatch_device = read_workspace_file(
-        "apps/aether-gateway/src/handlers/admin/provider/oauth/dispatch/device.rs",
+    assert!(
+        !workspace_file_exists("apps/aether-gateway/src/handlers/admin/provider/oauth/state.rs"),
+        "provider_oauth/state.rs should not exist after oauth storage helpers move under state/storage.rs"
+    );
+
+    let dispatch_device_authorize = read_workspace_file(
+        "apps/aether-gateway/src/handlers/admin/provider/oauth/dispatch/device/authorize.rs",
     );
     assert!(
-        dispatch_device.contains("aether_data::repository::provider_oauth"),
-        "provider_oauth/dispatch/device.rs should use shared provider oauth storage DTOs"
+        dispatch_device_authorize.contains("aether_data::repository::provider_oauth"),
+        "provider_oauth/dispatch/device/authorize.rs should use shared provider oauth storage DTOs"
+    );
+    assert!(
+        !workspace_file_exists("apps/aether-gateway/src/handlers/admin/provider/oauth/dispatch/device.rs"),
+        "provider_oauth/dispatch/device.rs should be removed once device flows move under dispatch/device/"
     );
 
     let shared_provider_oauth =

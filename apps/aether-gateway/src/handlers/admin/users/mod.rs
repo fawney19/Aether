@@ -1,11 +1,10 @@
-use crate::control::GatewayPublicRequestContext;
-use crate::{AppState, GatewayError};
-use axum::{body::Body, response::Response};
+use crate::handlers::admin::request::{AdminRouteRequest, AdminRouteResult};
 
 const ADMIN_USERS_DATA_UNAVAILABLE_DETAIL: &str = "Admin user management data unavailable";
 
 mod api_keys;
 mod lifecycle;
+mod route_seam;
 mod routes;
 mod sessions;
 mod shared;
@@ -40,10 +39,7 @@ use self::shared::{
 pub(crate) use self::shared::{normalize_admin_user_api_formats, normalize_admin_user_string_list};
 
 pub(crate) async fn maybe_build_local_admin_users_response(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
-    request_body: Option<&axum::body::Bytes>,
-) -> Result<Option<Response<Body>>, GatewayError> {
-    routes::maybe_build_local_admin_users_routes_response(state, request_context, request_body)
-        .await
+    request: AdminRouteRequest<'_>,
+) -> AdminRouteResult {
+    route_seam::maybe_build_local_admin_users_response(request).await
 }

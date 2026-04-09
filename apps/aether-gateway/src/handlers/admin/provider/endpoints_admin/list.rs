@@ -1,9 +1,9 @@
-use super::builders::build_admin_provider_endpoints_payload;
 use super::extractors::admin_provider_id_for_endpoints;
+use super::reads::build_admin_provider_endpoints_payload;
 use super::support::build_admin_endpoints_data_unavailable_response;
-use crate::control::GatewayPublicRequestContext;
+use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::query_param_value;
-use crate::{AppState, GatewayError};
+use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
     http,
@@ -13,20 +13,20 @@ use axum::{
 use serde_json::json;
 
 pub(super) async fn maybe_handle(
-    state: &AppState,
-    request_context: &GatewayPublicRequestContext,
+    state: &AdminAppState<'_>,
+    request_context: &AdminRequestContext<'_>,
     _request_body: Option<&Bytes>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
-    let Some(decision) = request_context.control_decision.as_ref() else {
+    let Some(decision) = request_context.decision() else {
         return Ok(None);
     };
 
     if decision.route_family.as_deref() != Some("endpoints_manage")
         || decision.route_kind.as_deref() != Some("list_provider_endpoints")
         || !request_context
-            .request_path
+            .path()
             .starts_with("/api/admin/endpoints/providers/")
-        || !request_context.request_path.ends_with("/endpoints")
+        || !request_context.path().ends_with("/endpoints")
     {
         return Ok(None);
     }
@@ -35,7 +35,7 @@ pub(super) async fn maybe_handle(
         return Ok(Some(build_admin_endpoints_data_unavailable_response()));
     }
 
-    let Some(provider_id) = admin_provider_id_for_endpoints(&request_context.request_path) else {
+    let Some(provider_id) = admin_provider_id_for_endpoints(request_context.path()) else {
         return Ok(Some(
             (
                 http::StatusCode::NOT_FOUND,
@@ -44,10 +44,10 @@ pub(super) async fn maybe_handle(
                 .into_response(),
         ));
     };
-    let skip = query_param_value(request_context.request_query_string.as_deref(), "skip")
+    let skip = query_param_value(request_context.query_string(), "skip")
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
-    let limit = query_param_value(request_context.request_query_string.as_deref(), "limit")
+    let limit = query_param_value(request_context.query_string(), "limit")
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(100);

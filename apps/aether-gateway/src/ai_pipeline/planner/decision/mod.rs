@@ -23,7 +23,3 @@ pub(crate) use super::standard::{
     maybe_build_sync_local_openai_cli_decision_payload,
     maybe_build_sync_local_standard_decision_payload,
 };
-pub(crate) use crate::ai_pipeline::planner::{
-    resolve_execution_runtime_stream_plan_kind as resolve_stream_plan_kind,
-    resolve_execution_runtime_sync_plan_kind as resolve_sync_plan_kind,
-};

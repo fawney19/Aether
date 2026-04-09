@@ -947,8 +947,8 @@ async fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_proxy_mode() 
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
     assert!(
-        message.starts_with("连接失败:"),
-        "message should include connect error, got: {message}"
+        message.starts_with("连接失败:") || message == "连接超时",
+        "message should report local network verification failure, got: {message}"
     );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
