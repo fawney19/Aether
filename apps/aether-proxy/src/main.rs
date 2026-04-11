@@ -36,12 +36,12 @@ fn build_command() -> clap::Command {
                         .default_value(DEFAULT_CONFIG),
                 ),
         )
-        .subcommand(clap::Command::new("start").about("Start the systemd service"))
+        .subcommand(clap::Command::new("start").about("Start the installed service"))
         .subcommand(clap::Command::new("status").about("Show service status"))
         .subcommand(clap::Command::new("logs").about("Tail service logs"))
-        .subcommand(clap::Command::new("restart").about("Restart the systemd service"))
-        .subcommand(clap::Command::new("stop").about("Stop the systemd service"))
-        .subcommand(clap::Command::new("uninstall").about("Uninstall the systemd service"))
+        .subcommand(clap::Command::new("restart").about("Restart the installed service"))
+        .subcommand(clap::Command::new("stop").about("Stop the installed service"))
+        .subcommand(clap::Command::new("uninstall").about("Uninstall the installed service"))
         .subcommand(
             clap::Command::new("upgrade")
                 .about("Self-upgrade from GitHub releases")
@@ -132,12 +132,16 @@ async fn handle_setup_result(outcome: setup::SetupOutcome) -> anyhow::Result<()>
     }
 }
 
-/// Start the proxy server, checking for systemd conflicts first.
 async fn run_proxy(config: Config) -> anyhow::Result<()> {
-    // Warn if systemd service is already running (would cause port conflict).
-    // Skip this check when we ARE the systemd service (INVOCATION_ID is set by systemd).
-    if std::env::var_os("INVOCATION_ID").is_none() && setup::service::is_service_active() {
-        eprintln!("Warning: systemd service is already running.");
+    // Warn if a managed service is already running (would cause conflicts).
+    if std::env::var_os("AETHER_PROXY_SERVICE_MANAGER").is_none()
+        && std::env::var_os("INVOCATION_ID").is_none()
+        && setup::service::is_service_active()
+    {
+        eprintln!(
+            "Warning: {} service is already running.",
+            setup::service::preferred_manager_name()
+        );
         eprintln!("Use `./aether-proxy stop` to stop it first, or manage via subcommands:");
         eprintln!("  ./aether-proxy status / logs / restart / stop");
         std::process::exit(1);

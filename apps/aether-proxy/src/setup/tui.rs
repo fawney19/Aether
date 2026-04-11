@@ -24,7 +24,6 @@ use crate::config::{ConfigFile, ServerEntry};
 
 /// Outcome of the setup wizard, returned to the caller.
 pub enum SetupOutcome {
-    /// Config saved; systemd service installed and started.
     ServiceInstalled,
     /// Config saved; no service -- caller should start the proxy directly.
     ReadyToRun(PathBuf),
@@ -160,7 +159,7 @@ impl App {
                     .into(),
                     kind: FieldKind::Bool,
                     required: true,
-                    help: "Install as systemd service (requires root) -- Enter to toggle",
+                    help: "Install as managed service (requires root) -- Enter to toggle",
                 },
             ],
             selected: 0,
@@ -410,11 +409,8 @@ impl App {
                             && toggled == "true"
                             && !super::service::is_available()
                         {
-                            self.message = Some((
-                                "requires root with systemd, use: sudo aether-proxy setup".into(),
-                                Instant::now(),
-                                true,
-                            ));
+                            self.message =
+                                Some((super::service::unavailable_hint(), Instant::now(), true));
                         } else {
                             self.selected_field_mut().value = toggled.into();
                             self.modified = true;

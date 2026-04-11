@@ -23,11 +23,23 @@ jobs:
       matrix:
         include:
           - name: linux-amd64
+            libc: gnu
             target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             use_cross: true
           - name: linux-arm64
+            libc: gnu
             target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use_cross: true
+          - name: linux-musl-amd64
+            libc: musl
+            target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use_cross: true
+          - name: linux-musl-arm64
+            libc: musl
+            target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             use_cross: true
           - name: macos-amd64
@@ -54,7 +66,6 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: aether-proxy -> target
           key: ${{ matrix.target }}
 
       - name: Install cross
@@ -62,7 +73,7 @@ jobs:
         uses: taiki-e/install-action@cross
 
       - name: Build
-        working-directory: aether-proxy
+        working-directory: apps/aether-proxy
         shell: bash
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then
@@ -75,16 +86,16 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          cd aether-proxy/target/${{ matrix.target }}/release
+          cd target/${{ matrix.target }}/release
           chmod +x aether-proxy
-          tar czf ../../../../aether-proxy-${{ matrix.name }}.tar.gz aether-proxy
+          tar czf ../../../aether-proxy-${{ matrix.name }}.tar.gz aether-proxy
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          cd aether-proxy/target/${{ matrix.target }}/release
-          7z a ../../../../aether-proxy-${{ matrix.name }}.zip aether-proxy.exe
+          cd target/${{ matrix.target }}/release
+          7z a ../../../aether-proxy-${{ matrix.name }}.zip aether-proxy.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
@@ -136,9 +147,9 @@ jobs:
 
       - name: Prepare binaries
         run: |
-          mkdir -p aether-proxy/build/linux-amd64 aether-proxy/build/linux-arm64
-          tar xzf artifacts/aether-proxy-linux-amd64.tar.gz -C aether-proxy/build/linux-amd64
-          tar xzf artifacts/aether-proxy-linux-arm64.tar.gz -C aether-proxy/build/linux-arm64
+          mkdir -p apps/aether-proxy/build/linux-amd64 apps/aether-proxy/build/linux-arm64
+          tar xzf artifacts/aether-proxy-linux-amd64.tar.gz -C apps/aether-proxy/build/linux-amd64
+          tar xzf artifacts/aether-proxy-linux-arm64.tar.gz -C apps/aether-proxy/build/linux-arm64
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -176,7 +187,7 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: ./aether-proxy
+          context: ./apps/aether-proxy
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -197,11 +208,20 @@ jobs:
         run: |
           VERSION="${TAG#proxy-v}"
           BASE="https://github.com/fawney19/Aether/releases/download/${TAG}"
-          cd aether-proxy
+
+          if [ -d apps/aether-proxy ]; then
+            PROXY_DIR="apps/aether-proxy"
+          else
+            PROXY_DIR="aether-proxy"
+          fi
+
+          cd "$PROXY_DIR"
 
           TABLE="| Platform | Download |\n|----------|----------|\n"
-          TABLE+="| Linux x86_64 | [aether-proxy-linux-amd64.tar.gz](${BASE}/aether-proxy-linux-amd64.tar.gz) |\n"
-          TABLE+="| Linux ARM64 | [aether-proxy-linux-arm64.tar.gz](${BASE}/aether-proxy-linux-arm64.tar.gz) |\n"
+          TABLE+="| Linux x86_64 (GNU) | [aether-proxy-linux-amd64.tar.gz](${BASE}/aether-proxy-linux-amd64.tar.gz) |\n"
+          TABLE+="| Linux ARM64 (GNU) | [aether-proxy-linux-arm64.tar.gz](${BASE}/aether-proxy-linux-arm64.tar.gz) |\n"
+          TABLE+="| Linux x86_64 (musl) | [aether-proxy-linux-musl-amd64.tar.gz](${BASE}/aether-proxy-linux-musl-amd64.tar.gz) |\n"
+          TABLE+="| Linux ARM64 (musl) | [aether-proxy-linux-musl-arm64.tar.gz](${BASE}/aether-proxy-linux-musl-arm64.tar.gz) |\n"
           TABLE+="| macOS x86_64 | [aether-proxy-macos-amd64.tar.gz](${BASE}/aether-proxy-macos-amd64.tar.gz) |\n"
           TABLE+="| macOS ARM64 | [aether-proxy-macos-arm64.tar.gz](${BASE}/aether-proxy-macos-arm64.tar.gz) |\n"
           TABLE+="| Windows x86_64 | [aether-proxy-windows-amd64.zip](${BASE}/aether-proxy-windows-amd64.zip) |"
@@ -217,7 +237,13 @@ jobs:
 
       - name: Commit and push
         run: |
-          cd aether-proxy
+          if [ -d apps/aether-proxy ]; then
+            PROXY_DIR="apps/aether-proxy"
+          else
+            PROXY_DIR="aether-proxy"
+          fi
+
+          cd "$PROXY_DIR"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add README.md

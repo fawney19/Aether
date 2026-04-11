@@ -1,8 +1,3 @@
-//! Self-upgrade for aether-proxy.
-//!
-//! Downloads a release from GitHub, verifies SHA256 checksum, and atomically
-//! replaces the running binary.  Restarts the systemd service if active.
-
 use std::path::{Path, PathBuf};
 
 use aether_http::{apply_http_client_config, HttpClientConfig};
@@ -23,7 +18,14 @@ struct GithubRelease {
 // ── Platform detection ───────────────────────────────────────────────────────
 
 fn detect_platform() -> &'static str {
-    if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
+    if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") && cfg!(target_env = "musl") {
+        "linux-musl-amd64"
+    } else if cfg!(target_os = "linux")
+        && cfg!(target_arch = "aarch64")
+        && cfg!(target_env = "musl")
+    {
+        "linux-musl-arm64"
+    } else if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
         "linux-amd64"
     } else if cfg!(target_os = "linux") && cfg!(target_arch = "aarch64") {
         "linux-arm64"
@@ -361,34 +363,33 @@ async fn execute_upgrade(
 
     match restart_mode {
         RestartMode::BestEffort => {
-            // Restart systemd service if running.
             // Use best-effort: binary is already replaced, so a restart failure should
             // not abort the whole upgrade -- the user can restart manually.
             if super::service::is_service_active() {
                 if super::service::is_root() {
-                    eprintln!("  Restarting systemd service...");
-                    match super::service::run_cmd("systemctl", &["restart", "aether-proxy"]) {
+                    eprintln!("  Restarting managed service...");
+                    match super::service::restart_active_service() {
                         Ok(()) => eprintln!("  Service restarted."),
                         Err(e) => {
                             eprintln!("  WARNING: failed to restart service: {}", e);
-                            eprintln!("  Run manually: sudo systemctl restart aether-proxy");
+                            eprintln!("  Run manually: sudo aether-proxy restart");
                         }
                     }
                 } else {
-                    eprintln!("  Systemd service is active, but restart requires root.");
-                    eprintln!("  Run: sudo systemctl restart aether-proxy");
+                    eprintln!("  Managed service is active, but restart requires root.");
+                    eprintln!("  Run: sudo aether-proxy restart");
                     eprintln!("  Skipping restart.");
                 }
             } else {
-                eprintln!("  No active systemd service detected, skipping restart.");
+                eprintln!("  No active service detected, skipping restart.");
             }
         }
         RestartMode::Required => {
             if !super::service::is_root() {
                 anyhow::bail!("automatic upgrade requires root privileges");
             }
-            eprintln!("  Restarting systemd service...");
-            super::service::run_cmd("systemctl", &["restart", "aether-proxy"])?;
+            eprintln!("  Restarting managed service...");
+            super::service::restart_active_service()?;
             eprintln!("  Service restarted.");
         }
     }
@@ -409,8 +410,6 @@ pub async fn cmd_upgrade(version: Option<String>) -> anyhow::Result<()> {
 
 /// Perform automatic upgrade to a specific version.
 ///
-/// This path is designed for server-pushed upgrades in systemd/root scenarios:
-/// it requires root and requires a successful `systemctl restart aether-proxy`.
 pub async fn perform_upgrade(version: &str) -> anyhow::Result<()> {
     execute_upgrade(Some(version), true, RestartMode::Required).await
 }

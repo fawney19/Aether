@@ -6,6 +6,10 @@ Tunnel 模式下代理节点**无需对外监听端口**，仅需出站连接到
 
 ## 安装
 
+`aether-proxy` 会根据宿主机自动选择服务管理器：
+- 常规 Linux 发行版：`systemd`
+- Alpine Linux：`OpenRC`
+
 ### Docker Compose 部署
 
 ```bash
@@ -19,12 +23,14 @@ docker compose up -d
 <!-- DOWNLOAD_TABLE_START -->
 | Platform | Download |
 |----------|----------|
-| Linux x86_64 | [aether-proxy-linux-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/proxy-v0.2.5/aether-proxy-linux-amd64.tar.gz) |
-| Linux ARM64 | [aether-proxy-linux-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/proxy-v0.2.5/aether-proxy-linux-arm64.tar.gz) |
+| Linux x86_64 (GNU) | [aether-proxy-linux-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/proxy-v0.2.5/aether-proxy-linux-amd64.tar.gz) |
+| Linux ARM64 (GNU) | [aether-proxy-linux-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/proxy-v0.2.5/aether-proxy-linux-arm64.tar.gz) |
 | macOS x86_64 | [aether-proxy-macos-amd64.tar.gz](https://github.com/fawney19/Aether/releases/download/proxy-v0.2.5/aether-proxy-macos-amd64.tar.gz) |
 | macOS ARM64 | [aether-proxy-macos-arm64.tar.gz](https://github.com/fawney19/Aether/releases/download/proxy-v0.2.5/aether-proxy-macos-arm64.tar.gz) |
 | Windows x86_64 | [aether-proxy-windows-amd64.zip](https://github.com/fawney19/Aether/releases/download/proxy-v0.2.5/aether-proxy-windows-amd64.zip) |
 <!-- DOWNLOAD_TABLE_END -->
+
+上表展示的是最新已发布版本的下载链接。从下一次 `proxy-v*` 发布开始，表格会自动补上 `Linux x86_64 (musl)` / `Linux ARM64 (musl)` 包，供 Alpine 等 musl 系统直接使用。
 
 ## 快速开始
 
@@ -34,7 +40,7 @@ sudo ./aether-proxy setup
 
 # 2. 日常管理 (勾选 Install Service 作为系统服务的情况下)
 aether-proxy status          # 看状态
-aether-proxy logs            # 看日志
+sudo aether-proxy logs       # 看日志
 
 sudo aether-proxy start      # 启动服务
 sudo aether-proxy stop       # 停止服务
@@ -47,7 +53,7 @@ sudo aether-proxy setup
 sudo aether-proxy uninstall
 ```
 
-完成向导后, 配置自动保存到 `aether-proxy.toml`，如果启用了 Install Service，将自动注册并启动 systemd 服务。
+完成向导后, 配置自动保存到 `aether-proxy.toml`，如果启用了 Install Service，将自动注册并启动当前系统支持的服务（`systemd` 或 `OpenRC`）。
 
 ### 直接运行
 
@@ -132,10 +138,11 @@ sudo aether-proxy uninstall
 
 ### 日志落点
 
-- 默认 `AETHER_PROXY_LOG_DESTINATION=stdout`，日志交给容器日志驱动或 `journald`
+- 默认 `AETHER_PROXY_LOG_DESTINATION=stdout`，日志交给容器日志驱动或宿主机服务管理器
 - 需要落盘时改成 `file` 或 `both`，并设置 `AETHER_PROXY_LOG_DIR`
 - 文件日志支持 `hourly/daily` 轮转，并按 `AETHER_PROXY_LOG_RETENTION_DAYS` 和 `AETHER_PROXY_LOG_MAX_FILES` 自动清理
-- `docker compose` 默认保持 `stdout`，避免和容器自带日志重复；systemd 安装默认会额外打开文件日志到 `/var/log/aether-proxy`
+- `docker compose` 默认保持 `stdout`，避免和容器自带日志重复；以 `systemd` 或 `OpenRC` 安装时默认会额外打开文件日志到 `/var/log/aether-proxy`
+- OpenRC 安装时，`aether-proxy logs` 实际读取 `/var/log/aether-proxy/current.log` 和 `/var/log/aether-proxy/error.log`；这些文件通常需要用 `sudo aether-proxy logs` 查看
 
 ### 多服务器配置
 
