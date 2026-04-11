@@ -1,3 +1,7 @@
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use clap::{Args as ClapArgs, Parser, ValueEnum};
 use tracing::{debug, info, warn};
 
@@ -491,7 +495,7 @@ impl GatewayLoggingArgs {
     about = "Phase 3a Rust ingress gateway for Aether"
 )]
 struct Args {
-    #[arg(long, env = "AETHER_GATEWAY_BIND", default_value = "0.0.0.0:80")]
+    #[arg(long, env = "AETHER_GATEWAY_BIND", default_value = "0.0.0.0:8084")]
     bind: String,
 
     /// 容器内健康检查入口：根据当前 bind 端口探测本地 /health。

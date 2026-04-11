@@ -25,7 +25,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
-    libjemalloc2 \
     libssl-dev \
     pkg-config \
     perl
@@ -66,16 +65,11 @@ RUN set -eux; \
     /runtime-root/etc/ssl \
     /runtime-root/lib \
     /runtime-root/lib64 \
-    /runtime-root/usr/local/bin \
-    /runtime-root/usr/local/lib; \
+    /runtime-root/usr/local/bin; \
     cp /tmp/aether-gateway /runtime-root/usr/local/bin/aether-gateway; \
     : > /tmp/runtime-libs.txt; \
     : > /tmp/runtime-scan-queue.txt; \
     printf '%s\n' /tmp/aether-gateway >> /tmp/runtime-scan-queue.txt; \
-    jemalloc_path="$(find /usr/lib -type f -name 'libjemalloc.so.2' | head -n1)"; \
-    [ -n "$jemalloc_path" ]; \
-    install -D "$jemalloc_path" /runtime-root/usr/local/lib/libjemalloc.so.2; \
-    printf '%s\n' "$jemalloc_path" >> /tmp/runtime-scan-queue.txt; \
     while [ -s /tmp/runtime-scan-queue.txt ]; do \
         current="$(head -n1 /tmp/runtime-scan-queue.txt)"; \
         sed -i '1d' /tmp/runtime-scan-queue.txt; \
@@ -125,13 +119,11 @@ WORKDIR /app
 
 ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
-    LD_PRELOAD=/usr/local/lib/libjemalloc.so.2 \
-    MALLOC_CONF=background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000 \
     RUST_LOG=aether_gateway=info \
-    AETHER_GATEWAY_BIND=0.0.0.0:80 \
+    AETHER_GATEWAY_BIND=0.0.0.0:8084 \
     AETHER_GATEWAY_STATIC_DIR=/srv/frontend
 
-EXPOSE 80
+EXPOSE 8084
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD ["/usr/local/bin/aether-gateway", "--healthcheck"]

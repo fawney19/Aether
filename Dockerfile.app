@@ -1,139 +1,31 @@
 # syntax=docker/dockerfile:1
-# Aether 运行镜像：Rust gateway 直接服务 API + 前端静态文件
-# 构建命令: docker build -f Dockerfile.app -t aether-app:latest .
-# 用于 GitHub Actions CI（官方源）
+# Aether Gateway 运行时镜像（交叉编译方案）
+# 二进制和前端产物均由 CI 预先构建，此 Dockerfile 仅做打包
+# 用法: docker buildx build --platform linux/amd64,linux/arm64 -f Dockerfile.app .
+#
+# 构建上下文中须包含:
+#   dist/aether-gateway-amd64   (x86_64-unknown-linux-musl 交叉编译产物)
+#   dist/aether-gateway-arm64   (aarch64-unknown-linux-musl 交叉编译产物)
+#   dist/frontend/              (npm run build 产物)
 
-# ==================== 前端构建 ====================
-FROM node:22-slim AS frontend-builder
-WORKDIR /app/frontend
-COPY frontend/package*.json ./
-RUN npm ci
-COPY frontend/ ./
-RUN npm run build
+FROM gcr.io/distroless/static-debian12
 
-# ==================== Rust gateway 构建 ====================
-FROM rust:1.94.1-slim AS gateway-base
-WORKDIR /build
+# TARGETARCH 由 buildx 自动注入: amd64 或 arm64
+ARG TARGETARCH
 
-# CI 镜像也采用同一套分层缓存策略，减少重复编译开销。
-ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
-    CARGO_PROFILE_RELEASE_LTO=thin \
-    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+COPY dist/aether-gateway-${TARGETARCH} /usr/local/bin/aether-gateway
+COPY dist/frontend/ /srv/frontend
 
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    ca-certificates \
-    libjemalloc2 \
-    libssl-dev \
-    pkg-config \
-    perl
-
-RUN --mount=type=cache,id=aether-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=aether-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    cargo install cargo-chef --locked
-
-FROM gateway-base AS gateway-planner
-COPY Cargo.toml Cargo.lock ./
-COPY apps/ ./apps/
-COPY crates/ ./crates/
-RUN cargo chef prepare --recipe-path recipe.json
-
-FROM gateway-base AS gateway-builder
-COPY --from=gateway-planner /build/recipe.json ./recipe.json
-RUN --mount=type=cache,id=aether-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=aether-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=aether-cargo-target-ci,target=/build/target,sharing=locked \
-    cargo chef cook --release --locked --package aether-gateway --bin aether-gateway --recipe-path recipe.json
-
-COPY Cargo.toml Cargo.lock ./
-COPY apps/ ./apps/
-COPY crates/ ./crates/
-RUN --mount=type=cache,id=aether-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=aether-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=aether-cargo-target-ci,target=/build/target,sharing=locked \
-    cargo build --release --locked -p aether-gateway && \
-    cp target/release/aether-gateway /tmp/aether-gateway
-
-# ==================== 最小运行时打包 ====================
-FROM gateway-builder AS runtime-prep
-RUN set -eux; \
-    mkdir -p \
-    /runtime-root/app/data \
-    /runtime-root/app/logs \
-    /runtime-root/etc \
-    /runtime-root/etc/ssl \
-    /runtime-root/lib \
-    /runtime-root/lib64 \
-    /runtime-root/usr/local/bin \
-    /runtime-root/usr/local/lib; \
-    cp /tmp/aether-gateway /runtime-root/usr/local/bin/aether-gateway; \
-    : > /tmp/runtime-libs.txt; \
-    : > /tmp/runtime-scan-queue.txt; \
-    printf '%s\n' /tmp/aether-gateway >> /tmp/runtime-scan-queue.txt; \
-    jemalloc_path="$(find /usr/lib -type f -name 'libjemalloc.so.2' | head -n1)"; \
-    [ -n "$jemalloc_path" ]; \
-    install -D "$jemalloc_path" /runtime-root/usr/local/lib/libjemalloc.so.2; \
-    printf '%s\n' "$jemalloc_path" >> /tmp/runtime-scan-queue.txt; \
-    while [ -s /tmp/runtime-scan-queue.txt ]; do \
-        current="$(head -n1 /tmp/runtime-scan-queue.txt)"; \
-        sed -i '1d' /tmp/runtime-scan-queue.txt; \
-        ldd "$current" | awk '/=>/ { print $3 } $1 ~ /^\// { print $1 }' | while read -r lib; do \
-            [ -n "$lib" ]; \
-            if ! grep -Fxq "$lib" /tmp/runtime-libs.txt; then \
-                printf '%s\n' "$lib" >> /tmp/runtime-libs.txt; \
-                printf '%s\n' "$lib" >> /tmp/runtime-scan-queue.txt; \
-            fi; \
-        done; \
-    done; \
-    sort -u /tmp/runtime-libs.txt -o /tmp/runtime-libs.txt; \
-    while read -r lib; do \
-        [ -n "$lib" ]; \
-        dest="/runtime-root$(dirname "$lib")"; \
-        mkdir -p "$dest"; \
-        cp -L "$lib" "$dest/"; \
-    done < /tmp/runtime-libs.txt; \
-    for lib in \
-        /lib/x86_64-linux-gnu/libnss_dns.so.2 \
-        /lib/x86_64-linux-gnu/libnss_files.so.2 \
-        /lib/x86_64-linux-gnu/libresolv.so.2; do \
-        if [ -f "$lib" ]; then \
-            dest="/runtime-root$(dirname "$lib")"; \
-            mkdir -p "$dest"; \
-            cp -L "$lib" "$dest/"; \
-        fi; \
-    done; \
-    cp -a /usr/lib/ssl /runtime-root/usr/lib/; \
-    cp -a /etc/ssl/certs /runtime-root/etc/ssl/; \
-    if [ -f /etc/ssl/openssl.cnf ]; then \
-        cp /etc/ssl/openssl.cnf /runtime-root/etc/ssl/openssl.cnf; \
-    fi; \
-    if [ -f /etc/nsswitch.conf ]; then \
-        cp /etc/nsswitch.conf /runtime-root/etc/nsswitch.conf; \
-    fi
-
-# ==================== 运行时镜像 ====================
-FROM scratch
-
-# 复制 gateway 二进制
-COPY --from=runtime-prep /runtime-root/ /
-
-# 复制前端构建产物
-COPY --from=frontend-builder /app/frontend/dist /srv/frontend
 WORKDIR /app
 
-ENV LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8 \
-    LD_PRELOAD=/usr/local/lib/libjemalloc.so.2 \
-    MALLOC_CONF=background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000 \
-    RUST_LOG=aether_gateway=info \
-    AETHER_GATEWAY_BIND=0.0.0.0:80 \
+ENV RUST_LOG=aether_gateway=info \
+    AETHER_GATEWAY_BIND=0.0.0.0:8084 \
     AETHER_GATEWAY_STATIC_DIR=/srv/frontend
 
-EXPOSE 80
+EXPOSE 8084
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD ["/usr/local/bin/aether-gateway", "--healthcheck"]
 
+USER root
 ENTRYPOINT ["/usr/local/bin/aether-gateway"]

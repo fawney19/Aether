@@ -106,39 +106,6 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
         run: sccache --show-stats
 
-  build_release:
-    name: Build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: rust-ci-${{ runner.os }}
-          workspaces: . -> target
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
-
-      - name: Build
-        env:
-          CARGO_INCREMENTAL: 0
-          CARGO_TERM_COLOR: always
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        run: cargo build --workspace --release
-
-      - name: Show sccache stats
-        if: always()
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-        run: sccache --show-stats
-
   check:
     name: check
     runs-on: ubuntu-latest
@@ -146,15 +113,13 @@ jobs:
       - fmt
       - clippy
       - test
-      - build_release
     if: ${{ always() }}
     steps:
       - name: Verify required jobs
         run: |
           if [ "${{ needs.fmt.result }}" != "success" ] || \
              [ "${{ needs.clippy.result }}" != "success" ] || \
-             [ "${{ needs.test.result }}" != "success" ] || \
-             [ "${{ needs.build_release.result }}" != "success" ]; then
+             [ "${{ needs.test.result }}" != "success" ]; then
             echo "Rust CI failed"
             exit 1
           fi

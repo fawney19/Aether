@@ -43,7 +43,7 @@ cd Aether
 
 # 2. 配置环境变量
 cp .env.example .env
-python generate_keys.py  # 生成密钥, 并将生成的密钥填入 .env
+./generate_keys.sh  # 生成密钥, 并将生成的密钥填入 .env
 
 # 3. 部署 / 更新（自动执行数据库迁移）
 docker compose pull && docker compose up -d
@@ -61,35 +61,12 @@ cd Aether
 
 # 2. 配置环境变量
 cp .env.example .env
-python generate_keys.py  # 生成密钥, 并将生成的密钥填入 .env
+./generate_keys.sh  # 生成密钥, 并将生成的密钥填入 .env
 
 # 3. 部署 / 更新（自动构建、启动、迁移）
 git pull
 ./deploy.sh
 ```
-
-### Systemd（二进制部署）
-
-如果你希望 `aether-gateway` 作为宿主机服务运行，Docker 只保留 `Postgres` / `Redis`，可以使用仓库内置的 systemd 部署骨架：
-
-```bash
-# 1. 构建 release 二进制和前端
-cargo build --release -p aether-gateway
-(cd frontend && npm ci && npm run build)
-
-# 2. 准备环境变量
-sudo mkdir -p /etc/aether
-sudo cp deploy/systemd/aether-gateway.env.example /etc/aether/aether-gateway.env
-# 安装脚本会拒绝 change-me / change-this 这类示例占位值
-
-# 3. 启动数据服务（Docker only）
-docker compose --env-file /etc/aether/aether-gateway.env -f deploy/docker-compose.data.yml up -d
-
-# 4. 安装并启动 aether-gateway systemd 服务
-sudo deploy/systemd/install-systemd.sh --env-file /etc/aether/aether-gateway.env
-```
-
-详细步骤见 [docs/deploy/systemd.md](docs/deploy/systemd.md)
 
 ### 本地开发
 
@@ -98,7 +75,6 @@ sudo deploy/systemd/install-systemd.sh --env-file /etc/aether/aether-gateway.env
 docker compose -f docker-compose.build.yml up -d postgres redis
 
 # 后端
-uv sync
 ./dev.sh
 
 # 前端

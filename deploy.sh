@@ -62,7 +62,7 @@ done
 calc_code_hash() {
     {
         cat Dockerfile.app.local 2>/dev/null
-        cat Cargo.toml Cargo.lock entrypoint.sh 2>/dev/null
+        cat Cargo.toml Cargo.lock 2>/dev/null
         find frontend/src -type f \( -name "*.vue" -o -name "*.ts" -o -name "*.tsx" -o -name "*.js" \) 2>/dev/null | sort | xargs cat 2>/dev/null
         find apps -type f \( -name "*.rs" -o -name "Cargo.toml" \) 2>/dev/null | sort | xargs cat 2>/dev/null
         find crates -type f \( -name "*.rs" -o -name "*.sql" -o -name "Cargo.toml" \) 2>/dev/null | sort | xargs cat 2>/dev/null

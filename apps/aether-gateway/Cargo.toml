@@ -37,7 +37,7 @@ flate2.workspace = true
 futures-util.workspace = true
 hmac.workspace = true
 http.workspace = true
-ldap3 = "0.11"
+ldap3 = { version = "0.11", default-features = false, features = ["sync", "tls-rustls"] }
 parking_lot = "0.12"
 regex.workspace = true
 redis.workspace = true
@@ -57,6 +57,9 @@ tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
 webpki-roots.workspace = true
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"
 
 [dev-dependencies]
 aether-testkit.workspace = true

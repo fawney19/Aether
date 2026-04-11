@@ -50,13 +50,14 @@ services:
       DATABASE_URL: postgresql://postgres:${DB_PASSWORD}@postgres:5432/aether
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       TZ: Asia/Shanghai
+      AETHER_GATEWAY_BIND: 0.0.0.0:${APP_PORT:-8084}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     ports:
-      - "${APP_PORT:-8084}:80"
+      - "${APP_PORT:-8084}:${APP_PORT:-8084}"
     volumes:
       - ./logs:/app/logs
     restart: unless-stopped
