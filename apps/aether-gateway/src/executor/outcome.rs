@@ -149,7 +149,7 @@ pub(crate) async fn record_failed_usage_for_exhausted_request(
         Value::String("application/json".to_string()),
     )]);
     if let Some(reason) = diagnostic
-        .and_then(|value| Some(value.reason.trim()))
+        .map(|value| value.reason.trim())
         .filter(|value| !value.is_empty())
     {
         client_headers.insert(
