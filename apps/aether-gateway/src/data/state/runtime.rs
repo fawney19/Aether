@@ -135,6 +135,18 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn list_video_task_page_summary(
+        &self,
+        filter: &VideoTaskQueryFilter,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<StoredVideoTask>, DataLayerError> {
+        match &self.video_task_reader {
+            Some(repository) => repository.list_page_summary(filter, offset, limit).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub(crate) async fn count_video_tasks(
         &self,
         filter: &VideoTaskQueryFilter,

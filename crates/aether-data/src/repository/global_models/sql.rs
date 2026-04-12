@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures_util::{stream::TryStream, TryStreamExt};
 use serde_json::Value;
 use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder, Row};
 
@@ -180,12 +181,8 @@ impl SqlxGlobalModelReadRepository {
             .push_bind(query.offset as i64)
             .push(" LIMIT ")
             .push_bind(query.limit as i64);
-        let rows = list_builder
-            .build()
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        let items = rows.iter().map(map_row).collect::<Result<Vec<_>, _>>()?;
+        let query = list_builder.build();
+        let items = collect_query_rows(query.fetch(&self.pool), map_row).await?;
 
         Ok(StoredPublicGlobalModelPage { items, total })
     }
@@ -198,17 +195,13 @@ impl SqlxGlobalModelReadRepository {
             return Ok(Vec::new());
         }
 
-        let rows = build_provider_id_list_query(
+        let mut builder = build_provider_id_list_query(
             LIST_PROVIDER_MODEL_STATS_PREFIX,
             provider_ids,
             ")\nGROUP BY provider_id\nORDER BY provider_id ASC",
-        )
-        .build()
-        .fetch_all(&self.pool)
-        .await
-        .map_postgres_err()?;
-
-        rows.iter().map(map_provider_model_stats_row).collect()
+        );
+        let query = builder.build();
+        collect_query_rows(query.fetch(&self.pool), map_provider_model_stats_row).await
     }
 
     pub async fn list_active_global_model_ids_by_provider_ids(
@@ -219,19 +212,17 @@ impl SqlxGlobalModelReadRepository {
             return Ok(Vec::new());
         }
 
-        let rows = build_provider_id_list_query(
+        let mut builder = build_provider_id_list_query(
             LIST_ACTIVE_GLOBAL_MODEL_IDS_BY_PROVIDER_IDS_PREFIX,
             provider_ids,
             ")\nAND is_active = TRUE\nAND global_model_id IS NOT NULL\nORDER BY provider_id ASC, global_model_id ASC",
+        );
+        let query = builder.build();
+        collect_query_rows(
+            query.fetch(&self.pool),
+            map_provider_active_global_model_row,
         )
-        .build()
-        .fetch_all(&self.pool)
         .await
-        .map_postgres_err()?;
-
-        rows.iter()
-            .map(map_provider_active_global_model_row)
-            .collect()
     }
 
     pub async fn list_admin_provider_models(
@@ -250,12 +241,8 @@ impl SqlxGlobalModelReadRepository {
             .push_bind(query.offset as i64)
             .push(" LIMIT ")
             .push_bind(query.limit as i64);
-        let rows = builder
-            .build()
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_admin_provider_model_row).collect()
+        let query = builder.build();
+        collect_query_rows(query.fetch(&self.pool), map_admin_provider_model_row).await
     }
 
     pub async fn list_admin_global_models(
@@ -281,15 +268,8 @@ impl SqlxGlobalModelReadRepository {
             .push_bind(query.offset as i64)
             .push(" LIMIT ")
             .push_bind(query.limit as i64);
-        let rows = list_builder
-            .build()
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        let items = rows
-            .iter()
-            .map(map_admin_global_model_row)
-            .collect::<Result<Vec<_>, _>>()?;
+        let query = list_builder.build();
+        let items = collect_query_rows(query.fetch(&self.pool), map_admin_global_model_row).await?;
         Ok(StoredAdminGlobalModelPage { items, total })
     }
 
@@ -343,8 +323,9 @@ LIMIT 1
         &self,
         provider_id: &str,
     ) -> Result<Vec<StoredAdminProviderModel>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
+        collect_query_rows(
+            sqlx::query(
+                r#"
 SELECT
   m.id,
   m.provider_id,
@@ -375,13 +356,12 @@ WHERE m.provider_id = $1
   AND gm.is_active = TRUE
 ORDER BY gm.name ASC, m.created_at DESC, m.id ASC
             "#,
+            )
+            .bind(provider_id)
+            .fetch(&self.pool),
+            map_admin_provider_model_row,
         )
-        .bind(provider_id)
-        .fetch_all(&self.pool)
         .await
-        .map_postgres_err()?;
-
-        rows.iter().map(map_admin_provider_model_row).collect()
     }
 
     pub async fn get_admin_global_model_by_id(
@@ -482,8 +462,9 @@ LIMIT 1
         &self,
         global_model_id: &str,
     ) -> Result<Vec<StoredAdminProviderModel>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
+        collect_query_rows(
+            sqlx::query(
+                r#"
 SELECT
   m.id,
   m.provider_id,
@@ -512,13 +493,12 @@ LEFT JOIN global_models gm ON gm.id = m.global_model_id
 WHERE m.global_model_id = $1
 ORDER BY m.created_at DESC, m.id ASC
             "#,
+            )
+            .bind(global_model_id)
+            .fetch(&self.pool),
+            map_admin_provider_model_row,
         )
-        .bind(global_model_id)
-        .fetch_all(&self.pool)
         .await
-        .map_postgres_err()?;
-
-        rows.iter().map(map_admin_provider_model_row).collect()
     }
 
     pub async fn create_admin_provider_model(
@@ -801,12 +781,8 @@ LIMIT 1
             .push_bind(query.offset as i64)
             .push(" LIMIT ")
             .push_bind(query.limit as i64);
-        let rows = builder
-            .build()
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_public_catalog_model_row).collect()
+        let query = builder.build();
+        collect_query_rows(query.fetch(&self.pool), map_public_catalog_model_row).await
     }
 
     async fn search_public_catalog_models(
@@ -822,12 +798,8 @@ LIMIT 1
         builder
             .push(" ORDER BY p.provider_priority ASC, p.name ASC, COALESCE(gm.name, m.provider_model_name) ASC, m.id ASC LIMIT ")
             .push_bind(query.limit as i64);
-        let rows = builder
-            .build()
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_public_catalog_model_row).collect()
+        let query = builder.build();
+        collect_query_rows(query.fetch(&self.pool), map_public_catalog_model_row).await
     }
 
     async fn list_admin_global_models(
@@ -1010,6 +982,20 @@ fn map_row(row: &PgRow) -> Result<StoredPublicGlobalModel, DataLayerError> {
         row.try_get("config").map_postgres_err()?,
         0,
     )
+}
+
+async fn collect_query_rows<T, S>(
+    mut rows: S,
+    map_row: fn(&PgRow) -> Result<T, DataLayerError>,
+) -> Result<Vec<T>, DataLayerError>
+where
+    S: TryStream<Ok = PgRow, Error = sqlx::Error> + Unpin,
+{
+    let mut items = Vec::new();
+    while let Some(row) = rows.try_next().await.map_postgres_err()? {
+        items.push(map_row(&row)?);
+    }
+    Ok(items)
 }
 
 fn apply_public_catalog_model_filters(

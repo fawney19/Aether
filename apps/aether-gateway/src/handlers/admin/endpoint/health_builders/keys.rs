@@ -315,7 +315,7 @@ pub(crate) async fn recover_all_admin_key_health(
         Vec::new()
     } else {
         state
-            .list_provider_catalog_keys_by_provider_ids(&provider_ids)
+            .list_provider_catalog_key_summaries_by_provider_ids(&provider_ids)
             .await
             .ok()
             .unwrap_or_default()

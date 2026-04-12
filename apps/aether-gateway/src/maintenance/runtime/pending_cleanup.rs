@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use chrono::Utc;
+use futures_util::TryStreamExt;
 use sqlx::Row;
 
 use crate::data::GatewayDataState;
@@ -59,13 +60,18 @@ pub(crate) async fn cleanup_stale_pending_requests_once(
 
     loop {
         let mut tx = pool.begin().await.map_err(postgres_error)?;
-        let stale_rows = sqlx::query(SELECT_STALE_PENDING_USAGE_BATCH_SQL)
-            .bind(active_statuses.clone())
-            .bind(cutoff_time)
-            .bind(i64::try_from(batch_size).unwrap_or(i64::MAX))
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(postgres_error)?;
+        let stale_rows = {
+            let mut stale_rows_stream = sqlx::query(SELECT_STALE_PENDING_USAGE_BATCH_SQL)
+                .bind(active_statuses.clone())
+                .bind(cutoff_time)
+                .bind(i64::try_from(batch_size).unwrap_or(i64::MAX))
+                .fetch(&mut *tx);
+            let mut stale_rows = Vec::new();
+            while let Some(row) = stale_rows_stream.try_next().await.map_err(postgres_error)? {
+                stale_rows.push(row);
+            }
+            stale_rows
+        };
         if stale_rows.is_empty() {
             tx.rollback().await.map_err(postgres_error)?;
             break;
@@ -93,14 +99,18 @@ pub(crate) async fn cleanup_stale_pending_requests_once(
         let completed_request_ids = if request_ids.is_empty() {
             HashSet::new()
         } else {
-            sqlx::query(SELECT_COMPLETED_PENDING_REQUEST_IDS_SQL)
-                .bind(request_ids)
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(postgres_error)?
-                .into_iter()
-                .filter_map(|row| row.try_get::<String, _>("request_id").ok())
-                .collect::<HashSet<_>>()
+            {
+                let mut completed_rows = sqlx::query(SELECT_COMPLETED_PENDING_REQUEST_IDS_SQL)
+                    .bind(request_ids)
+                    .fetch(&mut *tx);
+                let mut completed_request_ids = HashSet::new();
+                while let Some(row) = completed_rows.try_next().await.map_err(postgres_error)? {
+                    if let Ok(request_id) = row.try_get::<String, _>("request_id") {
+                        completed_request_ids.insert(request_id);
+                    }
+                }
+                completed_request_ids
+            }
         };
         let plan = plan_pending_cleanup_batch(stale_rows, &completed_request_ids, timeout_minutes);
         let now = Utc::now();

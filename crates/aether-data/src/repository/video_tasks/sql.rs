@@ -1,6 +1,6 @@
-use sqlx::{PgPool, Postgres, QueryBuilder, Row};
-
 use async_trait::async_trait;
+use futures_util::{stream::TryStream, TryStreamExt};
+use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder, Row};
 
 use crate::error::SqlxResultExt;
 use crate::repository::video_tasks::{
@@ -10,7 +10,7 @@ use crate::repository::video_tasks::{
 };
 use crate::DataLayerError;
 
-const SELECT_VIDEO_TASK_COLUMNS: &str = r#"
+const SELECT_VIDEO_TASK_COLUMNS_PREFIX: &str = r#"
   id,
   short_id,
   request_id,
@@ -26,12 +26,9 @@ const SELECT_VIDEO_TASK_COLUMNS: &str = r#"
   provider_api_format,
   format_converted,
   model,
-  prompt,
-  original_request_body,
-  duration_seconds,
-  resolution,
-  aspect_ratio,
-  size,
+"#;
+
+const SELECT_VIDEO_TASK_COLUMNS_SUFFIX: &str = r#"
   status,
   progress_percent,
   progress_message,
@@ -50,8 +47,53 @@ const SELECT_VIDEO_TASK_COLUMNS: &str = r#"
   request_metadata
 "#;
 
+fn select_video_task_columns(
+    prompt_sql: &str,
+    original_request_body_sql: &str,
+    duration_seconds_sql: &str,
+    resolution_sql: &str,
+    aspect_ratio_sql: &str,
+    size_sql: &str,
+) -> String {
+    format!(
+        "{SELECT_VIDEO_TASK_COLUMNS_PREFIX}
+  {prompt_sql} AS prompt,
+  {original_request_body_sql} AS original_request_body,
+  {duration_seconds_sql} AS duration_seconds,
+  {resolution_sql} AS resolution,
+  {aspect_ratio_sql} AS aspect_ratio,
+  {size_sql} AS size,
+{SELECT_VIDEO_TASK_COLUMNS_SUFFIX}"
+    )
+}
+
+fn select_video_task_full_columns() -> String {
+    select_video_task_columns(
+        "prompt",
+        "original_request_body",
+        "duration_seconds",
+        "resolution",
+        "aspect_ratio",
+        "size",
+    )
+}
+
+fn select_video_task_claim_columns() -> String {
+    select_video_task_columns(
+        "NULL::TEXT",
+        "NULL::jsonb",
+        "NULL::INTEGER",
+        "NULL::TEXT",
+        "NULL::TEXT",
+        "NULL::TEXT",
+    )
+}
+
 fn select_video_task_sql(where_clause: &str) -> String {
-    format!("SELECT\n{SELECT_VIDEO_TASK_COLUMNS}\nFROM video_tasks\n{where_clause}\n")
+    format!(
+        "SELECT\n{}\nFROM video_tasks\n{where_clause}\n",
+        select_video_task_full_columns()
+    )
 }
 
 fn find_by_id_sql() -> String {
@@ -76,7 +118,54 @@ fn list_due_sql() -> String {
     )
 }
 
+fn select_video_task_page_summary_columns() -> &'static str {
+    r#"
+  id,
+  NULL::TEXT AS short_id,
+  request_id,
+  user_id,
+  NULL::TEXT AS api_key_id,
+  username,
+  NULL::TEXT AS api_key_name,
+  external_task_id,
+  provider_id,
+  NULL::TEXT AS endpoint_id,
+  NULL::TEXT AS key_id,
+  NULL::TEXT AS client_api_format,
+  NULL::TEXT AS provider_api_format,
+  FALSE AS format_converted,
+  model,
+  CASE
+    WHEN prompt IS NULL THEN NULL
+    WHEN char_length(prompt) <= 100 THEN prompt
+    ELSE LEFT(prompt, 100) || '...'
+  END AS prompt,
+  NULL::jsonb AS original_request_body,
+  duration_seconds,
+  resolution,
+  aspect_ratio,
+  NULL::TEXT AS size,
+  status,
+  progress_percent,
+  progress_message,
+  0::INTEGER AS retry_count,
+  1::INTEGER AS poll_interval_seconds,
+  NULL::BIGINT AS next_poll_at_unix_secs,
+  poll_count,
+  max_poll_count,
+  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_ms,
+  CAST(EXTRACT(EPOCH FROM submitted_at) AS BIGINT) AS submitted_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM completed_at) AS BIGINT) AS completed_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
+  error_code,
+  error_message,
+  video_url,
+  NULL::jsonb AS request_metadata
+"#
+}
+
 fn claim_due_sql() -> String {
+    let columns = select_video_task_claim_columns();
     format!(
         "WITH due AS (
   SELECT id
@@ -94,12 +183,13 @@ SET next_poll_at = TO_TIMESTAMP($4),
     updated_at = TO_TIMESTAMP($5)
 WHERE id IN (SELECT id FROM due)
 RETURNING
-{SELECT_VIDEO_TASK_COLUMNS}
+{columns}
 "
     )
 }
 
 fn upsert_sql() -> String {
+    let columns = select_video_task_full_columns();
     format!(
         "INSERT INTO video_tasks (
   id,
@@ -216,12 +306,13 @@ ON CONFLICT (id) DO UPDATE SET
   completed_at = EXCLUDED.completed_at,
   updated_at = EXCLUDED.updated_at
 RETURNING
-{SELECT_VIDEO_TASK_COLUMNS}
+{columns}
 "
     )
 }
 
 fn update_if_active_sql() -> String {
+    let columns = select_video_task_full_columns();
     format!(
         "UPDATE video_tasks SET
   short_id = $2,
@@ -263,7 +354,7 @@ fn update_if_active_sql() -> String {
 WHERE id = $1
   AND status = ANY($38)
 RETURNING
-{SELECT_VIDEO_TASK_COLUMNS}
+{columns}
 "
     )
 }
@@ -343,16 +434,16 @@ impl SqlxVideoTaskRepository {
 
         let active_statuses = vec!["pending", "submitted", "queued", "processing"];
         let sql = list_active_sql();
-        let rows = sqlx::query(&sql)
-            .bind(active_statuses)
-            .bind(i64::try_from(limit).map_err(|_| {
-                DataLayerError::UnexpectedValue(format!("invalid active task limit: {limit}"))
-            })?)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-
-        rows.iter().map(map_video_task_row).collect()
+        collect_query_rows(
+            sqlx::query(&sql)
+                .bind(active_statuses)
+                .bind(i64::try_from(limit).map_err(|_| {
+                    DataLayerError::UnexpectedValue(format!("invalid active task limit: {limit}"))
+                })?)
+                .fetch(&self.pool),
+            map_video_task_row,
+        )
+        .await
     }
 
     pub async fn list_due(
@@ -366,17 +457,17 @@ impl SqlxVideoTaskRepository {
 
         let active_statuses = vec!["submitted", "queued", "processing"];
         let sql = list_due_sql();
-        let rows = sqlx::query(&sql)
-            .bind(active_statuses)
-            .bind(now_unix_secs as f64)
-            .bind(i64::try_from(limit).map_err(|_| {
-                DataLayerError::UnexpectedValue(format!("invalid due task limit: {limit}"))
-            })?)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-
-        rows.iter().map(map_video_task_row).collect()
+        collect_query_rows(
+            sqlx::query(&sql)
+                .bind(active_statuses)
+                .bind(now_unix_secs as f64)
+                .bind(i64::try_from(limit).map_err(|_| {
+                    DataLayerError::UnexpectedValue(format!("invalid due task limit: {limit}"))
+                })?)
+                .fetch(&self.pool),
+            map_video_task_row,
+        )
+        .await
     }
 
     pub async fn list_page(
@@ -395,7 +486,7 @@ impl SqlxVideoTaskRepository {
             .map_err(|_| DataLayerError::UnexpectedValue(format!("invalid limit: {limit}")))?;
 
         let mut builder = QueryBuilder::<Postgres>::new("SELECT\n");
-        builder.push(SELECT_VIDEO_TASK_COLUMNS);
+        builder.push(select_video_task_full_columns());
         builder.push("\nFROM video_tasks");
         push_video_task_filter(&mut builder, filter, None);
         builder.push("\nORDER BY created_at DESC, updated_at DESC");
@@ -404,12 +495,37 @@ impl SqlxVideoTaskRepository {
         builder.push("\nLIMIT ");
         builder.push_bind(limit);
 
-        let rows = builder
-            .build()
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_video_task_row).collect()
+        let query = builder.build();
+        collect_query_rows(query.fetch(&self.pool), map_video_task_row).await
+    }
+
+    pub async fn list_page_summary(
+        &self,
+        filter: &VideoTaskQueryFilter,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<StoredVideoTask>, DataLayerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let offset = i64::try_from(offset)
+            .map_err(|_| DataLayerError::UnexpectedValue(format!("invalid offset: {offset}")))?;
+        let limit = i64::try_from(limit)
+            .map_err(|_| DataLayerError::UnexpectedValue(format!("invalid limit: {limit}")))?;
+
+        let mut builder = QueryBuilder::<Postgres>::new("SELECT\n");
+        builder.push(select_video_task_page_summary_columns());
+        builder.push("\nFROM video_tasks");
+        push_video_task_filter(&mut builder, filter, None);
+        builder.push("\nORDER BY created_at DESC, updated_at DESC");
+        builder.push("\nOFFSET ");
+        builder.push_bind(offset);
+        builder.push("\nLIMIT ");
+        builder.push_bind(limit);
+
+        let query = builder.build();
+        collect_query_rows(query.fetch(&self.pool), map_video_task_row).await
     }
 
     pub async fn count(&self, filter: &VideoTaskQueryFilter) -> Result<u64, DataLayerError> {
@@ -436,29 +552,29 @@ impl SqlxVideoTaskRepository {
         push_video_task_filter(&mut builder, filter, None);
         builder.push("\nGROUP BY status\nORDER BY status ASC");
 
-        let rows = builder
-            .build()
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.into_iter()
-            .map(|row| {
+        let query = builder.build();
+        let mut rows = query.fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            let entry = {
                 let status = VideoTaskStatus::from_database(
                     row.try_get::<String, _>("status")
                         .map_postgres_err()?
                         .as_str(),
                 )?;
                 let total = row.try_get::<i64, _>("total").map_postgres_err()?;
-                Ok(VideoTaskStatusCount {
+                VideoTaskStatusCount {
                     status,
                     count: u64::try_from(total).map_err(|_| {
                         DataLayerError::UnexpectedValue(format!(
                             "invalid status count result: {total}"
                         ))
                     })?,
-                })
-            })
-            .collect()
+                }
+            };
+            items.push(entry);
+        }
+        Ok(items)
     }
 
     pub async fn count_distinct_users(
@@ -504,25 +620,25 @@ impl SqlxVideoTaskRepository {
         builder.push("\nGROUP BY model\nORDER BY total DESC, model ASC\nLIMIT ");
         builder.push_bind(limit);
 
-        let rows = builder
-            .build()
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.into_iter()
-            .map(|row| {
+        let query = builder.build();
+        let mut rows = query.fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            let entry = {
                 let model = row.try_get::<String, _>("model").map_postgres_err()?;
                 let total = row.try_get::<i64, _>("total").map_postgres_err()?;
-                Ok(VideoTaskModelCount {
+                VideoTaskModelCount {
                     model,
                     count: u64::try_from(total).map_err(|_| {
                         DataLayerError::UnexpectedValue(format!(
                             "invalid model count result: {total}"
                         ))
                     })?,
-                })
-            })
-            .collect()
+                }
+            };
+            items.push(entry);
+        }
+        Ok(items)
     }
 
     pub async fn count_created_since(
@@ -693,20 +809,17 @@ impl SqlxVideoTaskRepository {
         let limit = i64::try_from(limit)
             .map_err(|_| DataLayerError::UnexpectedValue(format!("invalid limit: {limit}")))?;
         let sql = claim_due_sql();
-        let rows = sqlx::query(&sql)
-            .bind(vec!["submitted", "queued", "processing"])
-            .bind(now_unix_secs as f64)
-            .bind(limit)
-            .bind(claim_until_unix_secs as f64)
-            .bind(now_unix_secs as f64)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-
-        let mut tasks = rows
-            .iter()
-            .map(map_video_task_row)
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut tasks = collect_query_rows(
+            sqlx::query(&sql)
+                .bind(vec!["submitted", "queued", "processing"])
+                .bind(now_unix_secs as f64)
+                .bind(limit)
+                .bind(claim_until_unix_secs as f64)
+                .bind(now_unix_secs as f64)
+                .fetch(&self.pool),
+            map_video_task_row,
+        )
+        .await?;
         tasks.sort_by(|left, right| {
             left.next_poll_at_unix_secs
                 .cmp(&right.next_poll_at_unix_secs)
@@ -744,6 +857,15 @@ impl VideoTaskReadRepository for SqlxVideoTaskRepository {
         limit: usize,
     ) -> Result<Vec<StoredVideoTask>, DataLayerError> {
         Self::list_page(self, filter, offset, limit).await
+    }
+
+    async fn list_page_summary(
+        &self,
+        filter: &VideoTaskQueryFilter,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<StoredVideoTask>, DataLayerError> {
+        Self::list_page_summary(self, filter, offset, limit).await
     }
 
     async fn count(&self, filter: &VideoTaskQueryFilter) -> Result<u64, DataLayerError> {
@@ -881,7 +1003,21 @@ fn map_status_for_database(status: VideoTaskStatus) -> &'static str {
     }
 }
 
-fn map_video_task_row(row: &sqlx::postgres::PgRow) -> Result<StoredVideoTask, DataLayerError> {
+async fn collect_query_rows<T, S>(
+    mut rows: S,
+    map_row: fn(&PgRow) -> Result<T, DataLayerError>,
+) -> Result<Vec<T>, DataLayerError>
+where
+    S: TryStream<Ok = PgRow, Error = sqlx::Error> + Unpin,
+{
+    let mut items = Vec::new();
+    while let Some(row) = rows.try_next().await.map_postgres_err()? {
+        items.push(map_row(&row)?);
+    }
+    Ok(items)
+}
+
+fn map_video_task_row(row: &PgRow) -> Result<StoredVideoTask, DataLayerError> {
     let status = VideoTaskStatus::from_database(
         row.try_get::<String, _>("status")
             .map_postgres_err()?

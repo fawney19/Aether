@@ -1,5 +1,6 @@
 use async_trait::async_trait;
-use sqlx::{PgPool, Row};
+use futures_util::{stream::TryStream, TryStreamExt};
+use sqlx::{postgres::PgRow, PgPool, Row};
 
 use super::types::{
     AuthApiKeyExportSummary, AuthApiKeyLookupKey, AuthApiKeyReadRepository,
@@ -644,6 +645,20 @@ impl SqlxAuthApiKeySnapshotReadRepository {
         &self.pool
     }
 
+    async fn collect_query_rows<T, S>(
+        mut rows: S,
+        map_row: fn(&PgRow) -> Result<T, DataLayerError>,
+    ) -> Result<Vec<T>, DataLayerError>
+    where
+        S: TryStream<Ok = PgRow, Error = sqlx::Error> + Unpin,
+    {
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(map_row(&row)?);
+        }
+        Ok(items)
+    }
+
     pub async fn find_api_key_snapshot(
         &self,
         key: AuthApiKeyLookupKey<'_>,
@@ -681,12 +696,13 @@ impl SqlxAuthApiKeySnapshotReadRepository {
             return Ok(Vec::new());
         }
 
-        let rows = sqlx::query(LIST_BY_API_KEY_IDS_SQL)
-            .bind(api_key_ids)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_auth_api_key_snapshot_row).collect()
+        Self::collect_query_rows(
+            sqlx::query(LIST_BY_API_KEY_IDS_SQL)
+                .bind(api_key_ids)
+                .fetch(&self.pool),
+            map_auth_api_key_snapshot_row,
+        )
+        .await
     }
 
     pub async fn list_export_api_keys_by_user_ids(
@@ -697,12 +713,13 @@ impl SqlxAuthApiKeySnapshotReadRepository {
             return Ok(Vec::new());
         }
 
-        let rows = sqlx::query(LIST_EXPORT_BY_USER_IDS_SQL)
-            .bind(user_ids)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_auth_api_key_export_row).collect()
+        Self::collect_query_rows(
+            sqlx::query(LIST_EXPORT_BY_USER_IDS_SQL)
+                .bind(user_ids)
+                .fetch(&self.pool),
+            map_auth_api_key_export_row,
+        )
+        .await
     }
 
     pub async fn list_export_api_keys_by_ids(
@@ -713,12 +730,13 @@ impl SqlxAuthApiKeySnapshotReadRepository {
             return Ok(Vec::new());
         }
 
-        let rows = sqlx::query(LIST_EXPORT_BY_API_KEY_IDS_SQL)
-            .bind(api_key_ids)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_auth_api_key_export_row).collect()
+        Self::collect_query_rows(
+            sqlx::query(LIST_EXPORT_BY_API_KEY_IDS_SQL)
+                .bind(api_key_ids)
+                .fetch(&self.pool),
+            map_auth_api_key_export_row,
+        )
+        .await
     }
 
     pub async fn summarize_export_api_keys_by_user_ids(
@@ -760,11 +778,11 @@ impl SqlxAuthApiKeySnapshotReadRepository {
     pub async fn list_export_standalone_api_keys(
         &self,
     ) -> Result<Vec<StoredAuthApiKeyExportRecord>, DataLayerError> {
-        let rows = sqlx::query(LIST_EXPORT_STANDALONE_SQL)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_auth_api_key_export_row).collect()
+        Self::collect_query_rows(
+            sqlx::query(LIST_EXPORT_STANDALONE_SQL).fetch(&self.pool),
+            map_auth_api_key_export_row,
+        )
+        .await
     }
 
     pub async fn list_export_standalone_api_keys_page(
@@ -775,14 +793,15 @@ impl SqlxAuthApiKeySnapshotReadRepository {
             .map_err(|_| DataLayerError::InvalidInput("limit is too large".to_string()))?;
         let skip = i64::try_from(query.skip)
             .map_err(|_| DataLayerError::InvalidInput("skip is too large".to_string()))?;
-        let rows = sqlx::query(LIST_EXPORT_STANDALONE_PAGE_SQL)
-            .bind(query.is_active)
-            .bind(skip)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_auth_api_key_export_row).collect()
+        Self::collect_query_rows(
+            sqlx::query(LIST_EXPORT_STANDALONE_PAGE_SQL)
+                .bind(query.is_active)
+                .bind(skip)
+                .bind(limit)
+                .fetch(&self.pool),
+            map_auth_api_key_export_row,
+        )
+        .await
     }
 
     pub async fn count_export_standalone_api_keys(

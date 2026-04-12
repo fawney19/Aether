@@ -267,11 +267,14 @@ fn build_successful_poll_update(
     record.format_converted = task.format_converted;
     record.model = task.model.clone().or(record.model);
     record.prompt = task.prompt.clone().or(record.prompt);
-    record.original_request_body = task.original_request_body.clone();
-    record.duration_seconds = task.duration_seconds;
-    record.resolution = task.resolution.clone();
-    record.aspect_ratio = task.aspect_ratio.clone();
-    record.size = task.size.clone();
+    record.original_request_body = task
+        .original_request_body
+        .clone()
+        .or(record.original_request_body);
+    record.duration_seconds = task.duration_seconds.or(record.duration_seconds);
+    record.resolution = task.resolution.clone().or(record.resolution);
+    record.aspect_ratio = task.aspect_ratio.clone().or(record.aspect_ratio);
+    record.size = task.size.clone().or(record.size);
     record.created_at_unix_ms = task.created_at_unix_ms;
     record.submitted_at_unix_secs = task.submitted_at_unix_secs;
     record.updated_at_unix_secs = now_unix_secs;
@@ -349,6 +352,8 @@ fn build_failed_poll_update(
 }
 
 fn stored_task_to_upsert(task: &StoredVideoTask) -> UpsertVideoTask {
+    let snapshot_record =
+        LocalVideoTaskSnapshot::from_stored_task(task).map(|snapshot| snapshot.to_upsert_record());
     UpsertVideoTask {
         id: task.id.clone(),
         short_id: task.short_id.clone(),
@@ -365,12 +370,36 @@ fn stored_task_to_upsert(task: &StoredVideoTask) -> UpsertVideoTask {
         provider_api_format: task.provider_api_format.clone(),
         format_converted: task.format_converted,
         model: task.model.clone(),
-        prompt: task.prompt.clone(),
-        original_request_body: task.original_request_body.clone(),
-        duration_seconds: task.duration_seconds,
-        resolution: task.resolution.clone(),
-        aspect_ratio: task.aspect_ratio.clone(),
-        size: task.size.clone(),
+        prompt: task.prompt.clone().or_else(|| {
+            snapshot_record
+                .as_ref()
+                .and_then(|record| record.prompt.clone())
+        }),
+        original_request_body: task.original_request_body.clone().or_else(|| {
+            snapshot_record
+                .as_ref()
+                .and_then(|record| record.original_request_body.clone())
+        }),
+        duration_seconds: task.duration_seconds.or_else(|| {
+            snapshot_record
+                .as_ref()
+                .and_then(|record| record.duration_seconds)
+        }),
+        resolution: task.resolution.clone().or_else(|| {
+            snapshot_record
+                .as_ref()
+                .and_then(|record| record.resolution.clone())
+        }),
+        aspect_ratio: task.aspect_ratio.clone().or_else(|| {
+            snapshot_record
+                .as_ref()
+                .and_then(|record| record.aspect_ratio.clone())
+        }),
+        size: task.size.clone().or_else(|| {
+            snapshot_record
+                .as_ref()
+                .and_then(|record| record.size.clone())
+        }),
         status: task.status,
         progress_percent: task.progress_percent,
         progress_message: task.progress_message.clone(),
@@ -549,4 +578,155 @@ fn now_unix_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_failed_poll_update, stored_task_to_upsert, VideoTaskRefreshError};
+    use crate::video_tasks::{
+        LocalVideoTaskPersistence, LocalVideoTaskSnapshot, LocalVideoTaskStatus,
+        LocalVideoTaskTransport, OpenAiVideoTaskSeed,
+    };
+    use aether_data_contracts::repository::video_tasks::{StoredVideoTask, VideoTaskStatus};
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    fn sample_sparse_stored_task() -> StoredVideoTask {
+        let snapshot = LocalVideoTaskSnapshot::OpenAi(OpenAiVideoTaskSeed {
+            local_task_id: "task-1".to_string(),
+            upstream_task_id: "ext-1".to_string(),
+            created_at_unix_ms: 1,
+            user_id: Some("user-1".to_string()),
+            api_key_id: Some("api-key-1".to_string()),
+            model: Some("sora-2".to_string()),
+            prompt: Some("hello".to_string()),
+            size: Some("1280x720".to_string()),
+            seconds: Some("4".to_string()),
+            remixed_from_video_id: None,
+            status: LocalVideoTaskStatus::Processing,
+            progress_percent: 50,
+            completed_at_unix_secs: None,
+            expires_at_unix_secs: None,
+            error_code: None,
+            error_message: None,
+            video_url: None,
+            persistence: LocalVideoTaskPersistence {
+                request_id: "request-1".to_string(),
+                username: Some("user".to_string()),
+                api_key_name: Some("primary".to_string()),
+                client_api_format: "openai:video".to_string(),
+                provider_api_format: "openai:video".to_string(),
+                original_request_body: json!({
+                    "prompt": "hello",
+                    "seconds": "4",
+                    "resolution": "720p",
+                    "aspect_ratio": "16:9",
+                    "size": "1280x720"
+                }),
+                format_converted: false,
+            },
+            transport: LocalVideoTaskTransport {
+                upstream_base_url: "https://example.com".to_string(),
+                provider_name: Some("provider".to_string()),
+                provider_id: "provider-1".to_string(),
+                endpoint_id: "endpoint-1".to_string(),
+                key_id: "key-1".to_string(),
+                headers: BTreeMap::new(),
+                content_type: Some("application/json".to_string()),
+                model_name: Some("sora-2".to_string()),
+                proxy: None,
+                tls_profile: None,
+                timeouts: None,
+            },
+        });
+
+        StoredVideoTask {
+            id: "task-1".to_string(),
+            short_id: Some("short-task-1".to_string()),
+            request_id: "request-1".to_string(),
+            user_id: Some("user-1".to_string()),
+            api_key_id: Some("api-key-1".to_string()),
+            username: Some("user".to_string()),
+            api_key_name: Some("primary".to_string()),
+            external_task_id: Some("ext-1".to_string()),
+            provider_id: Some("provider-1".to_string()),
+            endpoint_id: Some("endpoint-1".to_string()),
+            key_id: Some("key-1".to_string()),
+            client_api_format: Some("openai:video".to_string()),
+            provider_api_format: Some("openai:video".to_string()),
+            format_converted: false,
+            model: Some("sora-2".to_string()),
+            prompt: None,
+            original_request_body: None,
+            duration_seconds: None,
+            resolution: None,
+            aspect_ratio: None,
+            size: None,
+            status: VideoTaskStatus::Processing,
+            progress_percent: 50,
+            progress_message: Some("polling".to_string()),
+            retry_count: 1,
+            poll_interval_seconds: 10,
+            next_poll_at_unix_secs: Some(20),
+            poll_count: 2,
+            max_poll_count: 360,
+            created_at_unix_ms: 1,
+            submitted_at_unix_secs: Some(1),
+            completed_at_unix_secs: None,
+            updated_at_unix_secs: 20,
+            error_code: None,
+            error_message: None,
+            video_url: None,
+            request_metadata: Some(json!({
+                "rust_local_snapshot": serde_json::to_value(snapshot)
+                    .expect("snapshot should serialize")
+            })),
+        }
+    }
+
+    #[test]
+    fn stored_task_to_upsert_restores_sparse_fields_from_snapshot() {
+        let record = stored_task_to_upsert(&sample_sparse_stored_task());
+
+        assert_eq!(record.prompt.as_deref(), Some("hello"));
+        assert_eq!(
+            record.original_request_body,
+            Some(json!({
+                "prompt": "hello",
+                "seconds": "4",
+                "resolution": "720p",
+                "aspect_ratio": "16:9",
+                "size": "1280x720"
+            }))
+        );
+        assert_eq!(record.duration_seconds, Some(4));
+        assert_eq!(record.resolution.as_deref(), Some("720p"));
+        assert_eq!(record.aspect_ratio.as_deref(), Some("16:9"));
+        assert_eq!(record.size.as_deref(), Some("1280x720"));
+    }
+
+    #[test]
+    fn failed_poll_update_keeps_snapshot_backed_request_body() {
+        let record = build_failed_poll_update(
+            &sample_sparse_stored_task(),
+            &VideoTaskRefreshError {
+                message: "temporary failure".to_string(),
+                permanent: false,
+            },
+            100,
+        );
+
+        assert_eq!(
+            record.original_request_body,
+            Some(json!({
+                "prompt": "hello",
+                "seconds": "4",
+                "resolution": "720p",
+                "aspect_ratio": "16:9",
+                "size": "1280x720"
+            }))
+        );
+        assert_eq!(record.prompt.as_deref(), Some("hello"));
+        assert_eq!(record.resolution.as_deref(), Some("720p"));
+    }
 }

@@ -394,6 +394,13 @@ pub trait VideoTaskReadRepository: Send + Sync {
         limit: usize,
     ) -> Result<Vec<StoredVideoTask>, crate::DataLayerError>;
 
+    async fn list_page_summary(
+        &self,
+        filter: &VideoTaskQueryFilter,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<StoredVideoTask>, crate::DataLayerError>;
+
     async fn count(&self, filter: &VideoTaskQueryFilter) -> Result<u64, crate::DataLayerError>;
 
     async fn count_by_status(

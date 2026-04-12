@@ -1,14 +1,11 @@
 use chrono::{DateTime, Utc};
-use sqlx::Row;
-use uuid::Uuid;
 
 use crate::data::GatewayDataState;
 use aether_data_contracts::DataLayerError;
 
 use super::{
     maintenance_timezone, wallet_daily_usage_aggregation_target,
-    DELETE_STALE_WALLET_DAILY_USAGE_LEDGERS_SQL, SELECT_WALLET_DAILY_USAGE_AGGREGATION_ROWS_SQL,
-    UPSERT_WALLET_DAILY_USAGE_LEDGER_SQL,
+    DELETE_STALE_WALLET_DAILY_USAGE_LEDGERS_SQL, UPSERT_WALLET_DAILY_USAGE_LEDGER_SQL,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,60 +40,16 @@ pub(super) async fn perform_wallet_daily_usage_aggregation_once(
     };
 
     let mut tx = pool.begin().await.map_err(postgres_error)?;
-    let rows = sqlx::query(SELECT_WALLET_DAILY_USAGE_AGGREGATION_ROWS_SQL)
+    let aggregated_wallets = sqlx::query(UPSERT_WALLET_DAILY_USAGE_LEDGER_SQL)
         .bind(target.window_start_utc)
         .bind(target.window_end_utc)
-        .fetch_all(&mut *tx)
+        .bind(target.billing_date)
+        .bind(target.billing_timezone.as_str())
+        .bind(now_utc)
+        .execute(&mut *tx)
         .await
-        .map_err(postgres_error)?;
-    for row in &rows {
-        sqlx::query(UPSERT_WALLET_DAILY_USAGE_LEDGER_SQL)
-            .bind(Uuid::new_v4().to_string())
-            .bind(
-                row.try_get::<String, _>("wallet_id")
-                    .map_err(postgres_error)?,
-            )
-            .bind(target.billing_date)
-            .bind(target.billing_timezone.as_str())
-            .bind(
-                row.try_get::<f64, _>("total_cost_usd")
-                    .map_err(postgres_error)?,
-            )
-            .bind(
-                row.try_get::<i64, _>("total_requests")
-                    .map_err(postgres_error)?,
-            )
-            .bind(
-                row.try_get::<i64, _>("input_tokens")
-                    .map_err(postgres_error)?,
-            )
-            .bind(
-                row.try_get::<i64, _>("output_tokens")
-                    .map_err(postgres_error)?,
-            )
-            .bind(
-                row.try_get::<i64, _>("cache_creation_tokens")
-                    .map_err(postgres_error)?,
-            )
-            .bind(
-                row.try_get::<i64, _>("cache_read_tokens")
-                    .map_err(postgres_error)?,
-            )
-            .bind(
-                row.try_get::<Option<DateTime<Utc>>, _>("first_finalized_at")
-                    .map_err(postgres_error)?,
-            )
-            .bind(
-                row.try_get::<Option<DateTime<Utc>>, _>("last_finalized_at")
-                    .map_err(postgres_error)?,
-            )
-            .bind(now_utc)
-            .bind(now_utc)
-            .bind(now_utc)
-            .execute(&mut *tx)
-            .await
-            .map_err(postgres_error)?;
-    }
+        .map_err(postgres_error)?
+        .rows_affected();
 
     let deleted_stale_ledgers = sqlx::query(DELETE_STALE_WALLET_DAILY_USAGE_LEDGERS_SQL)
         .bind(target.billing_date)
@@ -112,7 +65,7 @@ pub(super) async fn perform_wallet_daily_usage_aggregation_once(
     Ok(WalletDailyUsageAggregationSummary {
         billing_date: target.billing_date,
         billing_timezone: target.billing_timezone,
-        aggregated_wallets: rows.len(),
+        aggregated_wallets: usize::try_from(aggregated_wallets).unwrap_or(usize::MAX),
         deleted_stale_ledgers: usize::try_from(deleted_stale_ledgers).unwrap_or(usize::MAX),
     })
 }

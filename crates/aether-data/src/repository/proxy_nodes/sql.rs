@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures_util::TryStreamExt;
 use sha2::{Digest, Sha256};
 use sqlx::{postgres::PgRow, PgPool, Row};
 
@@ -414,11 +415,12 @@ impl SqlxProxyNodeRepository {
 #[async_trait]
 impl ProxyNodeReadRepository for SqlxProxyNodeRepository {
     async fn list_proxy_nodes(&self) -> Result<Vec<StoredProxyNode>, DataLayerError> {
-        let rows = sqlx::query(LIST_PROXY_NODES_SQL)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(Self::row_to_stored).collect()
+        let mut rows = sqlx::query(LIST_PROXY_NODES_SQL).fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(Self::row_to_stored(&row)?);
+        }
+        Ok(items)
     }
 
     async fn find_proxy_node(
@@ -438,13 +440,15 @@ impl ProxyNodeReadRepository for SqlxProxyNodeRepository {
         node_id: &str,
         limit: usize,
     ) -> Result<Vec<StoredProxyNodeEvent>, DataLayerError> {
-        let rows = sqlx::query(LIST_PROXY_NODE_EVENTS_SQL)
+        let mut rows = sqlx::query(LIST_PROXY_NODE_EVENTS_SQL)
             .bind(node_id)
             .bind(i64::try_from(limit).unwrap_or(i64::MAX))
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(Self::row_to_event).collect()
+            .fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(Self::row_to_event(&row)?);
+        }
+        Ok(items)
     }
 }
 

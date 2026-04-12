@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures_util::TryStreamExt;
 use sqlx::{postgres::PgRow, PgPool, Row};
 
 use super::types::{
@@ -269,20 +270,19 @@ impl ManagementTokenReadRepository for SqlxManagementTokenRepository {
             .map_postgres_err()?;
         let total = count_row.try_get::<i64, _>("total").map_postgres_err()?;
 
-        let rows = sqlx::query(LIST_MANAGEMENT_TOKENS_SQL)
+        let mut rows = sqlx::query(LIST_MANAGEMENT_TOKENS_SQL)
             .bind(query.user_id.as_deref())
             .bind(query.is_active)
             .bind(i64::try_from(query.offset).unwrap_or(i64::MAX))
             .bind(i64::try_from(query.limit).unwrap_or(i64::MAX))
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
+            .fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(map_token_with_user_row(&row)?);
+        }
 
         Ok(StoredManagementTokenListPage {
-            items: rows
-                .iter()
-                .map(map_token_with_user_row)
-                .collect::<Result<Vec<_>, _>>()?,
+            items,
             total: usize::try_from(total.max(0)).unwrap_or(usize::MAX),
         })
     }

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
+use futures_util::TryStreamExt;
 use sqlx::{postgres::PgRow, PgPool, Row};
 
 use super::types::{
@@ -220,18 +221,16 @@ impl AnnouncementReadRepository for SqlxAnnouncementReadRepository {
             .map_postgres_err()?
             .max(0) as u64;
 
-        let rows = sqlx::query(LIST_ANNOUNCEMENTS_SQL)
+        let mut rows = sqlx::query(LIST_ANNOUNCEMENTS_SQL)
             .bind(query.active_only)
             .bind(now_unix_secs as f64)
             .bind(query.offset as i64)
             .bind(query.limit as i64)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        let items = rows
-            .iter()
-            .map(map_announcement_row)
-            .collect::<Result<Vec<_>, _>>()?;
+            .fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(map_announcement_row(&row)?);
+        }
 
         Ok(StoredAnnouncementPage { items, total })
     }

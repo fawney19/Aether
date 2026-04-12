@@ -49,7 +49,9 @@ pub(crate) use crate::handlers::admin::provider::pool::runtime::{
 };
 pub(crate) use crate::handlers::admin::provider::shared::support::AdminProviderPoolRuntimeState;
 pub(crate) use crate::handlers::admin::shared::attach_admin_audit_response;
-pub(crate) use aether_data_contracts::repository::provider_catalog::ProviderCatalogKeyListQuery;
+pub(crate) use aether_data_contracts::repository::provider_catalog::{
+    ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
+};
 
 pub(crate) async fn maybe_build_local_admin_pool_response(
     state: &AdminAppState<'_>,

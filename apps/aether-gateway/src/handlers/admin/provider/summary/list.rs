@@ -48,11 +48,11 @@ pub(crate) async fn build_admin_providers_payload(
             .ok()
             .unwrap_or_default()
     };
-    let keys = if provider_ids.is_empty() {
+    let key_stats = if provider_ids.is_empty() {
         Vec::new()
     } else {
         state
-            .list_provider_catalog_keys_by_provider_ids(&provider_ids)
+            .list_provider_catalog_key_stats_by_provider_ids(&provider_ids)
             .await
             .ok()
             .unwrap_or_default()
@@ -68,9 +68,12 @@ pub(crate) async fn build_admin_providers_payload(
             },
         );
     let has_any_key_by_provider =
-        keys.into_iter()
-            .fold(BTreeSet::<String>::new(), |mut acc, key| {
-                acc.insert(key.provider_id);
+        key_stats
+            .into_iter()
+            .fold(BTreeSet::<String>::new(), |mut acc, stats| {
+                if stats.total_keys > 0 {
+                    acc.insert(stats.provider_id);
+                }
                 acc
             });
 

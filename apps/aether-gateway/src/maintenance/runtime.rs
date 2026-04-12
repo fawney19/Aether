@@ -109,26 +109,26 @@ const DB_MAINTENANCE_HOUR: u32 = 5;
 const DB_MAINTENANCE_MINUTE: u32 = 0;
 const MAINTENANCE_DEFAULT_TIMEZONE: &str = "Asia/Shanghai";
 const DB_MAINTENANCE_TABLES: &[&str] = &["usage", "request_candidates", "audit_logs"];
-const SELECT_WALLET_DAILY_USAGE_AGGREGATION_ROWS_SQL: &str = r#"
-SELECT
-    wallet_id,
-    COUNT(id) AS total_requests,
-    CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost_usd,
-    COALESCE(SUM(input_tokens), 0) AS input_tokens,
-    COALESCE(SUM(output_tokens), 0) AS output_tokens,
-    COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_tokens,
-    COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_tokens,
-    MIN(finalized_at) AS first_finalized_at,
-    MAX(finalized_at) AS last_finalized_at
-FROM usage
-WHERE wallet_id IS NOT NULL
-  AND billing_status = 'settled'
-  AND total_cost_usd > 0
-  AND finalized_at >= $1
-  AND finalized_at < $2
-GROUP BY wallet_id
-"#;
 const UPSERT_WALLET_DAILY_USAGE_LEDGER_SQL: &str = r#"
+WITH aggregated AS (
+    SELECT
+        wallet_id,
+        COUNT(id) AS total_requests,
+        CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost_usd,
+        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        COALESCE(SUM(cache_creation_input_tokens), 0) AS cache_creation_tokens,
+        COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_tokens,
+        MIN(finalized_at) AS first_finalized_at,
+        MAX(finalized_at) AS last_finalized_at
+    FROM usage
+    WHERE wallet_id IS NOT NULL
+      AND billing_status = 'settled'
+      AND total_cost_usd > 0
+      AND finalized_at >= $1
+      AND finalized_at < $2
+    GROUP BY wallet_id
+)
 INSERT INTO wallet_daily_usage_ledgers (
     id,
     wallet_id,
@@ -146,11 +146,23 @@ INSERT INTO wallet_daily_usage_ledgers (
     created_at,
     updated_at
 )
-VALUES (
-    $1, $2, $3, $4, $5,
-    $6, $7, $8, $9, $10,
-    $11, $12, $13, $14, $15
-)
+SELECT
+    md5(CONCAT('wallet-daily-usage:', aggregated.wallet_id, ':', CAST($3 AS TEXT), ':', $4)),
+    aggregated.wallet_id,
+    $3,
+    $4,
+    aggregated.total_cost_usd,
+    aggregated.total_requests,
+    aggregated.input_tokens,
+    aggregated.output_tokens,
+    aggregated.cache_creation_tokens,
+    aggregated.cache_read_tokens,
+    aggregated.first_finalized_at,
+    aggregated.last_finalized_at,
+    $5,
+    $5,
+    $5
+FROM aggregated
 ON CONFLICT (wallet_id, billing_date, billing_timezone)
 DO UPDATE SET
     total_cost_usd = EXCLUDED.total_cost_usd,
@@ -311,11 +323,7 @@ WHERE id = ANY($1)
 "#;
 const SELECT_USAGE_BODY_COMPRESSION_BATCH_SQL: &str = r#"
 SELECT
-    id,
-    request_body,
-    response_body,
-    provider_request_body,
-    client_response_body
+    id
 FROM usage
 WHERE created_at < $1
   AND ($2::timestamptz IS NULL OR created_at >= $2)
@@ -327,6 +335,17 @@ WHERE created_at < $1
   )
 ORDER BY created_at ASC, id ASC
 LIMIT $3
+"#;
+const SELECT_USAGE_BODY_COMPRESSION_ROW_SQL: &str = r#"
+SELECT
+    id,
+    request_body,
+    response_body,
+    provider_request_body,
+    client_response_body
+FROM usage
+WHERE id = $1
+LIMIT 1
 "#;
 const UPDATE_USAGE_BODY_COMPRESSION_SQL: &str = r#"
 UPDATE usage
@@ -520,24 +539,24 @@ DO UPDATE SET
     aggregated_at = EXCLUDED.aggregated_at,
     updated_at = EXCLUDED.updated_at
 "#;
-const SELECT_STATS_DAILY_MODEL_AGGREGATES_SQL: &str = r#"
-SELECT
-    model,
-    CAST(COUNT(id) AS BIGINT) AS total_requests,
-    CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS input_tokens,
-    CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS output_tokens,
-    CAST(COALESCE(SUM(cache_creation_input_tokens), 0) AS BIGINT) AS cache_creation_tokens,
-    CAST(COALESCE(SUM(cache_read_input_tokens), 0) AS BIGINT) AS cache_read_tokens,
-    CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost,
-    CAST(COALESCE(AVG(response_time_ms), 0) AS DOUBLE PRECISION) AS avg_response_time_ms
-FROM usage
-WHERE created_at >= $1
-  AND created_at < $2
-  AND model IS NOT NULL
-  AND model <> ''
-GROUP BY model
-"#;
 const UPSERT_STATS_DAILY_MODEL_SQL: &str = r#"
+WITH aggregated AS (
+    SELECT
+        model,
+        CAST(COUNT(id) AS BIGINT) AS total_requests,
+        CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS input_tokens,
+        CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS output_tokens,
+        CAST(COALESCE(SUM(cache_creation_input_tokens), 0) AS BIGINT) AS cache_creation_tokens,
+        CAST(COALESCE(SUM(cache_read_input_tokens), 0) AS BIGINT) AS cache_read_tokens,
+        CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost,
+        CAST(COALESCE(AVG(response_time_ms), 0) AS DOUBLE PRECISION) AS avg_response_time_ms
+    FROM usage
+    WHERE created_at >= $1
+      AND created_at < $2
+      AND model IS NOT NULL
+      AND model <> ''
+    GROUP BY model
+)
 INSERT INTO stats_daily_model (
     id,
     date,
@@ -552,7 +571,20 @@ INSERT INTO stats_daily_model (
     created_at,
     updated_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+SELECT
+    md5(CONCAT('stats-daily-model:', aggregated.model, ':', CAST($1 AS TEXT))),
+    $1,
+    aggregated.model,
+    aggregated.total_requests,
+    aggregated.input_tokens,
+    aggregated.output_tokens,
+    aggregated.cache_creation_tokens,
+    aggregated.cache_read_tokens,
+    aggregated.total_cost,
+    aggregated.avg_response_time_ms,
+    $3,
+    $3
+FROM aggregated
 ON CONFLICT (date, model)
 DO UPDATE SET
     total_requests = EXCLUDED.total_requests,
@@ -564,21 +596,21 @@ DO UPDATE SET
     avg_response_time_ms = EXCLUDED.avg_response_time_ms,
     updated_at = EXCLUDED.updated_at
 "#;
-const SELECT_STATS_DAILY_PROVIDER_AGGREGATES_SQL: &str = r#"
-SELECT
-    COALESCE(provider_name, 'Unknown') AS provider_name,
-    CAST(COUNT(id) AS BIGINT) AS total_requests,
-    CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS input_tokens,
-    CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS output_tokens,
-    CAST(COALESCE(SUM(cache_creation_input_tokens), 0) AS BIGINT) AS cache_creation_tokens,
-    CAST(COALESCE(SUM(cache_read_input_tokens), 0) AS BIGINT) AS cache_read_tokens,
-    CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost
-FROM usage
-WHERE created_at >= $1
-  AND created_at < $2
-GROUP BY COALESCE(provider_name, 'Unknown')
-"#;
 const UPSERT_STATS_DAILY_PROVIDER_SQL: &str = r#"
+WITH aggregated AS (
+    SELECT
+        COALESCE(provider_name, 'Unknown') AS provider_name,
+        CAST(COUNT(id) AS BIGINT) AS total_requests,
+        CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS input_tokens,
+        CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS output_tokens,
+        CAST(COALESCE(SUM(cache_creation_input_tokens), 0) AS BIGINT) AS cache_creation_tokens,
+        CAST(COALESCE(SUM(cache_read_input_tokens), 0) AS BIGINT) AS cache_read_tokens,
+        CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost
+    FROM usage
+    WHERE created_at >= $1
+      AND created_at < $2
+    GROUP BY COALESCE(provider_name, 'Unknown')
+)
 INSERT INTO stats_daily_provider (
     id,
     date,
@@ -592,7 +624,19 @@ INSERT INTO stats_daily_provider (
     created_at,
     updated_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+SELECT
+    md5(CONCAT('stats-daily-provider:', aggregated.provider_name, ':', CAST($1 AS TEXT))),
+    $1,
+    aggregated.provider_name,
+    aggregated.total_requests,
+    aggregated.input_tokens,
+    aggregated.output_tokens,
+    aggregated.cache_creation_tokens,
+    aggregated.cache_read_tokens,
+    aggregated.total_cost,
+    $3,
+    $3
+FROM aggregated
 ON CONFLICT (date, provider_name)
 DO UPDATE SET
     total_requests = EXCLUDED.total_requests,
@@ -603,24 +647,34 @@ DO UPDATE SET
     total_cost = EXCLUDED.total_cost,
     updated_at = EXCLUDED.updated_at
 "#;
-const SELECT_STATS_DAILY_API_KEY_AGGREGATES_SQL: &str = r#"
-SELECT
-    api_key_id,
-    MAX(api_key_name) AS api_key_name,
-    CAST(COUNT(id) AS BIGINT) AS total_requests,
-    CAST(COALESCE(SUM(CASE WHEN status_code >= 400 OR error_message IS NOT NULL THEN 1 ELSE 0 END), 0) AS BIGINT) AS error_requests,
-    CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS input_tokens,
-    CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS output_tokens,
-    CAST(COALESCE(SUM(cache_creation_input_tokens), 0) AS BIGINT) AS cache_creation_tokens,
-    CAST(COALESCE(SUM(cache_read_input_tokens), 0) AS BIGINT) AS cache_read_tokens,
-    CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost
-FROM usage
-WHERE created_at >= $1
-  AND created_at < $2
-  AND api_key_id IS NOT NULL
-GROUP BY api_key_id
-"#;
 const UPSERT_STATS_DAILY_API_KEY_SQL: &str = r#"
+WITH aggregated AS (
+    SELECT
+        api_key_id,
+        MAX(api_key_name) AS api_key_name,
+        CAST(COUNT(id) AS BIGINT) AS total_requests,
+        CAST(
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN status_code >= 400 OR error_message IS NOT NULL THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS BIGINT
+        ) AS error_requests,
+        CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS input_tokens,
+        CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS output_tokens,
+        CAST(COALESCE(SUM(cache_creation_input_tokens), 0) AS BIGINT) AS cache_creation_tokens,
+        CAST(COALESCE(SUM(cache_read_input_tokens), 0) AS BIGINT) AS cache_read_tokens,
+        CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost
+    FROM usage
+    WHERE created_at >= $1
+      AND created_at < $2
+      AND api_key_id IS NOT NULL
+    GROUP BY api_key_id
+)
 INSERT INTO stats_daily_api_key (
     id,
     api_key_id,
@@ -637,7 +691,22 @@ INSERT INTO stats_daily_api_key (
     created_at,
     updated_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+SELECT
+    md5(CONCAT('stats-daily-api-key:', aggregated.api_key_id, ':', CAST($1 AS TEXT))),
+    aggregated.api_key_id,
+    aggregated.api_key_name,
+    $1,
+    aggregated.total_requests,
+    GREATEST(aggregated.total_requests - aggregated.error_requests, 0),
+    aggregated.error_requests,
+    aggregated.input_tokens,
+    aggregated.output_tokens,
+    aggregated.cache_creation_tokens,
+    aggregated.cache_read_tokens,
+    aggregated.total_cost,
+    $3,
+    $3
+FROM aggregated
 ON CONFLICT (api_key_id, date)
 DO UPDATE SET
     api_key_name = COALESCE(EXCLUDED.api_key_name, stats_daily_api_key.api_key_name),
@@ -655,19 +724,19 @@ const DELETE_STATS_DAILY_ERRORS_FOR_DATE_SQL: &str = r#"
 DELETE FROM stats_daily_error
 WHERE date = $1
 "#;
-const SELECT_STATS_DAILY_ERROR_AGGREGATES_SQL: &str = r#"
-SELECT
-    error_category,
-    provider_name,
-    model,
-    CAST(COUNT(id) AS BIGINT) AS total_count
-FROM usage
-WHERE created_at >= $1
-  AND created_at < $2
-  AND error_category IS NOT NULL
-GROUP BY error_category, provider_name, model
-"#;
 const INSERT_STATS_DAILY_ERROR_SQL: &str = r#"
+WITH aggregated AS (
+    SELECT
+        error_category,
+        provider_name,
+        model,
+        CAST(COUNT(id) AS BIGINT) AS total_count
+    FROM usage
+    WHERE created_at >= $1
+      AND created_at < $2
+      AND error_category IS NOT NULL
+    GROUP BY error_category, provider_name, model
+)
 INSERT INTO stats_daily_error (
     id,
     date,
@@ -678,32 +747,56 @@ INSERT INTO stats_daily_error (
     created_at,
     updated_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-"#;
-const SELECT_ACTIVE_USER_IDS_SQL: &str = r#"
-SELECT id
-FROM users
-WHERE is_active IS TRUE
-ORDER BY id ASC
-"#;
-const SELECT_STATS_USER_DAILY_AGGREGATES_SQL: &str = r#"
 SELECT
-    user_id,
-    MAX(username) AS username,
-    CAST(COUNT(id) AS BIGINT) AS total_requests,
-    CAST(COALESCE(SUM(CASE WHEN status_code >= 400 OR error_message IS NOT NULL THEN 1 ELSE 0 END), 0) AS BIGINT) AS error_requests,
-    CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS input_tokens,
-    CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS output_tokens,
-    CAST(COALESCE(SUM(cache_creation_input_tokens), 0) AS BIGINT) AS cache_creation_tokens,
-    CAST(COALESCE(SUM(cache_read_input_tokens), 0) AS BIGINT) AS cache_read_tokens,
-    CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost
-FROM usage
-WHERE created_at >= $1
-  AND created_at < $2
-  AND user_id IS NOT NULL
-GROUP BY user_id
+    md5(
+        CONCAT(
+            'stats-daily-error:',
+            CAST($1 AS TEXT),
+            ':',
+            aggregated.error_category,
+            ':',
+            COALESCE(aggregated.provider_name, ''),
+            ':',
+            COALESCE(aggregated.model, '')
+        )
+    ),
+    $1,
+    aggregated.error_category,
+    aggregated.provider_name,
+    aggregated.model,
+    aggregated.total_count,
+    $3,
+    $3
+FROM aggregated
 "#;
 const UPSERT_STATS_USER_DAILY_SQL: &str = r#"
+WITH aggregated AS (
+    SELECT
+        user_id,
+        MAX(username) AS username,
+        CAST(COUNT(id) AS BIGINT) AS total_requests,
+        CAST(
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN status_code >= 400 OR error_message IS NOT NULL THEN 1
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS BIGINT
+        ) AS error_requests,
+        CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS input_tokens,
+        CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS output_tokens,
+        CAST(COALESCE(SUM(cache_creation_input_tokens), 0) AS BIGINT) AS cache_creation_tokens,
+        CAST(COALESCE(SUM(cache_read_input_tokens), 0) AS BIGINT) AS cache_read_tokens,
+        CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost
+    FROM usage
+    WHERE created_at >= $1
+      AND created_at < $2
+      AND user_id IS NOT NULL
+    GROUP BY user_id
+)
 INSERT INTO stats_user_daily (
     id,
     user_id,
@@ -720,7 +813,24 @@ INSERT INTO stats_user_daily (
     created_at,
     updated_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+SELECT
+    md5(CONCAT('stats-user-daily:', users.id, ':', CAST($1 AS TEXT))),
+    users.id,
+    aggregated.username,
+    $1,
+    COALESCE(aggregated.total_requests, 0),
+    GREATEST(COALESCE(aggregated.total_requests, 0) - COALESCE(aggregated.error_requests, 0), 0),
+    COALESCE(aggregated.error_requests, 0),
+    COALESCE(aggregated.input_tokens, 0),
+    COALESCE(aggregated.output_tokens, 0),
+    COALESCE(aggregated.cache_creation_tokens, 0),
+    COALESCE(aggregated.cache_read_tokens, 0),
+    COALESCE(aggregated.total_cost, 0),
+    $3,
+    $3
+FROM users
+LEFT JOIN aggregated ON aggregated.user_id = users.id
+WHERE users.is_active IS TRUE
 ON CONFLICT (user_id, date)
 DO UPDATE SET
     username = COALESCE(EXCLUDED.username, stats_user_daily.username),
@@ -859,21 +969,29 @@ DO UPDATE SET
     aggregated_at = EXCLUDED.aggregated_at,
     updated_at = EXCLUDED.updated_at
 "#;
-const SELECT_STATS_HOURLY_USER_AGGREGATES_SQL: &str = r#"
-SELECT
-    user_id,
-    COUNT(id) AS total_requests,
-    COALESCE(SUM(CASE WHEN status_code >= 400 OR error_message IS NOT NULL THEN 1 ELSE 0 END), 0) AS error_requests,
-    COALESCE(SUM(input_tokens), 0) AS input_tokens,
-    COALESCE(SUM(output_tokens), 0) AS output_tokens,
-    CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost
-FROM usage
-WHERE created_at >= $1
-  AND created_at < $2
-  AND user_id IS NOT NULL
-GROUP BY user_id
-"#;
 const UPSERT_STATS_HOURLY_USER_SQL: &str = r#"
+WITH aggregated AS (
+    SELECT
+        user_id,
+        COUNT(id) AS total_requests,
+        COALESCE(
+            SUM(
+                CASE
+                    WHEN status_code >= 400 OR error_message IS NOT NULL THEN 1
+                    ELSE 0
+                END
+            ),
+            0
+        ) AS error_requests,
+        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost
+    FROM usage
+    WHERE created_at >= $1
+      AND created_at < $2
+      AND user_id IS NOT NULL
+    GROUP BY user_id
+)
 INSERT INTO stats_hourly_user (
     id,
     hour_utc,
@@ -887,7 +1005,19 @@ INSERT INTO stats_hourly_user (
     created_at,
     updated_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+SELECT
+    md5(CONCAT('stats-hourly-user:', aggregated.user_id, ':', CAST($1 AS TEXT))),
+    $1,
+    aggregated.user_id,
+    aggregated.total_requests,
+    GREATEST(aggregated.total_requests - aggregated.error_requests, 0),
+    aggregated.error_requests,
+    aggregated.input_tokens,
+    aggregated.output_tokens,
+    aggregated.total_cost,
+    $3,
+    $3
+FROM aggregated
 ON CONFLICT (hour_utc, user_id)
 DO UPDATE SET
     total_requests = EXCLUDED.total_requests,
@@ -898,20 +1028,22 @@ DO UPDATE SET
     total_cost = EXCLUDED.total_cost,
     updated_at = EXCLUDED.updated_at
 "#;
-const SELECT_STATS_HOURLY_MODEL_AGGREGATES_SQL: &str = r#"
-SELECT
-    model,
-    COUNT(id) AS total_requests,
-    COALESCE(SUM(input_tokens), 0) AS input_tokens,
-    COALESCE(SUM(output_tokens), 0) AS output_tokens,
-    CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost,
-    CAST(COALESCE(AVG(response_time_ms), 0) AS DOUBLE PRECISION) AS avg_response_time_ms
-FROM usage
-WHERE created_at >= $1
-  AND created_at < $2
-GROUP BY model
-"#;
 const UPSERT_STATS_HOURLY_MODEL_SQL: &str = r#"
+WITH aggregated AS (
+    SELECT
+        model,
+        COUNT(id) AS total_requests,
+        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost,
+        CAST(COALESCE(AVG(response_time_ms), 0) AS DOUBLE PRECISION) AS avg_response_time_ms
+    FROM usage
+    WHERE created_at >= $1
+      AND created_at < $2
+      AND model IS NOT NULL
+      AND model <> ''
+    GROUP BY model
+)
 INSERT INTO stats_hourly_model (
     id,
     hour_utc,
@@ -924,7 +1056,18 @@ INSERT INTO stats_hourly_model (
     created_at,
     updated_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+SELECT
+    md5(CONCAT('stats-hourly-model:', aggregated.model, ':', CAST($1 AS TEXT))),
+    $1,
+    aggregated.model,
+    aggregated.total_requests,
+    aggregated.input_tokens,
+    aggregated.output_tokens,
+    aggregated.total_cost,
+    aggregated.avg_response_time_ms,
+    $3,
+    $3
+FROM aggregated
 ON CONFLICT (hour_utc, model)
 DO UPDATE SET
     total_requests = EXCLUDED.total_requests,
@@ -934,19 +1077,21 @@ DO UPDATE SET
     avg_response_time_ms = EXCLUDED.avg_response_time_ms,
     updated_at = EXCLUDED.updated_at
 "#;
-const SELECT_STATS_HOURLY_PROVIDER_AGGREGATES_SQL: &str = r#"
-SELECT
-    provider_name,
-    COUNT(id) AS total_requests,
-    COALESCE(SUM(input_tokens), 0) AS input_tokens,
-    COALESCE(SUM(output_tokens), 0) AS output_tokens,
-    CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost
-FROM usage
-WHERE created_at >= $1
-  AND created_at < $2
-GROUP BY provider_name
-"#;
 const UPSERT_STATS_HOURLY_PROVIDER_SQL: &str = r#"
+WITH aggregated AS (
+    SELECT
+        provider_name,
+        COUNT(id) AS total_requests,
+        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost
+    FROM usage
+    WHERE created_at >= $1
+      AND created_at < $2
+      AND provider_name IS NOT NULL
+      AND provider_name <> ''
+    GROUP BY provider_name
+)
 INSERT INTO stats_hourly_provider (
     id,
     hour_utc,
@@ -958,7 +1103,17 @@ INSERT INTO stats_hourly_provider (
     created_at,
     updated_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+SELECT
+    md5(CONCAT('stats-hourly-provider:', aggregated.provider_name, ':', CAST($1 AS TEXT))),
+    $1,
+    aggregated.provider_name,
+    aggregated.total_requests,
+    aggregated.input_tokens,
+    aggregated.output_tokens,
+    aggregated.total_cost,
+    $3,
+    $3
+FROM aggregated
 ON CONFLICT (hour_utc, provider_name)
 DO UPDATE SET
     total_requests = EXCLUDED.total_requests,

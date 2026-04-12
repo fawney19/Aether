@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::Utc;
+use futures_util::{stream::TryStream, TryStreamExt};
 use sqlx::{postgres::PgRow, PgPool, Row};
 use uuid::Uuid;
 
@@ -24,7 +25,6 @@ use crate::{
     postgres::PostgresTransactionRunner,
     DataLayerError,
 };
-use std::collections::BTreeMap;
 
 const FIND_BY_WALLET_ID_SQL: &str = r#"
 SELECT
@@ -638,21 +638,13 @@ impl WalletReadRepository for SqlxWalletRepository {
         if user_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let mut ids_map = BTreeMap::new();
-        for (index, id) in user_ids.iter().enumerate() {
-            ids_map.entry(id).or_insert_with(Vec::new).push(index);
-        }
-        let rows = sqlx::query(LIST_BY_USER_IDS_SQL)
-            .bind(user_ids)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        let mut wallets = Vec::with_capacity(rows.len());
-        for row in rows {
-            let wallet = map_wallet_row(&row)?;
-            wallets.push(wallet);
-        }
-        Ok(wallets)
+        collect_query_rows(
+            sqlx::query(LIST_BY_USER_IDS_SQL)
+                .bind(user_ids)
+                .fetch(&self.pool),
+            map_wallet_row,
+        )
+        .await
     }
     async fn list_wallets_by_api_key_ids(
         &self,
@@ -661,17 +653,13 @@ impl WalletReadRepository for SqlxWalletRepository {
         if api_key_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let rows = sqlx::query(LIST_BY_API_KEY_IDS_SQL)
-            .bind(api_key_ids)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        let mut wallets = Vec::with_capacity(rows.len());
-        for row in rows {
-            let wallet = map_wallet_row(&row)?;
-            wallets.push(wallet);
-        }
-        Ok(wallets)
+        collect_query_rows(
+            sqlx::query(LIST_BY_API_KEY_IDS_SQL)
+                .bind(api_key_ids)
+                .fetch(&self.pool),
+            map_wallet_row,
+        )
+        .await
     }
 
     async fn list_admin_wallets(
@@ -686,18 +674,16 @@ impl WalletReadRepository for SqlxWalletRepository {
                 .await
                 .map_postgres_err()?,
         )?;
-        let rows = sqlx::query(LIST_ADMIN_WALLETS_SQL)
-            .bind(query.status.as_deref())
-            .bind(query.owner_type.as_deref())
-            .bind(as_i64(query.offset, "wallet offset")?)
-            .bind(as_i64(query.limit, "wallet limit")?)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        let items = rows
-            .iter()
-            .map(map_admin_wallet_list_item_row)
-            .collect::<Result<Vec<_>, _>>()?;
+        let items = collect_query_rows(
+            sqlx::query(LIST_ADMIN_WALLETS_SQL)
+                .bind(query.status.as_deref())
+                .bind(query.owner_type.as_deref())
+                .bind(as_i64(query.offset, "wallet offset")?)
+                .bind(as_i64(query.limit, "wallet limit")?)
+                .fetch(&self.pool),
+            map_admin_wallet_list_item_row,
+        )
+        .await?;
         Ok(StoredAdminWalletListPage { items, total })
     }
 
@@ -714,19 +700,17 @@ impl WalletReadRepository for SqlxWalletRepository {
                 .await
                 .map_postgres_err()?,
         )?;
-        let rows = sqlx::query(LIST_ADMIN_WALLET_LEDGER_SQL)
-            .bind(query.category.as_deref())
-            .bind(query.reason_code.as_deref())
-            .bind(query.owner_type.as_deref())
-            .bind(as_i64(query.offset, "wallet ledger offset")?)
-            .bind(as_i64(query.limit, "wallet ledger limit")?)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        let items = rows
-            .iter()
-            .map(map_admin_wallet_ledger_item_row)
-            .collect::<Result<Vec<_>, _>>()?;
+        let items = collect_query_rows(
+            sqlx::query(LIST_ADMIN_WALLET_LEDGER_SQL)
+                .bind(query.category.as_deref())
+                .bind(query.reason_code.as_deref())
+                .bind(query.owner_type.as_deref())
+                .bind(as_i64(query.offset, "wallet ledger offset")?)
+                .bind(as_i64(query.limit, "wallet ledger limit")?)
+                .fetch(&self.pool),
+            map_admin_wallet_ledger_item_row,
+        )
+        .await?;
         Ok(StoredAdminWalletLedgerPage { items, total })
     }
 
@@ -741,17 +725,15 @@ impl WalletReadRepository for SqlxWalletRepository {
                 .await
                 .map_postgres_err()?,
         )?;
-        let rows = sqlx::query(LIST_ADMIN_WALLET_REFUND_REQUESTS_SQL)
-            .bind(query.status.as_deref())
-            .bind(as_i64(query.offset, "wallet refund request offset")?)
-            .bind(as_i64(query.limit, "wallet refund request limit")?)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        let items = rows
-            .iter()
-            .map(map_admin_wallet_refund_request_item_row)
-            .collect::<Result<Vec<_>, _>>()?;
+        let items = collect_query_rows(
+            sqlx::query(LIST_ADMIN_WALLET_REFUND_REQUESTS_SQL)
+                .bind(query.status.as_deref())
+                .bind(as_i64(query.offset, "wallet refund request offset")?)
+                .bind(as_i64(query.limit, "wallet refund request limit")?)
+                .fetch(&self.pool),
+            map_admin_wallet_refund_request_item_row,
+        )
+        .await?;
         Ok(StoredAdminWalletRefundRequestPage { items, total })
     }
 
@@ -768,17 +750,15 @@ impl WalletReadRepository for SqlxWalletRepository {
                 .await
                 .map_postgres_err()?,
         )?;
-        let rows = sqlx::query(LIST_ADMIN_WALLET_TRANSACTIONS_SQL)
-            .bind(wallet_id)
-            .bind(as_i64(offset, "wallet transaction offset")?)
-            .bind(as_i64(limit, "wallet transaction limit")?)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        let items = rows
-            .iter()
-            .map(map_admin_wallet_transaction_row)
-            .collect::<Result<Vec<_>, _>>()?;
+        let items = collect_query_rows(
+            sqlx::query(LIST_ADMIN_WALLET_TRANSACTIONS_SQL)
+                .bind(wallet_id)
+                .bind(as_i64(offset, "wallet transaction offset")?)
+                .bind(as_i64(limit, "wallet transaction limit")?)
+                .fetch(&self.pool),
+            map_admin_wallet_transaction_row,
+        )
+        .await?;
         Ok(StoredAdminWalletTransactionPage { items, total })
     }
 
@@ -810,17 +790,15 @@ impl WalletReadRepository for SqlxWalletRepository {
                 .await
                 .map_postgres_err()?,
         )?;
-        let rows = sqlx::query(LIST_WALLET_DAILY_USAGE_HISTORY_SQL)
-            .bind(wallet_id)
-            .bind(billing_timezone)
-            .bind(as_i64(limit, "wallet daily usage history limit")?)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        let items = rows
-            .iter()
-            .map(map_wallet_daily_usage_row)
-            .collect::<Result<Vec<_>, _>>()?;
+        let items = collect_query_rows(
+            sqlx::query(LIST_WALLET_DAILY_USAGE_HISTORY_SQL)
+                .bind(wallet_id)
+                .bind(billing_timezone)
+                .bind(as_i64(limit, "wallet daily usage history limit")?)
+                .fetch(&self.pool),
+            map_wallet_daily_usage_row,
+        )
+        .await?;
         Ok(StoredWalletDailyUsageLedgerPage { items, total })
     }
 
@@ -837,17 +815,15 @@ impl WalletReadRepository for SqlxWalletRepository {
                 .await
                 .map_postgres_err()?,
         )?;
-        let rows = sqlx::query(LIST_ADMIN_WALLET_REFUNDS_SQL)
-            .bind(wallet_id)
-            .bind(as_i64(offset, "wallet refund offset")?)
-            .bind(as_i64(limit, "wallet refund limit")?)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        let items = rows
-            .iter()
-            .map(map_admin_wallet_refund_row)
-            .collect::<Result<Vec<_>, _>>()?;
+        let items = collect_query_rows(
+            sqlx::query(LIST_ADMIN_WALLET_REFUNDS_SQL)
+                .bind(wallet_id)
+                .bind(as_i64(offset, "wallet refund offset")?)
+                .bind(as_i64(limit, "wallet refund limit")?)
+                .fetch(&self.pool),
+            map_admin_wallet_refund_row,
+        )
+        .await?;
         Ok(StoredAdminWalletRefundPage { items, total })
     }
 
@@ -863,18 +839,16 @@ impl WalletReadRepository for SqlxWalletRepository {
                 .await
                 .map_postgres_err()?,
         )?;
-        let rows = sqlx::query(LIST_ADMIN_PAYMENT_ORDERS_SQL)
-            .bind(query.payment_method.as_deref())
-            .bind(query.status.as_deref())
-            .bind(as_i64(query.offset, "payment order offset")?)
-            .bind(as_i64(query.limit, "payment order limit")?)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        let items = rows
-            .iter()
-            .map(map_admin_payment_order_row)
-            .collect::<Result<Vec<_>, _>>()?;
+        let items = collect_query_rows(
+            sqlx::query(LIST_ADMIN_PAYMENT_ORDERS_SQL)
+                .bind(query.payment_method.as_deref())
+                .bind(query.status.as_deref())
+                .bind(as_i64(query.offset, "payment order offset")?)
+                .bind(as_i64(query.limit, "payment order limit")?)
+                .fetch(&self.pool),
+            map_admin_payment_order_row,
+        )
+        .await?;
         Ok(StoredAdminPaymentOrderPage { items, total })
     }
 
@@ -903,17 +877,15 @@ impl WalletReadRepository for SqlxWalletRepository {
                 .await
                 .map_postgres_err()?,
         )?;
-        let rows = sqlx::query(LIST_WALLET_PAYMENT_ORDERS_BY_USER_SQL)
-            .bind(user_id)
-            .bind(as_i64(offset, "wallet payment order offset")?)
-            .bind(as_i64(limit, "wallet payment order limit")?)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        let items = rows
-            .iter()
-            .map(map_admin_payment_order_row)
-            .collect::<Result<Vec<_>, _>>()?;
+        let items = collect_query_rows(
+            sqlx::query(LIST_WALLET_PAYMENT_ORDERS_BY_USER_SQL)
+                .bind(user_id)
+                .bind(as_i64(offset, "wallet payment order offset")?)
+                .bind(as_i64(limit, "wallet payment order limit")?)
+                .fetch(&self.pool),
+            map_admin_payment_order_row,
+        )
+        .await?;
         Ok(StoredAdminPaymentOrderPage { items, total })
     }
 
@@ -958,17 +930,15 @@ impl WalletReadRepository for SqlxWalletRepository {
                 .await
                 .map_postgres_err()?,
         )?;
-        let rows = sqlx::query(LIST_ADMIN_PAYMENT_CALLBACKS_SQL)
-            .bind(payment_method)
-            .bind(as_i64(offset, "payment callback offset")?)
-            .bind(as_i64(limit, "payment callback limit")?)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        let items = rows
-            .iter()
-            .map(map_admin_payment_callback_row)
-            .collect::<Result<Vec<_>, _>>()?;
+        let items = collect_query_rows(
+            sqlx::query(LIST_ADMIN_PAYMENT_CALLBACKS_SQL)
+                .bind(payment_method)
+                .bind(as_i64(offset, "payment callback offset")?)
+                .bind(as_i64(limit, "payment callback limit")?)
+                .fetch(&self.pool),
+            map_admin_payment_callback_row,
+        )
+        .await?;
         Ok(StoredAdminPaymentCallbackPage { items, total })
     }
 }
@@ -3554,6 +3524,20 @@ where
 fn read_count(row: PgRow) -> Result<u64, DataLayerError> {
     let total = row.try_get::<i64, _>("total").map_postgres_err()?;
     Ok(total.max(0) as u64)
+}
+
+async fn collect_query_rows<T, S>(
+    mut rows: S,
+    map_row: fn(&PgRow) -> Result<T, DataLayerError>,
+) -> Result<Vec<T>, DataLayerError>
+where
+    S: TryStream<Ok = PgRow, Error = sqlx::Error> + Unpin,
+{
+    let mut items = Vec::new();
+    while let Some(row) = rows.try_next().await.map_postgres_err()? {
+        items.push(map_row(&row)?);
+    }
+    Ok(items)
 }
 
 fn map_admin_wallet_list_item_row(

@@ -14,6 +14,7 @@ use aether_data::repository::auth::{
     read_resolved_auth_api_key_snapshot_by_key_hash,
     read_resolved_auth_api_key_snapshot_by_user_api_key_ids,
 };
+use futures_util::TryStreamExt;
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -1108,12 +1109,14 @@ impl GatewayDataState {
         let Some(pool) = self.postgres_pool() else {
             return Ok(Vec::new());
         };
-        let rows = sqlx::query(LIST_USER_SESSIONS_SQL)
+        let mut rows = sqlx::query(LIST_USER_SESSIONS_SQL)
             .bind(user_id)
-            .fetch_all(&pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_user_session_row).collect()
+            .fetch(&pool);
+        let mut sessions = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            sessions.push(map_user_session_row(&row)?);
+        }
+        Ok(sessions)
     }
 
     pub(crate) async fn create_user_session(

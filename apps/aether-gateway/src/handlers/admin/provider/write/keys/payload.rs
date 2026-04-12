@@ -1,4 +1,7 @@
 use crate::handlers::admin::request::AdminAppState;
+use aether_data_contracts::repository::provider_catalog::{
+    ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) async fn build_admin_provider_keys_payload(
@@ -15,30 +18,26 @@ pub(crate) async fn build_admin_provider_keys_payload(
         .await
         .ok()
         .and_then(|mut providers| providers.drain(..).next())?;
-    let mut keys = state
-        .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
+    let key_page = state
+        .list_provider_catalog_key_page(&ProviderCatalogKeyListQuery {
+            provider_id: provider.id.clone(),
+            search: None,
+            is_active: None,
+            offset: skip,
+            limit,
+            order: ProviderCatalogKeyListOrder::CreatedAt,
+        })
         .await
-        .ok()
-        .unwrap_or_default();
-    keys.sort_by(|left, right| {
-        left.internal_priority
-            .cmp(&right.internal_priority)
-            .then_with(|| {
-                left.created_at_unix_ms
-                    .unwrap_or_default()
-                    .cmp(&right.created_at_unix_ms.unwrap_or_default())
-            })
-            .then_with(|| left.id.cmp(&right.id))
-    });
+        .ok()?;
     let now_unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
     Some(serde_json::Value::Array(
-        keys.into_iter()
-            .skip(skip)
-            .take(limit)
+        key_page
+            .items
+            .into_iter()
             .map(|key| {
                 state.build_admin_provider_key_response(
                     &key,
