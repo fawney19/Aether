@@ -204,6 +204,7 @@ logs/
 
 # Git backup
 .git.backup/
+.worktrees/
 
 # Database backups
 backups/
