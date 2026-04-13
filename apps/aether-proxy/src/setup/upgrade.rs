@@ -1,3 +1,9 @@
+//! Self-upgrade support for `aether-proxy`.
+//!
+//! Downloads a release from GitHub, verifies the SHA256 checksum, replaces the
+//! running binary atomically, and restarts the active managed service when
+//! applicable.
+
 use std::path::{Path, PathBuf};
 
 use aether_http::{apply_http_client_config, HttpClientConfig};
@@ -410,6 +416,8 @@ pub async fn cmd_upgrade(version: Option<String>) -> anyhow::Result<()> {
 
 /// Perform automatic upgrade to a specific version.
 ///
+/// This path is used for server-pushed upgrades: it requires root and expects
+/// the currently active managed service to restart successfully.
 pub async fn perform_upgrade(version: &str) -> anyhow::Result<()> {
     execute_upgrade(Some(version), true, RestartMode::Required).await
 }

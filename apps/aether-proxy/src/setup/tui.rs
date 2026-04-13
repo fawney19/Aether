@@ -28,6 +28,7 @@ use crate::config::{
 
 /// Outcome of the setup wizard, returned to the caller.
 pub enum SetupOutcome {
+    /// Config saved and the selected host service was installed.
     ServiceInstalled,
     /// Config saved; no service -- caller should start the proxy directly.
     ReadyToRun(PathBuf),

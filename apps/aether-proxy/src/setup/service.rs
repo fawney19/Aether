@@ -1,3 +1,8 @@
+//! Service installation and management for `aether-proxy`.
+//!
+//! Supports the host-native service manager we currently target:
+//! `systemd` on most Linux distributions and `OpenRC` on Alpine.
+
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -142,7 +147,7 @@ pub fn cmd_logs() -> anyhow::Result<()> {
             .args(["-u", SERVICE_NAME, "-f", "--no-pager", "-n", "100"])
             .status()?,
         ServiceManager::OpenRc => Command::new(tail_bin())
-            .args(["-n", "100", "-F", OPENRC_STDOUT_LOG, OPENRC_STDERR_LOG])
+            .args(["-n", "100", "-f", OPENRC_STDOUT_LOG, OPENRC_STDERR_LOG])
             .status()?,
     };
     std::process::exit(status.code().unwrap_or(1));

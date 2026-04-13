@@ -132,6 +132,7 @@ async fn handle_setup_result(outcome: setup::SetupOutcome) -> anyhow::Result<()>
     }
 }
 
+/// Start the proxy server, checking for managed-service conflicts first.
 async fn run_proxy(config: Config) -> anyhow::Result<()> {
     // Warn if a managed service is already running (would cause conflicts).
     if std::env::var_os("AETHER_PROXY_SERVICE_MANAGER").is_none()
