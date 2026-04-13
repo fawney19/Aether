@@ -183,6 +183,18 @@ export interface RequestDetail {
   has_response_body?: boolean
   has_client_response_body?: boolean
   metadata?: Record<string, unknown>
+  settlement?: {
+    billing_snapshot?: Record<string, unknown>
+    billing_snapshot_schema_version?: string
+    billing_snapshot_status?: string
+    rate_multiplier?: number
+    is_free_tier?: boolean
+    input_price_per_1m?: number
+    output_price_per_1m?: number
+    cache_creation_price_per_1m?: number
+    cache_read_price_per_1m?: number
+    price_per_request?: number
+  } | null
   // 阶梯计费信息
   tiered_pricing?: {
     total_input_context: number  // 总输入上下文 (input + cache_read)

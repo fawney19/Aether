@@ -63,6 +63,7 @@ use crate::repository::wallet::{
     SqlxWalletRepository, WalletReadRepository, WalletWriteRepository,
 };
 use crate::DataLayerError;
+use futures_util::TryStreamExt;
 use sqlx::Row;
 
 const FIND_SYSTEM_CONFIG_VALUE_SQL: &str = r#"
@@ -332,23 +333,20 @@ impl PostgresBackend {
     pub async fn list_system_config_entries(
         &self,
     ) -> Result<Vec<StoredSystemConfigEntry>, DataLayerError> {
-        let rows = sqlx::query(LIST_SYSTEM_CONFIG_ENTRIES_SQL)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(StoredSystemConfigEntry {
-                    key: row.try_get("key").map_postgres_err()?,
-                    value: row.try_get("value").map_postgres_err()?,
-                    description: row.try_get("description").map_postgres_err()?,
-                    updated_at_unix_secs: row
-                        .try_get::<Option<i64>, _>("updated_at_unix_secs")
-                        .map_postgres_err()?
-                        .map(|value| value.max(0) as u64),
-                })
-            })
-            .collect::<Result<Vec<_>, DataLayerError>>()
+        let mut rows = sqlx::query(LIST_SYSTEM_CONFIG_ENTRIES_SQL).fetch(&self.pool);
+        let mut entries = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            entries.push(StoredSystemConfigEntry {
+                key: row.try_get("key").map_postgres_err()?,
+                value: row.try_get("value").map_postgres_err()?,
+                description: row.try_get("description").map_postgres_err()?,
+                updated_at_unix_secs: row
+                    .try_get::<Option<i64>, _>("updated_at_unix_secs")
+                    .map_postgres_err()?
+                    .map(|value| value.max(0) as u64),
+            });
+        }
+        Ok(entries)
     }
 
     pub async fn upsert_system_config_entry(

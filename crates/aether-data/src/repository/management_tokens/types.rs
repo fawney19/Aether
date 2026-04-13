@@ -306,6 +306,11 @@ pub trait ManagementTokenReadRepository: Send + Sync {
         &self,
         token_id: &str,
     ) -> Result<Option<StoredManagementTokenWithUser>, crate::DataLayerError>;
+
+    async fn get_management_token_with_user_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<StoredManagementTokenWithUser>, crate::DataLayerError>;
 }
 
 #[async_trait]
@@ -331,5 +336,11 @@ pub trait ManagementTokenWriteRepository: Send + Sync {
     async fn regenerate_management_token_secret(
         &self,
         mutation: &RegenerateManagementTokenSecret,
+    ) -> Result<Option<StoredManagementToken>, crate::DataLayerError>;
+
+    async fn record_management_token_usage(
+        &self,
+        token_id: &str,
+        last_used_ip: Option<&str>,
     ) -> Result<Option<StoredManagementToken>, crate::DataLayerError>;
 }

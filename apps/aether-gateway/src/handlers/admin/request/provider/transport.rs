@@ -1,4 +1,13 @@
 use super::*;
+use aether_contracts::ProxySnapshot;
+use aether_data::repository::proxy_nodes::{proxy_node_accepts_new_tunnels, StoredProxyNode};
+use aether_provider_transport::TransportTunnelAffinityLookup;
+use serde_json::{json, Map, Value};
+use url::Url;
+
+const TUNNEL_BASE_URL_EXTRA_KEY: &str = "tunnel_base_url";
+const TUNNEL_OWNER_INSTANCE_ID_EXTRA_KEY: &str = "tunnel_owner_instance_id";
+const TUNNEL_OWNER_OBSERVED_AT_EXTRA_KEY: &str = "tunnel_owner_observed_at_unix_secs";
 
 impl<'a> AdminAppState<'a> {
     pub(crate) async fn read_provider_transport_snapshot(
@@ -98,6 +107,100 @@ impl<'a> AdminAppState<'a> {
         crate::provider_transport::provider_types::provider_type_enables_format_conversion_by_default(
             provider_type,
         )
+    }
+
+    pub(crate) async fn resolve_admin_connector_proxy_snapshot(
+        &self,
+        connector_config: Option<&Map<String, Value>>,
+    ) -> Option<ProxySnapshot> {
+        let explicit_node_id = connector_config
+            .and_then(|config| admin_provider_transport_string_field(config, "proxy_node_id"));
+        if let Some(snapshot) = self
+            .resolve_admin_proxy_node_snapshot(explicit_node_id.as_deref())
+            .await
+        {
+            return Some(snapshot);
+        }
+
+        if explicit_node_id.is_none() {
+            let system_node_id = self
+                .read_system_config_json_value("system_proxy_node_id")
+                .await
+                .ok()
+                .flatten()
+                .and_then(|value| value.as_str().map(str::trim).map(ToOwned::to_owned))
+                .filter(|value| !value.is_empty());
+            if let Some(snapshot) = self
+                .resolve_admin_proxy_node_snapshot(system_node_id.as_deref())
+                .await
+            {
+                return Some(snapshot);
+            }
+        }
+
+        connector_config
+            .and_then(|config| config.get("proxy"))
+            .and_then(admin_provider_transport_legacy_proxy_snapshot)
+    }
+
+    pub(crate) async fn resolve_admin_proxy_node_snapshot(
+        &self,
+        node_id: Option<&str>,
+    ) -> Option<ProxySnapshot> {
+        let node_id = node_id.map(str::trim).filter(|value| !value.is_empty())?;
+        let node = self.find_proxy_node(node_id).await.ok().flatten()?;
+        if node.status.trim() != "online" {
+            return None;
+        }
+        if !proxy_node_accepts_new_tunnels(&node) {
+            return None;
+        }
+        if node.tunnel_mode && node.tunnel_connected {
+            let mut extra = Map::new();
+            if let Ok(Some(owner)) = self.app().lookup_tunnel_attachment_owner(node_id).await {
+                extra.insert(
+                    TUNNEL_BASE_URL_EXTRA_KEY.to_string(),
+                    Value::String(owner.relay_base_url),
+                );
+                extra.insert(
+                    TUNNEL_OWNER_INSTANCE_ID_EXTRA_KEY.to_string(),
+                    Value::String(owner.gateway_instance_id),
+                );
+                extra.insert(
+                    TUNNEL_OWNER_OBSERVED_AT_EXTRA_KEY.to_string(),
+                    json!(owner.observed_at_unix_secs),
+                );
+            }
+            return Some(ProxySnapshot {
+                enabled: Some(true),
+                mode: Some("tunnel".to_string()),
+                node_id: Some(node_id.to_string()),
+                label: Some(node.name),
+                url: None,
+                extra: if extra.is_empty() {
+                    None
+                } else {
+                    Some(Value::Object(extra))
+                },
+            });
+        }
+        if !node.is_manual {
+            return None;
+        }
+        let proxy_url = node
+            .proxy_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        Some(ProxySnapshot {
+            enabled: Some(true),
+            mode: admin_provider_transport_proxy_mode(Some(proxy_url)),
+            node_id: Some(node.id.clone()),
+            label: Some(node.name.clone()),
+            url: admin_provider_transport_proxy_url_with_node_auth(&node)
+                .or_else(|| Some(proxy_url.to_string())),
+            extra: None,
+        })
     }
 
     pub(crate) fn supports_local_gemini_transport_with_network(
@@ -221,4 +324,122 @@ impl<'a> AdminAppState<'a> {
     ) -> String {
         crate::provider_transport::url::build_openai_chat_url(upstream_base_url, query)
     }
+}
+
+fn admin_provider_transport_legacy_proxy_snapshot(value: &Value) -> Option<ProxySnapshot> {
+    match value {
+        Value::String(proxy_url) => {
+            let proxy_url = proxy_url.trim();
+            if proxy_url.is_empty() {
+                return None;
+            }
+            Some(ProxySnapshot {
+                enabled: Some(true),
+                mode: admin_provider_transport_proxy_mode(Some(proxy_url)),
+                node_id: None,
+                label: None,
+                url: Some(proxy_url.to_string()),
+                extra: None,
+            })
+        }
+        Value::Object(object) => {
+            if object.get("enabled").and_then(Value::as_bool) == Some(false) {
+                return None;
+            }
+            let proxy_url = object
+                .get("url")
+                .or_else(|| object.get("proxy_url"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            let username = object
+                .get("username")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let password = object
+                .get("password")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            Some(ProxySnapshot {
+                enabled: Some(true),
+                mode: object
+                    .get("mode")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+                    .or_else(|| admin_provider_transport_proxy_mode(Some(proxy_url))),
+                node_id: None,
+                label: object
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned),
+                url: admin_provider_transport_inject_proxy_auth(proxy_url, username, password)
+                    .or_else(|| Some(proxy_url.to_string())),
+                extra: None,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn admin_provider_transport_proxy_url_with_node_auth(node: &StoredProxyNode) -> Option<String> {
+    let proxy_url = node
+        .proxy_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let username = node
+        .proxy_username
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let password = node
+        .proxy_password
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    admin_provider_transport_inject_proxy_auth(proxy_url, username, password)
+}
+
+fn admin_provider_transport_inject_proxy_auth(
+    proxy_url: &str,
+    username: Option<&str>,
+    password: Option<&str>,
+) -> Option<String> {
+    let username = username.filter(|value| !value.is_empty())?;
+    let mut parsed = Url::parse(proxy_url).ok()?;
+    parsed.set_username(username).ok()?;
+    parsed.set_password(password).ok()?;
+    Some(parsed.to_string())
+}
+
+fn admin_provider_transport_proxy_mode(proxy_url: Option<&str>) -> Option<String> {
+    proxy_url
+        .and_then(|value| {
+            Url::parse(value)
+                .ok()
+                .map(|parsed| parsed.scheme().to_string())
+        })
+        .or_else(|| {
+            proxy_url.and_then(|value| {
+                value
+                    .split_once("://")
+                    .map(|(scheme, _)| scheme.trim().to_ascii_lowercase())
+                    .filter(|scheme| !scheme.is_empty())
+            })
+        })
+}
+
+fn admin_provider_transport_string_field(config: &Map<String, Value>, key: &str) -> Option<String> {
+    config
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }

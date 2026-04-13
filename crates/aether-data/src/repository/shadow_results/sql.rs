@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use futures_util::future::BoxFuture;
+use futures_util::TryStreamExt;
 use sqlx::{PgPool, Row};
 
 use super::types::{
@@ -161,17 +162,18 @@ impl SqlxShadowResultRepository {
             return Ok(Vec::new());
         }
 
-        let rows = sqlx::query(LIST_RECENT_SQL)
+        let mut rows = sqlx::query(LIST_RECENT_SQL)
             .bind(i64::try_from(limit).map_err(|_| {
                 DataLayerError::UnexpectedValue(format!(
                     "invalid recent shadow result limit: {limit}"
                 ))
             })?)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-
-        rows.iter().map(map_shadow_result_row).collect()
+            .fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(map_shadow_result_row(&row)?);
+        }
+        Ok(items)
     }
 
     pub async fn upsert(

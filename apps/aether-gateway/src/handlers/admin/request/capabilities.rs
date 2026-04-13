@@ -84,8 +84,16 @@ impl<'a> AdminAppState<'a> {
         self.app.has_user_data_reader()
     }
 
+    pub(crate) fn has_auth_user_data_reader(&self) -> bool {
+        self.app.has_auth_user_data_reader()
+    }
+
     pub(crate) fn has_proxy_node_reader(&self) -> bool {
         self.app.has_proxy_node_reader()
+    }
+
+    pub(crate) fn has_proxy_node_writer(&self) -> bool {
+        self.app.has_proxy_node_writer()
     }
 
     pub(crate) fn has_auth_api_key_writer(&self) -> bool {

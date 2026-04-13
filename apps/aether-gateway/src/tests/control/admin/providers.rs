@@ -813,7 +813,7 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
             "enable_format_conversion": false,
             "config": {"provider_ops": {"architecture_id": "cubence"}},
             "claude_code_advanced": {"pool_size": 2},
-            "pool_advanced": {"enabled": true},
+            "pool_advanced": {},
             "failover_rules": {"strategy": "ordered"},
             "proxy": {"url": "https://proxy.example"}
         }))
@@ -839,7 +839,7 @@ async fn gateway_updates_admin_provider_locally_with_trusted_admin_principal() {
     assert_eq!(payload["stream_first_byte_timeout"], 11.0);
     assert_eq!(payload["proxy"], json!({"url": "https://proxy.example"}));
     assert_eq!(payload["claude_code_advanced"], json!({"pool_size": 2}));
-    assert_eq!(payload["pool_advanced"], json!({"enabled": true}));
+    assert_eq!(payload["pool_advanced"], json!({}));
     assert_eq!(payload["failover_rules"], json!({"strategy": "ordered"}));
     assert_eq!(payload["ops_configured"], true);
     assert_eq!(payload["ops_architecture_id"], "cubence");
@@ -895,7 +895,7 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
             "website": "codex.example",
             "keep_priority_on_conversion": true,
             "max_retries": 7,
-            "pool_advanced": {"enabled": true},
+            "pool_advanced": {},
             "failover_rules": {"strategy": "ordered"},
             "proxy": {"url": "https://proxy.example"}
         }))
@@ -929,6 +929,14 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
     assert!(created.enable_format_conversion);
     assert_eq!(created.max_retries, Some(7));
     assert_eq!(created.keep_priority_on_conversion, true);
+    assert_eq!(
+        created
+            .config
+            .as_ref()
+            .and_then(|value| value.get("pool_advanced"))
+            .cloned(),
+        Some(json!({}))
+    );
 
     let endpoints = provider_catalog_repository
         .list_endpoints_by_provider_ids(std::slice::from_ref(&created.id))

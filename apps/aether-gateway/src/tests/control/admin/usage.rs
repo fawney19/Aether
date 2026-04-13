@@ -1,8 +1,13 @@
 use std::sync::{Arc, Mutex};
 
+use aether_data::repository::auth::{
+    InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeySnapshot,
+};
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::usage::InMemoryUsageReadRepository;
-use aether_data::repository::users::{InMemoryUserReadRepository, StoredUserSummary};
+use aether_data::repository::users::{
+    InMemoryUserReadRepository, StoredUserAuthRecord, StoredUserSummary,
+};
 use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
 use axum::body::{Body, Bytes};
 use axum::routing::{any, get, post};
@@ -208,6 +213,57 @@ fn sample_user_summary(id: &str, username: &str) -> StoredUserSummary {
     .expect("user summary should build")
 }
 
+fn sample_auth_user(id: &str, username: &str, role: &str, is_active: bool) -> StoredUserAuthRecord {
+    StoredUserAuthRecord::new(
+        id.to_string(),
+        Some(format!("{username}@example.com")),
+        true,
+        username.to_string(),
+        Some("hash".to_string()),
+        role.to_string(),
+        "local".to_string(),
+        None,
+        None,
+        None,
+        is_active,
+        false,
+        Some(chrono::Utc::now()),
+        Some(chrono::Utc::now()),
+    )
+    .expect("auth user should build")
+}
+
+fn sample_auth_api_key_snapshot(
+    user_id: &str,
+    api_key_id: &str,
+    api_key_name: &str,
+) -> StoredAuthApiKeySnapshot {
+    StoredAuthApiKeySnapshot::new(
+        user_id.to_string(),
+        format!("snapshot-{user_id}"),
+        Some(format!("snapshot-{user_id}@example.com")),
+        "user".to_string(),
+        "local".to_string(),
+        true,
+        false,
+        None,
+        None,
+        None,
+        api_key_id.to_string(),
+        Some(api_key_name.to_string()),
+        true,
+        false,
+        false,
+        Some(60),
+        Some(5),
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("auth snapshot should build")
+}
+
 fn recent_unix_secs(minutes_ago: u64) -> i64 {
     let now = chrono::Utc::now().timestamp();
     now.saturating_sub((minutes_ago * 60) as i64)
@@ -393,11 +449,11 @@ async fn gateway_handles_admin_usage_aggregation_stats_locally_with_trusted_admi
     assert_eq!(items[0]["request_count"], 2);
     assert_eq!(items[0]["output_tokens"], 40);
     assert_eq!(items[0]["effective_input_tokens"], 150);
-    assert_eq!(items[0]["total_input_context"], 200);
+    assert_eq!(items[0]["total_input_context"], 160);
     assert_eq!(items[0]["cache_creation_tokens"], 30);
     assert_eq!(items[0]["cache_creation_ephemeral_5m_tokens"], 12);
     assert_eq!(items[0]["cache_creation_ephemeral_1h_tokens"], 18);
-    assert_eq!(items[0]["cache_hit_rate"], 5.0);
+    assert_eq!(items[0]["cache_hit_rate"], 6.25);
     assert_eq!(items[1]["model"], "claude-3-7");
     assert_eq!(items[1]["output_tokens"], 20);
 
@@ -666,13 +722,18 @@ async fn gateway_handles_admin_usage_active_locally_with_trusted_admin_principal
         )],
         vec![provider_key],
     ));
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some("hash-key-1".to_string()),
+        sample_auth_api_key_snapshot("user-1", "key-1", "fresh-primary"),
+    )]));
 
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
             .with_data_state_for_tests(
                 GatewayDataState::with_usage_reader_for_tests(usage_repository)
-                    .with_provider_catalog_reader(provider_catalog_repository),
+                    .with_provider_catalog_reader(provider_catalog_repository)
+                    .with_auth_api_key_reader(auth_repository),
             ),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
@@ -689,6 +750,7 @@ async fn gateway_handles_admin_usage_active_locally_with_trusted_admin_principal
     assert_eq!(payload["requests"][0]["id"], "usage-pending");
     assert_eq!(payload["requests"][0]["effective_input_tokens"], 5);
     assert_eq!(payload["requests"][0]["provider"], "OpenAI");
+    assert_eq!(payload["requests"][0]["api_key_name"], "fresh-primary");
     assert_eq!(
         payload["requests"][0]["provider_key_name"],
         "upstream-primary"
@@ -848,6 +910,120 @@ async fn gateway_handles_admin_usage_records_with_provider_key_name_fallback_fro
 }
 
 #[tokio::test]
+async fn gateway_handles_admin_usage_records_with_snapshot_first_user_and_api_key_names() {
+    let (_upstream_url, upstream_hits, upstream_handle) =
+        start_usage_upstream("/api/admin/usage/records").await;
+
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![sample_usage_row(
+        "usage-snapshot",
+        "req-snapshot",
+        Some("user-2"),
+        Some("key-2"),
+        Some("legacy-secondary"),
+        "Anthropic",
+        "claude-3-7",
+        "failed",
+        40,
+        10,
+        0.1,
+        0.12,
+        DAY_2_UNIX_SECS,
+    )]));
+    let user_repository = Arc::new(InMemoryUserReadRepository::seed(vec![sample_user_summary(
+        "user-2",
+        "fresh-bob",
+    )]));
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some("hash-key-2".to_string()),
+        sample_auth_api_key_snapshot("user-2", "key-2", "fresh-secondary"),
+    )]));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_usage_reader_for_tests(usage_repository)
+                    .with_user_reader(user_repository)
+                    .with_auth_api_key_reader(auth_repository),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/usage/records?search=fresh-secondary&username=fresh-bob&limit=10&offset=0"
+    )))
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["total"], 1);
+    assert_eq!(payload["records"][0]["id"], "usage-snapshot");
+    assert_eq!(payload["records"][0]["username"], "fresh-bob");
+    assert_eq!(payload["records"][0]["api_key"]["name"], "fresh-secondary");
+    assert_eq!(payload["records"][0]["api_key_name"], "fresh-secondary");
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_usage_records_without_legacy_username_fallback_when_user_reader_exists(
+) {
+    let (_upstream_url, upstream_hits, upstream_handle) =
+        start_usage_upstream("/api/admin/usage/records").await;
+
+    let mut usage = sample_usage_row(
+        "usage-no-legacy-username",
+        "req-no-legacy-username",
+        Some("user-missing"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-5",
+        "completed",
+        10,
+        2,
+        0.01,
+        0.012,
+        DAY_1_UNIX_SECS,
+    );
+    usage.username = Some("stale-alice".to_string());
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_usage_reader_for_tests(Arc::new(
+                    InMemoryUsageReadRepository::seed(vec![usage]),
+                ))
+                .with_user_reader(Arc::new(
+                    InMemoryUserReadRepository::seed_auth_users(Vec::<StoredUserAuthRecord>::new()),
+                )),
+            )
+            .without_auth_user_store_for_tests(),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/usage/records?username=stale-alice&limit=10&offset=0"
+    )))
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["total"], 0);
+    assert!(payload["records"].as_array().expect("array").is_empty());
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_usage_detail_locally_with_trusted_admin_principal() {
     let (upstream_url, upstream_hits, upstream_handle) =
         start_usage_upstream("/api/admin/usage/usage-1").await;
@@ -912,6 +1088,28 @@ async fn gateway_handles_admin_usage_detail_locally_with_trusted_admin_principal
     }));
     usage.request_metadata = Some(json!({
         "trace_id": "trace-123",
+        "candidate_id": "cand-detail-1",
+        "candidate_index": 2,
+        "key_name": "upstream-primary",
+        "planner_kind": "claude_cli_sync",
+        "route_family": "claude",
+        "route_kind": "cli",
+        "execution_path": "local_execution_runtime_miss",
+        "local_execution_runtime_miss_reason": "all_candidates_skipped",
+        "billing_snapshot_schema_version": "v2",
+        "billing_snapshot_status": "resolved",
+        "rate_multiplier": 0.5,
+        "is_free_tier": false,
+        "input_price_per_1m": 3.0,
+        "output_price_per_1m": 15.0,
+        "cache_creation_price_per_1m": 3.75,
+        "cache_read_price_per_1m": 0.3,
+        "price_per_request": 0.02,
+        "billing_snapshot": {
+            "resolved_variables": {
+                "output_price_per_1m": 11.0
+            }
+        }
     }));
     let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![usage]));
     let user_repository = Arc::new(InMemoryUserReadRepository::seed(vec![sample_user_summary(
@@ -962,16 +1160,74 @@ async fn gateway_handles_admin_usage_detail_locally_with_trusted_admin_principal
     );
     assert_eq!(payload["response_headers"]["X-Upstream"], "openai");
     assert_eq!(payload["client_response_headers"]["X-Request-Id"], "req-1");
+    assert!(payload["metadata"]["trace_id"].is_null());
+    assert_eq!(payload["trace"]["trace_id"], "trace-123");
+    assert!(payload["metadata"]["request_preview_source"].is_null());
+    assert!(payload["metadata"]["original_request_body_available"].is_null());
+    assert!(payload["metadata"]["original_response_body_available"].is_null());
+    assert!(payload["metadata"]["candidate_id"].is_null());
+    assert!(payload["metadata"]["candidate_index"].is_null());
+    assert!(payload["metadata"]["key_name"].is_null());
+    assert!(payload["metadata"]["planner_kind"].is_null());
+    assert!(payload["metadata"]["route_family"].is_null());
+    assert!(payload["metadata"]["route_kind"].is_null());
+    assert!(payload["metadata"]["execution_path"].is_null());
+    assert!(payload["metadata"]["local_execution_runtime_miss_reason"].is_null());
+    assert!(payload["metadata"]["billing_snapshot"].is_null());
+    assert!(payload["metadata"]["billing_snapshot_schema_version"].is_null());
+    assert!(payload["metadata"]["billing_snapshot_status"].is_null());
+    assert!(payload["metadata"]["rate_multiplier"].is_null());
+    assert!(payload["metadata"]["is_free_tier"].is_null());
+    assert!(payload["metadata"]["input_price_per_1m"].is_null());
+    assert!(payload["metadata"]["output_price_per_1m"].is_null());
+    assert!(payload["metadata"]["cache_creation_price_per_1m"].is_null());
+    assert!(payload["metadata"]["cache_read_price_per_1m"].is_null());
+    assert!(payload["metadata"]["price_per_request"].is_null());
+    assert_eq!(payload["body_capture"]["request"]["storage"], "inline");
+    assert_eq!(payload["body_capture"]["request"]["available"], true);
     assert_eq!(
-        payload["metadata"]["request_preview_source"],
+        payload["body_capture"]["request"]["preview_source"],
         "stored_original"
     );
-    assert_eq!(payload["metadata"]["trace_id"], "trace-123");
-    assert_eq!(payload["metadata"]["original_request_body_available"], true);
     assert_eq!(
-        payload["metadata"]["original_response_body_available"],
-        true
+        payload["body_capture"]["provider_request"]["storage"],
+        "inline"
     );
+    assert_eq!(payload["body_capture"]["response"]["storage"], "inline");
+    assert_eq!(
+        payload["body_capture"]["client_response"]["storage"],
+        "inline"
+    );
+    assert_eq!(payload["routing"]["candidate_id"], "cand-detail-1");
+    assert_eq!(payload["routing"]["candidate_index"], 2);
+    assert_eq!(payload["routing"]["key_name"], "upstream-primary");
+    assert_eq!(payload["routing"]["planner_kind"], "claude_cli_sync");
+    assert_eq!(payload["routing"]["route_family"], "claude");
+    assert_eq!(payload["routing"]["route_kind"], "cli");
+    assert_eq!(
+        payload["routing"]["execution_path"],
+        "local_execution_runtime_miss"
+    );
+    assert_eq!(
+        payload["routing"]["local_execution_runtime_miss_reason"],
+        "all_candidates_skipped"
+    );
+    assert_eq!(
+        payload["settlement"]["billing_snapshot_schema_version"],
+        "v2"
+    );
+    assert_eq!(
+        payload["settlement"]["billing_snapshot"]["resolved_variables"]["output_price_per_1m"],
+        11.0
+    );
+    assert_eq!(payload["settlement"]["billing_snapshot_status"], "resolved");
+    assert_eq!(payload["settlement"]["rate_multiplier"], 0.5);
+    assert_eq!(payload["settlement"]["is_free_tier"], false);
+    assert_eq!(payload["settlement"]["input_price_per_1m"], 3.0);
+    assert_eq!(payload["settlement"]["output_price_per_1m"], 15.0);
+    assert_eq!(payload["settlement"]["cache_creation_price_per_1m"], 3.75);
+    assert_eq!(payload["settlement"]["cache_read_price_per_1m"], 0.3);
+    assert_eq!(payload["settlement"]["price_per_request"], 0.02);
     assert_eq!(payload["has_request_body"], true);
     assert_eq!(payload["has_provider_request_body"], true);
     assert_eq!(payload["has_response_body"], true);
@@ -1002,6 +1258,124 @@ async fn gateway_handles_admin_usage_detail_locally_with_trusted_admin_principal
     assert_eq!(payload["provider_request_body"]["temperature"], 0.2);
     assert_eq!(payload["response_body"]["id"], "resp-1");
     assert_eq!(payload["client_response_body"]["output_text"], "hello");
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_usage_detail_with_ref_backed_bodies() {
+    let (_upstream_url, upstream_hits, upstream_handle) =
+        start_usage_upstream("/api/admin/usage/usage-ref-detail").await;
+
+    let mut usage = sample_usage_row(
+        "usage-ref-detail",
+        "req-ref-detail",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-5",
+        "completed",
+        120,
+        30,
+        0.3,
+        0.36,
+        DAY_1_UNIX_SECS,
+    );
+    usage.request_body = Some(json!({
+        "model": "gpt-5",
+        "messages": [{"role": "user", "content": "ref-backed request body"}],
+        "stream": false,
+    }));
+    usage.provider_request_body = Some(json!({
+        "model": "gpt-5-target",
+        "temperature": 0.2,
+        "stream": false,
+    }));
+    usage.response_body = Some(json!({
+        "id": "resp-ref-detail",
+        "usage": {"total_tokens": 150},
+    }));
+    usage.client_response_body = Some(json!({
+        "id": "resp-ref-detail",
+        "output_text": "hello from ref",
+    }));
+    usage.request_metadata = Some(json!({
+        "trace_id": "trace-ref-detail",
+    }));
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed_with_detached_bodies(
+        vec![usage],
+    ));
+    let user_repository = Arc::new(InMemoryUserReadRepository::seed(vec![sample_user_summary(
+        "user-1", "alice",
+    )]));
+    let data_state = GatewayDataState::with_usage_reader_for_tests(usage_repository)
+        .with_user_reader(user_repository);
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(data_state),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(
+        reqwest::Client::new().get(format!("{gateway_url}/api/admin/usage/usage-ref-detail")),
+    )
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert!(payload["metadata"]["trace_id"].is_null());
+    assert_eq!(payload["trace"]["trace_id"], "trace-ref-detail");
+    assert!(payload["metadata"]["request_preview_source"].is_null());
+    assert!(payload["metadata"]["original_request_body_available"].is_null());
+    assert!(payload["metadata"]["original_response_body_available"].is_null());
+    assert_eq!(payload["body_capture"]["request"]["storage"], "reference");
+    assert_eq!(payload["body_capture"]["request"]["available"], true);
+    assert_eq!(
+        payload["body_capture"]["request"]["preview_source"],
+        "stored_reference"
+    );
+    assert_eq!(
+        payload["body_capture"]["provider_request"]["storage"],
+        "reference"
+    );
+    assert_eq!(payload["body_capture"]["response"]["storage"], "reference");
+    assert_eq!(
+        payload["body_capture"]["client_response"]["storage"],
+        "reference"
+    );
+    assert_eq!(
+        payload["body_capture"]["request"]["body_ref"],
+        "usage://request/req-ref-detail/request_body"
+    );
+    assert_eq!(
+        payload["body_capture"]["provider_request"]["body_ref"],
+        "usage://request/req-ref-detail/provider_request_body"
+    );
+    assert_eq!(
+        payload["body_capture"]["response"]["body_ref"],
+        "usage://request/req-ref-detail/response_body"
+    );
+    assert_eq!(
+        payload["body_capture"]["client_response"]["body_ref"],
+        "usage://request/req-ref-detail/client_response_body"
+    );
+    assert_eq!(payload["request_body"]["model"], "gpt-5");
+    assert_eq!(
+        payload["request_body"]["messages"][0]["content"],
+        "ref-backed request body"
+    );
+    assert_eq!(payload["provider_request_body"]["temperature"], 0.2);
+    assert_eq!(payload["response_body"]["id"], "resp-ref-detail");
+    assert_eq!(
+        payload["client_response_body"]["output_text"],
+        "hello from ref"
+    );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -1170,6 +1544,107 @@ async fn gateway_handles_admin_usage_replay_locally_with_trusted_admin_principal
     assert_eq!(payload["request_body"]["api_format"], "openai:chat");
     assert_eq!(payload["request_body"]["stream"], false);
     assert_eq!(payload["original_request_body_available"], false);
+    assert_eq!(
+        payload["body_capture"]["request"]["preview_source"],
+        "local_reconstruction"
+    );
+    assert_eq!(payload["body_capture"]["request"]["storage"], "missing");
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_usage_replay_with_ref_backed_request_body() {
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/api/admin/usage/usage-ref-replay/replay",
+        any(move |_request: Request| {
+            let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+            async move {
+                *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("unexpected upstream hit"))
+            }
+        }),
+    );
+
+    let mut usage = sample_usage_row(
+        "usage-ref-replay",
+        "req-ref-replay",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-5",
+        "success",
+        120,
+        50,
+        0.42,
+        0.37,
+        DAY_1_UNIX_SECS,
+    );
+    usage.request_body = Some(json!({
+        "model": "gpt-5",
+        "messages": [{"role": "user", "content": "replay from ref"}],
+        "stream": false,
+    }));
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed_with_detached_bodies(
+        vec![usage],
+    ));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider("provider-1", "OpenAI", 10)],
+        vec![sample_endpoint(
+            "endpoint-1",
+            "provider-1",
+            "openai:chat",
+            "https://api.openai.com/v1",
+        )],
+        vec![],
+    ));
+
+    let (_upstream_url, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_usage_reader_for_tests(usage_repository)
+                    .with_provider_catalog_reader(provider_catalog_repository),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(
+        reqwest::Client::new()
+            .post(format!(
+                "{gateway_url}/api/admin/usage/usage-ref-replay/replay"
+            ))
+            .json(&json!({
+                "provider_id": "provider-1"
+            })),
+    )
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["request_body"]["model"], "gpt-5");
+    assert_eq!(
+        payload["request_body"]["messages"][0]["content"],
+        "replay from ref"
+    );
+    assert_eq!(payload["original_request_body_available"], true);
+    assert_eq!(
+        payload["body_capture"]["request"]["preview_source"],
+        "stored_reference"
+    );
+    assert_eq!(payload["body_capture"]["request"]["storage"], "reference");
+    assert_eq!(
+        payload["body_capture"]["request"]["body_ref"],
+        "usage://request/req-ref-replay/request_body"
+    );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -1315,6 +1790,16 @@ async fn gateway_handles_admin_usage_curl_locally_with_trusted_admin_principal()
     assert_eq!(payload["body"]["temperature"], 0.2);
     assert_eq!(payload["body"]["stream"], false);
     assert_eq!(payload["original_request_body_available"], true);
+    assert_eq!(payload["body_capture"]["body_source"], "provider_request");
+    assert_eq!(payload["body_capture"]["request"]["storage"], "inline");
+    assert_eq!(
+        payload["body_capture"]["request"]["preview_source"],
+        "stored_original"
+    );
+    assert_eq!(
+        payload["body_capture"]["provider_request"]["storage"],
+        "inline"
+    );
     let curl = payload["curl"].as_str().expect("curl should be string");
     assert!(curl.contains("curl"));
     assert!(curl.contains("https://api.openai.example/v1/chat/completions"));
@@ -1323,6 +1808,103 @@ async fn gateway_handles_admin_usage_curl_locally_with_trusted_admin_principal()
     assert!(curl.contains("\"model\":\"gpt-5-target\""));
     assert!(curl.contains("\"temperature\":0.2"));
     assert!(curl.contains("\"stream\":false"));
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_usage_curl_with_ref_backed_provider_request_body() {
+    let (_upstream_url, upstream_hits, upstream_handle) =
+        start_usage_upstream("/api/admin/usage/usage-ref-curl/curl").await;
+
+    let mut usage = sample_usage_row(
+        "usage-ref-curl",
+        "req-ref-curl",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-5",
+        "completed",
+        120,
+        30,
+        0.3,
+        0.36,
+        DAY_1_UNIX_SECS,
+    );
+    usage.request_body = Some(json!({
+        "model": "gpt-5",
+        "messages": [{"role": "user", "content": "client body"}],
+        "stream": false,
+    }));
+    usage.provider_request_headers = Some(json!({
+        "Content-Type": "application/json",
+        "Authorization": "Bearer provider-real",
+    }));
+    usage.provider_request_body = Some(json!({
+        "model": "gpt-5-target",
+        "stream": false,
+        "temperature": 0.2,
+    }));
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed_with_detached_bodies(
+        vec![usage],
+    ));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider("provider-1", "openai", 10)],
+        vec![sample_endpoint(
+            "endpoint-1",
+            "provider-1",
+            "openai:chat",
+            "https://api.openai.example",
+        )],
+        vec![sample_key(
+            "provider-key-1",
+            "provider-1",
+            "openai:chat",
+            "sk-test",
+        )],
+    ));
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_and_usage_reader_for_tests(
+                    provider_catalog_repository,
+                    usage_repository,
+                ),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(
+        reqwest::Client::new().get(format!("{gateway_url}/api/admin/usage/usage-ref-curl/curl")),
+    )
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["body"]["model"], "gpt-5-target");
+    assert_eq!(payload["body"]["temperature"], 0.2);
+    assert_eq!(payload["original_request_body_available"], true);
+    assert_eq!(payload["body_capture"]["body_source"], "provider_request");
+    assert_eq!(payload["body_capture"]["request"]["storage"], "reference");
+    assert_eq!(
+        payload["body_capture"]["request"]["preview_source"],
+        "stored_reference"
+    );
+    assert_eq!(
+        payload["body_capture"]["provider_request"]["storage"],
+        "reference"
+    );
+    assert_eq!(
+        payload["body_capture"]["provider_request"]["body_ref"],
+        "usage://request/req-ref-curl/provider_request_body"
+    );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -1498,7 +2080,7 @@ async fn gateway_handles_admin_usage_cache_affinity_hit_analysis_locally_with_tr
     assert_eq!(payload["total_input_tokens"], 140);
     assert_eq!(payload["total_cache_read_tokens"], 50);
     assert_eq!(payload["total_cache_creation_tokens"], 15);
-    assert_eq!(payload["token_cache_hit_rate"], 26.32);
+    assert_eq!(payload["token_cache_hit_rate"], 35.71);
     assert_eq!(payload["total_cache_read_cost_usd"], 0.02);
     assert_eq!(payload["total_cache_creation_cost_usd"], 0.015);
     assert_eq!(payload["estimated_savings_usd"], 0.18);
@@ -1610,6 +2192,147 @@ async fn gateway_handles_admin_usage_cache_affinity_interval_timeline_locally_wi
         payload["models"].as_array().expect("array"),
         &vec![json!("claude-3-7"), json!("gpt-5")]
     );
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_usage_cache_affinity_interval_timeline_with_auth_user_fallback() {
+    let (_upstream_url, upstream_hits, upstream_handle) =
+        start_usage_upstream("/api/admin/usage/cache-affinity/interval-timeline").await;
+    let mut usage_one = sample_usage_row(
+        "usage-auth-fallback-1",
+        "req-auth-fallback-1",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-5",
+        "completed",
+        10,
+        2,
+        0.01,
+        0.012,
+        recent_unix_secs(55),
+    );
+    usage_one.username = Some("stale-alice".to_string());
+    let mut usage_two = sample_usage_row(
+        "usage-auth-fallback-2",
+        "req-auth-fallback-2",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-5",
+        "completed",
+        12,
+        3,
+        0.01,
+        0.012,
+        recent_unix_secs(50),
+    );
+    usage_two.username = Some("stale-alice".to_string());
+
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        usage_one, usage_two,
+    ]));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_usage_reader_for_tests(
+                usage_repository,
+            ))
+            .with_auth_users_for_tests([sample_auth_user("user-1", "fresh-alice", "user", true)]),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/usage/cache-affinity/interval-timeline?hours=24&limit=100&include_user_info=true"
+    )))
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["total_points"], 1);
+    assert_eq!(payload["points"][0]["user_id"], "user-1");
+    assert_eq!(payload["users"]["user-1"], "fresh-alice");
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_usage_cache_affinity_interval_timeline_without_legacy_username_fallback_when_user_reader_exists(
+) {
+    let (_upstream_url, upstream_hits, upstream_handle) =
+        start_usage_upstream("/api/admin/usage/cache-affinity/interval-timeline").await;
+    let mut usage_one = sample_usage_row(
+        "usage-auth-reader-miss-1",
+        "req-auth-reader-miss-1",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-5",
+        "completed",
+        10,
+        2,
+        0.01,
+        0.012,
+        recent_unix_secs(55),
+    );
+    usage_one.username = Some("stale-alice".to_string());
+    let mut usage_two = sample_usage_row(
+        "usage-auth-reader-miss-2",
+        "req-auth-reader-miss-2",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-5",
+        "completed",
+        12,
+        3,
+        0.01,
+        0.012,
+        recent_unix_secs(50),
+    );
+    usage_two.username = Some("stale-alice".to_string());
+
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        usage_one, usage_two,
+    ]));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_usage_reader_for_tests(
+                usage_repository,
+            ))
+            .with_auth_users_for_tests([sample_auth_user("user-2", "fresh-bob", "user", true)]),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/usage/cache-affinity/interval-timeline?hours=24&limit=100&include_user_info=true"
+    )))
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["total_points"], 1);
+    assert_eq!(payload["points"][0]["user_id"], "user-1");
+    assert!(payload["users"]
+        .as_object()
+        .expect("users should be object")
+        .get("user-1")
+        .is_none());
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

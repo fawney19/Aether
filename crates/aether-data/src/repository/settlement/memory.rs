@@ -46,6 +46,7 @@ impl InMemorySettlementWalletStore {
 pub struct InMemorySettlementRepository {
     wallets: InMemorySettlementWalletStore,
     provider_monthly_used: RwLock<BTreeMap<String, f64>>,
+    settlements: RwLock<BTreeMap<String, StoredUsageSettlement>>,
 }
 
 impl InMemorySettlementRepository {
@@ -56,6 +57,7 @@ impl InMemorySettlementRepository {
         Self {
             wallets: InMemorySettlementWalletStore::seeded(items),
             provider_monthly_used: RwLock::new(BTreeMap::new()),
+            settlements: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -63,6 +65,7 @@ impl InMemorySettlementRepository {
         Self {
             wallets: InMemorySettlementWalletStore::Shared(wallet_repository),
             provider_monthly_used: RwLock::new(BTreeMap::new()),
+            settlements: RwLock::new(BTreeMap::new()),
         }
     }
 }
@@ -75,7 +78,13 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
     ) -> Result<Option<StoredUsageSettlement>, DataLayerError> {
         input.validate()?;
         if input.billing_status != "pending" {
-            return Ok(Some(StoredUsageSettlement {
+            let existing = self
+                .settlements
+                .read()
+                .expect("settlement snapshot lock")
+                .get(&input.request_id)
+                .cloned();
+            return Ok(Some(existing.unwrap_or(StoredUsageSettlement {
                 request_id: input.request_id,
                 wallet_id: None,
                 billing_status: input.billing_status,
@@ -87,7 +96,7 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
                 wallet_gift_balance_after: None,
                 provider_monthly_used_usd: None,
                 finalized_at_unix_secs: input.finalized_at_unix_secs,
-            }));
+            })));
         }
 
         let final_billing_status = if input.status == "completed" {
@@ -172,6 +181,11 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
             }
         }
 
+        self.settlements
+            .write()
+            .expect("settlement snapshot lock")
+            .insert(settlement.request_id.clone(), settlement.clone());
+
         Ok(Some(settlement))
     }
 }
@@ -224,5 +238,43 @@ mod tests {
         assert_eq!(settlement.wallet_balance_before, Some(12.0));
         assert_eq!(settlement.wallet_balance_after, Some(9.0));
         assert_eq!(settlement.provider_monthly_used_usd, Some(1.5));
+    }
+
+    #[tokio::test]
+    async fn returns_stored_snapshot_when_usage_is_already_finalized() {
+        let repository = InMemorySettlementRepository::seed(vec![sample_wallet()]);
+        let settled = repository
+            .settle_usage(UsageSettlementInput {
+                request_id: "req-2".to_string(),
+                user_id: Some("user-1".to_string()),
+                api_key_id: Some("key-1".to_string()),
+                provider_id: Some("provider-1".to_string()),
+                status: "completed".to_string(),
+                billing_status: "pending".to_string(),
+                total_cost_usd: 2.0,
+                actual_total_cost_usd: 1.0,
+                finalized_at_unix_secs: Some(250),
+            })
+            .await
+            .expect("settlement should succeed")
+            .expect("settlement should exist");
+
+        let replay = repository
+            .settle_usage(UsageSettlementInput {
+                request_id: "req-2".to_string(),
+                user_id: Some("user-1".to_string()),
+                api_key_id: Some("key-1".to_string()),
+                provider_id: Some("provider-1".to_string()),
+                status: "completed".to_string(),
+                billing_status: "settled".to_string(),
+                total_cost_usd: 2.0,
+                actual_total_cost_usd: 1.0,
+                finalized_at_unix_secs: Some(250),
+            })
+            .await
+            .expect("replay should succeed")
+            .expect("snapshot should exist");
+
+        assert_eq!(replay, settled);
     }
 }

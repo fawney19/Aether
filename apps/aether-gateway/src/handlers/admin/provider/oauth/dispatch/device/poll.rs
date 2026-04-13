@@ -132,6 +132,7 @@ pub(super) async fn handle_admin_provider_oauth_device_poll(
             &session.client_id,
             &session.client_secret,
             &session.device_code,
+            session.proxy_node_id.as_deref(),
         )
         .await
     {

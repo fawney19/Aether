@@ -334,6 +334,7 @@ export interface ConfigImportResponse {
     models: { created: number; updated: number; skipped: number }
     ldap?: { created: number; updated: number; skipped: number }
     oauth?: { created: number; updated: number; skipped: number }
+    system_configs?: { created: number; updated: number; skipped: number }
     errors: string[]
   }
 }

@@ -67,33 +67,18 @@ pub(crate) async fn access_log_middleware(mut request: Request<Body>, next: Next
             HeaderValue::from_str(&trace_id).expect("trace id should be a valid header value"),
         );
     }
-    if should_downgrade_access_log(&method, &path) {
-        trace!(
-            event_name = "http_request_started",
-            log_type = "access",
-            status = "started",
-            trace_id = %trace_id,
-            request_id = "-",
-            method = %method,
-            path = %path,
-            route_class = "pending",
-            execution_path = "pending",
-            "gateway request started"
-        );
-    } else {
-        info!(
-            event_name = "http_request_started",
-            log_type = "access",
-            status = "started",
-            trace_id = %trace_id,
-            request_id = "-",
-            method = %method,
-            path = %path,
-            route_class = "pending",
-            execution_path = "pending",
-            "gateway request started"
-        );
-    }
+    trace!(
+        event_name = "http_request_started",
+        log_type = "access",
+        status = "started",
+        trace_id = %trace_id,
+        request_id = "-",
+        method = %method,
+        path = %path,
+        route_class = "pending",
+        execution_path = "pending",
+        "gateway request started"
+    );
     let mut response = next.run(request).await;
     if !response.headers().contains_key(TRACE_ID_HEADER) {
         response.headers_mut().insert(
@@ -228,7 +213,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn access_log_emits_started_and_completed_events() {
+    async fn access_log_emits_completed_events_by_default() {
         let writer = SharedBuffer::default();
         let subscriber = tracing_subscriber::registry().with(
             tracing_subscriber::fmt::layer()
@@ -236,7 +221,8 @@ mod tests {
                 .flatten_event(true)
                 .with_current_span(false)
                 .with_span_list(false)
-                .with_writer(writer.clone()),
+                .with_writer(writer.clone())
+                .with_filter(LevelFilter::INFO),
         );
         let dispatch = tracing::Dispatch::new(subscriber);
         let _guard = tracing::dispatcher::set_default(&dispatch);
@@ -276,15 +262,13 @@ mod tests {
         assert!(response.headers().contains_key(TRACE_ID_HEADER));
 
         let logs = writer.lines();
-        assert_eq!(logs.len(), 2);
-        assert_eq!(logs[0]["event_name"], "http_request_started");
-        assert_eq!(logs[0]["status"], "started");
-        assert_eq!(logs[1]["event_name"], "http_request_completed");
-        assert_eq!(logs[1]["status"], "completed");
-        assert_eq!(logs[1]["status_code"], 200);
-        assert_eq!(logs[1]["request_id"], "req-123");
-        assert_eq!(logs[1]["route_class"], "local");
-        assert_eq!(logs[1]["execution_path"], "local_route");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0]["event_name"], "http_request_completed");
+        assert_eq!(logs[0]["status"], "completed");
+        assert_eq!(logs[0]["status_code"], 200);
+        assert_eq!(logs[0]["request_id"], "req-123");
+        assert_eq!(logs[0]["route_class"], "local");
+        assert_eq!(logs[0]["execution_path"], "local_route");
     }
 
     #[tokio::test]
@@ -343,7 +327,8 @@ mod tests {
                 .flatten_event(true)
                 .with_current_span(false)
                 .with_span_list(false)
-                .with_writer(writer.clone()),
+                .with_writer(writer.clone())
+                .with_filter(LevelFilter::INFO),
         );
         let dispatch = tracing::Dispatch::new(subscriber);
         let _guard = tracing::dispatcher::set_default(&dispatch);
@@ -383,11 +368,11 @@ mod tests {
             .expect("request should succeed");
 
         let logs = writer.lines();
-        assert_eq!(logs[1]["request_id"], "d07e1e94");
+        assert_eq!(logs[0]["request_id"], "d07e1e94");
     }
 
     #[tokio::test]
-    async fn access_log_emits_started_and_failed_events_for_server_errors() {
+    async fn access_log_emits_failed_events_by_default_for_server_errors() {
         let writer = SharedBuffer::default();
         let subscriber = tracing_subscriber::registry().with(
             tracing_subscriber::fmt::layer()
@@ -395,7 +380,8 @@ mod tests {
                 .flatten_event(true)
                 .with_current_span(false)
                 .with_span_list(false)
-                .with_writer(writer.clone()),
+                .with_writer(writer.clone())
+                .with_filter(LevelFilter::INFO),
         );
         let dispatch = tracing::Dispatch::new(subscriber);
         let _guard = tracing::dispatcher::set_default(&dispatch);
@@ -425,13 +411,12 @@ mod tests {
             .expect("request should succeed");
 
         let logs = writer.lines();
-        assert_eq!(logs.len(), 2);
-        assert_eq!(logs[0]["event_name"], "http_request_started");
-        assert_eq!(logs[1]["event_name"], "http_request_failed");
-        assert_eq!(logs[1]["status"], "failed");
-        assert_eq!(logs[1]["status_code"], 502);
-        assert_eq!(logs[1]["route_class"], "passthrough");
-        assert_eq!(logs[1]["execution_path"], "execution_runtime_sync");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0]["event_name"], "http_request_failed");
+        assert_eq!(logs[0]["status"], "failed");
+        assert_eq!(logs[0]["status_code"], 502);
+        assert_eq!(logs[0]["route_class"], "passthrough");
+        assert_eq!(logs[0]["execution_path"], "execution_runtime_sync");
     }
 
     #[tokio::test]
@@ -443,7 +428,8 @@ mod tests {
                 .flatten_event(true)
                 .with_current_span(false)
                 .with_span_list(false)
-                .with_writer(writer.clone()),
+                .with_writer(writer.clone())
+                .with_filter(LevelFilter::INFO),
         );
         let dispatch = tracing::Dispatch::new(subscriber);
         let _guard = tracing::dispatcher::set_default(&dispatch);
@@ -473,13 +459,12 @@ mod tests {
             .expect("request should succeed");
 
         let logs = writer.lines();
-        assert_eq!(logs.len(), 2);
-        assert_eq!(logs[0]["event_name"], "http_request_started");
-        assert_eq!(logs[1]["event_name"], "http_request_completed");
-        assert_eq!(logs[1]["status"], "completed");
-        assert_eq!(logs[1]["status_code"], 401);
-        assert_eq!(logs[1]["route_class"], "auth");
-        assert_eq!(logs[1]["execution_path"], "local_auth_denied");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0]["event_name"], "http_request_completed");
+        assert_eq!(logs[0]["status"], "completed");
+        assert_eq!(logs[0]["status_code"], 401);
+        assert_eq!(logs[0]["route_class"], "auth");
+        assert_eq!(logs[0]["execution_path"], "local_auth_denied");
     }
 
     #[tokio::test]
@@ -491,7 +476,8 @@ mod tests {
                 .flatten_event(true)
                 .with_current_span(false)
                 .with_span_list(false)
-                .with_writer(writer.clone()),
+                .with_writer(writer.clone())
+                .with_filter(LevelFilter::INFO),
         );
         let dispatch = tracing::Dispatch::new(subscriber);
         let _guard = tracing::dispatcher::set_default(&dispatch);
@@ -528,13 +514,12 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let logs = writer.lines();
-        assert_eq!(logs.len(), 2);
-        assert_eq!(logs[0]["event_name"], "http_request_started");
-        assert_eq!(logs[1]["event_name"], "http_request_completed");
-        assert_eq!(logs[1]["status_code"], 200);
-        assert_eq!(logs[1]["request_id"], "req-stream");
-        assert_eq!(logs[1]["route_class"], "ai_public");
-        assert_eq!(logs[1]["execution_path"], "execution_runtime_stream");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0]["event_name"], "http_request_completed");
+        assert_eq!(logs[0]["status_code"], 200);
+        assert_eq!(logs[0]["request_id"], "req-stream");
+        assert_eq!(logs[0]["route_class"], "ai_public");
+        assert_eq!(logs[0]["execution_path"], "execution_runtime_stream");
     }
 
     #[tokio::test]

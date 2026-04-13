@@ -47,6 +47,7 @@
             id="section-proxy"
             :proxy-node-id="systemConfig.system_proxy_node_id"
             :online-nodes="proxyNodesStore.onlineNodes"
+            :all-nodes="proxyNodesStore.nodes"
             :loading="proxyConfigLoading"
             :has-changes="hasProxyConfigChanges"
             @save="saveProxyConfig"

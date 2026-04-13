@@ -2,6 +2,7 @@ use super::{
     build_auth_error_response, query_param_value, resolve_authenticated_local_user, AppState,
     GatewayError, GatewayPublicRequestContext,
 };
+use aether_billing::normalize_total_input_context_for_cache_hit_rate;
 use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageAuditListQuery};
 use axum::{
     body::Body,
@@ -28,6 +29,7 @@ struct DashboardUsageTotals {
     total_tokens: u64,
     cache_creation_tokens: u64,
     cache_read_tokens: u64,
+    cache_hit_total_input_context: u64,
     cache_creation_cost_usd: f64,
     cache_read_cost_usd: f64,
     total_cost_usd: f64,
@@ -69,12 +71,14 @@ pub(super) fn decision_route_kind(request_context: &GatewayPublicRequestContext)
 
 impl DashboardUsageTotals {
     fn record(&mut self, item: &StoredRequestUsageAudit) {
+        let cache_creation_tokens = dashboard_cache_creation_tokens(item);
         self.requests += 1;
         self.input_tokens += item.input_tokens;
         self.output_tokens += item.output_tokens;
         self.total_tokens += item.total_tokens;
-        self.cache_creation_tokens += item.cache_creation_input_tokens;
+        self.cache_creation_tokens += cache_creation_tokens;
         self.cache_read_tokens += item.cache_read_input_tokens;
+        self.cache_hit_total_input_context += dashboard_total_input_context(item);
         self.cache_creation_cost_usd += item.cache_creation_cost_usd;
         self.cache_read_cost_usd += item.cache_read_cost_usd;
         self.total_cost_usd += item.total_cost_usd;
@@ -102,13 +106,48 @@ impl DashboardUsageTotals {
     }
 
     fn cache_hit_rate(&self) -> f64 {
-        let total_cache_tokens = self.cache_creation_tokens + self.cache_read_tokens;
-        if total_cache_tokens == 0 {
+        if self.cache_hit_total_input_context == 0 {
             0.0
         } else {
-            dashboard_round_f64(self.cache_read_tokens as f64 / total_cache_tokens as f64, 4)
+            dashboard_round_f64(
+                self.cache_read_tokens as f64 / self.cache_hit_total_input_context as f64 * 100.0,
+                2,
+            )
         }
     }
+}
+
+fn dashboard_usage_should_count_in_summary(item: &StoredRequestUsageAudit) -> bool {
+    !matches!(item.status.as_str(), "pending" | "streaming")
+        && !matches!(item.provider_name.as_str(), "unknown" | "pending")
+}
+
+fn dashboard_cache_creation_tokens(item: &StoredRequestUsageAudit) -> u64 {
+    let classified = item
+        .cache_creation_ephemeral_5m_input_tokens
+        .saturating_add(item.cache_creation_ephemeral_1h_input_tokens);
+    if item.cache_creation_input_tokens == 0 && classified > 0 {
+        classified
+    } else {
+        item.cache_creation_input_tokens
+    }
+}
+
+fn dashboard_total_input_context(item: &StoredRequestUsageAudit) -> u64 {
+    let api_format = item
+        .endpoint_api_format
+        .as_deref()
+        .or(item.api_format.as_deref());
+    let input_tokens = i64::try_from(item.input_tokens).unwrap_or(i64::MAX);
+    let cache_creation_tokens =
+        i64::try_from(dashboard_cache_creation_tokens(item)).unwrap_or(i64::MAX);
+    let cache_read_tokens = i64::try_from(item.cache_read_input_tokens).unwrap_or(i64::MAX);
+    normalize_total_input_context_for_cache_hit_rate(
+        api_format,
+        input_tokens,
+        cache_creation_tokens,
+        cache_read_tokens,
+    ) as u64
 }
 
 fn dashboard_round_f64(value: f64, decimals: u32) -> f64 {
@@ -128,6 +167,39 @@ fn dashboard_format_integer(value: u64) -> String {
     formatted.chars().rev().collect()
 }
 
+fn dashboard_trimmed_decimal(value: f64, decimals: usize) -> String {
+    let mut formatted = format!("{value:.decimals$}");
+    while formatted.contains('.') && formatted.ends_with('0') {
+        formatted.pop();
+    }
+    if formatted.ends_with('.') {
+        formatted.pop();
+    }
+    formatted
+}
+
+fn dashboard_format_token_compact(value: u64) -> String {
+    if value < 1_000 {
+        return dashboard_format_integer(value);
+    }
+
+    if value < 1_000_000 {
+        let thousands = value as f64 / 1_000.0;
+        if thousands >= 100.0 {
+            return format!("{}K", thousands.round() as u64);
+        }
+        let decimals = if thousands >= 10.0 { 1 } else { 2 };
+        return format!("{}K", dashboard_trimmed_decimal(thousands, decimals));
+    }
+
+    let millions = value as f64 / 1_000_000.0;
+    if millions >= 100.0 {
+        return format!("{}M", millions.round() as u64);
+    }
+    let decimals = if millions >= 10.0 { 1 } else { 2 };
+    format!("{}M", dashboard_trimmed_decimal(millions, decimals))
+}
+
 fn dashboard_format_usd(value: f64) -> String {
     format!("${:.2}", dashboard_round_f64(value, 2))
 }
@@ -141,6 +213,16 @@ fn dashboard_format_token_subvalue(totals: &DashboardUsageTotals) -> String {
         "输入 {} / 输出 {}",
         dashboard_format_integer(totals.input_tokens),
         dashboard_format_integer(totals.output_tokens)
+    )
+}
+
+fn dashboard_format_today_token_subvalue(totals: &DashboardUsageTotals) -> String {
+    format!(
+        "输入 {} / 输出 {} · 写缓存 {} / 读缓存 {}",
+        dashboard_format_token_compact(totals.input_tokens),
+        dashboard_format_token_compact(totals.output_tokens),
+        dashboard_format_token_compact(totals.cache_creation_tokens),
+        dashboard_format_token_compact(totals.cache_read_tokens)
     )
 }
 
@@ -392,7 +474,10 @@ async fn dashboard_list_usage_for_range(
         })
         .await
     {
-        Ok(value) => Ok(value),
+        Ok(mut value) => {
+            value.retain(dashboard_usage_should_count_in_summary);
+            Ok(value)
+        }
         Err(err) => Err(build_auth_error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("{error_context}: {err:?}"),
@@ -578,8 +663,8 @@ pub(super) async fn handle_dashboard_stats_get(
             },
             {
                 "name": "今日 Token",
-                "value": dashboard_format_integer(today_totals.total_tokens),
-                "subValue": dashboard_format_token_subvalue(&today_totals),
+                "value": dashboard_format_token_compact(today_totals.total_tokens),
+                "subValue": dashboard_format_today_token_subvalue(&today_totals),
                 "icon": "Zap",
             },
             {
@@ -975,23 +1060,21 @@ pub(super) async fn handle_dashboard_recent_requests_get(
         .into_iter()
         .collect::<Vec<_>>();
     let users_by_id: BTreeMap<String, aether_data::repository::users::StoredUserSummary> =
-        if state.has_user_data_reader() && !user_ids.is_empty() {
-            match state.list_users_by_ids(&user_ids).await {
-                Ok(value) => value
-                    .into_iter()
-                    .map(|user| (user.id.clone(), user))
-                    .collect(),
-                Err(err) => {
-                    return build_auth_error_response(
-                        http::StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("dashboard user lookup failed: {err:?}"),
-                        false,
-                    )
-                }
+        match state.resolve_auth_user_summaries_by_ids(&user_ids).await {
+            Ok(value) => value,
+            Err(err) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("dashboard user lookup failed: {err:?}"),
+                    false,
+                )
             }
-        } else {
-            BTreeMap::new()
         };
+    let mut usernames_by_id: BTreeMap<String, String> = users_by_id
+        .iter()
+        .filter(|(_, user)| !user.username.trim().is_empty())
+        .map(|(user_id, user)| (user_id.clone(), user.username.clone()))
+        .collect();
 
     let requests = usage
         .into_iter()
@@ -999,9 +1082,13 @@ pub(super) async fn handle_dashboard_recent_requests_get(
             let username = item
                 .user_id
                 .as_ref()
-                .and_then(|user_id| users_by_id.get(user_id))
-                .map(|user| user.username.clone())
-                .or(item.username.clone())
+                .and_then(|user_id| usernames_by_id.get(user_id))
+                .cloned()
+                .or_else(|| {
+                    (!state.has_auth_user_data_reader())
+                        .then(|| item.username.clone())
+                        .flatten()
+                })
                 .unwrap_or_else(|| "Unknown".to_string());
             json!({
                 "id": item.id,

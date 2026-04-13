@@ -1,15 +1,18 @@
 use aether_data_contracts::DataLayerError;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::data::GatewayDataState;
 use crate::{AppState, GatewayError};
 
 use super::{
-    cleanup_audit_logs_once, cleanup_expired_gemini_file_mappings_once,
-    cleanup_request_candidates_once, cleanup_stale_pending_requests_once,
-    perform_db_maintenance_once, perform_provider_checkin_once, perform_stats_aggregation_once,
+    advance_proxy_upgrade_rollout_once, cleanup_audit_logs_once,
+    cleanup_expired_gemini_file_mappings_once, cleanup_request_candidates_once,
+    cleanup_stale_pending_requests_once, cleanup_stale_proxy_nodes_once,
+    collect_proxy_upgrade_rollout_probes, perform_db_maintenance_once,
+    perform_provider_checkin_once, perform_stats_aggregation_once,
     perform_stats_hourly_aggregation_once, perform_usage_cleanup_once,
-    perform_wallet_daily_usage_aggregation_once, summarize_postgres_pool,
+    perform_wallet_daily_usage_aggregation_once, record_proxy_upgrade_traffic_success,
+    summarize_postgres_pool,
 };
 
 pub(super) async fn run_audit_cleanup_once(data: &GatewayDataState) -> Result<(), DataLayerError> {
@@ -37,6 +40,91 @@ pub(super) async fn run_gemini_file_mapping_cleanup_once(
             worker = "gemini_file_mapping_cleanup",
             deleted,
             "gateway deleted expired gemini file mappings"
+        );
+    }
+    Ok(())
+}
+
+pub(super) async fn run_proxy_node_stale_cleanup_once(
+    data: &GatewayDataState,
+) -> Result<(), DataLayerError> {
+    let stale_marked = cleanup_stale_proxy_nodes_once(data).await?;
+    if stale_marked > 0 {
+        info!(
+            event_name = "proxy_node_stale_cleanup_completed",
+            log_type = "ops",
+            worker = "proxy_node_stale_cleanup",
+            stale_marked,
+            "gateway marked stale proxy nodes offline"
+        );
+    }
+    Ok(())
+}
+
+pub(super) async fn run_proxy_upgrade_rollout_once(state: &AppState) -> Result<(), DataLayerError> {
+    let mut summary = advance_proxy_upgrade_rollout_once(&state.data).await?;
+    let probes = collect_proxy_upgrade_rollout_probes(&state.data).await?;
+    let mut probe_recorded = false;
+    for probe in probes {
+        match state
+            .tunnel
+            .probe_node_url(&probe.node_id, &probe.url, probe.timeout_secs)
+            .await
+        {
+            Ok(status) if (200..300).contains(&status) => {
+                let _ = record_proxy_upgrade_traffic_success(&state.data, &probe.node_id).await?;
+                probe_recorded = true;
+                info!(
+                    event_name = "proxy_upgrade_rollout_probe_succeeded",
+                    log_type = "ops",
+                    worker = "proxy_upgrade_rollout",
+                    node_id = %probe.node_id,
+                    url = %probe.url,
+                    status,
+                    "gateway confirmed proxy upgrade health probe"
+                );
+            }
+            Ok(status) => {
+                warn!(
+                    event_name = "proxy_upgrade_rollout_probe_unhealthy",
+                    log_type = "ops",
+                    worker = "proxy_upgrade_rollout",
+                    node_id = %probe.node_id,
+                    url = %probe.url,
+                    status,
+                    "gateway proxy upgrade health probe returned non-success status"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    event_name = "proxy_upgrade_rollout_probe_failed",
+                    log_type = "ops",
+                    worker = "proxy_upgrade_rollout",
+                    node_id = %probe.node_id,
+                    url = %probe.url,
+                    error = %error,
+                    "gateway proxy upgrade health probe failed"
+                );
+            }
+        }
+    }
+
+    if probe_recorded {
+        summary = advance_proxy_upgrade_rollout_once(&state.data).await?;
+    }
+    if summary.updated > 0 || !summary.pending_node_ids.is_empty() || !summary.version.is_empty() {
+        info!(
+            event_name = "proxy_upgrade_rollout_checked",
+            log_type = "ops",
+            worker = "proxy_upgrade_rollout",
+            version = %summary.version,
+            updated = summary.updated,
+            blocked = summary.blocked,
+            pending = summary.pending_node_ids.len(),
+            completed = summary.completed,
+            remaining = summary.remaining,
+            rollout_active = summary.rollout_active,
+            "gateway checked proxy upgrade rollout"
         );
     }
     Ok(())
@@ -100,7 +188,8 @@ pub(super) async fn run_stats_aggregation_once(
 
 pub(super) async fn run_usage_cleanup_once(data: &GatewayDataState) -> Result<(), DataLayerError> {
     let summary = perform_usage_cleanup_once(data).await?;
-    if summary.body_compressed > 0
+    if summary.body_externalized > 0
+        || summary.legacy_body_refs_migrated > 0
         || summary.body_cleaned > 0
         || summary.header_cleaned > 0
         || summary.keys_cleaned > 0
@@ -110,7 +199,8 @@ pub(super) async fn run_usage_cleanup_once(data: &GatewayDataState) -> Result<()
             event_name = "usage_cleanup_completed",
             log_type = "ops",
             worker = "usage_cleanup",
-            body_compressed = summary.body_compressed,
+            body_externalized = summary.body_externalized,
+            legacy_body_refs_migrated = summary.legacy_body_refs_migrated,
             body_cleaned = summary.body_cleaned,
             header_cleaned = summary.header_cleaned,
             keys_cleaned = summary.keys_cleaned,

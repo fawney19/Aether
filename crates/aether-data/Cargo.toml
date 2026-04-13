@@ -13,6 +13,7 @@ aether-wallet.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
+flate2.workspace = true
 redis.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -6,7 +6,7 @@
 //! a tabbed interface.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -20,7 +20,11 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use ratatui::Terminal;
 
-use crate::config::{ConfigFile, ServerEntry};
+use crate::config::{
+    format_byte_size_human, parse_byte_size, ConfigFile, ProxyLogDestinationArg,
+    ProxyLogRotationArg, ServerEntry, DEFAULT_HEARTBEAT_INTERVAL_SECS, DEFAULT_LOG_MAX_FILES,
+    DEFAULT_LOG_RETENTION_DAYS, DEFAULT_REDIRECT_REPLAY_BUDGET_HUMAN,
+};
 
 /// Outcome of the setup wizard, returned to the caller.
 pub enum SetupOutcome {
@@ -82,7 +86,7 @@ impl ServerTab {
                 Field {
                     label: "Node Name",
                     key: "node_name",
-                    value: "proxy-01".into(),
+                    value: String::new(),
                     kind: FieldKind::Text,
                     required: true,
                     help: "Node name for identification in Aether dashboard",
@@ -133,22 +137,6 @@ impl App {
             active_tab: 0,
             global_fields: vec![
                 Field {
-                    label: "Log Level",
-                    key: "log_level",
-                    value: "info".into(),
-                    kind: FieldKind::LogLevel,
-                    required: true,
-                    help: "Log level -- Enter to cycle: trace / debug / info / warn / error",
-                },
-                Field {
-                    label: "Log JSON",
-                    key: "log_json",
-                    value: "false".into(),
-                    kind: FieldKind::Bool,
-                    required: true,
-                    help: "Output logs as JSON -- Enter to toggle",
-                },
-                Field {
                     label: "Install Service",
                     key: "install_service",
                     value: if super::service::is_available() {
@@ -158,8 +146,41 @@ impl App {
                     }
                     .into(),
                     kind: FieldKind::Bool,
-                    required: true,
+                    required: false,
                     help: "Install as managed service (requires root) -- Enter to toggle",
+                },
+                Field {
+                    label: "Log Level",
+                    key: "log_level",
+                    value: "info".into(),
+                    kind: FieldKind::LogLevel,
+                    required: true,
+                    help: "Log level -- Enter to cycle: trace / debug / info / warn / error",
+                },
+                Field {
+                    label: "Save Logs to File",
+                    key: "save_logs_to_file",
+                    value: "false".into(),
+                    kind: FieldKind::Bool,
+                    required: false,
+                    help: "Write pretty .log files with daily rotation and 7-day retention",
+                },
+                Field {
+                    label: "Heartbeat Interval",
+                    key: "heartbeat_interval",
+                    value: DEFAULT_HEARTBEAT_INTERVAL_SECS.to_string(),
+                    kind: FieldKind::Text,
+                    required: false,
+                    help: "Heartbeat interval in seconds; default is 30",
+                },
+                Field {
+                    label: "Redirect Replay Budget",
+                    key: "redirect_replay_budget_bytes",
+                    value: DEFAULT_REDIRECT_REPLAY_BUDGET_HUMAN.to_string(),
+                    kind: FieldKind::Text,
+                    required: false,
+                    help:
+                        "Prebuffer budget for 307/308 replay, e.g. 5M; set 0 to disable buffering",
                 },
             ],
             selected: 0,
@@ -225,7 +246,15 @@ impl App {
         for field in &mut self.global_fields {
             let val: Option<String> = match field.key {
                 "log_level" => cfg.log_level.clone(),
-                "log_json" => cfg.log_json.map(|v| v.to_string()),
+                "save_logs_to_file" => cfg.log_destination.map(|value| {
+                    matches!(
+                        value,
+                        ProxyLogDestinationArg::File | ProxyLogDestinationArg::Both
+                    )
+                    .to_string()
+                }),
+                "heartbeat_interval" => cfg.heartbeat_interval.map(|v| v.to_string()),
+                "redirect_replay_budget_bytes" => cfg.redirect_replay_budget_bytes.clone(),
                 _ => None,
             };
             if let Some(v) = val {
@@ -256,26 +285,104 @@ impl App {
         self.scroll_offset = 0;
     }
 
-    fn to_config(&self) -> ConfigFile {
-        let get_global = |key: &str| -> Option<String> {
-            self.global_fields
-                .iter()
-                .find(|f| f.key == key)
-                .map(|f| f.value.clone())
-                .filter(|v| !v.is_empty())
-        };
+    fn get_global(&self, key: &str) -> Option<String> {
+        self.global_fields
+            .iter()
+            .find(|f| f.key == key)
+            .map(|f| f.value.clone())
+            .filter(|v| !v.is_empty())
+    }
 
-        let get_tab = |tab: &ServerTab, key: &str| -> Option<String> {
-            tab.fields
-                .iter()
-                .find(|f| f.key == key)
-                .map(|f| f.value.clone())
-                .filter(|v| !v.is_empty())
-        };
+    fn get_tab(tab: &ServerTab, key: &str) -> Option<String> {
+        tab.fields
+            .iter()
+            .find(|f| f.key == key)
+            .map(|f| f.value.clone())
+            .filter(|v| !v.is_empty())
+    }
 
+    fn toggle_enabled(&self, key: &str) -> bool {
+        self.get_global(key).as_deref() == Some("true")
+    }
+
+    fn validate_required_fields(&self) -> anyhow::Result<()> {
+        for (tab_idx, tab) in self.server_tabs.iter().enumerate() {
+            for field in &tab.fields {
+                if field.required && field.value.trim().is_empty() {
+                    anyhow::bail!("server {} field `{}` is required", tab_idx + 1, field.label);
+                }
+            }
+        }
+
+        for field in &self.global_fields {
+            if field.required && field.value.trim().is_empty() {
+                anyhow::bail!("field `{}` is required", field.label);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn parse_optional_heartbeat_interval(&self) -> anyhow::Result<Option<u64>> {
+        let Some(raw) = self.get_global("heartbeat_interval") else {
+            return Ok(None);
+        };
+        let value = raw.trim().parse::<u64>().map_err(|_| {
+            anyhow::anyhow!("heartbeat interval must be an integer number of seconds")
+        })?;
+        if value == 0 || value > 3600 {
+            anyhow::bail!("heartbeat interval must be between 1 and 3600 seconds");
+        }
+        Ok(Some(value))
+    }
+
+    fn parse_optional_redirect_replay_budget(&self) -> anyhow::Result<Option<String>> {
+        let Some(raw) = self.get_global("redirect_replay_budget_bytes") else {
+            return Ok(None);
+        };
+        let bytes = parse_byte_size(raw.trim())
+            .map_err(|err| anyhow::anyhow!("redirect replay budget invalid: {err}"))?;
+        Ok(Some(format_byte_size_human(bytes)))
+    }
+
+    fn default_file_log_dir(&self) -> String {
+        if self.toggle_enabled("install_service") {
+            return "/var/log/aether-proxy".to_string();
+        }
+
+        let base = self
+            .config_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if base == Path::new(".") {
+            "logs".to_string()
+        } else {
+            base.join("logs").display().to_string()
+        }
+    }
+
+    fn to_config(&self) -> anyhow::Result<ConfigFile> {
+        self.validate_required_fields()?;
+
+        let get_global = |key: &str| -> Option<String> { self.get_global(key) };
+
+        let get_tab = |tab: &ServerTab, key: &str| -> Option<String> { Self::get_tab(tab, key) };
+
+        let save_logs_to_file = self.toggle_enabled("save_logs_to_file");
         let mut cfg = ConfigFile {
             log_level: get_global("log_level"),
-            log_json: get_global("log_json").and_then(|v| v.parse().ok()),
+            heartbeat_interval: self.parse_optional_heartbeat_interval()?,
+            redirect_replay_budget_bytes: self.parse_optional_redirect_replay_budget()?,
+            log_destination: Some(if save_logs_to_file {
+                ProxyLogDestinationArg::Both
+            } else {
+                ProxyLogDestinationArg::Stdout
+            }),
+            log_dir: save_logs_to_file.then(|| self.default_file_log_dir()),
+            log_rotation: save_logs_to_file.then_some(ProxyLogRotationArg::Daily),
+            log_retention_days: save_logs_to_file.then_some(DEFAULT_LOG_RETENTION_DAYS),
+            log_max_files: save_logs_to_file.then_some(DEFAULT_LOG_MAX_FILES),
             ..ConfigFile::default()
         };
 
@@ -289,11 +396,11 @@ impl App {
                 node_name: get_tab(tab, "node_name"),
             })
             .collect();
-        cfg
+        Ok(cfg)
     }
 
     fn save(&mut self) -> anyhow::Result<()> {
-        let cfg = self.to_config();
+        let cfg = self.to_config()?;
         cfg.save(&self.config_path)?;
         // Restrict config file permissions to owner-only (contains management token).
         #[cfg(unix)]
@@ -342,6 +449,24 @@ impl App {
             }
         }
 
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return true;
+        }
+
+        if key.code == KeyCode::Char('s')
+            && (key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::SUPER))
+        {
+            if self.mode == Mode::Editing && !self.commit_edit_buffer() {
+                return false;
+            }
+            if let Err(e) = self.save() {
+                self.message = Some((format!("error: {}", e), Instant::now(), true));
+                return false;
+            }
+            return true;
+        }
+
         match self.mode {
             Mode::Normal => self.handle_normal(key),
             Mode::Editing => {
@@ -362,7 +487,7 @@ impl App {
             self.pending_quit = true;
             self.confirm_delete = false;
             self.message = Some((
-                "unsaved changes! q again to discard, ^S to save".into(),
+                "unsaved changes! q again to discard, Ctrl+S to save and exit".into(),
                 Instant::now(),
                 true,
             ));
@@ -374,20 +499,17 @@ impl App {
             self.pending_quit = false;
             self.message = None;
         }
-        if self.confirm_delete && !matches!(key.code, KeyCode::Delete | KeyCode::Char('x')) {
+        if self.confirm_delete
+            && !matches!(
+                key.code,
+                KeyCode::Backspace | KeyCode::Delete | KeyCode::Char('x')
+            )
+        {
             self.confirm_delete = false;
             self.message = None;
         }
 
         match key.code {
-            KeyCode::Char('s')
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    || key.modifiers.contains(KeyModifiers::SUPER) =>
-            {
-                if let Err(e) = self.save() {
-                    self.message = Some((format!("error: {}", e), Instant::now(), true));
-                }
-            }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.selected = self.selected.saturating_sub(1);
             }
@@ -430,13 +552,13 @@ impl App {
                 }
             }
             // -- Tab navigation --
-            KeyCode::Tab => {
+            KeyCode::Tab | KeyCode::Right => {
                 if self.server_tabs.len() > 1 {
                     self.active_tab = (self.active_tab + 1) % self.server_tabs.len();
                     self.clamp_selection();
                 }
             }
-            KeyCode::BackTab => {
+            KeyCode::BackTab | KeyCode::Left => {
                 if self.server_tabs.len() > 1 {
                     self.active_tab = if self.active_tab == 0 {
                         self.server_tabs.len() - 1
@@ -466,7 +588,7 @@ impl App {
                     false,
                 ));
             }
-            KeyCode::Delete | KeyCode::Char('x') => {
+            KeyCode::Backspace | KeyCode::Delete | KeyCode::Char('x') => {
                 if self.server_tabs.len() <= 1 {
                     self.message =
                         Some(("cannot remove the last server".into(), Instant::now(), true));
@@ -481,7 +603,7 @@ impl App {
                 } else {
                     self.confirm_delete = true;
                     self.message = Some((
-                        "press Delete/x again to remove this server".into(),
+                        "press Backspace again to remove this server".into(),
                         Instant::now(),
                         true,
                     ));
@@ -498,13 +620,7 @@ impl App {
                 self.mode = Mode::Normal;
             }
             KeyCode::Enter => {
-                if self.validate_edit() {
-                    self.selected_field_mut().value = self.edit_buffer.clone();
-                    self.modified = true;
-                    self.mode = Mode::Normal;
-                } else {
-                    self.message = Some(("invalid format".into(), Instant::now(), true));
-                }
+                self.commit_edit_buffer();
             }
             KeyCode::Backspace => {
                 if self.edit_cursor > 0 {
@@ -539,8 +655,44 @@ impl App {
         }
     }
 
+    fn commit_edit_buffer(&mut self) -> bool {
+        if self.validate_edit() {
+            self.selected_field_mut().value = self.edit_buffer.clone();
+            self.modified = true;
+            self.mode = Mode::Normal;
+            true
+        } else {
+            self.message = Some(("invalid format".into(), Instant::now(), true));
+            false
+        }
+    }
+
     fn validate_edit(&self) -> bool {
-        true
+        let key = self.selected_field().key;
+        let trimmed = self.edit_buffer.trim();
+
+        if self.selected_field().required && trimmed.is_empty() {
+            return false;
+        }
+
+        match key {
+            "heartbeat_interval" => {
+                if trimmed.is_empty() {
+                    return true;
+                }
+                match trimmed.parse::<u64>() {
+                    Ok(value) => (1..=3600).contains(&value),
+                    Err(_) => false,
+                }
+            }
+            "redirect_replay_budget_bytes" => {
+                if trimmed.is_empty() {
+                    return true;
+                }
+                parse_byte_size(trimmed).is_ok()
+            }
+            _ => true,
+        }
     }
 
     /// Byte offset of the char at `char_idx`.
@@ -747,6 +899,13 @@ fn render_tab_bar(f: &mut Frame, app: &App, area: Rect) {
     }
 
     spans.push(Span::styled(" + Add ", Style::default().fg(Color::Green)));
+    if app.server_tabs.len() > 1 {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            " Backspace Remove ",
+            Style::default().fg(Color::Yellow),
+        ));
+    }
 
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -755,11 +914,11 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     let help = app.selected_field().help;
 
     let keybindings = if app.mode == Mode::Editing {
-        "Enter confirm  Esc cancel"
+        "Enter 确认  Esc 取消  Ctrl+S 保存退出  Ctrl+C 退出"
     } else if app.server_tabs.len() > 1 {
-        "j/k select  Enter edit  Tab switch  + add  x remove  ^S save  q quit"
+        "↑/↓ 选择  ←/→ 切换服务器  Enter 编辑  + 新增  Backspace 删除  Ctrl+S 保存退出  Ctrl+C 退出"
     } else {
-        "j/k select  Enter edit  + add server  ^S save  q quit"
+        "↑/↓ 选择  Enter 编辑  + 新增服务器  Ctrl+S 保存退出  Ctrl+C 退出"
     };
 
     let mut status_spans: Vec<Span> = vec![Span::styled(
@@ -861,4 +1020,175 @@ fn event_loop(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    fn set_server_field(app: &mut App, key: &str, value: &str) {
+        let field = app.server_tabs[0]
+            .fields
+            .iter_mut()
+            .find(|field| field.key == key)
+            .expect("server field");
+        field.value = value.to_string();
+    }
+
+    fn set_global_field(app: &mut App, key: &str, value: &str) {
+        let field = app
+            .global_fields
+            .iter_mut()
+            .find(|field| field.key == key)
+            .expect("global field");
+        field.value = value.to_string();
+    }
+
+    fn sample_app() -> App {
+        let mut app = App::new(PathBuf::from("aether-proxy.toml"));
+        set_server_field(&mut app, "aether_url", "https://aether.example.com");
+        set_server_field(&mut app, "management_token", "ae_test");
+        set_server_field(&mut app, "node_name", "jp-proxy-01");
+        app
+    }
+
+    fn unique_temp_config_path(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should work")
+            .as_nanos();
+        std::env::temp_dir().join(format!("aether-proxy-{name}-{nanos}.toml"))
+    }
+
+    #[test]
+    fn new_app_shows_default_heartbeat_interval() {
+        let app = sample_app();
+        let heartbeat = app
+            .global_fields
+            .iter()
+            .find(|field| field.key == "heartbeat_interval")
+            .expect("heartbeat field");
+        assert_eq!(heartbeat.value, DEFAULT_HEARTBEAT_INTERVAL_SECS.to_string());
+    }
+
+    #[test]
+    fn to_config_enables_pretty_file_logging_with_defaults() {
+        let mut app = sample_app();
+        set_global_field(&mut app, "save_logs_to_file", "true");
+
+        let cfg = app.to_config().expect("config should serialize");
+        assert_eq!(cfg.log_destination, Some(ProxyLogDestinationArg::Both));
+        assert_eq!(cfg.log_dir.as_deref(), Some("logs"));
+        assert_eq!(cfg.log_rotation, Some(ProxyLogRotationArg::Daily));
+        assert_eq!(cfg.log_retention_days, Some(DEFAULT_LOG_RETENTION_DAYS));
+        assert_eq!(cfg.log_max_files, Some(DEFAULT_LOG_MAX_FILES));
+    }
+
+    #[test]
+    fn to_config_uses_service_log_dir_when_installing_service() {
+        let mut app = sample_app();
+        set_global_field(&mut app, "install_service", "true");
+        set_global_field(&mut app, "save_logs_to_file", "true");
+
+        let cfg = app.to_config().expect("config should serialize");
+        assert_eq!(cfg.log_dir.as_deref(), Some("/var/log/aether-proxy"));
+    }
+
+    #[test]
+    fn to_config_persists_optional_heartbeat_interval() {
+        let mut app = sample_app();
+        set_global_field(&mut app, "heartbeat_interval", "45");
+        set_global_field(&mut app, "redirect_replay_budget_bytes", "6m");
+
+        let cfg = app.to_config().expect("config should serialize");
+        assert_eq!(cfg.heartbeat_interval, Some(45));
+        assert_eq!(cfg.redirect_replay_budget_bytes.as_deref(), Some("6M"));
+    }
+
+    #[test]
+    fn to_config_rejects_invalid_heartbeat_interval() {
+        let mut app = sample_app();
+        set_global_field(&mut app, "heartbeat_interval", "0");
+
+        let error = app.to_config().expect_err("heartbeat 0 should be rejected");
+        assert!(error.to_string().contains("heartbeat interval"));
+    }
+
+    #[test]
+    fn to_config_rejects_missing_required_node_name() {
+        let mut app = sample_app();
+        set_server_field(&mut app, "node_name", "");
+
+        let error = app
+            .to_config()
+            .expect_err("missing node_name should be rejected");
+        assert!(error.to_string().contains("Node Name"));
+    }
+
+    #[test]
+    fn ctrl_c_exits_immediately_even_with_unsaved_changes() {
+        let mut app = sample_app();
+        app.modified = true;
+
+        assert!(app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL,)));
+        assert!(!app.saved_once);
+    }
+
+    #[test]
+    fn ctrl_s_commits_edit_saves_and_exits() {
+        let config_path = unique_temp_config_path("ctrl-s");
+        let mut app = sample_app();
+        app.config_path = config_path.clone();
+        app.selected = app.server_field_count() + 3;
+        app.mode = Mode::Editing;
+        app.edit_buffer = "45".to_string();
+        app.edit_cursor = 2;
+
+        assert!(app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL,)));
+        assert!(app.saved_once);
+        assert!(matches!(app.mode, Mode::Normal));
+
+        let saved = fs::read_to_string(&config_path).expect("config should be saved");
+        assert!(saved.contains("heartbeat_interval = 45"));
+
+        let _ = fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn backspace_confirms_and_removes_active_server_tab() {
+        let mut app = sample_app();
+        app.server_tabs.push(ServerTab::from_entry(&ServerEntry {
+            aether_url: "https://aether-2.example.com".to_string(),
+            management_token: "ae_test_2".to_string(),
+            node_name: Some("jp-proxy-02".to_string()),
+        }));
+        app.active_tab = 1;
+
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE,)));
+        assert!(app.confirm_delete);
+        assert_eq!(app.server_tabs.len(), 2);
+
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE,)));
+        assert_eq!(app.server_tabs.len(), 1);
+        assert_eq!(app.active_tab, 0);
+    }
+
+    #[test]
+    fn left_and_right_switch_between_server_tabs() {
+        let mut app = sample_app();
+        app.server_tabs.push(ServerTab::from_entry(&ServerEntry {
+            aether_url: "https://aether-2.example.com".to_string(),
+            management_token: "ae_test_2".to_string(),
+            node_name: Some("jp-proxy-02".to_string()),
+        }));
+        app.active_tab = 0;
+
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE,)));
+        assert_eq!(app.active_tab, 1);
+
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE,)));
+        assert_eq!(app.active_tab, 0);
+    }
 }

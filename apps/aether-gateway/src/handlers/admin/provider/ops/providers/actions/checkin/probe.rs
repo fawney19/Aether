@@ -1,5 +1,7 @@
 use super::super::super::support::AdminProviderOpsCheckinOutcome;
-use super::super::super::verify::admin_provider_ops_execute_proxy_json_request;
+use super::super::super::verify::{
+    admin_provider_ops_execute_json_request, AdminProviderOpsExecuteJsonError,
+};
 use super::super::support::{admin_provider_ops_json_object_map, admin_provider_ops_request_url};
 use super::shared::{
     admin_provider_ops_checkin_already_done, admin_provider_ops_checkin_auth_failure,
@@ -27,40 +29,20 @@ pub(in super::super) async fn admin_provider_ops_probe_new_api_checkin(
         &admin_provider_ops_json_object_map(json!({ "endpoint": endpoint })),
         endpoint,
     );
-    let (status, response_json) = if let Some(proxy_snapshot) = proxy_snapshot {
-        match admin_provider_ops_execute_proxy_json_request(
-            state,
-            "provider-ops-action:probe_checkin",
-            reqwest::Method::POST,
-            &url,
-            headers,
-            None,
-            proxy_snapshot,
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => return None,
-        }
-    } else {
-        let response = match state
-            .http_client()
-            .request(reqwest::Method::POST, url)
-            .headers(headers.clone())
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(_) => return None,
-        };
-        let status = response.status();
-        let response_json = match response.bytes().await {
-            Ok(bytes) => {
-                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_else(|_| json!({}))
-            }
-            Err(_) => json!({}),
-        };
-        (status, response_json)
+    let (status, response_json) = match admin_provider_ops_execute_json_request(
+        state,
+        "provider-ops-action:probe_checkin",
+        reqwest::Method::POST,
+        &url,
+        headers,
+        None,
+        proxy_snapshot,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(AdminProviderOpsExecuteJsonError::InvalidJson(_))
+        | Err(AdminProviderOpsExecuteJsonError::Transport(_)) => return None,
     };
 
     if status == http::StatusCode::NOT_FOUND {

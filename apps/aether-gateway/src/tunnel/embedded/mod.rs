@@ -19,8 +19,10 @@ use axum::routing::{get, post};
 use axum::Router;
 use tracing::warn;
 
+use crate::data::GatewayDataState;
+
 pub use control_plane::ControlPlaneClient;
-pub use hub::{ConnConfig, HubRouter};
+pub use hub::{ConnConfig, HubRouter, ProxyConn};
 pub use local_relay::relay_request;
 
 #[derive(Clone)]
@@ -28,6 +30,7 @@ pub struct AppState {
     pub hub: Arc<HubRouter>,
     pub proxy_conn_cfg: ConnConfig,
     pub max_streams: usize,
+    data: Arc<GatewayDataState>,
     request_gate: Option<Arc<ConcurrencyGate>>,
     distributed_request_gate: Option<Arc<DistributedConcurrencyGate>>,
 }
@@ -48,9 +51,15 @@ impl AppState {
             hub: HubRouter::new(control_plane),
             proxy_conn_cfg,
             max_streams,
+            data: Arc::new(GatewayDataState::disabled()),
             request_gate: None,
             distributed_request_gate: None,
         }
+    }
+
+    pub(crate) fn with_data(mut self, data: Arc<GatewayDataState>) -> Self {
+        self.data = data;
+        self
     }
 
     pub fn with_request_concurrency_limit(mut self, limit: Option<usize>) -> Self {

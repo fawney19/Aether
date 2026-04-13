@@ -1,16 +1,20 @@
 use std::collections::BTreeMap;
 use std::error::Error as _;
+use std::io::Read;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
 use aether_contracts::{
     ExecutionPlan, ExecutionResult, ExecutionTelemetry, ProxySnapshot, ResponseBody,
+    EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER, EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
 };
 use aether_http::{apply_http_client_config, HttpClientConfig};
 use base64::Engine as _;
+use flate2::read::{DeflateDecoder, GzDecoder};
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use reqwest::redirect::Policy;
 use reqwest::tls::Version;
 use serde::Serialize;
 use serde_json::Value;
@@ -116,10 +120,20 @@ struct RelayRequestMeta {
     url: String,
     headers: BTreeMap<String, String>,
     timeout: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    follow_redirects: Option<bool>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    http1_only: bool,
 }
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DirectSyncExecutionRuntime;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ExecutionTransportControls {
+    follow_redirects: Option<bool>,
+    http1_only: bool,
+}
 
 #[derive(Debug)]
 pub(crate) struct DirectUpstreamStreamExecution {
@@ -150,6 +164,8 @@ impl DirectSyncExecutionRuntime {
         let body_bytes = response.bytes().await.map_err(|err| {
             ExecutionRuntimeTransportError::UpstreamRequest(format_upstream_request_error(&err))
         })?;
+        let decoded_body_bytes = decode_response_body_bytes(&headers, &body_bytes)
+            .unwrap_or_else(|| body_bytes.to_vec());
         let elapsed_ms = started_at.elapsed().as_millis() as u64;
         let upstream_bytes = body_bytes.len() as u64;
 
@@ -160,8 +176,8 @@ impl DirectSyncExecutionRuntime {
                 json_body: None,
                 body_bytes_b64: Some(base64::engine::general_purpose::STANDARD.encode(&body_bytes)),
             })
-        } else if response_body_is_json(&headers, &body_bytes) {
-            let body_json: Value = serde_json::from_slice(&body_bytes)
+        } else if response_body_is_json(&headers, &decoded_body_bytes) {
+            let body_json: Value = serde_json::from_slice(&decoded_body_bytes)
                 .map_err(ExecutionRuntimeTransportError::InvalidJson)?;
             Some(ResponseBody {
                 json_body: Some(body_json),
@@ -253,6 +269,7 @@ async fn send_request(
     }
 
     let method = plan.method.parse::<reqwest::Method>()?;
+    let transport_controls = resolve_execution_transport_controls(&plan.headers);
     let headers = build_request_headers(
         &plan.headers,
         plan.content_encoding.as_deref(),
@@ -266,14 +283,23 @@ async fn send_request(
         .map(Duration::from_millis);
 
     if let Some(node_id) = resolve_tunnel_node_id(plan.proxy.as_ref()) {
-        return send_via_tunnel_relay(plan, method, headers, body_bytes, &node_id, total_timeout)
-            .await;
+        return send_via_tunnel_relay(
+            plan,
+            method,
+            headers,
+            body_bytes,
+            &node_id,
+            total_timeout,
+            transport_controls,
+        )
+        .await;
     }
 
     let client = build_client(
         plan.timeouts.as_ref(),
         plan.proxy.as_ref(),
         plan.tls_profile.as_deref(),
+        transport_controls,
     )?;
     let mut request = client.request(method, &plan.url);
     request = request.headers(headers).body(body_bytes);
@@ -320,6 +346,7 @@ async fn send_via_tunnel_relay(
     body_bytes: Vec<u8>,
     node_id: &str,
     total_timeout: Option<Duration>,
+    transport_controls: ExecutionTransportControls,
 ) -> Result<reqwest::Response, ExecutionRuntimeTransportError> {
     let client = build_relay_client(plan.timeouts.as_ref())?;
     let relay_url = build_relay_url(plan.proxy.as_ref(), node_id);
@@ -329,6 +356,8 @@ async fn send_via_tunnel_relay(
             url: plan.url.clone(),
             headers: header_map_to_string_map(&headers),
             timeout: resolve_relay_timeout_seconds(plan),
+            follow_redirects: transport_controls.follow_redirects,
+            http1_only: transport_controls.http1_only,
         },
         &body_bytes,
     )?;
@@ -501,9 +530,17 @@ fn build_client(
     timeouts: Option<&aether_contracts::ExecutionTimeouts>,
     proxy: Option<&ProxySnapshot>,
     tls_profile: Option<&str>,
+    transport_controls: ExecutionTransportControls,
 ) -> Result<reqwest::Client, ExecutionRuntimeTransportError> {
+    let mut builder = reqwest::Client::builder();
+    if transport_controls.follow_redirects != Some(true) {
+        builder = builder.redirect(Policy::none());
+    }
+    if transport_controls.http1_only {
+        builder = builder.http1_only();
+    }
     let mut builder = apply_http_client_config(
-        reqwest::Client::builder(),
+        builder,
         &HttpClientConfig {
             connect_timeout_ms: timeouts.and_then(|timeouts| timeouts.connect_ms),
             ..HttpClientConfig::default()
@@ -608,7 +645,11 @@ fn build_request_headers(
     }
     for (key, value) in headers {
         let normalized_key = key.trim().to_ascii_lowercase();
-        if is_hop_by_hop_header(&normalized_key) || normalized_key == "content-encoding" {
+        if is_hop_by_hop_header(&normalized_key)
+            || normalized_key == "content-encoding"
+            || normalized_key == EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER
+            || normalized_key == EXECUTION_REQUEST_HTTP1_ONLY_HEADER
+        {
             continue;
         }
 
@@ -627,6 +668,43 @@ fn build_request_headers(
         );
     }
     Ok(out)
+}
+
+fn resolve_execution_transport_controls(
+    headers: &BTreeMap<String, String>,
+) -> ExecutionTransportControls {
+    ExecutionTransportControls {
+        follow_redirects: execution_transport_header_value(
+            headers,
+            EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER,
+        )
+        .and_then(|value| parse_execution_transport_bool(value)),
+        http1_only: execution_transport_header_value(headers, EXECUTION_REQUEST_HTTP1_ONLY_HEADER)
+            .and_then(|value| parse_execution_transport_bool(value))
+            .unwrap_or(false),
+    }
+}
+
+fn execution_transport_header_value<'a>(
+    headers: &'a BTreeMap<String, String>,
+    target: &str,
+) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(target))
+        .map(|(_, value)| value.as_str())
+}
+
+fn parse_execution_transport_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn header_map_to_string_map(headers: &HeaderMap) -> BTreeMap<String, String> {
@@ -661,6 +739,33 @@ fn collect_response_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
     header_map_to_string_map(headers)
 }
 
+fn decode_response_body_bytes(
+    headers: &BTreeMap<String, String>,
+    body_bytes: &[u8],
+) -> Option<Vec<u8>> {
+    let encoding = headers
+        .get("content-encoding")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+    match encoding.as_deref() {
+        Some("gzip") => {
+            let mut decoder = GzDecoder::new(body_bytes);
+            let mut out = Vec::new();
+            decoder.read_to_end(&mut out).ok()?;
+            Some(out)
+        }
+        Some("deflate") => {
+            let mut decoder = DeflateDecoder::new(body_bytes);
+            let mut out = Vec::new();
+            decoder.read_to_end(&mut out).ok()?;
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
 fn response_body_is_json(headers: &BTreeMap<String, String>, body_bytes: &[u8]) -> bool {
     if headers
         .get("content-type")
@@ -678,7 +783,10 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::Read;
 
-    use aether_contracts::{ExecutionPlan, ExecutionTimeouts, RequestBody};
+    use aether_contracts::{
+        ExecutionPlan, ExecutionTimeouts, RequestBody, EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER,
+        EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
+    };
     use axum::body::Bytes;
     use axum::extract::Path;
     use axum::routing::post;
@@ -881,6 +989,229 @@ mod tests {
         assert_eq!(
             result.body.and_then(|body| body.json_body),
             Some(json!({"tunnel": true, "node_id": "node-1"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_sync_execution_runtime_disables_redirects_by_default() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let app = Router::new()
+            .route(
+                "/redirect",
+                post(|| async {
+                    (
+                        axum::http::StatusCode::TEMPORARY_REDIRECT,
+                        [(
+                            axum::http::header::LOCATION,
+                            axum::http::HeaderValue::from_static("/final"),
+                        )],
+                    )
+                }),
+            )
+            .route(
+                "/final",
+                post(|| async {
+                    (
+                        axum::http::StatusCode::OK,
+                        Json(json!({"redirected": true})),
+                    )
+                }),
+            );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+
+        let execution_runtime = DirectSyncExecutionRuntime::new();
+        let result = execution_runtime
+            .execute_sync(ExecutionPlan {
+                request_id: "req-redirect-1".into(),
+                candidate_id: None,
+                provider_name: Some("provider_ops".into()),
+                provider_id: "prov-1".into(),
+                endpoint_id: "ep-1".into(),
+                key_id: "key-1".into(),
+                method: "POST".into(),
+                url: format!("http://{addr}/redirect"),
+                headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
+                content_type: Some("application/json".into()),
+                content_encoding: None,
+                body: RequestBody::from_json(json!({"model": "gpt-4.1"})),
+                stream: false,
+                client_api_format: "provider_ops:verify".into(),
+                provider_api_format: "provider_ops:verify".into(),
+                model_name: Some("verify-auth".into()),
+                proxy: None,
+                tls_profile: None,
+                timeouts: Some(ExecutionTimeouts {
+                    connect_ms: Some(5_000),
+                    total_ms: Some(5_000),
+                    ..ExecutionTimeouts::default()
+                }),
+            })
+            .await
+            .expect("sync execution should succeed");
+
+        server.abort();
+
+        assert_eq!(result.status_code, 307);
+        assert_eq!(
+            result.headers.get("location").map(String::as_str),
+            Some("/final")
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_sync_execution_runtime_follows_redirects_when_explicitly_enabled() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let app = Router::new()
+            .route(
+                "/redirect",
+                post(|| async {
+                    (
+                        axum::http::StatusCode::TEMPORARY_REDIRECT,
+                        [(
+                            axum::http::header::LOCATION,
+                            axum::http::HeaderValue::from_static("/final"),
+                        )],
+                    )
+                }),
+            )
+            .route(
+                "/final",
+                post(|| async {
+                    (
+                        axum::http::StatusCode::OK,
+                        Json(json!({"redirected": true})),
+                    )
+                }),
+            );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+
+        let execution_runtime = DirectSyncExecutionRuntime::new();
+        let result = execution_runtime
+            .execute_sync(ExecutionPlan {
+                request_id: "req-redirect-2".into(),
+                candidate_id: None,
+                provider_name: Some("provider_oauth".into()),
+                provider_id: "prov-1".into(),
+                endpoint_id: "ep-1".into(),
+                key_id: "key-1".into(),
+                method: "POST".into(),
+                url: format!("http://{addr}/redirect"),
+                headers: BTreeMap::from([
+                    ("content-type".into(), "application/json".into()),
+                    (
+                        EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER.into(),
+                        "true".into(),
+                    ),
+                ]),
+                content_type: Some("application/json".into()),
+                content_encoding: None,
+                body: RequestBody::from_json(json!({"model": "gpt-4.1"})),
+                stream: false,
+                client_api_format: "provider_oauth:exchange".into(),
+                provider_api_format: "provider_oauth:exchange".into(),
+                model_name: Some("oauth-exchange".into()),
+                proxy: None,
+                tls_profile: None,
+                timeouts: Some(ExecutionTimeouts {
+                    connect_ms: Some(5_000),
+                    total_ms: Some(5_000),
+                    ..ExecutionTimeouts::default()
+                }),
+            })
+            .await
+            .expect("sync execution should succeed");
+
+        server.abort();
+
+        assert_eq!(result.status_code, 200);
+        assert_eq!(
+            result.body.and_then(|body| body.json_body),
+            Some(json!({"redirected": true}))
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_sync_execution_runtime_forwards_http1_only_control_to_tunnel_relay() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let app = Router::new().route(
+            "/api/internal/tunnel/relay/{node_id}",
+            post(|Path(node_id): Path<String>, body: Bytes| async move {
+                let (meta, request_body) = decode_relay_envelope(&body);
+                assert_eq!(node_id, "node-1");
+                assert_eq!(meta["http1_only"], true);
+                assert_eq!(meta["follow_redirects"], json!(false));
+                let request_json: serde_json::Value =
+                    serde_json::from_slice(&request_body).expect("request body should be json");
+                assert_eq!(request_json["model"], "gpt-4.1");
+                (axum::http::StatusCode::OK, Json(json!({"ok": true})))
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("relay test server should run");
+        });
+
+        let execution_runtime = DirectSyncExecutionRuntime::new();
+        let result = execution_runtime
+            .execute_sync(ExecutionPlan {
+                request_id: "req-relay-http1-1".into(),
+                candidate_id: None,
+                provider_name: Some("provider_ops".into()),
+                provider_id: "prov-1".into(),
+                endpoint_id: "ep-1".into(),
+                key_id: "key-1".into(),
+                method: "POST".into(),
+                url: "https://example.com/chat".into(),
+                headers: BTreeMap::from([
+                    ("content-type".into(), "application/json".into()),
+                    (EXECUTION_REQUEST_HTTP1_ONLY_HEADER.into(), "true".into()),
+                    (
+                        EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER.into(),
+                        "false".into(),
+                    ),
+                ]),
+                content_type: Some("application/json".into()),
+                content_encoding: None,
+                body: RequestBody::from_json(json!({"model": "gpt-4.1"})),
+                stream: false,
+                client_api_format: "provider_ops:verify".into(),
+                provider_api_format: "provider_ops:verify".into(),
+                model_name: Some("verify-auth".into()),
+                proxy: Some(tunnel_proxy_snapshot(format!("http://{addr}"))),
+                tls_profile: None,
+                timeouts: Some(ExecutionTimeouts {
+                    connect_ms: Some(5_000),
+                    total_ms: Some(5_000),
+                    ..ExecutionTimeouts::default()
+                }),
+            })
+            .await
+            .expect("tunnel relay execution should succeed");
+
+        server.abort();
+
+        assert_eq!(result.status_code, 200);
+        assert_eq!(
+            result.body.and_then(|body| body.json_body),
+            Some(json!({"ok": true}))
         );
     }
 

@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex};
 
-use aether_contracts::ExecutionPlan;
+use aether_contracts::{
+    ExecutionPlan, EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER, EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
+};
 use aether_crypto::{
     decrypt_python_fernet_ciphertext, encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY,
 };
@@ -466,7 +468,7 @@ async fn gateway_saves_admin_provider_ops_config_locally_with_trusted_admin_prin
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["success"], true);
+    assert_eq!(payload["success"], true, "payload={payload}");
     assert_eq!(payload["message"], "配置保存成功");
 
     let stored_provider = provider_catalog_repository
@@ -1142,6 +1144,12 @@ async fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_proxy_mode() 
                 assert_eq!(parsed_proxy.password(), Some("supersecret"));
 
                 if plan.url.ends_with("/api/user/self") {
+                    assert_eq!(
+                        plan.headers
+                            .get(EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER)
+                            .map(String::as_str),
+                        None
+                    );
                     Json(json!({
                         "request_id": plan.request_id,
                         "status_code": 200,
@@ -1160,6 +1168,14 @@ async fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_proxy_mode() 
                         }
                     }))
                 } else {
+                    assert_eq!(plan.request_id, "provider-ops-acw:anyrouter");
+                    assert_eq!(plan.url, "https://ops.example");
+                    assert_eq!(
+                        plan.headers
+                            .get(EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER)
+                            .map(String::as_str),
+                        Some("false")
+                    );
                     Json(json!({
                         "request_id": plan.request_id,
                         "status_code": 200,
@@ -1242,9 +1258,159 @@ async fn gateway_verifies_admin_provider_ops_locally_for_anyrouter_proxy_mode() 
     assert_eq!(payload["data"]["request_count"], 8);
 
     let plans = execution_plans.lock().expect("mutex should lock");
-    assert_eq!(plans.len(), 1);
-    assert_eq!(plans[0].request_id, "provider-ops-verify:anyrouter");
-    assert_eq!(plans[0].url, "https://ops.example/api/user/self");
+    assert_eq!(plans.len(), 2);
+    assert_eq!(plans[0].request_id, "provider-ops-acw:anyrouter");
+    assert_eq!(plans[0].url, "https://ops.example");
+    assert_eq!(plans[1].request_id, "provider-ops-verify:anyrouter");
+    assert_eq!(plans[1].url, "https://ops.example/api/user/self");
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_verifies_admin_provider_ops_sub2api_proxy_mode_via_execution_runtime_http1_only() {
+    let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
+    let execution_plans_clone = Arc::clone(&execution_plans);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| {
+            let execution_plans_inner = Arc::clone(&execution_plans_clone);
+            async move {
+                execution_plans_inner
+                    .lock()
+                    .expect("mutex should lock")
+                    .push(plan.clone());
+                let proxy = plan.proxy.as_ref().expect("proxy snapshot should exist");
+                assert_eq!(proxy.node_id.as_deref(), Some("proxy-node-sub2api"));
+                assert_eq!(
+                    plan.headers
+                        .get(EXECUTION_REQUEST_HTTP1_ONLY_HEADER)
+                        .map(String::as_str),
+                    Some("true")
+                );
+
+                if plan.url.ends_with("/api/v1/auth/refresh") {
+                    Json(json!({
+                        "request_id": plan.request_id,
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {
+                                "code": 0,
+                                "data": {
+                                    "access_token": "sub2api-access-token",
+                                    "refresh_token": "sub2api-refresh-token-new"
+                                }
+                            }
+                        }
+                    }))
+                } else {
+                    assert_eq!(
+                        plan.headers.get("authorization").map(String::as_str),
+                        Some("Bearer sub2api-access-token")
+                    );
+                    Json(json!({
+                        "request_id": plan.request_id,
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {
+                                "code": 0,
+                                "data": {
+                                    "username": "sub2api-user",
+                                    "email": "sub2api@example.com",
+                                    "balance": 8.5,
+                                    "points": 1.5,
+                                    "status": "active",
+                                    "concurrency": 3
+                                }
+                            }
+                        }
+                    }))
+                }
+            }
+        }),
+    );
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider("provider-openai", "openai", 10)],
+        vec![],
+        vec![],
+    ));
+    let mut manual_node = sample_proxy_node("proxy-node-sub2api");
+    manual_node.name = "sub2api-manual".to_string();
+    manual_node.status = "online".to_string();
+    manual_node.is_manual = true;
+    manual_node.tunnel_mode = false;
+    manual_node.tunnel_connected = false;
+    manual_node.proxy_url = Some("http://proxy.example:8080".to_string());
+    let proxy_node_repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![manual_node]));
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository,
+                )
+                .attach_proxy_node_repository_for_tests(proxy_node_repository)
+                .with_system_config_values_for_tests(vec![(
+                    "system_proxy_node_id".to_string(),
+                    json!("proxy-node-sub2api"),
+                )]),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-ops/providers/provider-openai/verify"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "architecture_id": "sub2api",
+            "base_url": "https://sub2api.example",
+            "connector": {
+                "auth_type": "session_login",
+                "config": {},
+                "credentials": {
+                    "refresh_token": "refresh-token-old",
+                }
+            },
+            "actions": {},
+            "schedule": {},
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], true);
+    assert_eq!(payload["data"]["username"], "sub2api-user");
+    assert_eq!(
+        payload["updated_credentials"]["refresh_token"],
+        "sub2api-refresh-token-new"
+    );
+
+    let plans = execution_plans.lock().expect("mutex should lock");
+    assert_eq!(plans.len(), 2);
+    assert_eq!(plans[0].url, "https://sub2api.example/api/v1/auth/refresh");
+    assert!(
+        plans[1]
+            .url
+            .starts_with("https://sub2api.example/api/v1/auth/me"),
+        "url={}",
+        plans[1].url
+    );
 
     gateway_handle.abort();
     execution_runtime_handle.abort();
@@ -1510,6 +1676,109 @@ async fn gateway_verifies_admin_provider_ops_locally_for_new_api_proxy_node_mode
     assert_eq!(payload["data"]["request_count"], 9);
     assert_eq!(payload["data"]["extra"], json!({}));
     assert_eq!(payload["updated_credentials"], serde_json::Value::Null);
+    assert_eq!(execution_plans.lock().expect("mutex should lock").len(), 1);
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_verifies_admin_provider_ops_locally_for_new_api_without_proxy_via_execution_runtime(
+) {
+    let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
+    let execution_plans_clone = Arc::clone(&execution_plans);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| {
+            let execution_plans_inner = Arc::clone(&execution_plans_clone);
+            async move {
+                execution_plans_inner
+                    .lock()
+                    .expect("mutex should lock")
+                    .push(plan.clone());
+                assert_eq!(plan.request_id, "provider-ops-verify:new_api");
+                assert_eq!(plan.url, "https://ops.example/api/user/self");
+                assert_eq!(
+                    plan.headers.get("authorization").map(String::as_str),
+                    Some("Bearer live-secret-api-key")
+                );
+                assert_eq!(
+                    plan.headers.get("new-api-user").map(String::as_str),
+                    Some("42")
+                );
+                assert!(plan.proxy.is_none());
+                Json(json!({
+                    "request_id": plan.request_id,
+                    "status_code": 200,
+                    "headers": {
+                        "content-type": "application/json"
+                    },
+                    "body": {
+                        "json_body": {
+                            "success": true,
+                            "data": {
+                                "username": "alice",
+                                "display_name": "Alice",
+                                "quota": 42.5,
+                                "used_quota": 12.5,
+                                "request_count": 9
+                            }
+                        }
+                    }
+                }))
+            }
+        }),
+    );
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider("provider-openai", "openai", 10)],
+        vec![],
+        vec![],
+    ));
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository,
+                ),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-ops/providers/provider-openai/verify"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "architecture_id": "new_api",
+            "base_url": "https://ops.example",
+            "connector": {
+                "auth_type": "api_key",
+                "config": {},
+                "credentials": {
+                    "api_key": "live-secret-api-key",
+                    "user_id": "42",
+                    "cookie": "session=foo"
+                }
+            },
+            "actions": {},
+            "schedule": {},
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], true);
+    assert_eq!(payload["data"]["username"], "alice");
+    assert_eq!(payload["data"]["used_quota"], 12.5);
+    assert_eq!(payload["data"]["request_count"], 9);
     assert_eq!(execution_plans.lock().expect("mutex should lock").len(), 1);
 
     gateway_handle.abort();
@@ -2440,6 +2709,145 @@ async fn gateway_handles_admin_provider_ops_balance_locally_for_generic_api_prox
     assert!(plans.iter().any(|plan| {
         plan.request_id == "provider-ops-action:generic_api:query_balance:provider-openai"
             && plan.url == "https://ops.example/api/user/balance"
+    }));
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_provider_ops_balance_locally_without_proxy_via_execution_runtime() {
+    let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
+    let execution_plans_clone = Arc::clone(&execution_plans);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| {
+            let execution_plans_inner = Arc::clone(&execution_plans_clone);
+            async move {
+                execution_plans_inner
+                    .lock()
+                    .expect("mutex should lock")
+                    .push(plan.clone());
+                assert!(plan.proxy.is_none());
+                assert_eq!(
+                    plan.headers.get("authorization").map(String::as_str),
+                    Some("Bearer live-secret-api-key")
+                );
+
+                if plan.url.ends_with("/api/user/checkin") {
+                    Json(json!({
+                        "request_id": plan.request_id,
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {
+                                "success": true,
+                                "message": "执行层签到成功"
+                            }
+                        }
+                    }))
+                } else {
+                    assert!(plan.url.ends_with("/api/user/balance"));
+                    Json(json!({
+                        "request_id": plan.request_id,
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {
+                                "success": true,
+                                "data": {
+                                    "quota": 2500000,
+                                    "used_quota": 500000
+                                }
+                            }
+                        }
+                    }))
+                }
+            }
+        }),
+    );
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![
+            sample_provider("provider-openai", "openai", 10).with_transport_fields(
+                true,
+                false,
+                true,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(json!({
+                    "provider_ops": {
+                        "architecture_id": "generic_api",
+                        "base_url": "https://ops.example",
+                        "connector": {
+                            "auth_type": "api_key",
+                            "config": {
+                                "auth_method": "bearer"
+                            },
+                            "credentials": {
+                                "api_key": encrypt_python_fernet_plaintext(
+                                    DEVELOPMENT_ENCRYPTION_KEY,
+                                    "live-secret-api-key",
+                                ).expect("api key should encrypt"),
+                            }
+                        }
+                    }
+                })),
+            ),
+        ],
+        vec![],
+        vec![],
+    ));
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository,
+                ),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{gateway_url}/api/admin/provider-ops/providers/provider-openai/balance?refresh=false"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["status"], "success");
+    assert_eq!(payload["data"]["total_available"], 5.0);
+    assert_eq!(payload["data"]["total_used"], 1.0);
+    assert_eq!(payload["data"]["extra"]["checkin_success"], true);
+    assert_eq!(
+        payload["data"]["extra"]["checkin_message"],
+        "执行层签到成功"
+    );
+
+    let plans = execution_plans.lock().expect("mutex should lock");
+    assert_eq!(plans.len(), 2);
+    assert!(plans.iter().all(|plan| plan.proxy.is_none()));
+    assert!(plans
+        .iter()
+        .any(|plan| plan.request_id == "provider-ops-action:probe_checkin"));
+    assert!(plans.iter().any(|plan| {
+        plan.request_id == "provider-ops-action:generic_api:query_balance:provider-openai"
     }));
 
     gateway_handle.abort();

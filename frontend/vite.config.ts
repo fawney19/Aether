@@ -73,6 +73,11 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           secure: false,
         },
+        '/_gateway/': {
+          target: gatewayTarget,
+          changeOrigin: true,
+          secure: false,
+        },
       },
     },
     preview: {

@@ -23,16 +23,11 @@ impl<'a> AdminAppState<'a> {
         &self,
         provider: &aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider,
         existing: &aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey,
-        raw_payload: &serde_json::Map<String, serde_json::Value>,
-        payload: crate::handlers::admin::provider::shared::payloads::AdminProviderKeyUpdateRequest,
+        patch: crate::handlers::admin::provider::shared::payloads::AdminProviderKeyUpdatePatch,
     ) -> Result<aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey, String>
     {
         crate::handlers::admin::provider::write::keys::build_admin_update_provider_key_record(
-            self,
-            provider,
-            existing,
-            raw_payload,
-            payload,
+            self, provider, existing, patch,
         )
         .await
     }
@@ -130,17 +125,13 @@ impl<'a> AdminAppState<'a> {
     pub(crate) async fn build_admin_update_provider_record(
         &self,
         existing: &aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider,
-        raw_payload: &serde_json::Map<String, serde_json::Value>,
-        payload: crate::handlers::admin::provider::shared::payloads::AdminProviderUpdateRequest,
+        patch: crate::handlers::admin::provider::shared::payloads::AdminProviderUpdatePatch,
     ) -> Result<
         aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider,
         String,
     > {
         crate::handlers::admin::provider::write::provider::build_admin_update_provider_record(
-            self,
-            existing,
-            raw_payload,
-            payload,
+            self, existing, patch,
         )
         .await
     }
@@ -277,8 +268,7 @@ impl<'a> AdminAppState<'a> {
         &self,
         provider: &aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider,
         existing_endpoint: &aether_data_contracts::repository::provider_catalog::StoredProviderCatalogEndpoint,
-        raw_payload: &serde_json::Map<String, serde_json::Value>,
-        payload: crate::handlers::admin::provider::endpoints_admin::payloads::AdminProviderEndpointUpdateRequest,
+        patch: crate::handlers::admin::provider::endpoints_admin::payloads::AdminProviderEndpointUpdatePatch,
     ) -> Result<
         aether_data_contracts::repository::provider_catalog::StoredProviderCatalogEndpoint,
         String,
@@ -286,9 +276,10 @@ impl<'a> AdminAppState<'a> {
         use crate::api::ai::admin_endpoint_signature_parts;
         use crate::handlers::public::{admin_requested_force_stream, normalize_admin_base_url};
         use aether_admin::provider::endpoints as admin_provider_endpoints_pure;
+        let (fields, payload) = patch.into_parts();
 
         if self.provider_type_is_fixed(&provider.provider_type)
-            && (raw_payload.contains_key("base_url") || raw_payload.contains_key("custom_path"))
+            && (fields.contains("base_url") || fields.contains("custom_path"))
         {
             return Err(
                 "固定类型 Provider 的 Endpoint 不允许修改 base_url/custom_path".to_string(),
@@ -312,13 +303,14 @@ impl<'a> AdminAppState<'a> {
         let mut updated =
             admin_provider_endpoints_pure::apply_admin_provider_endpoint_update_fields(
                 existing_endpoint,
-                raw_payload,
+                |field| fields.contains(field),
+                |field| fields.is_null(field),
                 &update_fields,
             )?;
 
         let provider_type = provider.provider_type.trim().to_ascii_lowercase();
         if provider_type == "codex" && existing_endpoint.api_format == "openai:cli" {
-            let has_config_in_payload = raw_payload.contains_key("config");
+            let has_config_in_payload = fields.contains("config");
             let config_payload = if has_config_in_payload {
                 updated
                     .config

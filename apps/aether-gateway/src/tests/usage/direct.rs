@@ -9,6 +9,16 @@ use super::{
     TRACE_ID_HEADER,
 };
 
+fn large_request_body(stream: bool) -> String {
+    let large_message = "x".repeat(128 * 1024);
+    serde_json::to_string(&json!({
+        "model": "gpt-5",
+        "messages": [{"role": "user", "content": large_message}],
+        "stream": stream
+    }))
+    .expect("request body should encode")
+}
+
 #[tokio::test]
 async fn gateway_records_usage_for_execution_runtime_sync_when_runtime_enabled() {
     let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
@@ -265,6 +275,147 @@ async fn gateway_records_pending_usage_before_execution_runtime_sync_result_arri
     let stored = stored.expect("usage should be finalized");
     assert_eq!(stored.status, "completed");
     assert_eq!(stored.response_time_ms, Some(45));
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_keeps_pending_sync_usage_lightweight_for_large_request_body() {
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+    let execution_request_started = Arc::new(tokio::sync::Notify::new());
+    let allow_execution_response = Arc::new(tokio::sync::Notify::new());
+
+    let upstream = Router::new().route(
+        "/api/internal/gateway/report-sync",
+        any(|_request: Request| async move { Json(json!({"ok": true})) }),
+    );
+
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any({
+            let execution_request_started = Arc::clone(&execution_request_started);
+            let allow_execution_response = Arc::clone(&allow_execution_response);
+            move |_request: Request| {
+                let execution_request_started = Arc::clone(&execution_request_started);
+                let allow_execution_response = Arc::clone(&allow_execution_response);
+                async move {
+                    execution_request_started.notify_one();
+                    allow_execution_response.notified().await;
+                    Json(json!({
+                        "request_id": "req-usage-sync-large-pending-123",
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {
+                                "id": "chatcmpl-usage-sync-large-pending-123",
+                                "usage": {
+                                    "input_tokens": 3,
+                                    "output_tokens": 5,
+                                    "total_tokens": 8
+                                }
+                            }
+                        },
+                        "telemetry": {
+                            "elapsed_ms": 45
+                        }
+                    }))
+                }
+            }
+        }),
+    );
+
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-client-openai-usage-sync-large-pending")),
+        sample_local_openai_auth_snapshot(
+            "api-key-usage-sync-large-pending-123",
+            "user-usage-sync-large-pending-123",
+        ),
+    )]));
+    let candidate_selection_repository =
+        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            sample_local_openai_candidate_row(),
+        ]));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_local_openai_provider()],
+        vec![sample_local_openai_endpoint()],
+        vec![sample_local_openai_key()],
+    ));
+
+    let (_upstream_url, upstream_handle) = start_server(upstream).await;
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway_state = build_state_with_execution_runtime_override(execution_runtime_url)
+        .with_data_state_for_tests(
+            GatewayDataState::with_auth_candidate_selection_provider_catalog_request_candidates_and_usage_for_tests(
+                auth_repository,
+                candidate_selection_repository,
+                provider_catalog_repository,
+                Arc::clone(&request_candidate_repository),
+                Arc::clone(&usage_repository),
+                DEVELOPMENT_ENCRYPTION_KEY,
+            ),
+        )
+        .with_usage_runtime_for_tests(UsageRuntimeConfig {
+            enabled: true,
+            ..UsageRuntimeConfig::default()
+        });
+    let gateway = build_router_with_state(gateway_state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let request_task = tokio::spawn({
+        let gateway_url = gateway_url.clone();
+        async move {
+            let response = reqwest::Client::new()
+                .post(format!("{gateway_url}/v1/chat/completions"))
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    http::header::AUTHORIZATION,
+                    "Bearer sk-client-openai-usage-sync-large-pending",
+                )
+                .header(TRACE_ID_HEADER, "req-usage-sync-large-pending-123")
+                .body(large_request_body(false))
+                .send()
+                .await
+                .expect("request should succeed");
+            let status = response.status();
+            let body = response.text().await.expect("body should read");
+            (status, body)
+        }
+    });
+
+    execution_request_started.notified().await;
+
+    let mut pending = None;
+    for _ in 0..50 {
+        pending = usage_repository
+            .find_by_request_id("req-usage-sync-large-pending-123")
+            .await
+            .expect("usage lookup should succeed");
+        if pending
+            .as_ref()
+            .is_some_and(|stored| stored.status == "pending")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let pending = pending.expect("pending usage should be recorded before sync result resolves");
+    assert_eq!(pending.status, "pending");
+    assert!(pending.request_headers.is_none());
+    assert!(pending.request_body.is_none());
+    assert!(pending.provider_request_headers.is_none());
+    assert!(pending.provider_request_body.is_none());
+    assert!(pending.response_headers.is_none());
+    assert!(pending.client_response_headers.is_none());
+
+    allow_execution_response.notify_one();
+
+    let (status, _body) = request_task.await.expect("request task should join");
+    assert_eq!(status, StatusCode::OK);
 
     gateway_handle.abort();
     execution_runtime_handle.abort();
@@ -535,6 +686,142 @@ async fn gateway_records_pending_usage_before_execution_runtime_stream_headers_a
     let stored = stored.expect("usage should be finalized");
     assert_eq!(stored.status, "completed");
     assert_eq!(stored.first_byte_time_ms, Some(19));
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_keeps_pending_stream_usage_lightweight_for_large_request_body() {
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+    let execution_request_started = Arc::new(tokio::sync::Notify::new());
+    let allow_execution_response = Arc::new(tokio::sync::Notify::new());
+
+    let upstream = Router::new().route(
+        "/api/internal/gateway/report-stream",
+        any(|_request: Request| async move { Json(json!({"ok": true})) }),
+    );
+
+    let execution_runtime = Router::new().route(
+        "/v1/execute/stream",
+        any({
+            let execution_request_started = Arc::clone(&execution_request_started);
+            let allow_execution_response = Arc::clone(&allow_execution_response);
+            move |_request: Request| {
+                let execution_request_started = Arc::clone(&execution_request_started);
+                let allow_execution_response = Arc::clone(&allow_execution_response);
+                async move {
+                    execution_request_started.notify_one();
+                    allow_execution_response.notified().await;
+                    let frames = concat!(
+                        "{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n",
+                        "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: {\\\"id\\\":\\\"chatcmpl-usage-stream-large-pending-123\\\",\\\"usage\\\":{\\\"input_tokens\\\":2,\\\"output_tokens\\\":4,\\\"total_tokens\\\":6}}\\n\\n\"}}\n",
+                        "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"data: [DONE]\\n\\n\"}}\n",
+                        "{\"type\":\"telemetry\",\"payload\":{\"kind\":\"telemetry\",\"telemetry\":{\"elapsed_ms\":51,\"ttfb_ms\":19}}}\n",
+                        "{\"type\":\"eof\",\"payload\":{\"kind\":\"eof\"}}\n"
+                    );
+                    let mut response = Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from(frames))
+                        .expect("response should build");
+                    response.headers_mut().insert(
+                        http::header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/x-ndjson"),
+                    );
+                    response
+                }
+            }
+        }),
+    );
+
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-client-openai-stream-large-pending")),
+        sample_local_openai_auth_snapshot(
+            "api-key-usage-stream-large-pending-123",
+            "user-usage-stream-large-pending-123",
+        ),
+    )]));
+    let candidate_selection_repository =
+        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            sample_local_openai_candidate_row(),
+        ]));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_local_openai_provider()],
+        vec![sample_local_openai_endpoint()],
+        vec![sample_local_openai_key()],
+    ));
+    let (_upstream_url, upstream_handle) = start_server(upstream).await;
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway_state = build_state_with_execution_runtime_override(execution_runtime_url)
+        .with_data_state_for_tests(
+            GatewayDataState::with_auth_candidate_selection_provider_catalog_request_candidates_and_usage_for_tests(
+                auth_repository,
+                candidate_selection_repository,
+                provider_catalog_repository,
+                Arc::clone(&request_candidate_repository),
+                usage_repository.clone(),
+                DEVELOPMENT_ENCRYPTION_KEY,
+            ),
+        )
+        .with_usage_runtime_for_tests(UsageRuntimeConfig {
+            enabled: true,
+            ..UsageRuntimeConfig::default()
+        });
+    let gateway = build_router_with_state(gateway_state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let request_task = tokio::spawn({
+        let gateway_url = gateway_url.clone();
+        async move {
+            let response = reqwest::Client::new()
+                .post(format!("{gateway_url}/v1/chat/completions"))
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    http::header::AUTHORIZATION,
+                    "Bearer sk-client-openai-stream-large-pending",
+                )
+                .header(TRACE_ID_HEADER, "req-usage-stream-large-pending-123")
+                .body(large_request_body(true))
+                .send()
+                .await
+                .expect("request should succeed");
+            let status = response.status();
+            let body = response.text().await.expect("stream body should read");
+            (status, body)
+        }
+    });
+
+    execution_request_started.notified().await;
+
+    let mut pending = None;
+    for _ in 0..50 {
+        pending = usage_repository
+            .find_by_request_id("req-usage-stream-large-pending-123")
+            .await
+            .expect("usage lookup should succeed");
+        if pending
+            .as_ref()
+            .is_some_and(|stored| stored.status == "pending")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let pending = pending.expect("pending usage should be recorded before stream headers arrive");
+    assert_eq!(pending.status, "pending");
+    assert!(pending.request_headers.is_none());
+    assert!(pending.request_body.is_none());
+    assert!(pending.provider_request_headers.is_none());
+    assert!(pending.provider_request_body.is_none());
+    assert!(pending.response_headers.is_none());
+    assert!(pending.client_response_headers.is_none());
+
+    allow_execution_response.notify_one();
+
+    let (status, _body) = request_task.await.expect("request task should join");
+    assert_eq!(status, StatusCode::OK);
 
     gateway_handle.abort();
     execution_runtime_handle.abort();

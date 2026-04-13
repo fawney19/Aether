@@ -54,6 +54,17 @@ impl<'a> AdminAppState<'a> {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn resolve_request_usage_body_ref(
+        &self,
+        body_ref: &str,
+    ) -> Result<Option<serde_json::Value>, GatewayError> {
+        self.app
+            .data
+            .resolve_request_usage_body_ref(body_ref)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn list_admin_usage_for_range(
         &self,
         time_range: &crate::handlers::admin::observability::AdminStatsTimeRange,

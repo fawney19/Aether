@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aether_runtime::hold_admission_permit_until;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures_util::stream;
 use futures_util::StreamExt;
 use http_body_util::BodyExt;
@@ -40,6 +40,9 @@ const FRAME_SEND_TIMEOUT: Duration = Duration::from_secs(30);
 const MIN_TIMEOUT_SECS: u64 = 5;
 /// Maximum allowed upstream request timeout (seconds).
 const MAX_TIMEOUT_SECS: u64 = 300;
+/// Match reqwest's default redirect budget so direct execution and tunnel relay
+/// fail at the same point instead of diverging after a different number of hops.
+const MAX_REDIRECTS: usize = 10;
 
 /// Headers that must not be forwarded to upstream (hop-by-hop or security-sensitive).
 ///
@@ -63,6 +66,530 @@ const BLOCKED_HEADERS: &[&str] = &[
     "transfer-encoding",
     "upgrade",
 ];
+const REDIRECT_DROP_BODY_HEADERS: &[&str] = &[
+    "content-encoding",
+    "content-length",
+    "content-type",
+    "transfer-encoding",
+];
+const REDIRECT_SENSITIVE_HEADERS: &[&str] = &[
+    "authorization",
+    "cookie",
+    "cookie2",
+    "proxy-authorization",
+    "www-authenticate",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReplayableRequestBody {
+    None,
+    Replayable(Bytes),
+    NonReplayable,
+}
+
+struct PreparedRequestBody {
+    first_request_body: Option<upstream_client::UpstreamRequestBody>,
+    replay_body: ReplayableRequestBody,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedirectBodyMode {
+    Empty,
+    Replay,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RedirectDecision {
+    Stop,
+    Follow {
+        method: hyper::Method,
+        url: url::Url,
+        headers: Vec<(String, String)>,
+        body_mode: RedirectBodyMode,
+    },
+    Error(&'static str),
+}
+
+struct UpstreamResponseContext {
+    response: hyper::Response<hyper::body::Incoming>,
+    dns_ms: u64,
+    request_timing: upstream_client::RequestTiming,
+}
+
+impl PreparedRequestBody {
+    fn streaming(
+        body_rx: mpsc::Receiver<TunnelFrame>,
+        body_size: Arc<AtomicUsize>,
+    ) -> PreparedRequestBody {
+        PreparedRequestBody {
+            first_request_body: Some(build_streaming_request_body(body_rx, body_size)),
+            replay_body: ReplayableRequestBody::NonReplayable,
+        }
+    }
+
+    fn take_first_request_body(&mut self) -> upstream_client::UpstreamRequestBody {
+        self.first_request_body
+            .take()
+            .unwrap_or_else(empty_request_body)
+    }
+
+    fn build_redirect_request_body(
+        &self,
+        body_mode: RedirectBodyMode,
+    ) -> Option<upstream_client::UpstreamRequestBody> {
+        match body_mode {
+            RedirectBodyMode::Empty => Some(empty_request_body()),
+            RedirectBodyMode::Replay => match &self.replay_body {
+                ReplayableRequestBody::None => Some(empty_request_body()),
+                ReplayableRequestBody::Replayable(body) => {
+                    Some(buffered_request_body(body.clone()))
+                }
+                ReplayableRequestBody::NonReplayable => None,
+            },
+        }
+    }
+}
+
+fn follow_redirects_enabled(meta: &RequestMeta) -> bool {
+    meta.follow_redirects == Some(true)
+}
+
+fn sanitize_upstream_headers(
+    headers: &std::collections::HashMap<String, String>,
+) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter_map(|(key, value)| {
+            let normalized = key.to_ascii_lowercase();
+            if BLOCKED_HEADERS.contains(&normalized.as_str()) {
+                None
+            } else {
+                Some((key.clone(), value.clone()))
+            }
+        })
+        .collect()
+}
+
+fn apply_upstream_headers(headers: &mut hyper::HeaderMap, values: &[(String, String)]) {
+    for (key, value) in values {
+        if let (Ok(name), Ok(value)) = (
+            hyper::header::HeaderName::from_bytes(key.as_bytes()),
+            hyper::header::HeaderValue::from_str(value),
+        ) {
+            headers.insert(name, value);
+        }
+    }
+}
+
+fn empty_request_body() -> upstream_client::UpstreamRequestBody {
+    upstream_client::stream_request_body(stream::empty::<Result<BodyFrame<Bytes>, io::Error>>())
+}
+
+fn buffered_request_body(body: Bytes) -> upstream_client::UpstreamRequestBody {
+    if body.is_empty() {
+        return empty_request_body();
+    }
+    upstream_client::stream_request_body(stream::once(async move { Ok(BodyFrame::data(body)) }))
+}
+
+async fn prepare_redirect_request_body(
+    mut body_rx: mpsc::Receiver<TunnelFrame>,
+    body_size: Arc<AtomicUsize>,
+    deadline: Instant,
+    replay_budget_bytes: usize,
+) -> Result<PreparedRequestBody, String> {
+    let mut prefix_chunks = Vec::new();
+    let mut buffered_len = 0usize;
+    let mut finished = false;
+
+    loop {
+        let Some(frame) = recv_body_frame_with_deadline(&mut body_rx, deadline).await? else {
+            finished = true;
+            break;
+        };
+
+        match frame.msg_type {
+            MsgType::RequestBody => {
+                let end_stream = frame.is_end_stream();
+                let payload = decompress_if_gzip(&frame)
+                    .map_err(|error| format!("gzip decompress failed: {error}"))?;
+
+                if !payload.is_empty() {
+                    body_size.fetch_add(payload.len(), Ordering::Relaxed);
+                    buffered_len = buffered_len.saturating_add(payload.len());
+                    prefix_chunks.push(payload);
+                }
+
+                if end_stream {
+                    finished = true;
+                    break;
+                }
+
+                if buffered_len > replay_budget_bytes {
+                    break;
+                }
+            }
+            MsgType::StreamError => {
+                let message = String::from_utf8(frame.payload.to_vec())
+                    .unwrap_or_else(|_| "client cancelled request body".to_string());
+                return Err(message);
+            }
+            MsgType::StreamEnd => {
+                finished = true;
+                break;
+            }
+            _ => continue,
+        }
+    }
+
+    if buffered_len <= replay_budget_bytes && finished {
+        let total_len: usize = prefix_chunks.iter().map(Bytes::len).sum();
+        if total_len == 0 {
+            return Ok(PreparedRequestBody {
+                first_request_body: Some(empty_request_body()),
+                replay_body: ReplayableRequestBody::None,
+            });
+        }
+
+        let mut buffered = BytesMut::with_capacity(total_len);
+        for chunk in prefix_chunks {
+            buffered.extend_from_slice(&chunk);
+        }
+        let body = buffered.freeze();
+        return Ok(PreparedRequestBody {
+            first_request_body: Some(buffered_request_body(body.clone())),
+            replay_body: ReplayableRequestBody::Replayable(body),
+        });
+    }
+
+    Ok(PreparedRequestBody {
+        first_request_body: Some(build_prefixed_request_body(
+            prefix_chunks,
+            body_rx,
+            body_size,
+        )),
+        replay_body: ReplayableRequestBody::NonReplayable,
+    })
+}
+
+async fn recv_body_frame_with_deadline(
+    body_rx: &mut mpsc::Receiver<TunnelFrame>,
+    deadline: Instant,
+) -> Result<Option<TunnelFrame>, String> {
+    let Some(remaining) = remaining_timeout(deadline) else {
+        return Err("upstream timeout".to_string());
+    };
+    tokio::time::timeout(remaining, body_rx.recv())
+        .await
+        .map_err(|_| "upstream timeout".to_string())
+}
+
+fn remaining_timeout(deadline: Instant) -> Option<Duration> {
+    deadline.checked_duration_since(Instant::now())
+}
+
+fn remove_headers_case_insensitive(headers: &mut Vec<(String, String)>, blocked: &[&str]) {
+    headers.retain(|(name, _)| {
+        let normalized = name.to_ascii_lowercase();
+        !blocked.contains(&normalized.as_str())
+    });
+}
+
+fn strip_sensitive_headers_for_redirect(
+    headers: &mut Vec<(String, String)>,
+    next: &url::Url,
+    previous: &url::Url,
+) {
+    let cross_host = next.host_str() != previous.host_str()
+        || next.port_or_known_default() != previous.port_or_known_default();
+    if cross_host {
+        remove_headers_case_insensitive(headers, REDIRECT_SENSITIVE_HEADERS);
+    }
+}
+
+fn resolve_redirect<B>(
+    response: &hyper::Response<B>,
+    current_url: &url::Url,
+    current_method: &hyper::Method,
+    current_headers: &[(String, String)],
+    replay_body: &ReplayableRequestBody,
+    redirects_followed: usize,
+) -> RedirectDecision {
+    use hyper::StatusCode;
+
+    let mut next_method = current_method.clone();
+    let mut next_headers = current_headers.to_vec();
+    let body_mode = match response.status() {
+        StatusCode::MOVED_PERMANENTLY | StatusCode::FOUND | StatusCode::SEE_OTHER => {
+            remove_headers_case_insensitive(&mut next_headers, REDIRECT_DROP_BODY_HEADERS);
+            if next_method != hyper::Method::GET && next_method != hyper::Method::HEAD {
+                next_method = hyper::Method::GET;
+            }
+            RedirectBodyMode::Empty
+        }
+        StatusCode::TEMPORARY_REDIRECT | StatusCode::PERMANENT_REDIRECT => match replay_body {
+            ReplayableRequestBody::NonReplayable => return RedirectDecision::Stop,
+            ReplayableRequestBody::None => RedirectBodyMode::Empty,
+            ReplayableRequestBody::Replayable(_) => RedirectBodyMode::Replay,
+        },
+        _ => return RedirectDecision::Stop,
+    };
+
+    let Some(location) = response.headers().get(hyper::header::LOCATION) else {
+        return RedirectDecision::Stop;
+    };
+    let Ok(location) = location.to_str() else {
+        return RedirectDecision::Stop;
+    };
+    let Ok(next_url) = current_url.join(location) else {
+        return RedirectDecision::Stop;
+    };
+    match next_url.scheme() {
+        "http" | "https" => {}
+        _ => return RedirectDecision::Stop,
+    }
+
+    if redirects_followed >= MAX_REDIRECTS {
+        return RedirectDecision::Error("too many redirects");
+    }
+
+    strip_sensitive_headers_for_redirect(&mut next_headers, &next_url, current_url);
+    RedirectDecision::Follow {
+        method: next_method,
+        url: next_url,
+        headers: next_headers,
+        body_mode,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_upstream_request(
+    state: &AppState,
+    server: &ServerContext,
+    current_url: &url::Url,
+    method: hyper::Method,
+    headers: &[(String, String)],
+    request_body: upstream_client::UpstreamRequestBody,
+    timeout: Duration,
+    http1_only: bool,
+) -> Result<UpstreamResponseContext, String> {
+    let host = current_url
+        .host_str()
+        .ok_or_else(|| "missing host in URL".to_string())?;
+    let port = current_url.port_or_known_default().unwrap_or(443);
+
+    let dns_start = Instant::now();
+    {
+        let allowed_ports = Arc::clone(&server.dynamic.load().allowed_ports);
+        if let Err(error) =
+            target_filter::validate_target(host, port, &allowed_ports, &state.dns_cache).await
+        {
+            server.metrics.dns_failures.fetch_add(1, Ordering::Release);
+            return Err(format!("target blocked: {error}"));
+        }
+    }
+    let dns_ms = dns_start.elapsed().as_millis() as u64;
+
+    let client = if http1_only {
+        &state.upstream_http1_client
+    } else {
+        &state.upstream_client
+    };
+
+    let mut request = hyper::Request::builder()
+        .method(method)
+        .uri(current_url.as_str())
+        .body(request_body)
+        .map_err(|error| format!("invalid upstream request: {error}"))?;
+    apply_upstream_headers(request.headers_mut(), headers);
+
+    let connection_start = Instant::now();
+    let mut captured_connection = upstream_client::capture_connection(&mut request);
+    let connection_capture = tokio::spawn(async move {
+        let connected = captured_connection.wait_for_connection_metadata().await;
+        connected
+            .as_ref()
+            .map(|_| connection_start.elapsed().as_millis() as u64)
+    });
+
+    let response = match tokio::time::timeout(timeout, client.request(request)).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            connection_capture.abort();
+            server
+                .metrics
+                .failed_requests
+                .fetch_add(1, Ordering::Release);
+            let message = if error.is_connect() {
+                format!("upstream connect error: {error}")
+            } else {
+                format!("upstream error: {error}")
+            };
+            return Err(message);
+        }
+        Err(_) => {
+            connection_capture.abort();
+            server
+                .metrics
+                .failed_requests
+                .fetch_add(1, Ordering::Release);
+            return Err("upstream timeout".to_string());
+        }
+    };
+
+    let connection_acquire_ms =
+        match tokio::time::timeout(Duration::from_millis(100), connection_capture).await {
+            Ok(Ok(ms)) => ms,
+            Ok(Err(_)) => None,
+            Err(_) => None,
+        };
+    let request_timing = upstream_client::resolve_request_timing(
+        &response,
+        connection_acquire_ms,
+        connection_start.elapsed().as_millis() as u64,
+    );
+
+    Ok(UpstreamResponseContext {
+        response,
+        dns_ms,
+        request_timing,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn relay_upstream_response(
+    server: &ServerContext,
+    stream_id: u32,
+    frame_tx: &FrameSender,
+    response: hyper::Response<hyper::body::Incoming>,
+    total_dns_ms: u64,
+    total_elapsed: Duration,
+    request_timing: upstream_client::RequestTiming,
+    request_body_size: &AtomicUsize,
+    redirect_count: usize,
+) -> Option<Duration> {
+    let status = response.status().as_u16();
+    let ttfb_ms = total_elapsed.as_millis() as u64;
+    let mut resp_headers: Vec<(String, String)> = Vec::with_capacity(response.headers().len() + 1);
+    for (key, value) in response.headers() {
+        if let Ok(value) = value.to_str() {
+            resp_headers.push((key.as_str().to_string(), value.to_string()));
+        }
+    }
+    let timing = serde_json::json!({
+        "dns_ms": total_dns_ms,
+        "connection_acquire_ms": request_timing.connection_acquire_ms,
+        "connection_reused": request_timing.connection_reused,
+        "connect_ms": request_timing.connect_ms,
+        "tls_ms": request_timing.tls_ms,
+        "ttfb_ms": ttfb_ms,
+        "upstream_ms": ttfb_ms,
+        "response_wait_ms": request_timing.response_wait_ms,
+        "upstream_processing_ms": request_timing.response_wait_ms,
+        "timing_source": "instrumented_connector",
+        "total_ms": total_elapsed.as_millis() as u64,
+        "body_size": request_body_size.load(Ordering::Relaxed),
+        "mode": "tunnel",
+        "redirect_count": redirect_count,
+    });
+    resp_headers.push(("x-proxy-timing".to_string(), timing.to_string()));
+    let resp_meta = ResponseMeta {
+        status,
+        headers: resp_headers,
+    };
+    let meta_json: Bytes = serde_json::to_vec(&resp_meta).unwrap_or_default().into();
+    let (meta_payload, meta_flags) = compress_payload(meta_json);
+    if !send_frame(
+        frame_tx,
+        TunnelFrame::new(
+            stream_id,
+            MsgType::ResponseHeaders,
+            meta_flags,
+            meta_payload,
+        ),
+    )
+    .await
+    {
+        return Some(total_elapsed);
+    }
+
+    let mut stream = response.into_body().into_data_stream();
+    while let Some(chunk_result) = stream.next().await {
+        match chunk_result {
+            Ok(chunk) => {
+                if chunk.len() <= MAX_CHUNK_SIZE {
+                    let (payload, extra_flags) = compress_payload(chunk);
+                    if !send_frame(
+                        frame_tx,
+                        TunnelFrame::new(stream_id, MsgType::ResponseBody, extra_flags, payload),
+                    )
+                    .await
+                    {
+                        return Some(total_elapsed);
+                    }
+                } else {
+                    let mut offset = 0;
+                    while offset < chunk.len() {
+                        let end = (offset + MAX_CHUNK_SIZE).min(chunk.len());
+                        let slice = chunk.slice(offset..end);
+                        let (payload, extra_flags) = compress_payload(slice);
+                        if !send_frame(
+                            frame_tx,
+                            TunnelFrame::new(
+                                stream_id,
+                                MsgType::ResponseBody,
+                                extra_flags,
+                                payload,
+                            ),
+                        )
+                        .await
+                        {
+                            return Some(total_elapsed);
+                        }
+                        offset = end;
+                    }
+                }
+            }
+            Err(error) => {
+                server.metrics.stream_errors.fetch_add(1, Ordering::Release);
+                warn!(stream_id, error = %error, "upstream body read error");
+                send_error(frame_tx, stream_id, &format!("body read error: {error}")).await;
+                return Some(total_elapsed);
+            }
+        }
+    }
+
+    let _ = send_frame(
+        frame_tx,
+        TunnelFrame::new(
+            stream_id,
+            MsgType::StreamEnd,
+            flags::END_STREAM,
+            Bytes::new(),
+        ),
+    )
+    .await;
+
+    debug!(
+        stream_id,
+        status,
+        redirects = redirect_count,
+        "stream completed"
+    );
+    Some(total_elapsed)
+}
+
+#[cfg(test)]
+fn upstream_client_for_request<'a>(
+    state: &'a AppState,
+    meta: &RequestMeta,
+) -> &'a upstream_client::UpstreamClient {
+    if meta.http1_only {
+        &state.upstream_http1_client
+    } else {
+        &state.upstream_client
+    }
+}
 
 /// Handle a single stream: receive body, execute upstream, send response.
 pub async fn handle_stream(
@@ -127,8 +654,7 @@ async fn handle_stream_inner(
     body_rx: mpsc::Receiver<TunnelFrame>,
     frame_tx: &FrameSender,
 ) -> Option<Duration> {
-    // Validate target
-    let target_url = match url::Url::parse(&meta.url) {
+    let mut current_url = match url::Url::parse(&meta.url) {
         Ok(u) => u,
         Err(e) => {
             send_error(frame_tx, stream_id, &format!("invalid URL: {e}")).await;
@@ -137,7 +663,7 @@ async fn handle_stream_inner(
     };
 
     // Only allow http/https schemes (block file://, data://, etc.)
-    match target_url.scheme() {
+    match current_url.scheme() {
         "http" | "https" => {}
         other => {
             send_error(
@@ -150,229 +676,139 @@ async fn handle_stream_inner(
         }
     }
 
-    let host = match target_url.host_str() {
-        Some(h) => h.to_string(),
-        None => {
-            send_error(frame_tx, stream_id, "missing host in URL").await;
-            return None;
-        }
-    };
-    let port = target_url.port_or_known_default().unwrap_or(443);
-
-    // DNS + target validation (populates dns_cache for SafeDnsResolver)
-    let connect_start = Instant::now();
-    {
-        let allowed_ports = Arc::clone(&server.dynamic.load().allowed_ports);
-        if let Err(e) =
-            target_filter::validate_target(&host, port, &allowed_ports, &state.dns_cache).await
-        {
-            server.metrics.dns_failures.fetch_add(1, Ordering::Release);
-            send_error(frame_tx, stream_id, &format!("target blocked: {e}")).await;
-            return None;
-        }
-    }
-    let dns_ms = connect_start.elapsed().as_millis() as u64;
-
-    // Execute upstream request
-    let client = &state.upstream_client;
+    let deadline = Instant::now()
+        + Duration::from_secs(meta.timeout.clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS));
+    let follow_redirects = follow_redirects_enabled(&meta);
+    let mut current_method: hyper::Method = meta.method.parse().unwrap_or(hyper::Method::GET);
+    let mut current_headers = sanitize_upstream_headers(&meta.headers);
     let timeout = Duration::from_secs(meta.timeout.clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS));
     let request_body_size = Arc::new(AtomicUsize::new(0));
-    let request_body = build_streaming_request_body(body_rx, Arc::clone(&request_body_size));
-
-    let method: hyper::Method = meta.method.parse().unwrap_or(hyper::Method::GET);
-    let mut request = match hyper::Request::builder()
-        .method(method)
-        .uri(meta.url.as_str())
-        .body(request_body)
-    {
-        Ok(request) => request,
-        Err(e) => {
-            send_error(
-                frame_tx,
-                stream_id,
-                &format!("invalid upstream request: {e}"),
-            )
-            .await;
-            return None;
+    let mut prepared_body = if follow_redirects {
+        match prepare_redirect_request_body(
+            body_rx,
+            Arc::clone(&request_body_size),
+            deadline,
+            state.config.redirect_replay_budget_bytes,
+        )
+        .await
+        {
+            Ok(body) => body,
+            Err(message) => {
+                send_error(frame_tx, stream_id, &message).await;
+                return None;
+            }
         }
+    } else {
+        PreparedRequestBody::streaming(body_rx, Arc::clone(&request_body_size))
     };
 
-    let headers = request.headers_mut();
-    for (k, v) in &meta.headers {
-        let k_lower = k.to_ascii_lowercase();
-        if BLOCKED_HEADERS.contains(&k_lower.as_str()) {
-            continue;
-        }
-        if let (Ok(name), Ok(value)) = (
-            hyper::header::HeaderName::from_bytes(k.as_bytes()),
-            hyper::header::HeaderValue::from_str(v),
-        ) {
-            headers.insert(name, value);
-        }
-    }
+    let overall_start = Instant::now();
+    let mut total_dns_ms = 0u64;
+    let mut redirects_followed = 0usize;
+    let mut next_body_mode = None::<RedirectBodyMode>;
 
-    let mut captured_connection = upstream_client::capture_connection(&mut request);
-    let connection_start = Instant::now();
-    let connection_capture = tokio::spawn(async move {
-        let connected = captured_connection.wait_for_connection_metadata().await;
-        connected
-            .as_ref()
-            .map(|_| connection_start.elapsed().as_millis() as u64)
-    });
-
-    let upstream_start = Instant::now();
-    let response = match tokio::time::timeout(timeout, client.request(request)).await {
-        Ok(Ok(response)) => response,
-        Ok(Err(e)) => {
-            connection_capture.abort();
-            server
-                .metrics
-                .failed_requests
-                .fetch_add(1, Ordering::Release);
-            let msg = if e.is_connect() {
-                format!("upstream connect error: {e}")
-            } else {
-                format!("upstream error: {e}")
-            };
-            send_error(frame_tx, stream_id, &msg).await;
-            return None;
-        }
-        Err(_) => {
-            connection_capture.abort();
-            server
-                .metrics
-                .failed_requests
-                .fetch_add(1, Ordering::Release);
+    loop {
+        let Some(remaining) = remaining_timeout(deadline) else {
             send_error(frame_tx, stream_id, "upstream timeout").await;
             return None;
-        }
-    };
-
-    // Capture connection-establishment duration (DNS + TCP/TLS + TTFB)
-    // before proceeding to stream the response body.
-    let connect_elapsed = connect_start.elapsed();
-
-    // Send RESPONSE_HEADERS
-    let status = response.status().as_u16();
-    let ttfb_ms = upstream_start.elapsed().as_millis() as u64;
-    // Short timeout: on connection reuse hyper may never fire the connect
-    // callback, so avoid blocking indefinitely.
-    let connection_acquire_ms =
-        match tokio::time::timeout(Duration::from_millis(100), connection_capture).await {
-            Ok(Ok(ms)) => ms,
-            Ok(Err(_)) => None, // JoinError (task panicked / cancelled)
-            Err(_) => None,     // timeout -- task is detached but lightweight
         };
-    let request_timing =
-        upstream_client::resolve_request_timing(&response, connection_acquire_ms, ttfb_ms);
-    let mut resp_headers: Vec<(String, String)> = Vec::with_capacity(response.headers().len() + 1);
-    for (k, v) in response.headers() {
-        if let Ok(vs) = v.to_str() {
-            resp_headers.push((k.as_str().to_string(), vs.to_string()));
-        }
-    }
-    let timing = serde_json::json!({
-        "dns_ms": dns_ms,
-        "connection_acquire_ms": request_timing.connection_acquire_ms,
-        "connection_reused": request_timing.connection_reused,
-        "connect_ms": request_timing.connect_ms,
-        "tls_ms": request_timing.tls_ms,
-        "ttfb_ms": ttfb_ms,
-        "upstream_ms": ttfb_ms,
-        "response_wait_ms": request_timing.response_wait_ms,
-        "upstream_processing_ms": request_timing.response_wait_ms,
-        "timing_source": "instrumented_connector",
-        "total_ms": connect_elapsed.as_millis() as u64,
-        "body_size": request_body_size.load(Ordering::Relaxed),
-        "mode": "tunnel",
-    });
-    resp_headers.push(("x-proxy-timing".to_string(), timing.to_string()));
-    let resp_meta = ResponseMeta {
-        status,
-        headers: resp_headers,
-    };
-    let meta_json: Bytes = serde_json::to_vec(&resp_meta).unwrap_or_default().into();
-    let (meta_payload, meta_flags) = compress_payload(meta_json);
-    if !send_frame(
-        frame_tx,
-        TunnelFrame::new(
-            stream_id,
-            MsgType::ResponseHeaders,
-            meta_flags,
-            meta_payload,
-        ),
-    )
-    .await
-    {
-        return Some(connect_elapsed);
-    }
-
-    // Stream response body — relay upstream bytes through the tunnel.
-    // Apply tunnel-level frame compression for chunks that benefit from it
-    // (e.g. uncompressed SSE text). Already-compressed data (gzip/br from
-    // upstream Content-Encoding) won't shrink further and will be sent as-is
-    // thanks to the size check in compress_payload().
-    let mut stream = response.into_body().into_data_stream();
-    while let Some(chunk_result) = stream.next().await {
-        match chunk_result {
-            Ok(chunk) => {
-                if chunk.len() <= MAX_CHUNK_SIZE {
-                    let (payload, extra_flags) = compress_payload(chunk);
-                    if !send_frame(
+        let request_body = match next_body_mode.take() {
+            Some(mode) => match prepared_body.build_redirect_request_body(mode) {
+                Some(body) => body,
+                None => {
+                    send_error(
                         frame_tx,
-                        TunnelFrame::new(stream_id, MsgType::ResponseBody, extra_flags, payload),
+                        stream_id,
+                        "upstream redirect error: body not replayable",
                     )
-                    .await
-                    {
-                        return Some(connect_elapsed);
-                    }
-                } else {
-                    // Split oversized chunks, compress each slice
-                    let mut offset = 0;
-                    while offset < chunk.len() {
-                        let end = (offset + MAX_CHUNK_SIZE).min(chunk.len());
-                        let slice = chunk.slice(offset..end);
-                        let (payload, extra_flags) = compress_payload(slice);
-                        if !send_frame(
-                            frame_tx,
-                            TunnelFrame::new(
-                                stream_id,
-                                MsgType::ResponseBody,
-                                extra_flags,
-                                payload,
-                            ),
-                        )
-                        .await
-                        {
-                            return Some(connect_elapsed);
-                        }
-                        offset = end;
-                    }
+                    .await;
+                    return None;
+                }
+            },
+            None => prepared_body.take_first_request_body(),
+        };
+
+        let response_ctx = match execute_upstream_request(
+            state,
+            server,
+            &current_url,
+            current_method.clone(),
+            &current_headers,
+            request_body,
+            remaining.min(timeout),
+            meta.http1_only,
+        )
+        .await
+        {
+            Ok(context) => context,
+            Err(message) => {
+                send_error(frame_tx, stream_id, &message).await;
+                return None;
+            }
+        };
+        total_dns_ms = total_dns_ms.saturating_add(response_ctx.dns_ms);
+
+        if follow_redirects {
+            match resolve_redirect(
+                &response_ctx.response,
+                &current_url,
+                &current_method,
+                &current_headers,
+                &prepared_body.replay_body,
+                redirects_followed,
+            ) {
+                RedirectDecision::Stop => {
+                    return relay_upstream_response(
+                        server,
+                        stream_id,
+                        frame_tx,
+                        response_ctx.response,
+                        total_dns_ms,
+                        overall_start.elapsed(),
+                        response_ctx.request_timing,
+                        request_body_size.as_ref(),
+                        redirects_followed,
+                    )
+                    .await;
+                }
+                RedirectDecision::Follow {
+                    method,
+                    url,
+                    headers,
+                    body_mode,
+                } => {
+                    redirects_followed += 1;
+                    current_method = method;
+                    current_url = url;
+                    current_headers = headers;
+                    next_body_mode = Some(body_mode);
+                    continue;
+                }
+                RedirectDecision::Error(message) => {
+                    send_error(
+                        frame_tx,
+                        stream_id,
+                        &format!("upstream redirect error: {message}"),
+                    )
+                    .await;
+                    return None;
                 }
             }
-            Err(e) => {
-                server.metrics.stream_errors.fetch_add(1, Ordering::Release);
-                warn!(stream_id, error = %e, "upstream body read error");
-                send_error(frame_tx, stream_id, &format!("body read error: {e}")).await;
-                return Some(connect_elapsed);
-            }
         }
-    }
 
-    // Send STREAM_END
-    let _ = send_frame(
-        frame_tx,
-        TunnelFrame::new(
+        return relay_upstream_response(
+            server,
             stream_id,
-            MsgType::StreamEnd,
-            flags::END_STREAM,
-            Bytes::new(),
-        ),
-    )
-    .await;
-
-    debug!(stream_id, status, "stream completed");
-    Some(connect_elapsed)
+            frame_tx,
+            response_ctx.response,
+            total_dns_ms,
+            overall_start.elapsed(),
+            response_ctx.request_timing,
+            request_body_size.as_ref(),
+            redirects_followed,
+        )
+        .await;
+    }
 }
 
 async fn send_error(tx: &FrameSender, stream_id: u32, msg: &str) {
@@ -393,6 +829,20 @@ fn build_streaming_request_body(
     body_rx: mpsc::Receiver<TunnelFrame>,
     body_size: Arc<AtomicUsize>,
 ) -> upstream_client::UpstreamRequestBody {
+    build_prefixed_request_body(Vec::new(), body_rx, body_size)
+}
+
+fn build_prefixed_request_body(
+    prefix_chunks: Vec<Bytes>,
+    body_rx: mpsc::Receiver<TunnelFrame>,
+    body_size: Arc<AtomicUsize>,
+) -> upstream_client::UpstreamRequestBody {
+    let prefix_stream = stream::iter(
+        prefix_chunks
+            .into_iter()
+            .filter(|chunk| !chunk.is_empty())
+            .map(|chunk| Ok(BodyFrame::data(chunk))),
+    );
     let body_stream = stream::unfold(
         (body_rx, body_size, false),
         |(mut body_rx, body_size, finished)| async move {
@@ -443,17 +893,22 @@ fn build_streaming_request_body(
         },
     );
 
-    upstream_client::stream_request_body(body_stream)
+    upstream_client::stream_request_body(prefix_stream.chain(body_stream))
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::net::SocketAddr;
     use std::sync::atomic::AtomicU64;
     use std::sync::Once;
 
     use aether_runtime::{bounded_queue, ConcurrencyGate, DistributedConcurrencyGate};
     use arc_swap::ArcSwap;
+    use axum::body::Body;
+    use axum::http::{header, Response, StatusCode};
+    use axum::routing::{get, post};
+    use axum::Router;
 
     use super::*;
     use crate::config::Config;
@@ -532,6 +987,410 @@ mod tests {
         assert!(err.to_string().contains("client cancelled"));
         assert!(body.frame().await.is_none());
         assert_eq!(body_size.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn selects_http1_only_client_when_request_metadata_requires_it() {
+        let state = sample_state(None, None);
+        let default_meta = sample_request_meta();
+        assert!(std::ptr::eq(
+            upstream_client_for_request(state.as_ref(), &default_meta),
+            &state.upstream_client
+        ));
+
+        let mut http1_meta = sample_request_meta();
+        http1_meta.http1_only = true;
+        assert!(std::ptr::eq(
+            upstream_client_for_request(state.as_ref(), &http1_meta),
+            &state.upstream_http1_client
+        ));
+    }
+
+    #[test]
+    fn resolve_redirect_changes_post_to_get_for_302() {
+        let current_url = url::Url::parse("https://redirect.test/start").expect("url");
+        let response = Response::builder()
+            .status(StatusCode::FOUND)
+            .header(header::LOCATION, "/final")
+            .body(())
+            .expect("response");
+
+        let decision = resolve_redirect(
+            &response,
+            &current_url,
+            &hyper::Method::POST,
+            &[("content-type".into(), "application/json".into())],
+            &ReplayableRequestBody::Replayable(Bytes::from_static(br#"{"ok":true}"#)),
+            0,
+        );
+
+        match decision {
+            RedirectDecision::Follow {
+                method,
+                url,
+                headers,
+                body_mode,
+            } => {
+                assert_eq!(method, hyper::Method::GET);
+                assert_eq!(url.as_str(), "https://redirect.test/final");
+                assert_eq!(body_mode, RedirectBodyMode::Empty);
+                assert!(!headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("content-type")));
+            }
+            other => panic!("unexpected redirect decision: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_redirect_strips_sensitive_headers_for_cross_host_redirect() {
+        let current_url = url::Url::parse("https://redirect-a.test/start").expect("url");
+        let response = Response::builder()
+            .status(StatusCode::FOUND)
+            .header(header::LOCATION, "https://redirect-b.test/final")
+            .body(())
+            .expect("response");
+
+        let decision = resolve_redirect(
+            &response,
+            &current_url,
+            &hyper::Method::GET,
+            &[
+                ("authorization".into(), "Bearer secret".into()),
+                ("cookie".into(), "sid=123".into()),
+                ("x-custom".into(), "keep".into()),
+            ],
+            &ReplayableRequestBody::None,
+            0,
+        );
+
+        match decision {
+            RedirectDecision::Follow { headers, .. } => {
+                assert!(!headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("authorization")));
+                assert!(!headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("cookie")));
+                assert!(headers
+                    .iter()
+                    .any(|(name, value)| name.eq_ignore_ascii_case("x-custom") && value == "keep"));
+            }
+            other => panic!("unexpected redirect decision: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn preserves_redirect_response_by_default_when_follow_redirects_unspecified() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let app = Router::new().route(
+            "/start",
+            get(|| async {
+                Response::builder()
+                    .status(StatusCode::FOUND)
+                    .header(header::LOCATION, "/final")
+                    .body(Body::empty())
+                    .expect("redirect response")
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+
+        let host = "redirect-default-disabled.test";
+        let state = sample_state_for_port(addr.port());
+        cache_test_host(&state, host, addr).await;
+        let server_ctx = sample_server(&state);
+        let (frame_tx, mut frame_rx) = bounded_queue::<TunnelFrame>(16);
+        let (_body_tx, body_rx) = mpsc::channel(1);
+
+        let mut meta = sample_request_meta();
+        meta.url = format!("http://{host}:{}/start", addr.port());
+
+        handle_stream(Arc::clone(&state), server_ctx, 5, meta, body_rx, frame_tx).await;
+        let result = collect_stream_result(&mut frame_rx).await;
+        server.abort();
+
+        assert!(
+            result.error.is_none(),
+            "unexpected stream error: {:?}",
+            result.error
+        );
+        let response = result.response.expect("response metadata");
+        assert_eq!(response.status, 302);
+        assert_eq!(
+            response
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("location"))
+                .map(|(_, value)| value.as_str()),
+            Some("/final")
+        );
+    }
+
+    #[tokio::test]
+    async fn relays_basic_get_request_successfully_through_tunnel() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let app = Router::new().route(
+            "/ok",
+            get(|| async {
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "text/plain")
+                    .body(Body::from("proxy-ok"))
+                    .expect("ok response")
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+
+        let host = "basic-relay.test";
+        let state = sample_state_for_port(addr.port());
+        cache_test_host(&state, host, addr).await;
+        let server_ctx = sample_server(&state);
+        let (frame_tx, mut frame_rx) = bounded_queue::<TunnelFrame>(16);
+        let (_body_tx, body_rx) = mpsc::channel(1);
+
+        let mut meta = sample_request_meta();
+        meta.url = format!("http://{host}:{}/ok", addr.port());
+
+        handle_stream(Arc::clone(&state), server_ctx, 3, meta, body_rx, frame_tx).await;
+        let result = collect_stream_result(&mut frame_rx).await;
+        server.abort();
+
+        assert!(
+            result.error.is_none(),
+            "unexpected stream error: {:?}",
+            result.error
+        );
+        let response = result.response.expect("response metadata");
+        assert_eq!(response.status, 200);
+        assert_eq!(result.body, Bytes::from_static(b"proxy-ok"));
+        assert!(response
+            .headers
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("content-type")
+                && value.starts_with("text/plain")));
+    }
+
+    #[tokio::test]
+    async fn follows_redirects_when_explicitly_enabled_for_replayable_post_requests() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let app = Router::new()
+            .route(
+                "/start",
+                post(|body: Bytes| async move {
+                    assert_eq!(body, Bytes::from_static(b"hello"));
+                    Response::builder()
+                        .status(StatusCode::TEMPORARY_REDIRECT)
+                        .header(header::LOCATION, "/final")
+                        .body(Body::empty())
+                        .expect("redirect response")
+                }),
+            )
+            .route(
+                "/final",
+                post(|body: Bytes| async move {
+                    assert_eq!(body, Bytes::from_static(b"hello"));
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from("redirected"))
+                        .expect("final response")
+                }),
+            );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+
+        let host = "redirect-default.test";
+        let state = sample_state_for_port(addr.port());
+        cache_test_host(&state, host, addr).await;
+        let server_ctx = sample_server(&state);
+        let (frame_tx, mut frame_rx) = bounded_queue::<TunnelFrame>(16);
+        let (body_tx, body_rx) = mpsc::channel(4);
+        body_tx
+            .send(TunnelFrame::new(
+                1,
+                MsgType::RequestBody,
+                flags::END_STREAM,
+                Bytes::from_static(b"hello"),
+            ))
+            .await
+            .expect("send body");
+        drop(body_tx);
+
+        let mut meta = sample_request_meta();
+        meta.method = "POST".to_string();
+        meta.url = format!("http://{host}:{}/start", addr.port());
+        meta.follow_redirects = Some(true);
+
+        handle_stream(Arc::clone(&state), server_ctx, 1, meta, body_rx, frame_tx).await;
+        let result = collect_stream_result(&mut frame_rx).await;
+        server.abort();
+
+        assert!(
+            result.error.is_none(),
+            "unexpected stream error: {:?}",
+            result.error
+        );
+        let response = result.response.expect("response metadata");
+        assert_eq!(response.status, 200);
+        assert_eq!(result.body, Bytes::from_static(b"redirected"));
+        let timing_header = response
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("x-proxy-timing"))
+            .map(|(_, value)| value.clone())
+            .expect("timing header");
+        let timing: serde_json::Value =
+            serde_json::from_str(&timing_header).expect("timing header json");
+        assert_eq!(timing["redirect_count"], serde_json::json!(1));
+    }
+
+    #[tokio::test]
+    async fn preserves_redirect_response_when_follow_redirects_disabled() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let app = Router::new().route(
+            "/start",
+            get(|| async {
+                Response::builder()
+                    .status(StatusCode::FOUND)
+                    .header(header::LOCATION, "/final")
+                    .body(Body::empty())
+                    .expect("redirect response")
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+
+        let host = "redirect-disabled.test";
+        let state = sample_state_for_port(addr.port());
+        cache_test_host(&state, host, addr).await;
+        let server_ctx = sample_server(&state);
+        let (frame_tx, mut frame_rx) = bounded_queue::<TunnelFrame>(16);
+        let (_body_tx, body_rx) = mpsc::channel(1);
+
+        let mut meta = sample_request_meta();
+        meta.url = format!("http://{host}:{}/start", addr.port());
+        meta.follow_redirects = Some(false);
+
+        handle_stream(Arc::clone(&state), server_ctx, 7, meta, body_rx, frame_tx).await;
+        let result = collect_stream_result(&mut frame_rx).await;
+        server.abort();
+
+        assert!(
+            result.error.is_none(),
+            "unexpected stream error: {:?}",
+            result.error
+        );
+        let response = result.response.expect("response metadata");
+        assert_eq!(response.status, 302);
+        assert_eq!(
+            response
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("location"))
+                .map(|(_, value)| value.as_str()),
+            Some("/final")
+        );
+    }
+
+    #[tokio::test]
+    async fn preserves_redirect_response_when_replay_budget_is_zero() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let addr = listener.local_addr().expect("addr");
+        let app = Router::new()
+            .route(
+                "/start",
+                post(|body: Bytes| async move {
+                    assert_eq!(body, Bytes::from_static(b"hello"));
+                    Response::builder()
+                        .status(StatusCode::TEMPORARY_REDIRECT)
+                        .header(header::LOCATION, "/final")
+                        .body(Body::empty())
+                        .expect("redirect response")
+                }),
+            )
+            .route(
+                "/final",
+                post(|| async {
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from("unexpected"))
+                        .expect("final response")
+                }),
+            );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+
+        let host = "redirect-budget-zero.test";
+        let state = sample_state_for_budget(addr.port(), 0);
+        cache_test_host(&state, host, addr).await;
+        let server_ctx = sample_server(&state);
+        let (frame_tx, mut frame_rx) = bounded_queue::<TunnelFrame>(16);
+        let (body_tx, body_rx) = mpsc::channel(4);
+        body_tx
+            .send(TunnelFrame::new(
+                1,
+                MsgType::RequestBody,
+                flags::END_STREAM,
+                Bytes::from_static(b"hello"),
+            ))
+            .await
+            .expect("send body");
+        drop(body_tx);
+
+        let mut meta = sample_request_meta();
+        meta.method = "POST".to_string();
+        meta.url = format!("http://{host}:{}/start", addr.port());
+        meta.follow_redirects = Some(true);
+
+        handle_stream(Arc::clone(&state), server_ctx, 11, meta, body_rx, frame_tx).await;
+        let result = collect_stream_result(&mut frame_rx).await;
+        server.abort();
+
+        assert!(
+            result.error.is_none(),
+            "unexpected stream error: {:?}",
+            result.error
+        );
+        let response = result.response.expect("response metadata");
+        assert_eq!(response.status, 307);
+        assert_eq!(
+            response
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("location"))
+                .map(|(_, value)| value.as_str()),
+            Some("/final")
+        );
     }
 
     #[tokio::test]
@@ -613,6 +1472,8 @@ mod tests {
             url: "https://example.com/ok".to_string(),
             headers: HashMap::new(),
             timeout: 30,
+            follow_redirects: None,
+            http1_only: false,
         }
     }
 
@@ -625,13 +1486,49 @@ mod tests {
         let dns_cache = Arc::new(DnsCache::new(Duration::from_secs(60), 128));
         let upstream_client =
             upstream_client::build_upstream_client(&config, Arc::clone(&dns_cache));
+        let upstream_http1_client =
+            upstream_client::build_http1_only_upstream_client(&config, Arc::clone(&dns_cache));
         Arc::new(AppState {
             config,
             dns_cache,
             upstream_client,
+            upstream_http1_client,
             tunnel_tls_config: Arc::new(build_tls_config()),
             stream_gate,
             distributed_stream_gate,
+        })
+    }
+
+    fn sample_state_for_port(port: u16) -> Arc<AppState> {
+        ensure_rustls_provider();
+        let mut config = sample_config();
+        config.allowed_ports.push(port);
+        sample_state_with_config(config)
+    }
+
+    fn sample_state_for_budget(port: u16, redirect_replay_budget_bytes: usize) -> Arc<AppState> {
+        ensure_rustls_provider();
+        let mut config = sample_config();
+        config.allowed_ports.push(port);
+        config.redirect_replay_budget_bytes = redirect_replay_budget_bytes;
+        sample_state_with_config(config)
+    }
+
+    fn sample_state_with_config(config: Config) -> Arc<AppState> {
+        let config = Arc::new(config);
+        let dns_cache = Arc::new(DnsCache::new(Duration::from_secs(60), 128));
+        let upstream_client =
+            upstream_client::build_upstream_client(&config, Arc::clone(&dns_cache));
+        let upstream_http1_client =
+            upstream_client::build_http1_only_upstream_client(&config, Arc::clone(&dns_cache));
+        Arc::new(AppState {
+            config,
+            dns_cache,
+            upstream_client,
+            upstream_http1_client,
+            tunnel_tls_config: Arc::new(build_tls_config()),
+            stream_gate: None,
+            distributed_stream_gate: None,
         })
     }
 
@@ -688,8 +1585,8 @@ mod tests {
             upstream_pool_idle_timeout_secs: 60,
             upstream_tcp_keepalive_secs: 60,
             upstream_tcp_nodelay: true,
+            redirect_replay_budget_bytes: crate::config::DEFAULT_REDIRECT_REPLAY_BUDGET_BYTES,
             log_level: "info".to_string(),
-            log_json: false,
             log_destination: crate::config::ProxyLogDestinationArg::Stdout,
             log_dir: None,
             log_rotation: crate::config::ProxyLogRotationArg::Daily,
@@ -704,6 +1601,57 @@ mod tests {
             tunnel_tcp_nodelay: true,
             tunnel_stale_timeout_secs: 45,
             tunnel_connections: 1,
+        }
+    }
+
+    async fn cache_test_host(state: &Arc<AppState>, host: &str, addr: SocketAddr) {
+        state
+            .dns_cache
+            .insert(host, addr.port(), Arc::new(vec![addr]))
+            .await;
+    }
+
+    struct StreamResult {
+        response: Option<ResponseMeta>,
+        body: Bytes,
+        error: Option<String>,
+    }
+
+    async fn collect_stream_result(
+        frame_rx: &mut aether_runtime::BoundedQueueReceiver<TunnelFrame>,
+    ) -> StreamResult {
+        let mut response = None;
+        let mut body = BytesMut::new();
+        let mut error = None;
+
+        while let Some(frame) = frame_rx.recv().await {
+            match frame.msg_type {
+                MsgType::ResponseHeaders => {
+                    let payload = decompress_if_gzip(&frame).expect("headers payload");
+                    response = Some(
+                        serde_json::from_slice(&payload).expect("response metadata should decode"),
+                    );
+                }
+                MsgType::ResponseBody => {
+                    let payload = decompress_if_gzip(&frame).expect("body payload");
+                    body.extend_from_slice(&payload);
+                }
+                MsgType::StreamError => {
+                    error = Some(
+                        String::from_utf8(frame.payload.to_vec())
+                            .unwrap_or_else(|_| "stream error".to_string()),
+                    );
+                    break;
+                }
+                MsgType::StreamEnd => break,
+                _ => continue,
+            }
+        }
+
+        StreamResult {
+            response,
+            body: body.freeze(),
+            error,
         }
     }
 

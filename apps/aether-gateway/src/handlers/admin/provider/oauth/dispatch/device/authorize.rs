@@ -85,7 +85,11 @@ pub(super) async fn handle_admin_provider_oauth_device_authorize(
     };
 
     let client_registration = match state
-        .register_admin_kiro_device_oidc_client(&region, &start_url)
+        .register_admin_kiro_device_oidc_client(
+            &region,
+            &start_url,
+            payload.proxy_node_id.as_deref(),
+        )
         .await
     {
         Ok(payload) => payload,
@@ -105,7 +109,13 @@ pub(super) async fn handle_admin_provider_oauth_device_authorize(
     };
 
     let device_authorization = match state
-        .start_admin_kiro_device_authorization(&region, &client_id, &client_secret, &start_url)
+        .start_admin_kiro_device_authorization(
+            &region,
+            &client_id,
+            &client_secret,
+            &start_url,
+            payload.proxy_node_id.as_deref(),
+        )
         .await
     {
         Ok(payload) => payload,

@@ -1,8 +1,11 @@
 use async_trait::async_trait;
+use futures_util::TryStreamExt;
+use sha2::{Digest, Sha256};
 use sqlx::{postgres::PgRow, PgPool, Row};
 
 use super::types::{
-    normalize_proxy_metadata, ProxyNodeHeartbeatMutation, ProxyNodeReadRepository,
+    normalize_proxy_metadata, reconcile_remote_config_after_heartbeat, ProxyNodeHeartbeatMutation,
+    ProxyNodeReadRepository, ProxyNodeRegistrationMutation, ProxyNodeRemoteConfigMutation,
     ProxyNodeTunnelStatusMutation, ProxyNodeWriteRepository, StoredProxyNode, StoredProxyNodeEvent,
 };
 use crate::{
@@ -129,6 +132,140 @@ SET
 WHERE id = $1
 "#;
 
+const FIND_EXISTING_TUNNEL_NODE_SQL: &str = r#"
+SELECT
+  id,
+  name,
+  ip,
+  port,
+  region,
+  is_manual,
+  proxy_url,
+  proxy_username,
+  proxy_password,
+  CAST(status AS TEXT) AS status,
+  registered_by,
+  EXTRACT(EPOCH FROM last_heartbeat_at)::bigint AS last_heartbeat_at_unix_secs,
+  heartbeat_interval,
+  active_connections,
+  total_requests,
+  CAST(avg_latency_ms AS DOUBLE PRECISION) AS avg_latency_ms,
+  failed_requests,
+  dns_failures,
+  stream_errors,
+  proxy_metadata,
+  hardware_info,
+  estimated_max_concurrency,
+  tunnel_mode,
+  tunnel_connected,
+  EXTRACT(EPOCH FROM tunnel_connected_at)::bigint AS tunnel_connected_at_unix_secs,
+  remote_config,
+  config_version,
+  EXTRACT(EPOCH FROM created_at)::bigint AS created_at_unix_ms,
+  EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_unix_secs
+FROM proxy_nodes
+WHERE ip = $1
+  AND port = $2
+  AND is_manual = FALSE
+ORDER BY created_at ASC, id ASC
+LIMIT 1
+FOR UPDATE
+"#;
+
+const INSERT_PROXY_NODE_SQL: &str = r#"
+INSERT INTO proxy_nodes (
+  id,
+  name,
+  ip,
+  port,
+  region,
+  status,
+  registered_by,
+  last_heartbeat_at,
+  heartbeat_interval,
+  active_connections,
+  total_requests,
+  avg_latency_ms,
+  hardware_info,
+  estimated_max_concurrency,
+  tunnel_mode,
+  tunnel_connected,
+  proxy_metadata
+)
+VALUES (
+  $1,
+  $2,
+  $3,
+  $4,
+  $5,
+  'offline'::proxynodestatus,
+  $6,
+  NOW(),
+  $7,
+  COALESCE($8, 0),
+  COALESCE($9, 0),
+  $10,
+  $11,
+  $12,
+  $13,
+  FALSE,
+  $14
+)
+"#;
+
+const UPDATE_PROXY_NODE_REGISTRATION_SQL: &str = r#"
+UPDATE proxy_nodes
+SET
+  name = $2,
+  ip = $3,
+  port = $4,
+  region = $5,
+  registered_by = $6,
+  last_heartbeat_at = NOW(),
+  heartbeat_interval = $7,
+  active_connections = COALESCE($8, active_connections),
+  total_requests = COALESCE($9, total_requests),
+  avg_latency_ms = COALESCE($10, avg_latency_ms),
+  hardware_info = COALESCE($11, hardware_info),
+  estimated_max_concurrency = COALESCE($12, estimated_max_concurrency),
+  tunnel_mode = $13,
+  proxy_metadata = COALESCE($14, proxy_metadata),
+  updated_at = NOW()
+WHERE id = $1
+"#;
+
+const UNREGISTER_PROXY_NODE_SQL: &str = r#"
+UPDATE proxy_nodes
+SET
+  status = 'offline'::proxynodestatus,
+  tunnel_connected = FALSE,
+  tunnel_connected_at = NOW(),
+  updated_at = NOW()
+WHERE id = $1
+"#;
+
+const UPDATE_PROXY_NODE_REMOTE_CONFIG_SQL: &str = r#"
+UPDATE proxy_nodes
+SET
+  name = COALESCE($2, name),
+  remote_config = $3,
+  config_version = config_version + 1,
+  updated_at = NOW()
+WHERE id = $1
+"#;
+
+const RESET_STALE_TUNNEL_STATUSES_SQL: &str = r#"
+UPDATE proxy_nodes
+SET
+  tunnel_connected = FALSE,
+  status = 'offline'::proxynodestatus,
+  active_connections = 0,
+  tunnel_connected_at = NOW(),
+  updated_at = NOW()
+WHERE is_manual = FALSE
+  AND tunnel_connected = TRUE
+"#;
+
 #[derive(Debug, Clone)]
 pub struct SqlxProxyNodeRepository {
     pool: PgPool,
@@ -199,16 +336,91 @@ impl SqlxProxyNodeRepository {
             ),
         })
     }
+
+    fn registration_lock_key(ip: &str, port: i32) -> i64 {
+        let mut hasher = Sha256::new();
+        hasher.update(ip.as_bytes());
+        hasher.update(b":");
+        hasher.update(port.to_string().as_bytes());
+        let digest = hasher.finalize();
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&digest[..8]);
+        i64::from_be_bytes(bytes)
+    }
+
+    fn normalize_remote_config(
+        mutation: &ProxyNodeRemoteConfigMutation,
+        existing: Option<&serde_json::Value>,
+    ) -> Option<serde_json::Value> {
+        let mut config = match existing {
+            Some(serde_json::Value::Object(map)) => map.clone(),
+            _ => serde_json::Map::new(),
+        };
+
+        if let Some(node_name) = mutation.node_name.as_ref() {
+            config.insert(
+                "node_name".to_string(),
+                serde_json::Value::String(node_name.clone()),
+            );
+        }
+        if let Some(allowed_ports) = mutation.allowed_ports.as_ref() {
+            config.insert(
+                "allowed_ports".to_string(),
+                serde_json::json!(allowed_ports),
+            );
+        }
+        if let Some(log_level) = mutation.log_level.as_ref() {
+            config.insert(
+                "log_level".to_string(),
+                serde_json::Value::String(log_level.clone()),
+            );
+        }
+        if let Some(heartbeat_interval) = mutation.heartbeat_interval {
+            config.insert(
+                "heartbeat_interval".to_string(),
+                serde_json::json!(heartbeat_interval),
+            );
+        }
+        if let Some(scheduling_state) = mutation.scheduling_state.as_ref() {
+            match scheduling_state {
+                Some(state) => {
+                    config.insert(
+                        "scheduling_state".to_string(),
+                        serde_json::Value::String(state.clone()),
+                    );
+                }
+                None => {
+                    config.remove("scheduling_state");
+                }
+            }
+        }
+        if let Some(upgrade_to) = mutation.upgrade_to.as_ref() {
+            match upgrade_to {
+                Some(version) => {
+                    config.insert(
+                        "upgrade_to".to_string(),
+                        serde_json::Value::String(version.clone()),
+                    );
+                }
+                None => {
+                    config.remove("upgrade_to");
+                }
+            }
+        }
+
+        (!config.is_empty()).then_some(serde_json::Value::Object(config))
+    }
 }
 
 #[async_trait]
 impl ProxyNodeReadRepository for SqlxProxyNodeRepository {
     async fn list_proxy_nodes(&self) -> Result<Vec<StoredProxyNode>, DataLayerError> {
-        let rows = sqlx::query(LIST_PROXY_NODES_SQL)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(Self::row_to_stored).collect()
+        let mut rows = sqlx::query(LIST_PROXY_NODES_SQL).fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(Self::row_to_stored(&row)?);
+        }
+        Ok(items)
     }
 
     async fn find_proxy_node(
@@ -228,18 +440,102 @@ impl ProxyNodeReadRepository for SqlxProxyNodeRepository {
         node_id: &str,
         limit: usize,
     ) -> Result<Vec<StoredProxyNodeEvent>, DataLayerError> {
-        let rows = sqlx::query(LIST_PROXY_NODE_EVENTS_SQL)
+        let mut rows = sqlx::query(LIST_PROXY_NODE_EVENTS_SQL)
             .bind(node_id)
             .bind(i64::try_from(limit).unwrap_or(i64::MAX))
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(Self::row_to_event).collect()
+            .fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(Self::row_to_event(&row)?);
+        }
+        Ok(items)
     }
 }
 
 #[async_trait]
 impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
+    async fn reset_stale_tunnel_statuses(&self) -> Result<usize, DataLayerError> {
+        let result = sqlx::query(RESET_STALE_TUNNEL_STATUSES_SQL)
+            .execute(&self.pool)
+            .await
+            .map_postgres_err()?;
+        Ok(result.rows_affected() as usize)
+    }
+
+    async fn register_node(
+        &self,
+        mutation: &ProxyNodeRegistrationMutation,
+    ) -> Result<StoredProxyNode, DataLayerError> {
+        let normalized_proxy_metadata = normalize_proxy_metadata(
+            mutation.proxy_metadata.as_ref(),
+            mutation.proxy_version.as_deref(),
+        );
+        let lock_key = Self::registration_lock_key(&mutation.ip, mutation.port);
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+
+        let existing = sqlx::query(FIND_EXISTING_TUNNEL_NODE_SQL)
+            .bind(&mutation.ip)
+            .bind(mutation.port)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_postgres_err()?;
+
+        let node_id = if let Some(row) = existing.as_ref() {
+            let existing = Self::row_to_stored(row)?;
+            sqlx::query(UPDATE_PROXY_NODE_REGISTRATION_SQL)
+                .bind(&existing.id)
+                .bind(&mutation.name)
+                .bind(&mutation.ip)
+                .bind(mutation.port)
+                .bind(mutation.region.as_deref())
+                .bind(mutation.registered_by.as_deref())
+                .bind(mutation.heartbeat_interval)
+                .bind(mutation.active_connections)
+                .bind(mutation.total_requests)
+                .bind(mutation.avg_latency_ms)
+                .bind(mutation.hardware_info.as_ref())
+                .bind(mutation.estimated_max_concurrency)
+                .bind(mutation.tunnel_mode)
+                .bind(normalized_proxy_metadata.as_ref())
+                .execute(&mut *tx)
+                .await
+                .map_postgres_err()?;
+            existing.id
+        } else {
+            let node_id = uuid::Uuid::new_v4().to_string();
+            sqlx::query(INSERT_PROXY_NODE_SQL)
+                .bind(&node_id)
+                .bind(&mutation.name)
+                .bind(&mutation.ip)
+                .bind(mutation.port)
+                .bind(mutation.region.as_deref())
+                .bind(mutation.registered_by.as_deref())
+                .bind(mutation.heartbeat_interval)
+                .bind(mutation.active_connections)
+                .bind(mutation.total_requests)
+                .bind(mutation.avg_latency_ms)
+                .bind(mutation.hardware_info.as_ref())
+                .bind(mutation.estimated_max_concurrency)
+                .bind(mutation.tunnel_mode)
+                .bind(normalized_proxy_metadata.as_ref())
+                .execute(&mut *tx)
+                .await
+                .map_postgres_err()?;
+            node_id
+        };
+
+        tx.commit().await.map_err(postgres_error)?;
+        self.find_proxy_node(&node_id).await?.ok_or_else(|| {
+            DataLayerError::UnexpectedValue("registered proxy node missing".to_string())
+        })
+    }
+
     async fn apply_heartbeat(
         &self,
         mutation: &ProxyNodeHeartbeatMutation,
@@ -274,7 +570,30 @@ impl ProxyNodeWriteRepository for SqlxProxyNodeRepository {
             .await
             .map_postgres_err()?;
 
-        self.find_proxy_node(&mutation.node_id).await
+        let updated = self.find_proxy_node(&mutation.node_id).await?;
+        let Some(updated) = updated else {
+            return Ok(None);
+        };
+
+        if reconcile_remote_config_after_heartbeat(
+            updated.remote_config.as_ref(),
+            mutation.proxy_version.as_deref(),
+        ) != updated.remote_config
+        {
+            return self
+                .update_remote_config(&ProxyNodeRemoteConfigMutation {
+                    node_id: mutation.node_id.clone(),
+                    node_name: None,
+                    allowed_ports: None,
+                    log_level: None,
+                    heartbeat_interval: None,
+                    scheduling_state: None,
+                    upgrade_to: Some(None),
+                })
+                .await;
+        }
+
+        Ok(Some(updated))
     }
 
     async fn update_tunnel_status(
@@ -332,6 +651,10 @@ VALUES (
 UPDATE proxy_nodes
 SET
   tunnel_connected = $2,
+  active_connections = CASE
+    WHEN $2 THEN active_connections
+    ELSE 0
+  END,
   tunnel_connected_at = CASE
     WHEN $3::double precision IS NULL THEN NOW()
     ELSE TO_TIMESTAMP($3::double precision)
@@ -377,6 +700,51 @@ VALUES (
         .map_postgres_err()?;
 
         tx.commit().await.map_err(postgres_error)?;
+        self.find_proxy_node(&mutation.node_id).await
+    }
+
+    async fn unregister_node(
+        &self,
+        node_id: &str,
+    ) -> Result<Option<StoredProxyNode>, DataLayerError> {
+        let existing = self.find_proxy_node(node_id).await?;
+        let Some(existing) = existing else {
+            return Ok(None);
+        };
+
+        sqlx::query(UNREGISTER_PROXY_NODE_SQL)
+            .bind(node_id)
+            .execute(&self.pool)
+            .await
+            .map_postgres_err()?;
+
+        self.find_proxy_node(&existing.id).await
+    }
+
+    async fn update_remote_config(
+        &self,
+        mutation: &ProxyNodeRemoteConfigMutation,
+    ) -> Result<Option<StoredProxyNode>, DataLayerError> {
+        let existing = self.find_proxy_node(&mutation.node_id).await?;
+        let Some(existing) = existing else {
+            return Ok(None);
+        };
+        if existing.is_manual {
+            return Err(DataLayerError::InvalidInput(
+                "手动节点不支持远程配置下发".to_string(),
+            ));
+        }
+
+        let remote_config =
+            Self::normalize_remote_config(mutation, existing.remote_config.as_ref());
+        sqlx::query(UPDATE_PROXY_NODE_REMOTE_CONFIG_SQL)
+            .bind(&mutation.node_id)
+            .bind(mutation.node_name.as_deref())
+            .bind(remote_config.as_ref())
+            .execute(&self.pool)
+            .await
+            .map_postgres_err()?;
+
         self.find_proxy_node(&mutation.node_id).await
     }
 }

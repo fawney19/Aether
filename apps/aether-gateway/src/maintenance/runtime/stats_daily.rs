@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
@@ -10,15 +8,13 @@ use aether_data_contracts::DataLayerError;
 use super::{
     postgres_error, stats_aggregation_target_day, system_config_bool, PercentileSummary,
     StatsAggregationSummary, DELETE_STATS_DAILY_ERRORS_FOR_DATE_SQL, INSERT_STATS_DAILY_ERROR_SQL,
-    INSERT_STATS_SUMMARY_SQL, SELECT_ACTIVE_USER_IDS_SQL, SELECT_EXISTING_STATS_SUMMARY_ID_SQL,
-    SELECT_STATS_DAILY_AGGREGATE_SQL, SELECT_STATS_DAILY_API_KEY_AGGREGATES_SQL,
-    SELECT_STATS_DAILY_ERROR_AGGREGATES_SQL, SELECT_STATS_DAILY_FALLBACK_COUNT_SQL,
-    SELECT_STATS_DAILY_FIRST_BYTE_PERCENTILES_SQL, SELECT_STATS_DAILY_MODEL_AGGREGATES_SQL,
-    SELECT_STATS_DAILY_PROVIDER_AGGREGATES_SQL, SELECT_STATS_DAILY_RESPONSE_TIME_PERCENTILES_SQL,
-    SELECT_STATS_SUMMARY_ENTITY_COUNTS_SQL, SELECT_STATS_SUMMARY_TOTALS_SQL,
-    SELECT_STATS_USER_DAILY_AGGREGATES_SQL, UPDATE_STATS_SUMMARY_SQL,
-    UPSERT_STATS_DAILY_API_KEY_SQL, UPSERT_STATS_DAILY_MODEL_SQL, UPSERT_STATS_DAILY_PROVIDER_SQL,
-    UPSERT_STATS_DAILY_SQL, UPSERT_STATS_USER_DAILY_SQL,
+    INSERT_STATS_SUMMARY_SQL, SELECT_EXISTING_STATS_SUMMARY_ID_SQL,
+    SELECT_STATS_DAILY_AGGREGATE_SQL, SELECT_STATS_DAILY_FALLBACK_COUNT_SQL,
+    SELECT_STATS_DAILY_FIRST_BYTE_PERCENTILES_SQL,
+    SELECT_STATS_DAILY_RESPONSE_TIME_PERCENTILES_SQL, SELECT_STATS_SUMMARY_ENTITY_COUNTS_SQL,
+    SELECT_STATS_SUMMARY_TOTALS_SQL, UPDATE_STATS_SUMMARY_SQL, UPSERT_STATS_DAILY_API_KEY_SQL,
+    UPSERT_STATS_DAILY_MODEL_SQL, UPSERT_STATS_DAILY_PROVIDER_SQL, UPSERT_STATS_DAILY_SQL,
+    UPSERT_STATS_USER_DAILY_SQL,
 };
 
 pub(super) async fn perform_stats_aggregation_once(
@@ -226,31 +222,15 @@ async fn upsert_stats_daily_model_rows(
     day_end_utc: DateTime<Utc>,
     now_utc: DateTime<Utc>,
 ) -> Result<usize, sqlx::Error> {
-    let rows = sqlx::query(SELECT_STATS_DAILY_MODEL_AGGREGATES_SQL)
+    let rows_affected = sqlx::query(UPSERT_STATS_DAILY_MODEL_SQL)
         .bind(day_start_utc)
         .bind(day_end_utc)
-        .fetch_all(&mut **tx)
-        .await?;
+        .bind(now_utc)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
 
-    for row in &rows {
-        sqlx::query(UPSERT_STATS_DAILY_MODEL_SQL)
-            .bind(Uuid::new_v4().to_string())
-            .bind(day_start_utc)
-            .bind(row.try_get::<String, _>("model")?)
-            .bind(row.try_get::<i64, _>("total_requests")?)
-            .bind(row.try_get::<i64, _>("input_tokens")?)
-            .bind(row.try_get::<i64, _>("output_tokens")?)
-            .bind(row.try_get::<i64, _>("cache_creation_tokens")?)
-            .bind(row.try_get::<i64, _>("cache_read_tokens")?)
-            .bind(row.try_get::<f64, _>("total_cost")?)
-            .bind(row.try_get::<f64, _>("avg_response_time_ms")?)
-            .bind(now_utc)
-            .bind(now_utc)
-            .execute(&mut **tx)
-            .await?;
-    }
-
-    Ok(rows.len())
+    Ok(usize::try_from(rows_affected).unwrap_or(usize::MAX))
 }
 
 async fn upsert_stats_daily_provider_rows(
@@ -259,30 +239,15 @@ async fn upsert_stats_daily_provider_rows(
     day_end_utc: DateTime<Utc>,
     now_utc: DateTime<Utc>,
 ) -> Result<usize, sqlx::Error> {
-    let rows = sqlx::query(SELECT_STATS_DAILY_PROVIDER_AGGREGATES_SQL)
+    let rows_affected = sqlx::query(UPSERT_STATS_DAILY_PROVIDER_SQL)
         .bind(day_start_utc)
         .bind(day_end_utc)
-        .fetch_all(&mut **tx)
-        .await?;
+        .bind(now_utc)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
 
-    for row in &rows {
-        sqlx::query(UPSERT_STATS_DAILY_PROVIDER_SQL)
-            .bind(Uuid::new_v4().to_string())
-            .bind(day_start_utc)
-            .bind(row.try_get::<String, _>("provider_name")?)
-            .bind(row.try_get::<i64, _>("total_requests")?)
-            .bind(row.try_get::<i64, _>("input_tokens")?)
-            .bind(row.try_get::<i64, _>("output_tokens")?)
-            .bind(row.try_get::<i64, _>("cache_creation_tokens")?)
-            .bind(row.try_get::<i64, _>("cache_read_tokens")?)
-            .bind(row.try_get::<f64, _>("total_cost")?)
-            .bind(now_utc)
-            .bind(now_utc)
-            .execute(&mut **tx)
-            .await?;
-    }
-
-    Ok(rows.len())
+    Ok(usize::try_from(rows_affected).unwrap_or(usize::MAX))
 }
 
 async fn upsert_stats_daily_api_key_rows(
@@ -291,35 +256,15 @@ async fn upsert_stats_daily_api_key_rows(
     day_end_utc: DateTime<Utc>,
     now_utc: DateTime<Utc>,
 ) -> Result<usize, sqlx::Error> {
-    let rows = sqlx::query(SELECT_STATS_DAILY_API_KEY_AGGREGATES_SQL)
+    let rows_affected = sqlx::query(UPSERT_STATS_DAILY_API_KEY_SQL)
         .bind(day_start_utc)
         .bind(day_end_utc)
-        .fetch_all(&mut **tx)
-        .await?;
+        .bind(now_utc)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
 
-    for row in &rows {
-        let total_requests = row.try_get::<i64, _>("total_requests")?;
-        let error_requests = row.try_get::<i64, _>("error_requests")?;
-        sqlx::query(UPSERT_STATS_DAILY_API_KEY_SQL)
-            .bind(Uuid::new_v4().to_string())
-            .bind(row.try_get::<String, _>("api_key_id")?)
-            .bind(row.try_get::<Option<String>, _>("api_key_name")?)
-            .bind(day_start_utc)
-            .bind(total_requests)
-            .bind(total_requests.saturating_sub(error_requests))
-            .bind(error_requests)
-            .bind(row.try_get::<i64, _>("input_tokens")?)
-            .bind(row.try_get::<i64, _>("output_tokens")?)
-            .bind(row.try_get::<i64, _>("cache_creation_tokens")?)
-            .bind(row.try_get::<i64, _>("cache_read_tokens")?)
-            .bind(row.try_get::<f64, _>("total_cost")?)
-            .bind(now_utc)
-            .bind(now_utc)
-            .execute(&mut **tx)
-            .await?;
-    }
-
-    Ok(rows.len())
+    Ok(usize::try_from(rows_affected).unwrap_or(usize::MAX))
 }
 
 async fn refresh_stats_daily_error_rows(
@@ -332,27 +277,15 @@ async fn refresh_stats_daily_error_rows(
         .bind(day_start_utc)
         .execute(&mut **tx)
         .await?;
-    let rows = sqlx::query(SELECT_STATS_DAILY_ERROR_AGGREGATES_SQL)
+    let rows_affected = sqlx::query(INSERT_STATS_DAILY_ERROR_SQL)
         .bind(day_start_utc)
         .bind(day_end_utc)
-        .fetch_all(&mut **tx)
-        .await?;
+        .bind(now_utc)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
 
-    for row in &rows {
-        sqlx::query(INSERT_STATS_DAILY_ERROR_SQL)
-            .bind(Uuid::new_v4().to_string())
-            .bind(day_start_utc)
-            .bind(row.try_get::<String, _>("error_category")?)
-            .bind(row.try_get::<Option<String>, _>("provider_name")?)
-            .bind(row.try_get::<Option<String>, _>("model")?)
-            .bind(row.try_get::<i64, _>("total_count")?)
-            .bind(now_utc)
-            .bind(now_utc)
-            .execute(&mut **tx)
-            .await?;
-    }
-
-    Ok(rows.len())
+    Ok(usize::try_from(rows_affected).unwrap_or(usize::MAX))
 }
 
 async fn upsert_stats_user_daily_rows(
@@ -361,87 +294,15 @@ async fn upsert_stats_user_daily_rows(
     day_end_utc: DateTime<Utc>,
     now_utc: DateTime<Utc>,
 ) -> Result<usize, sqlx::Error> {
-    let active_user_ids = sqlx::query(SELECT_ACTIVE_USER_IDS_SQL)
-        .fetch_all(&mut **tx)
-        .await?
-        .into_iter()
-        .map(|row| row.try_get::<String, _>("id"))
-        .collect::<Result<Vec<_>, _>>()?;
-    if active_user_ids.is_empty() {
-        return Ok(0);
-    }
-
-    let aggregated_rows = sqlx::query(SELECT_STATS_USER_DAILY_AGGREGATES_SQL)
+    let rows_affected = sqlx::query(UPSERT_STATS_USER_DAILY_SQL)
         .bind(day_start_utc)
         .bind(day_end_utc)
-        .fetch_all(&mut **tx)
-        .await?;
-    let mut aggregated_by_user = HashMap::with_capacity(aggregated_rows.len());
-    for row in aggregated_rows {
-        let user_id = row.try_get::<String, _>("user_id")?;
-        aggregated_by_user.insert(user_id, row);
-    }
+        .bind(now_utc)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
 
-    for user_id in &active_user_ids {
-        let aggregated = aggregated_by_user.get(user_id);
-        let total_requests = aggregated
-            .map(|row| row.try_get::<i64, _>("total_requests"))
-            .transpose()?
-            .unwrap_or_default();
-        let error_requests = aggregated
-            .map(|row| row.try_get::<i64, _>("error_requests"))
-            .transpose()?
-            .unwrap_or_default();
-        sqlx::query(UPSERT_STATS_USER_DAILY_SQL)
-            .bind(Uuid::new_v4().to_string())
-            .bind(user_id)
-            .bind(
-                aggregated
-                    .map(|row| row.try_get::<Option<String>, _>("username"))
-                    .transpose()?
-                    .flatten(),
-            )
-            .bind(day_start_utc)
-            .bind(total_requests)
-            .bind(total_requests.saturating_sub(error_requests))
-            .bind(error_requests)
-            .bind(
-                aggregated
-                    .map(|row| row.try_get::<i64, _>("input_tokens"))
-                    .transpose()?
-                    .unwrap_or_default(),
-            )
-            .bind(
-                aggregated
-                    .map(|row| row.try_get::<i64, _>("output_tokens"))
-                    .transpose()?
-                    .unwrap_or_default(),
-            )
-            .bind(
-                aggregated
-                    .map(|row| row.try_get::<i64, _>("cache_creation_tokens"))
-                    .transpose()?
-                    .unwrap_or_default(),
-            )
-            .bind(
-                aggregated
-                    .map(|row| row.try_get::<i64, _>("cache_read_tokens"))
-                    .transpose()?
-                    .unwrap_or_default(),
-            )
-            .bind(
-                aggregated
-                    .map(|row| row.try_get::<f64, _>("total_cost"))
-                    .transpose()?
-                    .unwrap_or_default(),
-            )
-            .bind(now_utc)
-            .bind(now_utc)
-            .execute(&mut **tx)
-            .await?;
-    }
-
-    Ok(active_user_ids.len())
+    Ok(usize::try_from(rows_affected).unwrap_or(usize::MAX))
 }
 
 async fn refresh_stats_summary_row(

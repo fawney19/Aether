@@ -2,8 +2,7 @@ use super::super::{
     build_admin_users_bad_request_response, build_admin_users_data_unavailable_response,
     build_admin_users_read_only_response, normalize_admin_optional_user_email,
     normalize_admin_user_api_formats, normalize_admin_user_role, normalize_admin_user_string_list,
-    normalize_admin_username, validate_admin_user_password, AdminUpdateUserFieldPresence,
-    AdminUpdateUserRequest,
+    normalize_admin_username, validate_admin_user_password, AdminUpdateUserPatch,
 };
 use super::support::{
     admin_user_id_from_detail_path, admin_user_password_policy, build_admin_user_payload,
@@ -52,14 +51,7 @@ pub(in super::super) async fn build_admin_update_user_response(
                 .into_response())
         }
     };
-    let field_presence = AdminUpdateUserFieldPresence {
-        allowed_providers: raw_payload.contains_key("allowed_providers"),
-        allowed_api_formats: raw_payload.contains_key("allowed_api_formats"),
-        allowed_models: raw_payload.contains_key("allowed_models"),
-    };
-    let payload = match serde_json::from_value::<AdminUpdateUserRequest>(serde_json::Value::Object(
-        raw_payload.clone(),
-    )) {
+    let patch = match AdminUpdateUserPatch::from_object(raw_payload.clone()) {
         Ok(value) => value,
         Err(_) => {
             return Ok((
@@ -69,6 +61,7 @@ pub(in super::super) async fn build_admin_update_user_response(
                 .into_response())
         }
     };
+    let (field_presence, payload) = patch.into_parts();
 
     let email = match payload.email.as_deref() {
         Some(value) => match normalize_admin_optional_user_email(Some(value)) {
@@ -142,7 +135,7 @@ pub(in super::super) async fn build_admin_update_user_response(
         )
             .into_response());
     }
-    let allowed_providers = if field_presence.allowed_providers {
+    let allowed_providers = if field_presence.contains("allowed_providers") {
         match normalize_admin_user_string_list(payload.allowed_providers, "allowed_providers") {
             Ok(value) => value,
             Err(detail) => {
@@ -156,7 +149,7 @@ pub(in super::super) async fn build_admin_update_user_response(
     } else {
         None
     };
-    let allowed_api_formats = if field_presence.allowed_api_formats {
+    let allowed_api_formats = if field_presence.contains("allowed_api_formats") {
         match normalize_admin_user_api_formats(payload.allowed_api_formats) {
             Ok(value) => value,
             Err(detail) => {
@@ -170,7 +163,7 @@ pub(in super::super) async fn build_admin_update_user_response(
     } else {
         None
     };
-    let allowed_models = if field_presence.allowed_models {
+    let allowed_models = if field_presence.contains("allowed_models") {
         match normalize_admin_user_string_list(payload.allowed_models, "allowed_models") {
             Ok(value) => value,
             Err(detail) => {
@@ -188,9 +181,9 @@ pub(in super::super) async fn build_admin_update_user_response(
         || username.is_some()
         || payload.password.is_some()
         || role.is_some()
-        || field_presence.allowed_providers
-        || field_presence.allowed_api_formats
-        || field_presence.allowed_models
+        || field_presence.contains("allowed_providers")
+        || field_presence.contains("allowed_api_formats")
+        || field_presence.contains("allowed_models")
         || payload.rate_limit.is_some()
         || payload.is_active.is_some();
     if needs_auth_user_write && !state.has_auth_user_write_capability() {
@@ -251,9 +244,9 @@ pub(in super::super) async fn build_admin_update_user_response(
     }
 
     if role.is_some()
-        || field_presence.allowed_providers
-        || field_presence.allowed_api_formats
-        || field_presence.allowed_models
+        || field_presence.contains("allowed_providers")
+        || field_presence.contains("allowed_api_formats")
+        || field_presence.contains("allowed_models")
         || payload.rate_limit.is_some()
         || payload.is_active.is_some()
     {
@@ -261,11 +254,11 @@ pub(in super::super) async fn build_admin_update_user_response(
             .update_local_auth_user_admin_fields(
                 &user_id,
                 role,
-                field_presence.allowed_providers,
+                field_presence.contains("allowed_providers"),
                 allowed_providers,
-                field_presence.allowed_api_formats,
+                field_presence.contains("allowed_api_formats"),
                 allowed_api_formats,
-                field_presence.allowed_models,
+                field_presence.contains("allowed_models"),
                 allowed_models,
                 payload.rate_limit,
                 payload.is_active,

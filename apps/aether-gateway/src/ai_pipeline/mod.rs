@@ -8,6 +8,7 @@ pub(crate) mod transport;
 
 use axum::body::Body;
 use axum::http::{Response, Uri};
+use serde_json::Value;
 
 use crate::{usage::GatewaySyncReportRequest, AppState, GatewayError};
 
@@ -58,6 +59,10 @@ pub(crate) fn collect_control_headers(
     crate::headers::collect_control_headers(headers)
 }
 
+pub(crate) fn build_report_context_original_request_echo(body_json: &Value) -> Option<Value> {
+    (!body_json.is_null()).then(|| body_json.clone())
+}
+
 pub(crate) fn is_json_request(headers: &http::HeaderMap) -> bool {
     crate::headers::is_json_request(headers)
 }
@@ -98,4 +103,27 @@ pub(crate) fn maybe_build_local_sync_finalize_response(
     payload: &GatewaySyncReportRequest,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     crate::execution_runtime::maybe_build_local_sync_finalize_response(trace_id, decision, payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_report_context_original_request_echo;
+    use serde_json::json;
+
+    #[test]
+    fn build_report_context_original_request_echo_preserves_full_request_body() {
+        let body = json!({
+            "messages": [{"role": "user", "content": "large payload should be omitted"}],
+            "service_tier": "default",
+            "instructions": "Be concise.",
+            "thinking": {"type": "enabled", "budget_tokens": 512},
+            "metadata": {"trace": "keep"},
+            "body_bytes_b64": "aGVsbG8=",
+        });
+
+        let echo =
+            build_report_context_original_request_echo(&body).expect("echo should be produced");
+
+        assert_eq!(echo, body);
+    }
 }

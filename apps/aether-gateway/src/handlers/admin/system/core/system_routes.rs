@@ -97,6 +97,33 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
         )));
     }
 
+    if decision.route_kind.as_deref() == Some("config_import")
+        && request_method == http::Method::POST
+        && request_path == "/api/admin/system/config/import"
+    {
+        let Some(request_body) = request_body else {
+            return Ok(Some(
+                (
+                    http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "detail": "请求数据验证失败" })),
+                )
+                    .into_response(),
+            ));
+        };
+        return Ok(Some(
+            match state.import_admin_system_config(request_body).await? {
+                Ok(payload) => attach_admin_audit_response(
+                    Json(payload).into_response(),
+                    "admin_system_config_imported",
+                    "import_system_config",
+                    "system_config_import",
+                    "global",
+                ),
+                Err((status, payload)) => (status, Json(payload)).into_response(),
+            },
+        ));
+    }
+
     if decision.route_kind.as_deref() == Some("users_export")
         && request_method == http::Method::GET
         && request_path == "/api/admin/system/users/export"
@@ -110,12 +137,46 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
         )));
     }
 
+    if decision.route_kind.as_deref() == Some("users_import")
+        && request_method == http::Method::POST
+        && request_path == "/api/admin/system/users/import"
+    {
+        let Some(request_body) = request_body else {
+            return Ok(Some(
+                (
+                    http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "detail": "请求数据验证失败" })),
+                )
+                    .into_response(),
+            ));
+        };
+        return Ok(Some(
+            match state
+                .import_admin_system_users(
+                    request_body,
+                    decision
+                        .admin_principal
+                        .as_ref()
+                        .map(|principal| principal.user_id.as_str()),
+                )
+                .await?
+            {
+                Ok(payload) => attach_admin_audit_response(
+                    Json(payload).into_response(),
+                    "admin_system_users_imported",
+                    "import_system_users",
+                    "system_users_import",
+                    "global",
+                ),
+                Err((status, payload)) => (status, Json(payload)).into_response(),
+            },
+        ));
+    }
+
     if matches!(
         decision.route_kind.as_deref(),
         Some(
-            "config_import"
-                | "users_import"
-                | "smtp_test"
+            "smtp_test"
                 | "cleanup"
                 | "purge_config"
                 | "purge_users"

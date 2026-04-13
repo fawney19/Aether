@@ -4,6 +4,27 @@ use aether_data_contracts::DataLayerError;
 use crate::request_metadata::sanitize_usage_request_metadata;
 use crate::{UsageEvent, UsageEventType};
 
+fn metadata_string(metadata: Option<&serde_json::Value>, key: &str) -> Option<String> {
+    metadata
+        .and_then(serde_json::Value::as_object)
+        .and_then(|object| object.get(key))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn metadata_u64(metadata: Option<&serde_json::Value>, key: &str) -> Option<u64> {
+    metadata
+        .and_then(serde_json::Value::as_object)
+        .and_then(|object| object.get(key))
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))
+        })
+}
+
 pub fn build_upsert_usage_record_from_event(
     event: &UsageEvent,
 ) -> Result<UpsertUsageRecord, DataLayerError> {
@@ -53,12 +74,51 @@ pub fn build_upsert_usage_record_from_event(
         billing_status: billing_status.to_string(),
         request_headers: data.request_headers,
         request_body: data.request_body,
+        request_body_ref: empty_to_none(data.request_body_ref)
+            .or_else(|| metadata_string(data.request_metadata.as_ref(), "request_body_ref")),
         provider_request_headers: data.provider_request_headers,
         provider_request_body: data.provider_request_body,
+        provider_request_body_ref: empty_to_none(data.provider_request_body_ref).or_else(|| {
+            metadata_string(data.request_metadata.as_ref(), "provider_request_body_ref")
+        }),
         response_headers: data.response_headers,
         response_body: data.response_body,
+        response_body_ref: empty_to_none(data.response_body_ref)
+            .or_else(|| metadata_string(data.request_metadata.as_ref(), "response_body_ref")),
         client_response_headers: data.client_response_headers,
         client_response_body: data.client_response_body,
+        client_response_body_ref: empty_to_none(data.client_response_body_ref).or_else(|| {
+            metadata_string(data.request_metadata.as_ref(), "client_response_body_ref")
+        }),
+        candidate_id: data
+            .candidate_id
+            .or_else(|| metadata_string(data.request_metadata.as_ref(), "candidate_id")),
+        candidate_index: data
+            .candidate_index
+            .or_else(|| metadata_u64(data.request_metadata.as_ref(), "candidate_index")),
+        key_name: data
+            .key_name
+            .or_else(|| metadata_string(data.request_metadata.as_ref(), "key_name")),
+        planner_kind: data
+            .planner_kind
+            .or_else(|| metadata_string(data.request_metadata.as_ref(), "planner_kind")),
+        route_family: data
+            .route_family
+            .or_else(|| metadata_string(data.request_metadata.as_ref(), "route_family")),
+        route_kind: data
+            .route_kind
+            .or_else(|| metadata_string(data.request_metadata.as_ref(), "route_kind")),
+        execution_path: data
+            .execution_path
+            .or_else(|| metadata_string(data.request_metadata.as_ref(), "execution_path")),
+        local_execution_runtime_miss_reason: data.local_execution_runtime_miss_reason.or_else(
+            || {
+                metadata_string(
+                    data.request_metadata.as_ref(),
+                    "local_execution_runtime_miss_reason",
+                )
+            },
+        ),
         request_metadata: sanitize_usage_request_metadata(data.request_metadata),
         finalized_at_unix_secs: Some(now_unix_secs),
         created_at_unix_ms: Some(now_unix_secs),
@@ -138,11 +198,11 @@ mod tests {
         })
         .expect("record should build");
 
+        assert_eq!(record.candidate_id.as_deref(), Some("cand-2"));
+        assert_eq!(record.key_name.as_deref(), Some("upstream-primary"));
         assert_eq!(
             record.request_metadata,
             Some(serde_json::json!({
-                "candidate_id": "cand-2",
-                "key_name": "upstream-primary",
                 "billing_snapshot": { "status": "complete" }
             }))
         );

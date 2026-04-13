@@ -53,6 +53,15 @@ impl AppState {
         self.data.has_user_reader()
     }
 
+    pub fn has_auth_user_data_reader(&self) -> bool {
+        #[cfg(test)]
+        if self.auth_user_store.is_some() {
+            return true;
+        }
+
+        self.data.has_user_reader()
+    }
+
     pub fn has_usage_data_writer(&self) -> bool {
         self.data.has_usage_writer()
     }

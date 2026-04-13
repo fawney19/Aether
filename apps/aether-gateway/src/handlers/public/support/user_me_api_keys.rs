@@ -530,8 +530,17 @@ pub(super) async fn handle_users_me_api_key_create(
         key_hash: hash_users_me_api_key(&plaintext_key),
         key_encrypted: Some(key_encrypted),
         name: Some(name.clone()),
+        allowed_providers: None,
+        allowed_api_formats: None,
+        allowed_models: None,
         rate_limit,
         concurrent_limit: 5,
+        force_capabilities: None,
+        is_active: true,
+        expires_at_unix_secs: None,
+        auto_delete_on_expiry: false,
+        total_requests: 0,
+        total_cost_usd: 0.0,
     };
     let Some(created) = (match state.create_user_api_key(record).await {
         Ok(value) => value,

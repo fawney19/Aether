@@ -48,17 +48,41 @@ pub struct StoredRequestUsageAudit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_body: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_request_headers: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_request_body: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_request_body_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_headers: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_body: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_response_headers: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_response_body: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_response_body_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_execution_runtime_miss_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_metadata: Option<Value>,
     pub created_at_unix_ms: u64,
@@ -185,12 +209,24 @@ impl StoredRequestUsageAudit {
             billing_status,
             request_headers: None,
             request_body: None,
+            request_body_ref: None,
             provider_request_headers: None,
             provider_request_body: None,
+            provider_request_body_ref: None,
             response_headers: None,
             response_body: None,
+            response_body_ref: None,
             client_response_headers: None,
             client_response_body: None,
+            client_response_body_ref: None,
+            candidate_id: None,
+            candidate_index: None,
+            key_name: None,
+            planner_kind: None,
+            route_family: None,
+            route_kind: None,
+            execution_path: None,
+            local_execution_runtime_miss_reason: None,
             request_metadata: None,
             created_at_unix_ms: parse_timestamp(created_at_unix_ms, "usage.created_at_unix_ms")?,
             updated_at_unix_secs: parse_timestamp(
@@ -211,6 +247,154 @@ impl StoredRequestUsageAudit {
         self.cache_creation_input_tokens = cache_creation_input_tokens;
         self.cache_read_input_tokens = cache_read_input_tokens;
         self
+    }
+
+    fn request_metadata_object(&self) -> Option<&serde_json::Map<String, Value>> {
+        self.request_metadata.as_ref().and_then(Value::as_object)
+    }
+
+    fn request_metadata_number(&self, key: &str) -> Option<f64> {
+        self.request_metadata_object()
+            .and_then(|metadata| metadata.get(key))
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+    }
+
+    fn request_metadata_u64(&self, key: &str) -> Option<u64> {
+        self.request_metadata_object()
+            .and_then(|metadata| metadata.get(key))
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
+            })
+    }
+
+    fn request_metadata_bool(&self, key: &str) -> Option<bool> {
+        self.request_metadata_object()
+            .and_then(|metadata| metadata.get(key))
+            .and_then(Value::as_bool)
+    }
+
+    fn request_metadata_string(&self, key: &str) -> Option<&str> {
+        self.request_metadata_object()
+            .and_then(|metadata| metadata.get(key))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    fn billing_snapshot_resolved_number(&self, key: &str) -> Option<f64> {
+        self.request_metadata_object()
+            .and_then(|metadata| metadata.get("billing_snapshot"))
+            .and_then(Value::as_object)
+            .and_then(|snapshot| snapshot.get("resolved_variables"))
+            .and_then(Value::as_object)
+            .and_then(|variables| variables.get(key))
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+    }
+
+    pub fn settlement_billing_snapshot_schema_version(&self) -> Option<&str> {
+        self.request_metadata_string("billing_snapshot_schema_version")
+    }
+
+    pub fn settlement_billing_snapshot_status(&self) -> Option<&str> {
+        self.request_metadata_string("billing_snapshot_status")
+    }
+
+    pub fn settlement_rate_multiplier(&self) -> Option<f64> {
+        self.request_metadata_number("rate_multiplier")
+    }
+
+    pub fn settlement_is_free_tier(&self) -> Option<bool> {
+        self.request_metadata_bool("is_free_tier")
+    }
+
+    pub fn settlement_input_price_per_1m(&self) -> Option<f64> {
+        self.request_metadata_number("input_price_per_1m")
+            .or_else(|| self.billing_snapshot_resolved_number("input_price_per_1m"))
+    }
+
+    pub fn settlement_output_price_per_1m(&self) -> Option<f64> {
+        self.request_metadata_number("output_price_per_1m")
+            .or_else(|| self.billing_snapshot_resolved_number("output_price_per_1m"))
+            .or(self.output_price_per_1m)
+    }
+
+    pub fn settlement_cache_creation_price_per_1m(&self) -> Option<f64> {
+        self.request_metadata_number("cache_creation_price_per_1m")
+            .or_else(|| self.billing_snapshot_resolved_number("cache_creation_price_per_1m"))
+    }
+
+    pub fn settlement_cache_read_price_per_1m(&self) -> Option<f64> {
+        self.request_metadata_number("cache_read_price_per_1m")
+            .or_else(|| self.billing_snapshot_resolved_number("cache_read_price_per_1m"))
+    }
+
+    pub fn settlement_price_per_request(&self) -> Option<f64> {
+        self.request_metadata_number("price_per_request")
+            .or_else(|| self.billing_snapshot_resolved_number("price_per_request"))
+    }
+
+    pub fn trace_id(&self) -> Option<&str> {
+        self.request_metadata_string("trace_id")
+    }
+
+    pub fn body_ref(&self, field: UsageBodyField) -> Option<&str> {
+        match field {
+            UsageBodyField::RequestBody => self.request_body_ref.as_deref(),
+            UsageBodyField::ProviderRequestBody => self.provider_request_body_ref.as_deref(),
+            UsageBodyField::ResponseBody => self.response_body_ref.as_deref(),
+            UsageBodyField::ClientResponseBody => self.client_response_body_ref.as_deref(),
+        }
+    }
+
+    pub fn routing_candidate_id(&self) -> Option<&str> {
+        self.candidate_id
+            .as_deref()
+            .or_else(|| self.request_metadata_string("candidate_id"))
+    }
+
+    pub fn routing_candidate_index(&self) -> Option<u64> {
+        self.candidate_index
+            .or_else(|| self.request_metadata_u64("candidate_index"))
+    }
+
+    pub fn routing_key_name(&self) -> Option<&str> {
+        self.key_name
+            .as_deref()
+            .or_else(|| self.request_metadata_string("key_name"))
+    }
+
+    pub fn routing_planner_kind(&self) -> Option<&str> {
+        self.planner_kind
+            .as_deref()
+            .or_else(|| self.request_metadata_string("planner_kind"))
+    }
+
+    pub fn routing_route_family(&self) -> Option<&str> {
+        self.route_family
+            .as_deref()
+            .or_else(|| self.request_metadata_string("route_family"))
+    }
+
+    pub fn routing_route_kind(&self) -> Option<&str> {
+        self.route_kind
+            .as_deref()
+            .or_else(|| self.request_metadata_string("route_kind"))
+    }
+
+    pub fn routing_execution_path(&self) -> Option<&str> {
+        self.execution_path
+            .as_deref()
+            .or_else(|| self.request_metadata_string("execution_path"))
+    }
+
+    pub fn routing_local_execution_runtime_miss_reason(&self) -> Option<&str> {
+        self.local_execution_runtime_miss_reason
+            .as_deref()
+            .or_else(|| self.request_metadata_string("local_execution_runtime_miss_reason"))
     }
 }
 
@@ -298,6 +482,64 @@ pub struct UsageAuditListQuery {
     pub model: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageBodyField {
+    RequestBody,
+    ProviderRequestBody,
+    ResponseBody,
+    ClientResponseBody,
+}
+
+impl UsageBodyField {
+    pub fn as_ref_key(&self) -> &'static str {
+        match self {
+            Self::RequestBody => "request_body_ref",
+            Self::ProviderRequestBody => "provider_request_body_ref",
+            Self::ResponseBody => "response_body_ref",
+            Self::ClientResponseBody => "client_response_body_ref",
+        }
+    }
+
+    pub fn as_storage_field(&self) -> &'static str {
+        match self {
+            Self::RequestBody => "request_body",
+            Self::ProviderRequestBody => "provider_request_body",
+            Self::ResponseBody => "response_body",
+            Self::ClientResponseBody => "client_response_body",
+        }
+    }
+
+    pub fn from_storage_field(value: &str) -> Option<Self> {
+        match value {
+            "request_body" => Some(Self::RequestBody),
+            "provider_request_body" => Some(Self::ProviderRequestBody),
+            "response_body" => Some(Self::ResponseBody),
+            "client_response_body" => Some(Self::ClientResponseBody),
+            _ => None,
+        }
+    }
+}
+
+pub fn usage_body_ref(request_id: &str, field: UsageBodyField) -> String {
+    format!("usage://request/{request_id}/{}", field.as_storage_field())
+}
+
+pub fn parse_usage_body_ref(body_ref: &str) -> Option<(String, UsageBodyField)> {
+    let body_ref = body_ref.trim();
+    let prefix = "usage://request/";
+    let suffix = body_ref.strip_prefix(prefix)?;
+    let (request_id, field) = suffix.rsplit_once('/')?;
+    let request_id = request_id.trim();
+    if request_id.is_empty() {
+        return None;
+    }
+    Some((
+        request_id.to_string(),
+        UsageBodyField::from_storage_field(field.trim())?,
+    ))
+}
+
 #[async_trait]
 pub trait UsageReadRepository: Send + Sync {
     async fn find_by_id(
@@ -309,6 +551,11 @@ pub trait UsageReadRepository: Send + Sync {
         &self,
         request_id: &str,
     ) -> Result<Option<StoredRequestUsageAudit>, crate::DataLayerError>;
+
+    async fn resolve_body_ref(
+        &self,
+        body_ref: &str,
+    ) -> Result<Option<Value>, crate::DataLayerError>;
 
     async fn list_usage_audits(
         &self,
@@ -384,12 +631,24 @@ pub struct UpsertUsageRecord {
     pub billing_status: String,
     pub request_headers: Option<Value>,
     pub request_body: Option<Value>,
+    pub request_body_ref: Option<String>,
     pub provider_request_headers: Option<Value>,
     pub provider_request_body: Option<Value>,
+    pub provider_request_body_ref: Option<String>,
     pub response_headers: Option<Value>,
     pub response_body: Option<Value>,
+    pub response_body_ref: Option<String>,
     pub client_response_headers: Option<Value>,
     pub client_response_body: Option<Value>,
+    pub client_response_body_ref: Option<String>,
+    pub candidate_id: Option<String>,
+    pub candidate_index: Option<u64>,
+    pub key_name: Option<String>,
+    pub planner_kind: Option<String>,
+    pub route_family: Option<String>,
+    pub route_kind: Option<String>,
+    pub execution_path: Option<String>,
+    pub local_execution_runtime_miss_reason: Option<String>,
     pub request_metadata: Option<Value>,
     pub finalized_at_unix_secs: Option<u64>,
     pub created_at_unix_ms: Option<u64>,
@@ -511,8 +770,50 @@ fn parse_timestamp(value: i64, field_name: &str) -> Result<u64, crate::DataLayer
 
 #[cfg(test)]
 mod tests {
-    use super::{StoredRequestUsageAudit, UpsertUsageRecord};
+    use super::{StoredRequestUsageAudit, UpsertUsageRecord, UsageBodyField};
     use serde_json::json;
+
+    fn sample_usage() -> StoredRequestUsageAudit {
+        StoredRequestUsageAudit::new(
+            "usage-1".to_string(),
+            "req-1".to_string(),
+            None,
+            None,
+            None,
+            None,
+            "OpenAI".to_string(),
+            "gpt-4.1".to_string(),
+            None,
+            None,
+            None,
+            None,
+            Some("chat".to_string()),
+            Some("openai:chat".to_string()),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            Some("openai:chat".to_string()),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            false,
+            false,
+            10,
+            20,
+            30,
+            0.1,
+            0.1,
+            Some(200),
+            None,
+            None,
+            Some(120),
+            Some(80),
+            "completed".to_string(),
+            "settled".to_string(),
+            100,
+            101,
+            Some(102),
+        )
+        .expect("usage should build")
+    }
 
     #[test]
     fn rejects_empty_request_id() {
@@ -644,12 +945,24 @@ mod tests {
             billing_status: "pending".to_string(),
             request_headers: Some(json!({"authorization": "Bearer test"})),
             request_body: Some(json!({"model": "gpt-5"})),
+            request_body_ref: None,
             provider_request_headers: None,
             provider_request_body: None,
+            provider_request_body_ref: None,
             response_headers: None,
             response_body: None,
+            response_body_ref: None,
             client_response_headers: None,
             client_response_body: None,
+            client_response_body_ref: None,
+            candidate_id: None,
+            candidate_index: None,
+            key_name: None,
+            planner_kind: None,
+            route_family: None,
+            route_kind: None,
+            execution_path: None,
+            local_execution_runtime_miss_reason: None,
             request_metadata: None,
             finalized_at_unix_secs: None,
             created_at_unix_ms: Some(100),
@@ -657,5 +970,134 @@ mod tests {
         };
 
         assert!(record.validate().is_err());
+    }
+
+    #[test]
+    fn settlement_accessors_prefer_typed_metadata() {
+        let mut usage = sample_usage();
+        usage.output_price_per_1m = Some(11.0);
+        usage.request_metadata = Some(json!({
+            "billing_snapshot_schema_version": "v2",
+            "billing_snapshot_status": "resolved",
+            "rate_multiplier": 0.5,
+            "is_free_tier": false,
+            "input_price_per_1m": 3.0,
+            "output_price_per_1m": 9.0,
+            "cache_creation_price_per_1m": 3.75,
+            "cache_read_price_per_1m": 0.3,
+            "price_per_request": 0.02,
+            "billing_snapshot": {
+                "resolved_variables": {
+                    "output_price_per_1m": 11.0
+                }
+            }
+        }));
+
+        assert_eq!(
+            usage.settlement_billing_snapshot_schema_version(),
+            Some("v2")
+        );
+        assert_eq!(usage.settlement_billing_snapshot_status(), Some("resolved"));
+        assert_eq!(usage.settlement_rate_multiplier(), Some(0.5));
+        assert_eq!(usage.settlement_is_free_tier(), Some(false));
+        assert_eq!(usage.settlement_input_price_per_1m(), Some(3.0));
+        assert_eq!(usage.settlement_output_price_per_1m(), Some(9.0));
+        assert_eq!(usage.settlement_cache_creation_price_per_1m(), Some(3.75));
+        assert_eq!(usage.settlement_cache_read_price_per_1m(), Some(0.3));
+        assert_eq!(usage.settlement_price_per_request(), Some(0.02));
+    }
+
+    #[test]
+    fn settlement_accessors_fall_back_to_billing_snapshot_and_legacy_output_price() {
+        let mut usage = sample_usage();
+        usage.output_price_per_1m = Some(15.0);
+        usage.request_metadata = Some(json!({
+            "billing_snapshot": {
+                "resolved_variables": {
+                    "input_price_per_1m": 3.0,
+                    "cache_creation_price_per_1m": 3.75,
+                    "cache_read_price_per_1m": 0.3,
+                    "price_per_request": 0.02
+                }
+            }
+        }));
+
+        assert_eq!(usage.settlement_input_price_per_1m(), Some(3.0));
+        assert_eq!(usage.settlement_output_price_per_1m(), Some(15.0));
+        assert_eq!(usage.settlement_cache_creation_price_per_1m(), Some(3.75));
+        assert_eq!(usage.settlement_cache_read_price_per_1m(), Some(0.3));
+        assert_eq!(usage.settlement_price_per_request(), Some(0.02));
+    }
+
+    #[test]
+    fn body_ref_and_routing_accessors_prefer_typed_fields() {
+        let mut usage = sample_usage();
+        usage.request_body_ref = Some("usage://request/req-1/request_body".to_string());
+        usage.provider_request_body_ref =
+            Some("usage://request/req-1/provider_request_body".to_string());
+        usage.response_body_ref = Some("usage://request/req-1/response_body".to_string());
+        usage.client_response_body_ref =
+            Some("usage://request/req-1/client_response_body".to_string());
+        usage.candidate_id = Some("cand-typed".to_string());
+        usage.key_name = Some("primary-typed".to_string());
+        usage.planner_kind = Some("claude_cli_sync".to_string());
+        usage.route_family = Some("claude".to_string());
+        usage.route_kind = Some("cli".to_string());
+        usage.execution_path = Some("local_execution_runtime_miss".to_string());
+        usage.local_execution_runtime_miss_reason = Some("all_candidates_skipped".to_string());
+        usage.request_metadata = Some(json!({
+            "request_body_ref": "blob://legacy-request",
+            "provider_request_body_ref": "blob://legacy-provider",
+            "response_body_ref": "blob://legacy-response",
+            "client_response_body_ref": "blob://legacy-client-response",
+            "candidate_id": "cand-legacy",
+            "key_name": "primary-legacy"
+        }));
+
+        assert_eq!(
+            usage.body_ref(UsageBodyField::RequestBody),
+            Some("usage://request/req-1/request_body")
+        );
+        assert_eq!(
+            usage.body_ref(UsageBodyField::ProviderRequestBody),
+            Some("usage://request/req-1/provider_request_body")
+        );
+        assert_eq!(
+            usage.body_ref(UsageBodyField::ResponseBody),
+            Some("usage://request/req-1/response_body")
+        );
+        assert_eq!(
+            usage.body_ref(UsageBodyField::ClientResponseBody),
+            Some("usage://request/req-1/client_response_body")
+        );
+        assert_eq!(usage.routing_candidate_id(), Some("cand-typed"));
+        assert_eq!(usage.routing_key_name(), Some("primary-typed"));
+        assert_eq!(usage.routing_planner_kind(), Some("claude_cli_sync"));
+        assert_eq!(usage.routing_route_family(), Some("claude"));
+        assert_eq!(usage.routing_route_kind(), Some("cli"));
+        assert_eq!(
+            usage.routing_execution_path(),
+            Some("local_execution_runtime_miss")
+        );
+        assert_eq!(
+            usage.routing_local_execution_runtime_miss_reason(),
+            Some("all_candidates_skipped")
+        );
+    }
+
+    #[test]
+    fn body_ref_accessor_ignores_legacy_metadata_compatibility_keys() {
+        let mut usage = sample_usage();
+        usage.request_metadata = Some(json!({
+            "request_body_ref": "blob://legacy-request",
+            "provider_request_body_ref": "blob://legacy-provider",
+            "response_body_ref": "blob://legacy-response",
+            "client_response_body_ref": "blob://legacy-client-response"
+        }));
+
+        assert_eq!(usage.body_ref(UsageBodyField::RequestBody), None);
+        assert_eq!(usage.body_ref(UsageBodyField::ProviderRequestBody), None);
+        assert_eq!(usage.body_ref(UsageBodyField::ResponseBody), None);
+        assert_eq!(usage.body_ref(UsageBodyField::ClientResponseBody), None);
     }
 }

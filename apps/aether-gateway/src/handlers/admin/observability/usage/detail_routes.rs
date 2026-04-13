@@ -1,8 +1,9 @@
-use super::analytics::admin_usage_provider_key_names;
+use super::analytics::{admin_usage_api_key_names, admin_usage_provider_key_names};
 use super::replay::{
     admin_usage_curl_headers, admin_usage_curl_url, admin_usage_headers_from_value,
     admin_usage_id_from_action_path, admin_usage_id_from_detail_path,
-    admin_usage_resolve_request_preview_body, build_admin_usage_curl_response,
+    admin_usage_resolve_body_value, admin_usage_resolve_request_preview_body,
+    admin_usage_resolve_request_preview_body_for_item, build_admin_usage_curl_response,
     build_admin_usage_detail_payload, build_admin_usage_replay_response,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
@@ -12,6 +13,7 @@ use aether_admin::observability::usage::{
     admin_usage_bad_request_response, admin_usage_data_unavailable_response,
     admin_usage_provider_key_name, ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL,
 };
+use aether_data_contracts::repository::usage::UsageBodyField;
 use axum::{
     body::Body,
     http,
@@ -82,10 +84,22 @@ pub(super) async fn maybe_build_local_admin_usage_detail_response(
                 .and_then(admin_usage_headers_from_value)
                 .filter(|headers| !headers.is_empty())
                 .unwrap_or_else(admin_usage_curl_headers);
-            let body = item
-                .provider_request_body
-                .clone()
-                .or_else(|| item.request_body.clone())
+            let provider_request_body = admin_usage_resolve_body_value(
+                state,
+                &item,
+                item.provider_request_body.as_ref(),
+                UsageBodyField::ProviderRequestBody,
+            )
+            .await?;
+            let request_body = admin_usage_resolve_body_value(
+                state,
+                &item,
+                item.request_body.as_ref(),
+                UsageBodyField::RequestBody,
+            )
+            .await?;
+            let body = provider_request_body
+                .or(request_body)
                 .unwrap_or_else(|| admin_usage_resolve_request_preview_body(&item, None));
             return Ok(Some(attach_admin_audit_response(
                 build_admin_usage_curl_response(&item, url, headers_json, &headers, &body),
@@ -146,32 +160,50 @@ pub(super) async fn maybe_build_local_admin_usage_detail_response(
             };
 
             let users_by_id: BTreeMap<String, aether_data::repository::users::StoredUserSummary> =
-                if state.has_user_data_reader() {
-                    if let Some(user_id) = item.user_id.as_ref() {
-                        state
-                            .list_users_by_ids(std::slice::from_ref(user_id))
-                            .await?
-                            .into_iter()
-                            .map(|user| (user.id.clone(), user))
-                            .collect()
-                    } else {
-                        BTreeMap::new()
-                    }
-                } else {
-                    BTreeMap::new()
-                };
+                state
+                    .resolve_auth_user_summaries_by_ids(
+                        &item.user_id.clone().into_iter().collect::<Vec<_>>(),
+                    )
+                    .await?;
             let provider_key_names =
                 admin_usage_provider_key_names(state, std::slice::from_ref(&item)).await?;
+            let api_key_names =
+                admin_usage_api_key_names(state, std::slice::from_ref(&item)).await?;
             let provider_key_name = admin_usage_provider_key_name(&item, &provider_key_names);
 
-            let request_body = item
-                .request_body
-                .clone()
-                .unwrap_or_else(|| admin_usage_resolve_request_preview_body(&item, None));
+            let request_body =
+                admin_usage_resolve_request_preview_body_for_item(state, &item, None).await?;
+            let mut detail_item = item.clone();
+            if include_bodies {
+                detail_item.provider_request_body = admin_usage_resolve_body_value(
+                    state,
+                    &item,
+                    item.provider_request_body.as_ref(),
+                    UsageBodyField::ProviderRequestBody,
+                )
+                .await?;
+                detail_item.response_body = admin_usage_resolve_body_value(
+                    state,
+                    &item,
+                    item.response_body.as_ref(),
+                    UsageBodyField::ResponseBody,
+                )
+                .await?;
+                detail_item.client_response_body = admin_usage_resolve_body_value(
+                    state,
+                    &item,
+                    item.client_response_body.as_ref(),
+                    UsageBodyField::ClientResponseBody,
+                )
+                .await?;
+            }
             let default_headers = admin_usage_curl_headers();
             let payload = build_admin_usage_detail_payload(
-                &item,
+                &detail_item,
                 &users_by_id,
+                &api_key_names,
+                state.has_auth_user_data_reader(),
+                state.has_auth_api_key_data_reader(),
                 provider_key_name.as_deref(),
                 include_bodies,
                 request_body,

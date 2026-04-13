@@ -120,6 +120,18 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn list_video_task_page_summary(
+        &self,
+        filter: &VideoTaskQueryFilter,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<StoredVideoTask>, GatewayError> {
+        self.data
+            .list_video_task_page_summary(filter, offset, limit)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn count_video_tasks(
         &self,
         filter: &VideoTaskQueryFilter,

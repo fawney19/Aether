@@ -6,7 +6,7 @@ use std::sync::Arc;
 type HeartbeatAckCallback =
     dyn Fn(Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, String>> + Send + Sync;
 type NodeStatusCallback =
-    dyn Fn(String, bool, usize) -> BoxFuture<'static, Result<(), String>> + Send + Sync;
+    dyn Fn(String, bool, usize, u64) -> BoxFuture<'static, Result<(), String>> + Send + Sync;
 
 enum ControlPlaneMode {
     Disabled,
@@ -51,7 +51,7 @@ impl ControlPlaneClient {
     where
         HeartbeatAck:
             Fn(Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, String>> + Send + Sync + 'static,
-        PushNodeStatus: Fn(String, bool, usize) -> BoxFuture<'static, Result<(), String>>
+        PushNodeStatus: Fn(String, bool, usize, u64) -> BoxFuture<'static, Result<(), String>>
             + Send
             + Sync
             + 'static,
@@ -103,6 +103,7 @@ impl ControlPlaneClient {
         node_id: &str,
         connected: bool,
         conn_count: usize,
+        observed_at_unix_secs: u64,
     ) -> Result<(), String> {
         match self.inner.as_ref() {
             ControlPlaneMode::Disabled => Ok(()),
@@ -120,6 +121,7 @@ impl ControlPlaneClient {
                         "node_id": node_id,
                         "connected": connected,
                         "conn_count": conn_count,
+                        "observed_at_unix_secs": observed_at_unix_secs,
                     }))
                     .send()
                     .await
@@ -135,7 +137,15 @@ impl ControlPlaneClient {
             }
             ControlPlaneMode::Local {
                 push_node_status, ..
-            } => push_node_status(node_id.to_string(), connected, conn_count).await,
+            } => {
+                push_node_status(
+                    node_id.to_string(),
+                    connected,
+                    conn_count,
+                    observed_at_unix_secs,
+                )
+                .await
+            }
         }
     }
 }

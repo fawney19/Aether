@@ -3,6 +3,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER: &str = "x-aether-execution-follow-redirects";
+pub const EXECUTION_REQUEST_HTTP1_ONLY_HEADER: &str = "x-aether-execution-http1-only";
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ExecutionTimeouts {

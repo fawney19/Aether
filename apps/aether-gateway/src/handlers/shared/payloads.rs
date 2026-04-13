@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 pub(crate) struct InternalTunnelHeartbeatRequest {
     pub(crate) node_id: String,
     #[serde(default)]
+    pub(crate) heartbeat_id: Option<u64>,
+    #[serde(default)]
     pub(crate) heartbeat_interval: Option<i32>,
     #[serde(default)]
     pub(crate) active_connections: Option<i32>,
@@ -30,6 +32,8 @@ pub(crate) struct InternalTunnelNodeStatusRequest {
     pub(crate) connected: bool,
     #[serde(default)]
     pub(crate) conn_count: i32,
+    #[serde(default)]
+    pub(crate) observed_at_unix_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

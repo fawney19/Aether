@@ -169,6 +169,21 @@ impl Service<Uri> for InstrumentedConnector {
 }
 
 pub fn build_upstream_client(config: &Config, dns_cache: Arc<DnsCache>) -> UpstreamClient {
+    build_upstream_client_with_protocol(config, dns_cache, false)
+}
+
+pub fn build_http1_only_upstream_client(
+    config: &Config,
+    dns_cache: Arc<DnsCache>,
+) -> UpstreamClient {
+    build_upstream_client_with_protocol(config, dns_cache, true)
+}
+
+fn build_upstream_client_with_protocol(
+    config: &Config,
+    dns_cache: Arc<DnsCache>,
+    http1_only: bool,
+) -> UpstreamClient {
     let mut http = HttpConnector::new_with_resolver(ValidatedResolver::new(dns_cache));
     http.enforce_http(false);
     http.set_connect_timeout(Some(Duration::from_secs(
@@ -185,7 +200,7 @@ pub fn build_upstream_client(config: &Config, dns_cache: Arc<DnsCache>) -> Upstr
 
     let connector = InstrumentedConnector {
         http,
-        tls_config: build_tls_config(),
+        tls_config: build_tls_config(http1_only),
     };
 
     let mut builder = Client::builder(TokioExecutor::new());
@@ -226,13 +241,17 @@ pub fn resolve_request_timing<B>(
     }
 }
 
-fn build_tls_config() -> Arc<ClientConfig> {
+fn build_tls_config(http1_only: bool) -> Arc<ClientConfig> {
     let root_store =
         rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let mut config = ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config.alpn_protocols = if http1_only {
+        vec![b"http/1.1".to_vec()]
+    } else {
+        vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+    };
     Arc::new(config)
 }
 

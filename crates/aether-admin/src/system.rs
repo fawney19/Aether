@@ -13,7 +13,8 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::json;
+use serde::{de, de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone)]
@@ -35,6 +36,495 @@ pub struct AdminSystemConfigUpdate {
 pub struct AdminEmailTemplateUpdate {
     pub subject: Option<String>,
     pub html: Option<String>,
+}
+
+pub const ADMIN_SYSTEM_CONFIG_EXPORT_VERSION: &str = "2.2";
+pub const ADMIN_SYSTEM_CONFIG_SUPPORTED_VERSIONS: &[&str] = &["2.0", "2.1", "2.2"];
+pub const ADMIN_SYSTEM_PROVIDER_OPS_SENSITIVE_CREDENTIAL_FIELDS: &[&str] = &[
+    "api_key",
+    "password",
+    "refresh_token",
+    "session_token",
+    "session_cookie",
+    "token_cookie",
+    "auth_cookie",
+    "cookie_string",
+    "cookie",
+];
+
+fn default_true() -> bool {
+    true
+}
+
+fn invalid_request(detail: impl Into<String>) -> (http::StatusCode, serde_json::Value) {
+    (
+        http::StatusCode::BAD_REQUEST,
+        json!({ "detail": detail.into() }),
+    )
+}
+
+fn deserialize_optional_f64_from_number_or_string<'de, D>(
+    deserializer: D,
+) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_f64()
+            .filter(|value| value.is_finite())
+            .map(Some)
+            .ok_or_else(|| de::Error::custom("expected a finite number")),
+        Some(Value::String(raw)) => raw
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(Some)
+            .ok_or_else(|| de::Error::custom("expected a finite number or numeric string")),
+        Some(_) => Err(de::Error::custom(
+            "expected a finite number or numeric string",
+        )),
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminImportMergeMode {
+    #[default]
+    Skip,
+    Overwrite,
+    Error,
+}
+
+impl AdminImportMergeMode {
+    fn parse_json_value(
+        value: Option<&serde_json::Value>,
+    ) -> Result<Self, (http::StatusCode, serde_json::Value)> {
+        match value
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("skip")
+            .trim()
+        {
+            "" | "skip" => Ok(Self::Skip),
+            "overwrite" => Ok(Self::Overwrite),
+            "error" => Ok(Self::Error),
+            _ => Err(invalid_request(
+                "merge_mode 仅支持 skip / overwrite / error",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AdminImportMergeMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+        match value {
+            None | Some(serde_json::Value::Null) => Ok(Self::Skip),
+            Some(serde_json::Value::String(raw)) => match raw.trim() {
+                "" | "skip" => Ok(Self::Skip),
+                "overwrite" => Ok(Self::Overwrite),
+                "error" => Ok(Self::Error),
+                _ => Err(de::Error::custom(
+                    "merge_mode 仅支持 skip / overwrite / error",
+                )),
+            },
+            Some(_) => Err(de::Error::custom(
+                "merge_mode 仅支持 skip / overwrite / error",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct AdminSystemConfigImportCounter {
+    pub created: u64,
+    pub updated: u64,
+    pub skipped: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct AdminSystemConfigImportStats {
+    pub global_models: AdminSystemConfigImportCounter,
+    pub proxy_nodes: AdminSystemConfigImportCounter,
+    pub providers: AdminSystemConfigImportCounter,
+    pub endpoints: AdminSystemConfigImportCounter,
+    pub keys: AdminSystemConfigImportCounter,
+    pub models: AdminSystemConfigImportCounter,
+    pub ldap: AdminSystemConfigImportCounter,
+    pub oauth: AdminSystemConfigImportCounter,
+    pub system_configs: AdminSystemConfigImportCounter,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminSystemConfigGlobalModel {
+    pub name: String,
+    pub display_name: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_f64_from_number_or_string"
+    )]
+    pub default_price_per_request: Option<f64>,
+    #[serde(default)]
+    pub default_tiered_pricing: Option<Value>,
+    #[serde(default)]
+    pub supported_capabilities: Option<Vec<String>>,
+    #[serde(default)]
+    pub config: Option<Value>,
+    #[serde(default = "default_true")]
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminSystemConfigEndpoint {
+    pub api_format: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub header_rules: Option<Value>,
+    #[serde(default)]
+    pub body_rules: Option<Value>,
+    #[serde(default)]
+    pub max_retries: Option<i32>,
+    #[serde(default = "default_true")]
+    pub is_active: bool,
+    #[serde(default)]
+    pub custom_path: Option<String>,
+    #[serde(default)]
+    pub config: Option<Value>,
+    #[serde(default)]
+    pub format_acceptance_config: Option<Value>,
+    #[serde(default)]
+    pub proxy: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminSystemConfigProviderKey {
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub auth_type: Option<String>,
+    #[serde(default)]
+    pub auth_config: Option<Value>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub api_formats: Option<Vec<String>>,
+    #[serde(default)]
+    pub supported_endpoints: Option<Vec<String>>,
+    #[serde(default)]
+    pub rate_multipliers: Option<Value>,
+    #[serde(default)]
+    pub internal_priority: Option<i32>,
+    #[serde(default)]
+    pub global_priority_by_format: Option<Value>,
+    #[serde(default)]
+    pub rpm_limit: Option<u32>,
+    #[serde(default)]
+    pub allowed_models: Option<Vec<String>>,
+    #[serde(default)]
+    pub capabilities: Option<Value>,
+    #[serde(default)]
+    pub cache_ttl_minutes: Option<i32>,
+    #[serde(default)]
+    pub max_probe_interval_minutes: Option<i32>,
+    #[serde(default)]
+    pub auto_fetch_models: Option<bool>,
+    #[serde(default)]
+    pub locked_models: Option<Vec<String>>,
+    #[serde(default)]
+    pub model_include_patterns: Option<Vec<String>>,
+    #[serde(default)]
+    pub model_exclude_patterns: Option<Vec<String>>,
+    #[serde(default = "default_true")]
+    pub is_active: bool,
+    #[serde(default)]
+    pub proxy: Option<Value>,
+    #[serde(default)]
+    pub fingerprint: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminSystemConfigProviderModel {
+    #[serde(default)]
+    pub global_model_name: Option<String>,
+    pub provider_model_name: String,
+    #[serde(default)]
+    pub provider_model_mappings: Option<Value>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_f64_from_number_or_string"
+    )]
+    pub price_per_request: Option<f64>,
+    #[serde(default)]
+    pub tiered_pricing: Option<Value>,
+    #[serde(default)]
+    pub supports_vision: Option<bool>,
+    #[serde(default)]
+    pub supports_function_calling: Option<bool>,
+    #[serde(default)]
+    pub supports_streaming: Option<bool>,
+    #[serde(default)]
+    pub supports_extended_thinking: Option<bool>,
+    #[serde(default)]
+    pub supports_image_generation: Option<bool>,
+    #[serde(default = "default_true")]
+    pub is_active: bool,
+    #[serde(default)]
+    pub config: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminSystemConfigProvider {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub website: Option<String>,
+    #[serde(default)]
+    pub provider_type: Option<String>,
+    #[serde(default)]
+    pub billing_type: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_f64_from_number_or_string"
+    )]
+    pub monthly_quota_usd: Option<f64>,
+    #[serde(default)]
+    pub quota_reset_day: Option<u64>,
+    #[serde(default)]
+    pub provider_priority: Option<i32>,
+    #[serde(default)]
+    pub keep_priority_on_conversion: Option<bool>,
+    #[serde(default)]
+    pub enable_format_conversion: Option<bool>,
+    #[serde(default = "default_true")]
+    pub is_active: bool,
+    #[serde(default)]
+    pub concurrent_limit: Option<i32>,
+    #[serde(default)]
+    pub max_retries: Option<i32>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_f64_from_number_or_string"
+    )]
+    pub stream_first_byte_timeout: Option<f64>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_f64_from_number_or_string"
+    )]
+    pub request_timeout: Option<f64>,
+    #[serde(default)]
+    pub proxy: Option<Value>,
+    #[serde(default)]
+    pub config: Option<Value>,
+    #[serde(default)]
+    pub endpoints: Vec<AdminSystemConfigEndpoint>,
+    #[serde(default)]
+    pub api_keys: Vec<AdminSystemConfigProviderKey>,
+    #[serde(default)]
+    pub models: Vec<AdminSystemConfigProviderModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminSystemConfigProxyNode {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub ip: Option<String>,
+    #[serde(default)]
+    pub port: Option<i32>,
+    #[serde(default)]
+    pub region: Option<String>,
+    #[serde(default)]
+    pub is_manual: Option<bool>,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub proxy_username: Option<String>,
+    #[serde(default)]
+    pub proxy_password: Option<String>,
+    #[serde(default)]
+    pub tunnel_mode: Option<bool>,
+    #[serde(default)]
+    pub heartbeat_interval: Option<i32>,
+    #[serde(default)]
+    pub remote_config: Option<Value>,
+    #[serde(default)]
+    pub config_version: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminSystemConfigLdap {
+    pub server_url: String,
+    pub bind_dn: String,
+    #[serde(default)]
+    pub bind_password: Option<String>,
+    pub base_dn: String,
+    #[serde(default)]
+    pub user_search_filter: Option<String>,
+    #[serde(default)]
+    pub username_attr: Option<String>,
+    #[serde(default)]
+    pub email_attr: Option<String>,
+    #[serde(default)]
+    pub display_name_attr: Option<String>,
+    #[serde(default)]
+    pub is_enabled: bool,
+    #[serde(default)]
+    pub is_exclusive: bool,
+    #[serde(default)]
+    pub use_starttls: bool,
+    #[serde(default)]
+    pub connect_timeout: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminSystemConfigOAuthProvider {
+    pub provider_type: String,
+    pub display_name: String,
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    #[serde(default)]
+    pub authorization_url_override: Option<String>,
+    #[serde(default)]
+    pub token_url_override: Option<String>,
+    #[serde(default)]
+    pub userinfo_url_override: Option<String>,
+    #[serde(default)]
+    pub scopes: Option<Vec<String>>,
+    pub redirect_uri: String,
+    pub frontend_callback_url: String,
+    #[serde(default)]
+    pub attribute_mapping: Option<Value>,
+    #[serde(default)]
+    pub extra_config: Option<Value>,
+    #[serde(default)]
+    pub is_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminSystemConfigEntry {
+    pub key: String,
+    #[serde(default)]
+    pub value: Value,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminSystemConfigDocument {
+    pub version: String,
+    #[serde(default)]
+    pub exported_at: String,
+    #[serde(default)]
+    pub global_models: Vec<AdminSystemConfigGlobalModel>,
+    #[serde(default)]
+    pub providers: Vec<AdminSystemConfigProvider>,
+    #[serde(default)]
+    pub proxy_nodes: Vec<AdminSystemConfigProxyNode>,
+    #[serde(default)]
+    pub ldap_config: Option<AdminSystemConfigLdap>,
+    #[serde(default)]
+    pub oauth_providers: Vec<AdminSystemConfigOAuthProvider>,
+    #[serde(default)]
+    pub system_configs: Vec<AdminSystemConfigEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminSystemConfigImportRequest {
+    #[serde(flatten)]
+    pub document: AdminSystemConfigDocument,
+    #[serde(default)]
+    pub merge_mode: AdminImportMergeMode,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedAdminSystemConfigImportRequest {
+    pub request: AdminSystemConfigImportRequest,
+    pub root: Map<String, Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedAdminSystemConfigObject<T> {
+    pub raw: Map<String, Value>,
+    pub value: T,
+}
+
+impl<T> ParsedAdminSystemConfigObject<T> {
+    pub fn into_parts(self) -> (Map<String, Value>, T) {
+        (self.raw, self.value)
+    }
+}
+
+fn parse_admin_system_config_object<T: DeserializeOwned>(
+    item: Value,
+    field_name: &str,
+) -> Result<ParsedAdminSystemConfigObject<T>, (http::StatusCode, Value)> {
+    let raw = item
+        .as_object()
+        .cloned()
+        .ok_or_else(|| invalid_request(format!("{field_name} 项必须是对象")))?;
+    let value = serde_json::from_value::<T>(Value::Object(raw.clone()))
+        .map_err(|_| invalid_request(format!("{field_name} 项格式无效")))?;
+    Ok(ParsedAdminSystemConfigObject { raw, value })
+}
+
+pub fn parse_admin_system_config_array<T: DeserializeOwned>(
+    root: &Map<String, Value>,
+    field_name: &str,
+) -> Result<Vec<ParsedAdminSystemConfigObject<T>>, (http::StatusCode, Value)> {
+    let Some(value) = root.get(field_name) else {
+        return Ok(Vec::new());
+    };
+    let items = value
+        .as_array()
+        .ok_or_else(|| invalid_request(format!("{field_name} 必须是数组")))?;
+    items
+        .iter()
+        .cloned()
+        .map(|item| parse_admin_system_config_object(item, field_name))
+        .collect()
+}
+
+pub fn parse_admin_system_config_optional_object<T: DeserializeOwned>(
+    root: &Map<String, Value>,
+    field_name: &str,
+) -> Result<Option<ParsedAdminSystemConfigObject<T>>, (http::StatusCode, Value)> {
+    let Some(value) = root.get(field_name) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    parse_admin_system_config_object(value.clone(), field_name).map(Some)
+}
+
+pub fn parse_admin_system_config_nested_array<T: DeserializeOwned>(
+    parent: &Map<String, Value>,
+    field_name: &str,
+) -> Result<Vec<ParsedAdminSystemConfigObject<T>>, (http::StatusCode, Value)> {
+    let Some(value) = parent.get(field_name) else {
+        return Ok(Vec::new());
+    };
+    let items = value
+        .as_array()
+        .ok_or_else(|| invalid_request(format!("{field_name} 必须是数组")))?;
+    items
+        .iter()
+        .cloned()
+        .map(|item| parse_admin_system_config_object(item, field_name))
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -659,6 +1149,51 @@ pub fn serialize_admin_system_users_export_wallet(
     }))
 }
 
+pub fn parse_admin_system_config_import_request(
+    request_body: &[u8],
+) -> Result<ParsedAdminSystemConfigImportRequest, (http::StatusCode, serde_json::Value)> {
+    let root = match serde_json::from_slice::<serde_json::Value>(request_body) {
+        Ok(serde_json::Value::Object(root)) => root,
+        _ => return Err(invalid_request("请求数据验证失败")),
+    };
+
+    let version = root
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid_request("version 为必填字段"))?;
+    if !ADMIN_SYSTEM_CONFIG_SUPPORTED_VERSIONS.contains(&version) {
+        return Err(invalid_request(format!(
+            "不支持的配置版本: {version}，支持的版本: {}",
+            ADMIN_SYSTEM_CONFIG_SUPPORTED_VERSIONS.join(", ")
+        )));
+    }
+
+    let merge_mode = AdminImportMergeMode::parse_json_value(root.get("merge_mode"))?;
+    let document = serde_path_to_error::deserialize::<_, AdminSystemConfigDocument>(
+        serde_json::Value::Object(root.clone()),
+    )
+    .map_err(|err| {
+        let path = err.path().to_string();
+        let inner = err.into_inner();
+        let detail = if path.is_empty() {
+            format!("配置文件格式无效: {inner}")
+        } else {
+            format!("配置文件格式无效: {path}: {inner}")
+        };
+        invalid_request(detail)
+    })?;
+
+    Ok(ParsedAdminSystemConfigImportRequest {
+        request: AdminSystemConfigImportRequest {
+            document,
+            merge_mode,
+        },
+        root,
+    })
+}
+
 pub fn normalize_admin_system_config_key(requested_key: &str) -> String {
     let trimmed = requested_key.trim();
     if trimmed.eq_ignore_ascii_case(LEGACY_REQUEST_LOG_LEVEL_KEY) {
@@ -717,7 +1252,7 @@ pub fn admin_system_config_default_value(key: &str) -> Option<serde_json::Value>
         "auto_delete_expired_keys" => Some(json!(false)),
         "email_suffix_mode" => Some(json!("none")),
         "email_suffix_list" => Some(json!([])),
-        "enable_format_conversion" => Some(json!(true)),
+        "enable_format_conversion" => Some(json!(false)),
         "keep_priority_on_conversion" => Some(json!(false)),
         "audit_log_retention_days" => Some(json!(30)),
         "enable_db_maintenance" => Some(json!(true)),
@@ -1244,12 +1779,14 @@ pub fn build_admin_proxy_nodes_list_payload_response(
     total: usize,
     skip: usize,
     limit: usize,
+    rollout: Option<serde_json::Value>,
 ) -> Response<Body> {
     Json(json!({
         "items": items,
         "total": total,
         "skip": skip,
         "limit": limit,
+        "rollout": rollout,
     }))
     .into_response()
 }
@@ -1343,4 +1880,142 @@ fn mask_admin_proxy_node_password(password: Option<&str>) -> Option<String> {
         &password[..2],
         &password[password.len() - 2..]
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_admin_system_config_import_request_accepts_supported_versions() {
+        for version in ADMIN_SYSTEM_CONFIG_SUPPORTED_VERSIONS {
+            let parsed = parse_admin_system_config_import_request(
+                json!({
+                    "version": version,
+                    "global_models": [],
+                    "providers": [],
+                })
+                .to_string()
+                .as_bytes(),
+            )
+            .expect("supported version should parse");
+
+            assert_eq!(parsed.request.document.version, *version);
+            assert_eq!(parsed.request.merge_mode, AdminImportMergeMode::Skip);
+            assert!(parsed.request.document.oauth_providers.is_empty());
+            assert!(parsed.request.document.system_configs.is_empty());
+            assert!(parsed.request.document.ldap_config.is_none());
+        }
+    }
+
+    #[test]
+    fn parse_admin_system_config_import_request_rejects_invalid_merge_mode() {
+        let err = parse_admin_system_config_import_request(
+            json!({
+                "version": "2.2",
+                "merge_mode": "replace_all",
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .expect_err("invalid merge mode should fail");
+
+        assert_eq!(err.0, http::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.1["detail"],
+            "merge_mode 仅支持 skip / overwrite / error"
+        );
+    }
+
+    #[test]
+    fn parse_admin_system_config_import_request_reports_field_path_for_shape_errors() {
+        let err = parse_admin_system_config_import_request(
+            json!({
+                "version": "2.2",
+                "global_models": [],
+                "providers": [{
+                    "name": "import-openai",
+                    "endpoints": [{
+                        "api_format": "openai:chat",
+                        "base_url": "https://api.example.com",
+                        "is_active": "yes"
+                    }]
+                }],
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .expect_err("invalid endpoint shape should fail");
+
+        assert_eq!(err.0, http::StatusCode::BAD_REQUEST);
+        let detail = err.1["detail"].as_str().expect("detail should be a string");
+        assert!(detail.contains("配置文件格式无效"));
+        assert!(detail.contains("providers[0].endpoints[0].is_active"));
+    }
+
+    #[test]
+    fn parse_admin_system_config_import_request_accepts_numeric_string_fields() {
+        let parsed = parse_admin_system_config_import_request(
+            json!({
+                "version": "2.2",
+                "global_models": [{
+                    "name": "veo3.1",
+                    "display_name": "Veo 3.1",
+                    "default_price_per_request": "1.80000000",
+                }],
+                "providers": [{
+                    "name": "undyapi",
+                    "monthly_quota_usd": "12.50",
+                    "stream_first_byte_timeout": "60",
+                    "request_timeout": "120",
+                    "models": [{
+                        "global_model_name": "veo3.1",
+                        "provider_model_name": "veo3.1",
+                        "price_per_request": "0.70000000",
+                    }]
+                }],
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .expect("numeric string fields should parse");
+
+        let global_model = parsed
+            .request
+            .document
+            .global_models
+            .first()
+            .expect("global model should exist");
+        assert_eq!(global_model.default_price_per_request, Some(1.8));
+
+        let provider = parsed
+            .request
+            .document
+            .providers
+            .first()
+            .expect("provider should exist");
+        assert_eq!(provider.monthly_quota_usd, Some(12.5));
+        assert_eq!(provider.stream_first_byte_timeout, Some(60.0));
+        assert_eq!(provider.request_timeout, Some(120.0));
+        assert_eq!(provider.models.len(), 1);
+        assert_eq!(provider.models[0].price_per_request, Some(0.7));
+    }
+
+    #[test]
+    fn resolve_admin_system_export_key_api_formats_uses_endpoint_fallback() {
+        let provider_formats = vec!["openai:chat".to_string(), "claude:chat".to_string()];
+        let resolved =
+            resolve_admin_system_export_key_api_formats(None, &provider_formats, |value| {
+                Some(value.to_string())
+            });
+
+        assert_eq!(resolved, provider_formats);
+    }
+
+    #[test]
+    fn sensitive_admin_system_config_keys_are_case_insensitive() {
+        assert!(is_sensitive_admin_system_config_key("smtp_password"));
+        assert!(is_sensitive_admin_system_config_key("SMTP_PASSWORD"));
+        assert!(!is_sensitive_admin_system_config_key("site_name"));
+    }
 }

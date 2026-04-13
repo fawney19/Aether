@@ -1,7 +1,7 @@
 use super::extractors::admin_endpoint_id;
 use super::payloads::{
     build_admin_provider_endpoint_response, endpoint_key_counts_by_format,
-    AdminProviderEndpointUpdateRequest,
+    AdminProviderEndpointUpdatePatch,
 };
 use super::support::build_admin_endpoints_data_unavailable_response;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
@@ -75,8 +75,8 @@ pub(super) async fn maybe_handle(
                 .into_response(),
         ));
     };
-    let payload = match serde_json::from_value::<AdminProviderEndpointUpdateRequest>(raw_value) {
-        Ok(payload) => payload,
+    let patch = match AdminProviderEndpointUpdatePatch::from_object(raw_payload) {
+        Ok(patch) => patch,
         Err(_) => {
             return Ok(Some(
                 (
@@ -118,12 +118,7 @@ pub(super) async fn maybe_handle(
         ));
     };
     let updated_record = match state
-        .build_admin_update_provider_endpoint_record(
-            &provider,
-            &existing_endpoint,
-            &raw_payload,
-            payload,
-        )
+        .build_admin_update_provider_endpoint_record(&provider, &existing_endpoint, patch)
         .await
     {
         Ok(record) => record,

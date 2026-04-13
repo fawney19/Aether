@@ -6,6 +6,10 @@ use aether_scheduler_core::{
     execution_error_details, parse_request_candidate_report_context,
     SchedulerRequestCandidateStatusUpdate,
 };
+use aether_usage_runtime::{
+    build_lifecycle_usage_seed, build_sync_terminal_usage_payload_seed,
+    build_terminal_usage_context_seed,
+};
 use axum::body::Body;
 use axum::http::Response;
 use base64::Engine as _;
@@ -55,16 +59,17 @@ struct ImplicitSyncFinalizeOutcome {
     outcome: LocalCoreSyncFinalizeOutcome,
 }
 
-async fn record_sync_terminal_usage(
+fn record_sync_terminal_usage(
     state: &AppState,
     plan: &ExecutionPlan,
     report_context: Option<&serde_json::Value>,
     payload: &GatewaySyncReportRequest,
 ) {
+    let context_seed = build_terminal_usage_context_seed(plan, report_context);
+    let payload_seed = build_sync_terminal_usage_payload_seed(payload);
     state
         .usage_runtime
-        .record_sync_terminal(state.data.as_ref(), plan, report_context, payload)
-        .await;
+        .record_sync_terminal(state.data.as_ref(), &context_seed, &payload_seed);
 }
 
 #[cfg(test)]
@@ -98,10 +103,10 @@ pub(crate) async fn execute_execution_runtime_sync(
         .map(|value| value.to_string())
         .unwrap_or_else(|| "-".to_string());
     let candidate_started_unix_secs = current_request_candidate_unix_ms();
+    let lifecycle_seed = build_lifecycle_usage_seed(&plan, report_context.as_ref());
     state
         .usage_runtime
-        .record_pending(state.data.as_ref(), &plan, report_context.as_ref())
-        .await;
+        .record_pending(state.data.as_ref(), &lifecycle_seed);
     #[cfg(not(test))]
     let result = {
         match DirectSyncExecutionRuntime::new()
@@ -349,7 +354,7 @@ pub(crate) async fn execute_execution_runtime_sync(
                 .background_report
                 .as_ref()
                 .unwrap_or(&implicit_finalize.payload);
-            record_sync_terminal_usage(state, &plan, report_context.as_ref(), usage_payload).await;
+            record_sync_terminal_usage(state, &plan, report_context.as_ref(), usage_payload);
             if let Some(report_payload) = implicit_finalize.outcome.background_report {
                 spawn_sync_report(state.clone(), trace_id.to_string(), report_payload);
             } else {
@@ -386,8 +391,7 @@ pub(crate) async fn execute_execution_runtime_sync(
                 &plan,
                 payload.report_context.as_ref(),
                 usage_payload,
-            )
-            .await;
+            );
             if let Some(report_payload) = outcome.background_report {
                 spawn_sync_report(state.clone(), trace_id.to_string(), report_payload);
             } else {
@@ -417,8 +421,7 @@ pub(crate) async fn execute_execution_runtime_sync(
                 &plan,
                 payload.report_context.as_ref(),
                 &outcome.report_payload,
-            )
-            .await;
+            );
             if let Some(snapshot) = outcome.local_task_snapshot.clone() {
                 state.video_tasks.record_snapshot(snapshot.clone());
                 let _ = state.upsert_video_task_snapshot(&snapshot).await?;
@@ -454,8 +457,7 @@ pub(crate) async fn execute_execution_runtime_sync(
                 &plan,
                 payload.report_context.as_ref(),
                 &usage_payload,
-            )
-            .await;
+            );
             state
                 .video_tasks
                 .apply_finalize_mutation(request_path, payload.report_kind.as_str());
@@ -505,8 +507,7 @@ pub(crate) async fn execute_execution_runtime_sync(
                 &plan,
                 payload.report_context.as_ref(),
                 &usage_payload,
-            )
-            .await;
+            );
             if let Some(error_report_kind) =
                 resolve_local_sync_error_background_report_kind(payload.report_kind.as_str())
             {
@@ -530,7 +531,7 @@ pub(crate) async fn execute_execution_runtime_sync(
                 candidate_id,
             )?));
         }
-        record_sync_terminal_usage(state, &plan, payload.report_context.as_ref(), &payload).await;
+        record_sync_terminal_usage(state, &plan, payload.report_context.as_ref(), &payload);
         let response =
             submit_local_core_error_or_sync_finalize(state, trace_id, decision, payload).await?;
         return Ok(Some(attach_control_metadata_headers(
@@ -540,7 +541,7 @@ pub(crate) async fn execute_execution_runtime_sync(
         )?));
     }
 
-    record_sync_terminal_usage(state, &plan, report_context.as_ref(), &base_usage_payload).await;
+    record_sync_terminal_usage(state, &plan, report_context.as_ref(), &base_usage_payload);
     if let Some(report_kind) = report_kind {
         let report = GatewaySyncReportRequest {
             trace_id: trace_id.to_string(),

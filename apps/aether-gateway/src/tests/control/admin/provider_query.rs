@@ -278,16 +278,16 @@ async fn gateway_handles_admin_provider_query_models_with_openai_responses_endpo
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["success"], json!(true));
-    assert_eq!(payload["data"]["error"], serde_json::Value::Null);
-    assert_eq!(payload["data"]["from_cache"], json!(false));
+    assert_eq!(payload["success"], json!(false));
     assert_eq!(
-        payload["data"]["models"][0]["api_formats"],
-        json!(["openai:responses"])
+        payload["data"]["error"],
+        json!("No active endpoints found for this provider")
     );
+    assert_eq!(payload["data"]["from_cache"], json!(false));
+    assert_eq!(payload["data"]["models"], json!([]));
     assert_eq!(
         *execution_runtime_hits.lock().expect("mutex should lock"),
-        1
+        0
     );
 
     gateway_handle.abort();
@@ -557,10 +557,85 @@ async fn gateway_handles_admin_provider_query_models_aggregating_active_keys() {
         .iter()
         .map(|model| model["id"].as_str().expect("id should exist"))
         .collect::<Vec<_>>();
-    assert_eq!(model_ids, vec!["gpt-5", "gpt-4.1"]);
+    assert_eq!(model_ids, vec!["gpt-4.1", "gpt-5"]);
     assert_eq!(
         *execution_runtime_hits.lock().expect("mutex should lock"),
         2
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_provider_query_models_for_fixed_provider_without_endpoint() {
+    let execution_runtime_hits = Arc::new(Mutex::new(0usize));
+    let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |_request: Request| {
+            let execution_runtime_hits_inner = Arc::clone(&execution_runtime_hits_clone);
+            async move {
+                *execution_runtime_hits_inner
+                    .lock()
+                    .expect("mutex should lock") += 1;
+                Json(json!({
+                    "request_id": "unexpected",
+                    "status_code": 500
+                }))
+            }
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-codex", "Codex", 10);
+    provider.provider_type = "codex".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![],
+        vec![sample_key(
+            "key-codex-oauth",
+            "provider-codex",
+            "openai:cli",
+            "sk-test-codex",
+        )],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/models"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-codex",
+            "api_key_id": "key-codex-oauth"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(payload["data"]["error"], serde_json::Value::Null);
+    assert_eq!(payload["data"]["from_cache"], json!(false));
+    let models = payload["data"]["models"]
+        .as_array()
+        .expect("models should be an array");
+    assert!(models.iter().any(|model| model["id"] == "gpt-5.4"));
+    assert_eq!(
+        *execution_runtime_hits.lock().expect("mutex should lock"),
+        0
     );
 
     gateway_handle.abort();

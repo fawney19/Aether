@@ -8,6 +8,7 @@ pub mod openai_cli;
 
 pub use codex::{
     apply_codex_openai_cli_special_body_edits, apply_codex_openai_cli_special_headers,
+    apply_openai_compact_special_body_edits,
 };
 pub use family::{LocalStandardSourceFamily, LocalStandardSourceMode, LocalStandardSpec};
 pub use matrix::{

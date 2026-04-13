@@ -135,6 +135,18 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn list_video_task_page_summary(
+        &self,
+        filter: &VideoTaskQueryFilter,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<StoredVideoTask>, DataLayerError> {
+        match &self.video_task_reader {
+            Some(repository) => repository.list_page_summary(filter, offset, limit).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub(crate) async fn count_video_tasks(
         &self,
         filter: &VideoTaskQueryFilter,
@@ -635,6 +647,16 @@ impl GatewayDataState {
     ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
         match &self.usage_reader {
             Some(repository) => repository.find_by_id(usage_id).await,
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn resolve_request_usage_body_ref(
+        &self,
+        body_ref: &str,
+    ) -> Result<Option<serde_json::Value>, DataLayerError> {
+        match &self.usage_reader {
+            Some(repository) => repository.resolve_body_ref(body_ref).await,
             None => Ok(None),
         }
     }

@@ -28,13 +28,14 @@ use self::sessions::{
     build_admin_delete_user_session_response, build_admin_delete_user_sessions_response,
     build_admin_list_user_sessions_response,
 };
+use self::shared::AdminUpdateUserPatch;
 use self::shared::{
     admin_default_user_initial_gift, build_admin_users_bad_request_response,
     build_admin_users_data_unavailable_response, build_admin_users_read_only_response,
     format_optional_datetime_iso8601, normalize_admin_optional_user_email,
     normalize_admin_user_role, normalize_admin_username, validate_admin_user_password,
     AdminCreateUserApiKeyRequest, AdminCreateUserRequest, AdminToggleUserApiKeyLockRequest,
-    AdminUpdateUserApiKeyRequest, AdminUpdateUserFieldPresence, AdminUpdateUserRequest,
+    AdminUpdateUserApiKeyRequest,
 };
 pub(crate) use self::shared::{normalize_admin_user_api_formats, normalize_admin_user_string_list};
 

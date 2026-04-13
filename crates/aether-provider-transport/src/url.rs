@@ -242,7 +242,7 @@ fn merge_query_string(
 mod tests {
     use super::{
         build_gemini_content_url, build_gemini_files_passthrough_url,
-        build_gemini_video_predict_long_running_url, build_openai_chat_url,
+        build_gemini_video_predict_long_running_url, build_openai_chat_url, build_openai_cli_url,
         build_passthrough_path_url,
     };
 
@@ -254,6 +254,18 @@ mod tests {
                 Some("mode=fast&tenant=override")
             ),
             "https://api.openai.example/v1/chat/completions?mode=fast&tenant=override"
+        );
+    }
+
+    #[test]
+    fn openai_cli_url_preserves_codex_path_prefix() {
+        assert_eq!(
+            build_openai_cli_url("https://tiger.bookapi.cc/codex", None, false),
+            "https://tiger.bookapi.cc/codex/responses"
+        );
+        assert_eq!(
+            build_openai_cli_url("https://tiger.bookapi.cc/codex?tenant=demo", None, true),
+            "https://tiger.bookapi.cc/codex/responses/compact?tenant=demo"
         );
     }
 

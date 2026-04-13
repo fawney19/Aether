@@ -1,17 +1,22 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use aether_contracts::{ExecutionPlan, ExecutionTelemetry};
+use aether_contracts::ExecutionTelemetry;
 use aether_data::redis::RedisStreamRunner;
+use aether_data_contracts::repository::usage::UpsertUsageRecord;
 use aether_data_contracts::DataLayerError;
 use async_trait::async_trait;
 use tracing::warn;
 
+use crate::executor::spawn_on_usage_background_runtime;
 use crate::{
-    build_pending_usage_record, build_stream_terminal_usage_outcome, build_streaming_usage_record,
-    build_sync_terminal_usage_outcome, build_terminal_usage_event_from_outcome,
-    build_upsert_usage_record_from_event, build_usage_queue_worker, settle_usage_if_needed,
-    GatewayStreamReportRequest, GatewaySyncReportRequest, UsageEvent, UsageQueue,
-    UsageRecordWriter, UsageRuntimeConfig, UsageSettlementWriter, UsageTerminalState,
+    build_pending_usage_record_from_seed, build_stream_terminal_usage_seed,
+    build_streaming_usage_record_from_seed, build_sync_terminal_usage_seed,
+    build_terminal_usage_event_from_seed, build_upsert_usage_record_from_event,
+    build_usage_queue_worker, settle_usage_if_needed, LifecycleUsageSeed,
+    StreamTerminalUsagePayloadSeed, SyncTerminalUsagePayloadSeed, TerminalUsageContextSeed,
+    UsageEvent, UsageQueue, UsageRecordWriter, UsageRuntimeConfig, UsageSettlementWriter,
 };
 
 #[async_trait]
@@ -30,6 +35,17 @@ pub trait UsageRuntimeAccess:
 #[derive(Debug, Clone)]
 pub struct UsageRuntime {
     config: UsageRuntimeConfig,
+}
+
+struct SyncTerminalUsageTaskInput {
+    context_seed: TerminalUsageContextSeed,
+    payload_seed: SyncTerminalUsagePayloadSeed,
+}
+
+struct StreamTerminalUsageTaskInput {
+    context_seed: TerminalUsageContextSeed,
+    payload_seed: StreamTerminalUsagePayloadSeed,
+    cancelled: bool,
 }
 
 impl Default for UsageRuntime {
@@ -73,169 +89,197 @@ impl UsageRuntime {
         Some(worker.spawn())
     }
 
-    pub async fn record_pending<T>(
-        &self,
-        data: &T,
-        plan: &ExecutionPlan,
-        report_context: Option<&serde_json::Value>,
-    ) where
-        T: UsageRuntimeAccess,
+    pub fn record_pending<T>(&self, data: &T, seed: &LifecycleUsageSeed)
+    where
+        T: UsageRuntimeAccess + Clone + 'static,
     {
         if !self.is_enabled() {
             return;
         }
-        let now_unix_secs = now_unix_secs();
-        match build_pending_usage_record(plan, report_context, now_unix_secs) {
-            Ok(record) => {
-                if let Err(err) = data.upsert_usage_record(record).await {
+        let data = T::clone(data);
+        let seed = seed.clone();
+        let request_id = seed.request_id.clone();
+        spawn_on_usage_background_runtime(boxed_usage_task(async move {
+            let now_unix_secs = now_unix_secs();
+            match build_pending_usage_record_offthread(&seed, now_unix_secs).await {
+                Ok(record) => {
+                    if let Err(err) = data.upsert_usage_record(record).await {
+                        warn!(
+                            event_name = "usage_pending_record_failed",
+                            log_type = "event",
+                            request_id = %request_id,
+                            error = %err,
+                            "usage runtime failed to record sync pending usage"
+                        );
+                    }
+                }
+                Err(err) => {
                     warn!(
-                        event_name = "usage_pending_record_failed",
+                        event_name = "usage_pending_build_failed",
                         log_type = "event",
-                        request_id = %plan.request_id,
+                        request_id = %request_id,
                         error = %err,
-                        "usage runtime failed to record sync pending usage"
-                    );
+                        "usage runtime failed to build sync pending usage"
+                    )
                 }
             }
-            Err(err) => {
-                warn!(
-                    event_name = "usage_pending_build_failed",
-                    log_type = "event",
-                    request_id = %plan.request_id,
-                    error = %err,
-                    "usage runtime failed to build sync pending usage"
-                )
-            }
-        }
+        }));
     }
 
-    pub async fn record_stream_started<T>(
+    pub fn record_stream_started<T>(
         &self,
         data: &T,
-        plan: &ExecutionPlan,
-        report_context: Option<&serde_json::Value>,
+        seed: &LifecycleUsageSeed,
         status_code: u16,
-        headers: &std::collections::BTreeMap<String, String>,
         telemetry: Option<&ExecutionTelemetry>,
     ) where
-        T: UsageRuntimeAccess,
+        T: UsageRuntimeAccess + Clone + 'static,
     {
         if !self.is_enabled() {
             return;
         }
-        let now_unix_secs = now_unix_secs();
-        match build_streaming_usage_record(
-            plan,
-            report_context,
-            status_code,
-            headers,
-            telemetry,
-            now_unix_secs,
-        ) {
-            Ok(record) => {
-                if let Err(err) = data.upsert_usage_record(record).await {
+        let data = T::clone(data);
+        let seed = seed.clone();
+        let telemetry = telemetry.cloned();
+        let request_id = seed.request_id.clone();
+        spawn_on_usage_background_runtime(boxed_usage_task(async move {
+            let now_unix_secs = now_unix_secs();
+            match build_streaming_usage_record_offthread(
+                &seed,
+                status_code,
+                telemetry.as_ref(),
+                now_unix_secs,
+            )
+            .await
+            {
+                Ok(record) => {
+                    if let Err(err) = data.upsert_usage_record(record).await {
+                        warn!(
+                            event_name = "usage_stream_record_failed",
+                            log_type = "event",
+                            request_id = %request_id,
+                            error = %err,
+                            "usage runtime failed to record stream usage"
+                        );
+                    }
+                }
+                Err(err) => {
                     warn!(
-                        event_name = "usage_stream_record_failed",
+                        event_name = "usage_stream_build_failed",
                         log_type = "event",
-                        request_id = %plan.request_id,
+                        request_id = %request_id,
                         error = %err,
-                        "usage runtime failed to record stream usage"
-                    );
+                        "usage runtime failed to build stream usage"
+                    )
                 }
             }
-            Err(err) => {
-                warn!(
-                    event_name = "usage_stream_build_failed",
-                    log_type = "event",
-                    request_id = %plan.request_id,
-                    error = %err,
-                    "usage runtime failed to build stream usage"
-                )
-            }
-        }
+        }));
     }
 
-    pub async fn record_sync_terminal<T>(
+    pub fn record_sync_terminal<T>(
         &self,
         data: &T,
-        plan: &ExecutionPlan,
-        report_context: Option<&serde_json::Value>,
-        payload: &GatewaySyncReportRequest,
+        context_seed: &TerminalUsageContextSeed,
+        payload_seed: &SyncTerminalUsagePayloadSeed,
     ) where
-        T: UsageRuntimeAccess,
+        T: UsageRuntimeAccess + Clone + 'static,
     {
         if !self.is_enabled() {
             return;
         }
-        match build_terminal_usage_event_from_outcome(build_sync_terminal_usage_outcome(
-            plan,
-            report_context,
-            payload,
-        )) {
-            Ok(mut event) => {
-                if let Err(err) = data.enrich_usage_event(&mut event).await {
-                    warn!(
-                        event_name = "usage_sync_terminal_billing_enrichment_failed",
-                        log_type = "event",
-                        request_id = %plan.request_id,
-                        error = %err,
-                        "usage runtime failed to enrich sync usage event with billing"
-                    );
+        let runtime = self.clone();
+        let data = T::clone(data);
+        let request_id = context_seed.request_id.clone();
+        let input = Box::new(SyncTerminalUsageTaskInput {
+            context_seed: context_seed.clone(),
+            payload_seed: payload_seed.clone(),
+        });
+        spawn_on_usage_background_runtime(boxed_usage_task(async move {
+            match build_sync_terminal_usage_event_offthread(input).await {
+                Ok(mut event) => {
+                    if let Err(err) = data.enrich_usage_event(&mut event).await {
+                        warn!(
+                            event_name = "usage_sync_terminal_billing_enrichment_failed",
+                            log_type = "event",
+                            request_id = %request_id,
+                            error = %err,
+                            "usage runtime failed to enrich sync usage event with billing"
+                        );
+                    }
+                    runtime.enqueue_or_write_terminal(&data, event).await
                 }
-                self.enqueue_or_write_terminal(data, event).await
+                Err(err) => {
+                    warn!(
+                        event_name = "usage_sync_terminal_build_failed",
+                        log_type = "event",
+                        request_id = %request_id,
+                        error = %err,
+                        "usage runtime failed to build sync terminal usage event"
+                    )
+                }
             }
-            Err(err) => {
-                warn!(
-                    event_name = "usage_sync_terminal_build_failed",
-                    log_type = "event",
-                    request_id = %plan.request_id,
-                    error = %err,
-                    "usage runtime failed to build sync terminal usage event"
-                )
-            }
-        }
+        }));
     }
 
-    pub async fn record_stream_terminal<T>(
+    pub fn record_stream_terminal<T>(
         &self,
         data: &T,
-        plan: &ExecutionPlan,
-        report_context: Option<&serde_json::Value>,
-        payload: &GatewayStreamReportRequest,
+        context_seed: &TerminalUsageContextSeed,
+        payload_seed: &StreamTerminalUsagePayloadSeed,
         cancelled: bool,
     ) where
-        T: UsageRuntimeAccess,
+        T: UsageRuntimeAccess + Clone + 'static,
     {
         if !self.is_enabled() {
             return;
         }
-        let mut outcome = build_stream_terminal_usage_outcome(plan, report_context, payload);
-        if cancelled {
-            outcome.terminal_state = UsageTerminalState::Cancelled;
-        }
-        match build_terminal_usage_event_from_outcome(outcome) {
-            Ok(mut event) => {
-                if let Err(err) = data.enrich_usage_event(&mut event).await {
-                    warn!(
-                        event_name = "usage_stream_terminal_billing_enrichment_failed",
-                        log_type = "event",
-                        request_id = %plan.request_id,
-                        error = %err,
-                        "usage runtime failed to enrich stream usage event with billing"
-                    );
+        let runtime = self.clone();
+        let data = T::clone(data);
+        let request_id = context_seed.request_id.clone();
+        let input = Box::new(StreamTerminalUsageTaskInput {
+            context_seed: context_seed.clone(),
+            payload_seed: payload_seed.clone(),
+            cancelled,
+        });
+        spawn_on_usage_background_runtime(boxed_usage_task(async move {
+            match build_stream_terminal_usage_event_offthread(input).await {
+                Ok(mut event) => {
+                    if let Err(err) = data.enrich_usage_event(&mut event).await {
+                        warn!(
+                            event_name = "usage_stream_terminal_billing_enrichment_failed",
+                            log_type = "event",
+                            request_id = %request_id,
+                            error = %err,
+                            "usage runtime failed to enrich stream usage event with billing"
+                        );
+                    }
+                    runtime.enqueue_or_write_terminal(&data, event).await
                 }
-                self.enqueue_or_write_terminal(data, event).await
+                Err(err) => {
+                    warn!(
+                        event_name = "usage_stream_terminal_build_failed",
+                        log_type = "event",
+                        request_id = %request_id,
+                        error = %err,
+                        "usage runtime failed to build stream terminal usage event"
+                    )
+                }
             }
-            Err(err) => {
-                warn!(
-                    event_name = "usage_stream_terminal_build_failed",
-                    log_type = "event",
-                    request_id = %plan.request_id,
-                    error = %err,
-                    "usage runtime failed to build stream terminal usage event"
-                )
-            }
+        }));
+    }
+
+    pub fn submit_terminal_event<T>(&self, data: &T, event: UsageEvent)
+    where
+        T: UsageRuntimeAccess + Clone + 'static,
+    {
+        if !self.is_enabled() {
+            return;
         }
+        let runtime = self.clone();
+        let data = T::clone(data);
+        spawn_on_usage_background_runtime(boxed_usage_task(async move {
+            runtime.record_terminal_event(&data, event).await;
+        }));
     }
 
     pub async fn record_terminal_event<T>(&self, data: &T, mut event: UsageEvent)
@@ -324,6 +368,74 @@ impl UsageRuntime {
             }
         }
     }
+}
+
+async fn build_pending_usage_record_offthread(
+    seed: &LifecycleUsageSeed,
+    now_unix_secs: u64,
+) -> Result<UpsertUsageRecord, DataLayerError> {
+    let seed = seed.clone();
+    tokio::task::spawn_blocking(move || build_pending_usage_record_from_seed(&seed, now_unix_secs))
+        .await
+        .map_err(join_error_to_data_layer)?
+}
+
+async fn build_streaming_usage_record_offthread(
+    seed: &LifecycleUsageSeed,
+    status_code: u16,
+    telemetry: Option<&ExecutionTelemetry>,
+    now_unix_secs: u64,
+) -> Result<UpsertUsageRecord, DataLayerError> {
+    let seed = seed.clone();
+    let telemetry = telemetry.cloned();
+    tokio::task::spawn_blocking(move || {
+        build_streaming_usage_record_from_seed(
+            &seed,
+            status_code,
+            telemetry.as_ref(),
+            now_unix_secs,
+        )
+    })
+    .await
+    .map_err(join_error_to_data_layer)?
+}
+
+async fn build_sync_terminal_usage_event_offthread(
+    input: Box<SyncTerminalUsageTaskInput>,
+) -> Result<UsageEvent, DataLayerError> {
+    tokio::task::spawn_blocking(move || {
+        build_terminal_usage_event_from_seed(build_sync_terminal_usage_seed(
+            input.context_seed,
+            input.payload_seed,
+        ))
+    })
+    .await
+    .map_err(join_error_to_data_layer)?
+}
+
+async fn build_stream_terminal_usage_event_offthread(
+    input: Box<StreamTerminalUsageTaskInput>,
+) -> Result<UsageEvent, DataLayerError> {
+    tokio::task::spawn_blocking(move || {
+        build_terminal_usage_event_from_seed(build_stream_terminal_usage_seed(
+            input.context_seed,
+            input.payload_seed,
+            input.cancelled,
+        ))
+    })
+    .await
+    .map_err(join_error_to_data_layer)?
+}
+
+fn join_error_to_data_layer(err: tokio::task::JoinError) -> DataLayerError {
+    DataLayerError::UnexpectedValue(format!("usage builder task join failed: {err}"))
+}
+
+fn boxed_usage_task<F>(task: F) -> Pin<Box<dyn Future<Output = ()> + Send>>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    Box::pin(task)
 }
 
 fn now_unix_secs() -> u64 {

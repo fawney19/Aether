@@ -26,7 +26,7 @@ fn applies_codex_defaults_when_body_rules_do_not_handle_fields() {
 }
 
 #[test]
-fn defers_to_user_body_rules_for_handled_fields() {
+fn strips_store_for_compact_even_when_body_rules_handle_it() {
     let body_rules = json!([
         {"action":"set","path":"store","value":true},
         {"action":"set","path":"instructions","value":"Keep custom"},
@@ -51,7 +51,7 @@ fn defers_to_user_body_rules_for_handled_fields() {
     );
 
     assert!(body.get("max_output_tokens").is_none());
-    assert_eq!(body["store"], true);
+    assert!(body.get("store").is_none());
     assert_eq!(body["instructions"], "Keep custom");
     assert_eq!(body["metadata"]["mode"], "custom");
     assert_eq!(body["top_p"], 0.5);

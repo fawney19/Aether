@@ -144,7 +144,7 @@ pub fn build_gateway_control_plan_request(
 pub fn augment_sync_report_context(
     report_context: Option<serde_json::Value>,
     provider_request_headers: &BTreeMap<String, String>,
-    provider_request_body: &serde_json::Value,
+    _provider_request_body: &serde_json::Value,
 ) -> serde_json::Result<Option<serde_json::Value>> {
     let mut report_context = match report_context {
         Some(serde_json::Value::Object(map)) => map,
@@ -155,10 +155,6 @@ pub fn augment_sync_report_context(
     report_context.insert(
         "provider_request_headers".to_string(),
         serde_json::to_value(provider_request_headers)?,
-    );
-    report_context.insert(
-        "provider_request_body".to_string(),
-        provider_request_body.clone(),
     );
 
     Ok(Some(serde_json::Value::Object(report_context)))
@@ -233,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn augment_sync_report_context_attaches_provider_request_shape() {
+    fn augment_sync_report_context_attaches_provider_request_headers_only() {
         let report_context = augment_sync_report_context(
             Some(serde_json::json!({"trace_id": "abc"})),
             &BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
@@ -247,15 +243,12 @@ mod tests {
             Some(&serde_json::json!("abc"))
         );
         assert_eq!(
-            report_context.get("provider_request_body"),
-            Some(&serde_json::json!({"model": "gpt-5"}))
-        );
-        assert_eq!(
             report_context
                 .get("provider_request_headers")
                 .and_then(|value| value.get("content-type")),
             Some(&serde_json::json!("application/json"))
         );
+        assert!(report_context.get("provider_request_body").is_none());
     }
 
     #[test]

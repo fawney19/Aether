@@ -1,43 +1,34 @@
 use aether_contracts::ExecutionPlan;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
+
+const MAX_USAGE_REQUEST_METADATA_DEPTH: usize = 32;
+const MAX_USAGE_REQUEST_METADATA_NODES: usize = 4_000;
+const MAX_USAGE_REQUEST_METADATA_BYTES: usize = 16 * 1024;
+const MAX_USAGE_REQUEST_METADATA_STRING_BYTES: usize = 1_024;
 
 pub(crate) fn build_usage_request_metadata_seed(
-    plan: &ExecutionPlan,
+    _plan: &ExecutionPlan,
     context: Option<&Map<String, Value>>,
 ) -> Option<Value> {
-    let mut metadata = context.cloned().unwrap_or_default();
-    if !has_non_empty_string(&metadata, "candidate_id") {
-        if let Some(candidate_id) = plan
-            .candidate_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            metadata.insert(
-                "candidate_id".to_string(),
-                Value::String(candidate_id.to_string()),
-            );
-        }
+    let mut metadata = Map::new();
+    if let Some(context) = context {
+        copy_allowed_metadata_fields(context, &mut metadata);
     }
-    sanitize_usage_request_metadata(Some(Value::Object(metadata)))
+    (!metadata.is_empty()).then_some(Value::Object(metadata))
 }
 
 pub(crate) fn merge_usage_request_metadata(
     base: Option<Value>,
     override_value: Option<Value>,
 ) -> Option<Value> {
-    let merged = match (base, override_value) {
-        (Some(Value::Object(mut base)), Some(Value::Object(override_object))) => {
-            for (key, value) in override_object {
-                base.insert(key, value);
-            }
-            Some(Value::Object(base))
-        }
-        (Some(base), None) => Some(base),
-        (_, Some(override_value)) => Some(override_value),
-        (None, None) => None,
-    };
-    sanitize_usage_request_metadata(merged)
+    let mut metadata = Map::new();
+    if let Some(Value::Object(base)) = base.as_ref() {
+        copy_allowed_metadata_fields(base, &mut metadata);
+    }
+    if let Some(Value::Object(override_object)) = override_value.as_ref() {
+        copy_allowed_metadata_fields(override_object, &mut metadata);
+    }
+    (!metadata.is_empty()).then_some(Value::Object(metadata))
 }
 
 pub(crate) fn sanitize_usage_request_metadata(value: Option<Value>) -> Option<Value> {
@@ -46,26 +37,29 @@ pub(crate) fn sanitize_usage_request_metadata(value: Option<Value>) -> Option<Va
     };
 
     let mut filtered = Map::new();
-    copy_non_empty_string(&object, &mut filtered, "candidate_id");
-    copy_number(&object, &mut filtered, "candidate_index");
-    copy_non_empty_string(&object, &mut filtered, "key_name");
-    copy_non_empty_string(&object, &mut filtered, "trace_id");
-    copy_non_null_value(&object, &mut filtered, "billing_snapshot");
-    copy_non_null_value(&object, &mut filtered, "dimensions");
-    copy_non_null_value(&object, &mut filtered, "billing_rule_snapshot");
-    copy_non_null_value(&object, &mut filtered, "scheduling_audit");
-    copy_number(&object, &mut filtered, "rate_multiplier");
-    copy_bool(&object, &mut filtered, "is_free_tier");
+    copy_allowed_metadata_fields(&object, &mut filtered);
 
     (!filtered.is_empty()).then_some(Value::Object(filtered))
 }
 
-fn has_non_empty_string(object: &Map<String, Value>, key: &str) -> bool {
-    object
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .is_some_and(|value| !value.is_empty())
+fn copy_allowed_metadata_fields(source: &Map<String, Value>, target: &mut Map<String, Value>) {
+    copy_non_empty_string(source, target, "trace_id");
+    copy_number(source, target, "provider_request_body_base64_bytes");
+    copy_number(source, target, "provider_response_body_base64_bytes");
+    copy_number(source, target, "client_response_body_base64_bytes");
+    copy_non_null_value(source, target, "billing_snapshot");
+    copy_non_empty_string(source, target, "billing_snapshot_schema_version");
+    copy_non_empty_string(source, target, "billing_snapshot_status");
+    copy_non_null_value(source, target, "dimensions");
+    copy_non_null_value(source, target, "billing_rule_snapshot");
+    copy_non_null_value(source, target, "scheduling_audit");
+    copy_number(source, target, "rate_multiplier");
+    copy_bool(source, target, "is_free_tier");
+    copy_number(source, target, "input_price_per_1m");
+    copy_number(source, target, "output_price_per_1m");
+    copy_number(source, target, "cache_creation_price_per_1m");
+    copy_number(source, target, "cache_read_price_per_1m");
+    copy_number(source, target, "price_per_request");
 }
 
 fn copy_non_empty_string(source: &Map<String, Value>, target: &mut Map<String, Value>, key: &str) {
@@ -77,7 +71,10 @@ fn copy_non_empty_string(source: &Map<String, Value>, target: &mut Map<String, V
     else {
         return;
     };
-    target.insert(key.to_string(), Value::String(value.to_string()));
+    target.insert(
+        key.to_string(),
+        Value::String(truncate_usage_request_metadata_string(value)),
+    );
 }
 
 fn copy_number(source: &Map<String, Value>, target: &mut Map<String, Value>, key: &str) {
@@ -98,18 +95,130 @@ fn copy_non_null_value(source: &Map<String, Value>, target: &mut Map<String, Val
     let Some(value) = source.get(key).filter(|value| !value.is_null()) else {
         return;
     };
-    target.insert(key.to_string(), value.clone());
+    target.insert(
+        key.to_string(),
+        sanitize_usage_request_metadata_value(value),
+    );
+}
+
+fn sanitize_usage_request_metadata_value(value: &Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(truncate_usage_request_metadata_string(text)),
+        _ if usage_request_metadata_within_limits(value) => value.clone(),
+        _ => truncated_usage_request_metadata_value(value),
+    }
+}
+
+fn truncate_usage_request_metadata_string(value: &str) -> String {
+    const TRUNCATED_SUFFIX: &str = "...[truncated]";
+
+    if value.len() <= MAX_USAGE_REQUEST_METADATA_STRING_BYTES {
+        return value.to_string();
+    }
+
+    let target_bytes =
+        MAX_USAGE_REQUEST_METADATA_STRING_BYTES.saturating_sub(TRUNCATED_SUFFIX.len());
+    let mut end = 0usize;
+    for (idx, ch) in value.char_indices() {
+        let next = idx + ch.len_utf8();
+        if next > target_bytes {
+            break;
+        }
+        end = next;
+    }
+
+    if end == 0 {
+        return TRUNCATED_SUFFIX.to_string();
+    }
+
+    format!("{}{TRUNCATED_SUFFIX}", &value[..end])
+}
+
+fn truncated_usage_request_metadata_value(value: &Value) -> Value {
+    json!({
+        "truncated": true,
+        "reason": "usage_request_metadata_limits_exceeded",
+        "max_depth": MAX_USAGE_REQUEST_METADATA_DEPTH,
+        "max_nodes": MAX_USAGE_REQUEST_METADATA_NODES,
+        "max_bytes": MAX_USAGE_REQUEST_METADATA_BYTES,
+        "value_kind": usage_request_metadata_value_kind(value),
+    })
+}
+
+fn usage_request_metadata_within_limits(value: &Value) -> bool {
+    let mut nodes = 0usize;
+    let mut estimated_bytes = 0usize;
+    let mut stack = vec![(value, 1usize)];
+
+    while let Some((current, depth)) = stack.pop() {
+        nodes = nodes.saturating_add(1);
+        estimated_bytes =
+            estimated_bytes.saturating_add(usage_request_metadata_value_size_hint(current));
+        if depth > MAX_USAGE_REQUEST_METADATA_DEPTH
+            || nodes > MAX_USAGE_REQUEST_METADATA_NODES
+            || estimated_bytes > MAX_USAGE_REQUEST_METADATA_BYTES
+        {
+            return false;
+        }
+        match current {
+            Value::Array(items) => {
+                estimated_bytes = estimated_bytes.saturating_add(items.len().saturating_mul(2));
+                for item in items.iter().rev() {
+                    stack.push((item, depth + 1));
+                }
+            }
+            Value::Object(object) => {
+                estimated_bytes = estimated_bytes
+                    .saturating_add(object.len().saturating_mul(3))
+                    .saturating_add(
+                        object
+                            .keys()
+                            .map(|key| key.len().saturating_add(2))
+                            .sum::<usize>(),
+                    );
+                for item in object.values() {
+                    stack.push((item, depth + 1));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    true
+}
+
+fn usage_request_metadata_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn usage_request_metadata_value_size_hint(value: &Value) -> usize {
+    match value {
+        Value::Null => 4,
+        Value::Bool(false) => 5,
+        Value::Bool(true) => 4,
+        Value::Number(number) => number.to_string().len(),
+        Value::String(text) => text.len().saturating_add(2),
+        Value::Array(_) | Value::Object(_) => 2,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use aether_contracts::{ExecutionPlan, RequestBody};
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::collections::BTreeMap;
 
     use super::{
         build_usage_request_metadata_seed, merge_usage_request_metadata,
-        sanitize_usage_request_metadata,
+        sanitize_usage_request_metadata, MAX_USAGE_REQUEST_METADATA_BYTES,
+        MAX_USAGE_REQUEST_METADATA_DEPTH, MAX_USAGE_REQUEST_METADATA_NODES,
     };
 
     fn sample_plan() -> ExecutionPlan {
@@ -143,14 +252,22 @@ mod tests {
             "provider_id": "provider-1",
             "provider_name": "OpenAI",
             "model": "gpt-5",
-            "candidate_id": "cand-1",
             "candidate_index": 2,
-            "key_name": "upstream-primary",
             "trace_id": "trace-1",
+            "provider_request_body_base64_bytes": 512,
+            "provider_response_body_base64_bytes": 1024,
+            "client_response_body_base64_bytes": 2048,
             "billing_snapshot": {"status": "complete"},
+            "billing_snapshot_schema_version": "2.0",
+            "billing_snapshot_status": "complete",
             "dimensions": {"total_input_context": 10},
             "rate_multiplier": 1.25,
             "is_free_tier": false,
+            "input_price_per_1m": 3.0,
+            "output_price_per_1m": 15.0,
+            "cache_creation_price_per_1m": 3.75,
+            "cache_read_price_per_1m": 0.3,
+            "price_per_request": 0.02,
             "original_headers": {"authorization": "Bearer secret"},
             "original_request_body": {"messages": []},
             "provider_request_headers": {"authorization": "Bearer secret"},
@@ -161,27 +278,60 @@ mod tests {
         assert_eq!(
             metadata,
             json!({
-                "candidate_id": "cand-1",
-                "candidate_index": 2,
-                "key_name": "upstream-primary",
                 "trace_id": "trace-1",
+                "provider_request_body_base64_bytes": 512,
+                "provider_response_body_base64_bytes": 1024,
+                "client_response_body_base64_bytes": 2048,
                 "billing_snapshot": {"status": "complete"},
+                "billing_snapshot_schema_version": "2.0",
+                "billing_snapshot_status": "complete",
                 "dimensions": {"total_input_context": 10},
                 "rate_multiplier": 1.25,
-                "is_free_tier": false
+                "is_free_tier": false,
+                "input_price_per_1m": 3.0,
+                "output_price_per_1m": 15.0,
+                "cache_creation_price_per_1m": 3.75,
+                "cache_read_price_per_1m": 0.3,
+                "price_per_request": 0.02
             })
         );
     }
 
     #[test]
-    fn builds_seed_from_context_and_plan_candidate_id() {
+    fn sanitizes_large_allowed_metadata_values_to_bounded_representations() {
+        let metadata = sanitize_usage_request_metadata(Some(json!({
+            "trace_id": "t".repeat(2_048),
+            "billing_snapshot": {
+                "payload": "x".repeat(32 * 1024)
+            }
+        })))
+        .expect("metadata should remain");
+
+        assert!(metadata
+            .get("trace_id")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.ends_with("...[truncated]")));
+        assert_eq!(
+            metadata.get("billing_snapshot"),
+            Some(&json!({
+                "truncated": true,
+                "reason": "usage_request_metadata_limits_exceeded",
+                "max_depth": MAX_USAGE_REQUEST_METADATA_DEPTH,
+                "max_nodes": MAX_USAGE_REQUEST_METADATA_NODES,
+                "max_bytes": MAX_USAGE_REQUEST_METADATA_BYTES,
+                "value_kind": "object",
+            }))
+        );
+    }
+
+    #[test]
+    fn builds_seed_from_context_and_allowlisted_metadata_only() {
         let metadata = build_usage_request_metadata_seed(
             &sample_plan(),
             Some(
                 json!({
                     "request_id": "req-1",
                     "candidate_index": 0,
-                    "key_name": "upstream-primary",
                     "provider_id": "provider-1",
                     "billing_snapshot": {"status": "complete"}
                 })
@@ -194,9 +344,6 @@ mod tests {
         assert_eq!(
             metadata,
             json!({
-                "candidate_id": "cand-1",
-                "candidate_index": 0,
-                "key_name": "upstream-primary",
                 "billing_snapshot": {"status": "complete"}
             })
         );
@@ -206,24 +353,14 @@ mod tests {
     fn merges_and_filters_request_metadata() {
         let metadata = merge_usage_request_metadata(
             Some(json!({
-                "candidate_id": "cand-1",
                 "request_id": "req-1"
             })),
             Some(json!({
                 "candidate_index": 0,
-                "key_name": "upstream-primary",
                 "provider_name": "OpenAI"
             })),
-        )
-        .expect("metadata should remain");
-
-        assert_eq!(
-            metadata,
-            json!({
-                "candidate_id": "cand-1",
-                "candidate_index": 0,
-                "key_name": "upstream-primary"
-            })
         );
+
+        assert_eq!(metadata, None);
     }
 }

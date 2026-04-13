@@ -79,8 +79,8 @@ sudo aether-proxy uninstall
 |------|----------|--------|------|
 | `--aether-url` | `AETHER_PROXY_AETHER_URL` | **必填** | Aether 服务器地址 |
 | `--management-token` | `AETHER_PROXY_MANAGEMENT_TOKEN` | **必填** | 管理员 Token（`ae_xxx` 格式） |
+| `--node-name` | `AETHER_PROXY_NODE_NAME` | **必填** | 节点名称标识 |
 | `--public-ip` | `AETHER_PROXY_PUBLIC_IP` | 自动检测 | 公网 IP |
-| `--node-name` | `AETHER_PROXY_NODE_NAME` | `proxy-01` | 节点名称标识 |
 | `--node-region` | `AETHER_PROXY_NODE_REGION` | 自动检测 | 地区标识 |
 | `--heartbeat-interval` | `AETHER_PROXY_HEARTBEAT_INTERVAL` | `30` | 心跳间隔（秒） |
 | `--allowed-ports` | `AETHER_PROXY_ALLOWED_PORTS` | `80,443,8080,8443` | 允许代理的目标端口 |
@@ -108,6 +108,7 @@ sudo aether-proxy uninstall
 | `--upstream-pool-idle-timeout-secs` | `AETHER_PROXY_UPSTREAM_POOL_IDLE_TIMEOUT_SECS` | `300` | 连接池空闲超时（秒） |
 | `--upstream-tcp-keepalive-secs` | `AETHER_PROXY_UPSTREAM_TCP_KEEPALIVE_SECS` | `60` | TCP keepalive（秒，0 关闭） |
 | `--upstream-tcp-nodelay` | `AETHER_PROXY_UPSTREAM_TCP_NODELAY` | `true` | 启用 TCP_NODELAY |
+| `--redirect-replay-budget-bytes` | `AETHER_PROXY_REDIRECT_REPLAY_BUDGET_BYTES` | `5M` | 307/308 请求体重放的预读预算，支持 `K/M/G`，`0` 表示禁用 body replay buffering |
 
 #### Aether API 客户端
 
@@ -129,7 +130,6 @@ sudo aether-proxy uninstall
 | 参数 | 环境变量 | 默认值 | 说明 |
 |------|----------|--------|------|
 | `--log-level` | `AETHER_PROXY_LOG_LEVEL` | `info` | 日志级别 |
-| `--log-json` | `AETHER_PROXY_LOG_JSON` | `false` | JSON 格式日志 |
 | `--log-destination` | `AETHER_PROXY_LOG_DESTINATION` | `stdout` | 输出到 `stdout`、文件或两者同时输出 |
 | `--log-dir` | `AETHER_PROXY_LOG_DIR` | 空 | 文件日志目录，`file/both` 时必填 |
 | `--log-rotation` | `AETHER_PROXY_LOG_ROTATION` | `daily` | 文件日志按小时或按天轮转 |
@@ -139,8 +139,8 @@ sudo aether-proxy uninstall
 ### 日志落点
 
 - 默认 `AETHER_PROXY_LOG_DESTINATION=stdout`，日志交给容器日志驱动或宿主机服务管理器
-- 需要落盘时改成 `file` 或 `both`，并设置 `AETHER_PROXY_LOG_DIR`
-- 文件日志支持 `hourly/daily` 轮转，并按 `AETHER_PROXY_LOG_RETENTION_DAYS` 和 `AETHER_PROXY_LOG_MAX_FILES` 自动清理
+- 需要落盘时改成 `file` 或 `both`，并设置 `AETHER_PROXY_LOG_DIR`；setup TUI 里用 `Save Logs to File` 开关即可
+- 文件日志固定写普通文本，并支持 `hourly/daily` 轮转；默认按天轮换、保留 7 天，最多保留 30 个文件
 - `docker compose` 默认保持 `stdout`，避免和容器自带日志重复；以 `systemd` 或 `OpenRC` 安装时默认会额外打开文件日志到 `/var/log/aether-proxy`
 - OpenRC 安装时，`aether-proxy logs` 实际读取 `/var/log/aether-proxy/current.log` 和 `/var/log/aether-proxy/error.log`；这些文件通常需要用 `sudo aether-proxy logs` 查看
 

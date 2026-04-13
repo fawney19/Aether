@@ -1,4 +1,4 @@
-use crate::handlers::admin::provider::shared::payloads::AdminProviderKeyUpdateRequest;
+use crate::handlers::admin::provider::shared::payloads::AdminProviderKeyUpdatePatch;
 use crate::handlers::admin::provider::write::normalize::{
     normalize_auth_type, validate_vertex_api_formats,
 };
@@ -17,11 +17,11 @@ pub(crate) async fn build_admin_update_provider_key_record(
     state: &AdminAppState<'_>,
     provider: &StoredProviderCatalogProvider,
     existing: &StoredProviderCatalogKey,
-    raw_payload: &serde_json::Map<String, serde_json::Value>,
-    payload: AdminProviderKeyUpdateRequest,
+    patch: AdminProviderKeyUpdatePatch,
 ) -> Result<StoredProviderCatalogKey, String> {
     let state = state.as_ref();
     let mut updated = existing.clone();
+    let (fields, payload) = patch.into_parts();
     let current_auth_type = normalize_auth_type(Some(&existing.auth_type))?;
     let target_auth_type = payload
         .auth_type
@@ -34,7 +34,7 @@ pub(crate) async fn build_admin_update_provider_key_record(
         .as_deref()
         .is_some_and(|_| target_auth_type != current_auth_type);
 
-    let api_key_present = raw_payload.contains_key("api_key");
+    let api_key_present = fields.contains("api_key");
     let api_key_value = payload
         .api_key
         .as_deref()
@@ -44,7 +44,7 @@ pub(crate) async fn build_admin_update_provider_key_record(
         return Err("api_key 不能为空".to_string());
     }
 
-    let auth_config_present = raw_payload.contains_key("auth_config");
+    let auth_config_present = fields.contains("auth_config");
     let auth_config = normalize_json_object(payload.auth_config, "auth_config")?;
     let auth_config_object = auth_config
         .as_ref()
@@ -182,7 +182,7 @@ pub(crate) async fn build_admin_update_provider_key_record(
         _ => {}
     }
 
-    if raw_payload.contains_key("api_formats") {
+    if fields.contains("api_formats") {
         let api_formats = normalize_string_list(payload.api_formats)
             .ok_or_else(|| "api_formats 为必填字段".to_string())?;
         validate_vertex_api_formats(&provider.provider_type, &target_auth_type, &api_formats)?;
@@ -201,30 +201,30 @@ pub(crate) async fn build_admin_update_provider_key_record(
         }
         updated.name = trimmed.to_string();
     }
-    if raw_payload.contains_key("rate_multipliers") {
+    if fields.contains("rate_multipliers") {
         updated.rate_multipliers =
             normalize_json_object(payload.rate_multipliers, "rate_multipliers")?;
     }
     if let Some(internal_priority) = payload.internal_priority {
         updated.internal_priority = internal_priority;
     }
-    if raw_payload.contains_key("global_priority_by_format") {
+    if fields.contains("global_priority_by_format") {
         updated.global_priority_by_format = normalize_json_object(
             payload.global_priority_by_format,
             "global_priority_by_format",
         )?;
     }
-    if raw_payload.contains_key("rpm_limit") {
+    if fields.contains("rpm_limit") {
         updated.rpm_limit = payload.rpm_limit;
         if payload.rpm_limit.is_none() {
             updated.learned_rpm_limit = None;
         }
     }
-    if raw_payload.contains_key("allowed_models") {
+    if fields.contains("allowed_models") {
         updated.allowed_models =
             normalize_string_list(payload.allowed_models).map(|value| json!(value));
     }
-    if raw_payload.contains_key("capabilities") {
+    if fields.contains("capabilities") {
         updated.capabilities = normalize_json_object(payload.capabilities, "capabilities")?;
     }
     if let Some(cache_ttl_minutes) = payload.cache_ttl_minutes {
@@ -236,7 +236,7 @@ pub(crate) async fn build_admin_update_provider_key_record(
     if let Some(is_active) = payload.is_active {
         updated.is_active = is_active;
     }
-    if raw_payload.contains_key("note") {
+    if fields.contains("note") {
         updated.note = payload
             .note
             .map(|value| value.trim().to_string())
@@ -245,22 +245,22 @@ pub(crate) async fn build_admin_update_provider_key_record(
     if let Some(auto_fetch_models) = payload.auto_fetch_models {
         updated.auto_fetch_models = auto_fetch_models;
     }
-    if raw_payload.contains_key("locked_models") {
+    if fields.contains("locked_models") {
         updated.locked_models =
             normalize_string_list(payload.locked_models).map(|value| json!(value));
     }
-    if raw_payload.contains_key("model_include_patterns") {
+    if fields.contains("model_include_patterns") {
         updated.model_include_patterns =
             normalize_string_list(payload.model_include_patterns).map(|value| json!(value));
     }
-    if raw_payload.contains_key("model_exclude_patterns") {
+    if fields.contains("model_exclude_patterns") {
         updated.model_exclude_patterns =
             normalize_string_list(payload.model_exclude_patterns).map(|value| json!(value));
     }
-    if raw_payload.contains_key("proxy") {
+    if fields.contains("proxy") {
         updated.proxy = normalize_json_object(payload.proxy, "proxy")?;
     }
-    if raw_payload.contains_key("fingerprint") {
+    if fields.contains("fingerprint") {
         updated.fingerprint = normalize_json_object(payload.fingerprint, "fingerprint")?;
     }
     if auth_config_present && !auth_type_switch && updated.auth_type != "api_key" {

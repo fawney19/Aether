@@ -94,17 +94,41 @@ pub struct UsageEventData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_body: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_request_headers: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_request_body: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_request_body_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_headers: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_body: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_response_headers: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_response_body: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_response_body_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_execution_runtime_miss_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_metadata: Option<Value>,
 }

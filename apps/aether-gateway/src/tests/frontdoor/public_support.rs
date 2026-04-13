@@ -2156,6 +2156,37 @@ fn sample_auth_session(
     .expect("auth session should build")
 }
 
+fn sample_usage_auth_snapshot(
+    api_key_id: &str,
+    user_id: &str,
+    api_key_name: &str,
+) -> StoredAuthApiKeySnapshot {
+    StoredAuthApiKeySnapshot::new(
+        user_id.to_string(),
+        "alice".to_string(),
+        Some("alice@example.com".to_string()),
+        "user".to_string(),
+        "local".to_string(),
+        true,
+        false,
+        Some(json!(["openai"])),
+        Some(json!(["openai:chat"])),
+        Some(json!(["gpt-5"])),
+        api_key_id.to_string(),
+        Some(api_key_name.to_string()),
+        true,
+        false,
+        false,
+        Some(60),
+        Some(5),
+        None,
+        Some(json!(["openai"])),
+        Some(json!(["openai:chat"])),
+        Some(json!(["gpt-5"])),
+    )
+    .expect("auth api key snapshot should build")
+}
+
 async fn start_auth_gateway_with_state(
     user: StoredUserAuthRecord,
     wallet: StoredWalletSnapshot,
@@ -4671,6 +4702,22 @@ async fn gateway_handles_users_me_usage_locally_without_proxying_upstream() {
         ]),
         now + chrono::Duration::hours(1),
     );
+    let mut streaming_usage = sample_user_usage_audit(
+        "usage-users-me-streaming-1",
+        "req-users-me-streaming-1",
+        "user-auth-1",
+        "gpt-4.1-mini",
+        "OpenAI",
+        "streaming",
+        now - chrono::Duration::minutes(5),
+    );
+    streaming_usage.request_metadata = Some(json!({
+        "rate_multiplier": 0.5,
+        "input_price_per_1m": 3.0,
+        "output_price_per_1m": 9.0,
+        "cache_creation_price_per_1m": 3.75,
+        "cache_read_price_per_1m": 0.3,
+    }));
     let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
         sample_user_usage_audit(
             "usage-users-me-completed-1",
@@ -4690,34 +4737,41 @@ async fn gateway_handles_users_me_usage_locally_without_proxying_upstream() {
             "failed",
             now - chrono::Duration::minutes(10),
         ),
-        sample_user_usage_audit(
-            "usage-users-me-streaming-1",
-            "req-users-me-streaming-1",
-            "user-auth-1",
-            "gpt-4.1-mini",
-            "OpenAI",
-            "streaming",
-            now - chrono::Duration::minutes(5),
-        ),
+        streaming_usage,
     ]));
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some("hash-api-key-user-1".to_string()),
+        sample_usage_auth_snapshot("api-key-user-1", "user-auth-1", "renamed-key"),
+    )]));
     let (gateway_url, upstream_hits, gateway_handle, upstream_handle) =
-        start_auth_gateway_with_usage_state(
-            user,
-            sample_auth_wallet("user-auth-1", now),
-            [sample_auth_session(
-                "user-auth-1",
-                "session-users-me-usage-1",
-                "device-users-me-usage-1",
-                "refresh-token-placeholder",
-                now,
-            )],
-            usage_repository,
-        )
+        start_auth_gateway_with_builder(|| {
+            let data_state = crate::data::GatewayDataState::with_user_wallet_and_usage_for_tests(
+                Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
+                    user.clone()
+                ])),
+                Arc::new(InMemoryWalletRepository::seed(vec![sample_auth_wallet(
+                    "user-auth-1",
+                    now,
+                )])),
+                Arc::clone(&usage_repository),
+            )
+            .with_auth_api_key_reader(auth_repository);
+            AppState::new()
+                .expect("gateway should build")
+                .with_data_state_for_tests(data_state)
+                .with_auth_sessions_for_tests([sample_auth_session(
+                    "user-auth-1",
+                    "session-users-me-usage-1",
+                    "device-users-me-usage-1",
+                    "refresh-token-placeholder",
+                    now,
+                )])
+        })
         .await;
 
     let response = reqwest::Client::new()
         .get(format!(
-            "{gateway_url}/api/users/me/usage?limit=10&offset=0"
+            "{gateway_url}/api/users/me/usage?limit=10&offset=0&search=renamed-key"
         ))
         .header("authorization", format!("Bearer {access_token}"))
         .header("x-client-device-id", "device-users-me-usage-1")
@@ -4744,6 +4798,12 @@ async fn gateway_handles_users_me_usage_locally_without_proxying_upstream() {
         payload["records"][0]["cache_creation_ephemeral_1h_input_tokens"],
         6
     );
+    assert_eq!(payload["records"][0]["input_price_per_1m"], 3.0);
+    assert_eq!(payload["records"][0]["output_price_per_1m"], 9.0);
+    assert_eq!(payload["records"][0]["cache_creation_price_per_1m"], 3.75);
+    assert_eq!(payload["records"][0]["cache_read_price_per_1m"], 0.3);
+    assert_eq!(payload["records"][0]["api_key"]["name"], "renamed-key");
+    assert_eq!(payload["records"][0]["api_key"]["display"], "renamed-key");
     assert_eq!(
         payload["summary_by_model"]
             .as_array()
@@ -4763,8 +4823,93 @@ async fn gateway_handles_users_me_usage_locally_without_proxying_upstream() {
         payload["summary_by_model"][0]["effective_input_tokens"],
         105
     );
-    assert_eq!(payload["summary_by_model"][0]["total_input_context"], 145);
+    assert_eq!(payload["summary_by_model"][0]["total_input_context"], 120);
     assert_eq!(payload["billing"]["id"], "wallet-auth-1");
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_users_me_usage_without_legacy_api_key_name_fallback_when_auth_reader_exists(
+) {
+    let now = Utc::now();
+    let user = sample_auth_user(now);
+    let access_token = build_test_auth_token(
+        "access",
+        serde_json::Map::from_iter([
+            ("user_id".to_string(), json!(user.id)),
+            ("role".to_string(), json!(user.role)),
+            (
+                "created_at".to_string(),
+                json!(user.created_at.map(|value| value.to_rfc3339())),
+            ),
+            (
+                "session_id".to_string(),
+                json!("session-users-me-usage-no-legacy-fallback"),
+            ),
+        ]),
+        now + chrono::Duration::hours(1),
+    );
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        sample_user_usage_audit(
+            "usage-users-me-completed-no-legacy-fallback",
+            "req-users-me-completed-no-legacy-fallback",
+            "user-auth-1",
+            "gpt-4.1",
+            "OpenAI",
+            "completed",
+            now - chrono::Duration::minutes(20),
+        ),
+    ]));
+    let (gateway_url, upstream_hits, gateway_handle, upstream_handle) =
+        start_auth_gateway_with_builder(|| {
+            let data_state = crate::data::GatewayDataState::with_user_wallet_and_usage_for_tests(
+                Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
+                    user.clone()
+                ])),
+                Arc::new(InMemoryWalletRepository::seed(vec![sample_auth_wallet(
+                    "user-auth-1",
+                    now,
+                )])),
+                Arc::clone(&usage_repository),
+            )
+            .with_auth_api_key_reader(Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![])));
+            AppState::new()
+                .expect("gateway should build")
+                .with_data_state_for_tests(data_state)
+                .with_auth_sessions_for_tests([sample_auth_session(
+                    "user-auth-1",
+                    "session-users-me-usage-no-legacy-fallback",
+                    "device-users-me-usage-no-legacy-fallback",
+                    "refresh-token-users-me-usage-no-legacy-fallback",
+                    now,
+                )])
+        })
+        .await;
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{gateway_url}/api/users/me/usage?limit=10&offset=0&search=default"
+        ))
+        .header("authorization", format!("Bearer {access_token}"))
+        .header(
+            "x-client-device-id",
+            "device-users-me-usage-no-legacy-fallback",
+        )
+        .header("user-agent", "AetherTest/1.0")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["pagination"]["total"], 0);
+    assert_eq!(
+        payload["records"].as_array().expect("records array").len(),
+        0
+    );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -4788,6 +4933,18 @@ async fn gateway_handles_users_me_usage_active_locally_without_proxying_upstream
         ]),
         now + chrono::Duration::hours(1),
     );
+    let mut streaming_usage = sample_user_usage_audit(
+        "usage-users-me-streaming-1",
+        "req-users-me-streaming-1",
+        "user-auth-1",
+        "gpt-4.1-mini",
+        "OpenAI",
+        "streaming",
+        now - chrono::Duration::minutes(2),
+    );
+    streaming_usage.request_metadata = Some(json!({
+        "rate_multiplier": 0.5,
+    }));
     let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
         sample_user_usage_audit(
             "usage-users-me-pending-1",
@@ -4798,15 +4955,7 @@ async fn gateway_handles_users_me_usage_active_locally_without_proxying_upstream
             "pending",
             now - chrono::Duration::minutes(4),
         ),
-        sample_user_usage_audit(
-            "usage-users-me-streaming-1",
-            "req-users-me-streaming-1",
-            "user-auth-1",
-            "gpt-4.1-mini",
-            "OpenAI",
-            "streaming",
-            now - chrono::Duration::minutes(2),
-        ),
+        streaming_usage,
         sample_user_usage_audit(
             "usage-users-me-completed-1",
             "req-users-me-completed-1",
@@ -4846,6 +4995,7 @@ async fn gateway_handles_users_me_usage_active_locally_without_proxying_upstream
     let requests = payload["requests"].as_array().expect("requests array");
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0]["status"], "streaming");
+    assert_eq!(requests[0]["rate_multiplier"], 0.5);
     assert_eq!(requests[0]["cache_creation_ephemeral_5m_input_tokens"], 4);
     assert_eq!(requests[0]["cache_creation_ephemeral_1h_input_tokens"], 6);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);

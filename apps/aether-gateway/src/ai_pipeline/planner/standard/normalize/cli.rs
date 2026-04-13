@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 use url::form_urlencoded;
 
-use super::super::codex::apply_codex_openai_cli_special_body_edits;
 use crate::ai_pipeline::conversion::{request_conversion_kind, RequestConversionKind};
 use crate::ai_pipeline::transport::antigravity::{
     build_antigravity_v1internal_url, AntigravityRequestUrlAction,
@@ -14,6 +13,7 @@ use crate::ai_pipeline::transport::url::{
     build_openai_cli_url, build_passthrough_path_url,
 };
 use crate::ai_pipeline::{
+    apply_codex_openai_cli_special_body_edits, apply_openai_compact_special_body_edits,
     build_cross_format_openai_cli_request_body as pipeline_build_cross_format_openai_cli_request_body,
     build_local_openai_cli_request_body as pipeline_build_local_openai_cli_request_body,
     GatewayProviderTransportSnapshot,
@@ -40,6 +40,7 @@ pub(crate) fn build_local_openai_cli_request_body(
         body_rules,
         user_api_key_id,
     );
+    apply_openai_compact_special_body_edits(&mut provider_request_body, provider_api_format);
     Some(provider_request_body)
 }
 
@@ -70,6 +71,7 @@ pub(crate) fn build_cross_format_openai_cli_request_body(
         body_rules,
         user_api_key_id,
     );
+    apply_openai_compact_special_body_edits(&mut provider_request_body, provider_api_format);
     Some(provider_request_body)
 }
 

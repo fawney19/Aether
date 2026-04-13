@@ -1,24 +1,37 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use aether_data::repository::proxy_nodes::{
+    InMemoryProxyNodeRepository, ProxyNodeHeartbeatMutation, ProxyNodeReadRepository,
+    ProxyNodeWriteRepository, StoredProxyNode,
+};
+use aether_runtime::bounded_queue;
+use axum::extract::ws::Message;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde_json::json;
+use tokio::sync::watch;
 
 use super::{
-    cleanup_audit_logs_with, next_daily_run_after, next_db_maintenance_run_after,
+    advance_proxy_upgrade_rollout_once, cleanup_audit_logs_with, cleanup_stale_proxy_nodes_once,
+    inspect_proxy_upgrade_rollout, next_daily_run_after, next_db_maintenance_run_after,
     next_stats_aggregation_run_after, next_stats_hourly_aggregation_run_after,
     pending_cleanup_batch_size, pending_cleanup_timeout_minutes, plan_pending_cleanup_batch,
-    provider_checkin_schedule, run_db_maintenance_with, spawn_audit_cleanup_worker,
-    spawn_db_maintenance_worker, spawn_pending_cleanup_worker, spawn_pool_monitor_worker,
-    spawn_provider_checkin_worker, spawn_stats_aggregation_worker,
-    spawn_stats_hourly_aggregation_worker, spawn_usage_cleanup_worker,
-    spawn_wallet_daily_usage_aggregation_worker, stats_aggregation_target_day,
+    provider_checkin_schedule, record_proxy_upgrade_traffic_success, run_db_maintenance_with,
+    run_proxy_upgrade_rollout_once, spawn_audit_cleanup_worker, spawn_db_maintenance_worker,
+    spawn_pending_cleanup_worker, spawn_pool_monitor_worker, spawn_provider_checkin_worker,
+    spawn_proxy_node_stale_cleanup_worker, spawn_proxy_upgrade_rollout_worker,
+    spawn_stats_aggregation_worker, spawn_stats_hourly_aggregation_worker,
+    spawn_usage_cleanup_worker, spawn_wallet_daily_usage_aggregation_worker,
+    start_proxy_upgrade_rollout, stats_aggregation_target_day,
     stats_hourly_aggregation_target_hour, summarize_postgres_pool, usage_cleanup_settings,
     usage_cleanup_window, wallet_daily_usage_aggregation_target, AppState, DbMaintenanceRunSummary,
-    FailedPendingUsageRow, GatewayDataState, StalePendingUsageRow, UsageCleanupSettings,
-    USAGE_CLEANUP_HOUR, USAGE_CLEANUP_MINUTE, WALLET_DAILY_USAGE_AGGREGATION_HOUR,
-    WALLET_DAILY_USAGE_AGGREGATION_MINUTE,
+    FailedPendingUsageRow, GatewayDataState, ProxyUpgradeRolloutProbeConfig, StalePendingUsageRow,
+    UsageCleanupSettings, DELETE_STALE_WALLET_DAILY_USAGE_LEDGERS_SQL,
+    SELECT_STALE_PENDING_USAGE_BATCH_SQL, UPSERT_WALLET_DAILY_USAGE_LEDGER_SQL,
+    UPDATE_FAILED_VOID_STALE_USAGE_SQL, USAGE_CLEANUP_HOUR, USAGE_CLEANUP_MINUTE,
+    WALLET_DAILY_USAGE_AGGREGATION_HOUR, WALLET_DAILY_USAGE_AGGREGATION_MINUTE,
 };
 
 #[tokio::test]
@@ -37,8 +50,494 @@ async fn spawn_pending_cleanup_worker_skips_when_postgres_unavailable() {
 }
 
 #[tokio::test]
+async fn spawn_proxy_node_stale_cleanup_worker_skips_when_proxy_nodes_unavailable() {
+    assert!(
+        spawn_proxy_node_stale_cleanup_worker(Arc::new(GatewayDataState::disabled())).is_none()
+    );
+}
+
+#[tokio::test]
+async fn spawn_proxy_upgrade_rollout_worker_skips_when_proxy_nodes_unavailable() {
+    let state = AppState::new()
+        .expect("gateway state should build")
+        .with_data_state_for_tests(GatewayDataState::disabled());
+    assert!(spawn_proxy_upgrade_rollout_worker(state).is_none());
+}
+
+#[tokio::test]
+async fn spawn_proxy_upgrade_rollout_worker_skips_when_system_config_unavailable() {
+    let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![]));
+    let data = GatewayDataState::with_proxy_node_repository_for_tests(repository);
+    let state = AppState::new()
+        .expect("gateway state should build")
+        .with_data_state_for_tests(data);
+    assert!(spawn_proxy_upgrade_rollout_worker(state).is_none());
+}
+
+#[tokio::test]
 async fn spawn_pool_monitor_worker_skips_when_postgres_unavailable() {
     assert!(spawn_pool_monitor_worker(Arc::new(GatewayDataState::disabled())).is_none());
+}
+
+#[test]
+fn wallet_daily_usage_queries_use_settlement_snapshots_for_wallet_identity() {
+    assert!(
+        UPSERT_WALLET_DAILY_USAGE_LEDGER_SQL.contains("JOIN usage_settlement_snapshots")
+    );
+    assert!(UPSERT_WALLET_DAILY_USAGE_LEDGER_SQL
+        .contains("usage_settlement_snapshots.wallet_id"));
+    assert!(DELETE_STALE_WALLET_DAILY_USAGE_LEDGERS_SQL.contains("JOIN usage_settlement_snapshots"));
+    assert!(DELETE_STALE_WALLET_DAILY_USAGE_LEDGERS_SQL
+        .contains("usage_settlement_snapshots.wallet_id = ledgers.wallet_id"));
+}
+
+#[test]
+fn pending_cleanup_queries_use_settlement_snapshots_for_billing_authority() {
+    assert!(SELECT_STALE_PENDING_USAGE_BATCH_SQL.contains("LEFT JOIN usage_settlement_snapshots"));
+    assert!(SELECT_STALE_PENDING_USAGE_BATCH_SQL
+        .contains("COALESCE(usage_settlement_snapshots.billing_status, usage.billing_status)"));
+    assert!(UPDATE_FAILED_VOID_STALE_USAGE_SQL.contains("INSERT INTO usage_settlement_snapshots"));
+    assert!(UPDATE_FAILED_VOID_STALE_USAGE_SQL.contains("billing_status = EXCLUDED.billing_status"));
+}
+
+fn sample_connected_proxy_node(
+    node_id: &str,
+    heartbeat_interval: i32,
+    last_heartbeat_at_unix_secs: u64,
+) -> StoredProxyNode {
+    StoredProxyNode::new(
+        node_id.to_string(),
+        format!("proxy-{node_id}"),
+        "127.0.0.1".to_string(),
+        0,
+        false,
+        "online".to_string(),
+        heartbeat_interval,
+        3,
+        10,
+        0,
+        0,
+        0,
+        true,
+        true,
+        0,
+    )
+    .expect("node should build")
+    .with_runtime_fields(
+        Some("test".to_string()),
+        None,
+        Some(last_heartbeat_at_unix_secs),
+        None,
+        None,
+        None,
+        None,
+        Some(last_heartbeat_at_unix_secs),
+        None,
+        Some(last_heartbeat_at_unix_secs),
+        Some(last_heartbeat_at_unix_secs),
+    )
+}
+
+#[tokio::test]
+async fn stale_proxy_node_cleanup_marks_timed_out_tunnel_offline() {
+    let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![
+        sample_connected_proxy_node("node-stale", 30, 1),
+    ]));
+    let data = GatewayDataState::with_proxy_node_repository_for_tests(Arc::clone(&repository));
+
+    let updated = cleanup_stale_proxy_nodes_once(&data)
+        .await
+        .expect("cleanup should succeed");
+
+    assert_eq!(updated, 1);
+    let node = repository
+        .find_proxy_node("node-stale")
+        .await
+        .expect("lookup should succeed")
+        .expect("node should exist");
+    assert_eq!(node.status, "offline");
+    assert_eq!(node.tunnel_connected, false);
+    assert_eq!(node.active_connections, 0);
+}
+
+#[tokio::test]
+async fn proxy_upgrade_rollout_advances_next_wave_after_version_health_confirmation() {
+    let mut alpha = sample_connected_proxy_node("node-alpha", 30, 1_800_000_000);
+    alpha.name = "alpha".to_string();
+    alpha.proxy_metadata = Some(json!({"version": "1.0.0"}));
+    alpha.remote_config = None;
+    alpha.config_version = 0;
+
+    let mut zeta = sample_connected_proxy_node("node-zeta", 30, 1_800_000_000);
+    zeta.name = "zeta".to_string();
+    zeta.proxy_metadata = Some(json!({"version": "1.0.0"}));
+    zeta.remote_config = None;
+    zeta.config_version = 0;
+
+    let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![zeta, alpha]));
+    let data = GatewayDataState::with_proxy_node_repository_for_tests(Arc::clone(&repository))
+        .with_system_config_values_for_tests(Vec::<(String, serde_json::Value)>::new());
+
+    let first_wave = start_proxy_upgrade_rollout(&data, "2.0.0".to_string(), 1, 0, None)
+        .await
+        .expect("rollout should start");
+    assert_eq!(first_wave.updated, 1);
+    assert_eq!(first_wave.node_ids, vec!["node-alpha".to_string()]);
+    assert!(first_wave.rollout_active);
+
+    let alpha_after_first = repository
+        .find_proxy_node("node-alpha")
+        .await
+        .expect("lookup should succeed")
+        .expect("alpha should exist");
+    assert_eq!(
+        alpha_after_first
+            .remote_config
+            .as_ref()
+            .and_then(|value| value.get("upgrade_to")),
+        Some(&json!("2.0.0"))
+    );
+
+    repository
+        .apply_heartbeat(&ProxyNodeHeartbeatMutation {
+            node_id: "node-alpha".to_string(),
+            heartbeat_interval: None,
+            active_connections: Some(2),
+            total_requests_delta: Some(1),
+            avg_latency_ms: Some(2.0),
+            failed_requests_delta: Some(0),
+            dns_failures_delta: Some(0),
+            stream_errors_delta: Some(0),
+            proxy_metadata: Some(json!({"version": "2.0.0"})),
+            proxy_version: Some("2.0.0".to_string()),
+        })
+        .await
+        .expect("heartbeat should succeed");
+
+    let observed = advance_proxy_upgrade_rollout_once(&data)
+        .await
+        .expect("rollout should observe confirmed version");
+    assert_eq!(observed.updated, 0);
+    assert!(observed.blocked);
+    assert_eq!(observed.pending_node_ids, vec!["node-alpha".to_string()]);
+
+    assert!(!record_proxy_upgrade_traffic_success(&data, "node-zeta")
+        .await
+        .expect("untracked node traffic should be ignored"));
+    assert!(record_proxy_upgrade_traffic_success(&data, "node-alpha")
+        .await
+        .expect("traffic confirmation should be recorded"));
+
+    let second_wave = advance_proxy_upgrade_rollout_once(&data)
+        .await
+        .expect("rollout should advance after a healthy observation cycle");
+    assert_eq!(second_wave.updated, 1);
+    assert_eq!(second_wave.node_ids, vec!["node-zeta".to_string()]);
+    assert!(second_wave.rollout_active);
+
+    repository
+        .apply_heartbeat(&ProxyNodeHeartbeatMutation {
+            node_id: "node-zeta".to_string(),
+            heartbeat_interval: None,
+            active_connections: Some(2),
+            total_requests_delta: Some(1),
+            avg_latency_ms: Some(2.0),
+            failed_requests_delta: Some(0),
+            dns_failures_delta: Some(0),
+            stream_errors_delta: Some(0),
+            proxy_metadata: Some(json!({"version": "2.0.0"})),
+            proxy_version: Some("proxy-v2.0.0".to_string()),
+        })
+        .await
+        .expect("heartbeat should succeed");
+
+    let zeta_observed = advance_proxy_upgrade_rollout_once(&data)
+        .await
+        .expect("rollout should observe second wave");
+    assert_eq!(zeta_observed.updated, 0);
+    assert!(zeta_observed.blocked);
+    assert_eq!(
+        zeta_observed.pending_node_ids,
+        vec!["node-zeta".to_string()]
+    );
+
+    assert!(record_proxy_upgrade_traffic_success(&data, "node-zeta")
+        .await
+        .expect("traffic confirmation should be recorded"));
+
+    let finished = advance_proxy_upgrade_rollout_once(&data)
+        .await
+        .expect("rollout should finish after the second healthy observation cycle");
+    assert!(!finished.rollout_active);
+    assert_eq!(finished.completed, 2);
+    assert_eq!(finished.remaining, 0);
+    assert!(data
+        .list_system_config_entries()
+        .await
+        .expect("system config list should succeed")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn proxy_upgrade_rollout_excludes_draining_nodes_from_online_eligible_pool() {
+    let mut alpha = sample_connected_proxy_node("node-alpha", 30, 1_800_000_000);
+    alpha.name = "alpha".to_string();
+    alpha.proxy_metadata = Some(json!({"version": "1.0.0"}));
+    alpha.remote_config = Some(json!({"scheduling_state": "draining"}));
+    alpha.config_version = 1;
+
+    let mut zeta = sample_connected_proxy_node("node-zeta", 30, 1_800_000_000);
+    zeta.name = "zeta".to_string();
+    zeta.proxy_metadata = Some(json!({"version": "1.0.0"}));
+    zeta.remote_config = None;
+    zeta.config_version = 0;
+
+    let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![zeta, alpha]));
+    let data = GatewayDataState::with_proxy_node_repository_for_tests(Arc::clone(&repository))
+        .with_system_config_values_for_tests(Vec::<(String, serde_json::Value)>::new());
+
+    let rollout = start_proxy_upgrade_rollout(&data, "2.0.0".to_string(), 2, 0, None)
+        .await
+        .expect("rollout should start");
+    assert_eq!(rollout.updated, 1);
+    assert_eq!(rollout.node_ids, vec!["node-zeta".to_string()]);
+
+    let alpha_after = repository
+        .find_proxy_node("node-alpha")
+        .await
+        .expect("lookup should succeed")
+        .expect("alpha should exist");
+    assert_eq!(
+        alpha_after
+            .remote_config
+            .as_ref()
+            .and_then(|value| value.get("upgrade_to")),
+        None
+    );
+
+    let rollout_status = inspect_proxy_upgrade_rollout(&data)
+        .await
+        .expect("inspect should succeed")
+        .expect("rollout should exist");
+    assert_eq!(rollout_status.online_eligible_total, 1);
+}
+
+#[tokio::test]
+async fn proxy_upgrade_rollout_blocks_next_wave_after_post_upgrade_transport_errors() {
+    let mut alpha = sample_connected_proxy_node("node-alpha", 30, 1_800_000_000);
+    alpha.name = "alpha".to_string();
+    alpha.proxy_metadata = Some(json!({"version": "1.0.0"}));
+    alpha.remote_config = None;
+    alpha.config_version = 0;
+
+    let mut zeta = sample_connected_proxy_node("node-zeta", 30, 1_800_000_000);
+    zeta.name = "zeta".to_string();
+    zeta.proxy_metadata = Some(json!({"version": "1.0.0"}));
+    zeta.remote_config = None;
+    zeta.config_version = 0;
+
+    let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![zeta, alpha]));
+    let data = GatewayDataState::with_proxy_node_repository_for_tests(Arc::clone(&repository))
+        .with_system_config_values_for_tests(Vec::<(String, serde_json::Value)>::new());
+
+    let first_wave = start_proxy_upgrade_rollout(&data, "2.0.0".to_string(), 1, 0, None)
+        .await
+        .expect("rollout should start");
+    assert_eq!(first_wave.updated, 1);
+    assert_eq!(first_wave.node_ids, vec!["node-alpha".to_string()]);
+
+    repository
+        .apply_heartbeat(&ProxyNodeHeartbeatMutation {
+            node_id: "node-alpha".to_string(),
+            heartbeat_interval: None,
+            active_connections: Some(2),
+            total_requests_delta: Some(1),
+            avg_latency_ms: Some(2.0),
+            failed_requests_delta: Some(0),
+            dns_failures_delta: Some(0),
+            stream_errors_delta: Some(0),
+            proxy_metadata: Some(json!({"version": "2.0.0"})),
+            proxy_version: Some("2.0.0".to_string()),
+        })
+        .await
+        .expect("heartbeat should succeed");
+
+    let observed = advance_proxy_upgrade_rollout_once(&data)
+        .await
+        .expect("rollout should observe the first upgraded node");
+    assert!(observed.blocked);
+    assert_eq!(observed.pending_node_ids, vec!["node-alpha".to_string()]);
+
+    assert!(record_proxy_upgrade_traffic_success(&data, "node-alpha")
+        .await
+        .expect("traffic confirmation should be recorded"));
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    repository
+        .apply_heartbeat(&ProxyNodeHeartbeatMutation {
+            node_id: "node-alpha".to_string(),
+            heartbeat_interval: None,
+            active_connections: Some(2),
+            total_requests_delta: Some(1),
+            avg_latency_ms: Some(2.0),
+            failed_requests_delta: Some(1),
+            dns_failures_delta: Some(0),
+            stream_errors_delta: Some(0),
+            proxy_metadata: Some(json!({"version": "2.0.0"})),
+            proxy_version: Some("2.0.0".to_string()),
+        })
+        .await
+        .expect("heartbeat should succeed");
+
+    let blocked = advance_proxy_upgrade_rollout_once(&data)
+        .await
+        .expect("rollout should stay blocked after post-upgrade transport errors");
+    assert_eq!(blocked.updated, 0);
+    assert!(blocked.blocked);
+    assert_eq!(blocked.pending_node_ids, vec!["node-alpha".to_string()]);
+
+    let zeta_after = repository
+        .find_proxy_node("node-zeta")
+        .await
+        .expect("lookup should succeed")
+        .expect("zeta should exist");
+    assert!(zeta_after.remote_config.is_none());
+}
+
+#[tokio::test]
+async fn proxy_upgrade_rollout_active_probe_advances_next_wave_after_version_confirmation() {
+    let mut alpha = sample_connected_proxy_node("node-alpha", 30, 1_800_000_000);
+    alpha.name = "alpha".to_string();
+    alpha.proxy_metadata = Some(json!({"version": "1.0.0"}));
+    alpha.remote_config = None;
+    alpha.config_version = 0;
+
+    let mut zeta = sample_connected_proxy_node("node-zeta", 30, 1_800_000_000);
+    zeta.name = "zeta".to_string();
+    zeta.proxy_metadata = Some(json!({"version": "1.0.0"}));
+    zeta.remote_config = None;
+    zeta.config_version = 0;
+
+    let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![zeta, alpha]));
+    let data = GatewayDataState::with_proxy_node_repository_for_tests(Arc::clone(&repository))
+        .with_system_config_values_for_tests(Vec::<(String, serde_json::Value)>::new());
+    let state = AppState::new()
+        .expect("gateway state should build")
+        .with_data_state_for_tests(data.clone());
+
+    let first_wave = start_proxy_upgrade_rollout(
+        &data,
+        "2.0.0".to_string(),
+        1,
+        0,
+        Some(ProxyUpgradeRolloutProbeConfig {
+            url: "https://probe.example/health".to_string(),
+            timeout_secs: 5,
+        }),
+    )
+    .await
+    .expect("rollout should start");
+    assert_eq!(first_wave.node_ids, vec!["node-alpha".to_string()]);
+
+    repository
+        .apply_heartbeat(&ProxyNodeHeartbeatMutation {
+            node_id: "node-alpha".to_string(),
+            heartbeat_interval: None,
+            active_connections: Some(2),
+            total_requests_delta: Some(1),
+            avg_latency_ms: Some(2.0),
+            failed_requests_delta: Some(0),
+            dns_failures_delta: Some(0),
+            stream_errors_delta: Some(0),
+            proxy_metadata: Some(json!({"version": "2.0.0"})),
+            proxy_version: Some("2.0.0".to_string()),
+        })
+        .await
+        .expect("heartbeat should succeed");
+
+    let tunnel_state = state.tunnel.app_state();
+    let (proxy_tx, mut proxy_rx) = bounded_queue(8);
+    let (proxy_close_tx, _) = watch::channel(false);
+    tunnel_state
+        .hub
+        .register_proxy(Arc::new(crate::tunnel::TunnelProxyConn::new(
+            700,
+            "node-alpha".to_string(),
+            "Node Alpha".to_string(),
+            proxy_tx,
+            proxy_close_tx,
+            16,
+        )));
+
+    let responder_hub = tunnel_state.hub.clone();
+    let responder = tokio::spawn(async move {
+        let request_headers = match proxy_rx.recv().await.expect("headers frame should arrive") {
+            Message::Binary(data) => data,
+            other => panic!("unexpected message: {other:?}"),
+        };
+        let request_header = crate::tunnel::tunnel_protocol::FrameHeader::parse(&request_headers)
+            .expect("probe request headers should parse");
+        assert_eq!(
+            request_header.msg_type,
+            crate::tunnel::tunnel_protocol::REQUEST_HEADERS
+        );
+
+        let request_body = match proxy_rx.recv().await.expect("body frame should arrive") {
+            Message::Binary(data) => data,
+            other => panic!("unexpected message: {other:?}"),
+        };
+        let request_body_header = crate::tunnel::tunnel_protocol::FrameHeader::parse(&request_body)
+            .expect("probe request body should parse");
+        assert_eq!(
+            request_body_header.msg_type,
+            crate::tunnel::tunnel_protocol::REQUEST_BODY
+        );
+
+        let response_meta = crate::tunnel::tunnel_protocol::ResponseMeta {
+            status: 204,
+            headers: vec![],
+        };
+        let response_payload =
+            serde_json::to_vec(&response_meta).expect("response meta should serialize");
+        let mut response_headers_frame = crate::tunnel::tunnel_protocol::encode_frame(
+            request_header.stream_id,
+            crate::tunnel::tunnel_protocol::RESPONSE_HEADERS,
+            0,
+            &response_payload,
+        );
+        responder_hub
+            .handle_proxy_frame(700, &mut response_headers_frame)
+            .await;
+
+        let mut response_end_frame = crate::tunnel::tunnel_protocol::encode_frame(
+            request_header.stream_id,
+            crate::tunnel::tunnel_protocol::STREAM_END,
+            0,
+            &[],
+        );
+        responder_hub
+            .handle_proxy_frame(700, &mut response_end_frame)
+            .await;
+    });
+
+    run_proxy_upgrade_rollout_once(&state)
+        .await
+        .expect("rollout worker should succeed");
+    responder.await.expect("probe responder should complete");
+
+    let zeta_after = repository
+        .find_proxy_node("node-zeta")
+        .await
+        .expect("lookup should succeed")
+        .expect("zeta should exist");
+    assert_eq!(
+        zeta_after
+            .remote_config
+            .as_ref()
+            .and_then(|value| value.get("upgrade_to")),
+        Some(&json!("2.0.0"))
+    );
 }
 
 #[tokio::test]

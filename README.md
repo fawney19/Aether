@@ -45,10 +45,13 @@ cd Aether
 cp .env.example .env
 ./generate_keys.sh  # 生成密钥, 并将生成的密钥填入 .env
 
-# 3. 部署 / 更新（自动执行数据库迁移）
+# 3. 首次部署 / 更新
 docker compose pull && docker compose up -d
 
-# 4. 升级前备份 (可选)
+# 4. 如果后续版本包含 schema 变更，再显式执行数据库迁移
+docker compose run --rm app --migrate
+
+# 5. 升级前备份 (可选)
 docker compose exec postgres pg_dump -U postgres aether | gzip > backup_$(date +%Y%m%d_%H%M%S).sql.gz
 ```
 
@@ -63,7 +66,7 @@ cd Aether
 cp .env.example .env
 ./generate_keys.sh  # 生成密钥, 并将生成的密钥填入 .env
 
-# 3. 部署 / 更新（自动构建、启动、迁移）
+# 3. 部署 / 更新（自动构建并启动）
 git pull
 ./deploy.sh
 ```
@@ -73,6 +76,9 @@ git pull
 ```bash
 # 启动依赖
 docker compose -f docker-compose.build.yml up -d postgres redis
+
+# 数据库迁移（仅在已有数据库引入新 migration 时需要）
+./dev.sh --migrate
 
 # 后端
 ./dev.sh
@@ -97,7 +103,10 @@ client -> rust frontdoor (aether-gateway) -> execution_runtime/provider transpor
 
 - `aether-gateway` 负责公开入口、健康检查、格式转换、本地执行 runtime，以及当前已迁到 Rust 的 frontdoor/control/background 路径。
 - `./dev.sh` 不再启动 Python 宿主；未下沉到 Rust 的 legacy 路由会直接失败。
+- `./dev.sh --migrate` 会复用 `.env` 里的数据库配置，显式执行一次数据库迁移后退出。
 - `./dev.sh` 默认把 `AETHER_GATEWAY_VIDEO_TASK_TRUTH_SOURCE_MODE` 设为 `rust-authoritative`，避免本地还依赖 Python sync report 语义。
+- 空库首次启动会自动初始化到当前 baseline。
+- `aether-gateway` 默认启动不会自动应用后续 schema migration；如果数据库版本落后，服务会拒绝启动，并提示先执行 `aether-gateway --migrate`。
 
 ## Aether Proxy (可选)
 
@@ -162,7 +171,7 @@ systemd 的 `.env` 必须保持简单 `KEY=VALUE` 形式，不要写 `export`、
 
 **没有备份的情况：**
 
-当前不应该再依赖旧的 `alembic downgrade` 路线。`aether-gateway` 启动时执行的是 Rust / `sqlx` 迁移；如果本次发布带来了不可逆的数据结构变化，没有备份就不能保证安全回滚。因此升级前强烈建议先备份 `Postgres`。
+当前不应该再依赖旧的 `alembic downgrade` 路线。空库首次启动会自动初始化，但后续数据库升级需要显式执行 `aether-gateway --migrate`；常规服务启动不会自动应用新增 migration。如果本次发布带来了不可逆的数据结构变化，没有备份就不能保证安全回滚。因此升级前强烈建议先备份 `Postgres`。
 
 ---
 

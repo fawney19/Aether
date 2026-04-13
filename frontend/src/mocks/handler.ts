@@ -3016,6 +3016,194 @@ mockHandlers['GET /api/admin/stats/errors/distribution'] = async () => {
   })
 }
 
+mockHandlers['GET /api/admin/monitoring/system-status'] = async () => {
+  await delay()
+  requireAdmin()
+  return createMockResponse({
+    timestamp: new Date().toISOString(),
+    users: {
+      total: 124,
+      active: 111
+    },
+    providers: {
+      total: 18,
+      active: 15
+    },
+    api_keys: {
+      total: 263,
+      active: 241
+    },
+    today_stats: {
+      requests: 12483,
+      tokens: 48751234,
+      cost_usd: '$182.4631'
+    },
+    tunnel: {
+      proxy_connections: 28,
+      nodes: 6,
+      active_streams: 164
+    },
+    internal_gateway: {
+      status: 'rust_native_control_plane',
+      path_prefixes: ['/api/', '/v1/', '/v1beta/', '/_gateway/']
+    },
+    recent_errors: 9
+  })
+}
+
+mockHandlers['GET /api/admin/monitoring/resilience-status'] = async () => {
+  await delay()
+  requireAdmin()
+  return createMockResponse({
+    timestamp: new Date().toISOString(),
+    health_score: 86,
+    status: 'healthy',
+    error_statistics: {
+      total_errors: 14,
+      active_keys: 24,
+      degraded_keys: 3,
+      unhealthy_keys: 1,
+      open_circuit_breakers: 1,
+      circuit_breakers: {
+        'provider-key-1': {
+          state: 'open',
+          provider_id: 'provider-openai',
+          provider_name: 'OpenAI',
+          key_name: 'prod-key-a',
+          health_score: 0.42,
+          consecutive_failures: 4,
+          last_failure_at: new Date(Date.now() - 8 * 60 * 1000).toISOString(),
+          open_formats: ['openai:chat']
+        }
+      }
+    },
+    recent_errors: [
+      {
+        error_id: 'usage-request-1',
+        error_type: 'timeout',
+        operation: 'OpenAI:openai:chat',
+        timestamp: new Date(Date.now() - 3 * 60 * 1000).toISOString(),
+        context: {
+          request_id: 'req-live-001',
+          provider_id: 'provider-openai',
+          provider_name: 'OpenAI',
+          model: 'gpt-5',
+          api_format: 'openai:chat',
+          status_code: 504,
+          error_message: '上游响应超时，等待首字节超过阈值'
+        }
+      },
+      {
+        error_id: 'usage-request-2',
+        error_type: 'server_error',
+        operation: 'Anthropic:claude:chat',
+        timestamp: new Date(Date.now() - 11 * 60 * 1000).toISOString(),
+        context: {
+          request_id: 'req-live-002',
+          provider_id: 'provider-anthropic',
+          provider_name: 'Anthropic',
+          model: 'claude-sonnet-4-5',
+          api_format: 'claude:chat',
+          status_code: 502,
+          error_message: '上游返回 502 Bad Gateway'
+        }
+      }
+    ],
+    recommendations: [
+      '以下服务熔断器已打开：OpenAI/prod-key-a',
+      '建议检查最近的 timeout 与 5xx 错误峰值',
+      '当前整体健康度可接受，但需要关注单 Key 退化'
+    ]
+  })
+}
+
+mockHandlers['GET /api/admin/monitoring/resilience/circuit-history'] = async () => {
+  await delay()
+  requireAdmin()
+  return createMockResponse({
+    count: 2,
+    items: [
+      {
+        event: 'opened',
+        key_id: 'provider-key-1',
+        provider_id: 'provider-openai',
+        provider_name: 'OpenAI',
+        key_name: 'prod-key-a',
+        api_format: 'openai:chat',
+        reason: '错误率过高',
+        recovery_seconds: 300,
+        timestamp: new Date(Date.now() - 10 * 60 * 1000).toISOString()
+      },
+      {
+        event: 'half_open',
+        key_id: 'provider-key-7',
+        provider_id: 'provider-gemini',
+        provider_name: 'Gemini',
+        key_name: 'gemini-burst',
+        api_format: 'gemini:chat',
+        reason: '正在探测恢复',
+        recovery_seconds: 120,
+        timestamp: new Date(Date.now() - 22 * 60 * 1000).toISOString()
+      }
+    ]
+  })
+}
+
+mockHandlers['GET /_gateway/metrics'] = async () => {
+  await delay(60)
+  requireAdmin()
+  return createMockResponse(`# HELP aether_gateway_service_up Whether the service process is currently up.
+# TYPE aether_gateway_service_up gauge
+aether_gateway_service_up{service="aether-gateway"} 1
+# HELP aether_gateway_concurrency_in_flight Current number of in-flight operations guarded by the concurrency gate.
+# TYPE aether_gateway_concurrency_in_flight gauge
+aether_gateway_concurrency_in_flight{gate="gateway_requests"} 82
+# HELP aether_gateway_concurrency_available_permits Currently available permits for the concurrency gate.
+# TYPE aether_gateway_concurrency_available_permits gauge
+aether_gateway_concurrency_available_permits{gate="gateway_requests"} 174
+# HELP aether_gateway_concurrency_high_watermark Highest observed in-flight count for the concurrency gate.
+# TYPE aether_gateway_concurrency_high_watermark gauge
+aether_gateway_concurrency_high_watermark{gate="gateway_requests"} 121
+# HELP aether_gateway_concurrency_rejected_total Number of operations rejected by the concurrency gate.
+# TYPE aether_gateway_concurrency_rejected_total counter
+aether_gateway_concurrency_rejected_total{gate="gateway_requests"} 6
+# HELP aether_gateway_concurrency_in_flight Current number of in-flight operations guarded by the concurrency gate.
+# TYPE aether_gateway_concurrency_in_flight gauge
+aether_gateway_concurrency_in_flight{gate="gateway_requests_distributed"} 94
+# HELP aether_gateway_concurrency_available_permits Currently available permits for the concurrency gate.
+# TYPE aether_gateway_concurrency_available_permits gauge
+aether_gateway_concurrency_available_permits{gate="gateway_requests_distributed"} 418
+# HELP aether_gateway_concurrency_high_watermark Highest observed in-flight count for the concurrency gate.
+# TYPE aether_gateway_concurrency_high_watermark gauge
+aether_gateway_concurrency_high_watermark{gate="gateway_requests_distributed"} 137
+# HELP aether_gateway_concurrency_rejected_total Number of operations rejected by the concurrency gate.
+# TYPE aether_gateway_concurrency_rejected_total counter
+aether_gateway_concurrency_rejected_total{gate="gateway_requests_distributed"} 11
+# HELP aether_gateway_tunnel_proxy_connections Current number of connected proxy sockets.
+# TYPE aether_gateway_tunnel_proxy_connections gauge
+aether_gateway_tunnel_proxy_connections 28
+# HELP aether_gateway_tunnel_nodes Current number of connected logical nodes.
+# TYPE aether_gateway_tunnel_nodes gauge
+aether_gateway_tunnel_nodes 6
+# HELP aether_gateway_tunnel_active_streams Current number of active local relay streams.
+# TYPE aether_gateway_tunnel_active_streams gauge
+aether_gateway_tunnel_active_streams 164
+# HELP aether_gateway_decision_remote_total Number of requests that fell back to Python decision endpoints.
+# TYPE aether_gateway_decision_remote_total counter
+aether_gateway_decision_remote_total{route_kind="chat",reason="local_decision_miss"} 4
+aether_gateway_decision_remote_total{route_kind="responses",reason="remote_decision_miss"} 2
+# HELP aether_gateway_plan_fallback_total Number of requests that fell back to Python plan endpoints.
+# TYPE aether_gateway_plan_fallback_total counter
+aether_gateway_plan_fallback_total{route_kind="chat",reason="scheduler_decision_unsupported"} 3
+# HELP aether_gateway_control_execute_fallback_total Number of requests that fell back to Python control execution.
+# TYPE aether_gateway_control_execute_fallback_total counter
+aether_gateway_control_execute_fallback_total{route_kind="chat",reason="control_execute_emergency"} 1
+# HELP aether_gateway_remote_execute_emergency_total Number of requests that used remote emergency execution fallback.
+# TYPE aether_gateway_remote_execute_emergency_total counter
+aether_gateway_remote_execute_emergency_total{route_kind="chat",reason="control_execute_emergency"} 2
+`)
+}
+
 mockHandlers['GET /api/admin/stats/comparison'] = async () => {
   await delay()
   requireAdmin()

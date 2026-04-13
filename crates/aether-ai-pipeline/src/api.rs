@@ -139,9 +139,9 @@ pub use crate::planner::specialized::{
 };
 pub use crate::planner::standard::{
     apply_codex_openai_cli_special_body_edits, apply_codex_openai_cli_special_headers,
-    build_cross_format_openai_chat_request_body, build_cross_format_openai_cli_request_body,
-    build_local_openai_chat_request_body, build_local_openai_cli_request_body,
-    build_standard_request_body, build_standard_upstream_url,
+    apply_openai_compact_special_body_edits, build_cross_format_openai_chat_request_body,
+    build_cross_format_openai_cli_request_body, build_local_openai_chat_request_body,
+    build_local_openai_cli_request_body, build_standard_request_body, build_standard_upstream_url,
     claude::{
         resolve_stream_spec as resolve_claude_stream_spec,
         resolve_sync_spec as resolve_claude_sync_spec,

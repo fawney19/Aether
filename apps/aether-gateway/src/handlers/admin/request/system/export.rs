@@ -2,11 +2,15 @@ use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::system::shared::configs::is_sensitive_admin_system_config_key;
 use crate::handlers::admin::system::shared::export::{
     build_admin_system_export_providers_payload, decrypt_admin_system_export_secret,
-    ADMIN_SYSTEM_CONFIG_EXPORT_VERSION, ADMIN_SYSTEM_EXPORT_PAGE_LIMIT,
+    ADMIN_SYSTEM_EXPORT_PAGE_LIMIT,
 };
 use crate::handlers::shared::{system_config_string, unix_secs_to_rfc3339};
 use crate::GatewayError;
-use aether_admin::system::serialize_admin_system_users_export_wallet;
+use aether_admin::system::{
+    serialize_admin_system_users_export_wallet, AdminSystemConfigDocument, AdminSystemConfigEntry,
+    AdminSystemConfigGlobalModel, AdminSystemConfigLdap, AdminSystemConfigOAuthProvider,
+    AdminSystemConfigProxyNode, ADMIN_SYSTEM_CONFIG_EXPORT_VERSION,
+};
 use aether_data_contracts::repository::global_models::AdminGlobalModelListQuery;
 use chrono::Utc;
 use serde_json::json;
@@ -31,42 +35,50 @@ impl<'a> AdminAppState<'a> {
             .collect::<BTreeMap<_, _>>();
         let global_models_data = global_models
             .iter()
-            .map(|model| {
-                json!({
-                    "name": model.name,
-                    "display_name": model.display_name,
-                    "default_price_per_request": model.default_price_per_request,
-                    "default_tiered_pricing": model.default_tiered_pricing,
-                    "supported_capabilities": model.supported_capabilities,
-                    "config": model.config,
-                    "is_active": model.is_active,
-                })
+            .map(|model| AdminSystemConfigGlobalModel {
+                name: model.name.clone(),
+                display_name: model.display_name.clone(),
+                default_price_per_request: model.default_price_per_request,
+                default_tiered_pricing: model.default_tiered_pricing.clone(),
+                supported_capabilities: model.supported_capabilities.as_ref().and_then(|value| {
+                    value.as_array().map(|items| {
+                        items
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(ToOwned::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                }),
+                config: model.config.clone(),
+                is_active: model.is_active,
             })
             .collect::<Vec<_>>();
         let providers_data =
             build_admin_system_export_providers_payload(self, &global_model_name_by_id).await?;
 
-        let ldap_data = self.get_ldap_module_config().await?.map(|config| {
-            let bind_password = config
-                .bind_password_encrypted
-                .as_deref()
-                .and_then(|ciphertext| decrypt_admin_system_export_secret(self, ciphertext))
-                .unwrap_or_default();
-            json!({
-                "server_url": config.server_url,
-                "bind_dn": config.bind_dn,
-                "bind_password": bind_password,
-                "base_dn": config.base_dn,
-                "user_search_filter": config.user_search_filter,
-                "username_attr": config.username_attr,
-                "email_attr": config.email_attr,
-                "display_name_attr": config.display_name_attr,
-                "is_enabled": config.is_enabled,
-                "is_exclusive": config.is_exclusive,
-                "use_starttls": config.use_starttls,
-                "connect_timeout": config.connect_timeout,
-            })
-        });
+        let ldap_data = self
+            .get_ldap_module_config()
+            .await?
+            .map(|config| AdminSystemConfigLdap {
+                server_url: config.server_url,
+                bind_dn: config.bind_dn,
+                bind_password: Some(
+                    config
+                        .bind_password_encrypted
+                        .as_deref()
+                        .and_then(|ciphertext| decrypt_admin_system_export_secret(self, ciphertext))
+                        .unwrap_or_default(),
+                ),
+                base_dn: config.base_dn,
+                user_search_filter: config.user_search_filter,
+                username_attr: config.username_attr,
+                email_attr: config.email_attr,
+                display_name_attr: config.display_name_attr,
+                is_enabled: config.is_enabled,
+                is_exclusive: config.is_exclusive,
+                use_starttls: config.use_starttls,
+                connect_timeout: config.connect_timeout,
+            });
 
         let system_configs = self.list_system_config_entries().await?;
         let system_configs_data = system_configs
@@ -82,73 +94,72 @@ impl<'a> AdminAppState<'a> {
                 } else {
                     entry.value.clone()
                 };
-                json!({
-                    "key": entry.key,
-                    "value": value,
-                    "description": entry.description,
-                })
+                AdminSystemConfigEntry {
+                    key: entry.key.clone(),
+                    value,
+                    description: entry.description.clone(),
+                }
             })
             .collect::<Vec<_>>();
 
         let oauth_providers = self.list_oauth_provider_configs().await?;
         let oauth_data = oauth_providers
             .iter()
-            .map(|provider| {
-                let client_secret = provider
-                    .client_secret_encrypted
-                    .as_deref()
-                    .and_then(|ciphertext| decrypt_admin_system_export_secret(self, ciphertext))
-                    .unwrap_or_default();
-                json!({
-                    "provider_type": provider.provider_type,
-                    "display_name": provider.display_name,
-                    "client_id": provider.client_id,
-                    "client_secret": client_secret,
-                    "authorization_url_override": provider.authorization_url_override,
-                    "token_url_override": provider.token_url_override,
-                    "userinfo_url_override": provider.userinfo_url_override,
-                    "scopes": provider.scopes,
-                    "redirect_uri": provider.redirect_uri,
-                    "frontend_callback_url": provider.frontend_callback_url,
-                    "attribute_mapping": provider.attribute_mapping,
-                    "extra_config": provider.extra_config,
-                    "is_enabled": provider.is_enabled,
-                })
+            .map(|provider| AdminSystemConfigOAuthProvider {
+                provider_type: provider.provider_type.clone(),
+                display_name: provider.display_name.clone(),
+                client_id: provider.client_id.clone(),
+                client_secret: Some(
+                    provider
+                        .client_secret_encrypted
+                        .as_deref()
+                        .and_then(|ciphertext| decrypt_admin_system_export_secret(self, ciphertext))
+                        .unwrap_or_default(),
+                ),
+                authorization_url_override: provider.authorization_url_override.clone(),
+                token_url_override: provider.token_url_override.clone(),
+                userinfo_url_override: provider.userinfo_url_override.clone(),
+                scopes: provider.scopes.clone(),
+                redirect_uri: provider.redirect_uri.clone(),
+                frontend_callback_url: provider.frontend_callback_url.clone(),
+                attribute_mapping: provider.attribute_mapping.clone(),
+                extra_config: provider.extra_config.clone(),
+                is_enabled: provider.is_enabled,
             })
             .collect::<Vec<_>>();
 
         let proxy_nodes = self.list_proxy_nodes().await?;
         let proxy_nodes_data = proxy_nodes
             .iter()
-            .map(|node| {
-                json!({
-                    "id": node.id,
-                    "name": node.name,
-                    "ip": node.ip,
-                    "port": node.port,
-                    "region": node.region,
-                    "is_manual": node.is_manual,
-                    "proxy_url": node.proxy_url,
-                    "proxy_username": node.proxy_username,
-                    "proxy_password": node.proxy_password,
-                    "tunnel_mode": node.tunnel_mode,
-                    "heartbeat_interval": node.heartbeat_interval,
-                    "remote_config": node.remote_config,
-                    "config_version": node.config_version,
-                })
+            .map(|node| AdminSystemConfigProxyNode {
+                id: Some(node.id.clone()),
+                name: Some(node.name.clone()),
+                ip: Some(node.ip.clone()),
+                port: Some(node.port),
+                region: node.region.clone(),
+                is_manual: Some(node.is_manual),
+                proxy_url: node.proxy_url.clone(),
+                proxy_username: node.proxy_username.clone(),
+                proxy_password: node.proxy_password.clone(),
+                tunnel_mode: Some(node.tunnel_mode),
+                heartbeat_interval: Some(node.heartbeat_interval),
+                remote_config: node.remote_config.clone(),
+                config_version: Some(node.config_version),
             })
             .collect::<Vec<_>>();
 
-        Ok(json!({
-            "version": ADMIN_SYSTEM_CONFIG_EXPORT_VERSION,
-            "exported_at": Utc::now().to_rfc3339(),
-            "global_models": global_models_data,
-            "providers": providers_data,
-            "proxy_nodes": proxy_nodes_data,
-            "ldap_config": ldap_data,
-            "oauth_providers": oauth_data,
-            "system_configs": system_configs_data,
-        }))
+        let document = AdminSystemConfigDocument {
+            version: ADMIN_SYSTEM_CONFIG_EXPORT_VERSION.to_string(),
+            exported_at: Utc::now().to_rfc3339(),
+            global_models: global_models_data,
+            providers: providers_data,
+            proxy_nodes: proxy_nodes_data,
+            ldap_config: ldap_data,
+            oauth_providers: oauth_data,
+            system_configs: system_configs_data,
+        };
+
+        serde_json::to_value(document).map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
     pub(crate) async fn build_admin_system_users_export_payload(

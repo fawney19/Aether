@@ -517,6 +517,17 @@ export interface PoolAdvancedConfig {
   auto_remove_banned_keys?: boolean
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+export function normalizePoolAdvancedConfig(value: unknown): PoolAdvancedConfig | null {
+  if (value == null || value === false) return null
+  if (value === true) return {}
+  if (!isPlainObject(value)) return null
+  return { ...value } as PoolAdvancedConfig
+}
+
 export interface FailoverRuleItem {
   pattern: string
   description?: string

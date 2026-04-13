@@ -187,6 +187,15 @@ impl VideoTaskReadRepository for InMemoryVideoTaskRepository {
         Ok(tasks.into_iter().skip(offset).take(limit).collect())
     }
 
+    async fn list_page_summary(
+        &self,
+        filter: &VideoTaskQueryFilter,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<StoredVideoTask>, DataLayerError> {
+        Self::list_page(self, filter, offset, limit).await
+    }
+
     async fn count(&self, filter: &VideoTaskQueryFilter) -> Result<u64, DataLayerError> {
         Ok(self
             .index

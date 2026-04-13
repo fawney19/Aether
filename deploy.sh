@@ -138,4 +138,7 @@ fi
 docker image prune -f >/dev/null 2>&1 || true
 
 echo ">>> Done!"
+echo ">>> Note: empty databases auto-bootstrap on first start."
+echo ">>> Note: if the app exits because schema is behind, run:"
+echo ">>>   ${DC} run --rm app --migrate"
 $DC ps

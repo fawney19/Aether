@@ -396,6 +396,10 @@ Health checks:
   curl -fsS http://127.0.0.1:${gateway_port}/_gateway/health
   curl -fsS http://127.0.0.1:${gateway_port}/readyz
 
+Database:
+  empty database: first service start auto-bootstraps to the current baseline
+  later schema upgrades: ${INSTALL_ROOT}/current/bin/aether-gateway --migrate
+
 Current release:
   ${INSTALL_ROOT}/current
 EOF

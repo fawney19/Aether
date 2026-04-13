@@ -1,18 +1,20 @@
 use super::{
     AuthApiKeyLookupKey, CreateManagementTokenRecord, DataLayerError, GatewayAuthApiKeySnapshot,
     GatewayDataState, ManagementTokenListQuery, ProxyNodeHeartbeatMutation,
-    ProxyNodeTunnelStatusMutation, RegenerateManagementTokenSecret, StoredAuthApiKeyExportRecord,
-    StoredAuthApiKeySnapshot, StoredLdapModuleConfig, StoredManagementToken,
-    StoredManagementTokenListPage, StoredManagementTokenWithUser, StoredOAuthProviderConfig,
-    StoredOAuthProviderModuleConfig, StoredProxyNode, StoredProxyNodeEvent, StoredUserAuthRecord,
-    StoredUserPreferenceRecord, StoredUserSessionRecord, StoredWalletSnapshot,
-    UpdateManagementTokenRecord, UpsertOAuthProviderConfigRecord,
+    ProxyNodeRegistrationMutation, ProxyNodeRemoteConfigMutation, ProxyNodeTunnelStatusMutation,
+    RegenerateManagementTokenSecret, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
+    StoredLdapModuleConfig, StoredManagementToken, StoredManagementTokenListPage,
+    StoredManagementTokenWithUser, StoredOAuthProviderConfig, StoredOAuthProviderModuleConfig,
+    StoredProxyNode, StoredProxyNodeEvent, StoredUserAuthRecord, StoredUserPreferenceRecord,
+    StoredUserSessionRecord, StoredWalletSnapshot, UpdateManagementTokenRecord,
+    UpsertOAuthProviderConfigRecord,
 };
 use crate::LocalMutationOutcome;
 use aether_data::repository::auth::{
     read_resolved_auth_api_key_snapshot_by_key_hash,
     read_resolved_auth_api_key_snapshot_by_user_api_key_ids,
 };
+use futures_util::TryStreamExt;
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -720,6 +722,88 @@ RETURNING
     CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs
 "#;
 
+const UPDATE_AUTH_API_KEY_WALLET_LIMIT_MODE_SQL: &str = r#"
+UPDATE wallets
+SET
+    limit_mode = $2,
+    updated_at = NOW()
+WHERE api_key_id = $1
+RETURNING
+    id,
+    user_id,
+    api_key_id,
+    CAST(balance AS DOUBLE PRECISION) AS balance,
+    CAST(gift_balance AS DOUBLE PRECISION) AS gift_balance,
+    limit_mode,
+    currency,
+    status,
+    CAST(total_recharged AS DOUBLE PRECISION) AS total_recharged,
+    CAST(total_consumed AS DOUBLE PRECISION) AS total_consumed,
+    CAST(total_refunded AS DOUBLE PRECISION) AS total_refunded,
+    CAST(total_adjusted AS DOUBLE PRECISION) AS total_adjusted,
+    CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs
+"#;
+
+const UPDATE_AUTH_USER_WALLET_SNAPSHOT_SQL: &str = r#"
+UPDATE wallets
+SET
+    balance = $2,
+    gift_balance = $3,
+    limit_mode = $4,
+    currency = $5,
+    status = $6,
+    total_recharged = $7,
+    total_consumed = $8,
+    total_refunded = $9,
+    total_adjusted = $10,
+    updated_at = COALESCE(TO_TIMESTAMP($11::DOUBLE PRECISION), updated_at)
+WHERE user_id = $1
+RETURNING
+    id,
+    user_id,
+    api_key_id,
+    CAST(balance AS DOUBLE PRECISION) AS balance,
+    CAST(gift_balance AS DOUBLE PRECISION) AS gift_balance,
+    limit_mode,
+    currency,
+    status,
+    CAST(total_recharged AS DOUBLE PRECISION) AS total_recharged,
+    CAST(total_consumed AS DOUBLE PRECISION) AS total_consumed,
+    CAST(total_refunded AS DOUBLE PRECISION) AS total_refunded,
+    CAST(total_adjusted AS DOUBLE PRECISION) AS total_adjusted,
+    CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs
+"#;
+
+const UPDATE_AUTH_API_KEY_WALLET_SNAPSHOT_SQL: &str = r#"
+UPDATE wallets
+SET
+    balance = $2,
+    gift_balance = $3,
+    limit_mode = $4,
+    currency = $5,
+    status = $6,
+    total_recharged = $7,
+    total_consumed = $8,
+    total_refunded = $9,
+    total_adjusted = $10,
+    updated_at = COALESCE(TO_TIMESTAMP($11::DOUBLE PRECISION), updated_at)
+WHERE api_key_id = $1
+RETURNING
+    id,
+    user_id,
+    api_key_id,
+    CAST(balance AS DOUBLE PRECISION) AS balance,
+    CAST(gift_balance AS DOUBLE PRECISION) AS gift_balance,
+    limit_mode,
+    currency,
+    status,
+    CAST(total_recharged AS DOUBLE PRECISION) AS total_recharged,
+    CAST(total_consumed AS DOUBLE PRECISION) AS total_consumed,
+    CAST(total_refunded AS DOUBLE PRECISION) AS total_refunded,
+    CAST(total_adjusted AS DOUBLE PRECISION) AS total_adjusted,
+    CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs
+"#;
+
 const CREATE_AUTH_USER_WALLET_SQL: &str = r#"
 INSERT INTO wallets (
     id,
@@ -741,6 +825,55 @@ VALUES (
     $1,
     $2,
     NULL,
+    0,
+    $3,
+    $4,
+    'USD',
+    'active',
+    0,
+    0,
+    0,
+    $5,
+    NOW(),
+    NOW()
+)
+RETURNING
+    id,
+    user_id,
+    api_key_id,
+    CAST(balance AS DOUBLE PRECISION) AS balance,
+    CAST(gift_balance AS DOUBLE PRECISION) AS gift_balance,
+    limit_mode,
+    currency,
+    status,
+    CAST(total_recharged AS DOUBLE PRECISION) AS total_recharged,
+    CAST(total_consumed AS DOUBLE PRECISION) AS total_consumed,
+    CAST(total_refunded AS DOUBLE PRECISION) AS total_refunded,
+    CAST(total_adjusted AS DOUBLE PRECISION) AS total_adjusted,
+    CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs
+"#;
+
+const CREATE_AUTH_API_KEY_WALLET_SQL: &str = r#"
+INSERT INTO wallets (
+    id,
+    user_id,
+    api_key_id,
+    balance,
+    gift_balance,
+    limit_mode,
+    currency,
+    status,
+    total_recharged,
+    total_consumed,
+    total_refunded,
+    total_adjusted,
+    created_at,
+    updated_at
+)
+VALUES (
+    $1,
+    NULL,
+    $2,
     0,
     $3,
     $4,
@@ -804,6 +937,45 @@ VALUES (
     $4,
     NULL,
     '用户初始赠款',
+    NOW()
+)
+"#;
+
+const CREATE_AUTH_API_KEY_WALLET_GIFT_TX_SQL: &str = r#"
+INSERT INTO wallet_transactions (
+    id,
+    wallet_id,
+    category,
+    reason_code,
+    amount,
+    balance_before,
+    balance_after,
+    recharge_balance_before,
+    recharge_balance_after,
+    gift_balance_before,
+    gift_balance_after,
+    link_type,
+    link_id,
+    operator_id,
+    description,
+    created_at
+)
+VALUES (
+    $1,
+    $2,
+    'gift',
+    'gift_initial',
+    $3,
+    0,
+    $3,
+    0,
+    0,
+    0,
+    $3,
+    'system_task',
+    $4,
+    NULL,
+    '独立余额 Key 初始赠款',
     NOW()
 )
 "#;
@@ -1107,12 +1279,14 @@ impl GatewayDataState {
         let Some(pool) = self.postgres_pool() else {
             return Ok(Vec::new());
         };
-        let rows = sqlx::query(LIST_USER_SESSIONS_SQL)
+        let mut rows = sqlx::query(LIST_USER_SESSIONS_SQL)
             .bind(user_id)
-            .fetch_all(&pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_user_session_row).collect()
+            .fetch(&pool);
+        let mut sessions = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            sessions.push(map_user_session_row(&row)?);
+        }
+        Ok(sessions)
     }
 
     pub(crate) async fn create_user_session(
@@ -1487,6 +1661,45 @@ impl GatewayDataState {
         Ok(Some(wallet))
     }
 
+    pub(crate) async fn initialize_auth_api_key_wallet(
+        &self,
+        api_key_id: &str,
+        initial_gift_usd: f64,
+        unlimited: bool,
+    ) -> Result<Option<StoredWalletSnapshot>, DataLayerError> {
+        let Some(pool) = self.postgres_pool() else {
+            return Ok(None);
+        };
+        let mut tx = pool.begin().await.map_postgres_err()?;
+        let gift_amount = if unlimited {
+            0.0
+        } else {
+            initial_gift_usd.max(0.0)
+        };
+        let row = sqlx::query(CREATE_AUTH_API_KEY_WALLET_SQL)
+            .bind(Uuid::new_v4().to_string())
+            .bind(api_key_id)
+            .bind(gift_amount)
+            .bind(if unlimited { "unlimited" } else { "finite" })
+            .bind(gift_amount)
+            .fetch_one(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        let wallet = map_wallet_snapshot_row(&row)?;
+        if gift_amount > 0.0 {
+            sqlx::query(CREATE_AUTH_API_KEY_WALLET_GIFT_TX_SQL)
+                .bind(Uuid::new_v4().to_string())
+                .bind(&wallet.id)
+                .bind(gift_amount)
+                .bind(api_key_id)
+                .execute(&mut *tx)
+                .await
+                .map_postgres_err()?;
+        }
+        tx.commit().await.map_err(postgres_error)?;
+        Ok(Some(wallet))
+    }
+
     pub(crate) async fn update_auth_user_wallet_limit_mode(
         &self,
         user_id: &str,
@@ -1498,6 +1711,95 @@ impl GatewayDataState {
         let row = sqlx::query(UPDATE_AUTH_USER_WALLET_LIMIT_MODE_SQL)
             .bind(user_id)
             .bind(limit_mode)
+            .fetch_optional(&pool)
+            .await
+            .map_postgres_err()?;
+        row.as_ref().map(map_wallet_snapshot_row).transpose()
+    }
+
+    pub(crate) async fn update_auth_api_key_wallet_limit_mode(
+        &self,
+        api_key_id: &str,
+        limit_mode: &str,
+    ) -> Result<Option<StoredWalletSnapshot>, DataLayerError> {
+        let Some(pool) = self.postgres_pool() else {
+            return Ok(None);
+        };
+        let row = sqlx::query(UPDATE_AUTH_API_KEY_WALLET_LIMIT_MODE_SQL)
+            .bind(api_key_id)
+            .bind(limit_mode)
+            .fetch_optional(&pool)
+            .await
+            .map_postgres_err()?;
+        row.as_ref().map(map_wallet_snapshot_row).transpose()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn update_auth_user_wallet_snapshot(
+        &self,
+        user_id: &str,
+        balance: f64,
+        gift_balance: f64,
+        limit_mode: &str,
+        currency: &str,
+        status: &str,
+        total_recharged: f64,
+        total_consumed: f64,
+        total_refunded: f64,
+        total_adjusted: f64,
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<Option<StoredWalletSnapshot>, DataLayerError> {
+        let Some(pool) = self.postgres_pool() else {
+            return Ok(None);
+        };
+        let row = sqlx::query(UPDATE_AUTH_USER_WALLET_SNAPSHOT_SQL)
+            .bind(user_id)
+            .bind(balance)
+            .bind(gift_balance)
+            .bind(limit_mode)
+            .bind(currency)
+            .bind(status)
+            .bind(total_recharged)
+            .bind(total_consumed)
+            .bind(total_refunded)
+            .bind(total_adjusted)
+            .bind(updated_at_unix_secs.map(|value| value as i64))
+            .fetch_optional(&pool)
+            .await
+            .map_postgres_err()?;
+        row.as_ref().map(map_wallet_snapshot_row).transpose()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn update_auth_api_key_wallet_snapshot(
+        &self,
+        api_key_id: &str,
+        balance: f64,
+        gift_balance: f64,
+        limit_mode: &str,
+        currency: &str,
+        status: &str,
+        total_recharged: f64,
+        total_consumed: f64,
+        total_refunded: f64,
+        total_adjusted: f64,
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<Option<StoredWalletSnapshot>, DataLayerError> {
+        let Some(pool) = self.postgres_pool() else {
+            return Ok(None);
+        };
+        let row = sqlx::query(UPDATE_AUTH_API_KEY_WALLET_SNAPSHOT_SQL)
+            .bind(api_key_id)
+            .bind(balance)
+            .bind(gift_balance)
+            .bind(limit_mode)
+            .bind(currency)
+            .bind(status)
+            .bind(total_recharged)
+            .bind(total_consumed)
+            .bind(total_refunded)
+            .bind(total_adjusted)
+            .bind(updated_at_unix_secs.map(|value| value as i64))
             .fetch_optional(&pool)
             .await
             .map_postgres_err()?;
@@ -1858,6 +2160,20 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn get_management_token_with_user_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<StoredManagementTokenWithUser>, DataLayerError> {
+        match &self.management_token_reader {
+            Some(repository) => {
+                repository
+                    .get_management_token_with_user_by_hash(token_hash)
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
     pub(crate) async fn create_management_token(
         &self,
         record: &CreateManagementTokenRecord,
@@ -1901,6 +2217,21 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn record_management_token_usage(
+        &self,
+        token_id: &str,
+        last_used_ip: Option<&str>,
+    ) -> Result<Option<StoredManagementToken>, DataLayerError> {
+        match &self.management_token_writer {
+            Some(repository) => {
+                repository
+                    .record_management_token_usage(token_id, last_used_ip)
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
     pub(crate) async fn find_proxy_node(
         &self,
         node_id: &str,
@@ -1929,6 +2260,25 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn register_proxy_node(
+        &self,
+        mutation: &ProxyNodeRegistrationMutation,
+    ) -> Result<Option<StoredProxyNode>, DataLayerError> {
+        match &self.proxy_node_writer {
+            Some(repository) => repository.register_node(mutation).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn reset_stale_proxy_node_tunnel_statuses(
+        &self,
+    ) -> Result<usize, DataLayerError> {
+        match &self.proxy_node_writer {
+            Some(repository) => repository.reset_stale_tunnel_statuses().await,
+            None => Ok(0),
+        }
+    }
+
     pub(crate) async fn apply_proxy_node_heartbeat(
         &self,
         mutation: &ProxyNodeHeartbeatMutation,
@@ -1945,6 +2295,26 @@ impl GatewayDataState {
     ) -> Result<Option<StoredProxyNode>, DataLayerError> {
         match &self.proxy_node_writer {
             Some(repository) => repository.update_tunnel_status(mutation).await,
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn unregister_proxy_node(
+        &self,
+        node_id: &str,
+    ) -> Result<Option<StoredProxyNode>, DataLayerError> {
+        match &self.proxy_node_writer {
+            Some(repository) => repository.unregister_node(node_id).await,
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn update_proxy_node_remote_config(
+        &self,
+        mutation: &ProxyNodeRemoteConfigMutation,
+    ) -> Result<Option<StoredProxyNode>, DataLayerError> {
+        match &self.proxy_node_writer {
+            Some(repository) => repository.update_remote_config(mutation).await,
             None => Ok(None),
         }
     }

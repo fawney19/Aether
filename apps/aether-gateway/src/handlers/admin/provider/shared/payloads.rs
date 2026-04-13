@@ -1,3 +1,6 @@
+use crate::handlers::admin::shared::{
+    deserialize_optional_f64_from_number_or_string, AdminTypedObjectPatch,
+};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -83,6 +86,8 @@ pub(crate) struct AdminProviderKeyUpdateRequest {
     pub(crate) fingerprint: Option<serde_json::Value>,
 }
 
+pub(crate) type AdminProviderKeyUpdatePatch = AdminTypedObjectPatch<AdminProviderKeyUpdateRequest>;
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct AdminProviderKeyBatchDeleteRequest {
     pub(crate) ids: Vec<String>,
@@ -105,7 +110,10 @@ pub(crate) struct AdminProviderCreateRequest {
     pub(crate) website: Option<String>,
     #[serde(default)]
     pub(crate) billing_type: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_f64_from_number_or_string"
+    )]
     pub(crate) monthly_quota_usd: Option<f64>,
     #[serde(default)]
     pub(crate) quota_reset_day: Option<u64>,
@@ -125,9 +133,15 @@ pub(crate) struct AdminProviderCreateRequest {
     pub(crate) max_retries: Option<i32>,
     #[serde(default)]
     pub(crate) proxy: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_f64_from_number_or_string"
+    )]
     pub(crate) stream_first_byte_timeout: Option<f64>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_f64_from_number_or_string"
+    )]
     pub(crate) request_timeout: Option<f64>,
     #[serde(default)]
     pub(crate) pool_advanced: Option<serde_json::Value>,
@@ -151,7 +165,10 @@ pub(crate) struct AdminProviderUpdateRequest {
     pub(crate) website: Option<String>,
     #[serde(default)]
     pub(crate) billing_type: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_f64_from_number_or_string"
+    )]
     pub(crate) monthly_quota_usd: Option<f64>,
     #[serde(default)]
     pub(crate) quota_reset_day: Option<u64>,
@@ -171,9 +188,15 @@ pub(crate) struct AdminProviderUpdateRequest {
     pub(crate) max_retries: Option<i32>,
     #[serde(default)]
     pub(crate) proxy: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_f64_from_number_or_string"
+    )]
     pub(crate) stream_first_byte_timeout: Option<f64>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_f64_from_number_or_string"
+    )]
     pub(crate) request_timeout: Option<f64>,
     #[serde(default)]
     pub(crate) pool_advanced: Option<serde_json::Value>,
@@ -186,6 +209,8 @@ pub(crate) struct AdminProviderUpdateRequest {
     #[serde(default)]
     pub(crate) config: Option<serde_json::Value>,
 }
+
+pub(crate) type AdminProviderUpdatePatch = AdminTypedObjectPatch<AdminProviderUpdateRequest>;
 
 pub(crate) const CODEX_WHAM_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 pub(crate) const KIRO_USAGE_LIMITS_PATH: &str = "/getUsageLimits";
@@ -202,7 +227,10 @@ pub(crate) struct AdminProviderModelCreateRequest {
     #[serde(default)]
     pub(crate) provider_model_mappings: Option<serde_json::Value>,
     pub(crate) global_model_id: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_f64_from_number_or_string"
+    )]
     pub(crate) price_per_request: Option<f64>,
     #[serde(default)]
     pub(crate) tiered_pricing: Option<serde_json::Value>,
@@ -228,7 +256,10 @@ pub(crate) struct AdminProviderModelUpdateRequest {
     pub(crate) provider_model_mappings: Option<serde_json::Value>,
     #[serde(default)]
     pub(crate) global_model_id: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_f64_from_number_or_string"
+    )]
     pub(crate) price_per_request: Option<f64>,
     #[serde(default)]
     pub(crate) tiered_pricing: Option<serde_json::Value>,
@@ -248,6 +279,9 @@ pub(crate) struct AdminProviderModelUpdateRequest {
     pub(crate) config: Option<serde_json::Value>,
 }
 
+pub(crate) type AdminProviderModelUpdatePatch =
+    AdminTypedObjectPatch<AdminProviderModelUpdateRequest>;
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct AdminBatchAssignGlobalModelsRequest {
     pub(crate) global_model_ids: Vec<String>,
@@ -258,6 +292,9 @@ pub(crate) struct AdminImportProviderModelsRequest {
     pub(crate) model_ids: Vec<String>,
     #[serde(default)]
     pub(crate) tiered_pricing: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_f64_from_number_or_string"
+    )]
     pub(crate) price_per_request: Option<f64>,
 }

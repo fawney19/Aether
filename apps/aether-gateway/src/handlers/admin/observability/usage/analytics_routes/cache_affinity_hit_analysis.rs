@@ -4,8 +4,9 @@ use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::query_param_value;
 use crate::GatewayError;
 use aether_admin::observability::usage::{
-    admin_usage_bad_request_response, admin_usage_data_unavailable_response,
-    admin_usage_matches_optional_id, admin_usage_parse_recent_hours,
+    admin_usage_bad_request_response, admin_usage_cache_creation_tokens,
+    admin_usage_data_unavailable_response, admin_usage_matches_optional_id,
+    admin_usage_parse_recent_hours, admin_usage_total_input_context,
     ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL,
 };
 use axum::{
@@ -50,10 +51,9 @@ pub(super) async fn build_admin_usage_cache_affinity_hit_analysis_response(
         .iter()
         .map(|item| item.cache_read_input_tokens)
         .sum();
-    let total_cache_creation_tokens: u64 = filtered
-        .iter()
-        .map(|item| item.cache_creation_input_tokens)
-        .sum();
+    let total_cache_creation_tokens: u64 =
+        filtered.iter().map(admin_usage_cache_creation_tokens).sum();
+    let total_input_context: u64 = filtered.iter().map(admin_usage_total_input_context).sum();
     let total_cache_read_cost: f64 = filtered.iter().map(|item| item.cache_read_cost_usd).sum();
     let total_cache_creation_cost: f64 = filtered
         .iter()
@@ -63,12 +63,11 @@ pub(super) async fn build_admin_usage_cache_affinity_hit_analysis_response(
         .iter()
         .filter(|item| item.cache_read_input_tokens > 0)
         .count();
-    let total_context_tokens = total_input_tokens.saturating_add(total_cache_read_tokens);
-    let token_cache_hit_rate = if total_context_tokens == 0 {
+    let token_cache_hit_rate = if total_input_context == 0 {
         0.0
     } else {
         round_to(
-            total_cache_read_tokens as f64 / total_context_tokens as f64 * 100.0,
+            total_cache_read_tokens as f64 / total_input_context as f64 * 100.0,
             2,
         )
     };

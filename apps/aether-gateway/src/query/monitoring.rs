@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use aether_data::postgres::PostgresPool;
 use chrono::{DateTime, Utc};
+use futures_util::TryStreamExt;
 use serde_json::{json, Value};
 use sqlx::Row;
 
@@ -36,7 +37,7 @@ WHERE a.created_at >= $1
     .await
     .map_err(|err| GatewayError::Internal(format!("admin audit logs count failed: {err}")))?;
 
-    let rows = sqlx::query(
+    let mut rows = sqlx::query(
         r#"
 SELECT
   a.id,
@@ -64,21 +65,24 @@ LIMIT $4 OFFSET $5
     .bind(event_type)
     .bind(i64::try_from(limit).unwrap_or(i64::MAX))
     .bind(i64::try_from(offset).unwrap_or(i64::MAX))
-    .fetch_all(pool)
-    .await
-    .map_err(|err| GatewayError::Internal(format!("admin audit logs read failed: {err}")))?;
+    .fetch(pool);
+    let mut items = Vec::new();
+    while let Some(row) = rows
+        .try_next()
+        .await
+        .map_err(|err| GatewayError::Internal(format!("admin audit logs read failed: {err}")))?
+    {
+        items.push(admin_audit_log_row_to_json(row));
+    }
 
-    Ok((
-        rows.into_iter().map(admin_audit_log_row_to_json).collect(),
-        usize::try_from(total.max(0)).unwrap_or(usize::MAX),
-    ))
+    Ok((items, usize::try_from(total.max(0)).unwrap_or(usize::MAX)))
 }
 
 pub(crate) async fn list_admin_suspicious_activities(
     pool: &PostgresPool,
     cutoff_time: DateTime<Utc>,
 ) -> Result<Vec<Value>, GatewayError> {
-    let rows = sqlx::query(
+    let mut rows = sqlx::query(
         r#"
 SELECT
   id,
@@ -102,13 +106,15 @@ LIMIT 100
         "login_failed",
         "request_rate_limited",
     ])
-    .fetch_all(pool)
-    .await
-    .map_err(|err| {
+    .fetch(pool);
+    let mut items = Vec::new();
+    while let Some(row) = rows.try_next().await.map_err(|err| {
         GatewayError::Internal(format!("admin suspicious activities read failed: {err}"))
-    })?;
+    })? {
+        items.push(admin_suspicious_row_to_json(row));
+    }
 
-    Ok(rows.into_iter().map(admin_suspicious_row_to_json).collect())
+    Ok(items)
 }
 
 pub(crate) async fn read_admin_user_behavior_event_counts(
@@ -116,7 +122,7 @@ pub(crate) async fn read_admin_user_behavior_event_counts(
     user_id: &str,
     cutoff_time: DateTime<Utc>,
 ) -> Result<BTreeMap<String, u64>, GatewayError> {
-    let rows = sqlx::query(
+    let mut rows = sqlx::query(
         r#"
 SELECT event_type, COUNT(*)::bigint AS count
 FROM audit_logs
@@ -127,22 +133,25 @@ GROUP BY event_type
     )
     .bind(user_id)
     .bind(cutoff_time)
-    .fetch_all(pool)
-    .await
-    .map_err(|err| GatewayError::Internal(format!("admin user behavior read failed: {err}")))?;
+    .fetch(pool);
+    let mut counts = BTreeMap::new();
+    while let Some(row) = rows
+        .try_next()
+        .await
+        .map_err(|err| GatewayError::Internal(format!("admin user behavior read failed: {err}")))?
+    {
+        let Ok(event_type) = row.try_get::<String, _>("event_type") else {
+            continue;
+        };
+        let count = row
+            .try_get::<i64, _>("count")
+            .ok()
+            .and_then(|value| u64::try_from(value.max(0)).ok())
+            .unwrap_or(0);
+        counts.insert(event_type, count);
+    }
 
-    Ok(rows
-        .into_iter()
-        .filter_map(|row| {
-            let event_type = row.try_get::<String, _>("event_type").ok()?;
-            let count = row
-                .try_get::<i64, _>("count")
-                .ok()
-                .and_then(|value| u64::try_from(value.max(0)).ok())
-                .unwrap_or(0);
-            Some((event_type, count))
-        })
-        .collect())
+    Ok(counts)
 }
 
 pub(crate) async fn list_user_audit_logs(
@@ -176,7 +185,7 @@ WHERE user_id = $1
         }
     };
 
-    let rows = match sqlx::query(
+    let mut rows = sqlx::query(
         r#"
 SELECT id, event_type, description, ip_address, status_code, created_at
 FROM audit_logs
@@ -192,21 +201,17 @@ LIMIT $4 OFFSET $5
     .bind(event_type)
     .bind(i64::try_from(limit).unwrap_or(i64::MAX))
     .bind(i64::try_from(offset).unwrap_or(i64::MAX))
-    .fetch_all(pool)
-    .await
+    .fetch(pool);
+    let mut items = Vec::new();
+    while let Some(row) = rows
+        .try_next()
+        .await
+        .map_err(|err| GatewayError::Internal(format!("user audit logs read failed: {err}")))?
     {
-        Ok(value) => value,
-        Err(err) => {
-            return Err(GatewayError::Internal(format!(
-                "user audit logs read failed: {err}"
-            )))
-        }
-    };
+        items.push(user_audit_log_row_to_json(row));
+    }
 
-    Ok((
-        rows.into_iter().map(user_audit_log_row_to_json).collect(),
-        total,
-    ))
+    Ok((items, total))
 }
 
 fn admin_audit_log_row_to_json(row: sqlx::postgres::PgRow) -> Value {

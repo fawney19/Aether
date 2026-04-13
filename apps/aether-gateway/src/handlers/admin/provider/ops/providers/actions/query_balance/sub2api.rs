@@ -1,7 +1,7 @@
 use super::super::super::config::persist_admin_provider_ops_runtime_credentials;
 use super::super::super::verify::{
-    admin_provider_ops_execute_proxy_json_request, admin_provider_ops_sub2api_exchange_token,
-    admin_provider_ops_sub2api_request_url,
+    admin_provider_ops_execute_json_request, admin_provider_ops_sub2api_exchange_token,
+    admin_provider_ops_sub2api_request_url, AdminProviderOpsExecuteJsonError,
 };
 use super::super::responses::{
     admin_provider_ops_action_error, admin_provider_ops_action_response,
@@ -93,97 +93,37 @@ pub(super) async fn admin_provider_ops_sub2api_balance_payload(
     };
     let auth_headers =
         reqwest::header::HeaderMap::from_iter([(reqwest::header::AUTHORIZATION, auth_value)]);
-    let (me_result, subscription_result) = if let Some(proxy_snapshot) = proxy_snapshot {
-        let me_request_id = format!("provider-ops-action:sub2api:me:{provider_id}");
-        let subscription_request_id =
-            format!("provider-ops-action:sub2api:subscriptions:{provider_id}");
-        tokio::join!(
-            admin_provider_ops_execute_proxy_json_request(
-                state,
-                &me_request_id,
-                reqwest::Method::GET,
-                &me_url,
-                &auth_headers,
-                None,
-                proxy_snapshot,
-            ),
-            admin_provider_ops_execute_proxy_json_request(
-                state,
-                &subscription_request_id,
-                reqwest::Method::GET,
-                &subscription_url,
-                &auth_headers,
-                None,
-                proxy_snapshot,
-            )
+    let me_request_id = format!("provider-ops-action:sub2api:me:{provider_id}");
+    let subscription_request_id =
+        format!("provider-ops-action:sub2api:subscriptions:{provider_id}");
+    let (me_result, subscription_result) = tokio::join!(
+        admin_provider_ops_execute_json_request(
+            state,
+            &me_request_id,
+            reqwest::Method::GET,
+            &me_url,
+            &auth_headers,
+            None,
+            proxy_snapshot,
+        ),
+        admin_provider_ops_execute_json_request(
+            state,
+            &subscription_request_id,
+            reqwest::Method::GET,
+            &subscription_url,
+            &auth_headers,
+            None,
+            proxy_snapshot,
         )
-    } else {
-        let http_client = state.http_client();
-        let (me_response, subscription_response) = tokio::join!(
-            http_client.get(me_url).bearer_auth(&access_token).send(),
-            http_client
-                .get(subscription_url)
-                .bearer_auth(&access_token)
-                .send()
-        );
-        let me_result = match me_response {
-            Ok(response) => {
-                let status = response.status();
-                let value = match response.bytes().await {
-                    Ok(bytes) => {
-                        serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|_| json!({}))
-                    }
-                    Err(err) => {
-                        return admin_provider_ops_action_error(
-                            "network_error",
-                            "query_balance",
-                            format!("网络错误: {err}"),
-                            Some(start.elapsed().as_millis() as u64),
-                        )
-                    }
-                };
-                Ok((status, value))
-            }
-            Err(err) if err.is_timeout() => {
-                return admin_provider_ops_action_error(
-                    "network_error",
-                    "query_balance",
-                    "请求超时",
-                    Some(start.elapsed().as_millis() as u64),
-                );
-            }
-            Err(err) => {
-                return admin_provider_ops_action_error(
-                    "network_error",
-                    "query_balance",
-                    format!("网络错误: {err}"),
-                    Some(start.elapsed().as_millis() as u64),
-                );
-            }
-        };
-        let subscription_result = match subscription_response {
-            Ok(response) => {
-                let status = response.status();
-                let value = match response.bytes().await {
-                    Ok(bytes) => {
-                        serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|_| json!({}))
-                    }
-                    Err(err) => {
-                        return admin_provider_ops_action_error(
-                            "network_error",
-                            "query_balance",
-                            format!("网络错误: {err}"),
-                            Some(start.elapsed().as_millis() as u64),
-                        )
-                    }
-                };
-                Ok((status, value))
-            }
-            Err(err) if err.is_timeout() => Err("请求超时".to_string()),
-            Err(err) => Err(format!("网络错误: {err}")),
-        };
-        (me_result, subscription_result)
-    };
+    );
+    let me_result = me_result.map_err(|err| match err {
+        AdminProviderOpsExecuteJsonError::InvalidJson(message)
+        | AdminProviderOpsExecuteJsonError::Transport(message) => message,
+    });
+    let subscription_result = subscription_result.map_err(|err| match err {
+        AdminProviderOpsExecuteJsonError::InvalidJson(message)
+        | AdminProviderOpsExecuteJsonError::Transport(message) => message,
+    });
     let response_time_ms = Some(start.elapsed().as_millis() as u64);
 
     let (me_status, me_json) = match me_result {

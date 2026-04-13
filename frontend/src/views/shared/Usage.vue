@@ -163,7 +163,7 @@ const statsExpanded = useLocalStorage('usage-stats-expanded', true)
 
 // 时间范围选择
 const timeRange = ref<DateRangeParams>(
-  getDateRangeFromPeriod(isAdminPage.value ? 'last7days' : 'today')
+  getDateRangeFromPeriod('today')
 )
 
 // 分页状态

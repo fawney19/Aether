@@ -7,6 +7,7 @@ import type {
   ProviderWithEndpointsSummary,
   ProxyConfig,
 } from './types'
+import { normalizePoolAdvancedConfig as normalizePoolAdvanced } from './types'
 
 interface ProviderRequestOptions {
   timeout?: number
@@ -31,6 +32,15 @@ export interface ProviderSummaryPageResponse {
   items: ProviderWithEndpointsSummary[]
 }
 
+function normalizeProviderSummary(
+  provider: ProviderWithEndpointsSummary,
+): ProviderWithEndpointsSummary {
+  return {
+    ...provider,
+    pool_advanced: normalizePoolAdvanced(provider.pool_advanced),
+  }
+}
+
 export async function getProvidersSummary(
   params: ProviderSummaryQuery = {},
 ): Promise<ProviderSummaryPageResponse> {
@@ -38,7 +48,10 @@ export async function getProvidersSummary(
     '/api/admin/providers/summary',
     { params },
   )
-  return response.data
+  return {
+    ...response.data,
+    items: response.data.items.map(normalizeProviderSummary),
+  }
 }
 
 /**
@@ -46,7 +59,7 @@ export async function getProvidersSummary(
  */
 export async function getProvider(providerId: string): Promise<ProviderWithEndpointsSummary> {
   const response = await client.get<ProviderWithEndpointsSummary>(`/api/admin/providers/${providerId}/summary`)
-  return response.data
+  return normalizeProviderSummary(response.data)
 }
 
 /**
@@ -81,7 +94,7 @@ export async function updateProvider(
   requestOptions?: ProviderRequestOptions,
 ): Promise<ProviderWithEndpointsSummary> {
   const response = await client.patch(`/api/admin/providers/${providerId}`, data, requestOptions)
-  return response.data
+  return normalizeProviderSummary(response.data)
 }
 
 /**

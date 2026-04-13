@@ -1,6 +1,9 @@
 mod embedded;
 
+use std::collections::HashMap;
 use std::fmt;
+use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -11,11 +14,13 @@ use aether_data::repository::proxy_nodes::{
     ProxyNodeHeartbeatMutation, ProxyNodeTunnelStatusMutation, StoredProxyNode,
 };
 use aether_runtime::MetricSample;
-use axum::body::{to_bytes, Body};
+use async_stream::stream;
+use axum::body::{Body, Bytes};
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::warn;
@@ -28,6 +33,7 @@ use super::error::GatewayError;
 use super::headers::{extract_or_generate_trace_id, should_skip_request_header};
 use super::AppState;
 
+pub(crate) use embedded::ProxyConn as TunnelProxyConn;
 pub use embedded::{
     build_router_with_state as build_tunnel_runtime_router_with_state, protocol as tunnel_protocol,
     AppState as TunnelRuntimeState, ConnConfig as TunnelConnConfig,
@@ -45,6 +51,7 @@ const DEFAULT_PING_INTERVAL_SECS: u64 = 15;
 const DEFAULT_MAX_STREAMS: usize = 2048;
 const DEFAULT_OUTBOUND_QUEUE_CAPACITY: usize = 128;
 const DEFAULT_ATTACHMENT_TTL_SECS: u64 = 90;
+const DEFAULT_OWNER_RELAY_BODY_LIMIT_BYTES: usize = 5_242_880;
 const TUNNEL_ATTACHMENT_KEY_PREFIX: &str = "tunnel.attachments.";
 const TUNNEL_ATTACHMENT_REDIS_KEY_PREFIX: &str = "tunnel:attachments:";
 const TUNNEL_INSTANCE_ID_ENV: &str = "AETHER_GATEWAY_INSTANCE_ID";
@@ -54,6 +61,8 @@ const TUNNEL_ATTACHMENT_TTL_ENV: &str = "AETHER_TUNNEL_ATTACHMENT_TTL_SECS";
 #[derive(Debug, Deserialize)]
 struct InternalTunnelHeartbeatRequest {
     node_id: String,
+    #[serde(default)]
+    heartbeat_id: Option<u64>,
     #[serde(default)]
     heartbeat_interval: Option<i32>,
     #[serde(default)]
@@ -183,6 +192,7 @@ impl TunnelAttachmentDirectory {
         node_id: &str,
         connected: bool,
         conn_count: usize,
+        observed_at_unix_secs: u64,
     ) -> Result<(), String> {
         let node_id = node_id.trim();
         if node_id.is_empty() {
@@ -203,7 +213,7 @@ impl TunnelAttachmentDirectory {
                 gateway_instance_id: self.identity.instance_id.clone(),
                 relay_base_url: relay_base_url.clone(),
                 conn_count,
-                observed_at_unix_secs: current_unix_secs(),
+                observed_at_unix_secs,
             },
         )
         .await
@@ -404,7 +414,8 @@ impl EmbeddedTunnelState {
                     outbound_queue_capacity: DEFAULT_OUTBOUND_QUEUE_CAPACITY,
                 },
                 DEFAULT_MAX_STREAMS,
-            ),
+            )
+            .with_data(data),
             attachment_directory,
         }
     }
@@ -432,6 +443,39 @@ impl EmbeddedTunnelState {
 
     pub(crate) fn metric_samples(&self) -> Vec<MetricSample> {
         self.inner.hub.stats().to_metric_samples()
+    }
+
+    pub(crate) async fn probe_node_url(
+        &self,
+        node_id: &str,
+        url: &str,
+        timeout_secs: u64,
+    ) -> Result<u16, String> {
+        let timeout_secs = timeout_secs.clamp(5, 60);
+        let meta = tunnel_protocol::RequestMeta {
+            method: "GET".to_string(),
+            url: url.trim().to_string(),
+            headers: HashMap::new(),
+            timeout: timeout_secs,
+            follow_redirects: Some(false),
+            http1_only: false,
+        };
+        let stream = self.inner.hub.open_local_stream(node_id, &meta)?;
+        let stream_id = stream.id;
+        let result = async {
+            self.inner
+                .hub
+                .push_local_request_body(stream_id, Bytes::new(), true)?;
+            let response = stream
+                .wait_headers(Duration::from_secs(timeout_secs))
+                .await?;
+            Ok(response.status)
+        }
+        .await;
+        self.inner
+            .hub
+            .cancel_local_stream(stream_id, "tunnel health probe completed");
+        result
     }
 
     pub(crate) fn local_instance_id(&self) -> &str {
@@ -579,14 +623,26 @@ fn build_embedded_control_plane(
                 Ok(ack)
             })
         },
-        move |node_id, connected, conn_count| {
+        move |node_id, connected, conn_count, observed_at_unix_secs| {
             let data = Arc::clone(&node_status_data);
             let directory = node_status_directory.clone();
             Box::pin(async move {
-                apply_embedded_tunnel_node_status(data.as_ref(), &node_id, connected, conn_count)
-                    .await?;
+                apply_embedded_tunnel_node_status(
+                    data.as_ref(),
+                    &node_id,
+                    connected,
+                    conn_count,
+                    Some(observed_at_unix_secs),
+                )
+                .await?;
                 if let Err(error) = directory
-                    .sync_node_status(data.as_ref(), &node_id, connected, conn_count)
+                    .sync_node_status(
+                        data.as_ref(),
+                        &node_id,
+                        connected,
+                        conn_count,
+                        observed_at_unix_secs,
+                    )
                     .await
                 {
                     warn!(error = %error, node_id = %node_id, "failed to sync tunnel attachment");
@@ -606,9 +662,16 @@ async fn forward_relay_request_to_owner(
 ) -> Result<axum::http::Response<Body>, GatewayError> {
     let owner_url = build_owner_relay_url(&owner.relay_base_url, node_id)?;
     let (parts, body) = request.into_parts();
-    let body = to_bytes(body, usize::MAX)
-        .await
-        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let body_limit = owner_relay_body_limit_bytes(state.data.as_ref()).await;
+    if request_content_length_exceeds_limit(&parts.headers, body_limit) {
+        return build_local_http_error_response(
+            trace_id,
+            None,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            &format!("tunnel relay body exceeds {body_limit} bytes"),
+        );
+    }
+    let limit_exceeded = Arc::new(AtomicBool::new(false));
 
     let mut upstream_request = state.client.post(owner_url);
     for (name, value) in &parts.headers {
@@ -630,11 +693,30 @@ async fn forward_relay_request_to_owner(
         upstream_request = upstream_request.header(TRACE_ID_HEADER, trace_id);
     }
 
-    let upstream_response = upstream_request
-        .body(body)
+    let upstream_response = match upstream_request
+        .body(build_owner_relay_request_body(
+            body,
+            body_limit,
+            Arc::clone(&limit_exceeded),
+        ))
         .send()
         .await
-        .map_err(|err| GatewayError::Internal(format!("owner tunnel relay failed: {err}")))?;
+    {
+        Ok(response) => response,
+        Err(err) if limit_exceeded.load(Ordering::SeqCst) => {
+            return build_local_http_error_response(
+                trace_id,
+                None,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                &format!("tunnel relay body exceeds {body_limit} bytes"),
+            );
+        }
+        Err(err) => {
+            return Err(GatewayError::Internal(format!(
+                "owner tunnel relay failed: {err}"
+            )));
+        }
+    };
 
     build_client_response(upstream_response, trace_id, None)
 }
@@ -654,6 +736,57 @@ fn build_owner_relay_url(relay_base_url: &str, node_id: &str) -> Result<String, 
         segments.push(node_id.trim());
     }
     Ok(url.to_string())
+}
+
+async fn owner_relay_body_limit_bytes(data: &GatewayDataState) -> usize {
+    data.find_system_config_value("max_request_body_size")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|value| value.as_u64())
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_OWNER_RELAY_BODY_LIMIT_BYTES)
+}
+
+fn request_content_length_exceeds_limit(headers: &HeaderMap, body_limit: usize) -> bool {
+    headers
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(|value| usize::try_from(value).ok())
+        .is_some_and(|value| value > body_limit)
+}
+
+fn build_owner_relay_request_body(
+    body: Body,
+    body_limit: usize,
+    limit_exceeded: Arc<AtomicBool>,
+) -> reqwest::Body {
+    let mut body_stream = body.into_data_stream();
+    reqwest::Body::wrap_stream(stream! {
+        let mut forwarded = 0usize;
+        while let Some(next_chunk) = body_stream.next().await {
+            match next_chunk {
+                Ok(chunk) => {
+                    forwarded = forwarded.saturating_add(chunk.len());
+                    if forwarded > body_limit {
+                        limit_exceeded.store(true, Ordering::SeqCst);
+                        yield Err::<Bytes, io::Error>(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("tunnel relay body exceeds {body_limit} bytes"),
+                        ));
+                        break;
+                    }
+                    yield Ok::<Bytes, io::Error>(chunk);
+                }
+                Err(err) => {
+                    yield Err::<Bytes, io::Error>(io::Error::other(err));
+                    break;
+                }
+            }
+        }
+    })
 }
 
 fn tunnel_attachment_key(node_id: &str) -> String {
@@ -719,7 +852,10 @@ async fn apply_embedded_tunnel_heartbeat(
         .map_err(|err| format!("heartbeat sync failed: {err}"))?
         .ok_or_else(|| format!("heartbeat sync failed: ProxyNode {node_id} 不存在"))?;
 
-    Ok(build_embedded_tunnel_heartbeat_ack(&node))
+    Ok(build_embedded_tunnel_heartbeat_ack(
+        &node,
+        payload.heartbeat_id,
+    ))
 }
 
 async fn apply_embedded_tunnel_node_status(
@@ -727,13 +863,14 @@ async fn apply_embedded_tunnel_node_status(
     node_id: &str,
     connected: bool,
     conn_count: usize,
+    observed_at_unix_secs: Option<u64>,
 ) -> Result<(), String> {
     let mutation = ProxyNodeTunnelStatusMutation {
         node_id: node_id.trim().to_string(),
         connected,
         conn_count: conn_count.min(i32::MAX as usize) as i32,
         detail: None,
-        observed_at_unix_secs: None,
+        observed_at_unix_secs,
     };
 
     data.update_proxy_node_tunnel_status(&mutation)
@@ -742,22 +879,26 @@ async fn apply_embedded_tunnel_node_status(
         .map_err(|err| format!("node status sync failed: {err}"))
 }
 
-fn build_embedded_tunnel_heartbeat_ack(node: &StoredProxyNode) -> Vec<u8> {
-    let Some(remote_config) = node.remote_config.as_ref() else {
-        return b"{}".to_vec();
-    };
-
+fn build_embedded_tunnel_heartbeat_ack(
+    node: &StoredProxyNode,
+    heartbeat_id: Option<u64>,
+) -> Vec<u8> {
     let mut payload = serde_json::Map::new();
-    payload.insert("remote_config".to_string(), remote_config.clone());
-    payload.insert("config_version".to_string(), json!(node.config_version));
-    if let Some(upgrade_to) = remote_config
-        .as_object()
-        .and_then(|value| value.get("upgrade_to"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        payload.insert("upgrade_to".to_string(), json!(upgrade_to));
+    if let Some(heartbeat_id) = heartbeat_id {
+        payload.insert("heartbeat_id".to_string(), json!(heartbeat_id));
+    }
+    if let Some(remote_config) = node.remote_config.as_ref() {
+        payload.insert("remote_config".to_string(), remote_config.clone());
+        payload.insert("config_version".to_string(), json!(node.config_version));
+        if let Some(upgrade_to) = remote_config
+            .as_object()
+            .and_then(|value| value.get("upgrade_to"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            payload.insert("upgrade_to".to_string(), json!(upgrade_to));
+        }
     }
 
     serde_json::to_vec(&serde_json::Value::Object(payload)).unwrap_or_else(|_| b"{}".to_vec())
@@ -857,6 +998,7 @@ mod tests {
             &data,
             br#"{
                 "node_id": "node-123",
+                "heartbeat_id": 42,
                 "heartbeat_interval": 45,
                 "active_connections": 5,
                 "total_requests": 9,
@@ -873,6 +1015,7 @@ mod tests {
 
         let payload: serde_json::Value =
             serde_json::from_slice(&ack).expect("ack payload should parse");
+        assert_eq!(payload["heartbeat_id"], 42);
         assert_eq!(payload["config_version"], 7);
         assert_eq!(payload["upgrade_to"], "1.2.3");
         assert_eq!(payload["remote_config"]["allowed_ports"][0], 443);
@@ -906,7 +1049,7 @@ mod tests {
         )]));
         let data = GatewayDataState::with_proxy_node_repository_for_tests(Arc::clone(&repository));
 
-        apply_embedded_tunnel_node_status(&data, "node-123", true, 4)
+        apply_embedded_tunnel_node_status(&data, "node-123", true, 4, Some(1_800_000_123))
             .await
             .expect("node status should succeed");
 
@@ -917,6 +1060,7 @@ mod tests {
             .expect("node should exist");
         assert_eq!(node.status, "online");
         assert_eq!(node.tunnel_connected, true);
+        assert_eq!(node.tunnel_connected_at_unix_secs, Some(1_800_000_123));
     }
 
     #[tokio::test]
@@ -929,7 +1073,7 @@ mod tests {
         );
 
         directory
-            .sync_node_status(&data, "node-123", true, 2)
+            .sync_node_status(&data, "node-123", true, 2, 1_800_000_010)
             .await
             .expect("attachment should sync");
         let record = directory
@@ -940,9 +1084,10 @@ mod tests {
         assert_eq!(record.gateway_instance_id, "gateway-a");
         assert_eq!(record.relay_base_url, "http://gateway-a.internal");
         assert_eq!(record.conn_count, 2);
+        assert_eq!(record.observed_at_unix_secs, 1_800_000_010);
 
         directory
-            .sync_node_status(&data, "node-123", false, 0)
+            .sync_node_status(&data, "node-123", false, 0, 1_800_000_011)
             .await
             .expect("attachment should clear");
         assert!(directory

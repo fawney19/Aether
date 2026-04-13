@@ -652,6 +652,10 @@ async fn gateway_surfaces_local_execution_runtime_miss_reason_when_all_openai_ch
     );
     let payload: serde_json::Value = response.json().await.expect("body should parse");
     assert_eq!(payload["error"]["type"], "http_error");
+    assert_eq!(
+        payload["error"]["message"],
+        "没有可用的提供商支持模型 gpt-5 的同步请求"
+    );
 
     let stored_candidates = request_candidate_repository
         .list_by_request_id("trace-openai-chat-local-miss-123")

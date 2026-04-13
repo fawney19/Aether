@@ -86,6 +86,19 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn get_management_token_with_user_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<
+        Option<aether_data::repository::management_tokens::StoredManagementTokenWithUser>,
+        GatewayError,
+    > {
+        self.data
+            .get_management_token_with_user_by_hash(token_hash)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn create_management_token(
         &self,
         record: &aether_data::repository::management_tokens::CreateManagementTokenRecord,
@@ -118,6 +131,20 @@ impl AppState {
     ) -> Result<bool, GatewayError> {
         self.data
             .delete_management_token(token_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn record_management_token_usage(
+        &self,
+        token_id: &str,
+        last_used_ip: Option<&str>,
+    ) -> Result<
+        Option<aether_data::repository::management_tokens::StoredManagementToken>,
+        GatewayError,
+    > {
+        self.data
+            .record_management_token_usage(token_id, last_used_ip)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
@@ -385,6 +412,16 @@ impl AppState {
     ) -> Result<Vec<provider_catalog::StoredProviderCatalogKey>, GatewayError> {
         self.data
             .list_provider_catalog_keys_by_provider_ids(provider_ids)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn list_provider_catalog_key_summaries_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<provider_catalog::StoredProviderCatalogKey>, GatewayError> {
+        self.data
+            .list_provider_catalog_key_summaries_by_provider_ids(provider_ids)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }

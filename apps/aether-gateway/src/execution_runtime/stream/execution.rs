@@ -6,6 +6,10 @@ use aether_data_contracts::repository::candidates::RequestCandidateStatus;
 use aether_scheduler_core::{
     parse_request_candidate_report_context, SchedulerRequestCandidateStatusUpdate,
 };
+use aether_usage_runtime::{
+    build_lifecycle_usage_seed, build_stream_terminal_usage_payload_seed,
+    build_sync_terminal_usage_payload_seed, build_terminal_usage_context_seed,
+};
 use async_stream::stream;
 use axum::body::{Body, Bytes};
 use axum::http::Response;
@@ -62,6 +66,36 @@ use crate::usage::submit_stream_report;
 use crate::usage::{GatewayStreamReportRequest, GatewaySyncReportRequest};
 use crate::{AppState, GatewayError};
 
+fn record_sync_terminal_usage(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+    payload: &GatewaySyncReportRequest,
+) {
+    let context_seed = build_terminal_usage_context_seed(plan, report_context);
+    let payload_seed = build_sync_terminal_usage_payload_seed(payload);
+    state
+        .usage_runtime
+        .record_sync_terminal(state.data.as_ref(), &context_seed, &payload_seed);
+}
+
+fn record_stream_terminal_usage(
+    state: &AppState,
+    plan: &ExecutionPlan,
+    report_context: Option<&serde_json::Value>,
+    payload: &GatewayStreamReportRequest,
+    cancelled: bool,
+) {
+    let context_seed = build_terminal_usage_context_seed(plan, report_context);
+    let payload_seed = build_stream_terminal_usage_payload_seed(payload);
+    state.usage_runtime.record_stream_terminal(
+        state.data.as_ref(),
+        &context_seed,
+        &payload_seed,
+        cancelled,
+    );
+}
+
 #[allow(clippy::too_many_arguments)] // internal function, grouping would add unnecessary indirection
 pub(crate) async fn execute_execution_runtime_stream(
     state: &AppState,
@@ -73,10 +107,10 @@ pub(crate) async fn execute_execution_runtime_stream(
     mut report_context: Option<serde_json::Value>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     ensure_execution_request_candidate_slot(state, &mut plan, &mut report_context).await;
+    let lifecycle_seed = build_lifecycle_usage_seed(&plan, report_context.as_ref());
     state
         .usage_runtime
-        .record_pending(state.data.as_ref(), &plan, report_context.as_ref())
-        .await;
+        .record_pending(state.data.as_ref(), &lifecycle_seed);
     let plan_request_id_for_log = short_request_id(plan.request_id.as_str());
     let provider_name = plan.provider_name.as_deref().unwrap_or("-");
     let endpoint_id = plan.endpoint_id.as_str();
@@ -348,6 +382,7 @@ async fn execute_stream_from_frame_stream(
     let candidate_id = plan.candidate_id.as_deref();
     let provider_name = plan.provider_name.as_deref().unwrap_or("-");
     let model_name = plan.model_name.as_deref().unwrap_or("-");
+    let lifecycle_seed = build_lifecycle_usage_seed(&plan, report_context.as_ref());
     let candidate_index = parse_request_candidate_report_context(report_context.as_ref())
         .and_then(|context| context.candidate_index)
         .map(|value| value.to_string())
@@ -527,15 +562,7 @@ async fn execute_stream_from_frame_stream(
             body_base64: body_base64.clone(),
             telemetry: None,
         };
-        state
-            .usage_runtime
-            .record_sync_terminal(
-                state.data.as_ref(),
-                &plan,
-                report_context.as_ref(),
-                &usage_payload,
-            )
-            .await;
+        record_sync_terminal_usage(state, &plan, report_context.as_ref(), &usage_payload);
         let terminal_unix_secs = current_request_candidate_unix_ms();
         record_local_request_candidate_status(
             state,
@@ -739,15 +766,12 @@ async fn execute_stream_from_frame_stream(
                                 body_base64: None,
                                 telemetry: prefetched_telemetry.clone(),
                             };
-                            state
-                                .usage_runtime
-                                .record_sync_terminal(
-                                    state.data.as_ref(),
-                                    &plan,
-                                    report_context.as_ref(),
-                                    &payload,
-                                )
-                                .await;
+                            record_sync_terminal_usage(
+                                state,
+                                &plan,
+                                report_context.as_ref(),
+                                &payload,
+                            );
                             let response = submit_local_core_error_or_sync_finalize(
                                 state, trace_id, decision, payload,
                             )
@@ -876,17 +900,12 @@ async fn execute_stream_from_frame_stream(
     }
 
     let candidate_started_unix_secs = current_request_candidate_unix_ms();
-    state
-        .usage_runtime
-        .record_stream_started(
-            state.data.as_ref(),
-            &plan,
-            report_context.as_ref(),
-            status_code,
-            &headers,
-            prefetched_telemetry.as_ref(),
-        )
-        .await;
+    state.usage_runtime.record_stream_started(
+        state.data.as_ref(),
+        &lifecycle_seed,
+        status_code,
+        prefetched_telemetry.as_ref(),
+    );
     record_local_request_candidate_status(
         state,
         &plan,
@@ -912,6 +931,7 @@ async fn execute_stream_from_frame_stream(
     let headers_for_report = headers.clone();
     let report_kind_owned = report_kind.clone();
     let report_context_owned = report_context.clone();
+    let lifecycle_seed_for_report = lifecycle_seed.clone();
     let provider_prefetched_body_for_report = provider_prefetched_body.clone();
     let prefetched_body_for_report = prefetched_body.clone();
     let prefetched_chunks_for_body = prefetched_chunks.clone();
@@ -1066,17 +1086,12 @@ async fn execute_stream_from_frame_stream(
                         );
                         telemetry = Some(frame_telemetry.clone());
                         if should_refresh_stream_usage {
-                            state_for_report
-                                .usage_runtime
-                                .record_stream_started(
-                                    state_for_report.data.as_ref(),
-                                    &plan_for_report,
-                                    report_context_owned.as_ref(),
-                                    status_code,
-                                    &headers_for_report,
-                                    Some(&frame_telemetry),
-                                )
-                                .await;
+                            state_for_report.usage_runtime.record_stream_started(
+                                state_for_report.data.as_ref(),
+                                &lifecycle_seed_for_report,
+                                status_code,
+                                Some(&frame_telemetry),
+                            );
                             usage_stream_telemetry = Some(frame_telemetry);
                         }
                     }
@@ -1230,30 +1245,25 @@ async fn execute_stream_from_frame_stream(
                 trace_id = %trace_id_owned,
                 "gateway skipped stream report because downstream disconnected before completion"
             );
-            state_for_report
-                .usage_runtime
-                .record_stream_terminal(
-                    state_for_report.data.as_ref(),
-                    &plan_for_report,
-                    report_context_owned.as_ref(),
-                    &GatewayStreamReportRequest {
-                        trace_id: trace_id_owned.clone(),
-                        report_kind: report_kind_owned.clone().unwrap_or_default(),
-                        report_context: report_context_owned.clone(),
-                        status_code: 499,
-                        headers: headers_for_report.clone(),
-                        provider_body_base64: (!provider_buffered_body.is_empty()).then(|| {
-                            base64::engine::general_purpose::STANDARD
-                                .encode(&provider_buffered_body)
-                        }),
-                        client_body_base64: (!buffered_body.is_empty()).then(|| {
-                            base64::engine::general_purpose::STANDARD.encode(&buffered_body)
-                        }),
-                        telemetry: telemetry.clone(),
-                    },
-                    true,
-                )
-                .await;
+            record_stream_terminal_usage(
+                &state_for_report,
+                &plan_for_report,
+                report_context_owned.as_ref(),
+                &GatewayStreamReportRequest {
+                    trace_id: trace_id_owned.clone(),
+                    report_kind: report_kind_owned.clone().unwrap_or_default(),
+                    report_context: report_context_owned.clone(),
+                    status_code: 499,
+                    headers: headers_for_report.clone(),
+                    provider_body_base64: (!provider_buffered_body.is_empty()).then(|| {
+                        base64::engine::general_purpose::STANDARD.encode(&provider_buffered_body)
+                    }),
+                    client_body_base64: (!buffered_body.is_empty())
+                        .then(|| base64::engine::general_purpose::STANDARD.encode(&buffered_body)),
+                    telemetry: telemetry.clone(),
+                },
+                true,
+            );
             record_local_request_candidate_status(
                 &state_for_report,
                 &plan_for_report,
@@ -1301,16 +1311,13 @@ async fn execute_stream_from_frame_stream(
                 .then(|| base64::engine::general_purpose::STANDARD.encode(&buffered_body)),
             telemetry: telemetry.clone(),
         };
-        state_for_report
-            .usage_runtime
-            .record_stream_terminal(
-                state_for_report.data.as_ref(),
-                &plan_for_report,
-                report_context_owned.as_ref(),
-                &usage_payload,
-                false,
-            )
-            .await;
+        record_stream_terminal_usage(
+            &state_for_report,
+            &plan_for_report,
+            report_context_owned.as_ref(),
+            &usage_payload,
+            false,
+        );
         record_local_request_candidate_status(
             &state_for_report,
             &plan_for_report,

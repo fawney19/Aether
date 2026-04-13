@@ -3,7 +3,7 @@ use crate::handlers::admin::provider::shared::paths::{
     admin_provider_id_for_manage_path, is_admin_providers_root,
 };
 use crate::handlers::admin::provider::shared::payloads::{
-    AdminProviderCreateRequest, AdminProviderUpdateRequest,
+    AdminProviderCreateRequest, AdminProviderUpdatePatch,
 };
 use crate::handlers::admin::provider::write::provider::build_admin_fixed_provider_endpoint_record;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
@@ -137,8 +137,8 @@ pub(crate) async fn maybe_build_local_admin_provider_writes_response(
                 "请求体必须是合法的 JSON 对象",
             )));
         };
-        let payload = match serde_json::from_value::<AdminProviderUpdateRequest>(raw_value) {
-            Ok(payload) => payload,
+        let patch = match AdminProviderUpdatePatch::from_object(raw_payload) {
+            Ok(patch) => patch,
             Err(_) => {
                 return Ok(Some(build_admin_provider_bad_request_response(
                     "请求体必须是合法的 JSON 对象",
@@ -156,7 +156,7 @@ pub(crate) async fn maybe_build_local_admin_provider_writes_response(
             ))));
         };
         let updated_record = match state
-            .build_admin_update_provider_record(&existing_provider, &raw_payload, payload)
+            .build_admin_update_provider_record(&existing_provider, patch)
             .await
         {
             Ok(record) => record,

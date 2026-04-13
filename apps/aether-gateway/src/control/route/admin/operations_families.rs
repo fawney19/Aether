@@ -181,6 +181,69 @@ pub(super) fn classify_admin_operations_family_route(
     } else if method == http::Method::POST
         && matches!(
             normalized_path,
+            "/api/admin/proxy-nodes/upgrade/cancel" | "/api/admin/proxy-nodes/upgrade/cancel/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "proxy_nodes_manage",
+            "cancel_upgrade_rollout",
+            "admin:proxy_nodes",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && matches!(
+            normalized_path,
+            "/api/admin/proxy-nodes/upgrade/clear-conflicts"
+                | "/api/admin/proxy-nodes/upgrade/clear-conflicts/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "proxy_nodes_manage",
+            "clear_upgrade_rollout_conflicts",
+            "admin:proxy_nodes",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && matches!(
+            normalized_path,
+            "/api/admin/proxy-nodes/upgrade/restore-skipped"
+                | "/api/admin/proxy-nodes/upgrade/restore-skipped/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "proxy_nodes_manage",
+            "restore_skipped_upgrade_rollout_nodes",
+            "admin:proxy_nodes",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && normalized_path.starts_with("/api/admin/proxy-nodes/")
+        && normalized_path.ends_with("/upgrade/skip")
+    {
+        Some(classified(
+            "admin_proxy",
+            "proxy_nodes_manage",
+            "skip_upgrade_rollout_node",
+            "admin:proxy_nodes",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && normalized_path.starts_with("/api/admin/proxy-nodes/")
+        && normalized_path.ends_with("/upgrade/retry")
+    {
+        Some(classified(
+            "admin_proxy",
+            "proxy_nodes_manage",
+            "retry_upgrade_rollout_node",
+            "admin:proxy_nodes",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && matches!(
+            normalized_path,
             "/api/admin/proxy-nodes/test-url" | "/api/admin/proxy-nodes/test-url/"
         )
     {

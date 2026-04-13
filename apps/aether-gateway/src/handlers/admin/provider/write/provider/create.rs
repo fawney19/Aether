@@ -2,7 +2,9 @@ use crate::handlers::admin::provider::shared::payloads::AdminProviderCreateReque
 use crate::handlers::admin::provider::shared::support::{
     normalize_provider_billing_type, parse_optional_rfc3339_unix_secs,
 };
-use crate::handlers::admin::provider::write::normalize::normalize_provider_type_input;
+use crate::handlers::admin::provider::write::normalize::{
+    normalize_pool_advanced_config, normalize_provider_type_input,
+};
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::normalize_json_object;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider;
@@ -118,7 +120,7 @@ pub(crate) async fn build_admin_create_provider_record(
     let mut config_map = normalize_json_object(payload.config, "config")?
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
-    if let Some(value) = normalize_json_object(payload.pool_advanced, "pool_advanced")? {
+    if let Some(value) = normalize_pool_advanced_config(payload.pool_advanced)? {
         config_map.insert("pool_advanced".to_string(), value);
     }
     if let Some(value) = normalize_json_object(payload.failover_rules, "failover_rules")? {

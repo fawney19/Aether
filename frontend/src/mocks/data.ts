@@ -197,7 +197,7 @@ export const MOCK_DASHBOARD_STATS: DashboardStatsResponse = {
     cache_read_tokens: 200000,
     cache_creation_cost: 0.25,
     cache_read_cost: 0.10,
-    cache_hit_rate: 0.35,
+    cache_hit_rate: 35.0,
     total_cache_tokens: 250000
   },
   users: {

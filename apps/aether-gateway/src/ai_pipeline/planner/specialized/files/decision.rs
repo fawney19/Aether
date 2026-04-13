@@ -297,7 +297,7 @@ pub(super) async fn maybe_build_local_gemini_files_decision_payload_for_candidat
             "provider_api_format": GEMINI_FILES_CLIENT_API_FORMAT,
             "client_api_format": GEMINI_FILES_CLIENT_API_FORMAT,
             "original_headers": collect_control_headers(&parts.headers),
-            "original_request_body": original_request_body,
+            "original_request_body": crate::ai_pipeline::build_report_context_original_request_echo(&original_request_body),
             "has_envelope": false,
             "needs_conversion": false,
         })),

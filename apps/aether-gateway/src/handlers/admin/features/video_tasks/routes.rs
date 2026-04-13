@@ -60,7 +60,9 @@ pub(super) async fn maybe_build_local_admin_video_tasks_response(
         let page_size = query_param_value(request_context.query_string(), "page_size")
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(20);
-        let response = state.read_video_task_page(&filter, page, page_size).await?;
+        let response = state
+            .read_video_task_page_summary(&filter, page, page_size)
+            .await?;
         let provider_names = build_admin_video_task_provider_names(state, &response.items).await?;
         return Ok(Some(
             Json(json!({

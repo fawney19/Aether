@@ -35,34 +35,55 @@
               />
             </div>
           </div>
-          <div class="flex items-center gap-2">
-            <div class="relative flex-1">
-              <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground z-10 pointer-events-none" />
-              <Input
-                v-model="searchQuery"
-                type="text"
-                placeholder="搜索..."
-                class="w-full pl-8 pr-3 h-8 text-sm bg-background/50 border-border/60"
-              />
-            </div>
-            <Select v-model="filterStatus">
-              <SelectTrigger class="w-24 h-8 text-xs border-border/60">
-                <SelectValue placeholder="状态" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">
-                  全部
-                </SelectItem>
-                <SelectItem value="online">
-                  在线
-                </SelectItem>
-                <SelectItem value="offline">
-                  离线
-                </SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
+	          <div class="flex flex-wrap items-center gap-2">
+	            <div class="relative min-w-0 basis-full">
+	              <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground z-10 pointer-events-none" />
+	              <Input
+	                v-model="searchQuery"
+	                type="text"
+	                placeholder="搜索..."
+	                class="w-full pl-8 pr-3 h-8 text-sm bg-background/50 border-border/60"
+	              />
+	            </div>
+	            <div class="min-w-0 flex-1">
+	              <Select v-model="filterStatus">
+	                <SelectTrigger class="w-full h-8 text-xs border-border/60">
+	                  <SelectValue placeholder="状态" />
+	                </SelectTrigger>
+	                <SelectContent>
+	                  <SelectItem value="all">
+	                    全部
+	                  </SelectItem>
+	                  <SelectItem value="online">
+	                    在线
+	                  </SelectItem>
+	                  <SelectItem value="offline">
+	                    离线
+	                  </SelectItem>
+	                </SelectContent>
+	              </Select>
+	            </div>
+	            <div class="min-w-0 flex-1">
+	              <Select
+	                v-model="filterRolloutStage"
+	                :disabled="!store.rollout"
+	              >
+	                <SelectTrigger class="w-full h-8 text-xs border-border/60">
+	                  <SelectValue placeholder="阶段" />
+	                </SelectTrigger>
+	                <SelectContent>
+	                  <SelectItem
+	                    v-for="option in rolloutStageOptions"
+	                    :key="option.value"
+	                    :value="option.value"
+	                  >
+	                    {{ option.label }}
+	                  </SelectItem>
+	                </SelectContent>
+	              </Select>
+	            </div>
+	          </div>
+	        </div>
 
         <!-- 桌面端 -->
         <div class="hidden sm:flex items-center justify-between gap-4">
@@ -79,26 +100,43 @@
                 class="w-48 pl-8 pr-3 h-8 text-sm bg-background/50 border-border/60"
               />
             </div>
-            <div class="h-4 w-px bg-border" />
-            <Select v-model="filterStatus">
-              <SelectTrigger class="w-28 h-8 text-xs border-border/60">
-                <SelectValue placeholder="全部状态" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">
-                  全部状态
-                </SelectItem>
-                <SelectItem value="online">
-                  在线
-                </SelectItem>
-                <SelectItem value="offline">
-                  离线
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <div class="h-4 w-px bg-border" />
-            <Button
-              variant="outline"
+	            <div class="h-4 w-px bg-border" />
+	            <Select v-model="filterStatus">
+	              <SelectTrigger class="w-28 h-8 text-xs border-border/60">
+	                <SelectValue placeholder="全部状态" />
+	              </SelectTrigger>
+	              <SelectContent>
+	                <SelectItem value="all">
+	                  全部状态
+	                </SelectItem>
+	                <SelectItem value="online">
+	                  在线
+	                </SelectItem>
+	                <SelectItem value="offline">
+	                  离线
+	                </SelectItem>
+	              </SelectContent>
+	            </Select>
+	            <Select
+	              v-model="filterRolloutStage"
+	              :disabled="!store.rollout"
+	            >
+	              <SelectTrigger class="w-36 h-8 text-xs border-border/60">
+	                <SelectValue placeholder="全部阶段" />
+	              </SelectTrigger>
+	              <SelectContent>
+	                <SelectItem
+	                  v-for="option in rolloutStageOptions"
+	                  :key="option.value"
+	                  :value="option.value"
+	                >
+	                  {{ option.label }}
+	                </SelectItem>
+	              </SelectContent>
+	            </Select>
+	            <div class="h-4 w-px bg-border" />
+	            <Button
+	              variant="outline"
               size="sm"
               class="h-8 text-xs"
               @click="showBatchUpgradeDialog = true"
@@ -118,6 +156,305 @@
               :loading="store.loading"
               @click="refresh"
             />
+          </div>
+        </div>
+      </div>
+
+      <div
+        v-if="store.rollout"
+        class="px-4 sm:px-6 py-4 border-b border-border/60 bg-muted/15"
+      >
+        <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+          <div class="space-y-3">
+	            <div class="flex flex-wrap items-center gap-2">
+	              <Badge
+	                :variant="store.rollout.blocked ? 'warning' : 'success'"
+	                class="text-[11px] px-2 py-0.5"
+              >
+                {{ store.rollout.blocked ? 'Rollout 等待确认' : 'Rollout 推进中' }}
+              </Badge>
+	              <span class="text-sm font-semibold">目标版本 {{ store.rollout.version }}</span>
+	              <span class="text-xs text-muted-foreground">
+	                每波 {{ store.rollout.batch_size }} 个节点 · 冷却 {{ formatDurationShort(store.rollout.cooldown_secs) }}
+	              </span>
+	              <Badge
+	                v-if="filterRolloutStage !== 'all'"
+	                variant="outline"
+	                class="text-[11px] px-2 py-0.5"
+	              >
+	                筛选: {{ activeRolloutStageLabel }}
+	              </Badge>
+	              <Button
+	                v-if="filterRolloutStage !== 'all'"
+	                variant="ghost"
+	                size="sm"
+	                class="h-7 px-2 text-[11px]"
+	                @click="filterRolloutStage = 'all'"
+	              >
+	                清除阶段筛选
+	              </Button>
+	            </div>
+            <div class="grid grid-cols-2 gap-3 sm:grid-cols-5">
+              <div class="rounded-lg border border-border/50 bg-background/80 px-3 py-2">
+                <div class="text-[11px] text-muted-foreground">
+                  已完成
+                </div>
+                <div class="mt-1 text-sm font-semibold tabular-nums">
+                  {{ store.rollout.completed_node_ids.length }}
+                </div>
+              </div>
+              <div class="rounded-lg border border-border/50 bg-background/80 px-3 py-2">
+                <div class="text-[11px] text-muted-foreground">
+                  等待确认
+                </div>
+                <div class="mt-1 text-sm font-semibold tabular-nums">
+                  {{ store.rollout.pending_node_ids.length }}
+                </div>
+              </div>
+              <div class="rounded-lg border border-border/50 bg-background/80 px-3 py-2">
+                <div class="text-[11px] text-muted-foreground">
+                  冲突节点
+                </div>
+                <div class="mt-1 text-sm font-semibold tabular-nums">
+                  {{ store.rollout.conflict_node_ids.length }}
+                </div>
+              </div>
+              <div class="rounded-lg border border-border/50 bg-background/80 px-3 py-2">
+                <div class="text-[11px] text-muted-foreground">
+                  已跳过
+                </div>
+                <div class="mt-1 text-sm font-semibold tabular-nums">
+                  {{ store.rollout.skipped_node_ids.length }}
+                </div>
+              </div>
+              <div class="rounded-lg border border-border/50 bg-background/80 px-3 py-2">
+                <div class="text-[11px] text-muted-foreground">
+                  在线可升级
+                </div>
+                <div class="mt-1 text-sm font-semibold tabular-nums">
+                  {{ store.rollout.online_eligible_total }}
+                </div>
+              </div>
+            </div>
+            <div
+              v-if="rolloutPendingPreview.length > 0"
+              class="space-y-2"
+            >
+              <div class="text-xs font-medium text-foreground/80">
+                当前卡点
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <div
+                  v-for="entry in rolloutPendingPreview"
+                  :key="entry.node_id"
+                  class="flex items-center gap-2 rounded-full border border-border/60 bg-background/90 px-3 py-1 text-xs"
+                >
+                  <span class="font-medium">{{ entry.name }}</span>
+                  <Badge
+                    :variant="entry.variant"
+                    class="px-1.5 py-0 text-[10px]"
+                  >
+                    {{ entry.label }}
+                  </Badge>
+                  <Button
+                    v-if="canRetryUpgradeNode(entry.node)"
+                    variant="ghost"
+                    size="sm"
+                    class="h-6 px-2 text-[11px]"
+                    :disabled="isUpgradeNodeActioning(entry.node_id)"
+                    @click="handleRetryUpgradeNode(entry.node)"
+                  >
+                    <Loader2
+                      v-if="isUpgradeNodeActioning(entry.node_id)"
+                      class="h-3 w-3 mr-1 animate-spin"
+                    />
+                    <RotateCcw
+                      v-else
+                      class="h-3 w-3 mr-1"
+                    />
+                    重试
+                  </Button>
+                  <Button
+                    v-if="canSkipUpgradeNode(entry.node)"
+                    variant="ghost"
+                    size="sm"
+                    class="h-6 px-2 text-[11px]"
+                    :disabled="isUpgradeNodeActioning(entry.node_id)"
+                    @click="handleSkipUpgradeNode(entry.node)"
+                  >
+                    <Loader2
+                      v-if="isUpgradeNodeActioning(entry.node_id)"
+                      class="h-3 w-3 mr-1 animate-spin"
+                    />
+                    <SkipForward
+                      v-else
+                      class="h-3 w-3 mr-1"
+                    />
+                    跳过
+                  </Button>
+                </div>
+              </div>
+              <p
+                v-if="hiddenPendingNodeCount > 0"
+                class="text-xs text-muted-foreground"
+              >
+                还有 {{ hiddenPendingNodeCount }} 个节点处于等待状态。
+              </p>
+            </div>
+            <div
+              v-if="rolloutConflictPreview.length > 0"
+              class="space-y-2"
+            >
+              <div class="text-xs font-medium text-foreground/80">
+                冲突节点
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <div
+                  v-for="entry in rolloutConflictPreview"
+                  :key="entry.node_id"
+                  class="flex items-center gap-2 rounded-full border border-border/60 bg-background/90 px-3 py-1 text-xs"
+                >
+                  <span class="font-medium">{{ entry.name }}</span>
+                  <Badge
+                    variant="destructive"
+                    class="px-1.5 py-0 text-[10px]"
+                  >
+                    版本冲突
+                  </Badge>
+                  <Button
+                    v-if="canRetryUpgradeNode(entry.node)"
+                    variant="ghost"
+                    size="sm"
+                    class="h-6 px-2 text-[11px]"
+                    :disabled="isUpgradeNodeActioning(entry.node_id)"
+                    @click="handleRetryUpgradeNode(entry.node)"
+                  >
+                    <Loader2
+                      v-if="isUpgradeNodeActioning(entry.node_id)"
+                      class="h-3 w-3 mr-1 animate-spin"
+                    />
+                    <RotateCcw
+                      v-else
+                      class="h-3 w-3 mr-1"
+                    />
+                    对齐版本
+                  </Button>
+                  <Button
+                    v-if="canSkipUpgradeNode(entry.node)"
+                    variant="ghost"
+                    size="sm"
+                    class="h-6 px-2 text-[11px]"
+                    :disabled="isUpgradeNodeActioning(entry.node_id)"
+                    @click="handleSkipUpgradeNode(entry.node)"
+                  >
+                    <Loader2
+                      v-if="isUpgradeNodeActioning(entry.node_id)"
+                      class="h-3 w-3 mr-1 animate-spin"
+                    />
+                    <SkipForward
+                      v-else
+                      class="h-3 w-3 mr-1"
+                    />
+                    跳过
+                  </Button>
+                </div>
+              </div>
+              <p
+                v-if="hiddenConflictNodeCount > 0"
+                class="text-xs text-muted-foreground"
+              >
+                还有 {{ hiddenConflictNodeCount }} 个节点存在版本冲突。
+              </p>
+            </div>
+            <div
+              v-if="rolloutSkippedPreview.length > 0"
+              class="space-y-2"
+            >
+              <div class="text-xs font-medium text-foreground/80">
+                已跳过节点
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <div
+                  v-for="entry in rolloutSkippedPreview"
+                  :key="entry.node_id"
+                  class="flex items-center gap-2 rounded-full border border-border/60 bg-background/90 px-3 py-1 text-xs"
+                >
+                  <span class="font-medium">{{ entry.name }}</span>
+                  <Badge
+                    variant="outline"
+                    class="px-1.5 py-0 text-[10px]"
+                  >
+                    已跳过
+                  </Badge>
+                  <Button
+                    v-if="canRetryUpgradeNode(entry.node)"
+                    variant="ghost"
+                    size="sm"
+                    class="h-6 px-2 text-[11px]"
+                    :disabled="isUpgradeNodeActioning(entry.node_id)"
+                    @click="handleRetryUpgradeNode(entry.node)"
+                  >
+                    <Loader2
+                      v-if="isUpgradeNodeActioning(entry.node_id)"
+                      class="h-3 w-3 mr-1 animate-spin"
+                    />
+                    <RotateCcw
+                      v-else
+                      class="h-3 w-3 mr-1"
+                    />
+                    恢复
+                  </Button>
+                </div>
+              </div>
+              <p
+                v-if="hiddenSkippedNodeCount > 0"
+                class="text-xs text-muted-foreground"
+              >
+                还有 {{ hiddenSkippedNodeCount }} 个节点已被人工跳过。
+              </p>
+            </div>
+          </div>
+          <div class="space-y-1 text-xs text-muted-foreground xl:text-right">
+            <div class="flex items-center justify-start gap-2 xl:justify-end">
+              <Button
+                v-if="store.rollout.skipped_node_ids.length > 0"
+                variant="outline"
+                size="sm"
+                class="h-8 text-xs"
+                :disabled="restoringSkippedUpgradeNodes || clearingUpgradeConflicts || cancellingUpgradeRollout"
+                @click="handleRestoreSkippedUpgradeNodes"
+              >
+                {{ restoringSkippedUpgradeNodes ? '恢复中...' : '恢复已跳过' }}
+              </Button>
+              <Button
+                v-if="store.rollout.conflict_node_ids.length > 0"
+                variant="outline"
+                size="sm"
+                class="h-8 text-xs"
+                :disabled="clearingUpgradeConflicts || cancellingUpgradeRollout || restoringSkippedUpgradeNodes"
+                @click="handleClearUpgradeConflicts"
+              >
+                {{ clearingUpgradeConflicts ? '清理中...' : '清空冲突' }}
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                class="h-8 text-xs"
+                :disabled="cancellingUpgradeRollout || clearingUpgradeConflicts || restoringSkippedUpgradeNodes"
+                @click="handleCancelUpgradeRollout"
+              >
+                {{ cancellingUpgradeRollout ? '取消中...' : '取消 Rollout' }}
+              </Button>
+            </div>
+            <div>开始时间: {{ formatTime(store.rollout.started_at) }}</div>
+            <div>最近放量: {{ formatTime(store.rollout.last_dispatched_at) }}</div>
+            <div>最近更新: {{ formatTime(store.rollout.updated_at) }}</div>
+            <div v-if="store.rollout.probe">
+              主动探测: GET {{ store.rollout.probe.url }} · {{ store.rollout.probe.timeout_secs }}s
+            </div>
+            <div v-else>
+              主动探测: 未配置，等待真实流量确认
+            </div>
           </div>
         </div>
       </div>
@@ -181,6 +518,20 @@
                     class="text-[10px] px-1.5 py-0"
                   >
                     Tunnel
+                  </Badge>
+                  <Badge
+                    v-if="nodeSchedulingBadge(node)"
+                    :variant="nodeSchedulingBadge(node)!.variant"
+                    class="text-[10px] px-1.5 py-0"
+                  >
+                    {{ nodeSchedulingBadge(node)!.label }}
+                  </Badge>
+                  <Badge
+                    v-if="nodeRolloutBadge(node)"
+                    :variant="nodeRolloutBadge(node)!.variant"
+                    class="text-[10px] px-1.5 py-0"
+                  >
+                    {{ nodeRolloutBadge(node)!.label }}
                   </Badge>
                   <HardwareTooltip :node="node" />
                 </div>
@@ -267,6 +618,42 @@
                     <History class="h-4 w-4" />
                   </Button>
                   <Button
+                    v-if="canRetryUpgradeNode(node)"
+                    variant="ghost"
+                    size="icon"
+                    class="h-8 w-8"
+                    :title="isUpgradeNodeActioning(node.id) ? '处理中...' : '重试当前节点升级'"
+                    :disabled="isUpgradeNodeActioning(node.id)"
+                    @click="handleRetryUpgradeNode(node)"
+                  >
+                    <Loader2
+                      v-if="isUpgradeNodeActioning(node.id)"
+                      class="h-4 w-4 animate-spin"
+                    />
+                    <RotateCcw
+                      v-else
+                      class="h-4 w-4"
+                    />
+                  </Button>
+                  <Button
+                    v-if="canSkipUpgradeNode(node)"
+                    variant="ghost"
+                    size="icon"
+                    class="h-8 w-8"
+                    :title="isUpgradeNodeActioning(node.id) ? '处理中...' : '跳过当前节点'"
+                    :disabled="isUpgradeNodeActioning(node.id)"
+                    @click="handleSkipUpgradeNode(node)"
+                  >
+                    <Loader2
+                      v-if="isUpgradeNodeActioning(node.id)"
+                      class="h-4 w-4 animate-spin"
+                    />
+                    <SkipForward
+                      v-else
+                      class="h-4 w-4"
+                    />
+                  </Button>
+                  <Button
                     variant="ghost"
                     size="icon"
                     class="h-8 w-8"
@@ -315,6 +702,13 @@
                 >
                   Tunnel
                 </Badge>
+                <Badge
+                  v-if="nodeSchedulingBadge(node)"
+                  :variant="nodeSchedulingBadge(node)!.variant"
+                  class="text-[10px] px-1.5 py-0"
+                >
+                  {{ nodeSchedulingBadge(node)!.label }}
+                </Badge>
                 <HardwareTooltip :node="node" />
               </div>
               <code class="text-xs text-muted-foreground">{{ nodeAddress(node) }}</code>
@@ -323,6 +717,17 @@
                 class="text-[11px] text-muted-foreground mt-1"
               >
                 版本: {{ nodeProxyVersion(node) }}
+              </div>
+              <div
+                v-if="nodeRolloutBadge(node)"
+                class="mt-1"
+              >
+                <Badge
+                  :variant="nodeRolloutBadge(node)!.variant"
+                  class="text-[10px] px-1.5 py-0"
+                >
+                  {{ nodeRolloutBadge(node)!.label }}
+                </Badge>
               </div>
             </div>
             <Badge
@@ -392,6 +797,42 @@
               >
                 <Settings class="h-3 w-3 mr-1" />
                 配置
+              </Button>
+              <Button
+                v-if="canRetryUpgradeNode(node)"
+                variant="ghost"
+                size="sm"
+                class="h-7 px-2 text-xs"
+                :disabled="isUpgradeNodeActioning(node.id)"
+                @click="handleRetryUpgradeNode(node)"
+              >
+                <Loader2
+                  v-if="isUpgradeNodeActioning(node.id)"
+                  class="h-3 w-3 mr-1 animate-spin"
+                />
+                <RotateCcw
+                  v-else
+                  class="h-3 w-3 mr-1"
+                />
+                重试
+              </Button>
+              <Button
+                v-if="canSkipUpgradeNode(node)"
+                variant="ghost"
+                size="sm"
+                class="h-7 px-2 text-xs"
+                :disabled="isUpgradeNodeActioning(node.id)"
+                @click="handleSkipUpgradeNode(node)"
+              >
+                <Loader2
+                  v-if="isUpgradeNodeActioning(node.id)"
+                  class="h-3 w-3 mr-1 animate-spin"
+                />
+                <SkipForward
+                  v-else
+                  class="h-3 w-3 mr-1"
+                />
+                跳过
               </Button>
               <Button
                 variant="ghost"
@@ -568,6 +1009,26 @@
               max="600"
             />
           </div>
+          <div class="space-y-1.5">
+            <Label>接单状态</Label>
+            <Select v-model="configForm.scheduling_state">
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="active">
+                  active
+                </SelectItem>
+                <SelectItem value="draining">
+                  draining
+                </SelectItem>
+                <SelectItem value="cordoned">
+                  cordoned
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <p class="text-xs text-muted-foreground">
+              draining/cordoned 都会停止新隧道请求；draining 用于排空，cordoned 用于人工隔离。
+            </p>
+          </div>
         </div>
         <div class="space-y-1.5">
           <Label>升级到版本</Label>
@@ -609,7 +1070,7 @@
       description="向所有在线 tunnel 节点下发升级版本指令"
       :icon="Settings"
       size="sm"
-      @update:model-value="(open: boolean) => { if (!open) { showBatchUpgradeDialog = false; batchUpgradeVersion = '' } }"
+      @update:model-value="(open: boolean) => { if (!open) { resetBatchUpgradeDialog() } }"
     >
       <form
         class="space-y-4"
@@ -622,11 +1083,35 @@
             placeholder="例如 0.2.3"
           />
         </div>
+        <div class="space-y-1.5">
+          <Label>升级健康探测 URL</Label>
+          <Input
+            v-model="batchUpgradeProbeUrl"
+            placeholder="可选，例如 https://example.com/health"
+          />
+          <p class="text-xs text-muted-foreground">
+            留空则只等待真实流量或手动确认；填写后 gateway 会通过 tunnel 主动发起 GET 探测。
+          </p>
+        </div>
+        <div class="space-y-1.5">
+          <Label>探测超时（秒）</Label>
+          <Input
+            v-model="batchUpgradeProbeTimeout"
+            type="number"
+            min="5"
+            max="60"
+            inputmode="numeric"
+            placeholder="默认 10"
+          />
+          <p class="text-xs text-muted-foreground">
+            仅在填写探测 URL 时生效，允许范围 5 到 60 秒。
+          </p>
+        </div>
       </form>
       <template #footer>
         <Button
           variant="outline"
-          @click="showBatchUpgradeDialog = false; batchUpgradeVersion = ''"
+          @click="resetBatchUpgradeDialog()"
         >
           取消
         </Button>
@@ -717,7 +1202,14 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import { useToast } from '@/composables/useToast'
 import { useConfirm } from '@/composables/useConfirm'
-import { proxyNodesApi, type ProxyNode, type ProxyNodeRemoteConfig, type ProxyNodeEvent } from '@/api/proxy-nodes'
+import {
+  proxyNodesApi,
+  type ProxyNode,
+  type ProxyNodeEvent,
+  type ProxyNodeRemoteConfig,
+  type ProxyNodeSchedulingState,
+  type ProxyNodeUpgradeRolloutTrackedNode,
+} from '@/api/proxy-nodes'
 
 import {
   Card,
@@ -741,17 +1233,18 @@ import {
   Dialog,
 } from '@/components/ui'
 
-import { Search, Trash2, Plus, SquarePen, Activity, Loader2, Settings, History } from 'lucide-vue-next'
+import { Search, Trash2, Plus, SquarePen, Activity, Loader2, Settings, History, RotateCcw, SkipForward } from 'lucide-vue-next'
 import { parseApiError } from '@/utils/errorParser'
 import { formatRegion } from '@/utils/region'
 import HardwareTooltip from './components/HardwareTooltip.vue'
 
 const { success, error: toastError } = useToast()
-const { confirmDanger } = useConfirm()
+const { confirmDanger, confirmWarning } = useConfirm()
 const store = useProxyNodesStore()
 
 const searchQuery = ref('')
 const filterStatus = ref('all')
+const filterRolloutStage = ref<RolloutStageFilterValue>('all')
 const currentPage = ref(1)
 const pageSize = ref(20)
 
@@ -775,11 +1268,18 @@ const configForm = ref({
   allowed_ports: '',
   log_level: 'info',
   heartbeat_interval: '30',
+  scheduling_state: 'active' as ProxyNodeSchedulingState,
   upgrade_to: '',
 })
 const showBatchUpgradeDialog = ref(false)
 const batchUpgradeVersion = ref('')
+const batchUpgradeProbeUrl = ref('')
+const batchUpgradeProbeTimeout = ref('10')
 const batchUpgrading = ref(false)
+const clearingUpgradeConflicts = ref(false)
+const cancellingUpgradeRollout = ref(false)
+const restoringSkippedUpgradeNodes = ref(false)
+const actioningUpgradeNodes = ref(new Set<string>())
 
 // 连接事件对话框
 const showEventsDialog = ref(false)
@@ -790,6 +1290,95 @@ const loadingEvents = ref(false)
 // 测试连通性
 const testingNodes = ref(new Set<string>())
 const testingUrl = ref(false)
+
+const rolloutTrackedNodeById = computed(() => new Map(
+  (store.rollout?.tracked_nodes ?? []).map(node => [node.node_id, node] as const)
+))
+
+const rolloutConflictNodeIds = computed(() => new Set(store.rollout?.conflict_node_ids ?? []))
+const rolloutCompletedNodeIds = computed(() => new Set(store.rollout?.completed_node_ids ?? []))
+const rolloutSkippedNodeIds = computed(() => new Set(store.rollout?.skipped_node_ids ?? []))
+
+const rolloutPendingPreview = computed(() => {
+  if (!store.rollout) return []
+  return store.rollout.pending_node_ids
+    .map(nodeId => {
+      const node = store.nodes.find(candidate => candidate.id === nodeId)
+      if (!node) return null
+      const badge = nodeRolloutBadge(node)
+      return {
+        node_id: node.id,
+        name: node.name,
+        node,
+        label: badge?.label ?? '等待确认',
+        variant: badge?.variant ?? 'secondary',
+      }
+    })
+    .filter((entry): entry is {
+      node_id: string
+      name: string
+      node: ProxyNode
+      label: string
+      variant: 'default' | 'secondary' | 'destructive' | 'outline' | 'success' | 'warning' | 'dark'
+    } => entry !== null)
+    .slice(0, 6)
+})
+
+const hiddenPendingNodeCount = computed(() =>
+  Math.max(0, (store.rollout?.pending_node_ids.length ?? 0) - rolloutPendingPreview.value.length)
+)
+
+const rolloutConflictPreview = computed(() => {
+  if (!store.rollout) return []
+  return store.rollout.conflict_node_ids
+    .map(nodeId => {
+      const node = store.nodes.find(candidate => candidate.id === nodeId)
+      if (!node) return null
+      return {
+        node_id: node.id,
+        name: node.name,
+        node,
+      }
+    })
+    .filter((entry): entry is {
+      node_id: string
+      name: string
+      node: ProxyNode
+    } => entry !== null)
+    .slice(0, 6)
+})
+
+const hiddenConflictNodeCount = computed(() =>
+  Math.max(0, (store.rollout?.conflict_node_ids.length ?? 0) - rolloutConflictPreview.value.length)
+)
+
+const rolloutSkippedPreview = computed(() => {
+  if (!store.rollout) return []
+  return store.rollout.skipped_node_ids
+    .map(nodeId => {
+      const node = store.nodes.find(candidate => candidate.id === nodeId)
+      if (!node) return null
+      return {
+        node_id: node.id,
+        name: node.name,
+        node,
+      }
+    })
+    .filter((entry): entry is {
+      node_id: string
+      name: string
+      node: ProxyNode
+    } => entry !== null)
+    .slice(0, 6)
+})
+
+const hiddenSkippedNodeCount = computed(() =>
+  Math.max(0, (store.rollout?.skipped_node_ids.length ?? 0) - rolloutSkippedPreview.value.length)
+)
+
+const activeRolloutStageLabel = computed(() =>
+  rolloutStageOptions.find(option => option.value === filterRolloutStage.value)?.label ?? '全部阶段'
+)
 
 const filteredNodes = computed(() => {
   let filtered = [...store.nodes]
@@ -806,6 +1395,10 @@ const filteredNodes = computed(() => {
     filtered = filtered.filter(node => node.status === filterStatus.value)
   }
 
+  if (filterRolloutStage.value !== 'all') {
+    filtered = filtered.filter(node => nodeMatchesRolloutStage(node, filterRolloutStage.value))
+  }
+
   return filtered
 })
 
@@ -814,9 +1407,18 @@ const paginatedNodes = computed(() => {
   return filteredNodes.value.slice(start, start + pageSize.value)
 })
 
-watch([searchQuery, filterStatus], () => {
+watch([searchQuery, filterStatus, filterRolloutStage], () => {
   currentPage.value = 1
 })
+
+watch(
+  () => store.rollout,
+  rollout => {
+    if (!rollout) {
+      filterRolloutStage.value = 'all'
+    }
+  },
+)
 
 onMounted(async () => {
   await store.fetchNodes()
@@ -920,6 +1522,7 @@ function handleConfig(node: ProxyNode) {
     allowed_ports: rc.allowed_ports?.join(', ') || '',
     log_level: rc.log_level || 'info',
     heartbeat_interval: String(rc.heartbeat_interval || node.heartbeat_interval || 30),
+    scheduling_state: rc.scheduling_state || 'active',
     upgrade_to: rc.upgrade_to || '',
   }
   showConfigDialog.value = true
@@ -954,6 +1557,7 @@ async function handleSaveConfig() {
     if (!isNaN(hb) && hb >= 5) {
       data.heartbeat_interval = hb
     }
+    data.scheduling_state = configForm.value.scheduling_state
     const targetVersion = configForm.value.upgrade_to.trim()
     if (targetVersion) {
       data.upgrade_to = targetVersion
@@ -976,16 +1580,154 @@ async function handleBatchUpgrade() {
   if (!version || batchUpgrading.value) return
   batchUpgrading.value = true
   try {
-    const result = await proxyNodesApi.batchUpgrade(version)
-    success(`升级指令已下发：${result.updated} 个节点，跳过 ${result.skipped} 个`)
-    showBatchUpgradeDialog.value = false
-    batchUpgradeVersion.value = ''
+    const probeUrl = batchUpgradeProbeUrl.value.trim()
+    const rawProbeTimeout = batchUpgradeProbeTimeout.value.trim()
+    const parsedProbeTimeout = rawProbeTimeout ? parseInt(rawProbeTimeout, 10) : NaN
+    const probeTimeoutSecs = probeUrl && !isNaN(parsedProbeTimeout)
+      ? Math.min(60, Math.max(5, parsedProbeTimeout))
+      : undefined
+
+    const result = await proxyNodesApi.batchUpgrade(version, {
+      probe_url: probeUrl || undefined,
+      probe_timeout_secs: probeUrl ? probeTimeoutSecs : undefined,
+    })
+    if (result.blocked) {
+      success(`升级 rollout 正在等待 ${result.pending_node_ids.length} 个节点确认到 ${result.version}`)
+    } else {
+      success(`升级指令已下发：本波 ${result.updated} 个节点，跳过 ${result.skipped} 个，已完成 ${result.completed} 个，剩余 ${result.remaining} 个`)
+    }
+    resetBatchUpgradeDialog()
     await store.fetchNodes()
   } catch (err: unknown) {
     toastError(parseApiError(err, '批量升级下发失败'))
   } finally {
     batchUpgrading.value = false
   }
+}
+
+async function handleCancelUpgradeRollout() {
+  if (!store.rollout || cancellingUpgradeRollout.value) return
+  const confirmed = await confirmDanger(
+    `确定要取消当前升级 rollout 吗？这会停止后续自动放量，但不会回滚已经下发到节点的升级指令。`,
+    '取消升级 Rollout',
+    '取消 Rollout'
+  )
+  if (!confirmed) return
+
+  cancellingUpgradeRollout.value = true
+  try {
+    const result = await proxyNodesApi.cancelUpgradeRollout()
+    await store.fetchNodes()
+    if (result.cancelled) {
+      success(
+        `已取消 ${result.version || '当前'} rollout，待确认节点 ${(result.pending_node_ids?.length ?? 0)} 个，冲突节点 ${(result.conflict_node_ids?.length ?? 0)} 个`
+      )
+    } else {
+      success('当前没有活动中的 rollout')
+    }
+  } catch (err: unknown) {
+    toastError(parseApiError(err, '取消 rollout 失败'))
+  } finally {
+    cancellingUpgradeRollout.value = false
+  }
+}
+
+async function handleClearUpgradeConflicts() {
+  if (!store.rollout || clearingUpgradeConflicts.value || store.rollout.conflict_node_ids.length === 0) return
+  const confirmed = await confirmWarning(
+    `确定要清空 ${store.rollout.conflict_node_ids.length} 个冲突节点上的升级目标吗？这不会回滚已经下发成功的节点，但会解除当前 rollout 的冲突阻塞。`,
+    '清空冲突升级目标'
+  )
+  if (!confirmed) return
+
+  clearingUpgradeConflicts.value = true
+  try {
+    const result = await proxyNodesApi.clearUpgradeConflicts()
+    await store.fetchNodes()
+    if (result.cleared > 0) {
+      success(
+        `已清空 ${result.cleared} 个冲突节点；本次新增下发 ${result.updated} 个节点，剩余 ${result.remaining} 个`
+      )
+    } else {
+      success('当前没有需要清理的冲突节点')
+    }
+  } catch (err: unknown) {
+    toastError(parseApiError(err, '清空冲突失败'))
+  } finally {
+    clearingUpgradeConflicts.value = false
+  }
+}
+
+async function handleRestoreSkippedUpgradeNodes() {
+  if (!store.rollout || restoringSkippedUpgradeNodes.value || store.rollout.skipped_node_ids.length === 0) return
+  const confirmed = await confirmWarning(
+    `确定要恢复 ${store.rollout.skipped_node_ids.length} 个已跳过节点吗？它们会重新进入当前 rollout 队列；如果当前没有待确认节点，gateway 会按批次重新下发升级。`,
+    '恢复已跳过节点'
+  )
+  if (!confirmed) return
+
+  restoringSkippedUpgradeNodes.value = true
+  try {
+    const result = await proxyNodesApi.restoreSkippedUpgradeNodes()
+    await store.fetchNodes()
+    if (result.restored > 0) {
+      success(
+        `已恢复 ${result.restored} 个已跳过节点；本次新增下发 ${result.updated} 个节点，剩余 ${result.remaining} 个`
+      )
+    } else {
+      success('当前没有需要恢复的已跳过节点')
+    }
+  } catch (err: unknown) {
+    toastError(parseApiError(err, '恢复已跳过节点失败'))
+  } finally {
+    restoringSkippedUpgradeNodes.value = false
+  }
+}
+
+async function handleSkipUpgradeNode(node: ProxyNode) {
+  if (!canSkipUpgradeNode(node) || isUpgradeNodeActioning(node.id)) return
+  const confirmed = await confirmWarning(
+    `确定要在当前 rollout 中跳过节点 "${node.name}" 吗？这会把它排除出本轮升级，并清除当前 rollout 下发给它的升级目标。`,
+    '跳过当前节点'
+  )
+  if (!confirmed) return
+
+  setUpgradeNodeActioning(node.id, true)
+  try {
+    const result = await proxyNodesApi.skipUpgradeNode(node.id)
+    await store.fetchNodes()
+    success(
+      `已跳过节点 ${node.name}；本次新增下发 ${result.updated} 个节点，剩余 ${result.remaining} 个`
+    )
+  } catch (err: unknown) {
+    toastError(parseApiError(err, '跳过节点失败'))
+  } finally {
+    setUpgradeNodeActioning(node.id, false)
+  }
+}
+
+async function handleRetryUpgradeNode(node: ProxyNode) {
+  if (!canRetryUpgradeNode(node) || isUpgradeNodeActioning(node.id)) return
+
+  setUpgradeNodeActioning(node.id, true)
+  try {
+    const result = await proxyNodesApi.retryUpgradeNode(node.id)
+    await store.fetchNodes()
+    success(
+      `已重试节点 ${node.name}；当前待确认 ${result.pending_node_ids.length} 个，剩余 ${result.remaining} 个`
+    )
+  } catch (err: unknown) {
+    toastError(parseApiError(err, '重试节点失败'))
+  } finally {
+    setUpgradeNodeActioning(node.id, false)
+  }
+}
+
+function resetBatchUpgradeDialog() {
+  showBatchUpgradeDialog.value = false
+  batchUpgradeVersion.value = ''
+  batchUpgradeProbeUrl.value = ''
+  batchUpgradeProbeTimeout.value = '10'
 }
 
 async function handleDelete(node: ProxyNode) {
@@ -997,8 +1739,7 @@ async function handleDelete(node: ProxyNode) {
 
   try {
     const result = await proxyNodesApi.deleteProxyNode(node.id)
-    // 同步更新 store 本地状态
-    store.nodes = store.nodes.filter(n => n.id !== node.id)
+    await store.fetchNodes()
     if (result.cleared_system_proxy) {
       success('代理节点已删除，系统默认代理已自动清除')
     } else {
@@ -1121,5 +1862,182 @@ function nodeProxyVersion(node: ProxyNode) {
   if (typeof version !== 'string') return '-'
   const normalized = version.trim()
   return normalized || '-'
+}
+
+type BadgeVariant = 'default' | 'secondary' | 'destructive' | 'outline' | 'success' | 'warning' | 'dark'
+type RolloutStageFilterValue =
+  | 'all'
+  | 'pending'
+  | 'conflict'
+  | 'skipped'
+  | 'completed'
+  | 'awaiting_version'
+  | 'awaiting_traffic'
+  | 'cooling_down'
+  | 'unhealthy'
+  | 'ready_to_finalize'
+
+const rolloutStageOptions: Array<{ value: RolloutStageFilterValue; label: string }> = [
+  { value: 'all', label: '全部阶段' },
+  { value: 'pending', label: '全部卡点' },
+  { value: 'awaiting_version', label: '等待版本' },
+  { value: 'awaiting_traffic', label: '等待流量' },
+  { value: 'cooling_down', label: '冷却中' },
+  { value: 'unhealthy', label: '健康失败' },
+  { value: 'ready_to_finalize', label: '等待收尾' },
+  { value: 'conflict', label: '版本冲突' },
+  { value: 'skipped', label: '已跳过' },
+  { value: 'completed', label: '已完成' },
+]
+
+function normalizeVersion(value: string | null | undefined) {
+  const trimmed = (value || '').trim().toLowerCase()
+  return trimmed.startsWith('proxy-v') ? trimmed.slice('proxy-v'.length) : trimmed
+}
+
+function formatDurationShort(seconds: number | null | undefined) {
+  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return '0s'
+  if (seconds < 60) return `${Math.floor(seconds)}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
+  return `${Math.floor(seconds / 3600)}h`
+}
+
+function resolveTrackedNodeBadge(
+  tracked: ProxyNodeUpgradeRolloutTrackedNode,
+): { label: string; variant: BadgeVariant } {
+  switch (tracked.state) {
+    case 'awaiting_version':
+      return { label: '等待版本上报', variant: 'secondary' }
+    case 'awaiting_traffic':
+      return { label: '等待流量确认', variant: 'warning' }
+    case 'cooling_down':
+      return {
+        label: tracked.cooldown_remaining_secs && tracked.cooldown_remaining_secs > 0
+          ? `冷却中 ${formatDurationShort(tracked.cooldown_remaining_secs)}`
+          : '冷却中',
+        variant: 'warning',
+      }
+    case 'unhealthy':
+      return { label: '健康检查未过', variant: 'destructive' }
+    case 'ready_to_finalize':
+      return { label: '等待收尾', variant: 'success' }
+    default:
+      return { label: '升级中', variant: 'secondary' }
+  }
+}
+
+function nodeRolloutBadge(node: ProxyNode): { label: string; variant: BadgeVariant } | null {
+  const rollout = store.rollout
+  if (!rollout || node.is_manual || !node.tunnel_mode) return null
+  if (rolloutSkippedNodeIds.value.has(node.id)) {
+    return { label: '已跳过', variant: 'outline' }
+  }
+  if (rolloutConflictNodeIds.value.has(node.id)) {
+    return { label: '版本冲突', variant: 'destructive' }
+  }
+  const tracked = rolloutTrackedNodeById.value.get(node.id)
+  if (tracked) {
+    return resolveTrackedNodeBadge(tracked)
+  }
+  if (rolloutCompletedNodeIds.value.has(node.id)) {
+    const nodeVersion = normalizeVersion(nodeProxyVersion(node))
+    if (nodeVersion && nodeVersion === normalizeVersion(rollout.version)) {
+      return { label: '已确认完成', variant: 'success' }
+    }
+    return { label: '目标版本', variant: 'outline' }
+  }
+  const targetVersion = normalizeVersion(rollout.version)
+  const remoteUpgradeTarget = normalizeVersion(node.remote_config?.upgrade_to ?? null)
+  if (remoteUpgradeTarget && remoteUpgradeTarget === targetVersion) {
+    return { label: '已下发升级', variant: 'secondary' }
+  }
+  return null
+}
+
+function nodeSchedulingBadge(node: ProxyNode): { label: string; variant: BadgeVariant } | null {
+  switch (node.remote_config?.scheduling_state) {
+    case 'draining':
+      return { label: '排空中', variant: 'warning' }
+    case 'cordoned':
+      return { label: '已封锁', variant: 'dark' }
+    default:
+      return null
+  }
+}
+
+function rolloutStageOfNode(node: ProxyNode): Exclude<RolloutStageFilterValue, 'all'> | null {
+  const rollout = store.rollout
+  if (!rollout || node.is_manual || !node.tunnel_mode) return null
+  if (rolloutSkippedNodeIds.value.has(node.id)) {
+    return 'skipped'
+  }
+  if (rolloutConflictNodeIds.value.has(node.id)) {
+    return 'conflict'
+  }
+  const tracked = rolloutTrackedNodeById.value.get(node.id)
+  if (tracked) {
+    return tracked.state
+  }
+  if (rolloutCompletedNodeIds.value.has(node.id)) {
+    return 'completed'
+  }
+  if (rollout.pending_node_ids.includes(node.id)) {
+    return 'pending'
+  }
+  const targetVersion = normalizeVersion(rollout.version)
+  const remoteUpgradeTarget = normalizeVersion(node.remote_config?.upgrade_to ?? null)
+  if (remoteUpgradeTarget && remoteUpgradeTarget === targetVersion) {
+    return 'pending'
+  }
+  return null
+}
+
+function nodeMatchesRolloutStage(node: ProxyNode, stage: RolloutStageFilterValue) {
+  if (stage === 'all') return true
+  const resolvedStage = rolloutStageOfNode(node)
+  if (!resolvedStage) return false
+  if (stage === 'pending') {
+    return resolvedStage === 'pending'
+      || resolvedStage === 'awaiting_version'
+      || resolvedStage === 'awaiting_traffic'
+      || resolvedStage === 'cooling_down'
+      || resolvedStage === 'unhealthy'
+      || resolvedStage === 'ready_to_finalize'
+  }
+  return resolvedStage === stage
+}
+
+function isUpgradeNodeActioning(nodeId: string) {
+  return actioningUpgradeNodes.value.has(nodeId)
+}
+
+function setUpgradeNodeActioning(nodeId: string, active: boolean) {
+  const next = new Set(actioningUpgradeNodes.value)
+  if (active) {
+    next.add(nodeId)
+  } else {
+    next.delete(nodeId)
+  }
+  actioningUpgradeNodes.value = next
+}
+
+function canSkipUpgradeNode(node: ProxyNode) {
+  const rollout = store.rollout
+  if (!rollout || node.is_manual || !node.tunnel_mode) return false
+  if (rolloutSkippedNodeIds.value.has(node.id) || rolloutCompletedNodeIds.value.has(node.id)) {
+    return false
+  }
+  return rolloutConflictNodeIds.value.has(node.id)
+    || rolloutTrackedNodeById.value.has(node.id)
+    || rollout.pending_node_ids.includes(node.id)
+}
+
+function canRetryUpgradeNode(node: ProxyNode) {
+  const rollout = store.rollout
+  if (!rollout || node.is_manual || !node.tunnel_mode) return false
+  if (rolloutCompletedNodeIds.value.has(node.id)) return false
+  return rolloutSkippedNodeIds.value.has(node.id)
+    || rolloutConflictNodeIds.value.has(node.id)
+    || rolloutTrackedNodeById.value.has(node.id)
 }
 </script>

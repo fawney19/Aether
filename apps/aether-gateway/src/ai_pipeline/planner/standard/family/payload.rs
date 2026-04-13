@@ -358,9 +358,8 @@ pub(super) async fn maybe_build_local_standard_decision_payload_for_candidate(
                     "upstream_url": upstream_url,
                     "provider_request_method": serde_json::Value::Null,
                     "provider_request_headers": provider_request_headers,
-                    "provider_request_body": provider_request_body,
                     "original_headers": collect_control_headers(&parts.headers),
-                    "original_request_body": body_json,
+                    "original_request_body": crate::ai_pipeline::build_report_context_original_request_echo(body_json),
                     "has_envelope": false,
                     "needs_conversion": true,
                 }),
@@ -384,6 +383,13 @@ pub(super) async fn mark_skipped_local_standard_candidate(
     candidate_id: &str,
     skip_reason: &'static str,
 ) {
+    state.mutate_local_execution_runtime_miss_diagnostic(trace_id, |diagnostic| {
+        *diagnostic
+            .skip_reasons
+            .entry(skip_reason.to_string())
+            .or_insert(0) += 1;
+        *diagnostic.skipped_candidate_count.get_or_insert(0) += 1;
+    });
     PlannerAppState::new(state)
         .persist_skipped_local_candidate(
             trace_id,

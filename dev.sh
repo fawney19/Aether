@@ -3,6 +3,35 @@
 set -euo pipefail
 clear >/dev/null 2>&1 || true
 
+usage() {
+    cat <<'EOF'
+用法:
+  ./dev.sh              启动本地 aether-gateway
+  ./dev.sh --migrate    执行数据库迁移后退出
+  ./dev.sh --help       显示帮助
+EOF
+}
+
+RUN_MIGRATE_ONLY=false
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --migrate)
+            RUN_MIGRATE_ONLY=true
+            shift
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "=> 未知参数: $1"
+            usage
+            exit 1
+            ;;
+    esac
+done
+
 # 加载 .env 文件
 set -a
 source .env
@@ -17,6 +46,12 @@ print_dev_infra_hint() {
     echo "=> 本地开发依赖未就绪。"
     echo "=> 请先启动 Postgres / Redis:"
     echo "=>   docker compose -f docker-compose.build.yml up -d postgres redis"
+}
+
+print_postgres_hint() {
+    echo "=> PostgreSQL 未就绪。"
+    echo "=> 请先启动 Postgres:"
+    echo "=>   docker compose -f docker-compose.build.yml up -d postgres"
 }
 
 check_postgres_ready() {
@@ -70,6 +105,19 @@ preflight_dev_infra() {
     if ! check_redis_ready "${redis_host}" "${redis_port}" "${redis_password}"; then
         echo "=> Redis 不可用: ${redis_host}:${redis_port}"
         print_dev_infra_hint
+        return 1
+    fi
+
+    return 0
+}
+
+preflight_postgres_only() {
+    local postgres_host="${DB_HOST:-localhost}"
+    local postgres_port="${DB_PORT:-5432}"
+
+    if ! check_postgres_ready "${postgres_host}" "${postgres_port}"; then
+        echo "=> PostgreSQL 不可用: ${postgres_host}:${postgres_port}"
+        print_postgres_hint
         return 1
     fi
 
@@ -131,6 +179,7 @@ wait_for_startup() {
         if ! kill -0 "${pid}" >/dev/null 2>&1; then
             STARTUP_WAIT_EARLY_EXIT=true
             echo "=> ${service_name} 启动进程已提前退出，请检查上面的日志。"
+            echo "=> 如果日志提示数据库 schema 落后，请先执行: ./dev.sh --migrate"
             return 1
         fi
 
@@ -144,6 +193,7 @@ wait_for_startup() {
     if ! kill -0 "${pid}" >/dev/null 2>&1; then
         STARTUP_WAIT_EARLY_EXIT=true
         echo "=> ${service_name} 启动进程已提前退出，请检查上面的日志。"
+        echo "=> 如果日志提示数据库 schema 落后，请先执行: ./dev.sh --migrate"
         return 1
     fi
 
@@ -156,6 +206,7 @@ wait_for_startup() {
 # - Rust aether-gateway 绑定 APP_PORT，作为唯一公开入口
 # - ./dev.sh 不再启动 Python 宿主；本地默认只验证 Rust-owned 路径
 export APP_PORT=${APP_PORT:-8084}
+export RUST_LOG=${RUST_LOG:-aether_gateway=info}
 RUST_SERVICE_STARTUP_TIMEOUT_SECONDS=${RUST_SERVICE_STARTUP_TIMEOUT_SECONDS:-120}
 GATEWAY_STARTUP_TIMEOUT_SECONDS=${GATEWAY_STARTUP_TIMEOUT_SECONDS:-${RUST_SERVICE_STARTUP_TIMEOUT_SECONDS}}
 
@@ -166,12 +217,23 @@ fi
 
 export AETHER_GATEWAY_VIDEO_TASK_TRUTH_SOURCE_MODE=${AETHER_GATEWAY_VIDEO_TASK_TRUTH_SOURCE_MODE:-rust-authoritative}
 
+if [ "${RUN_MIGRATE_ONLY}" = "true" ]; then
+    if ! preflight_postgres_only; then
+        exit 1
+    fi
+
+    echo "=> 执行 aether-gateway 数据库迁移..."
+    cargo run -q -p aether-gateway -- --migrate
+    exit 0
+fi
+
 if ! preflight_dev_infra; then
     exit 1
 fi
 
 GATEWAY_ARGS=(--app-port "${APP_PORT}")
 echo "=> 启动 aether-gateway (Rust frontdoor: 0.0.0.0:${APP_PORT})..."
+echo "=> 日志过滤: ${RUST_LOG} (需要更详细日志可用: RUST_LOG=aether_gateway=debug ./dev.sh)"
 cargo run -q -p aether-gateway -- "${GATEWAY_ARGS[@]}" &
 GATEWAY_PID=$!
 

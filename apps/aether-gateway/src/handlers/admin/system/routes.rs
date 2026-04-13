@@ -38,6 +38,7 @@ pub(crate) async fn maybe_build_local_admin_system_response(
     if let Some(response) = proxy_nodes::maybe_build_local_admin_proxy_nodes_response(
         &request.state(),
         &request.request_context(),
+        request.request_body(),
     )
     .await?
     {

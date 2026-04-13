@@ -1,10 +1,11 @@
 use async_trait::async_trait;
+use futures_util::TryStreamExt;
 use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder, Row};
 
 use super::{
-    ProviderCatalogKeyListQuery, ProviderCatalogReadRepository, ProviderCatalogWriteRepository,
-    StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogKeyPage,
-    StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
+    ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery, ProviderCatalogReadRepository,
+    ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+    StoredProviderCatalogKeyPage, StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
 };
 use crate::{
     error::{postgres_error, SqlxResultExt},
@@ -240,6 +241,61 @@ FROM provider_api_keys
 WHERE provider_id IN (
 "#;
 
+const LIST_KEY_SUMMARIES_BY_PROVIDER_IDS_PREFIX: &str = r#"
+SELECT
+  id,
+  provider_id,
+  COALESCE(NULLIF(name, ''), id) AS name,
+  COALESCE(NULLIF(auth_type, ''), 'summary') AS auth_type,
+  capabilities,
+  is_active,
+  api_formats,
+  'summary' AS api_key,
+  NULL::text AS auth_config,
+  NULL::text AS note,
+  internal_priority,
+  rate_multipliers,
+  global_priority_by_format,
+  NULL::jsonb AS allowed_models,
+  NULL::bigint AS expires_at_unix_secs,
+  cache_ttl_minutes,
+  max_probe_interval_minutes,
+  NULL::jsonb AS proxy,
+  NULL::jsonb AS fingerprint,
+  NULL::integer AS rpm_limit,
+  NULL::integer AS learned_rpm_limit,
+  NULL::integer AS concurrent_429_count,
+  NULL::integer AS rpm_429_count,
+  NULL::bigint AS last_429_at_unix_secs,
+  NULL::text AS last_429_type,
+  NULL::jsonb AS adjustment_history,
+  NULL::jsonb AS utilization_samples,
+  NULL::bigint AS last_probe_increase_at_unix_secs,
+  request_count,
+  0::bigint AS total_tokens,
+  0::double precision AS total_cost_usd,
+  success_count,
+  NULL::integer AS error_count,
+  total_response_time_ms,
+  EXTRACT(EPOCH FROM last_used_at)::bigint AS last_used_at_unix_secs,
+  auto_fetch_models,
+  NULL::bigint AS last_models_fetch_at_unix_secs,
+  NULL::text AS last_models_fetch_error,
+  NULL::jsonb AS locked_models,
+  NULL::jsonb AS model_include_patterns,
+  NULL::jsonb AS model_exclude_patterns,
+  NULL::jsonb AS upstream_metadata,
+  EXTRACT(EPOCH FROM oauth_invalid_at)::bigint AS oauth_invalid_at_unix_secs,
+  oauth_invalid_reason,
+  NULL::jsonb AS status_snapshot,
+  EXTRACT(EPOCH FROM created_at)::bigint AS created_at_unix_ms,
+  EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_unix_secs,
+  health_by_format,
+  circuit_breaker_by_format
+FROM provider_api_keys
+WHERE provider_id IN (
+"#;
+
 const LIST_KEY_STATS_BY_PROVIDER_IDS_PREFIX: &str = r#"
 SELECT
   provider_id,
@@ -271,24 +327,26 @@ impl SqlxProviderCatalogReadRepository {
             return Ok(Vec::new());
         }
 
-        let rows = build_list_query(
-            LIST_PROVIDERS_BY_IDS_PREFIX,
-            provider_ids,
-            " ORDER BY name ASC",
+        collect_query_rows(
+            build_list_query(
+                LIST_PROVIDERS_BY_IDS_PREFIX,
+                provider_ids,
+                " ORDER BY name ASC",
+            )
+            .build()
+            .fetch(&self.pool),
+            map_provider_row,
         )
-        .build()
-        .fetch_all(&self.pool)
         .await
-        .map_postgres_err()?;
-        rows.iter().map(map_provider_row).collect()
     }
 
     pub async fn list_providers(
         &self,
         active_only: bool,
     ) -> Result<Vec<StoredProviderCatalogProvider>, DataLayerError> {
-        let rows = sqlx::query(
-            r#"
+        collect_query_rows(
+            sqlx::query(
+                r#"
 SELECT
   id,
   name,
@@ -317,12 +375,12 @@ FROM providers
 WHERE ($1::boolean = false OR is_active = true)
 ORDER BY provider_priority ASC, name ASC
 "#,
+            )
+            .bind(active_only)
+            .fetch(&self.pool),
+            map_provider_row,
         )
-        .bind(active_only)
-        .fetch_all(&self.pool)
         .await
-        .map_postgres_err()?;
-        rows.iter().map(map_provider_row).collect()
     }
 
     pub async fn list_endpoints_by_ids(
@@ -333,28 +391,35 @@ ORDER BY provider_priority ASC, name ASC
             return Ok(Vec::new());
         }
 
-        let rows = match build_list_query(
-            LIST_ENDPOINTS_BY_IDS_PREFIX,
-            endpoint_ids,
-            " ORDER BY api_format ASC, id ASC",
-        )
-        .build()
-        .fetch_all(&self.pool)
-        .await
-        {
-            Ok(rows) => rows,
-            Err(error) if is_missing_endpoint_health_score_column(&error) => build_list_query(
-                LIST_ENDPOINTS_BY_IDS_PREFIX_LEGACY,
+        let rows = match collect_query_rows(
+            build_list_query(
+                LIST_ENDPOINTS_BY_IDS_PREFIX,
                 endpoint_ids,
                 " ORDER BY api_format ASC, id ASC",
             )
             .build()
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?,
+            .fetch(&self.pool),
+            map_endpoint_row,
+        )
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) if is_missing_endpoint_health_score_column_sql(&error) => {
+                collect_query_rows(
+                    build_list_query(
+                        LIST_ENDPOINTS_BY_IDS_PREFIX_LEGACY,
+                        endpoint_ids,
+                        " ORDER BY api_format ASC, id ASC",
+                    )
+                    .build()
+                    .fetch(&self.pool),
+                    map_endpoint_row,
+                )
+                .await?
+            }
             Err(error) => return Err(postgres_error(error)),
         };
-        rows.iter().map(map_endpoint_row).collect()
+        Ok(rows)
     }
 
     pub async fn list_endpoints_by_provider_ids(
@@ -365,28 +430,35 @@ ORDER BY provider_priority ASC, name ASC
             return Ok(Vec::new());
         }
 
-        let rows = match build_list_query(
-            LIST_ENDPOINTS_BY_PROVIDER_IDS_PREFIX,
-            provider_ids,
-            " ORDER BY provider_id ASC, api_format ASC, id ASC",
-        )
-        .build()
-        .fetch_all(&self.pool)
-        .await
-        {
-            Ok(rows) => rows,
-            Err(error) if is_missing_endpoint_health_score_column(&error) => build_list_query(
-                LIST_ENDPOINTS_BY_PROVIDER_IDS_PREFIX_LEGACY,
+        let rows = match collect_query_rows(
+            build_list_query(
+                LIST_ENDPOINTS_BY_PROVIDER_IDS_PREFIX,
                 provider_ids,
                 " ORDER BY provider_id ASC, api_format ASC, id ASC",
             )
             .build()
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?,
+            .fetch(&self.pool),
+            map_endpoint_row,
+        )
+        .await
+        {
+            Ok(rows) => rows,
+            Err(error) if is_missing_endpoint_health_score_column_sql(&error) => {
+                collect_query_rows(
+                    build_list_query(
+                        LIST_ENDPOINTS_BY_PROVIDER_IDS_PREFIX_LEGACY,
+                        provider_ids,
+                        " ORDER BY provider_id ASC, api_format ASC, id ASC",
+                    )
+                    .build()
+                    .fetch(&self.pool),
+                    map_endpoint_row,
+                )
+                .await?
+            }
             Err(error) => return Err(postgres_error(error)),
         };
-        rows.iter().map(map_endpoint_row).collect()
+        Ok(rows)
     }
 
     pub async fn list_keys_by_ids(
@@ -397,16 +469,17 @@ ORDER BY provider_priority ASC, name ASC
             return Ok(Vec::new());
         }
 
-        let rows = build_list_query(
-            LIST_KEYS_BY_IDS_PREFIX,
-            key_ids,
-            " ORDER BY name ASC, id ASC",
+        collect_query_rows(
+            build_list_query(
+                LIST_KEYS_BY_IDS_PREFIX,
+                key_ids,
+                " ORDER BY name ASC, id ASC",
+            )
+            .build()
+            .fetch(&self.pool),
+            map_key_row,
         )
-        .build()
-        .fetch_all(&self.pool)
         .await
-        .map_postgres_err()?;
-        rows.iter().map(map_key_row).collect()
     }
 
     pub async fn list_keys_by_provider_ids(
@@ -417,16 +490,38 @@ ORDER BY provider_priority ASC, name ASC
             return Ok(Vec::new());
         }
 
-        let rows = build_list_query(
-            LIST_KEYS_BY_PROVIDER_IDS_PREFIX,
-            provider_ids,
-            " ORDER BY provider_id ASC, name ASC, id ASC",
+        collect_query_rows(
+            build_list_query(
+                LIST_KEYS_BY_PROVIDER_IDS_PREFIX,
+                provider_ids,
+                " ORDER BY provider_id ASC, name ASC, id ASC",
+            )
+            .build()
+            .fetch(&self.pool),
+            map_key_row,
         )
-        .build()
-        .fetch_all(&self.pool)
         .await
-        .map_postgres_err()?;
-        rows.iter().map(map_key_row).collect()
+    }
+
+    pub async fn list_key_summaries_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        if provider_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        collect_query_rows(
+            build_list_query(
+                LIST_KEY_SUMMARIES_BY_PROVIDER_IDS_PREFIX,
+                provider_ids,
+                " ORDER BY provider_id ASC, id ASC",
+            )
+            .build()
+            .fetch(&self.pool),
+            map_key_row,
+        )
+        .await
     }
 
     pub async fn list_keys_page(
@@ -457,6 +552,12 @@ ORDER BY provider_priority ASC, name ASC
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(|value| format!("%{}%", value.to_ascii_lowercase()));
+        let order_by = match query.order {
+            ProviderCatalogKeyListOrder::Name => "internal_priority ASC, name ASC, id ASC",
+            ProviderCatalogKeyListOrder::CreatedAt => {
+                "internal_priority ASC, COALESCE(created_at, TO_TIMESTAMP(0)) ASC, id ASC"
+            }
+        };
 
         let count_row = sqlx::query(
             r#"
@@ -475,7 +576,7 @@ WHERE provider_id = $1
         .map_postgres_err()?;
         let total = row_get::<i64>(&count_row, "total")?.max(0) as usize;
 
-        let rows = sqlx::query(
+        let sql = format!(
             r#"
 SELECT
   id,
@@ -531,23 +632,22 @@ FROM provider_api_keys
 WHERE provider_id = $1
   AND ($2::TEXT IS NULL OR LOWER(name) LIKE $2 OR LOWER(id) LIKE $2)
   AND ($3::BOOLEAN IS NULL OR is_active = $3)
-ORDER BY internal_priority ASC, name ASC, id ASC
+ORDER BY {order_by}
 OFFSET $4
 LIMIT $5
 "#,
+        );
+        let items = collect_query_rows(
+            sqlx::query(&sql)
+                .bind(&query.provider_id)
+                .bind(search_pattern.as_deref())
+                .bind(query.is_active)
+                .bind(offset)
+                .bind(limit)
+                .fetch(&self.pool),
+            map_key_row,
         )
-        .bind(&query.provider_id)
-        .bind(search_pattern.as_deref())
-        .bind(query.is_active)
-        .bind(offset)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .map_postgres_err()?;
-        let items = rows
-            .iter()
-            .map(map_key_row)
-            .collect::<Result<Vec<_>, _>>()?;
+        .await?;
 
         Ok(StoredProviderCatalogKeyPage { items, total })
     }
@@ -560,16 +660,17 @@ LIMIT $5
             return Ok(Vec::new());
         }
 
-        let rows = build_list_query(
-            LIST_KEY_STATS_BY_PROVIDER_IDS_PREFIX,
-            provider_ids,
-            "\nGROUP BY provider_id\nORDER BY provider_id ASC",
+        collect_query_rows(
+            build_list_query(
+                LIST_KEY_STATS_BY_PROVIDER_IDS_PREFIX,
+                provider_ids,
+                "\nGROUP BY provider_id\nORDER BY provider_id ASC",
+            )
+            .build()
+            .fetch(&self.pool),
+            map_key_stats_row,
         )
-        .build()
-        .fetch_all(&self.pool)
         .await
-        .map_postgres_err()?;
-        rows.iter().map(map_key_stats_row).collect()
     }
 
     pub async fn update_key_oauth_credentials(
@@ -1794,6 +1895,13 @@ impl ProviderCatalogReadRepository for SqlxProviderCatalogReadRepository {
         Self::list_keys_by_provider_ids(self, provider_ids).await
     }
 
+    async fn list_key_summaries_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        Self::list_key_summaries_by_provider_ids(self, provider_ids).await
+    }
+
     async fn list_keys_page(
         &self,
         query: &ProviderCatalogKeyListQuery,
@@ -2049,6 +2157,29 @@ fn is_missing_endpoint_health_score_column(error: &sqlx::Error) -> bool {
             .as_database_error()
             .map(|db| db.message().contains("health_score"))
             .unwrap_or(false)
+}
+
+fn is_missing_endpoint_health_score_column_sql(error: &DataLayerError) -> bool {
+    match error {
+        DataLayerError::Postgres(message) => {
+            message.contains("endpoint_health_score") && message.contains("does not exist")
+        }
+        _ => false,
+    }
+}
+
+async fn collect_query_rows<T, S>(
+    mut rows: S,
+    mapper: fn(&PgRow) -> Result<T, DataLayerError>,
+) -> Result<Vec<T>, DataLayerError>
+where
+    S: futures_util::TryStream<Ok = PgRow, Error = sqlx::Error> + Unpin,
+{
+    let mut items = Vec::new();
+    while let Some(row) = rows.try_next().await.map_postgres_err()? {
+        items.push(mapper(&row)?);
+    }
+    Ok(items)
 }
 
 fn map_key_stats_row(row: &PgRow) -> Result<StoredProviderCatalogKeyStats, DataLayerError> {

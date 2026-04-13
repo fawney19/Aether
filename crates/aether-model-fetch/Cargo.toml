@@ -11,8 +11,11 @@ aether-data-contracts.workspace = true
 aether-provider-transport.workspace = true
 aether-scheduler-core.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 regex.workspace = true
+rsa = "0.9.10"
 serde_json.workspace = true
+sha2 = { workspace = true, features = ["oid"] }
 uuid.workspace = true
 
 [dev-dependencies]

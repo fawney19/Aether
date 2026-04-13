@@ -15,7 +15,7 @@ use super::shared::{
 use crate::handlers::admin::model::shared::{
     admin_global_model_assign_to_providers_id, admin_global_model_id_from_path,
     is_admin_global_models_root, AdminBatchAssignToProvidersRequest, AdminBatchDeleteIdsRequest,
-    AdminGlobalModelCreateRequest, AdminGlobalModelUpdateRequest,
+    AdminGlobalModelCreateRequest, AdminGlobalModelUpdatePatch,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
@@ -150,16 +150,14 @@ async fn build_update_global_model_response(
         Ok(payload) => payload,
         Err(response) => return Ok(response),
     };
-    let payload = match serde_json::from_value::<AdminGlobalModelUpdateRequest>(raw_value) {
-        Ok(payload) => payload,
+    let patch = match AdminGlobalModelUpdatePatch::from_object(raw_payload) {
+        Ok(patch) => patch,
         Err(_) => return Ok(bad_request_response("请求体必须是合法的 JSON 对象")),
     };
-    let record =
-        match build_admin_global_model_update_record(state, &existing, &raw_payload, payload).await
-        {
-            Ok(record) => record,
-            Err(detail) => return Ok(bad_request_response(detail)),
-        };
+    let record = match build_admin_global_model_update_record(state, &existing, patch).await {
+        Ok(record) => record,
+        Err(detail) => return Ok(bad_request_response(detail)),
+    };
 
     Ok(match state.update_admin_global_model(&record).await? {
         Some(updated) => attach_admin_audit_response(

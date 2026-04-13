@@ -28,7 +28,7 @@
             直连（不使用代理）
           </SelectItem>
           <SelectItem
-            v-for="node in onlineNodes"
+            v-for="node in selectableNodes"
             :key="node.id"
             :value="node.id"
           >
@@ -44,6 +44,7 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import Button from '@/components/ui/button.vue'
 import Label from '@/components/ui/label.vue'
 import Select from '@/components/ui/select.vue'
@@ -61,9 +62,10 @@ interface ProxyNode {
   port: number
 }
 
-defineProps<{
+const props = defineProps<{
   proxyNodeId: string | null
   onlineNodes: ProxyNode[]
+  allNodes: ProxyNode[]
   loading: boolean
   hasChanges: boolean
 }>()
@@ -72,4 +74,16 @@ defineEmits<{
   save: []
   'update:proxyNodeId': [value: string | null]
 }>()
+
+const selectableNodes = computed(() => {
+  if (!props.proxyNodeId) {
+    return props.onlineNodes
+  }
+  const exists = props.onlineNodes.some(node => node.id === props.proxyNodeId)
+  if (exists) {
+    return props.onlineNodes
+  }
+  const selected = props.allNodes.find(node => node.id === props.proxyNodeId)
+  return selected ? [selected, ...props.onlineNodes] : props.onlineNodes
+})
 </script>

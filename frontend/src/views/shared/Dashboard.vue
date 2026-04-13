@@ -819,6 +819,7 @@ import {
   DollarSign,
   Key,
   Hash,
+  Zap,
   Bell,
   AlertCircle,
   AlertTriangle,
@@ -830,6 +831,7 @@ import {
   Shuffle
 } from 'lucide-vue-next'
 import { formatTokens, formatCurrency } from '@/utils/format'
+import { parseDateLike } from '@/utils/date'
 import { marked } from 'marked'
 import { sanitizeMarkdown } from '@/utils/sanitize'
 import type { ChartData, ChartOptions, ChartDataset, TooltipItem } from 'chart.js'
@@ -1000,7 +1002,7 @@ const selectedAnnouncement = ref<Announcement | null>(null)
 const detailDialogOpen = ref(false)
 
 const iconMap: Record<string, unknown> = {
-  Users, Activity, TrendingUp, DollarSign, Key, Hash, Database
+  Users, Activity, TrendingUp, DollarSign, Key, Hash, Zap, Database
 }
 
 // 空状态占位卡片
@@ -1315,7 +1317,10 @@ onBeforeUnmount(() => {
 async function loadDashboardData() {
   loading.value = true
   try {
-    const statsData = await dashboardApi.getStats()
+    const statsData = await dashboardApi.getStats({
+      timezone: dailyTimeRange.value.timezone,
+      tz_offset_minutes: dailyTimeRange.value.tz_offset_minutes
+    })
     stats.value = statsData.stats.map(stat => ({
       ...stat,
       icon: iconMap[stat.icon] || Activity
@@ -1382,7 +1387,7 @@ function scheduleDailyStatsLoad() {
 watch(dailyTimeRange, scheduleDailyStatsLoad, { deep: true })
 
 function formatDate(dateString: string): string {
-  const date = new Date(dateString)
+  const date = parseDateLike(dateString)
   const today = new Date()
   const yesterday = new Date(today)
   yesterday.setDate(yesterday.getDate() - 1)
@@ -1392,7 +1397,7 @@ function formatDate(dateString: string): string {
 }
 
 function formatDateForChart(dateString: string): string {
-  const date = new Date(dateString)
+  const date = parseDateLike(dateString)
   const today = new Date()
   const yesterday = new Date(today)
   yesterday.setDate(yesterday.getDate() - 1)

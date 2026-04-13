@@ -16,6 +16,20 @@ use axum::{
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
+async fn load_usage_cache_affinity_usernames(
+    state: &AdminAppState<'_>,
+    user_ids: &[String],
+) -> Result<BTreeMap<String, String>, GatewayError> {
+    Ok(state
+        .resolve_auth_user_summaries_by_ids(user_ids)
+        .await?
+        .into_iter()
+        .filter_map(|(user_id, user)| {
+            (!user.username.trim().is_empty()).then_some((user_id, user.username))
+        })
+        .collect())
+}
+
 pub(super) async fn build_admin_usage_cache_affinity_interval_timeline_response(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
@@ -41,6 +55,7 @@ pub(super) async fn build_admin_usage_cache_affinity_interval_timeline_response(
         list_recent_completed_usage_for_cache_affinity(state, hours, user_id.as_deref()).await?;
     let mut grouped: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
     let mut models = BTreeSet::new();
+    let mut legacy_usernames_by_user_id = BTreeMap::new();
     let mut usernames_by_user_id = BTreeMap::new();
 
     for (group_user_id, items) in admin_usage_group_completed_by_user(&usage) {
@@ -67,7 +82,7 @@ pub(super) async fn build_admin_usage_cache_affinity_interval_timeline_response(
                     if include_user_info && user_id.is_none() {
                         point["user_id"] = json!(group_user_id.clone());
                         if let Some(username) = item.username.clone() {
-                            usernames_by_user_id
+                            legacy_usernames_by_user_id
                                 .entry(group_user_id.clone())
                                 .or_insert(username);
                         }
@@ -82,16 +97,16 @@ pub(super) async fn build_admin_usage_cache_affinity_interval_timeline_response(
         }
     }
 
-    if include_user_info && user_id.is_none() && state.has_user_data_reader() {
+    if include_user_info && user_id.is_none() {
         let user_ids: Vec<_> = grouped.keys().cloned().collect();
-        let user_map: BTreeMap<_, _> = state
-            .list_users_by_ids(&user_ids)
-            .await?
-            .into_iter()
-            .map(|user| (user.id, user.username))
-            .collect();
+        let user_map = load_usage_cache_affinity_usernames(state, &user_ids).await?;
         for (user_id, username) in user_map {
             usernames_by_user_id.insert(user_id, username);
+        }
+        if !state.has_auth_user_data_reader() {
+            for (user_id, username) in legacy_usernames_by_user_id {
+                usernames_by_user_id.entry(user_id).or_insert(username);
+            }
         }
     }
 

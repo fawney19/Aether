@@ -607,6 +607,8 @@ fn relay_envelope() -> Vec<u8> {
             "application/json".to_string(),
         )]),
         timeout: 30,
+        follow_redirects: None,
+        http1_only: false,
     };
     let meta_json = serde_json::to_vec(&meta).expect("hub relay metadata should serialize");
     let body = br#"{"model":"gpt-5","messages":[{"role":"user","content":"hello"}]}"#;

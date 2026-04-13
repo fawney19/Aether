@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures_util::TryStreamExt;
 use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder, Row};
 
 use super::types::{
@@ -91,16 +92,15 @@ WHERE file_name = $1
             .fetch_one(&self.pool)
             .await
             .map_postgres_err()?;
-        let rows = build_list_rows_query(query)
-            .build()
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
+        let mut builder = build_list_rows_query(query);
+        let built_query = builder.build();
+        let mut rows = built_query.fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(Self::map_row(&row)?);
+        }
         Ok(StoredGeminiFileMappingListPage {
-            items: rows
-                .iter()
-                .map(Self::map_row)
-                .collect::<Result<Vec<_>, _>>()?,
+            items,
             total: usize::try_from(total).unwrap_or_default(),
         })
     }
@@ -133,7 +133,7 @@ FROM gemini_file_mappings
                 .map_postgres_err()?,
         )
         .unwrap_or_default();
-        let by_mime_type_rows = sqlx::query(
+        let mut by_mime_type_rows = sqlx::query(
             r#"
 SELECT
   COALESCE(NULLIF(TRIM(mime_type), ''), 'unknown') AS mime_type,
@@ -145,23 +145,20 @@ ORDER BY mime_type ASC
 "#,
         )
         .bind(now_unix_secs as f64)
-        .fetch_all(&self.pool)
-        .await
-        .map_postgres_err()?;
+        .fetch(&self.pool);
+        let mut by_mime_type = Vec::new();
+        while let Some(row) = by_mime_type_rows.try_next().await.map_postgres_err()? {
+            by_mime_type.push(GeminiFileMappingMimeTypeCount {
+                mime_type: row.try_get("mime_type").map_postgres_err()?,
+                count: usize::try_from(row.try_get::<i64, _>("count").map_postgres_err()?)
+                    .unwrap_or_default(),
+            });
+        }
         Ok(GeminiFileMappingStats {
             total_mappings,
             active_mappings,
             expired_mappings: total_mappings.saturating_sub(active_mappings),
-            by_mime_type: by_mime_type_rows
-                .into_iter()
-                .map(|row| {
-                    Ok(GeminiFileMappingMimeTypeCount {
-                        mime_type: row.try_get("mime_type").map_postgres_err()?,
-                        count: usize::try_from(row.try_get::<i64, _>("count").map_postgres_err()?)
-                            .unwrap_or_default(),
-                    })
-                })
-                .collect::<Result<Vec<_>, DataLayerError>>()?,
+            by_mime_type,
         })
     }
 }

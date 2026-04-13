@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures_util::{stream::TryStream, TryStreamExt};
 use sqlx::{PgPool, Row};
 
 use super::{
@@ -165,16 +166,31 @@ impl SqlxMinimalCandidateSelectionReadRepository {
         &self.pool
     }
 
+    async fn collect_query_rows<T, S>(
+        mut rows: S,
+        map_row: fn(&sqlx::postgres::PgRow) -> Result<T, DataLayerError>,
+    ) -> Result<Vec<T>, DataLayerError>
+    where
+        S: TryStream<Ok = sqlx::postgres::PgRow, Error = sqlx::Error> + Unpin,
+    {
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(map_row(&row)?);
+        }
+        Ok(items)
+    }
+
     pub async fn list_for_exact_api_format(
         &self,
         api_format: &str,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
-        let rows = sqlx::query(LIST_FOR_EXACT_API_FORMAT_SQL)
-            .bind(api_format)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_candidate_selection_row).collect()
+        Self::collect_query_rows(
+            sqlx::query(LIST_FOR_EXACT_API_FORMAT_SQL)
+                .bind(api_format)
+                .fetch(&self.pool),
+            map_candidate_selection_row,
+        )
+        .await
     }
 
     pub async fn list_for_exact_api_format_and_global_model(
@@ -182,13 +198,14 @@ impl SqlxMinimalCandidateSelectionReadRepository {
         api_format: &str,
         global_model_name: &str,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
-        let rows = sqlx::query(LIST_FOR_EXACT_API_FORMAT_AND_GLOBAL_MODEL_SQL)
-            .bind(api_format)
-            .bind(global_model_name)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_candidate_selection_row).collect()
+        Self::collect_query_rows(
+            sqlx::query(LIST_FOR_EXACT_API_FORMAT_AND_GLOBAL_MODEL_SQL)
+                .bind(api_format)
+                .bind(global_model_name)
+                .fetch(&self.pool),
+            map_candidate_selection_row,
+        )
+        .await
     }
 }
 

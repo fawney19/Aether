@@ -349,22 +349,26 @@ pub(crate) fn gateway_error_message(error: GatewayError) -> String {
     }
 }
 
-pub(crate) fn build_internal_tunnel_heartbeat_ack(node: &StoredProxyNode) -> serde_json::Value {
-    let Some(remote_config) = node.remote_config.as_ref() else {
-        return json!({});
-    };
-
+pub(crate) fn build_internal_tunnel_heartbeat_ack(
+    node: &StoredProxyNode,
+    heartbeat_id: Option<u64>,
+) -> serde_json::Value {
     let mut payload = serde_json::Map::new();
-    payload.insert("remote_config".to_string(), remote_config.clone());
-    payload.insert("config_version".to_string(), json!(node.config_version));
-    if let Some(upgrade_to) = remote_config
-        .as_object()
-        .and_then(|value| value.get("upgrade_to"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        payload.insert("upgrade_to".to_string(), json!(upgrade_to));
+    if let Some(heartbeat_id) = heartbeat_id {
+        payload.insert("heartbeat_id".to_string(), json!(heartbeat_id));
+    }
+    if let Some(remote_config) = node.remote_config.as_ref() {
+        payload.insert("remote_config".to_string(), remote_config.clone());
+        payload.insert("config_version".to_string(), json!(node.config_version));
+        if let Some(upgrade_to) = remote_config
+            .as_object()
+            .and_then(|value| value.get("upgrade_to"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            payload.insert("upgrade_to".to_string(), json!(upgrade_to));
+        }
     }
     serde_json::Value::Object(payload)
 }

@@ -5,7 +5,8 @@ use aether_admin::observability::usage::{
     ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL,
 };
 use aether_data_contracts::repository::{
-    provider_catalog::StoredProviderCatalogEndpoint, usage::StoredRequestUsageAudit,
+    provider_catalog::StoredProviderCatalogEndpoint,
+    usage::{StoredRequestUsageAudit, UsageBodyField},
 };
 use axum::{
     body::Body,
@@ -46,6 +47,50 @@ pub(super) fn admin_usage_resolve_request_preview_body(
     )
 }
 
+pub(super) async fn admin_usage_resolve_body_value(
+    state: &AdminAppState<'_>,
+    item: &StoredRequestUsageAudit,
+    inline_body: Option<&Value>,
+    field: UsageBodyField,
+) -> Result<Option<Value>, GatewayError> {
+    let resolved_ref_body = match item.body_ref(field) {
+        Some(body_ref) => state.resolve_request_usage_body_ref(body_ref).await?,
+        None => None,
+    };
+    Ok(admin_usage_body_value_from_sources(
+        resolved_ref_body,
+        inline_body,
+    ))
+}
+
+fn admin_usage_body_value_from_sources(
+    resolved_ref_body: Option<Value>,
+    inline_body: Option<&Value>,
+) -> Option<Value> {
+    resolved_ref_body.or_else(|| inline_body.cloned())
+}
+
+pub(super) async fn admin_usage_resolve_request_preview_body_for_item(
+    state: &AdminAppState<'_>,
+    item: &StoredRequestUsageAudit,
+    body_override: Option<serde_json::Value>,
+) -> Result<serde_json::Value, GatewayError> {
+    if let Some(body_override) = body_override {
+        return Ok(body_override);
+    }
+    if let Some(body) = admin_usage_resolve_body_value(
+        state,
+        item,
+        item.request_body.as_ref(),
+        UsageBodyField::RequestBody,
+    )
+    .await?
+    {
+        return Ok(body);
+    }
+    Ok(admin_usage_resolve_request_preview_body(item, None))
+}
+
 pub(super) fn build_admin_usage_curl_response(
     item: &StoredRequestUsageAudit,
     url: Option<String>,
@@ -62,9 +107,46 @@ pub(super) fn build_admin_usage_curl_response(
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use super::admin_usage_body_value_from_sources;
+    use serde_json::json;
+
+    #[test]
+    fn resolved_reference_body_wins_over_inline_fallback() {
+        let inline_body = json!({
+            "truncated": true,
+            "reason": "usage_capture_limits_exceeded"
+        });
+        let ref_body = json!({
+            "messages": [{"role": "user", "content": "real request body"}]
+        });
+
+        assert_eq!(
+            admin_usage_body_value_from_sources(Some(ref_body.clone()), Some(&inline_body)),
+            Some(ref_body)
+        );
+    }
+
+    #[test]
+    fn inline_body_is_used_when_reference_body_is_unavailable() {
+        let inline_body = json!({
+            "messages": [{"role": "user", "content": "fallback inline body"}]
+        });
+
+        assert_eq!(
+            admin_usage_body_value_from_sources(None, Some(&inline_body)),
+            Some(inline_body)
+        );
+    }
+}
+
 pub(super) fn build_admin_usage_detail_payload(
     item: &StoredRequestUsageAudit,
     users_by_id: &BTreeMap<String, aether_data::repository::users::StoredUserSummary>,
+    api_key_names: &BTreeMap<String, String>,
+    auth_user_reader_available: bool,
+    auth_api_key_reader_available: bool,
     provider_key_name: Option<&str>,
     include_bodies: bool,
     request_body: Value,
@@ -73,6 +155,9 @@ pub(super) fn build_admin_usage_detail_payload(
     aether_admin::observability::usage::build_admin_usage_detail_payload(
         item,
         users_by_id,
+        api_key_names,
+        auth_user_reader_available,
+        auth_api_key_reader_available,
         provider_key_name,
         include_bodies,
         request_body,
@@ -254,7 +339,9 @@ pub(super) async fn build_admin_usage_replay_response(
 
     let same_provider = item.provider_id.as_deref() == Some(target_provider.id.as_str());
     let same_endpoint = item.provider_endpoint_id.as_deref() == Some(target_endpoint.id.as_str());
-    let request_body = admin_usage_resolve_request_preview_body(&item, payload.body_override);
+    let request_body =
+        admin_usage_resolve_request_preview_body_for_item(state, &item, payload.body_override)
+            .await?;
 
     let url = admin_usage_curl_url(state, &target_endpoint, &item);
     let headers = admin_usage_curl_headers();

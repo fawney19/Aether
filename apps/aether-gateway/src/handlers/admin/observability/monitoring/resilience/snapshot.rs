@@ -58,7 +58,7 @@ pub(super) async fn build_admin_monitoring_provider_name_by_id_and_keys(
         Vec::new()
     } else {
         state
-            .list_provider_catalog_keys_by_provider_ids(&provider_ids)
+            .list_provider_catalog_key_summaries_by_provider_ids(&provider_ids)
             .await?
     };
     Ok((provider_name_by_id, keys))

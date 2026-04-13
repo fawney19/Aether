@@ -1,6 +1,6 @@
 use super::payloads::build_admin_provider_model_response;
 use crate::handlers::admin::provider::shared::paths::admin_provider_model_route_parts;
-use crate::handlers::admin::provider::shared::payloads::AdminProviderModelUpdateRequest;
+use crate::handlers::admin::provider::shared::payloads::AdminProviderModelUpdatePatch;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::GatewayError;
 use axum::{
@@ -75,8 +75,8 @@ pub(super) async fn maybe_handle(
                     .into_response(),
             ));
         };
-        let payload = match serde_json::from_value::<AdminProviderModelUpdateRequest>(raw_value) {
-            Ok(payload) => payload,
+        let patch = match AdminProviderModelUpdatePatch::from_object(raw_payload) {
+            Ok(patch) => patch,
             Err(_) => {
                 return Ok(Some(
                     (
@@ -88,7 +88,7 @@ pub(super) async fn maybe_handle(
             }
         };
         let record = match state
-            .build_admin_provider_model_update_record(&existing, &raw_payload, payload)
+            .build_admin_provider_model_update_record(&existing, patch)
             .await
         {
             Ok(record) => record,

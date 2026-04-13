@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::json;
+use tracing::debug;
 
 use crate::ai_pipeline::collect_control_headers;
 use crate::ai_pipeline::transport::{
@@ -53,6 +54,31 @@ pub(crate) async fn maybe_build_local_openai_cli_decision_payload_for_candidate(
     let proxy =
         resolve_transport_proxy_snapshot_with_tunnel_affinity(state, &resolved.transport).await;
     let tls_profile = resolve_transport_tls_profile(&resolved.transport);
+    let timeouts = resolve_transport_execution_timeouts(&resolved.transport);
+
+    debug!(
+        event_name = "local_openai_cli_decision_payload_built",
+        log_type = "debug",
+        trace_id = %trace_id,
+        candidate_id = %candidate_id,
+        candidate_index,
+        provider_name = %resolved.transport.provider.name,
+        provider_id = %candidate.provider_id,
+        endpoint_id = %candidate.endpoint_id,
+        key_id = %candidate.key_id,
+        decision_kind = spec.decision_kind,
+        execution_strategy = resolved.execution_strategy.as_str(),
+        conversion_mode = resolved.conversion_mode.as_str(),
+        client_api_format = spec.api_format,
+        provider_api_format = %resolved.provider_api_format,
+        request_path = %parts.uri.path(),
+        request_query = ?parts.uri.query(),
+        upstream_base_url = %resolved.transport.endpoint.base_url,
+        upstream_url = %resolved.upstream_url,
+        upstream_is_stream = resolved.upstream_is_stream,
+        has_envelope = resolved.is_antigravity,
+        "gateway built local openai cli decision payload"
+    );
 
     Some(GatewayControlSyncDecisionResponse {
         action: if spec.require_streaming {
@@ -89,7 +115,7 @@ pub(crate) async fn maybe_build_local_openai_cli_decision_payload_for_candidate(
         content_type: Some("application/json".to_string()),
         proxy,
         tls_profile,
-        timeouts: resolve_transport_execution_timeouts(&resolved.transport),
+        timeouts,
         upstream_is_stream: resolved.upstream_is_stream,
         report_kind: Some(spec.report_kind.to_string()),
         report_context: Some(append_local_failover_policy_to_value(
@@ -115,9 +141,8 @@ pub(crate) async fn maybe_build_local_openai_cli_decision_payload_for_candidate(
                     "upstream_url": resolved.upstream_url,
                     "provider_request_method": serde_json::Value::Null,
                     "provider_request_headers": resolved.provider_request_headers,
-                    "provider_request_body": resolved.provider_request_body,
                     "original_headers": collect_control_headers(&parts.headers),
-                    "original_request_body": body_json,
+                    "original_request_body": crate::ai_pipeline::build_report_context_original_request_echo(body_json),
                     "has_envelope": resolved.is_antigravity,
                     "envelope_name": if resolved.is_antigravity {
                         Some("antigravity:v1internal")

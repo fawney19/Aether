@@ -346,6 +346,8 @@ mod tests {
             url: "http://127.0.0.1:80/blocked".to_string(),
             headers: std::collections::HashMap::new(),
             timeout: 5,
+            follow_redirects: None,
+            http1_only: false,
         };
         let meta_json =
             serde_json::to_vec(&meta).expect("tunnel relay probe metadata should serialize");
@@ -409,10 +411,13 @@ mod tests {
         let dns_cache = Arc::new(DnsCache::new(Duration::from_secs(60), 128));
         let upstream_client =
             upstream_client::build_upstream_client(&config, Arc::clone(&dns_cache));
+        let upstream_http1_client =
+            upstream_client::build_http1_only_upstream_client(&config, Arc::clone(&dns_cache));
         Arc::new(ProxyAppState {
             config,
             dns_cache,
             upstream_client,
+            upstream_http1_client,
             tunnel_tls_config: Arc::new(crate::tunnel::client::build_tls_config()),
             stream_gate: None,
             distributed_stream_gate: None,
@@ -472,8 +477,8 @@ mod tests {
             upstream_pool_idle_timeout_secs: 60,
             upstream_tcp_keepalive_secs: 60,
             upstream_tcp_nodelay: true,
+            redirect_replay_budget_bytes: crate::config::DEFAULT_REDIRECT_REPLAY_BUDGET_BYTES,
             log_level: "info".to_string(),
-            log_json: false,
             log_destination: crate::config::ProxyLogDestinationArg::Stdout,
             log_dir: None,
             log_rotation: crate::config::ProxyLogRotationArg::Daily,

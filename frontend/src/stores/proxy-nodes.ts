@@ -1,10 +1,16 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { proxyNodesApi, type ProxyNode, type ManualProxyNodeCreateRequest } from '@/api/proxy-nodes'
+import {
+  proxyNodesApi,
+  type ManualProxyNodeCreateRequest,
+  type ProxyNode,
+  type ProxyNodeUpgradeRolloutStatus,
+} from '@/api/proxy-nodes'
 import { parseApiError } from '@/utils/errorParser'
 
 export const useProxyNodesStore = defineStore('proxy-nodes', () => {
   const nodes = ref<ProxyNode[]>([])
+  const rollout = ref<ProxyNodeUpgradeRolloutStatus | null>(null)
   const total = ref(0)
   const loading = ref(false)
   const error = ref<string | null>(null)
@@ -13,7 +19,11 @@ export const useProxyNodesStore = defineStore('proxy-nodes', () => {
 
   /** 在线节点（可用于代理选择） */
   const onlineNodes = computed(() =>
-    nodes.value.filter(n => n.status === 'online')
+    nodes.value.filter(n =>
+      n.status === 'online'
+      && n.remote_config?.scheduling_state !== 'draining'
+      && n.remote_config?.scheduling_state !== 'cordoned'
+    )
   )
 
   async function fetchNodes(params?: { status?: string }) {
@@ -23,9 +33,11 @@ export const useProxyNodesStore = defineStore('proxy-nodes', () => {
     try {
       const data = await proxyNodesApi.listProxyNodes({ ...params, limit: 1000 })
       nodes.value = data.items
+      rollout.value = data.rollout
       total.value = data.total
       fetched.value = true
     } catch (err: unknown) {
+      rollout.value = null
       error.value = parseApiError(err, '获取代理节点列表失败')
     } finally {
       loading.value = false
@@ -74,6 +86,7 @@ export const useProxyNodesStore = defineStore('proxy-nodes', () => {
 
   return {
     nodes,
+    rollout,
     total,
     loading,
     error,

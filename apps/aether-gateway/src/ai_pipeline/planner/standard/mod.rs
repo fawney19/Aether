@@ -267,4 +267,32 @@ mod tests {
         assert_eq!(converted["store"], false);
         assert_eq!(converted["instructions"], "You are GPT-5.");
     }
+
+    #[test]
+    fn strips_store_for_openai_compact_requests() {
+        let request = json!({
+            "model": "gpt-5",
+            "messages": [{
+                "role": "user",
+                "content": "Hello from OpenAI Chat"
+            }],
+            "store": true
+        });
+
+        let converted = build_standard_request_body(
+            &request,
+            "openai:chat",
+            "gpt-5",
+            "openai",
+            "openai:compact",
+            "/v1/chat/completions",
+            false,
+            None,
+            None,
+        )
+        .expect("openai chat should convert to openai compact");
+
+        assert_eq!(converted["model"], "gpt-5");
+        assert!(converted.get("store").is_none());
+    }
 }

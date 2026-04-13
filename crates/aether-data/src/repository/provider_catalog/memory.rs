@@ -4,9 +4,9 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 
 use super::{
-    ProviderCatalogKeyListQuery, ProviderCatalogReadRepository, ProviderCatalogWriteRepository,
-    StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogKeyPage,
-    StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
+    ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery, ProviderCatalogReadRepository,
+    ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+    StoredProviderCatalogKeyPage, StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
 };
 use crate::DataLayerError;
 
@@ -146,6 +146,13 @@ impl ProviderCatalogReadRepository for InMemoryProviderCatalogReadRepository {
         Ok(keys)
     }
 
+    async fn list_key_summaries_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKey>, DataLayerError> {
+        Self::list_keys_by_provider_ids(self, provider_ids).await
+    }
+
     async fn list_keys_page(
         &self,
         query: &ProviderCatalogKeyListQuery,
@@ -170,12 +177,28 @@ impl ProviderCatalogReadRepository for InMemoryProviderCatalogReadRepository {
             })
             .cloned()
             .collect::<Vec<_>>();
-        keys.sort_by(|left, right| {
-            left.internal_priority
-                .cmp(&right.internal_priority)
-                .then(left.name.cmp(&right.name))
-                .then(left.id.cmp(&right.id))
-        });
+        match query.order {
+            ProviderCatalogKeyListOrder::Name => {
+                keys.sort_by(|left, right| {
+                    left.internal_priority
+                        .cmp(&right.internal_priority)
+                        .then(left.name.cmp(&right.name))
+                        .then(left.id.cmp(&right.id))
+                });
+            }
+            ProviderCatalogKeyListOrder::CreatedAt => {
+                keys.sort_by(|left, right| {
+                    left.internal_priority
+                        .cmp(&right.internal_priority)
+                        .then(
+                            left.created_at_unix_ms
+                                .unwrap_or_default()
+                                .cmp(&right.created_at_unix_ms.unwrap_or_default()),
+                        )
+                        .then(left.id.cmp(&right.id))
+                });
+            }
+        }
         let total = keys.len();
         let items = keys
             .into_iter()
@@ -415,8 +438,9 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
 mod tests {
     use super::InMemoryProviderCatalogReadRepository;
     use crate::repository::provider_catalog::{
-        ProviderCatalogKeyListQuery, ProviderCatalogReadRepository, ProviderCatalogWriteRepository,
-        StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+        ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery, ProviderCatalogReadRepository,
+        ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+        StoredProviderCatalogProvider,
     };
 
     fn sample_provider(id: &str) -> StoredProviderCatalogProvider {
@@ -583,6 +607,7 @@ mod tests {
                 is_active: Some(true),
                 offset: 0,
                 limit: 10,
+                order: ProviderCatalogKeyListOrder::Name,
             })
             .await
             .expect("keys should page");
@@ -595,6 +620,44 @@ mod tests {
                 .map(|item| item.name.as_str())
                 .collect::<Vec<_>>(),
             vec!["beta", "alpha"]
+        );
+    }
+
+    #[tokio::test]
+    async fn paginates_provider_keys_by_created_at_when_requested() {
+        let mut early = sample_key("key-1", "provider-1");
+        early.name = "zeta".to_string();
+        early.internal_priority = 10;
+        early.created_at_unix_ms = Some(10);
+        let mut late = sample_key("key-2", "provider-1");
+        late.name = "alpha".to_string();
+        late.internal_priority = 10;
+        late.created_at_unix_ms = Some(20);
+        let repository = InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider("provider-1")],
+            vec![],
+            vec![late, early],
+        );
+
+        let page = repository
+            .list_keys_page(&ProviderCatalogKeyListQuery {
+                provider_id: "provider-1".to_string(),
+                search: None,
+                is_active: None,
+                offset: 0,
+                limit: 10,
+                order: ProviderCatalogKeyListOrder::CreatedAt,
+            })
+            .await
+            .expect("keys should page");
+
+        assert_eq!(page.total, 2);
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["key-1", "key-2"]
         );
     }
 

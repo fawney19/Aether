@@ -14,6 +14,7 @@ use futures_util::StreamExt;
 use tracing::warn;
 
 use crate::api::response::apply_streaming_response_headers;
+use crate::maintenance::record_proxy_upgrade_traffic_success;
 
 use super::hub::{LocalBodyEvent, LocalStream};
 use super::protocol;
@@ -222,6 +223,13 @@ pub async fn relay_request(
             );
         }
     };
+    if let Err(error) = record_proxy_upgrade_traffic_success(state.data.as_ref(), &node_id).await {
+        warn!(
+            node_id = %node_id,
+            error = %error,
+            "failed to record proxy upgrade traffic confirmation"
+        );
+    }
 
     let Some(mut body_rx) = stream.take_body_receiver() else {
         state
@@ -340,12 +348,25 @@ fn tunnel_error_response(status: StatusCode, kind: &str, message: &str) -> Respo
 
 #[cfg(test)]
 mod tests {
-    use super::super::{AppState, ConnConfig, ControlPlaneClient};
+    use super::super::hub::ProxyConn;
+    use super::super::{protocol, AppState, ConnConfig, ControlPlaneClient};
     use super::{relay_request, Body, Request, SocketAddr, StatusCode, TUNNEL_ERROR_HEADER};
+    use crate::data::GatewayDataState;
+    use crate::maintenance::start_proxy_upgrade_rollout;
     use aether_contracts::tunnel::TUNNEL_RELAY_FORWARDED_BY_HEADER;
+    use aether_data::repository::proxy_nodes::{
+        InMemoryProxyNodeRepository, ProxyNodeHeartbeatMutation, ProxyNodeWriteRepository,
+        StoredProxyNode,
+    };
+    use axum::extract::ws::Message;
     use axum::extract::{ConnectInfo, Path, State};
     use axum::response::IntoResponse;
+    use bytes::Bytes;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::sync::Arc;
     use std::time::Duration;
+    use tokio::sync::watch;
 
     fn test_app_state() -> AppState {
         AppState::new(
@@ -357,6 +378,49 @@ mod tests {
             },
             128,
         )
+    }
+
+    fn sample_connected_proxy_node(node_id: &str) -> StoredProxyNode {
+        StoredProxyNode::new(
+            node_id.to_string(),
+            format!("proxy-{node_id}"),
+            "127.0.0.1".to_string(),
+            0,
+            false,
+            "online".to_string(),
+            30,
+            0,
+            0,
+            0,
+            0,
+            0,
+            true,
+            true,
+            0,
+        )
+        .expect("node should build")
+        .with_runtime_fields(
+            Some("test".to_string()),
+            None,
+            Some(1_800_000_000),
+            None,
+            None,
+            None,
+            None,
+            Some(1_800_000_000),
+            None,
+            Some(1_800_000_000),
+            Some(1_800_000_000),
+        )
+    }
+
+    fn encode_relay_envelope(meta: &protocol::RequestMeta, body: &[u8]) -> Vec<u8> {
+        let meta_bytes = serde_json::to_vec(meta).expect("meta should serialize");
+        let mut payload = Vec::with_capacity(4 + meta_bytes.len() + body.len());
+        payload.extend_from_slice(&(meta_bytes.len() as u32).to_be_bytes());
+        payload.extend_from_slice(&meta_bytes);
+        payload.extend_from_slice(body);
+        payload
     }
 
     #[tokio::test]
@@ -399,5 +463,150 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("bad_request")
         );
+    }
+
+    #[tokio::test]
+    async fn relay_records_real_traffic_confirmation_for_upgrade_rollout() {
+        let mut node = sample_connected_proxy_node("node-123");
+        node.proxy_metadata = Some(json!({"version": "1.0.0"}));
+        let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![node]));
+        let data = Arc::new(
+            GatewayDataState::with_proxy_node_repository_for_tests(Arc::clone(&repository))
+                .with_system_config_values_for_tests(Vec::<(String, serde_json::Value)>::new()),
+        );
+
+        let started = start_proxy_upgrade_rollout(data.as_ref(), "2.0.0".to_string(), 1, 0, None)
+            .await
+            .expect("rollout should start");
+        assert_eq!(started.node_ids, vec!["node-123".to_string()]);
+
+        repository
+            .apply_heartbeat(&ProxyNodeHeartbeatMutation {
+                node_id: "node-123".to_string(),
+                heartbeat_interval: None,
+                active_connections: Some(1),
+                total_requests_delta: Some(1),
+                avg_latency_ms: Some(2.0),
+                failed_requests_delta: Some(0),
+                dns_failures_delta: Some(0),
+                stream_errors_delta: Some(0),
+                proxy_metadata: Some(json!({"version": "2.0.0"})),
+                proxy_version: Some("2.0.0".to_string()),
+            })
+            .await
+            .expect("heartbeat should succeed");
+
+        let observed = start_proxy_upgrade_rollout(data.as_ref(), "2.0.0".to_string(), 1, 0, None)
+            .await
+            .expect("rollout should observe version confirmation");
+        assert!(observed.blocked);
+        assert_eq!(observed.pending_node_ids, vec!["node-123".to_string()]);
+
+        let state = test_app_state().with_data(Arc::clone(&data));
+        let (proxy_tx, mut proxy_rx) = aether_runtime::bounded_queue(8);
+        let (proxy_close_tx, _) = watch::channel(false);
+        state.hub.register_proxy(Arc::new(ProxyConn::new(
+            500,
+            "node-123".to_string(),
+            "Node 123".to_string(),
+            proxy_tx,
+            proxy_close_tx,
+            16,
+        )));
+
+        let meta = protocol::RequestMeta {
+            method: "GET".to_string(),
+            url: "https://example.com/health".to_string(),
+            headers: HashMap::new(),
+            timeout: 30,
+            follow_redirects: None,
+            http1_only: false,
+        };
+        let request = Request::builder()
+            .body(Body::from(encode_relay_envelope(&meta, &[])))
+            .expect("request should build");
+
+        let relay_state = state.clone();
+        let relay_task = tokio::spawn(async move {
+            relay_request(
+                Path("node-123".to_string()),
+                State(relay_state),
+                ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4242))),
+                request,
+            )
+            .await
+            .into_response()
+        });
+
+        let request_headers = match proxy_rx.recv().await.expect("headers frame should arrive") {
+            Message::Binary(data) => data,
+            other => panic!("unexpected message: {other:?}"),
+        };
+        let request_header = protocol::FrameHeader::parse(&request_headers)
+            .expect("request header frame should parse");
+        assert_eq!(request_header.msg_type, protocol::REQUEST_HEADERS);
+
+        let request_body = match proxy_rx.recv().await.expect("body frame should arrive") {
+            Message::Binary(data) => data,
+            other => panic!("unexpected message: {other:?}"),
+        };
+        let request_body_header =
+            protocol::FrameHeader::parse(&request_body).expect("request body frame should parse");
+        assert_eq!(request_body_header.msg_type, protocol::REQUEST_BODY);
+
+        let response_meta = protocol::ResponseMeta {
+            status: 200,
+            headers: vec![("content-type".to_string(), "text/plain".to_string())],
+        };
+        let response_payload =
+            serde_json::to_vec(&response_meta).expect("response meta should serialize");
+        let mut response_headers_frame = protocol::encode_frame(
+            request_header.stream_id,
+            protocol::RESPONSE_HEADERS,
+            0,
+            &response_payload,
+        );
+        state
+            .hub
+            .handle_proxy_frame(500, &mut response_headers_frame)
+            .await;
+
+        let mut response_body_frame = protocol::encode_frame(
+            request_header.stream_id,
+            protocol::RESPONSE_BODY,
+            0,
+            Bytes::new().as_ref(),
+        );
+        state
+            .hub
+            .handle_proxy_frame(500, &mut response_body_frame)
+            .await;
+        let mut response_end_frame =
+            protocol::encode_frame(request_header.stream_id, protocol::STREAM_END, 0, &[]);
+        state
+            .hub
+            .handle_proxy_frame(500, &mut response_end_frame)
+            .await;
+
+        let response = relay_task.await.expect("relay task should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        assert!(body.is_empty());
+
+        let rollout_entry = data
+            .list_system_config_entries()
+            .await
+            .expect("system config list should succeed")
+            .into_iter()
+            .find(|entry| entry.key == "proxy_node_upgrade_rollout")
+            .expect("rollout entry should exist");
+        let tracked_nodes = rollout_entry.value["tracked_nodes"]
+            .as_array()
+            .expect("tracked nodes should be an array");
+        assert_eq!(tracked_nodes.len(), 1);
+        assert!(tracked_nodes[0]["version_confirmed_at_unix_secs"].is_u64());
+        assert!(tracked_nodes[0]["traffic_confirmed_at_unix_secs"].is_u64());
     }
 }

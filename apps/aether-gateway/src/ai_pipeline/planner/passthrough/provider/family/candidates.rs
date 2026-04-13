@@ -85,7 +85,7 @@ pub(crate) async fn materialize_local_same_format_provider_candidate_attempts(
     trace_id: &str,
     input: &LocalSameFormatProviderDecisionInput,
     spec: LocalSameFormatProviderSpec,
-) -> Result<Vec<LocalSameFormatProviderCandidateAttempt>, GatewayError> {
+) -> Result<(Vec<LocalSameFormatProviderCandidateAttempt>, usize), GatewayError> {
     let planner_state = PlannerAppState::new(state);
     let candidates = planner_state
         .list_selectable_candidates(
@@ -104,6 +104,7 @@ pub(crate) async fn materialize_local_same_format_provider_candidate_attempts(
         input.required_capabilities.as_ref(),
     )
     .await;
+    let candidate_count = candidates.len();
 
     let created_at_unix_ms = current_unix_ms();
     let mut attempts = Vec::with_capacity(candidates.len());
@@ -160,5 +161,5 @@ pub(crate) async fn materialize_local_same_format_provider_candidate_attempts(
         });
     }
 
-    Ok(attempts)
+    Ok((attempts, candidate_count))
 }

@@ -20,6 +20,12 @@ fn is_codex_openai_cli_request(provider_type: &str, provider_api_format: &str) -
         )
 }
 
+fn is_openai_compact_request(provider_api_format: &str) -> bool {
+    provider_api_format
+        .trim()
+        .eq_ignore_ascii_case("openai:compact")
+}
+
 fn build_stable_codex_prompt_cache_key(user_api_key_id: &str) -> Option<String> {
     let normalized = user_api_key_id.trim();
     if normalized.is_empty() {
@@ -135,6 +141,22 @@ fn maybe_inject_codex_prompt_cache_key(
     );
 }
 
+pub fn apply_openai_compact_special_body_edits(
+    provider_request_body: &mut Value,
+    provider_api_format: &str,
+) {
+    if !is_openai_compact_request(provider_api_format) {
+        return;
+    }
+
+    let Some(body_object) = provider_request_body.as_object_mut() else {
+        return;
+    };
+
+    // `/v1/responses/compact` does not accept `store`.
+    body_object.remove("store");
+}
+
 pub fn apply_codex_openai_cli_special_body_edits(
     provider_request_body: &mut Value,
     provider_type: &str,
@@ -162,7 +184,9 @@ pub fn apply_codex_openai_cli_special_body_edits(
     if !body_rules_handle_path(body_rules, "metadata") {
         body_object.remove("metadata");
     }
-    if !body_rules_handle_path(body_rules, "store") {
+    if is_openai_compact_request(provider_api_format) {
+        body_object.remove("store");
+    } else if !body_rules_handle_path(body_rules, "store") {
         body_object.insert("store".to_string(), json!(false));
     }
     if !body_rules_handle_path(body_rules, "instructions")

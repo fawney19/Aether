@@ -2,22 +2,11 @@ use super::super::configs::is_sensitive_admin_system_config_key;
 use crate::api::ai::admin_endpoint_signature_parts;
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::shared::decrypt_catalog_secret_with_fallbacks;
+pub(crate) use aether_admin::system::ADMIN_SYSTEM_CONFIG_EXPORT_VERSION;
+use aether_admin::system::ADMIN_SYSTEM_PROVIDER_OPS_SENSITIVE_CREDENTIAL_FIELDS;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogEndpoint;
 
-pub(crate) const ADMIN_SYSTEM_CONFIG_EXPORT_VERSION: &str = "2.2";
 pub(crate) const ADMIN_SYSTEM_EXPORT_PAGE_LIMIT: usize = 10_000;
-
-const PROVIDER_OPS_SENSITIVE_CREDENTIAL_FIELDS: &[&str] = &[
-    "api_key",
-    "password",
-    "refresh_token",
-    "session_token",
-    "session_cookie",
-    "token_cookie",
-    "auth_cookie",
-    "cookie_string",
-    "cookie",
-];
 
 pub(crate) fn decrypt_admin_system_export_secret(
     state: &AdminAppState<'_>,
@@ -74,7 +63,7 @@ pub(super) fn decrypt_admin_system_export_provider_config(
         return Some(decrypted);
     };
 
-    for field in PROVIDER_OPS_SENSITIVE_CREDENTIAL_FIELDS {
+    for field in ADMIN_SYSTEM_PROVIDER_OPS_SENSITIVE_CREDENTIAL_FIELDS {
         let Some(serde_json::Value::String(ciphertext)) = credentials.get(*field).cloned() else {
             continue;
         };

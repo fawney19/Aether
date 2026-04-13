@@ -619,9 +619,32 @@ function openProviderDrawer(providerId: string) {
   providerDrawerOpen.value = true
 }
 
+function mergeUpdatedProvider(updated: ProviderWithEndpointsSummary) {
+  const index = providers.value.findIndex(p => p.id === updated.id)
+  if (index !== -1) {
+    providers.value[index] = updated
+    loadBalances([updated], false)
+  }
+}
+
+async function refreshProviderSnapshot(
+  providerId: string,
+  fallbackErrorMessage = '刷新提供商数据失败',
+): Promise<ProviderWithEndpointsSummary | null> {
+  try {
+    const updated = await getProvider(providerId)
+    mergeUpdatedProvider(updated)
+    return updated
+  } catch (err) {
+    showError(parseApiError(err, fallbackErrorMessage), '错误')
+    return null
+  }
+}
+
 // 打开编辑提供商对话框
-function openEditProviderDialog(provider: ProviderWithEndpointsSummary) {
-  providerToEdit.value = provider
+async function openEditProviderDialog(provider: ProviderWithEndpointsSummary) {
+  const latest = await refreshProviderSnapshot(provider.id, '刷新提供商状态失败')
+  providerToEdit.value = latest ?? provider
   providerDialogOpen.value = true
 }
 
@@ -640,27 +663,13 @@ function handleOpsConfigSaved() {
 
 // 处理提供商编辑完成
 function handleProviderUpdated(updated: ProviderWithEndpointsSummary) {
-  const index = providers.value.findIndex(p => p.id === updated.id)
-  if (index !== -1) {
-    providers.value[index] = updated
-    // 刷新该提供商的余额数据
-    loadBalances([updated], false)
-  }
+  mergeUpdatedProvider(updated)
 }
 
 // 处理详情抽屉内的刷新：只刷新当前查看的那一条提供商
 async function handleDrawerRefresh() {
   if (!selectedProviderId.value) return
-  try {
-    const updated = await getProvider(selectedProviderId.value)
-    const index = providers.value.findIndex(p => p.id === updated.id)
-    if (index !== -1) {
-      providers.value[index] = updated
-      loadBalances([updated], false)
-    }
-  } catch (err) {
-    showError(parseApiError(err, '刷新提供商数据失败'), '错误')
-  }
+  await refreshProviderSnapshot(selectedProviderId.value)
 }
 
 // 优先级保存成功回调

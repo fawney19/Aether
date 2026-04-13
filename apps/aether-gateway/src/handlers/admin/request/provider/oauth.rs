@@ -1,5 +1,9 @@
 use super::*;
 use crate::handlers::admin::provider::oauth::errors::build_internal_control_error_response;
+use aether_contracts::{
+    ExecutionPlan, ExecutionResult, ExecutionTimeouts, RequestBody,
+    EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER,
+};
 use aether_data::repository::provider_oauth::{
     build_provider_oauth_batch_task_status_payload, provider_oauth_batch_task_storage_key,
     provider_oauth_device_session_storage_key, provider_oauth_state_storage_key,
@@ -7,11 +11,22 @@ use aether_data::repository::provider_oauth::{
     PROVIDER_OAUTH_BATCH_TASK_TTL_SECS, PROVIDER_OAUTH_STATE_TTL_SECS,
 };
 use axum::http;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use flate2::read::{DeflateDecoder, GzDecoder};
 use serde_json::json;
+use std::collections::BTreeMap;
+use std::io::Read;
 use url::Url;
 
 const KIRO_IDC_AMZ_USER_AGENT: &str =
     "aws-sdk-js/3.738.0 ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#3.738.0 m/E KiroIDE";
+const ADMIN_PROVIDER_OAUTH_TIMEOUT_MS: u64 = 30_000;
+
+pub(crate) struct AdminProviderOAuthHttpResponse {
+    pub(crate) status: http::StatusCode,
+    pub(crate) body_text: String,
+    pub(crate) json_body: Option<serde_json::Value>,
+}
 
 impl<'a> AdminAppState<'a> {
     pub(crate) async fn update_provider_catalog_key_oauth_credentials(
@@ -117,6 +132,7 @@ impl<'a> AdminAppState<'a> {
         code: &str,
         state_nonce: &str,
         pkce_verifier: Option<&str>,
+        proxy_node_id: Option<&str>,
     ) -> Result<serde_json::Value, Response<Body>> {
         crate::handlers::admin::provider::oauth::state::exchange_admin_provider_oauth_code(
             self,
@@ -124,6 +140,7 @@ impl<'a> AdminAppState<'a> {
             code,
             state_nonce,
             pkce_verifier,
+            proxy_node_id,
         )
         .await
     }
@@ -132,11 +149,13 @@ impl<'a> AdminAppState<'a> {
         &self,
         template: AdminProviderOAuthTemplate,
         refresh_token: &str,
+        proxy_node_id: Option<&str>,
     ) -> Result<serde_json::Value, Response<Body>> {
         crate::handlers::admin::provider::oauth::state::exchange_admin_provider_oauth_refresh_token(
             self,
             template,
             refresh_token,
+            proxy_node_id,
         )
         .await
     }
@@ -296,6 +315,7 @@ impl<'a> AdminAppState<'a> {
         &self,
         region: &str,
         start_url: &str,
+        proxy_node_id: Option<&str>,
     ) -> Result<serde_json::Value, Response<Body>> {
         let payload = post_kiro_device_oidc_json(
             self,
@@ -317,6 +337,7 @@ impl<'a> AdminAppState<'a> {
                 ],
                 "issuerUrl": start_url,
             }),
+            proxy_node_id,
         )
         .await?;
         if payload
@@ -343,6 +364,7 @@ impl<'a> AdminAppState<'a> {
         client_id: &str,
         client_secret: &str,
         start_url: &str,
+        proxy_node_id: Option<&str>,
     ) -> Result<serde_json::Value, Response<Body>> {
         let payload = post_kiro_device_oidc_json(
             self,
@@ -353,6 +375,7 @@ impl<'a> AdminAppState<'a> {
                 "clientSecret": client_secret,
                 "startUrl": start_url,
             }),
+            proxy_node_id,
         )
         .await?;
         if payload
@@ -379,6 +402,7 @@ impl<'a> AdminAppState<'a> {
         client_id: &str,
         client_secret: &str,
         device_code: &str,
+        proxy_node_id: Option<&str>,
     ) -> Result<serde_json::Value, Response<Body>> {
         post_kiro_device_oidc_json(
             self,
@@ -390,6 +414,7 @@ impl<'a> AdminAppState<'a> {
                 "grantType": "urn:ietf:params:oauth:grant-type:device_code",
                 "deviceCode": device_code,
             }),
+            proxy_node_id,
         )
         .await
     }
@@ -479,22 +504,43 @@ async fn post_kiro_device_oidc_json(
     endpoint_key: &str,
     default_url: String,
     body: serde_json::Value,
+    proxy_node_id: Option<&str>,
 ) -> Result<serde_json::Value, Response<Body>> {
     let url = state.provider_oauth_token_url(endpoint_key, &default_url);
     let host = Url::parse(&url)
         .ok()
         .and_then(|value| value.host_str().map(ToOwned::to_owned))
         .unwrap_or_default();
+    let headers = reqwest::header::HeaderMap::from_iter([
+        (
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("application/json"),
+        ),
+        (
+            reqwest::header::ACCEPT,
+            reqwest::header::HeaderValue::from_static("*/*"),
+        ),
+        (
+            reqwest::header::USER_AGENT,
+            reqwest::header::HeaderValue::from_static("node"),
+        ),
+        (
+            reqwest::header::HeaderName::from_static("x-amz-user-agent"),
+            reqwest::header::HeaderValue::from_static(KIRO_IDC_AMZ_USER_AGENT),
+        ),
+    ]);
+    let headers = maybe_insert_host_header(headers, host.as_str());
     let response = state
-        .http_client()
-        .post(url)
-        .header("Content-Type", "application/json")
-        .header("Accept", "*/*")
-        .header("User-Agent", "node")
-        .header("x-amz-user-agent", KIRO_IDC_AMZ_USER_AGENT)
-        .header("Host", host)
-        .json(&body)
-        .send()
+        .execute_admin_provider_oauth_http_request(
+            endpoint_key,
+            reqwest::Method::POST,
+            &url,
+            &headers,
+            Some("application/json"),
+            Some(body),
+            None,
+            proxy_node_id,
+        )
         .await
         .map_err(|_| {
             build_internal_control_error_response(
@@ -502,13 +548,8 @@ async fn post_kiro_device_oidc_json(
                 "发起设备授权失败: unknown",
             )
         })?;
-    let status = response.status();
-    let body_text = response.text().await.map_err(|_| {
-        build_internal_control_error_response(
-            http::StatusCode::BAD_REQUEST,
-            "发起设备授权失败: unknown",
-        )
-    })?;
+    let status = response.status;
+    let body_text = response.body_text;
     Ok(
         serde_json::from_str::<serde_json::Value>(&body_text).unwrap_or_else(|_| {
             json!({
@@ -517,4 +558,180 @@ async fn post_kiro_device_oidc_json(
             })
         }),
     )
+}
+
+impl<'a> AdminAppState<'a> {
+    pub(crate) async fn execute_admin_provider_oauth_http_request(
+        &self,
+        request_id: &str,
+        method: reqwest::Method,
+        url: &str,
+        headers: &reqwest::header::HeaderMap,
+        content_type: Option<&str>,
+        json_body: Option<serde_json::Value>,
+        body_bytes: Option<Vec<u8>>,
+        proxy_node_id: Option<&str>,
+    ) -> Result<AdminProviderOAuthHttpResponse, String> {
+        let body = if let Some(json_body) = json_body {
+            RequestBody::from_json(json_body)
+        } else {
+            RequestBody {
+                json_body: None,
+                body_bytes_b64: body_bytes.map(|bytes| STANDARD.encode(bytes)),
+                body_ref: None,
+            }
+        };
+        let plan = ExecutionPlan {
+            request_id: request_id.to_string(),
+            candidate_id: None,
+            provider_name: Some("provider_oauth".to_string()),
+            provider_id: String::new(),
+            endpoint_id: String::new(),
+            key_id: String::new(),
+            method: method.as_str().to_string(),
+            url: url.to_string(),
+            headers: admin_provider_oauth_execution_headers(headers),
+            content_type: content_type
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
+            content_encoding: None,
+            body,
+            stream: false,
+            client_api_format: "provider_oauth:exchange".to_string(),
+            provider_api_format: "provider_oauth:exchange".to_string(),
+            model_name: Some("oauth-exchange".to_string()),
+            proxy: self.resolve_admin_proxy_node_snapshot(proxy_node_id).await,
+            tls_profile: None,
+            timeouts: Some(ExecutionTimeouts {
+                connect_ms: Some(ADMIN_PROVIDER_OAUTH_TIMEOUT_MS),
+                read_ms: Some(ADMIN_PROVIDER_OAUTH_TIMEOUT_MS),
+                write_ms: Some(ADMIN_PROVIDER_OAUTH_TIMEOUT_MS),
+                pool_ms: Some(ADMIN_PROVIDER_OAUTH_TIMEOUT_MS),
+                total_ms: Some(ADMIN_PROVIDER_OAUTH_TIMEOUT_MS),
+                ..ExecutionTimeouts::default()
+            }),
+        };
+        let result = self
+            .execute_execution_runtime_sync_plan(None, &plan)
+            .await
+            .map_err(admin_provider_oauth_gateway_error_message)?;
+        Ok(AdminProviderOAuthHttpResponse {
+            status: http::StatusCode::from_u16(result.status_code)
+                .unwrap_or(http::StatusCode::BAD_GATEWAY),
+            body_text: admin_provider_oauth_execution_body_text(&result),
+            json_body: admin_provider_oauth_execution_json_body(&result),
+        })
+    }
+}
+
+fn maybe_insert_host_header(
+    mut headers: reqwest::header::HeaderMap,
+    host: &str,
+) -> reqwest::header::HeaderMap {
+    let host = host.trim();
+    if host.is_empty() {
+        return headers;
+    }
+    if let Ok(value) = reqwest::header::HeaderValue::from_str(host) {
+        headers.insert(reqwest::header::HOST, value);
+    }
+    headers
+}
+
+fn admin_provider_oauth_execution_headers(
+    headers: &reqwest::header::HeaderMap,
+) -> BTreeMap<String, String> {
+    let mut headers: BTreeMap<String, String> = headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|text| (name.as_str().to_string(), text.to_string()))
+        })
+        .collect();
+    headers.insert(
+        EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER.to_string(),
+        "true".to_string(),
+    );
+    headers
+}
+
+fn admin_provider_oauth_execution_json_body(result: &ExecutionResult) -> Option<serde_json::Value> {
+    result
+        .body
+        .as_ref()
+        .and_then(|body| body.json_body.clone())
+        .or_else(|| {
+            result
+                .body
+                .as_ref()
+                .and_then(|body| admin_provider_oauth_execution_body_bytes(&result.headers, body))
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        })
+}
+
+fn admin_provider_oauth_execution_body_text(result: &ExecutionResult) -> String {
+    result
+        .body
+        .as_ref()
+        .and_then(|body| admin_provider_oauth_execution_body_bytes(&result.headers, body))
+        .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+        .or_else(|| {
+            result
+                .body
+                .as_ref()
+                .and_then(|body| body.json_body.as_ref())
+                .and_then(|value| serde_json::to_string(value).ok())
+        })
+        .unwrap_or_default()
+}
+
+fn admin_provider_oauth_execution_body_bytes(
+    headers: &BTreeMap<String, String>,
+    body: &aether_contracts::ResponseBody,
+) -> Option<Vec<u8>> {
+    let bytes = body
+        .body_bytes_b64
+        .as_deref()
+        .and_then(|value| STANDARD.decode(value).ok())?;
+    admin_provider_oauth_decode_response_bytes(
+        &bytes,
+        headers.get("content-encoding").map(String::as_str),
+    )
+    .or(Some(bytes))
+}
+
+fn admin_provider_oauth_decode_response_bytes(
+    bytes: &[u8],
+    content_encoding: Option<&str>,
+) -> Option<Vec<u8>> {
+    let encoding = content_encoding
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+    match encoding.as_deref() {
+        Some("gzip") => {
+            let mut decoder = GzDecoder::new(bytes);
+            let mut out = Vec::new();
+            decoder.read_to_end(&mut out).ok()?;
+            Some(out)
+        }
+        Some("deflate") => {
+            let mut decoder = DeflateDecoder::new(bytes);
+            let mut out = Vec::new();
+            decoder.read_to_end(&mut out).ok()?;
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+fn admin_provider_oauth_gateway_error_message(error: GatewayError) -> String {
+    match error {
+        GatewayError::UpstreamUnavailable { message, .. }
+        | GatewayError::ControlUnavailable { message, .. }
+        | GatewayError::Internal(message) => message,
+    }
 }

@@ -16,6 +16,16 @@ impl<'a> AdminAppState<'a> {
         self.app.list_users_by_ids(user_ids).await
     }
 
+    pub(crate) async fn resolve_auth_user_summaries_by_ids(
+        &self,
+        user_ids: &[String],
+    ) -> Result<
+        std::collections::BTreeMap<String, aether_data::repository::users::StoredUserSummary>,
+        GatewayError,
+    > {
+        self.app.resolve_auth_user_summaries_by_ids(user_ids).await
+    }
+
     pub(crate) async fn list_export_users_page(
         &self,
         query: &aether_data::repository::users::UserExportListQuery,
@@ -103,6 +113,17 @@ impl<'a> AdminAppState<'a> {
             .await
     }
 
+    pub(crate) async fn initialize_auth_api_key_wallet(
+        &self,
+        api_key_id: &str,
+        initial_gift_usd: f64,
+        unlimited: bool,
+    ) -> Result<Option<aether_data::repository::wallet::StoredWalletSnapshot>, GatewayError> {
+        self.app
+            .initialize_auth_api_key_wallet(api_key_id, initial_gift_usd, unlimited)
+            .await
+    }
+
     pub(crate) async fn update_local_auth_user_profile(
         &self,
         user_id: &str,
@@ -165,8 +186,92 @@ impl<'a> AdminAppState<'a> {
             .await
     }
 
+    pub(crate) async fn update_auth_api_key_wallet_limit_mode(
+        &self,
+        api_key_id: &str,
+        limit_mode: &str,
+    ) -> Result<Option<aether_data::repository::wallet::StoredWalletSnapshot>, GatewayError> {
+        self.app
+            .update_auth_api_key_wallet_limit_mode(api_key_id, limit_mode)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn update_auth_user_wallet_snapshot(
+        &self,
+        user_id: &str,
+        balance: f64,
+        gift_balance: f64,
+        limit_mode: &str,
+        currency: &str,
+        status: &str,
+        total_recharged: f64,
+        total_consumed: f64,
+        total_refunded: f64,
+        total_adjusted: f64,
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<Option<aether_data::repository::wallet::StoredWalletSnapshot>, GatewayError> {
+        self.app
+            .update_auth_user_wallet_snapshot(
+                user_id,
+                balance,
+                gift_balance,
+                limit_mode,
+                currency,
+                status,
+                total_recharged,
+                total_consumed,
+                total_refunded,
+                total_adjusted,
+                updated_at_unix_secs,
+            )
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn update_auth_api_key_wallet_snapshot(
+        &self,
+        api_key_id: &str,
+        balance: f64,
+        gift_balance: f64,
+        limit_mode: &str,
+        currency: &str,
+        status: &str,
+        total_recharged: f64,
+        total_consumed: f64,
+        total_refunded: f64,
+        total_adjusted: f64,
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<Option<aether_data::repository::wallet::StoredWalletSnapshot>, GatewayError> {
+        self.app
+            .update_auth_api_key_wallet_snapshot(
+                api_key_id,
+                balance,
+                gift_balance,
+                limit_mode,
+                currency,
+                status,
+                total_recharged,
+                total_consumed,
+                total_refunded,
+                total_adjusted,
+                updated_at_unix_secs,
+            )
+            .await
+    }
+
     pub(crate) async fn count_active_admin_users(&self) -> Result<u64, GatewayError> {
         self.app.count_active_admin_users().await
+    }
+
+    pub(crate) async fn update_user_model_capability_settings(
+        &self,
+        user_id: &str,
+        settings: Option<serde_json::Value>,
+    ) -> Result<Option<serde_json::Value>, GatewayError> {
+        self.app
+            .update_user_model_capability_settings(user_id, settings)
+            .await
     }
 
     pub(crate) async fn count_user_pending_refunds(
@@ -234,6 +339,24 @@ impl<'a> AdminAppState<'a> {
             .list_auth_api_key_snapshots_by_ids(api_key_ids)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn resolve_auth_api_key_snapshots_by_ids(
+        &self,
+        api_key_ids: &[String],
+    ) -> Result<Vec<aether_data::repository::auth::StoredAuthApiKeySnapshot>, GatewayError> {
+        self.app
+            .resolve_auth_api_key_snapshots_by_ids(api_key_ids)
+            .await
+    }
+
+    pub(crate) async fn resolve_auth_api_key_names_by_ids(
+        &self,
+        api_key_ids: &[String],
+    ) -> Result<std::collections::BTreeMap<String, String>, GatewayError> {
+        self.app
+            .resolve_auth_api_key_names_by_ids(api_key_ids)
+            .await
     }
 
     pub(crate) async fn list_auth_api_key_export_records_by_user_ids(
@@ -339,6 +462,18 @@ impl<'a> AdminAppState<'a> {
             .await
     }
 
+    pub(crate) async fn set_user_api_key_active(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        is_active: bool,
+    ) -> Result<Option<aether_data::repository::auth::StoredAuthApiKeyExportRecord>, GatewayError>
+    {
+        self.app
+            .set_user_api_key_active(user_id, api_key_id, is_active)
+            .await
+    }
+
     pub(crate) async fn set_user_api_key_locked(
         &self,
         user_id: &str,
@@ -359,6 +494,18 @@ impl<'a> AdminAppState<'a> {
     {
         self.app
             .set_user_api_key_allowed_providers(user_id, api_key_id, allowed_providers)
+            .await
+    }
+
+    pub(crate) async fn set_user_api_key_force_capabilities(
+        &self,
+        user_id: &str,
+        api_key_id: &str,
+        force_capabilities: Option<serde_json::Value>,
+    ) -> Result<Option<aether_data::repository::auth::StoredAuthApiKeyExportRecord>, GatewayError>
+    {
+        self.app
+            .set_user_api_key_force_capabilities(user_id, api_key_id, force_capabilities)
             .await
     }
 

@@ -1,9 +1,11 @@
 use crate::observability::stats::{aggregate_usage_stats, parse_bounded_u32, round_to};
-use aether_billing::normalize_input_tokens_for_billing;
+use aether_billing::{
+    normalize_input_tokens_for_billing, normalize_total_input_context_for_cache_hit_rate,
+};
 use aether_data::repository::users::StoredUserSummary;
 use aether_data_contracts::repository::{
     provider_catalog::{StoredProviderCatalogEndpoint, StoredProviderCatalogProvider},
-    usage::StoredRequestUsageAudit,
+    usage::{StoredRequestUsageAudit, UsageBodyField},
 };
 use axum::{
     body::Body,
@@ -126,13 +128,54 @@ pub fn admin_usage_parse_aggregation_limit(query: Option<&str>) -> Result<usize,
     }
 }
 
-pub fn admin_usage_matches_search(item: &StoredRequestUsageAudit, search: Option<&str>) -> bool {
+pub fn admin_usage_username(
+    item: &StoredRequestUsageAudit,
+    users_by_id: &BTreeMap<String, StoredUserSummary>,
+    auth_user_reader_available: bool,
+) -> Option<String> {
+    item.user_id
+        .as_ref()
+        .and_then(|user_id| users_by_id.get(user_id))
+        .map(|value| value.username.clone())
+        .or_else(|| {
+            (!auth_user_reader_available)
+                .then(|| item.username.clone())
+                .flatten()
+        })
+}
+
+pub fn admin_usage_api_key_name(
+    item: &StoredRequestUsageAudit,
+    api_key_names: &BTreeMap<String, String>,
+    auth_api_key_reader_available: bool,
+) -> Option<String> {
+    item.api_key_id
+        .as_ref()
+        .and_then(|api_key_id| api_key_names.get(api_key_id))
+        .cloned()
+        .or_else(|| {
+            (!auth_api_key_reader_available)
+                .then(|| item.api_key_name.clone())
+                .flatten()
+        })
+}
+
+pub fn admin_usage_matches_search(
+    item: &StoredRequestUsageAudit,
+    search: Option<&str>,
+    users_by_id: &BTreeMap<String, StoredUserSummary>,
+    api_key_names: &BTreeMap<String, String>,
+    auth_user_reader_available: bool,
+    auth_api_key_reader_available: bool,
+) -> bool {
     let Some(search) = search.map(str::trim).filter(|value| !value.is_empty()) else {
         return true;
     };
+    let username = admin_usage_username(item, users_by_id, auth_user_reader_available);
+    let api_key_name = admin_usage_api_key_name(item, api_key_names, auth_api_key_reader_available);
     let haystack = [
-        item.username.as_deref(),
-        item.api_key_name.as_deref(),
+        username.as_deref(),
+        api_key_name.as_deref(),
         Some(item.model.as_str()),
         Some(item.provider_name.as_str()),
     ];
@@ -148,11 +191,13 @@ pub fn admin_usage_matches_search(item: &StoredRequestUsageAudit, search: Option
 pub fn admin_usage_matches_username(
     item: &StoredRequestUsageAudit,
     username: Option<&str>,
+    users_by_id: &BTreeMap<String, StoredUserSummary>,
+    auth_user_reader_available: bool,
 ) -> bool {
     let Some(username) = username.map(str::trim).filter(|value| !value.is_empty()) else {
         return true;
     };
-    item.username
+    admin_usage_username(item, users_by_id, auth_user_reader_available)
         .as_deref()
         .unwrap_or_default()
         .to_ascii_lowercase()
@@ -210,18 +255,272 @@ pub fn admin_usage_matches_status(item: &StoredRequestUsageAudit, status: Option
     }
 }
 
-fn admin_usage_request_metadata_string(
+fn admin_usage_has_body_value(
     item: &StoredRequestUsageAudit,
+    body: Option<&Value>,
+    field: UsageBodyField,
+) -> bool {
+    body.is_some() || item.body_ref(field).is_some()
+}
+
+fn admin_usage_body_capture_storage(
+    item: &StoredRequestUsageAudit,
+    body: Option<&Value>,
+    field: UsageBodyField,
+) -> &'static str {
+    if item.body_ref(field).is_some() {
+        "reference"
+    } else if body.is_some() {
+        "inline"
+    } else {
+        "missing"
+    }
+}
+
+fn admin_usage_body_capture_entry(
+    item: &StoredRequestUsageAudit,
+    body: Option<&Value>,
+    field: UsageBodyField,
+) -> serde_json::Map<String, Value> {
+    let mut entry = serde_json::Map::new();
+    entry.insert(
+        "available".to_string(),
+        json!(admin_usage_has_body_value(item, body, field)),
+    );
+    entry.insert(
+        "storage".to_string(),
+        json!(admin_usage_body_capture_storage(item, body, field)),
+    );
+    if let Some(body_ref) = item.body_ref(field) {
+        entry.insert("body_ref".to_string(), json!(body_ref));
+    }
+    entry
+}
+
+fn admin_usage_request_preview_source(item: &StoredRequestUsageAudit) -> &'static str {
+    if item.body_ref(UsageBodyField::RequestBody).is_some() {
+        "stored_reference"
+    } else if item.request_body.is_some() {
+        "stored_original"
+    } else {
+        "local_reconstruction"
+    }
+}
+
+fn admin_usage_request_capture_entry(
+    item: &StoredRequestUsageAudit,
+) -> serde_json::Map<String, Value> {
+    let mut request = admin_usage_body_capture_entry(
+        item,
+        item.request_body.as_ref(),
+        UsageBodyField::RequestBody,
+    );
+    request.insert(
+        "preview_source".to_string(),
+        json!(admin_usage_request_preview_source(item)),
+    );
+    request
+}
+
+fn admin_usage_curl_body_source(item: &StoredRequestUsageAudit) -> &'static str {
+    if admin_usage_has_body_value(
+        item,
+        item.provider_request_body.as_ref(),
+        UsageBodyField::ProviderRequestBody,
+    ) {
+        "provider_request"
+    } else if admin_usage_has_body_value(
+        item,
+        item.request_body.as_ref(),
+        UsageBodyField::RequestBody,
+    ) {
+        "request"
+    } else {
+        "local_reconstruction"
+    }
+}
+
+fn admin_usage_strip_body_ref_metadata(metadata: &mut serde_json::Map<String, Value>) {
+    metadata.remove(UsageBodyField::RequestBody.as_ref_key());
+    metadata.remove(UsageBodyField::ProviderRequestBody.as_ref_key());
+    metadata.remove(UsageBodyField::ResponseBody.as_ref_key());
+    metadata.remove(UsageBodyField::ClientResponseBody.as_ref_key());
+}
+
+fn admin_usage_strip_routing_metadata(metadata: &mut serde_json::Map<String, Value>) {
+    metadata.remove("candidate_id");
+    metadata.remove("candidate_index");
+    metadata.remove("key_name");
+    metadata.remove("planner_kind");
+    metadata.remove("route_family");
+    metadata.remove("route_kind");
+    metadata.remove("execution_path");
+    metadata.remove("local_execution_runtime_miss_reason");
+}
+
+fn admin_usage_strip_settlement_metadata(metadata: &mut serde_json::Map<String, Value>) {
+    metadata.remove("billing_snapshot");
+    metadata.remove("billing_snapshot_schema_version");
+    metadata.remove("billing_snapshot_status");
+    metadata.remove("rate_multiplier");
+    metadata.remove("is_free_tier");
+    metadata.remove("input_price_per_1m");
+    metadata.remove("output_price_per_1m");
+    metadata.remove("cache_creation_price_per_1m");
+    metadata.remove("cache_read_price_per_1m");
+    metadata.remove("price_per_request");
+}
+
+fn admin_usage_strip_trace_metadata(metadata: &mut serde_json::Map<String, Value>) {
+    metadata.remove("trace_id");
+}
+
+fn maybe_insert_number_field(
+    object: &mut serde_json::Map<String, Value>,
     key: &str,
-) -> Option<String> {
-    item.request_metadata
+    value: Option<f64>,
+) {
+    if let Some(value) = value {
+        object.insert(key.to_string(), json!(value));
+    }
+}
+
+fn maybe_insert_u64_field(
+    object: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Option<u64>,
+) {
+    if let Some(value) = value {
+        object.insert(key.to_string(), json!(value));
+    }
+}
+
+fn maybe_insert_bool_field(
+    object: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Option<bool>,
+) {
+    if let Some(value) = value {
+        object.insert(key.to_string(), json!(value));
+    }
+}
+
+fn admin_usage_body_capture_json(item: &StoredRequestUsageAudit) -> Value {
+    let request = admin_usage_request_capture_entry(item);
+    let provider_request = admin_usage_body_capture_entry(
+        item,
+        item.provider_request_body.as_ref(),
+        UsageBodyField::ProviderRequestBody,
+    );
+    let response = admin_usage_body_capture_entry(
+        item,
+        item.response_body.as_ref(),
+        UsageBodyField::ResponseBody,
+    );
+    let client_response = admin_usage_body_capture_entry(
+        item,
+        item.client_response_body.as_ref(),
+        UsageBodyField::ClientResponseBody,
+    );
+    json!({
+        "request": request,
+        "provider_request": provider_request,
+        "response": response,
+        "client_response": client_response,
+    })
+}
+
+fn admin_usage_settlement_json(item: &StoredRequestUsageAudit) -> Value {
+    let mut settlement = serde_json::Map::new();
+    if let Some(snapshot) = item
+        .request_metadata
         .as_ref()
         .and_then(Value::as_object)
-        .and_then(|metadata| metadata.get(key))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+        .and_then(|metadata| metadata.get("billing_snapshot"))
+        .cloned()
+    {
+        settlement.insert("billing_snapshot".to_string(), snapshot);
+    }
+    maybe_insert_string_field(
+        &mut settlement,
+        "billing_snapshot_schema_version",
+        item.settlement_billing_snapshot_schema_version(),
+    );
+    maybe_insert_string_field(
+        &mut settlement,
+        "billing_snapshot_status",
+        item.settlement_billing_snapshot_status(),
+    );
+    maybe_insert_number_field(
+        &mut settlement,
+        "rate_multiplier",
+        item.settlement_rate_multiplier(),
+    );
+    maybe_insert_bool_field(
+        &mut settlement,
+        "is_free_tier",
+        item.settlement_is_free_tier(),
+    );
+    maybe_insert_number_field(
+        &mut settlement,
+        "input_price_per_1m",
+        item.settlement_input_price_per_1m(),
+    );
+    maybe_insert_number_field(
+        &mut settlement,
+        "output_price_per_1m",
+        item.settlement_output_price_per_1m(),
+    );
+    maybe_insert_number_field(
+        &mut settlement,
+        "cache_creation_price_per_1m",
+        item.settlement_cache_creation_price_per_1m(),
+    );
+    maybe_insert_number_field(
+        &mut settlement,
+        "cache_read_price_per_1m",
+        item.settlement_cache_read_price_per_1m(),
+    );
+    maybe_insert_number_field(
+        &mut settlement,
+        "price_per_request",
+        item.settlement_price_per_request(),
+    );
+    if settlement.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(settlement)
+    }
+}
+
+fn admin_usage_trace_json(item: &StoredRequestUsageAudit) -> Value {
+    let mut trace = serde_json::Map::new();
+    if let Some(trace_id) = item.trace_id() {
+        trace.insert("trace_id".to_string(), json!(trace_id));
+    }
+    if trace.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(trace)
+    }
+}
+
+fn admin_usage_replay_body_capture_json(item: &StoredRequestUsageAudit) -> Value {
+    json!({
+        "request": admin_usage_request_capture_entry(item),
+    })
+}
+
+fn admin_usage_curl_body_capture_json(item: &StoredRequestUsageAudit) -> Value {
+    json!({
+        "body_source": admin_usage_curl_body_source(item),
+        "request": admin_usage_request_capture_entry(item),
+        "provider_request": admin_usage_body_capture_entry(
+            item,
+            item.provider_request_body.as_ref(),
+            UsageBodyField::ProviderRequestBody,
+        ),
+    })
 }
 
 pub fn admin_usage_provider_key_name(
@@ -232,22 +531,30 @@ pub fn admin_usage_provider_key_name(
         .as_ref()
         .and_then(|key_id| provider_key_names.get(key_id))
         .cloned()
-        .or_else(|| admin_usage_request_metadata_string(item, "key_name"))
+        .or_else(|| item.routing_key_name().map(ToOwned::to_owned))
 }
 
 pub fn admin_usage_record_json(
     item: &StoredRequestUsageAudit,
     users_by_id: &BTreeMap<String, StoredUserSummary>,
+    api_key_names: &BTreeMap<String, String>,
+    auth_user_reader_available: bool,
+    auth_api_key_reader_available: bool,
     provider_key_name: Option<&str>,
 ) -> Value {
+    let rate_multiplier = item.settlement_rate_multiplier();
+    let input_price_per_1m = item.settlement_input_price_per_1m();
+    let output_price_per_1m = item.settlement_output_price_per_1m();
+    let cache_creation_price_per_1m = item.settlement_cache_creation_price_per_1m();
+    let cache_read_price_per_1m = item.settlement_cache_read_price_per_1m();
+    let is_free_tier = item.settlement_is_free_tier();
     let user = item
         .user_id
         .as_ref()
         .and_then(|user_id| users_by_id.get(user_id));
-    let username = user
-        .map(|value| value.username.clone())
-        .or_else(|| item.username.clone())
+    let username = admin_usage_username(item, users_by_id, auth_user_reader_available)
         .unwrap_or_else(|| "已删除用户".to_string());
+    let api_key_name = admin_usage_api_key_name(item, api_key_names, auth_api_key_reader_available);
     let user_email = user
         .and_then(|value| value.email.clone())
         .unwrap_or_else(|| "已删除用户".to_string());
@@ -259,8 +566,8 @@ pub fn admin_usage_record_json(
         "username": username,
         "api_key": item.api_key_id.as_ref().map(|api_key_id| json!({
             "id": api_key_id,
-            "name": item.api_key_name.clone(),
-            "display": item.api_key_name.clone().unwrap_or_else(|| api_key_id.clone()),
+            "name": api_key_name.clone(),
+            "display": api_key_name.clone().unwrap_or_else(|| api_key_id.clone()),
         })),
         "provider": item.provider_name,
         "model": item.model,
@@ -275,25 +582,26 @@ pub fn admin_usage_record_json(
         "total_tokens": admin_usage_total_tokens(item),
         "cost": round_to(item.total_cost_usd, 6),
         "actual_cost": round_to(item.actual_total_cost_usd, 6),
-        "rate_multiplier": Value::Null,
+        "rate_multiplier": rate_multiplier,
         "response_time_ms": item.response_time_ms,
         "first_byte_time_ms": item.first_byte_time_ms,
         "created_at": unix_secs_to_rfc3339(item.created_at_unix_ms),
         "is_stream": item.is_stream,
-        "input_price_per_1m": Value::Null,
-        "output_price_per_1m": item.output_price_per_1m,
-        "cache_creation_price_per_1m": Value::Null,
-        "cache_read_price_per_1m": Value::Null,
+        "input_price_per_1m": input_price_per_1m,
+        "output_price_per_1m": output_price_per_1m,
+        "cache_creation_price_per_1m": cache_creation_price_per_1m,
+        "cache_read_price_per_1m": cache_read_price_per_1m,
         "status_code": item.status_code,
         "error_message": item.error_message,
         "status": item.status,
         "has_fallback": false,
         "has_retry": false,
         "has_rectified": false,
+        "is_free_tier": is_free_tier,
         "api_format": item.api_format,
         "endpoint_api_format": item.endpoint_api_format,
         "has_format_conversion": item.has_format_conversion,
-        "api_key_name": item.api_key_name,
+        "api_key_name": api_key_name,
         "provider_key_name": provider_key_name,
         "model_version": Value::Null,
     })
@@ -318,9 +626,20 @@ pub fn admin_usage_cache_creation_tokens(item: &StoredRequestUsageAudit) -> u64 
 }
 
 pub fn admin_usage_total_input_context(item: &StoredRequestUsageAudit) -> u64 {
-    item.input_tokens
-        .saturating_add(admin_usage_cache_creation_tokens(item))
-        .saturating_add(item.cache_read_input_tokens)
+    let api_format = item
+        .endpoint_api_format
+        .as_deref()
+        .or(item.api_format.as_deref());
+    let input_tokens = i64::try_from(item.input_tokens).unwrap_or(i64::MAX);
+    let cache_creation_tokens =
+        i64::try_from(admin_usage_cache_creation_tokens(item)).unwrap_or(i64::MAX);
+    let cache_read_tokens = i64::try_from(item.cache_read_input_tokens).unwrap_or(i64::MAX);
+    normalize_total_input_context_for_cache_hit_rate(
+        api_format,
+        input_tokens,
+        cache_creation_tokens,
+        cache_read_tokens,
+    ) as u64
 }
 
 pub fn admin_usage_effective_input_tokens(item: &StoredRequestUsageAudit) -> u64 {
@@ -353,18 +672,66 @@ fn admin_usage_provider_display_name(item: &StoredRequestUsageAudit) -> Option<S
     }
 }
 
+fn maybe_insert_string_field(
+    object: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value {
+        object.insert(key.to_string(), Value::String(value.to_string()));
+    }
+}
+
+fn admin_usage_routing_json(
+    item: &StoredRequestUsageAudit,
+    provider_key_name: Option<&str>,
+) -> Value {
+    let mut routing = serde_json::Map::new();
+    maybe_insert_string_field(&mut routing, "candidate_id", item.routing_candidate_id());
+    maybe_insert_u64_field(
+        &mut routing,
+        "candidate_index",
+        item.routing_candidate_index(),
+    );
+    maybe_insert_string_field(
+        &mut routing,
+        "key_name",
+        provider_key_name.or_else(|| item.routing_key_name()),
+    );
+    maybe_insert_string_field(&mut routing, "planner_kind", item.routing_planner_kind());
+    maybe_insert_string_field(&mut routing, "route_family", item.routing_route_family());
+    maybe_insert_string_field(&mut routing, "route_kind", item.routing_route_kind());
+    maybe_insert_string_field(
+        &mut routing,
+        "execution_path",
+        item.routing_execution_path(),
+    );
+    maybe_insert_string_field(
+        &mut routing,
+        "local_execution_runtime_miss_reason",
+        item.routing_local_execution_runtime_miss_reason(),
+    );
+    if routing.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(routing)
+    }
+}
+
 pub fn admin_usage_aggregation_by_model_json(
     usage: &[StoredRequestUsageAudit],
     limit: usize,
 ) -> Value {
     #[allow(clippy::type_complexity)]
-    let mut grouped: BTreeMap<String, (u64, u64, u64, u64, u64, u64, u64, u64, u64, f64, f64)> =
-        BTreeMap::new();
+    let mut grouped: BTreeMap<
+        String,
+        (u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, f64, f64),
+    > = BTreeMap::new();
     for item in usage {
         let key = item.model.clone();
         let entry = grouped
             .entry(key)
-            .or_insert((0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0, 0.0));
+            .or_insert((0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0, 0.0));
         entry.0 = entry.0.saturating_add(1);
         entry.1 = entry.1.saturating_add(item.total_tokens);
         entry.2 = entry.2.saturating_add(item.input_tokens);
@@ -374,16 +741,19 @@ pub fn admin_usage_aggregation_by_model_json(
             .saturating_add(admin_usage_effective_input_tokens(item));
         entry.5 = entry
             .5
-            .saturating_add(admin_usage_cache_creation_tokens(item));
+            .saturating_add(admin_usage_total_input_context(item));
         entry.6 = entry
             .6
-            .saturating_add(item.cache_creation_ephemeral_5m_input_tokens);
+            .saturating_add(admin_usage_cache_creation_tokens(item));
         entry.7 = entry
             .7
+            .saturating_add(item.cache_creation_ephemeral_5m_input_tokens);
+        entry.8 = entry
+            .8
             .saturating_add(item.cache_creation_ephemeral_1h_input_tokens);
-        entry.8 = entry.8.saturating_add(item.cache_read_input_tokens);
-        entry.9 += item.total_cost_usd;
-        entry.10 += item.actual_total_cost_usd;
+        entry.9 = entry.9.saturating_add(item.cache_read_input_tokens);
+        entry.10 += item.total_cost_usd;
+        entry.11 += item.actual_total_cost_usd;
     }
 
     let mut items: Vec<Value> = grouped
@@ -394,9 +764,10 @@ pub fn admin_usage_aggregation_by_model_json(
                 (
                     request_count,
                     total_tokens,
-                    input_tokens,
+                    _input_tokens,
                     output_tokens,
                     effective_input_tokens,
+                    total_input_context,
                     cache_creation_tokens,
                     cache_creation_ephemeral_5m_tokens,
                     cache_creation_ephemeral_1h_tokens,
@@ -410,9 +781,7 @@ pub fn admin_usage_aggregation_by_model_json(
                     "request_count": request_count,
                     "total_tokens": total_tokens,
                     "effective_input_tokens": effective_input_tokens,
-                    "total_input_context": input_tokens
-                        .saturating_add(cache_creation_tokens)
-                        .saturating_add(cache_read_tokens),
+                    "total_input_context": total_input_context,
                     "output_tokens": output_tokens,
                     "total_cost": round_to(total_cost, 6),
                     "actual_cost": round_to(actual_cost, 6),
@@ -421,9 +790,7 @@ pub fn admin_usage_aggregation_by_model_json(
                     "cache_creation_ephemeral_1h_tokens": cache_creation_ephemeral_1h_tokens,
                     "cache_read_tokens": cache_read_tokens,
                     "cache_hit_rate": admin_usage_token_cache_hit_rate(
-                        input_tokens
-                            .saturating_add(cache_creation_tokens)
-                            .saturating_add(cache_read_tokens),
+                        total_input_context,
                         cache_read_tokens,
                     ),
                 })
@@ -464,6 +831,7 @@ pub fn admin_usage_aggregation_by_provider_json(
             u64,
             u64,
             u64,
+            u64,
             f64,
             f64,
             u64,
@@ -479,6 +847,7 @@ pub fn admin_usage_aggregation_by_provider_json(
             admin_usage_provider_display_name(item).unwrap_or_else(|| "Unknown".to_string());
         let entry = grouped.entry(key).or_insert((
             provider_name.clone(),
+            0,
             0,
             0,
             0,
@@ -505,21 +874,24 @@ pub fn admin_usage_aggregation_by_provider_json(
             .saturating_add(admin_usage_effective_input_tokens(item));
         entry.6 = entry
             .6
-            .saturating_add(admin_usage_cache_creation_tokens(item));
+            .saturating_add(admin_usage_total_input_context(item));
         entry.7 = entry
             .7
-            .saturating_add(item.cache_creation_ephemeral_5m_input_tokens);
+            .saturating_add(admin_usage_cache_creation_tokens(item));
         entry.8 = entry
             .8
+            .saturating_add(item.cache_creation_ephemeral_5m_input_tokens);
+        entry.9 = entry
+            .9
             .saturating_add(item.cache_creation_ephemeral_1h_input_tokens);
-        entry.9 = entry.9.saturating_add(item.cache_read_input_tokens);
-        entry.10 += item.total_cost_usd;
-        entry.11 += item.actual_total_cost_usd;
-        entry.12 = entry
-            .12
-            .saturating_add(item.response_time_ms.unwrap_or_default());
+        entry.10 = entry.10.saturating_add(item.cache_read_input_tokens);
+        entry.11 += item.total_cost_usd;
+        entry.12 += item.actual_total_cost_usd;
         entry.13 = entry
             .13
+            .saturating_add(item.response_time_ms.unwrap_or_default());
+        entry.14 = entry
+            .14
             .saturating_add(if admin_usage_is_success(item) { 1 } else { 0 });
     }
 
@@ -532,9 +904,10 @@ pub fn admin_usage_aggregation_by_provider_json(
                     provider_name,
                     request_count,
                     total_tokens,
-                    input_tokens,
+                    _input_tokens,
                     output_tokens,
                     effective_input_tokens,
+                    total_input_context,
                     cache_creation_tokens,
                     cache_creation_ephemeral_5m_tokens,
                     cache_creation_ephemeral_1h_tokens,
@@ -562,9 +935,7 @@ pub fn admin_usage_aggregation_by_provider_json(
                     "request_count": request_count,
                     "total_tokens": total_tokens,
                     "effective_input_tokens": effective_input_tokens,
-                    "total_input_context": input_tokens
-                        .saturating_add(cache_creation_tokens)
-                        .saturating_add(cache_read_tokens),
+                    "total_input_context": total_input_context,
                     "output_tokens": output_tokens,
                     "total_cost": round_to(total_cost, 6),
                     "actual_cost": round_to(actual_cost, 6),
@@ -576,9 +947,7 @@ pub fn admin_usage_aggregation_by_provider_json(
                     "cache_creation_ephemeral_1h_tokens": cache_creation_ephemeral_1h_tokens,
                     "cache_read_tokens": cache_read_tokens,
                     "cache_hit_rate": admin_usage_token_cache_hit_rate(
-                        input_tokens
-                            .saturating_add(cache_creation_tokens)
-                            .saturating_add(cache_read_tokens),
+                        total_input_context,
                         cache_read_tokens,
                     ),
                 })
@@ -608,7 +977,21 @@ pub fn admin_usage_aggregation_by_api_format_json(
     #[allow(clippy::type_complexity)]
     let mut grouped: BTreeMap<
         String,
-        (u64, u64, u64, u64, u64, u64, u64, u64, u64, f64, f64, u64),
+        (
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+            f64,
+            f64,
+            u64,
+        ),
     > = BTreeMap::new();
     for item in usage {
         let key = item
@@ -617,7 +1000,7 @@ pub fn admin_usage_aggregation_by_api_format_json(
             .unwrap_or_else(|| "unknown".to_string());
         let entry = grouped
             .entry(key)
-            .or_insert((0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0, 0.0, 0));
+            .or_insert((0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0, 0.0, 0));
         entry.0 = entry.0.saturating_add(1);
         entry.1 = entry.1.saturating_add(item.total_tokens);
         entry.2 = entry.2.saturating_add(item.input_tokens);
@@ -627,18 +1010,21 @@ pub fn admin_usage_aggregation_by_api_format_json(
             .saturating_add(admin_usage_effective_input_tokens(item));
         entry.5 = entry
             .5
-            .saturating_add(admin_usage_cache_creation_tokens(item));
+            .saturating_add(admin_usage_total_input_context(item));
         entry.6 = entry
             .6
-            .saturating_add(item.cache_creation_ephemeral_5m_input_tokens);
+            .saturating_add(admin_usage_cache_creation_tokens(item));
         entry.7 = entry
             .7
+            .saturating_add(item.cache_creation_ephemeral_5m_input_tokens);
+        entry.8 = entry
+            .8
             .saturating_add(item.cache_creation_ephemeral_1h_input_tokens);
-        entry.8 = entry.8.saturating_add(item.cache_read_input_tokens);
-        entry.9 += item.total_cost_usd;
-        entry.10 += item.actual_total_cost_usd;
-        entry.11 = entry
-            .11
+        entry.9 = entry.9.saturating_add(item.cache_read_input_tokens);
+        entry.10 += item.total_cost_usd;
+        entry.11 += item.actual_total_cost_usd;
+        entry.12 = entry
+            .12
             .saturating_add(item.response_time_ms.unwrap_or_default());
     }
 
@@ -650,9 +1036,10 @@ pub fn admin_usage_aggregation_by_api_format_json(
                 (
                     request_count,
                     total_tokens,
-                    input_tokens,
+                    _input_tokens,
                     output_tokens,
                     effective_input_tokens,
+                    total_input_context,
                     cache_creation_tokens,
                     cache_creation_ephemeral_5m_tokens,
                     cache_creation_ephemeral_1h_tokens,
@@ -672,9 +1059,7 @@ pub fn admin_usage_aggregation_by_api_format_json(
                     "request_count": request_count,
                     "total_tokens": total_tokens,
                     "effective_input_tokens": effective_input_tokens,
-                    "total_input_context": input_tokens
-                        .saturating_add(cache_creation_tokens)
-                        .saturating_add(cache_read_tokens),
+                    "total_input_context": total_input_context,
                     "output_tokens": output_tokens,
                     "total_cost": round_to(total_cost, 6),
                     "actual_cost": round_to(actual_cost, 6),
@@ -684,9 +1069,7 @@ pub fn admin_usage_aggregation_by_api_format_json(
                     "cache_creation_ephemeral_1h_tokens": cache_creation_ephemeral_1h_tokens,
                     "cache_read_tokens": cache_read_tokens,
                     "cache_hit_rate": admin_usage_token_cache_hit_rate(
-                        input_tokens
-                            .saturating_add(cache_creation_tokens)
-                            .saturating_add(cache_read_tokens),
+                        total_input_context,
                         cache_read_tokens,
                     ),
                 })
@@ -1092,12 +1475,16 @@ pub fn build_admin_usage_summary_stats_response(
 
 pub fn build_admin_usage_active_requests_response(
     items: &[StoredRequestUsageAudit],
+    api_key_names: &BTreeMap<String, String>,
+    auth_api_key_reader_available: bool,
     provider_key_names: &BTreeMap<String, String>,
 ) -> Response<Body> {
     let payload: Vec<_> = items
         .iter()
         .map(|item| {
             let provider_key_name = admin_usage_provider_key_name(item, provider_key_names);
+            let api_key_name =
+                admin_usage_api_key_name(item, api_key_names, auth_api_key_reader_available);
             let mut value = json!({
                 "id": item.id,
                 "status": item.status,
@@ -1113,7 +1500,7 @@ pub fn build_admin_usage_active_requests_response(
                 "response_time_ms": item.response_time_ms,
                 "first_byte_time_ms": item.first_byte_time_ms,
                 "provider": item.provider_name,
-                "api_key_name": item.api_key_name,
+                "api_key_name": api_key_name,
                 "provider_key_name": provider_key_name,
             });
             if let Some(api_format) = item.api_format.as_ref() {
@@ -1133,9 +1520,13 @@ pub fn build_admin_usage_active_requests_response(
     Json(json!({ "requests": payload })).into_response()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_admin_usage_records_response(
     items: &[StoredRequestUsageAudit],
     users_by_id: &BTreeMap<String, StoredUserSummary>,
+    api_key_names: &BTreeMap<String, String>,
+    auth_user_reader_available: bool,
+    auth_api_key_reader_available: bool,
     provider_key_names: &BTreeMap<String, String>,
     total: usize,
     limit: usize,
@@ -1145,7 +1536,14 @@ pub fn build_admin_usage_records_response(
         .iter()
         .map(|item| {
             let provider_key_name = admin_usage_provider_key_name(item, provider_key_names);
-            admin_usage_record_json(item, users_by_id, provider_key_name.as_deref())
+            admin_usage_record_json(
+                item,
+                users_by_id,
+                api_key_names,
+                auth_user_reader_available,
+                auth_api_key_reader_available,
+                provider_key_name.as_deref(),
+            )
         })
         .collect();
 
@@ -1172,43 +1570,54 @@ pub fn build_admin_usage_curl_response(
         "headers": headers_json.unwrap_or_else(|| json!(headers.clone())),
         "body": body,
         "curl": curl,
-        "original_request_body_available": item.request_body.is_some() || item.provider_request_body.is_some(),
+        "body_capture": admin_usage_curl_body_capture_json(item),
+        "original_request_body_available": admin_usage_has_body_value(
+            item,
+            item.request_body.as_ref(),
+            UsageBodyField::RequestBody
+        )
+            || admin_usage_has_body_value(
+                item,
+                item.provider_request_body.as_ref(),
+                UsageBodyField::ProviderRequestBody
+            ),
     }))
     .into_response()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_admin_usage_detail_payload(
     item: &StoredRequestUsageAudit,
     users_by_id: &BTreeMap<String, StoredUserSummary>,
+    api_key_names: &BTreeMap<String, String>,
+    auth_user_reader_available: bool,
+    auth_api_key_reader_available: bool,
     provider_key_name: Option<&str>,
     include_bodies: bool,
     request_body: Value,
     default_headers: &BTreeMap<String, String>,
 ) -> Value {
-    let mut payload = admin_usage_record_json(item, users_by_id, provider_key_name);
-    let request_preview_source = if item.request_body.is_some() {
-        "stored_original"
-    } else {
-        "local_reconstruction"
-    };
+    let mut payload = admin_usage_record_json(
+        item,
+        users_by_id,
+        api_key_names,
+        auth_user_reader_available,
+        auth_api_key_reader_available,
+        provider_key_name,
+    );
     let mut metadata = match item.request_metadata.clone() {
         Some(Value::Object(object)) => Value::Object(object),
         Some(value) => json!({ "request_metadata": value }),
         None => json!({}),
     };
     if let Some(object) = metadata.as_object_mut() {
-        object.insert(
-            "request_preview_source".to_string(),
-            json!(request_preview_source),
-        );
-        object.insert(
-            "original_request_body_available".to_string(),
-            json!(item.request_body.is_some()),
-        );
-        object.insert(
-            "original_response_body_available".to_string(),
-            json!(item.response_body.is_some() || item.client_response_body.is_some()),
-        );
+        admin_usage_strip_body_ref_metadata(object);
+        admin_usage_strip_routing_metadata(object);
+        admin_usage_strip_settlement_metadata(object);
+        admin_usage_strip_trace_metadata(object);
+        object.remove("request_preview_source");
+        object.remove("original_request_body_available");
+        object.remove("original_response_body_available");
     }
     payload["user"] = match item.user_id.as_ref() {
         Some(user_id) => json!({
@@ -1240,10 +1649,26 @@ pub fn build_admin_usage_detail_payload(
     payload["client_response_headers"] =
         item.client_response_headers.clone().unwrap_or(Value::Null);
     payload["metadata"] = metadata;
+    payload["routing"] = admin_usage_routing_json(item, provider_key_name);
+    payload["body_capture"] = admin_usage_body_capture_json(item);
+    payload["settlement"] = admin_usage_settlement_json(item);
+    payload["trace"] = admin_usage_trace_json(item);
     payload["has_request_body"] = json!(true);
-    payload["has_provider_request_body"] = json!(item.provider_request_body.is_some());
-    payload["has_response_body"] = json!(item.response_body.is_some());
-    payload["has_client_response_body"] = json!(item.client_response_body.is_some());
+    payload["has_provider_request_body"] = json!(admin_usage_has_body_value(
+        item,
+        item.provider_request_body.as_ref(),
+        UsageBodyField::ProviderRequestBody
+    ));
+    payload["has_response_body"] = json!(admin_usage_has_body_value(
+        item,
+        item.response_body.as_ref(),
+        UsageBodyField::ResponseBody
+    ));
+    payload["has_client_response_body"] = json!(admin_usage_has_body_value(
+        item,
+        item.client_response_body.as_ref(),
+        UsageBodyField::ClientResponseBody
+    ));
     payload["tiered_pricing"] = Value::Null;
     if include_bodies {
         payload["request_body"] = request_body;
@@ -1292,7 +1717,12 @@ pub fn build_admin_usage_replay_plan_response(
         "url": url,
         "request_headers": headers,
         "request_body": request_body,
-        "original_request_body_available": item.request_body.is_some(),
+        "body_capture": admin_usage_replay_body_capture_json(item),
+        "original_request_body_available": admin_usage_has_body_value(
+            item,
+            item.request_body.as_ref(),
+            UsageBodyField::RequestBody
+        ),
         "note": "Rust local replay currently exposes a dry-run plan and does not dispatch upstream",
         "curl": curl,
     }))
@@ -1301,8 +1731,16 @@ pub fn build_admin_usage_replay_plan_response(
 
 #[cfg(test)]
 mod tests {
-    use super::{admin_usage_is_failed, admin_usage_matches_status};
-    use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
+    use std::collections::BTreeMap;
+
+    use serde_json::json;
+
+    use super::{
+        admin_usage_has_body_value, admin_usage_is_failed, admin_usage_matches_search,
+        admin_usage_matches_status, admin_usage_matches_username, admin_usage_record_json,
+        build_admin_usage_detail_payload,
+    };
+    use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageBodyField};
 
     fn sample_usage(
         status: &str,
@@ -1370,5 +1808,382 @@ mod tests {
         };
         assert!(admin_usage_is_failed(&item));
         assert!(admin_usage_matches_status(&item, Some("failed")));
+    }
+
+    #[test]
+    fn body_availability_considers_typed_reference_fields() {
+        let item = StoredRequestUsageAudit {
+            request_body_ref: Some("usage://request/req-1/request_body".to_string()),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        assert!(admin_usage_has_body_value(
+            &item,
+            item.request_body.as_ref(),
+            UsageBodyField::RequestBody
+        ));
+    }
+
+    #[test]
+    fn detail_payload_marks_reference_backed_bodies_as_available() {
+        let item = StoredRequestUsageAudit {
+            request_body: None,
+            request_body_ref: Some("usage://request/req-1/request_body".to_string()),
+            provider_request_body: None,
+            provider_request_body_ref: Some(
+                "usage://request/req-1/provider_request_body".to_string(),
+            ),
+            response_body: None,
+            response_body_ref: Some("usage://request/req-1/response_body".to_string()),
+            client_response_body: None,
+            client_response_body_ref: Some(
+                "usage://request/req-1/client_response_body".to_string(),
+            ),
+            request_metadata: Some(json!({
+                "request_body_ref": "usage://request/req-1/request_body",
+                "provider_request_body_ref": "usage://request/req-1/provider_request_body",
+                "response_body_ref": "usage://request/req-1/response_body",
+                "client_response_body_ref": "usage://request/req-1/client_response_body",
+            })),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        let payload = build_admin_usage_detail_payload(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+            false,
+            json!({"model": "gpt-5"}),
+            &BTreeMap::new(),
+        );
+
+        assert!(payload["metadata"]["request_preview_source"].is_null());
+        assert!(payload["metadata"]["original_request_body_available"].is_null());
+        assert!(payload["metadata"]["original_response_body_available"].is_null());
+        assert!(payload["metadata"]["request_body_ref"].is_null());
+        assert!(payload["metadata"]["provider_request_body_ref"].is_null());
+        assert!(payload["metadata"]["response_body_ref"].is_null());
+        assert!(payload["metadata"]["client_response_body_ref"].is_null());
+        assert_eq!(payload["body_capture"]["request"]["available"], true);
+        assert_eq!(payload["body_capture"]["request"]["storage"], "reference");
+        assert_eq!(
+            payload["body_capture"]["request"]["body_ref"],
+            "usage://request/req-1/request_body"
+        );
+        assert_eq!(
+            payload["body_capture"]["request"]["preview_source"],
+            "stored_reference"
+        );
+        assert_eq!(
+            payload["body_capture"]["provider_request"]["body_ref"],
+            "usage://request/req-1/provider_request_body"
+        );
+        assert_eq!(
+            payload["body_capture"]["response"]["body_ref"],
+            "usage://request/req-1/response_body"
+        );
+        assert_eq!(
+            payload["body_capture"]["client_response"]["body_ref"],
+            "usage://request/req-1/client_response_body"
+        );
+        assert_eq!(payload["body_capture"]["response"]["available"], true);
+        assert_eq!(
+            payload["body_capture"]["client_response"]["available"],
+            true
+        );
+        assert_eq!(payload["has_provider_request_body"], true);
+        assert_eq!(payload["has_response_body"], true);
+        assert_eq!(payload["has_client_response_body"], true);
+    }
+
+    #[test]
+    fn admin_usage_record_prefers_typed_pricing_metadata_with_billing_snapshot_fallback() {
+        let item = StoredRequestUsageAudit {
+            output_price_per_1m: Some(15.0),
+            request_metadata: Some(json!({
+                "rate_multiplier": 0.5,
+                "is_free_tier": false,
+                "input_price_per_1m": 3.0,
+                "cache_creation_price_per_1m": 3.75,
+                "billing_snapshot": {
+                    "resolved_variables": {
+                        "cache_read_price_per_1m": 0.30,
+                        "output_price_per_1m": 15.0
+                    }
+                }
+            })),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        let payload = admin_usage_record_json(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            Some("primary"),
+        );
+
+        assert_eq!(payload["rate_multiplier"], 0.5);
+        assert_eq!(payload["is_free_tier"], false);
+        assert_eq!(payload["input_price_per_1m"], 3.0);
+        assert_eq!(payload["output_price_per_1m"], 15.0);
+        assert_eq!(payload["cache_creation_price_per_1m"], 3.75);
+        assert_eq!(payload["cache_read_price_per_1m"], 0.30);
+    }
+
+    #[test]
+    fn detail_payload_exposes_typed_settlement_section() {
+        let item = StoredRequestUsageAudit {
+            output_price_per_1m: Some(15.0),
+            request_metadata: Some(json!({
+                "trace_id": "trace-detail",
+                "billing_snapshot_schema_version": "v2",
+                "billing_snapshot_status": "resolved",
+                "rate_multiplier": 0.5,
+                "is_free_tier": false,
+                "input_price_per_1m": 3.0,
+                "output_price_per_1m": 9.0,
+                "cache_creation_price_per_1m": 3.75,
+                "cache_read_price_per_1m": 0.30,
+                "price_per_request": 0.02,
+                "billing_snapshot": {
+                    "resolved_variables": {
+                        "output_price_per_1m": 11.0
+                    }
+                }
+            })),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        let payload = build_admin_usage_detail_payload(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+            false,
+            json!({"model": "gpt-5"}),
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(payload["trace"]["trace_id"], "trace-detail");
+        assert_eq!(
+            payload["settlement"]["billing_snapshot_schema_version"],
+            "v2"
+        );
+        assert_eq!(
+            payload["settlement"]["billing_snapshot"]["resolved_variables"]["output_price_per_1m"],
+            11.0
+        );
+        assert_eq!(payload["settlement"]["billing_snapshot_status"], "resolved");
+        assert_eq!(payload["settlement"]["rate_multiplier"], 0.5);
+        assert_eq!(payload["settlement"]["is_free_tier"], false);
+        assert_eq!(payload["settlement"]["input_price_per_1m"], 3.0);
+        assert_eq!(payload["settlement"]["output_price_per_1m"], 9.0);
+        assert_eq!(payload["settlement"]["cache_creation_price_per_1m"], 3.75);
+        assert_eq!(payload["settlement"]["cache_read_price_per_1m"], 0.30);
+        assert_eq!(payload["settlement"]["price_per_request"], 0.02);
+        assert!(payload["metadata"]["trace_id"].is_null());
+        assert!(payload["metadata"]["billing_snapshot"].is_null());
+        assert!(payload["metadata"]["billing_snapshot_schema_version"].is_null());
+        assert!(payload["metadata"]["billing_snapshot_status"].is_null());
+        assert!(payload["metadata"]["rate_multiplier"].is_null());
+        assert!(payload["metadata"]["is_free_tier"].is_null());
+        assert!(payload["metadata"]["input_price_per_1m"].is_null());
+        assert!(payload["metadata"]["output_price_per_1m"].is_null());
+        assert!(payload["metadata"]["cache_creation_price_per_1m"].is_null());
+        assert!(payload["metadata"]["cache_read_price_per_1m"].is_null());
+        assert!(payload["metadata"]["price_per_request"].is_null());
+    }
+
+    #[test]
+    fn admin_usage_provider_key_name_falls_back_to_typed_routing_metadata() {
+        let item = StoredRequestUsageAudit {
+            request_metadata: Some(json!({
+                "key_name": "upstream-primary"
+            })),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        assert_eq!(
+            super::admin_usage_provider_key_name(&item, &BTreeMap::new()),
+            Some("upstream-primary".to_string())
+        );
+    }
+
+    #[test]
+    fn detail_payload_exposes_typed_routing_section() {
+        let item = StoredRequestUsageAudit {
+            request_metadata: Some(json!({
+                "trace_id": "trace-routing-detail"
+            })),
+            candidate_id: Some("cand-1".to_string()),
+            candidate_index: Some(2),
+            key_name: Some("upstream-primary".to_string()),
+            planner_kind: Some("claude_cli_sync".to_string()),
+            route_family: Some("claude".to_string()),
+            route_kind: Some("cli".to_string()),
+            execution_path: Some("local_execution_runtime_miss".to_string()),
+            local_execution_runtime_miss_reason: Some("all_candidates_skipped".to_string()),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        let payload = build_admin_usage_detail_payload(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            Some("resolved-primary"),
+            false,
+            json!({"model": "gpt-5"}),
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(payload["routing"]["candidate_id"], "cand-1");
+        assert_eq!(payload["routing"]["candidate_index"], 2);
+        assert_eq!(payload["routing"]["key_name"], "resolved-primary");
+        assert_eq!(payload["routing"]["planner_kind"], "claude_cli_sync");
+        assert_eq!(payload["routing"]["route_family"], "claude");
+        assert_eq!(payload["routing"]["route_kind"], "cli");
+        assert_eq!(
+            payload["routing"]["execution_path"],
+            "local_execution_runtime_miss"
+        );
+        assert_eq!(
+            payload["routing"]["local_execution_runtime_miss_reason"],
+            "all_candidates_skipped"
+        );
+        assert!(payload["metadata"]["candidate_id"].is_null());
+        assert!(payload["metadata"]["candidate_index"].is_null());
+        assert!(payload["metadata"]["key_name"].is_null());
+        assert!(payload["metadata"]["planner_kind"].is_null());
+        assert!(payload["metadata"]["trace_id"].is_null());
+        assert!(payload["metadata"]["request_preview_source"].is_null());
+        assert!(payload["metadata"]["original_request_body_available"].is_null());
+        assert!(payload["metadata"]["original_response_body_available"].is_null());
+        assert!(payload["metadata"]["route_family"].is_null());
+        assert!(payload["metadata"]["route_kind"].is_null());
+        assert!(payload["metadata"]["execution_path"].is_null());
+        assert!(payload["metadata"]["local_execution_runtime_miss_reason"].is_null());
+    }
+
+    #[test]
+    fn admin_usage_record_prefers_joined_user_and_api_key_names_over_legacy_columns() {
+        let item = StoredRequestUsageAudit {
+            username: Some("legacy-alice".to_string()),
+            api_key_name: Some("legacy-default".to_string()),
+            ..sample_usage("completed", Some(200), None)
+        };
+        let users_by_id = BTreeMap::from([(
+            "user-1".to_string(),
+            aether_data::repository::users::StoredUserSummary::new(
+                "user-1".to_string(),
+                "fresh-alice".to_string(),
+                Some("fresh-alice@example.com".to_string()),
+                "user".to_string(),
+                true,
+                false,
+            )
+            .expect("user summary should build"),
+        )]);
+        let api_key_names =
+            BTreeMap::from([("api-key-1".to_string(), "fresh-default".to_string())]);
+
+        let payload = admin_usage_record_json(
+            &item,
+            &users_by_id,
+            &api_key_names,
+            true,
+            true,
+            Some("primary"),
+        );
+
+        assert_eq!(payload["username"], "fresh-alice");
+        assert_eq!(payload["api_key"]["name"], "fresh-default");
+        assert_eq!(payload["api_key"]["display"], "fresh-default");
+        assert_eq!(payload["api_key_name"], "fresh-default");
+        assert!(admin_usage_matches_search(
+            &item,
+            Some("fresh-default"),
+            &users_by_id,
+            &api_key_names,
+            true,
+            true
+        ));
+        assert!(admin_usage_matches_username(
+            &item,
+            Some("fresh-alice"),
+            &users_by_id,
+            true
+        ));
+    }
+
+    #[test]
+    fn admin_usage_record_does_not_fallback_to_legacy_username_when_reader_is_available() {
+        let item = StoredRequestUsageAudit {
+            username: Some("legacy-alice".to_string()),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        let payload = admin_usage_record_json(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            true,
+            false,
+            Some("primary"),
+        );
+
+        assert_eq!(payload["username"], "已删除用户");
+        assert!(!admin_usage_matches_search(
+            &item,
+            Some("legacy-alice"),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            true,
+            false
+        ));
+        assert!(!admin_usage_matches_username(
+            &item,
+            Some("legacy-alice"),
+            &BTreeMap::new(),
+            true
+        ));
+    }
+
+    #[test]
+    fn admin_usage_record_does_not_fallback_to_legacy_api_key_name_when_reader_is_available() {
+        let item = StoredRequestUsageAudit {
+            api_key_name: Some("legacy-default".to_string()),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        let payload = admin_usage_record_json(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            true,
+            Some("primary"),
+        );
+
+        assert_eq!(payload["api_key"]["id"], "api-key-1");
+        assert!(payload["api_key"]["name"].is_null());
+        assert_eq!(payload["api_key"]["display"], "api-key-1");
+        assert!(payload["api_key_name"].is_null());
+        assert!(!admin_usage_matches_search(
+            &item,
+            Some("legacy-default"),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            true
+        ));
     }
 }

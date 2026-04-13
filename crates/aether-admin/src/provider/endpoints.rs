@@ -2,7 +2,7 @@ use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
 };
 use chrono::{TimeZone, Utc};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 fn unix_secs_to_rfc3339(unix_secs: u64) -> Option<String> {
@@ -173,16 +173,21 @@ pub fn build_admin_provider_endpoint_record(
     .map_err(|err| err.to_string())
 }
 
-pub fn apply_admin_provider_endpoint_update_fields(
+pub fn apply_admin_provider_endpoint_update_fields<FC, FN>(
     existing_endpoint: &StoredProviderCatalogEndpoint,
-    raw_payload: &Map<String, Value>,
+    contains_field: FC,
+    is_null_field: FN,
     payload: &AdminProviderEndpointUpdateFields,
-) -> Result<StoredProviderCatalogEndpoint, String> {
+) -> Result<StoredProviderCatalogEndpoint, String>
+where
+    FC: Fn(&str) -> bool,
+    FN: Fn(&str) -> bool,
+{
     let mut updated = existing_endpoint.clone();
 
-    if let Some(value) = raw_payload.get("base_url") {
+    if contains_field("base_url") {
         let Some(base_url) = payload.base_url.as_deref() else {
-            return Err(if value.is_null() {
+            return Err(if is_null_field("base_url") {
                 "base_url 不能为空".to_string()
             } else {
                 "base_url 必须是字符串".to_string()
@@ -191,35 +196,41 @@ pub fn apply_admin_provider_endpoint_update_fields(
         updated.base_url = base_url.to_string();
     }
 
-    if raw_payload.contains_key("custom_path") {
+    if contains_field("custom_path") {
         updated.custom_path = payload.custom_path.clone();
     }
 
-    if let Some(value) = raw_payload.get("header_rules") {
-        if !value.is_null() && !value.is_array() {
-            return Err("header_rules 必须是数组或 null".to_string());
-        }
-        updated.header_rules = if value.is_null() {
+    if contains_field("header_rules") {
+        updated.header_rules = if is_null_field("header_rules") {
             None
         } else {
-            payload.header_rules.clone()
+            let Some(header_rules) = payload.header_rules.as_ref() else {
+                return Err("header_rules 必须是数组或 null".to_string());
+            };
+            if !header_rules.is_array() {
+                return Err("header_rules 必须是数组或 null".to_string());
+            }
+            Some(header_rules.clone())
         };
     }
 
-    if let Some(value) = raw_payload.get("body_rules") {
-        if !value.is_null() && !value.is_array() {
-            return Err("body_rules 必须是数组或 null".to_string());
-        }
-        updated.body_rules = if value.is_null() {
+    if contains_field("body_rules") {
+        updated.body_rules = if is_null_field("body_rules") {
             None
         } else {
-            payload.body_rules.clone()
+            let Some(body_rules) = payload.body_rules.as_ref() else {
+                return Err("body_rules 必须是数组或 null".to_string());
+            };
+            if !body_rules.is_array() {
+                return Err("body_rules 必须是数组或 null".to_string());
+            }
+            Some(body_rules.clone())
         };
     }
 
-    if let Some(value) = raw_payload.get("max_retries") {
+    if contains_field("max_retries") {
         let Some(max_retries) = payload.max_retries else {
-            return Err(if value.is_null() {
+            return Err(if is_null_field("max_retries") {
                 "max_retries 必须是 0 到 999 之间的整数".to_string()
             } else {
                 "max_retries 必须是整数".to_string()
@@ -231,26 +242,29 @@ pub fn apply_admin_provider_endpoint_update_fields(
         updated.max_retries = Some(max_retries);
     }
 
-    if raw_payload.contains_key("is_active") {
+    if contains_field("is_active") {
         let Some(is_active) = payload.is_active else {
             return Err("is_active 必须是布尔值".to_string());
         };
         updated.is_active = is_active;
     }
 
-    if let Some(value) = raw_payload.get("config") {
-        if !value.is_null() && !value.is_object() {
-            return Err("config 必须是对象或 null".to_string());
-        }
-        updated.config = if value.is_null() {
+    if contains_field("config") {
+        updated.config = if is_null_field("config") {
             None
         } else {
-            payload.config.clone()
+            let Some(config) = payload.config.as_ref() else {
+                return Err("config 必须是对象或 null".to_string());
+            };
+            if !config.is_object() {
+                return Err("config 必须是对象或 null".to_string());
+            }
+            Some(config.clone())
         };
     }
 
-    if let Some(value) = raw_payload.get("proxy") {
-        if value.is_null() {
+    if contains_field("proxy") {
+        if is_null_field("proxy") {
             updated.proxy = None;
         } else {
             let Some(mut proxy) = payload
@@ -276,14 +290,17 @@ pub fn apply_admin_provider_endpoint_update_fields(
         }
     }
 
-    if let Some(value) = raw_payload.get("format_acceptance_config") {
-        if !value.is_null() && !value.is_object() {
-            return Err("format_acceptance_config 必须是对象或 null".to_string());
-        }
-        updated.format_acceptance_config = if value.is_null() {
+    if contains_field("format_acceptance_config") {
+        updated.format_acceptance_config = if is_null_field("format_acceptance_config") {
             None
         } else {
-            payload.format_acceptance_config.clone()
+            let Some(config) = payload.format_acceptance_config.as_ref() else {
+                return Err("format_acceptance_config 必须是对象或 null".to_string());
+            };
+            if !config.is_object() {
+                return Err("format_acceptance_config 必须是对象或 null".to_string());
+            }
+            Some(config.clone())
         };
     }
 

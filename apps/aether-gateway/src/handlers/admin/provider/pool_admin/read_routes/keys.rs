@@ -3,7 +3,7 @@ use super::{
     parse_admin_pool_page, parse_admin_pool_page_size, parse_admin_pool_search,
     parse_admin_pool_status_filter, pool_payloads, pool_selection,
     read_admin_provider_pool_cooldown_key_ids, read_admin_provider_pool_runtime_state,
-    AdminProviderPoolRuntimeState, ProviderCatalogKeyListQuery,
+    AdminProviderPoolRuntimeState, ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
     ADMIN_POOL_PROVIDER_CATALOG_READER_UNAVAILABLE_DETAIL,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
@@ -118,6 +118,7 @@ pub(super) async fn build_admin_pool_list_keys_response(
                 },
                 offset: page_offset,
                 limit: page_size,
+                order: ProviderCatalogKeyListOrder::Name,
             })
             .await?;
         (key_page.items, key_page.total)

@@ -176,10 +176,18 @@ pub struct RequestMeta {
     pub headers: std::collections::HashMap<String, String>,
     #[serde(default = "default_timeout", deserialize_with = "deserialize_timeout")]
     pub timeout: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_redirects: Option<bool>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub http1_only: bool,
 }
 
 fn default_timeout() -> u64 {
     60
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn deserialize_timeout<'de, D>(deserializer: D) -> Result<u64, D::Error>

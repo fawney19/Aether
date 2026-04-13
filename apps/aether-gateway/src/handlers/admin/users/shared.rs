@@ -1,4 +1,5 @@
 use super::ADMIN_USERS_DATA_UNAVAILABLE_DETAIL;
+use crate::handlers::admin::shared::AdminTypedObjectPatch;
 use axum::{
     body::Body,
     http,
@@ -94,12 +95,7 @@ pub(super) struct AdminUpdateUserRequest {
     pub(super) is_active: Option<bool>,
 }
 
-#[derive(Debug, Default)]
-pub(super) struct AdminUpdateUserFieldPresence {
-    pub(super) allowed_providers: bool,
-    pub(super) allowed_api_formats: bool,
-    pub(super) allowed_models: bool,
-}
+pub(super) type AdminUpdateUserPatch = AdminTypedObjectPatch<AdminUpdateUserRequest>;
 
 pub(super) fn build_admin_users_data_unavailable_response() -> Response<Body> {
     (

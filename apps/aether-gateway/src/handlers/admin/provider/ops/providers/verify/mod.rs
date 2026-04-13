@@ -12,7 +12,10 @@ use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogPr
 pub(super) use proxy::{
     admin_provider_ops_anyrouter_acw_cookie, admin_provider_ops_resolve_proxy_snapshot,
 };
-pub(super) use request::admin_provider_ops_execute_proxy_json_request;
+pub(super) use request::{
+    admin_provider_ops_execute_json_request, admin_provider_ops_execute_proxy_json_request,
+    AdminProviderOpsExecuteJsonError,
+};
 pub(super) use sub2api::{
     admin_provider_ops_sub2api_exchange_token, admin_provider_ops_sub2api_request_url,
 };

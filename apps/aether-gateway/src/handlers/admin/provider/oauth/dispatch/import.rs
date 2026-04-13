@@ -98,7 +98,11 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
     };
 
     let token_payload = match state
-        .exchange_admin_provider_oauth_refresh_token(template, refresh_token_input)
+        .exchange_admin_provider_oauth_refresh_token(
+            template,
+            refresh_token_input,
+            proxy_node_id.as_deref(),
+        )
         .await
     {
         Ok(payload) => payload,

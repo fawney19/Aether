@@ -41,7 +41,7 @@ pub(crate) async fn build_admin_keys_grouped_by_format_payload(
 
     let (endpoints_result, keys_result) = tokio::join!(
         state.list_provider_catalog_endpoints_by_provider_ids(&provider_ids),
-        state.list_provider_catalog_keys_by_provider_ids(&provider_ids),
+        state.list_provider_catalog_key_summaries_by_provider_ids(&provider_ids),
     );
 
     let endpoint_base_url_by_provider_and_format = endpoints_result

@@ -67,6 +67,34 @@ pub(crate) async fn read_video_task_page(
     })
 }
 
+pub(crate) async fn read_video_task_page_summary(
+    state: &AppState,
+    filter: &VideoTaskQueryFilter,
+    page: usize,
+    page_size: usize,
+) -> Result<VideoTaskPageResponse, GatewayError> {
+    let page = page.max(1);
+    let page_size = page_size.clamp(1, 100);
+    let total = state.count_video_tasks(filter).await?;
+    let offset = page_size.saturating_mul(page.saturating_sub(1));
+    let items = state
+        .list_video_task_page_summary(filter, offset, page_size)
+        .await?;
+    let pages = if total == 0 {
+        0
+    } else {
+        ((total as usize) + page_size - 1) / page_size
+    };
+
+    Ok(VideoTaskPageResponse {
+        items,
+        total,
+        page,
+        page_size,
+        pages,
+    })
+}
+
 pub(crate) async fn read_video_task_detail(
     state: &AppState,
     task_id: &str,

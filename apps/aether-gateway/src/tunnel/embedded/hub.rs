@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aether_runtime::{BoundedQueueSender, MetricKind, MetricSample, QueueSendError};
 use axum::extract::ws::Message;
@@ -324,10 +324,46 @@ pub struct HubRouter {
     next_conn_id: AtomicU64,
     next_local_stream_id: AtomicU64,
     control_plane: ControlPlaneClient,
+    node_status_tx: mpsc::UnboundedSender<NodeStatusEvent>,
+}
+
+#[derive(Debug)]
+struct NodeStatusEvent {
+    node_id: String,
+    connected: bool,
+    conn_count: usize,
+    observed_at_unix_secs: u64,
 }
 
 impl HubRouter {
     pub fn new(control_plane: ControlPlaneClient) -> Arc<Self> {
+        let (node_status_tx, mut node_status_rx) = mpsc::unbounded_channel::<NodeStatusEvent>();
+        let worker_control_plane = control_plane.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                while let Some(event) = node_status_rx.recv().await {
+                    if let Err(error) = worker_control_plane
+                        .push_node_status(
+                            &event.node_id,
+                            event.connected,
+                            event.conn_count,
+                            event.observed_at_unix_secs,
+                        )
+                        .await
+                    {
+                        warn!(
+                            node_id = %event.node_id,
+                            connected = event.connected,
+                            conn_count = event.conn_count,
+                            observed_at_unix_secs = event.observed_at_unix_secs,
+                            error = %error,
+                            "failed to push node status to app control plane"
+                        );
+                    }
+                }
+            });
+        }
+
         Arc::new(Self {
             proxy_conns: RwLock::new(HashMap::new()),
             proxy_conns_by_id: DashMap::new(),
@@ -336,6 +372,7 @@ impl HubRouter {
             next_conn_id: AtomicU64::new(1),
             next_local_stream_id: AtomicU64::new(1),
             control_plane,
+            node_status_tx,
         })
     }
 
@@ -405,21 +442,21 @@ impl HubRouter {
     }
 
     fn notify_node_status(&self, node_id: String, connected: bool, conn_count: usize) {
-        let control_plane = self.control_plane.clone();
-        tokio::spawn(async move {
-            if let Err(error) = control_plane
-                .push_node_status(&node_id, connected, conn_count)
-                .await
-            {
-                warn!(
-                    node_id = %node_id,
-                    connected = connected,
-                    conn_count = conn_count,
-                    error = %error,
-                    "failed to push node status to app control plane"
-                );
-            }
-        });
+        let event = NodeStatusEvent {
+            node_id,
+            connected,
+            conn_count,
+            observed_at_unix_secs: current_unix_secs(),
+        };
+        if let Err(error) = self.node_status_tx.send(event) {
+            warn!(
+                node_id = %error.0.node_id,
+                connected = error.0.connected,
+                conn_count = error.0.conn_count,
+                observed_at_unix_secs = error.0.observed_at_unix_secs,
+                "node status worker unavailable"
+            );
+        }
     }
 
     fn get_proxy_conn(&self, node_id: &str) -> Option<Arc<ProxyConn>> {
@@ -750,8 +787,12 @@ impl HubRouter {
         let ack_payload = match self.control_plane.heartbeat_ack(&payload).await {
             Ok(payload) => payload,
             Err(error) => {
-                warn!(proxy_conn_id = proxy_conn_id, error = %error, "control-plane heartbeat callback failed");
-                b"{}".to_vec()
+                warn!(
+                    proxy_conn_id = proxy_conn_id,
+                    error = %error,
+                    "control-plane heartbeat callback failed; keeping heartbeat pending"
+                );
+                return;
             }
         };
         if let Some(pc) = self.proxy_conns_by_id.get(&proxy_conn_id) {
@@ -794,6 +835,13 @@ impl HubRouter {
             active_streams: self.local_streams.len(),
         }
     }
+}
+
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[derive(serde::Serialize)]
@@ -845,6 +893,8 @@ mod tests {
             url: "https://example.com".to_string(),
             headers: HashMap::new(),
             timeout: 30,
+            follow_redirects: None,
+            http1_only: false,
         }
     }
 
@@ -923,5 +973,35 @@ mod tests {
         let second_header = protocol::FrameHeader::parse(&second).expect("second body header");
         assert_eq!(second_header.msg_type, protocol::REQUEST_BODY);
         assert_ne!(second_header.flags & protocol::FLAG_END_STREAM, 0);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_callback_failure_does_not_send_fake_ack() {
+        let hub = HubRouter::new(ControlPlaneClient::local(
+            |_payload| Box::pin(async { Err("db unavailable".to_string()) }),
+            |_node_id, _connected, _conn_count, _observed_at_unix_secs| Box::pin(async { Ok(()) }),
+        ));
+
+        let (proxy_tx, mut proxy_rx) = bounded_queue(8);
+        let (proxy_close_tx, _) = watch::channel(false);
+        let proxy = Arc::new(ProxyConn::new(
+            300,
+            "node-3".to_string(),
+            "Node 3".to_string(),
+            proxy_tx,
+            proxy_close_tx,
+            16,
+        ));
+        hub.register_proxy(proxy);
+
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "node_id": "node-3",
+            "heartbeat_id": 99u64,
+        }))
+        .expect("payload should serialize");
+        let mut frame = protocol::encode_frame(1, protocol::HEARTBEAT_DATA, 0, &payload);
+        hub.handle_proxy_frame(300, &mut frame).await;
+
+        assert!(proxy_rx.try_recv().is_err());
     }
 }

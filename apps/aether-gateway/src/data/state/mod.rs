@@ -40,8 +40,9 @@ use aether_data::repository::oauth_providers::{
     UpsertOAuthProviderConfigRecord,
 };
 use aether_data::repository::proxy_nodes::{
-    ProxyNodeHeartbeatMutation, ProxyNodeReadRepository, ProxyNodeTunnelStatusMutation,
-    ProxyNodeWriteRepository, StoredProxyNode, StoredProxyNodeEvent,
+    ProxyNodeHeartbeatMutation, ProxyNodeReadRepository, ProxyNodeRegistrationMutation,
+    ProxyNodeRemoteConfigMutation, ProxyNodeTunnelStatusMutation, ProxyNodeWriteRepository,
+    StoredProxyNode, StoredProxyNodeEvent,
 };
 use aether_data::repository::shadow_results::{
     merge_shadow_result_sample, RecordShadowResultSample, ShadowResultLookupKey,

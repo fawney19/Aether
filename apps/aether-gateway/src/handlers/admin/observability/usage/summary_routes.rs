@@ -1,5 +1,5 @@
 use super::super::stats::{AdminStatsTimeRange, AdminStatsUsageFilter};
-use super::analytics::admin_usage_provider_key_names;
+use super::analytics::{admin_usage_api_key_names, admin_usage_provider_key_names};
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::query_param_value;
 use crate::GatewayError;
@@ -85,10 +85,13 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
             if requested_ids.is_none() && items.len() > 50 {
                 items.truncate(50);
             }
+            let api_key_names = admin_usage_api_key_names(state, &items).await?;
             let provider_key_names = admin_usage_provider_key_names(state, &items).await?;
 
             return Ok(Some(build_admin_usage_active_requests_response(
                 &items,
+                &api_key_names,
+                state.has_auth_api_key_data_reader(),
                 &provider_key_names,
             )));
         }
@@ -134,10 +137,30 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                 Err(detail) => return Ok(Some(admin_usage_bad_request_response(detail))),
             };
 
+            let user_ids: Vec<String> = usage
+                .iter()
+                .filter_map(|item| item.user_id.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let users_by_id: BTreeMap<String, aether_data::repository::users::StoredUserSummary> =
+                state.resolve_auth_user_summaries_by_ids(&user_ids).await?;
+            let api_key_names = admin_usage_api_key_names(state, &usage).await?;
+
             usage.retain(|item| {
-                admin_usage_matches_search(item, search.as_deref())
-                    && admin_usage_matches_username(item, username_filter.as_deref())
-                    && admin_usage_matches_eq(item.model.as_str(), model_filter.as_deref())
+                admin_usage_matches_search(
+                    item,
+                    search.as_deref(),
+                    &users_by_id,
+                    &api_key_names,
+                    state.has_auth_user_data_reader(),
+                    state.has_auth_api_key_data_reader(),
+                ) && admin_usage_matches_username(
+                    item,
+                    username_filter.as_deref(),
+                    &users_by_id,
+                    state.has_auth_user_data_reader(),
+                ) && admin_usage_matches_eq(item.model.as_str(), model_filter.as_deref())
                     && admin_usage_matches_eq(
                         item.provider_name.as_str(),
                         provider_filter.as_deref(),
@@ -153,24 +176,6 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
             });
             let total = usage.len();
 
-            let user_ids: Vec<String> = usage
-                .iter()
-                .filter_map(|item| item.user_id.clone())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
-            let users_by_id: BTreeMap<String, aether_data::repository::users::StoredUserSummary> =
-                if state.has_user_data_reader() && !user_ids.is_empty() {
-                    state
-                        .list_users_by_ids(&user_ids)
-                        .await?
-                        .into_iter()
-                        .map(|user| (user.id.clone(), user))
-                        .collect()
-                } else {
-                    BTreeMap::new()
-                };
-
             let provider_key_names = admin_usage_provider_key_names(state, &usage).await?;
 
             let records = usage
@@ -182,6 +187,9 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
             return Ok(Some(build_admin_usage_records_response(
                 &records,
                 &users_by_id,
+                &api_key_names,
+                state.has_auth_user_data_reader(),
+                state.has_auth_api_key_data_reader(),
                 &provider_key_names,
                 total,
                 limit,

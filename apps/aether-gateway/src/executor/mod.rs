@@ -16,8 +16,9 @@ pub(crate) use candidate_loop::{
 };
 pub(crate) use orchestration::*;
 pub(crate) use outcome::{
-    build_local_execution_exhaustion, record_failed_usage_for_exhausted_request,
-    LocalExecutionExhaustion, LocalExecutionRequestOutcome,
+    build_local_execution_exhaustion, build_local_execution_runtime_miss_context,
+    record_failed_usage_for_exhausted_request, record_failed_usage_for_runtime_miss_request,
+    LocalExecutionExhaustion, LocalExecutionRequestOutcome, LocalExecutionRuntimeMissContext,
 };
 pub(crate) use plan_fallback::{
     maybe_execute_stream_via_plan_fallback, maybe_execute_sync_via_plan_fallback,

@@ -4,6 +4,7 @@ use crate::{
     AdminBillingRuleWriteInput, GatewayError, LocalMutationOutcome,
 };
 use aether_data::postgres::PostgresPool;
+use futures_util::TryStreamExt;
 use sqlx::Row;
 
 fn internal(err: impl ToString) -> GatewayError {
@@ -136,7 +137,7 @@ WHERE ($1::TEXT IS NULL OR task_type = $1)
     )?;
 
     let offset = u64::from(page.saturating_sub(1) * page_size);
-    let rows = sqlx::query(
+    let mut rows = sqlx::query(
         r#"
 SELECT
   id,
@@ -162,16 +163,13 @@ LIMIT $4
     .bind(is_enabled)
     .bind(i64::try_from(offset).map_err(|err| GatewayError::Internal(err.to_string()))?)
     .bind(i64::from(page_size))
-    .fetch_all(pool)
-    .await
-    .map_err(internal)?;
+    .fetch(pool);
+    let mut items = Vec::new();
+    while let Some(row) = rows.try_next().await.map_err(internal)? {
+        items.push(admin_billing_rule_from_row(&row)?);
+    }
 
-    Ok((
-        rows.iter()
-            .map(admin_billing_rule_from_row)
-            .collect::<Result<Vec<_>, _>>()?,
-        total,
-    ))
+    Ok((items, total))
 }
 
 pub(crate) async fn find_admin_billing_rule(
@@ -374,7 +372,7 @@ WHERE ($1::TEXT IS NULL OR api_format = $1)
     )?;
 
     let offset = u64::from(page.saturating_sub(1) * page_size);
-    let rows = sqlx::query(
+    let mut rows = sqlx::query(
         r#"
 SELECT
   id,
@@ -406,16 +404,13 @@ LIMIT $6
     .bind(is_enabled)
     .bind(i64::try_from(offset).map_err(|err| GatewayError::Internal(err.to_string()))?)
     .bind(i64::from(page_size))
-    .fetch_all(pool)
-    .await
-    .map_err(internal)?;
+    .fetch(pool);
+    let mut items = Vec::new();
+    while let Some(row) = rows.try_next().await.map_err(internal)? {
+        items.push(admin_billing_collector_from_row(&row)?);
+    }
 
-    Ok((
-        rows.iter()
-            .map(admin_billing_collector_from_row)
-            .collect::<Result<Vec<_>, _>>()?,
-        total,
-    ))
+    Ok((items, total))
 }
 
 pub(crate) async fn find_admin_billing_collector(

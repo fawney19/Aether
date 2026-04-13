@@ -32,10 +32,12 @@ pub(super) async fn load_user_leaderboard_metadata(
                 },
             );
         }
-        return Ok(metadata);
     }
 
     for user_id in user_ids {
+        if metadata.contains_key(user_id) {
+            continue;
+        }
         let Some(user) = state.find_user_auth_by_id(user_id).await? else {
             continue;
         };

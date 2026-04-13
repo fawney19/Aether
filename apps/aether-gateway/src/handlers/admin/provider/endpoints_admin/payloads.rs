@@ -1,3 +1,4 @@
+use crate::handlers::admin::shared::AdminTypedObjectPatch;
 use aether_admin::provider::endpoints as admin_provider_endpoints_pure;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
@@ -82,3 +83,6 @@ pub(crate) struct AdminProviderEndpointUpdateRequest {
     #[serde(default)]
     pub(crate) format_acceptance_config: Option<serde_json::Value>,
 }
+
+pub(crate) type AdminProviderEndpointUpdatePatch =
+    AdminTypedObjectPatch<AdminProviderEndpointUpdateRequest>;

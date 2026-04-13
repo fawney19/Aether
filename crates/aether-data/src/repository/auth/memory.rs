@@ -385,15 +385,15 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             StoredAuthApiKeySnapshot {
                 api_key_id: record.api_key_id.clone(),
                 api_key_name: record.name.clone(),
-                api_key_is_active: true,
+                api_key_is_active: record.is_active,
                 api_key_is_locked: false,
                 api_key_is_standalone: false,
                 api_key_rate_limit: Some(record.rate_limit),
                 api_key_concurrent_limit: Some(record.concurrent_limit),
-                api_key_expires_at_unix_secs: None,
-                api_key_allowed_providers: None,
-                api_key_allowed_api_formats: None,
-                api_key_allowed_models: None,
+                api_key_expires_at_unix_secs: record.expires_at_unix_secs,
+                api_key_allowed_providers: record.allowed_providers.clone(),
+                api_key_allowed_api_formats: record.allowed_api_formats.clone(),
+                api_key_allowed_models: record.allowed_models.clone(),
                 ..template
             }
         } else {
@@ -413,15 +413,24 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                 None,
                 record.api_key_id.clone(),
                 record.name.clone(),
-                true,
+                record.is_active,
                 false,
                 false,
                 Some(record.rate_limit),
                 Some(record.concurrent_limit),
-                None,
-                None,
-                None,
-                None,
+                record.expires_at_unix_secs.map(|value| value as i64),
+                record
+                    .allowed_providers
+                    .as_ref()
+                    .map(|value| serde_json::json!(value)),
+                record
+                    .allowed_api_formats
+                    .as_ref()
+                    .map(|value| serde_json::json!(value)),
+                record
+                    .allowed_models
+                    .as_ref()
+                    .map(|value| serde_json::json!(value)),
             )?
         };
 
@@ -431,17 +440,26 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             record.key_hash.clone(),
             record.key_encrypted,
             record.name,
-            None,
-            None,
-            None,
+            record
+                .allowed_providers
+                .as_ref()
+                .map(|value| serde_json::json!(value)),
+            record
+                .allowed_api_formats
+                .as_ref()
+                .map(|value| serde_json::json!(value)),
+            record
+                .allowed_models
+                .as_ref()
+                .map(|value| serde_json::json!(value)),
             Some(record.rate_limit),
             Some(record.concurrent_limit),
-            None,
-            true,
-            None,
-            false,
-            0,
-            0.0,
+            record.force_capabilities,
+            record.is_active,
+            record.expires_at_unix_secs.map(|value| value as i64),
+            record.auto_delete_on_expiry,
+            record.total_requests as i64,
+            record.total_cost_usd,
             false,
         )?;
 
@@ -487,12 +505,12 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             StoredAuthApiKeySnapshot {
                 api_key_id: record.api_key_id.clone(),
                 api_key_name: record.name.clone(),
-                api_key_is_active: true,
+                api_key_is_active: record.is_active,
                 api_key_is_locked: false,
                 api_key_is_standalone: true,
                 api_key_rate_limit: Some(record.rate_limit),
                 api_key_concurrent_limit: Some(record.concurrent_limit),
-                api_key_expires_at_unix_secs: None,
+                api_key_expires_at_unix_secs: record.expires_at_unix_secs,
                 api_key_allowed_providers: record.allowed_providers.clone(),
                 api_key_allowed_api_formats: record.allowed_api_formats.clone(),
                 api_key_allowed_models: record.allowed_models.clone(),
@@ -515,12 +533,12 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                 None,
                 record.api_key_id.clone(),
                 record.name.clone(),
-                true,
+                record.is_active,
                 false,
                 true,
                 Some(record.rate_limit),
                 Some(record.concurrent_limit),
-                None,
+                record.expires_at_unix_secs.map(|value| value as i64),
                 record
                     .allowed_providers
                     .as_ref()
@@ -556,12 +574,12 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
                 .map(|value| serde_json::json!(value)),
             Some(record.rate_limit),
             Some(record.concurrent_limit),
-            None,
-            true,
-            None,
-            false,
-            0,
-            0.0,
+            record.force_capabilities,
+            record.is_active,
+            record.expires_at_unix_secs.map(|value| value as i64),
+            record.auto_delete_on_expiry,
+            record.total_requests as i64,
+            record.total_cost_usd,
             true,
         )?;
 

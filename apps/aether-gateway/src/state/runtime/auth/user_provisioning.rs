@@ -243,6 +243,56 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn initialize_auth_api_key_wallet(
+        &self,
+        api_key_id: &str,
+        initial_gift_usd: f64,
+        unlimited: bool,
+    ) -> Result<Option<aether_data::repository::wallet::StoredWalletSnapshot>, GatewayError> {
+        #[cfg(test)]
+        if let Some(store) = self.auth_wallet_store.as_ref() {
+            let gift_balance = if unlimited {
+                0.0
+            } else {
+                initial_gift_usd.max(0.0)
+            };
+            let now_unix_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let wallet = aether_data::repository::wallet::StoredWalletSnapshot::new(
+                uuid::Uuid::new_v4().to_string(),
+                None,
+                Some(api_key_id.to_string()),
+                0.0,
+                gift_balance,
+                if unlimited {
+                    "unlimited".to_string()
+                } else {
+                    "finite".to_string()
+                },
+                "USD".to_string(),
+                "active".to_string(),
+                0.0,
+                0.0,
+                0.0,
+                gift_balance,
+                now_unix_secs,
+            )
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+            store
+                .lock()
+                .expect("auth wallet store should lock")
+                .insert(wallet.id.clone(), wallet.clone());
+            return Ok(Some(wallet));
+        }
+
+        self.data
+            .initialize_auth_api_key_wallet(api_key_id, initial_gift_usd, unlimited)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn update_auth_user_wallet_limit_mode(
         &self,
         user_id: &str,
@@ -265,6 +315,146 @@ impl AppState {
 
         self.data
             .update_auth_user_wallet_limit_mode(user_id, limit_mode)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn update_auth_api_key_wallet_limit_mode(
+        &self,
+        api_key_id: &str,
+        limit_mode: &str,
+    ) -> Result<Option<aether_data::repository::wallet::StoredWalletSnapshot>, GatewayError> {
+        #[cfg(test)]
+        if let Some(store) = self.auth_wallet_store.as_ref() {
+            let mut guard = store.lock().expect("auth wallet store should lock");
+            let Some((wallet_id, wallet)) = guard
+                .iter_mut()
+                .find(|(_, wallet)| wallet.api_key_id.as_deref() == Some(api_key_id))
+            else {
+                return Ok(None);
+            };
+            let _ = wallet_id;
+            wallet.limit_mode = limit_mode.to_string();
+            wallet.updated_at_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
+            return Ok(Some(wallet.clone()));
+        }
+
+        self.data
+            .update_auth_api_key_wallet_limit_mode(api_key_id, limit_mode)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn update_auth_user_wallet_snapshot(
+        &self,
+        user_id: &str,
+        balance: f64,
+        gift_balance: f64,
+        limit_mode: &str,
+        currency: &str,
+        status: &str,
+        total_recharged: f64,
+        total_consumed: f64,
+        total_refunded: f64,
+        total_adjusted: f64,
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<Option<aether_data::repository::wallet::StoredWalletSnapshot>, GatewayError> {
+        #[cfg(test)]
+        if let Some(store) = self.auth_wallet_store.as_ref() {
+            let mut guard = store.lock().expect("auth wallet store should lock");
+            let Some((_, wallet)) = guard
+                .iter_mut()
+                .find(|(_, wallet)| wallet.user_id.as_deref() == Some(user_id))
+            else {
+                return Ok(None);
+            };
+            wallet.balance = balance;
+            wallet.gift_balance = gift_balance;
+            wallet.limit_mode = limit_mode.to_string();
+            wallet.currency = currency.to_string();
+            wallet.status = status.to_string();
+            wallet.total_recharged = total_recharged;
+            wallet.total_consumed = total_consumed;
+            wallet.total_refunded = total_refunded;
+            wallet.total_adjusted = total_adjusted;
+            if let Some(updated_at_unix_secs) = updated_at_unix_secs {
+                wallet.updated_at_unix_secs = updated_at_unix_secs;
+            }
+            return Ok(Some(wallet.clone()));
+        }
+
+        self.data
+            .update_auth_user_wallet_snapshot(
+                user_id,
+                balance,
+                gift_balance,
+                limit_mode,
+                currency,
+                status,
+                total_recharged,
+                total_consumed,
+                total_refunded,
+                total_adjusted,
+                updated_at_unix_secs,
+            )
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn update_auth_api_key_wallet_snapshot(
+        &self,
+        api_key_id: &str,
+        balance: f64,
+        gift_balance: f64,
+        limit_mode: &str,
+        currency: &str,
+        status: &str,
+        total_recharged: f64,
+        total_consumed: f64,
+        total_refunded: f64,
+        total_adjusted: f64,
+        updated_at_unix_secs: Option<u64>,
+    ) -> Result<Option<aether_data::repository::wallet::StoredWalletSnapshot>, GatewayError> {
+        #[cfg(test)]
+        if let Some(store) = self.auth_wallet_store.as_ref() {
+            let mut guard = store.lock().expect("auth wallet store should lock");
+            let Some((_, wallet)) = guard
+                .iter_mut()
+                .find(|(_, wallet)| wallet.api_key_id.as_deref() == Some(api_key_id))
+            else {
+                return Ok(None);
+            };
+            wallet.balance = balance;
+            wallet.gift_balance = gift_balance;
+            wallet.limit_mode = limit_mode.to_string();
+            wallet.currency = currency.to_string();
+            wallet.status = status.to_string();
+            wallet.total_recharged = total_recharged;
+            wallet.total_consumed = total_consumed;
+            wallet.total_refunded = total_refunded;
+            wallet.total_adjusted = total_adjusted;
+            if let Some(updated_at_unix_secs) = updated_at_unix_secs {
+                wallet.updated_at_unix_secs = updated_at_unix_secs;
+            }
+            return Ok(Some(wallet.clone()));
+        }
+
+        self.data
+            .update_auth_api_key_wallet_snapshot(
+                api_key_id,
+                balance,
+                gift_balance,
+                limit_mode,
+                currency,
+                status,
+                total_recharged,
+                total_consumed,
+                total_refunded,
+                total_adjusted,
+                updated_at_unix_secs,
+            )
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }

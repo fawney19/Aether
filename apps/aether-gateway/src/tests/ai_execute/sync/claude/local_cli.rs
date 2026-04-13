@@ -7,6 +7,7 @@ use super::{
     StoredAuthApiKeySnapshot, StoredMinimalCandidateSelectionRow, StoredProviderCatalogEndpoint,
     StoredProviderCatalogKey, StoredProviderCatalogProvider, StoredProviderModelMapping,
     DEVELOPMENT_ENCRYPTION_KEY, EXECUTION_PATH_EXECUTION_RUNTIME_SYNC, EXECUTION_PATH_HEADER,
+    EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS, LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER,
     TRACE_ID_HEADER,
 };
 
@@ -727,6 +728,250 @@ async fn gateway_returns_claude_cli_error_for_local_sync_failure() {
         !*seen_report.lock().expect("mutex should lock"),
         "report-sync should stay local when request candidate persistence is available"
     );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_marks_claude_cli_cross_format_runtime_miss_when_format_conversion_is_disabled() {
+    fn hash_api_key(value: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(value.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn sample_auth_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnapshot {
+        StoredAuthApiKeySnapshot::new(
+            user_id.to_string(),
+            "alice".to_string(),
+            Some("alice@example.com".to_string()),
+            "user".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            None,
+            Some(serde_json::json!(["claude:cli"])),
+            Some(serde_json::json!(["gpt-5.4"])),
+            api_key_id.to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            Some(60),
+            Some(5),
+            Some(4_102_444_800),
+            None,
+            Some(serde_json::json!(["claude:cli"])),
+            Some(serde_json::json!(["gpt-5.4"])),
+        )
+        .expect("auth snapshot should build")
+    }
+
+    fn sample_candidate_row() -> StoredMinimalCandidateSelectionRow {
+        StoredMinimalCandidateSelectionRow {
+            provider_id: "provider-claude-cli-openai-local-miss-1".to_string(),
+            provider_name: "RightCode".to_string(),
+            provider_type: "custom".to_string(),
+            provider_priority: 10,
+            provider_is_active: true,
+            endpoint_id: "endpoint-claude-cli-openai-local-miss-1".to_string(),
+            endpoint_api_format: "openai:cli".to_string(),
+            endpoint_api_family: Some("openai".to_string()),
+            endpoint_kind: Some("cli".to_string()),
+            endpoint_is_active: true,
+            key_id: "key-claude-cli-openai-local-miss-1".to_string(),
+            key_name: "codex".to_string(),
+            key_auth_type: "bearer".to_string(),
+            key_is_active: true,
+            key_api_formats: Some(vec!["openai:cli".to_string()]),
+            key_allowed_models: None,
+            key_capabilities: None,
+            key_internal_priority: 5,
+            key_global_priority_by_format: Some(serde_json::json!({"openai:cli": 1})),
+            model_id: "model-claude-cli-openai-local-miss-1".to_string(),
+            global_model_id: "global-model-claude-cli-openai-local-miss-1".to_string(),
+            global_model_name: "gpt-5.4".to_string(),
+            global_model_mappings: None,
+            global_model_supports_streaming: Some(true),
+            model_provider_model_name: "gpt-5.4".to_string(),
+            model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
+                name: "gpt-5.4".to_string(),
+                priority: 1,
+                api_formats: Some(vec!["openai:cli".to_string()]),
+            }]),
+            model_supports_streaming: Some(true),
+            model_is_active: true,
+            model_is_available: true,
+        }
+    }
+
+    fn sample_provider_catalog_provider() -> StoredProviderCatalogProvider {
+        StoredProviderCatalogProvider::new(
+            "provider-claude-cli-openai-local-miss-1".to_string(),
+            "RightCode".to_string(),
+            Some("https://right.codes".to_string()),
+            "custom".to_string(),
+        )
+        .expect("provider should build")
+        .with_transport_fields(
+            true,
+            false,
+            false,
+            None,
+            Some(2),
+            None,
+            Some(20.0),
+            None,
+            None,
+        )
+    }
+
+    fn sample_provider_catalog_endpoint() -> StoredProviderCatalogEndpoint {
+        StoredProviderCatalogEndpoint::new(
+            "endpoint-claude-cli-openai-local-miss-1".to_string(),
+            "provider-claude-cli-openai-local-miss-1".to_string(),
+            "openai:cli".to_string(),
+            Some("openai".to_string()),
+            Some("cli".to_string()),
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://right.codes/codex".to_string(),
+            None,
+            None,
+            Some(2),
+            Some("/v1/messages".to_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build")
+    }
+
+    fn sample_provider_catalog_key() -> StoredProviderCatalogKey {
+        StoredProviderCatalogKey::new(
+            "key-claude-cli-openai-local-miss-1".to_string(),
+            "provider-claude-cli-openai-local-miss-1".to_string(),
+            "codex".to_string(),
+            "bearer".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+        .with_transport_fields(
+            Some(serde_json::json!(["openai:cli"])),
+            encrypt_python_fernet_plaintext(
+                DEVELOPMENT_ENCRYPTION_KEY,
+                "sk-upstream-openai-cli-local-miss",
+            )
+            .expect("api key should encrypt"),
+            None,
+            None,
+            Some(serde_json::json!({"openai:cli": 1})),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("key transport should build")
+    }
+
+    let public_hits = Arc::new(Mutex::new(0usize));
+    let public_hits_clone = Arc::clone(&public_hits);
+    let upstream = Router::new().route(
+        "/v1/messages",
+        any(move |_request: Request| {
+            let public_hits_inner = Arc::clone(&public_hits_clone);
+            async move {
+                *public_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::IM_A_TEAPOT, Body::from("public-route-hit"))
+            }
+        }),
+    );
+    let execution_runtime = Router::new();
+
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-client-claude-cli-openai-local-miss")),
+        sample_auth_snapshot(
+            "api-key-claude-cli-openai-local-miss-1",
+            "user-claude-cli-openai-local-miss-1",
+        ),
+    )]));
+    let candidate_selection_repository =
+        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            sample_candidate_row(),
+        ]));
+    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider_catalog_provider()],
+        vec![sample_provider_catalog_endpoint()],
+        vec![sample_provider_catalog_key()],
+    ));
+
+    let (_upstream_url, upstream_handle) = start_server(upstream).await;
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway_state = build_state_with_execution_runtime_override(execution_runtime_url.clone())
+    .with_data_state_for_tests(
+        crate::data::GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
+            auth_repository,
+            candidate_selection_repository,
+            provider_catalog_repository,
+            Arc::clone(&request_candidate_repository),
+            DEVELOPMENT_ENCRYPTION_KEY,
+        ),
+    );
+    let gateway = build_router_with_state(gateway_state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/messages?beta=true"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header(
+            http::header::AUTHORIZATION,
+            "Bearer sk-client-claude-cli-openai-local-miss",
+        )
+        .header(TRACE_ID_HEADER, "trace-claude-cli-openai-local-miss-123")
+        .body("{\"model\":\"gpt-5.4\",\"messages\":[]}")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(EXECUTION_PATH_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some(EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS)
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some("all_candidates_skipped")
+    );
+    let response_json: serde_json::Value = response.json().await.expect("body should parse");
+    assert_eq!(response_json["error"]["type"], "http_error");
+    assert_eq!(
+        response_json["error"]["message"],
+        "没有可用的提供商支持模型 gpt-5.4 的同步请求"
+    );
+
+    let stored_candidates = request_candidate_repository
+        .list_by_request_id("trace-claude-cli-openai-local-miss-123")
+        .await
+        .expect("request candidate trace should read");
+    assert_eq!(stored_candidates.len(), 1);
+    assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Skipped);
+    assert_eq!(
+        stored_candidates[0].skip_reason.as_deref(),
+        Some("format_conversion_disabled")
+    );
+    assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
     execution_runtime_handle.abort();

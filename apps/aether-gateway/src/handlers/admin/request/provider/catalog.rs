@@ -69,6 +69,18 @@ impl<'a> AdminAppState<'a> {
             .await
     }
 
+    pub(crate) async fn list_provider_catalog_key_summaries_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<
+        Vec<aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey>,
+        GatewayError,
+    > {
+        self.app
+            .list_provider_catalog_key_summaries_by_provider_ids(provider_ids)
+            .await
+    }
+
     pub(crate) async fn list_provider_catalog_keys_by_ids(
         &self,
         key_ids: &[String],

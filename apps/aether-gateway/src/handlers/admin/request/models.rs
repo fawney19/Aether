@@ -1,7 +1,7 @@
 use super::AdminAppState;
 use crate::handlers::admin::provider::shared::payloads::{
     AdminImportProviderModelsRequest, AdminProviderModelCreateRequest,
-    AdminProviderModelUpdateRequest,
+    AdminProviderModelUpdatePatch,
 };
 use crate::handlers::admin::shared::{normalize_json_array, normalize_json_object};
 use crate::GatewayError;
@@ -128,12 +128,12 @@ impl<'a> AdminAppState<'a> {
     pub(crate) async fn build_admin_provider_model_update_record(
         &self,
         existing: &StoredAdminProviderModel,
-        raw_payload: &serde_json::Map<String, serde_json::Value>,
-        payload: AdminProviderModelUpdateRequest,
+        patch: AdminProviderModelUpdatePatch,
     ) -> Result<UpsertAdminProviderModelRecord, String> {
-        let provider_model_name = if let Some(value) = raw_payload.get("provider_model_name") {
+        let (fields, payload) = patch.into_parts();
+        let provider_model_name = if fields.contains("provider_model_name") {
             let Some(name) = payload.provider_model_name.as_deref() else {
-                return Err(if value.is_null() {
+                return Err(if fields.is_null("provider_model_name") {
                     "provider_model_name 不能为空".to_string()
                 } else {
                     "provider_model_name 必须是字符串".to_string()
@@ -155,9 +155,9 @@ impl<'a> AdminAppState<'a> {
             existing.provider_model_name.clone()
         };
 
-        let global_model_id = if let Some(value) = raw_payload.get("global_model_id") {
+        let global_model_id = if fields.contains("global_model_id") {
             let Some(global_model_id) = payload.global_model_id.as_deref() else {
-                return Err(if value.is_null() {
+                return Err(if fields.is_null("global_model_id") {
                     "global_model_id 不能为空".to_string()
                 } else {
                     "global_model_id 必须是字符串".to_string()
@@ -175,7 +175,7 @@ impl<'a> AdminAppState<'a> {
             existing.global_model_id.clone()
         };
 
-        let price_per_request = if raw_payload.contains_key("price_per_request") {
+        let price_per_request = if fields.contains("price_per_request") {
             admin_provider_models_write_pure::normalize_optional_price(
                 payload.price_per_request,
                 "price_per_request",
@@ -183,17 +183,17 @@ impl<'a> AdminAppState<'a> {
         } else {
             existing.price_per_request
         };
-        let tiered_pricing = if raw_payload.contains_key("tiered_pricing") {
+        let tiered_pricing = if fields.contains("tiered_pricing") {
             normalize_json_object(payload.tiered_pricing, "tiered_pricing")?
         } else {
             existing.tiered_pricing.clone()
         };
-        let provider_model_mappings = if raw_payload.contains_key("provider_model_mappings") {
+        let provider_model_mappings = if fields.contains("provider_model_mappings") {
             normalize_json_array(payload.provider_model_mappings, "provider_model_mappings")?
         } else {
             existing.provider_model_mappings.clone()
         };
-        let config = if raw_payload.contains_key("config") {
+        let config = if fields.contains("config") {
             normalize_json_object(payload.config, "config")?
         } else {
             existing.config.clone()
@@ -206,22 +206,22 @@ impl<'a> AdminAppState<'a> {
             provider_model_mappings,
             price_per_request,
             tiered_pricing,
-            if raw_payload.contains_key("supports_vision") {
+            if fields.contains("supports_vision") {
                 payload.supports_vision
             } else {
                 existing.supports_vision
             },
-            if raw_payload.contains_key("supports_function_calling") {
+            if fields.contains("supports_function_calling") {
                 payload.supports_function_calling
             } else {
                 existing.supports_function_calling
             },
-            if raw_payload.contains_key("supports_streaming") {
+            if fields.contains("supports_streaming") {
                 payload.supports_streaming
             } else {
                 existing.supports_streaming
             },
-            if raw_payload.contains_key("supports_extended_thinking") {
+            if fields.contains("supports_extended_thinking") {
                 payload.supports_extended_thinking
             } else {
                 existing.supports_extended_thinking

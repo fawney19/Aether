@@ -22,6 +22,8 @@ pub struct AppState {
     pub dns_cache: Arc<DnsCache>,
     /// Hyper client for tunnel upstream requests with validated DNS and connection timing.
     pub upstream_client: UpstreamClient,
+    /// Dedicated Hyper client that forces HTTP/1.1 for upstreams that break on H2/ALPN.
+    pub upstream_http1_client: UpstreamClient,
     /// Shared TLS config for tunnel WebSocket connections (avoids re-parsing root CAs on each reconnect).
     pub tunnel_tls_config: Arc<rustls::ClientConfig>,
     /// Optional per-process stream admission gate.

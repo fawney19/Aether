@@ -1,4 +1,5 @@
 use aether_contracts::{ExecutionPlan, RequestBody};
+use tracing::debug;
 
 use super::super::{
     augment_sync_report_context, generic_decision_missing_exact_provider_request,
@@ -263,12 +264,12 @@ pub(crate) fn build_openai_cli_stream_plan_from_decision(
     else {
         return Ok(None);
     };
-    let url = if let Some(upstream_url) = payload
+    let (url, url_source) = if let Some(upstream_url) = payload
         .upstream_url
         .clone()
         .filter(|value| !value.trim().is_empty())
     {
-        upstream_url
+        (upstream_url, "upstream_url")
     } else {
         let Some(upstream_base_url) = payload
             .upstream_base_url
@@ -277,7 +278,10 @@ pub(crate) fn build_openai_cli_stream_plan_from_decision(
         else {
             return Ok(None);
         };
-        build_openai_cli_url(&upstream_base_url, parts.uri.query(), compact)
+        (
+            build_openai_cli_url(&upstream_base_url, parts.uri.query(), compact),
+            "upstream_base_url",
+        )
     };
     let Some(provider_request_body_value) = payload.provider_request_body.clone() else {
         return Ok(None);
@@ -329,6 +333,27 @@ pub(crate) fn build_openai_cli_stream_plan_from_decision(
         tls_profile: payload.tls_profile.clone(),
         timeouts: payload.timeouts.clone(),
     };
+
+    debug!(
+        event_name = "local_openai_cli_stream_plan_built",
+        log_type = "debug",
+        request_id = %plan.request_id,
+        candidate_id = ?plan.candidate_id,
+        provider_id = %plan.provider_id,
+        endpoint_id = %plan.endpoint_id,
+        key_id = %plan.key_id,
+        downstream_path = %parts.uri.path(),
+        downstream_query = ?parts.uri.query(),
+        url_source,
+        decision_upstream_base_url = ?payload.upstream_base_url,
+        decision_upstream_url = ?payload.upstream_url,
+        plan_url = %plan.url,
+        client_api_format = %plan.client_api_format,
+        provider_api_format = %plan.provider_api_format,
+        upstream_is_stream = payload.upstream_is_stream,
+        compact,
+        "gateway built local openai cli stream execution plan"
+    );
 
     Ok(Some(LocalStreamPlanAndReport {
         plan,
@@ -446,12 +471,14 @@ mod tests {
                 "prompt_cache_key",
             ]
         );
-        let report_context = built
-            .report_context
-            .as_ref()
-            .and_then(|value| value.get("provider_request_body"))
-            .expect("report context should contain provider request body");
-        assert_eq!(object_keys(report_context), object_keys(plan_body));
+        assert!(
+            built
+                .report_context
+                .as_ref()
+                .and_then(|value| value.get("provider_request_body"))
+                .is_none(),
+            "report context should not duplicate provider request body"
+        );
     }
 
     #[test]

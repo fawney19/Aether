@@ -1,0 +1,122 @@
+{
+  "version": "2.1",
+  "exported_at": "2026-04-11T10:00:01Z",
+  "global_models": [
+    {
+      "name": "legacy-gpt-5-v21",
+      "display_name": "Legacy GPT 5 v21",
+      "default_price_per_request": 0.03,
+      "default_tiered_pricing": {
+        "tiers": [
+          {
+            "up_to": null,
+            "input_price_per_1m": 4.0,
+            "output_price_per_1m": 20.0
+          }
+        ]
+      },
+      "supported_capabilities": [
+        "streaming"
+      ],
+      "config": {
+        "quality": "high"
+      },
+      "is_active": true
+    }
+  ],
+  "providers": [
+    {
+      "name": "legacy-provider-v21",
+      "provider_type": "custom",
+      "website": "https://legacy-v21.example.com",
+      "billing_type": "pay_as_you_go",
+      "provider_priority": 11,
+      "keep_priority_on_conversion": false,
+      "enable_format_conversion": true,
+      "is_active": true,
+      "max_retries": 2,
+      "request_timeout": 30.0,
+      "stream_first_byte_timeout": 15.0,
+      "endpoints": [
+        {
+          "api_format": "openai:chat",
+          "base_url": "https://legacy-v21.example.com/v1",
+          "max_retries": 2,
+          "is_active": true
+        }
+      ],
+      "api_keys": [
+        {
+          "name": "legacy-key-v21",
+          "api_formats": [
+            "openai:chat"
+          ],
+          "auth_type": "api_key",
+          "api_key": "sk-legacy-v21",
+          "internal_priority": 5,
+          "is_active": true
+        }
+      ],
+      "models": [
+        {
+          "global_model_name": "legacy-gpt-5-v21",
+          "provider_model_name": "legacy-gpt-5-v21",
+          "price_per_request": 0.03,
+          "tiered_pricing": {
+            "tiers": [
+              {
+                "up_to": null,
+                "input_price_per_1m": 4.0,
+                "output_price_per_1m": 20.0
+              }
+            ]
+          },
+          "supports_vision": false,
+          "supports_function_calling": true,
+          "supports_streaming": true,
+          "supports_extended_thinking": false,
+          "supports_image_generation": false,
+          "is_active": true
+        }
+      ]
+    }
+  ],
+  "ldap_config": {
+    "server_url": "ldaps://legacy-v21.example.com",
+    "bind_dn": "cn=admin,dc=example,dc=com",
+    "bind_password": "bind-secret-v21",
+    "base_dn": "dc=example,dc=com",
+    "user_search_filter": "(uid={username})",
+    "username_attr": "uid",
+    "email_attr": "mail",
+    "display_name_attr": "displayName",
+    "is_enabled": false,
+    "is_exclusive": false,
+    "use_starttls": true,
+    "connect_timeout": 10
+  },
+  "oauth_providers": [
+    {
+      "provider_type": "linuxdo-v21",
+      "display_name": "Linux Do v21",
+      "client_id": "linuxdo-client-v21",
+      "client_secret": "linuxdo-secret-v21",
+      "authorization_url_override": "https://connect.linux.do/oauth2/authorize",
+      "token_url_override": "https://connect.linux.do/oauth2/token",
+      "userinfo_url_override": "https://connect.linux.do/api/user",
+      "scopes": [
+        "openid",
+        "profile"
+      ],
+      "redirect_uri": "https://backend.example.com/oauth/callback",
+      "frontend_callback_url": "https://frontend.example.com/auth/callback",
+      "attribute_mapping": {
+        "email": "email"
+      },
+      "extra_config": {
+        "team": true
+      },
+      "is_enabled": true
+    }
+  ]
+}

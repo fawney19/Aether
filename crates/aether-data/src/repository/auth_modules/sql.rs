@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures_util::{stream::TryStream, TryStreamExt};
 use sqlx::{postgres::PgRow, PgPool, Row};
 
 use super::types::{
@@ -145,16 +146,30 @@ impl SqlxAuthModuleRepository {
     }
 }
 
+async fn collect_query_rows<T, S>(
+    mut rows: S,
+    map_row: fn(&PgRow) -> Result<T, DataLayerError>,
+) -> Result<Vec<T>, DataLayerError>
+where
+    S: TryStream<Ok = PgRow, Error = sqlx::Error> + Unpin,
+{
+    let mut items = Vec::new();
+    while let Some(row) = rows.try_next().await.map_postgres_err()? {
+        items.push(map_row(&row)?);
+    }
+    Ok(items)
+}
+
 #[async_trait]
 impl AuthModuleReadRepository for SqlxAuthModuleReadRepository {
     async fn list_enabled_oauth_providers(
         &self,
     ) -> Result<Vec<StoredOAuthProviderModuleConfig>, DataLayerError> {
-        let rows = sqlx::query(LIST_ENABLED_OAUTH_PROVIDERS_SQL)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_oauth_row).collect()
+        collect_query_rows(
+            sqlx::query(LIST_ENABLED_OAUTH_PROVIDERS_SQL).fetch(&self.pool),
+            map_oauth_row,
+        )
+        .await
     }
 
     async fn get_ldap_config(&self) -> Result<Option<StoredLdapModuleConfig>, DataLayerError> {
@@ -171,11 +186,11 @@ impl AuthModuleReadRepository for SqlxAuthModuleRepository {
     async fn list_enabled_oauth_providers(
         &self,
     ) -> Result<Vec<StoredOAuthProviderModuleConfig>, DataLayerError> {
-        let rows = sqlx::query(LIST_ENABLED_OAUTH_PROVIDERS_SQL)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_oauth_row).collect()
+        collect_query_rows(
+            sqlx::query(LIST_ENABLED_OAUTH_PROVIDERS_SQL).fetch(&self.pool),
+            map_oauth_row,
+        )
+        .await
     }
 
     async fn get_ldap_config(&self) -> Result<Option<StoredLdapModuleConfig>, DataLayerError> {

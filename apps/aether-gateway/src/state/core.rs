@@ -40,6 +40,8 @@ use crate::maintenance::spawn_gemini_file_mapping_cleanup_worker;
 use crate::maintenance::spawn_pending_cleanup_worker;
 use crate::maintenance::spawn_pool_monitor_worker;
 use crate::maintenance::spawn_provider_checkin_worker;
+use crate::maintenance::spawn_proxy_node_stale_cleanup_worker;
+use crate::maintenance::spawn_proxy_upgrade_rollout_worker;
 use crate::maintenance::spawn_request_candidate_cleanup_worker;
 use crate::maintenance::spawn_stats_aggregation_worker;
 use crate::maintenance::spawn_stats_hourly_aggregation_worker;
@@ -250,6 +252,28 @@ impl AppState {
         Ok(true)
     }
 
+    pub async fn pending_postgres_migrations(
+        &self,
+    ) -> Result<Option<Vec<aether_data::migrate::PendingMigrationInfo>>, sqlx::migrate::MigrateError>
+    {
+        let Some(pool) = self.postgres_pool() else {
+            return Ok(None);
+        };
+        Ok(Some(aether_data::migrate::pending_migrations(&pool).await?))
+    }
+
+    pub async fn prepare_postgres_for_startup(
+        &self,
+    ) -> Result<Option<Vec<aether_data::migrate::PendingMigrationInfo>>, sqlx::migrate::MigrateError>
+    {
+        let Some(pool) = self.postgres_pool() else {
+            return Ok(None);
+        };
+        Ok(Some(
+            aether_data::migrate::prepare_database_for_startup(&pool).await?,
+        ))
+    }
+
     pub fn with_video_task_poller_config(mut self, interval: Duration, batch_size: usize) -> Self {
         self.video_task_poller = Some(VideoTaskPollerConfig {
             interval,
@@ -294,6 +318,10 @@ impl AppState {
 
     pub(crate) fn has_proxy_node_reader(&self) -> bool {
         self.data.has_proxy_node_reader()
+    }
+
+    pub(crate) fn has_proxy_node_writer(&self) -> bool {
+        self.data.has_proxy_node_writer()
     }
 
     pub(crate) fn frontdoor_cors(&self) -> Option<Arc<FrontdoorCorsConfig>> {
@@ -430,12 +458,49 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn register_proxy_node(
+        &self,
+        mutation: &aether_data::repository::proxy_nodes::ProxyNodeRegistrationMutation,
+    ) -> Result<Option<StoredProxyNode>, GatewayError> {
+        self.data
+            .register_proxy_node(mutation)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub async fn reset_stale_proxy_node_tunnel_statuses(&self) -> std::io::Result<usize> {
+        self.data
+            .reset_stale_proxy_node_tunnel_statuses()
+            .await
+            .map_err(|err| std::io::Error::other(err.to_string()))
+    }
+
     pub(crate) async fn apply_proxy_node_heartbeat(
         &self,
         mutation: &ProxyNodeHeartbeatMutation,
     ) -> Result<Option<StoredProxyNode>, GatewayError> {
         self.data
             .apply_proxy_node_heartbeat(mutation)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn unregister_proxy_node(
+        &self,
+        node_id: &str,
+    ) -> Result<Option<StoredProxyNode>, GatewayError> {
+        self.data
+            .unregister_proxy_node(node_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn update_proxy_node_remote_config(
+        &self,
+        mutation: &aether_data::repository::proxy_nodes::ProxyNodeRemoteConfigMutation,
+    ) -> Result<Option<StoredProxyNode>, GatewayError> {
+        self.data
+            .update_proxy_node_remote_config(mutation)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
@@ -516,10 +581,17 @@ impl AppState {
         trace_id: &str,
         diagnostic: LocalExecutionRuntimeMissDiagnostic,
     ) {
-        self.local_execution_runtime_miss_diagnostics
+        let mut diagnostics = self
+            .local_execution_runtime_miss_diagnostics
             .lock()
-            .expect("local execution runtime miss diagnostics should lock")
-            .insert(trace_id.to_string(), diagnostic);
+            .expect("local execution runtime miss diagnostics should lock");
+        if diagnostics
+            .get(trace_id)
+            .is_some_and(|existing| should_preserve_runtime_miss_diagnostic(existing, &diagnostic))
+        {
+            return;
+        }
+        diagnostics.insert(trace_id.to_string(), diagnostic);
     }
 
     pub(crate) fn mutate_local_execution_runtime_miss_diagnostic<F>(
@@ -536,6 +608,17 @@ impl AppState {
         if let Some(diagnostic) = diagnostics.get_mut(trace_id) {
             mutate(diagnostic);
         }
+    }
+
+    pub(crate) fn local_execution_runtime_miss_diagnostic_has_candidate_signal(
+        &self,
+        trace_id: &str,
+    ) -> bool {
+        self.local_execution_runtime_miss_diagnostics
+            .lock()
+            .expect("local execution runtime miss diagnostics should lock")
+            .get(trace_id)
+            .is_some_and(runtime_miss_diagnostic_has_candidate_signal)
     }
 
     pub(crate) fn take_local_execution_runtime_miss_diagnostic(
@@ -668,6 +751,12 @@ impl AppState {
         if let Some(handle) = spawn_pending_cleanup_worker(self.data.clone()) {
             tasks.push(handle);
         }
+        if let Some(handle) = spawn_proxy_node_stale_cleanup_worker(self.data.clone()) {
+            tasks.push(handle);
+        }
+        if let Some(handle) = spawn_proxy_upgrade_rollout_worker(self.clone()) {
+            tasks.push(handle);
+        }
         if let Some(handle) = spawn_provider_checkin_worker(self.clone()) {
             tasks.push(handle);
         }
@@ -685,4 +774,20 @@ impl AppState {
         }
         tasks
     }
+}
+
+fn should_preserve_runtime_miss_diagnostic(
+    existing: &LocalExecutionRuntimeMissDiagnostic,
+    next: &LocalExecutionRuntimeMissDiagnostic,
+) -> bool {
+    runtime_miss_diagnostic_has_candidate_signal(existing)
+        && !runtime_miss_diagnostic_has_candidate_signal(next)
+}
+
+fn runtime_miss_diagnostic_has_candidate_signal(
+    diagnostic: &LocalExecutionRuntimeMissDiagnostic,
+) -> bool {
+    diagnostic.candidate_count.unwrap_or(0) > 0
+        || diagnostic.skipped_candidate_count.unwrap_or(0) > 0
+        || !diagnostic.skip_reasons.is_empty()
 }

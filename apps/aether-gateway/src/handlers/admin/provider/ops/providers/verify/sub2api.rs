@@ -1,6 +1,6 @@
 use super::request::{
-    admin_provider_ops_execute_proxy_json_request,
-    admin_provider_ops_verify_execution_error_message,
+    admin_provider_ops_execute_json_request, admin_provider_ops_headers_with_transport_controls,
+    admin_provider_ops_verify_execution_error_message, AdminProviderOpsExecuteJsonError,
 };
 use crate::handlers::admin::provider::ops::providers::config::persist_admin_provider_ops_runtime_credentials;
 use crate::handlers::admin::request::AdminAppState;
@@ -10,7 +10,6 @@ use aether_admin::provider::ops::{
 };
 use aether_contracts::ProxySnapshot;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider;
-use aether_http::{apply_http_client_config, HttpClientConfig};
 use serde_json::{json, Map, Value};
 use tracing::warn;
 
@@ -64,51 +63,26 @@ pub(super) async fn admin_provider_ops_local_sub2api_verify_response(
             reqwest::header::HeaderValue::from_static("*/*"),
         ),
     ]);
-    let (status, response_json) = if let Some(proxy_snapshot) = proxy_snapshot {
-        match admin_provider_ops_execute_proxy_json_request(
-            state,
-            "provider-ops-verify:sub2api",
-            reqwest::Method::GET,
-            &verify_url,
-            &auth_headers,
-            None,
-            proxy_snapshot,
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => {
-                return admin_provider_ops_verify_failure(
-                    admin_provider_ops_verify_execution_error_message(&error),
-                );
-            }
+    let auth_headers =
+        admin_provider_ops_headers_with_transport_controls(&auth_headers, None, true);
+    let (status, response_json) = match admin_provider_ops_execute_json_request(
+        state,
+        "provider-ops-verify:sub2api",
+        reqwest::Method::GET,
+        &verify_url,
+        &auth_headers,
+        None,
+        proxy_snapshot,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(AdminProviderOpsExecuteJsonError::InvalidJson(message))
+        | Err(AdminProviderOpsExecuteJsonError::Transport(message)) => {
+            return admin_provider_ops_verify_failure(
+                admin_provider_ops_verify_execution_error_message(&message),
+            );
         }
-    } else {
-        let http_client = match admin_provider_ops_sub2api_http_client() {
-            Ok(client) => client,
-            Err(err) => {
-                return admin_provider_ops_verify_failure(format!("验证失败: {err}"));
-            }
-        };
-        let response = match http_client
-            .get(&verify_url)
-            .headers(auth_headers)
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(err) if err.is_timeout() => return admin_provider_ops_verify_failure("连接超时"),
-            Err(err) if err.is_connect() => {
-                return admin_provider_ops_verify_failure(format!("连接失败: {err}"));
-            }
-            Err(err) => return admin_provider_ops_verify_failure(format!("验证失败: {err}")),
-        };
-        let status = response.status();
-        let response_json = match response.bytes().await {
-            Ok(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|_| json!({})),
-            Err(_) => json!({}),
-        };
-        (status, response_json)
     };
 
     parse_verify_payload(
@@ -117,20 +91,6 @@ pub(super) async fn admin_provider_ops_local_sub2api_verify_response(
         &response_json,
         frontend_updated_credentials,
     )
-}
-
-fn admin_provider_ops_sub2api_http_client() -> Result<reqwest::Client, reqwest::Error> {
-    let builder = apply_http_client_config(
-        reqwest::Client::builder().http1_only(),
-        &HttpClientConfig {
-            connect_timeout_ms: Some(10_000),
-            request_timeout_ms: Some(30_000),
-            use_rustls_tls: true,
-            user_agent: Some(ADMIN_PROVIDER_OPS_USER_AGENT.to_string()),
-            ..HttpClientConfig::default()
-        },
-    );
-    builder.build()
 }
 
 // 对齐 Python httpx.AsyncClient(base_url=...) 的行为:
@@ -263,39 +223,24 @@ async fn admin_provider_ops_sub2api_token_request(
             reqwest::header::HeaderValue::from_static("*/*"),
         ),
     ]);
-    let (status, response_json) = if let Some(proxy_snapshot) = proxy_snapshot {
-        admin_provider_ops_execute_proxy_json_request(
-            state,
-            &format!("provider-ops-sub2api:{path}"),
-            reqwest::Method::POST,
-            &url,
-            &default_headers,
-            Some(body),
-            proxy_snapshot,
-        )
-        .await
-        .map_err(|error| admin_provider_ops_verify_execution_error_message(&error))?
-    } else {
-        let client =
-            admin_provider_ops_sub2api_http_client().map_err(|err| format!("验证失败: {err}"))?;
-        let response = match client
-            .post(url)
-            .headers(default_headers)
-            .json(&body)
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(err) if err.is_timeout() => return Err("连接超时".to_string()),
-            Err(err) if err.is_connect() => return Err(format!("连接失败: {err}")),
-            Err(err) => return Err(format!("验证失败: {err}")),
-        };
-        let status = response.status();
-        let response_json = match response.bytes().await {
-            Ok(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|_| json!({})),
-            Err(_) => json!({}),
-        };
-        (status, response_json)
+    let default_headers =
+        admin_provider_ops_headers_with_transport_controls(&default_headers, None, true);
+    let (status, response_json) = match admin_provider_ops_execute_json_request(
+        state,
+        &format!("provider-ops-sub2api:{path}"),
+        reqwest::Method::POST,
+        &url,
+        &default_headers,
+        Some(body),
+        proxy_snapshot,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(AdminProviderOpsExecuteJsonError::InvalidJson(message))
+        | Err(AdminProviderOpsExecuteJsonError::Transport(message)) => {
+            return Err(admin_provider_ops_verify_execution_error_message(&message));
+        }
     };
     let payload = response_json.as_object().cloned().unwrap_or_default();
     if status != http::StatusCode::OK

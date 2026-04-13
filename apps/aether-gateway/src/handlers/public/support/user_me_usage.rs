@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use aether_billing::normalize_input_tokens_for_billing;
+use aether_billing::{
+    normalize_input_tokens_for_billing, normalize_total_input_context_for_cache_hit_rate,
+};
 use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageAuditListQuery};
 use axum::{
     body::Body,
@@ -101,9 +103,20 @@ fn users_me_usage_cache_creation_tokens(item: &StoredRequestUsageAudit) -> u64 {
 }
 
 fn users_me_usage_total_input_context(item: &StoredRequestUsageAudit) -> u64 {
-    item.input_tokens
-        .saturating_add(users_me_usage_cache_creation_tokens(item))
-        .saturating_add(item.cache_read_input_tokens)
+    let api_format = item
+        .endpoint_api_format
+        .as_deref()
+        .or(item.api_format.as_deref());
+    let input_tokens = i64::try_from(item.input_tokens).unwrap_or(i64::MAX);
+    let cache_creation_tokens =
+        i64::try_from(users_me_usage_cache_creation_tokens(item)).unwrap_or(i64::MAX);
+    let cache_read_tokens = i64::try_from(item.cache_read_input_tokens).unwrap_or(i64::MAX);
+    normalize_total_input_context_for_cache_hit_rate(
+        api_format,
+        input_tokens,
+        cache_creation_tokens,
+        cache_read_tokens,
+    ) as u64
 }
 
 fn users_me_usage_effective_input_tokens(item: &StoredRequestUsageAudit) -> u64 {
@@ -132,32 +145,56 @@ fn users_me_usage_cache_hit_rate(total_input_context: u64, cache_read_tokens: u6
     }
 }
 
-fn users_me_usage_matches_search(item: &StoredRequestUsageAudit, search: Option<&str>) -> bool {
+fn users_me_usage_api_key_name(
+    item: &StoredRequestUsageAudit,
+    api_key_names: &BTreeMap<String, String>,
+    auth_api_key_reader_available: bool,
+) -> Option<String> {
+    item.api_key_id
+        .as_ref()
+        .and_then(|api_key_id| api_key_names.get(api_key_id))
+        .cloned()
+        .or_else(|| {
+            (!auth_api_key_reader_available)
+                .then(|| item.api_key_name.clone())
+                .flatten()
+        })
+}
+
+fn users_me_usage_matches_search(
+    item: &StoredRequestUsageAudit,
+    search: Option<&str>,
+    api_key_names: &BTreeMap<String, String>,
+    auth_api_key_reader_available: bool,
+) -> bool {
     let Some(search) = search.map(str::trim).filter(|value| !value.is_empty()) else {
         return true;
     };
 
     let model = item.model.to_ascii_lowercase();
-    let api_key_name = item
-        .api_key_name
-        .as_deref()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    let api_key_name =
+        users_me_usage_api_key_name(item, api_key_names, auth_api_key_reader_available)
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
     search.split_whitespace().all(|keyword| {
         let keyword = keyword.to_ascii_lowercase();
         model.contains(&keyword) || api_key_name.contains(&keyword)
     })
 }
 
-fn build_users_me_usage_api_key_payload(item: &StoredRequestUsageAudit) -> serde_json::Value {
+fn build_users_me_usage_api_key_payload(
+    item: &StoredRequestUsageAudit,
+    api_key_names: &BTreeMap<String, String>,
+    auth_api_key_reader_available: bool,
+) -> serde_json::Value {
+    let api_key_name =
+        users_me_usage_api_key_name(item, api_key_names, auth_api_key_reader_available);
     match item.api_key_id.as_deref() {
         Some(api_key_id) => json!({
             "id": api_key_id,
-            "name": item.api_key_name.clone(),
-            "display": item
-                .api_key_name
-                .clone()
-                .unwrap_or_else(|| api_key_id.to_string()),
+            "name": api_key_name.clone(),
+            "display": api_key_name.unwrap_or_else(|| api_key_id.to_string()),
         }),
         None => serde_json::Value::Null,
     }
@@ -166,7 +203,14 @@ fn build_users_me_usage_api_key_payload(item: &StoredRequestUsageAudit) -> serde
 fn build_users_me_usage_record_payload(
     item: &StoredRequestUsageAudit,
     include_actual_cost: bool,
+    api_key_names: &BTreeMap<String, String>,
+    auth_api_key_reader_available: bool,
 ) -> serde_json::Value {
+    let input_price_per_1m = item.settlement_input_price_per_1m();
+    let output_price_per_1m = item.settlement_output_price_per_1m();
+    let cache_creation_price_per_1m = item.settlement_cache_creation_price_per_1m();
+    let cache_read_price_per_1m = item.settlement_cache_read_price_per_1m();
+    let rate_multiplier = item.settlement_rate_multiplier();
     let mut payload = json!({
         "id": item.id,
         "model": item.model,
@@ -190,11 +234,15 @@ fn build_users_me_usage_record_payload(
         "cache_read_input_tokens": item.cache_read_input_tokens,
         "status_code": item.status_code,
         "error_message": item.error_message,
-        "input_price_per_1m": serde_json::Value::Null,
-        "output_price_per_1m": item.output_price_per_1m,
-        "cache_creation_price_per_1m": serde_json::Value::Null,
-        "cache_read_price_per_1m": serde_json::Value::Null,
-        "api_key": build_users_me_usage_api_key_payload(item),
+        "input_price_per_1m": input_price_per_1m,
+        "output_price_per_1m": output_price_per_1m,
+        "cache_creation_price_per_1m": cache_creation_price_per_1m,
+        "cache_read_price_per_1m": cache_read_price_per_1m,
+        "api_key": build_users_me_usage_api_key_payload(
+            item,
+            api_key_names,
+            auth_api_key_reader_available,
+        ),
     });
 
     if item.target_model.is_some() {
@@ -202,7 +250,7 @@ fn build_users_me_usage_record_payload(
     }
     if include_actual_cost {
         payload["actual_cost"] = json!(round_to(item.actual_total_cost_usd, 6));
-        payload["rate_multiplier"] = serde_json::Value::Null;
+        payload["rate_multiplier"] = json!(rate_multiplier);
     }
     payload
 }
@@ -220,7 +268,7 @@ fn build_users_me_usage_active_payload(item: &StoredRequestUsageAudit) -> serde_
         "cache_read_input_tokens": item.cache_read_input_tokens,
         "cost": round_to(item.total_cost_usd, 6),
         "actual_cost": round_to(item.actual_total_cost_usd, 6),
-        "rate_multiplier": serde_json::Value::Null,
+        "rate_multiplier": item.settlement_rate_multiplier(),
         "response_time_ms": item.response_time_ms,
         "first_byte_time_ms": item.first_byte_time_ms,
         "api_format": item.api_format,
@@ -662,6 +710,30 @@ pub(super) async fn handle_users_me_usage_get(
             )
         }
     };
+    let api_key_names = if state.has_auth_api_key_data_reader() {
+        let api_key_ids = usage
+            .iter()
+            .filter_map(|item| item.api_key_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if api_key_ids.is_empty() {
+            BTreeMap::new()
+        } else {
+            match state.resolve_auth_api_key_names_by_ids(&api_key_ids).await {
+                Ok(value) => value,
+                Err(err) => {
+                    return build_auth_error_response(
+                        http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("user api key name lookup failed: {err:?}"),
+                        false,
+                    )
+                }
+            }
+        }
+    } else {
+        BTreeMap::new()
+    };
 
     let summary_items = usage
         .iter()
@@ -725,7 +797,14 @@ pub(super) async fn handle_users_me_usage_get(
 
     let mut records = usage
         .into_iter()
-        .filter(|item| users_me_usage_matches_search(item, search.as_deref()))
+        .filter(|item| {
+            users_me_usage_matches_search(
+                item,
+                search.as_deref(),
+                &api_key_names,
+                state.has_auth_api_key_data_reader(),
+            )
+        })
         .collect::<Vec<_>>();
     records.sort_by(|left, right| {
         right
@@ -738,7 +817,14 @@ pub(super) async fn handle_users_me_usage_get(
         .into_iter()
         .skip(offset)
         .take(limit)
-        .map(|item| build_users_me_usage_record_payload(&item, include_actual_cost))
+        .map(|item| {
+            build_users_me_usage_record_payload(
+                &item,
+                include_actual_cost,
+                &api_key_names,
+                state.has_auth_api_key_data_reader(),
+            )
+        })
         .collect::<Vec<_>>();
 
     let wallet = state

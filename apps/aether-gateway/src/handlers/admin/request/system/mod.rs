@@ -3,6 +3,7 @@ use crate::GatewayError;
 
 mod adaptive;
 mod export;
+mod import;
 mod modules;
 mod proxy_nodes;
 mod templates;

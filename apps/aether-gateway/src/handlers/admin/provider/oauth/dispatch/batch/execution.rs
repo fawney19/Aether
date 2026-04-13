@@ -126,6 +126,7 @@ pub(super) async fn execute_admin_provider_oauth_batch_import(
             state,
             template,
             entry.refresh_token.as_str(),
+            proxy_node_id,
         )
         .await
         {

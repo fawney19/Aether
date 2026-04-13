@@ -1,6 +1,14 @@
+use aether_provider_transport::snapshot::{
+    GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
+    GatewayProviderTransportProvider, GatewayProviderTransportSnapshot,
+};
+use http::Request;
 use serde_json::{json, Value};
 
-use super::{build_cross_format_openai_cli_request_body, build_local_openai_cli_request_body};
+use super::{
+    build_cross_format_openai_cli_request_body, build_local_openai_cli_request_body,
+    build_local_openai_cli_upstream_url,
+};
 
 fn object_keys(value: &Value) -> Vec<&str> {
     value
@@ -9,6 +17,59 @@ fn object_keys(value: &Value) -> Vec<&str> {
         .keys()
         .map(String::as_str)
         .collect()
+}
+
+fn sample_transport(base_url: &str, api_format: &str) -> GatewayProviderTransportSnapshot {
+    GatewayProviderTransportSnapshot {
+        provider: GatewayProviderTransportProvider {
+            id: "provider-codex".to_string(),
+            name: "codex".to_string(),
+            provider_type: "codex".to_string(),
+            website: None,
+            is_active: true,
+            keep_priority_on_conversion: false,
+            enable_format_conversion: false,
+            concurrent_limit: None,
+            max_retries: None,
+            proxy: None,
+            request_timeout_secs: None,
+            stream_first_byte_timeout_secs: None,
+            config: None,
+        },
+        endpoint: GatewayProviderTransportEndpoint {
+            id: "endpoint-codex".to_string(),
+            provider_id: "provider-codex".to_string(),
+            api_format: api_format.to_string(),
+            api_family: Some("openai".to_string()),
+            endpoint_kind: Some("cli".to_string()),
+            is_active: true,
+            base_url: base_url.to_string(),
+            header_rules: None,
+            body_rules: None,
+            max_retries: None,
+            custom_path: None,
+            config: None,
+            format_acceptance_config: None,
+            proxy: None,
+        },
+        key: GatewayProviderTransportKey {
+            id: "key-codex".to_string(),
+            provider_id: "provider-codex".to_string(),
+            name: "oauth".to_string(),
+            auth_type: "oauth".to_string(),
+            is_active: true,
+            api_formats: Some(vec![api_format.to_string()]),
+            allowed_models: None,
+            capabilities: None,
+            rate_multipliers: None,
+            global_priority_by_format: None,
+            expires_at_unix_secs: None,
+            proxy: None,
+            fingerprint: None,
+            decrypted_api_key: "__placeholder__".to_string(),
+            decrypted_auth_config: None,
+        },
+    }
 }
 
 #[test]
@@ -79,6 +140,47 @@ fn local_openai_cli_wrapper_preserves_body_order_after_edits() {
             "prompt_cache_key",
         ]
     );
+}
+
+#[test]
+fn local_openai_compact_wrapper_strips_store_for_same_format_requests() {
+    let body_json = json!({
+        "model": "gpt-5.4",
+        "input": [],
+        "store": true
+    });
+
+    let provider_request_body = build_local_openai_cli_request_body(
+        &body_json,
+        "gpt-5.4",
+        false,
+        "openai",
+        "openai:compact",
+        None,
+        None,
+    )
+    .expect("local openai compact body should build");
+
+    assert!(provider_request_body.get("store").is_none());
+}
+
+#[test]
+fn local_openai_cli_upstream_url_preserves_codex_base_path() {
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .body(())
+        .expect("request should build");
+    let (parts, _) = request.into_parts();
+
+    let upstream_url = build_local_openai_cli_upstream_url(
+        &parts,
+        &sample_transport("https://tiger.bookapi.cc/codex", "openai:cli"),
+        false,
+    )
+    .expect("openai cli upstream url should build");
+
+    assert_eq!(upstream_url, "https://tiger.bookapi.cc/codex/responses");
 }
 
 #[test]

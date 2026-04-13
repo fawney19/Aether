@@ -301,7 +301,12 @@ import {
 import { Server, SquarePen } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
 import { useFormDialog } from '@/composables/useFormDialog'
-import { createProvider, updateProvider, type ProviderWithEndpointsSummary } from '@/api/endpoints'
+import {
+  createProvider,
+  normalizePoolAdvancedConfig,
+  updateProvider,
+  type ProviderWithEndpointsSummary,
+} from '@/api/endpoints'
 import { parseApiError } from '@/utils/errorParser'
 import { parseNumberInput } from '@/utils/form'
 
@@ -388,6 +393,7 @@ function resetForm() {
 // 加载提供商数据（编辑模式）
 function loadProviderData() {
   if (!props.provider) return
+  const poolAdvanced = normalizePoolAdvancedConfig(props.provider.pool_advanced)
 
   form.value = {
     name: props.provider.name,
@@ -412,7 +418,7 @@ function loadProviderData() {
     stream_first_byte_timeout: props.provider.stream_first_byte_timeout ?? undefined,
     request_timeout: props.provider.request_timeout ?? undefined,
     // 号池模式
-    pool_mode_enabled: !!props.provider.pool_advanced,
+    pool_mode_enabled: poolAdvanced !== null,
   }
 }
 
@@ -448,6 +454,7 @@ const handleSubmit = async () => {
 
   loading.value = true
   try {
+    const currentPoolAdvanced = normalizePoolAdvancedConfig(props.provider?.pool_advanced)
     const basePayload = {
       name: form.value.name,
       provider_type: form.value.provider_type,
@@ -466,7 +473,7 @@ const handleSubmit = async () => {
       stream_first_byte_timeout: form.value.stream_first_byte_timeout ?? null,
       request_timeout: form.value.request_timeout ?? null,
       pool_advanced: form.value.pool_mode_enabled
-        ? (props.provider?.pool_advanced ?? {})
+        ? (currentPoolAdvanced ?? {})
         : null,
     }
 

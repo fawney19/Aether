@@ -121,6 +121,7 @@ pub(super) async fn handle_admin_provider_oauth_complete_provider(
             &callback.code,
             &callback.state_nonce,
             state_data.pkce_verifier.as_deref(),
+            payload.proxy_node_id.as_deref(),
         )
         .await
     {

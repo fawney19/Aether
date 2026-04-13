@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate;
 use serde_json::Value;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::ai_pipeline::conversion::{
     request_conversion_direct_auth, request_conversion_kind,
@@ -429,6 +429,30 @@ pub(crate) async fn resolve_local_openai_cli_candidate_payload_parts(
     } else {
         ConversionMode::None
     };
+
+    debug!(
+        event_name = "local_openai_cli_upstream_url_resolved",
+        log_type = "debug",
+        trace_id = %trace_id,
+        candidate_id = %candidate_id,
+        candidate_index,
+        provider_id = %candidate.provider_id,
+        endpoint_id = %candidate.endpoint_id,
+        key_id = %candidate.key_id,
+        provider_type = %transport.provider.provider_type,
+        client_api_format = spec.api_format,
+        provider_api_format = %provider_api_format,
+        execution_strategy = execution_strategy.as_str(),
+        conversion_mode = conversion_mode.as_str(),
+        base_url = %transport.endpoint.base_url,
+        custom_path = ?transport.endpoint.custom_path,
+        request_path = %parts.uri.path(),
+        request_query = ?parts.uri.query(),
+        mapped_model = %mapped_model,
+        upstream_url = %upstream_url,
+        upstream_is_stream,
+        "gateway resolved local openai cli upstream url"
+    );
 
     Some(LocalOpenAiCliCandidatePayloadParts {
         auth_header,

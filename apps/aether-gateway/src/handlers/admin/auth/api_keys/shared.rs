@@ -1,5 +1,5 @@
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
-use crate::handlers::admin::shared::query_param_value;
+use crate::handlers::admin::shared::{query_param_value, AdminTypedObjectPatch};
 use crate::handlers::admin::users::{
     format_optional_unix_secs_iso8601, masked_user_api_key_display,
 };
@@ -43,16 +43,12 @@ pub(super) struct AdminStandaloneApiKeyUpdateRequest {
     pub(super) auto_delete_on_expiry: Option<bool>,
 }
 
+pub(super) type AdminStandaloneApiKeyUpdatePatch =
+    AdminTypedObjectPatch<AdminStandaloneApiKeyUpdateRequest>;
+
 #[derive(Debug, Default, serde::Deserialize)]
 pub(super) struct AdminStandaloneApiKeyToggleRequest {
     pub(super) is_active: Option<bool>,
-}
-
-#[derive(Debug, Default)]
-pub(super) struct AdminStandaloneApiKeyFieldPresence {
-    pub(super) allowed_providers: bool,
-    pub(super) allowed_api_formats: bool,
-    pub(super) allowed_models: bool,
 }
 
 pub(super) fn build_admin_api_keys_data_unavailable_response() -> Response<Body> {

@@ -1,8 +1,7 @@
+use std::fmt;
 use std::path::Path;
 
-use aether_runtime::{
-    FileLoggingConfig, LogDestination, LogFormat, LogRotation, ServiceRuntimeConfig,
-};
+use aether_runtime::{FileLoggingConfig, LogDestination, LogRotation, ServiceRuntimeConfig};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +34,149 @@ const DELEGATE_TO_UPSTREAM: &[(&str, &str)] = &[
     ("delegate_tcp_keepalive_secs", "upstream_tcp_keepalive_secs"),
     ("delegate_tcp_nodelay", "upstream_tcp_nodelay"),
 ];
+
+/// Default bytes buffered before a tunnel request becomes non-replayable for
+/// 307/308 redirects. Kept aligned with the current admin-side request size
+/// default, but exposed as an independent proxy transport budget.
+pub const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
+#[allow(dead_code)]
+pub const DEFAULT_REDIRECT_REPLAY_BUDGET_BYTES: usize = 5_242_880;
+pub const DEFAULT_REDIRECT_REPLAY_BUDGET_HUMAN: &str = "5M";
+pub const DEFAULT_LOG_RETENTION_DAYS: u64 = 7;
+pub const DEFAULT_LOG_MAX_FILES: usize = 30;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ByteSizeValue {
+    Text(String),
+    Integer(u64),
+}
+
+impl<'de> Deserialize<'de> for ByteSizeValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ByteSizeValueVisitor;
+
+        impl serde::de::Visitor<'_> for ByteSizeValueVisitor {
+            type Value = ByteSizeValue;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a byte-size string like 5M or an integer byte count")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(ByteSizeValue::Integer(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if value < 0 {
+                    return Err(E::custom("byte size must be >= 0"));
+                }
+                Ok(ByteSizeValue::Integer(value as u64))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(ByteSizeValue::Text(value.to_string()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(ByteSizeValue::Text(value))
+            }
+        }
+
+        deserializer.deserialize_any(ByteSizeValueVisitor)
+    }
+}
+
+fn deserialize_optional_byte_size<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<ByteSizeValue>::deserialize(deserializer)?;
+    value
+        .map(|value| match value {
+            ByteSizeValue::Text(text) => {
+                normalize_byte_size_text(&text).map_err(serde::de::Error::custom)
+            }
+            ByteSizeValue::Integer(value) => usize::try_from(value)
+                .map(format_byte_size_human)
+                .map_err(|_| serde::de::Error::custom("byte size exceeds usize")),
+        })
+        .transpose()
+}
+
+pub fn parse_byte_size(input: &str) -> Result<usize, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("byte size must not be empty".to_string());
+    }
+
+    let digits_end = trimmed
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(trimmed.len());
+    if digits_end == 0 {
+        return Err(format!("invalid byte size `{trimmed}`"));
+    }
+
+    let number = trimmed[..digits_end]
+        .parse::<u64>()
+        .map_err(|_| format!("invalid byte size `{trimmed}`"))?;
+    let suffix = trimmed[digits_end..].trim().to_ascii_lowercase();
+    let multiplier = match suffix.as_str() {
+        "" | "b" => 1u64,
+        "k" | "kb" | "kib" => 1024u64,
+        "m" | "mb" | "mib" => 1024u64.pow(2),
+        "g" | "gb" | "gib" => 1024u64.pow(3),
+        _ => {
+            return Err(format!(
+                "invalid byte size suffix `{}`; use B, K, M, or G",
+                &trimmed[digits_end..].trim()
+            ))
+        }
+    };
+
+    let total = number
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("byte size `{trimmed}` is too large"))?;
+    usize::try_from(total).map_err(|_| format!("byte size `{trimmed}` exceeds usize"))
+}
+
+fn normalize_byte_size_text(input: &str) -> Result<String, String> {
+    parse_byte_size(input).map(format_byte_size_human)
+}
+
+pub fn format_byte_size_human(bytes: usize) -> String {
+    const KIB: usize = 1024;
+    const MIB: usize = 1024 * 1024;
+    const GIB: usize = 1024 * 1024 * 1024;
+
+    if bytes == 0 {
+        return "0".to_string();
+    }
+    if bytes.is_multiple_of(GIB) {
+        return format!("{}G", bytes / GIB);
+    }
+    if bytes.is_multiple_of(MIB) {
+        return format!("{}M", bytes / MIB);
+    }
+    if bytes.is_multiple_of(KIB) {
+        return format!("{}K", bytes / KIB);
+    }
+    bytes.to_string()
+}
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -91,7 +233,7 @@ pub struct Config {
     pub public_ip: Option<String>,
 
     /// Human-readable node name
-    #[arg(long, env = "AETHER_PROXY_NODE_NAME", default_value = "proxy-01")]
+    #[arg(long, env = "AETHER_PROXY_NODE_NAME")]
     pub node_name: String,
 
     /// Region label (e.g. ap-northeast-1)
@@ -99,7 +241,11 @@ pub struct Config {
     pub node_region: Option<String>,
 
     /// Heartbeat interval in seconds
-    #[arg(long, env = "AETHER_PROXY_HEARTBEAT_INTERVAL", default_value_t = 30)]
+    #[arg(
+        long,
+        env = "AETHER_PROXY_HEARTBEAT_INTERVAL",
+        default_value_t = DEFAULT_HEARTBEAT_INTERVAL_SECS
+    )]
     pub heartbeat_interval: u64,
 
     /// Allowed destination ports (default: 80,443,8080,8443)
@@ -271,13 +417,19 @@ pub struct Config {
     )]
     pub upstream_tcp_nodelay: bool,
 
+    /// Maximum request body bytes buffered to support 307/308 redirect replay.
+    /// Accepts values like 5M / 512K / 1G. Set to 0 to disable request-body replay buffering.
+    #[arg(
+        long,
+        env = "AETHER_PROXY_REDIRECT_REPLAY_BUDGET_BYTES",
+        value_parser = parse_byte_size,
+        default_value = DEFAULT_REDIRECT_REPLAY_BUDGET_HUMAN
+    )]
+    pub redirect_replay_budget_bytes: usize,
+
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, env = "AETHER_PROXY_LOG_LEVEL", default_value = "info")]
     pub log_level: String,
-
-    /// Output logs as JSON
-    #[arg(long, env = "AETHER_PROXY_LOG_JSON", default_value_t = false)]
-    pub log_json: bool,
 
     /// Log destination (stdout, file, both)
     #[arg(
@@ -302,11 +454,19 @@ pub struct Config {
     pub log_rotation: ProxyLogRotationArg,
 
     /// Log file retention days for file logging
-    #[arg(long, env = "AETHER_PROXY_LOG_RETENTION_DAYS", default_value_t = 7)]
+    #[arg(
+        long,
+        env = "AETHER_PROXY_LOG_RETENTION_DAYS",
+        default_value_t = DEFAULT_LOG_RETENTION_DAYS
+    )]
     pub log_retention_days: u64,
 
     /// Maximum number of retained rolled log files
-    #[arg(long, env = "AETHER_PROXY_LOG_MAX_FILES", default_value_t = 30)]
+    #[arg(
+        long,
+        env = "AETHER_PROXY_LOG_MAX_FILES",
+        default_value_t = DEFAULT_LOG_MAX_FILES
+    )]
     pub log_max_files: usize,
 
     /// Tunnel reconnect base delay in milliseconds (used by exponential backoff)
@@ -370,6 +530,9 @@ impl Config {
         }
         if self.allowed_ports.is_empty() {
             anyhow::bail!("allowed_ports must not be empty");
+        }
+        if self.node_name.trim().is_empty() {
+            anyhow::bail!("node_name must not be empty");
         }
         for &port in &self.allowed_ports {
             if port == 0 {
@@ -439,11 +602,7 @@ impl Config {
 
     pub fn service_runtime_config(&self) -> anyhow::Result<ServiceRuntimeConfig> {
         let mut config = ServiceRuntimeConfig::new("aether-proxy", "aether_proxy=info")
-            .with_log_format(if self.log_json {
-                LogFormat::Json
-            } else {
-                LogFormat::Pretty
-            })
+            .with_log_format(aether_runtime::LogFormat::Pretty)
             .with_log_destination(self.log_destination.into())
             .with_node_role("proxy")
             .with_instance_id(self.node_name.trim().to_string());
@@ -535,10 +694,14 @@ pub struct ConfigFile {
     pub upstream_tcp_keepalive_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_tcp_nodelay: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_byte_size"
+    )]
+    pub redirect_replay_budget_bytes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_level: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub log_json: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_destination: Option<ProxyLogDestinationArg>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -794,8 +957,11 @@ impl ConfigFile {
             "AETHER_PROXY_UPSTREAM_TCP_NODELAY",
             self.upstream_tcp_nodelay
         );
+        set!(
+            "AETHER_PROXY_REDIRECT_REPLAY_BUDGET_BYTES",
+            self.redirect_replay_budget_bytes
+        );
         set!("AETHER_PROXY_LOG_LEVEL", self.log_level);
-        set!("AETHER_PROXY_LOG_JSON", self.log_json);
         set!(
             "AETHER_PROXY_LOG_DESTINATION",
             self.log_destination.map(|v| match v {
@@ -853,5 +1019,52 @@ impl ConfigFile {
                 std::env::set_var("AETHER_PROXY_ALLOWED_PORTS", s);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::*;
+
+    #[test]
+    fn parse_byte_size_supports_human_units() {
+        assert_eq!(
+            parse_byte_size("5M").expect("5M should parse"),
+            5 * 1024 * 1024
+        );
+        assert_eq!(
+            parse_byte_size("512K").expect("512K should parse"),
+            512 * 1024
+        );
+        assert_eq!(
+            parse_byte_size("1G").expect("1G should parse"),
+            1024 * 1024 * 1024
+        );
+        assert_eq!(parse_byte_size("0").expect("0 should parse"), 0);
+    }
+
+    #[test]
+    fn config_file_deserializes_budget_from_integer_and_string() {
+        let numeric: ConfigFile =
+            toml::from_str("redirect_replay_budget_bytes = 5242880").expect("numeric toml");
+        assert_eq!(numeric.redirect_replay_budget_bytes.as_deref(), Some("5M"));
+
+        let stringy: ConfigFile =
+            toml::from_str("redirect_replay_budget_bytes = \"6m\"").expect("string toml");
+        assert_eq!(stringy.redirect_replay_budget_bytes.as_deref(), Some("6M"));
+    }
+
+    #[test]
+    fn config_requires_node_name() {
+        let command = Config::command();
+        let node_name = command
+            .get_arguments()
+            .find(|arg| arg.get_id() == "node_name")
+            .expect("node_name arg");
+
+        assert!(node_name.is_required_set());
+        assert!(node_name.get_default_values().is_empty());
     }
 }

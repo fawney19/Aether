@@ -163,12 +163,41 @@ pub struct ProxyNodeHeartbeatMutation {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProxyNodeRegistrationMutation {
+    pub name: String,
+    pub ip: String,
+    pub port: i32,
+    pub region: Option<String>,
+    pub heartbeat_interval: i32,
+    pub active_connections: Option<i32>,
+    pub total_requests: Option<i64>,
+    pub avg_latency_ms: Option<f64>,
+    pub hardware_info: Option<serde_json::Value>,
+    pub estimated_max_concurrency: Option<i32>,
+    pub proxy_metadata: Option<serde_json::Value>,
+    pub proxy_version: Option<String>,
+    pub registered_by: Option<String>,
+    pub tunnel_mode: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProxyNodeTunnelStatusMutation {
     pub node_id: String,
     pub connected: bool,
     pub conn_count: i32,
     pub detail: Option<String>,
     pub observed_at_unix_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProxyNodeRemoteConfigMutation {
+    pub node_id: String,
+    pub node_name: Option<String>,
+    pub allowed_ports: Option<Vec<u16>>,
+    pub log_level: Option<String>,
+    pub heartbeat_interval: Option<i32>,
+    pub scheduling_state: Option<Option<String>>,
+    pub upgrade_to: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -214,6 +243,91 @@ pub fn normalize_proxy_metadata(
     }
 }
 
+fn normalize_proxy_version_label(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(
+        trimmed
+            .strip_prefix("proxy-v")
+            .unwrap_or(trimmed)
+            .to_ascii_lowercase(),
+    )
+}
+
+pub const PROXY_NODE_SCHEDULING_STATE_DRAINING: &str = "draining";
+pub const PROXY_NODE_SCHEDULING_STATE_CORDONED: &str = "cordoned";
+
+pub fn normalize_proxy_node_scheduling_state(value: &str) -> Option<&'static str> {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case(PROXY_NODE_SCHEDULING_STATE_DRAINING) {
+        return Some(PROXY_NODE_SCHEDULING_STATE_DRAINING);
+    }
+    if trimmed.eq_ignore_ascii_case(PROXY_NODE_SCHEDULING_STATE_CORDONED) {
+        return Some(PROXY_NODE_SCHEDULING_STATE_CORDONED);
+    }
+    None
+}
+
+pub fn remote_config_scheduling_state(
+    remote_config: Option<&serde_json::Value>,
+) -> Option<&'static str> {
+    remote_config
+        .and_then(serde_json::Value::as_object)
+        .and_then(|value| value.get("scheduling_state"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(normalize_proxy_node_scheduling_state)
+}
+
+pub fn proxy_node_accepts_new_tunnels(node: &StoredProxyNode) -> bool {
+    remote_config_scheduling_state(node.remote_config.as_ref()).is_none()
+}
+
+pub fn proxy_reported_version(proxy_metadata: Option<&serde_json::Value>) -> Option<String> {
+    proxy_metadata
+        .and_then(serde_json::Value::as_object)
+        .and_then(|value| value.get("version"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(normalize_proxy_version_label)
+}
+
+pub fn remote_config_upgrade_target(remote_config: Option<&serde_json::Value>) -> Option<String> {
+    remote_config
+        .and_then(serde_json::Value::as_object)
+        .and_then(|value| value.get("upgrade_to"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(normalize_proxy_version_label)
+}
+
+pub fn reconcile_remote_config_after_heartbeat(
+    remote_config: Option<&serde_json::Value>,
+    proxy_version: Option<&str>,
+) -> Option<serde_json::Value> {
+    let Some(mut config) = remote_config
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+    else {
+        return remote_config.cloned();
+    };
+    let Some(target_version) = config
+        .get("upgrade_to")
+        .and_then(serde_json::Value::as_str)
+        .and_then(normalize_proxy_version_label)
+    else {
+        return Some(serde_json::Value::Object(config));
+    };
+    let Some(reported_version) = proxy_version.and_then(normalize_proxy_version_label) else {
+        return Some(serde_json::Value::Object(config));
+    };
+
+    if reported_version == target_version {
+        config.remove("upgrade_to");
+    }
+
+    (!config.is_empty()).then_some(serde_json::Value::Object(config))
+}
+
 #[async_trait]
 pub trait ProxyNodeReadRepository: Send + Sync {
     async fn list_proxy_nodes(&self) -> Result<Vec<StoredProxyNode>, crate::DataLayerError>;
@@ -232,6 +346,13 @@ pub trait ProxyNodeReadRepository: Send + Sync {
 
 #[async_trait]
 pub trait ProxyNodeWriteRepository: Send + Sync {
+    async fn reset_stale_tunnel_statuses(&self) -> Result<usize, crate::DataLayerError>;
+
+    async fn register_node(
+        &self,
+        mutation: &ProxyNodeRegistrationMutation,
+    ) -> Result<StoredProxyNode, crate::DataLayerError>;
+
     async fn apply_heartbeat(
         &self,
         mutation: &ProxyNodeHeartbeatMutation,
@@ -241,4 +362,108 @@ pub trait ProxyNodeWriteRepository: Send + Sync {
         &self,
         mutation: &ProxyNodeTunnelStatusMutation,
     ) -> Result<Option<StoredProxyNode>, crate::DataLayerError>;
+
+    async fn unregister_node(
+        &self,
+        node_id: &str,
+    ) -> Result<Option<StoredProxyNode>, crate::DataLayerError>;
+
+    async fn update_remote_config(
+        &self,
+        mutation: &ProxyNodeRemoteConfigMutation,
+    ) -> Result<Option<StoredProxyNode>, crate::DataLayerError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{
+        normalize_proxy_node_scheduling_state, proxy_node_accepts_new_tunnels,
+        proxy_reported_version, reconcile_remote_config_after_heartbeat,
+        remote_config_scheduling_state, remote_config_upgrade_target, StoredProxyNode,
+    };
+
+    #[test]
+    fn normalizes_reported_versions_and_clears_completed_upgrade_targets() {
+        let remote_config = json!({
+            "node_name": "edge-1",
+            "upgrade_to": "proxy-v2.0.0",
+        });
+        let proxy_metadata = json!({
+            "version": "2.0.0",
+            "arch": "arm64",
+        });
+
+        assert_eq!(
+            proxy_reported_version(Some(&proxy_metadata)).as_deref(),
+            Some("2.0.0")
+        );
+        assert_eq!(
+            remote_config_upgrade_target(Some(&remote_config)).as_deref(),
+            Some("2.0.0")
+        );
+
+        let reconciled =
+            reconcile_remote_config_after_heartbeat(Some(&remote_config), Some("proxy-v2.0.0"))
+                .expect("reconciled config should remain an object");
+        assert_eq!(reconciled.get("upgrade_to"), None);
+        assert_eq!(reconciled.get("node_name"), Some(&json!("edge-1")));
+    }
+
+    #[test]
+    fn normalizes_proxy_node_scheduling_state_and_detects_unschedulable_nodes() {
+        assert_eq!(
+            normalize_proxy_node_scheduling_state("draining"),
+            Some("draining")
+        );
+        assert_eq!(
+            normalize_proxy_node_scheduling_state(" CORDONED "),
+            Some("cordoned")
+        );
+        assert_eq!(normalize_proxy_node_scheduling_state("active"), None);
+
+        let remote_config = json!({
+            "node_name": "edge-1",
+            "scheduling_state": "draining",
+        });
+        assert_eq!(
+            remote_config_scheduling_state(Some(&remote_config)),
+            Some("draining")
+        );
+
+        let node = StoredProxyNode::new(
+            "node-1".to_string(),
+            "edge-1".to_string(),
+            "127.0.0.1".to_string(),
+            0,
+            false,
+            "online".to_string(),
+            30,
+            0,
+            0,
+            0,
+            0,
+            0,
+            true,
+            true,
+            0,
+        )
+        .expect("node should build")
+        .with_runtime_fields(
+            None,
+            None,
+            Some(1_800_000_000),
+            None,
+            None,
+            None,
+            None,
+            Some(1_800_000_001),
+            Some(remote_config),
+            Some(1_800_000_000),
+            Some(1_800_000_001),
+        );
+
+        assert!(!proxy_node_accepts_new_tunnels(&node));
+    }
 }

@@ -7,6 +7,7 @@ use super::{
     StoredAuthApiKeySnapshot, StoredMinimalCandidateSelectionRow, StoredProviderCatalogEndpoint,
     StoredProviderCatalogKey, StoredProviderCatalogProvider, StoredProviderModelMapping,
     DEVELOPMENT_ENCRYPTION_KEY, EXECUTION_PATH_EXECUTION_RUNTIME_SYNC, EXECUTION_PATH_HEADER,
+    EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS, LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER,
     TRACE_ID_HEADER,
 };
 
@@ -444,6 +445,131 @@ async fn gateway_executes_claude_chat_sync_via_local_decision_gate_with_local_sy
 
     assert_eq!(*decision_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*plan_hits.lock().expect("mutex should lock"), 0);
+    assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_surfaces_candidate_list_empty_reason_for_claude_chat_runtime_miss() {
+    fn hash_api_key(value: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(value.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn sample_auth_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnapshot {
+        StoredAuthApiKeySnapshot::new(
+            user_id.to_string(),
+            "alice".to_string(),
+            Some("alice@example.com".to_string()),
+            "user".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            Some(serde_json::json!(["claude"])),
+            Some(serde_json::json!(["claude:chat"])),
+            Some(serde_json::json!(["claude-sonnet-4-5"])),
+            api_key_id.to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            Some(60),
+            Some(5),
+            Some(4_102_444_800),
+            Some(serde_json::json!(["claude"])),
+            Some(serde_json::json!(["claude:chat"])),
+            Some(serde_json::json!(["claude-sonnet-4-5"])),
+        )
+        .expect("auth snapshot should build")
+    }
+
+    let public_hits = Arc::new(Mutex::new(0usize));
+    let public_hits_clone = Arc::clone(&public_hits);
+
+    let upstream = Router::new().route(
+        "/v1/messages",
+        any(move |_request: Request| {
+            let public_hits_inner = Arc::clone(&public_hits_clone);
+            async move {
+                *public_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::IM_A_TEAPOT, Body::from("public-route-hit"))
+            }
+        }),
+    );
+    let execution_runtime = Router::new();
+
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-client-claude-chat-empty")),
+        sample_auth_snapshot("api-key-claude-empty-1", "user-claude-empty-1"),
+    )]));
+    let candidate_selection_repository = Arc::new(
+        InMemoryMinimalCandidateSelectionReadRepository::seed(vec![]),
+    );
+    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![],
+        vec![],
+        vec![],
+    ));
+
+    let (_upstream_url, upstream_handle) = start_server(upstream).await;
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway_state =
+        build_state_with_execution_runtime_override(execution_runtime_url.clone())
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
+                    auth_repository,
+                    candidate_selection_repository,
+                    provider_catalog_repository,
+                    Arc::clone(&request_candidate_repository),
+                    DEVELOPMENT_ENCRYPTION_KEY,
+                ),
+            );
+    let gateway = build_router_with_state(gateway_state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/messages?beta=true"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header("x-api-key", "sk-client-claude-chat-empty")
+        .header("anthropic-version", "2023-06-01")
+        .header(TRACE_ID_HEADER, "trace-claude-chat-empty-123")
+        .body("{\"model\":\"claude-sonnet-4-5\",\"messages\":[]}")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(EXECUTION_PATH_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some(EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS)
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some("candidate_list_empty")
+    );
+    let payload: serde_json::Value = response.json().await.expect("body should parse");
+    assert_eq!(payload["error"]["type"], "http_error");
+    assert_eq!(
+        payload["error"]["message"],
+        "没有可用的提供商支持模型 claude-sonnet-4-5 的同步请求"
+    );
+
+    let stored_candidates = request_candidate_repository
+        .list_by_request_id("trace-claude-chat-empty-123")
+        .await
+        .expect("request candidate trace should read");
+    assert!(stored_candidates.is_empty());
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

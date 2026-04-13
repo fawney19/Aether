@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use tracing::debug;
 use url::Url;
 
 use crate::ai_pipeline::planner::common::{
@@ -155,6 +156,25 @@ async fn maybe_build_local_video_task_follow_up_sync_decision_payload(
     } else {
         ConversionMode::Bidirectional
     };
+    let upstream_base_url = infer_upstream_base_url(&follow_up.plan.url);
+
+    debug!(
+        event_name = "local_video_follow_up_sync_decision_payload_built",
+        log_type = "debug",
+        trace_id = %trace_id,
+        request_id = %trace_id,
+        candidate_id = ?follow_up.plan.candidate_id,
+        provider_id = %follow_up.plan.provider_id,
+        endpoint_id = %follow_up.plan.endpoint_id,
+        key_id = %follow_up.plan.key_id,
+        plan_kind,
+        downstream_path = %parts.uri.path(),
+        provider_api_format = %follow_up.plan.provider_api_format,
+        client_api_format = %follow_up.plan.client_api_format,
+        upstream_base_url = ?upstream_base_url,
+        upstream_url = %follow_up.plan.url,
+        "gateway built local video follow-up sync decision payload"
+    );
 
     Ok(Some(GatewayControlSyncDecisionResponse {
         action: EXECUTION_RUNTIME_SYNC_DECISION_ACTION.to_string(),
@@ -167,7 +187,7 @@ async fn maybe_build_local_video_task_follow_up_sync_decision_payload(
         provider_id: Some(follow_up.plan.provider_id.clone()),
         endpoint_id: Some(follow_up.plan.endpoint_id.clone()),
         key_id: Some(follow_up.plan.key_id.clone()),
-        upstream_base_url: infer_upstream_base_url(&follow_up.plan.url),
+        upstream_base_url,
         upstream_url: Some(follow_up.plan.url.clone()),
         provider_request_method: Some(follow_up.plan.method.clone()),
         auth_header: auth_pair.as_ref().map(|(name, _)| name.clone()),
@@ -219,5 +239,79 @@ fn infer_upstream_base_url(upstream_url: &str) -> Option<String> {
         base.push(':');
         base.push_str(port.to_string().as_str());
     }
+    let base_path = infer_upstream_base_path(parsed.path());
+    if !base_path.is_empty() {
+        base.push_str(base_path);
+    }
     Some(base)
+}
+
+fn infer_upstream_base_path(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed == "/" {
+        return "";
+    }
+
+    for suffix in [
+        "/responses/compact",
+        "/responses",
+        "/chat/completions",
+        "/messages",
+    ] {
+        if let Some(prefix) = trimmed.strip_suffix(suffix) {
+            return normalize_inferred_base_path(prefix);
+        }
+    }
+
+    for marker in ["/v1/videos", "/v1beta/"] {
+        if let Some((prefix, _)) = trimmed.split_once(marker) {
+            return normalize_inferred_base_path(prefix);
+        }
+    }
+
+    normalize_inferred_base_path(trimmed)
+}
+
+fn normalize_inferred_base_path(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed == "/" {
+        ""
+    } else {
+        trimmed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::infer_upstream_base_url;
+
+    #[test]
+    fn infer_upstream_base_url_preserves_codex_base_path() {
+        assert_eq!(
+            infer_upstream_base_url("https://tiger.bookapi.cc/codex/responses").as_deref(),
+            Some("https://tiger.bookapi.cc/codex")
+        );
+        assert_eq!(
+            infer_upstream_base_url("https://chatgpt.com/backend-api/codex/responses").as_deref(),
+            Some("https://chatgpt.com/backend-api/codex")
+        );
+    }
+
+    #[test]
+    fn infer_upstream_base_url_preserves_nested_v1_prefix() {
+        assert_eq!(
+            infer_upstream_base_url("https://api.openai.example/custom/v1/chat/completions?mode=1")
+                .as_deref(),
+            Some("https://api.openai.example/custom/v1")
+        );
+    }
+
+    #[test]
+    fn infer_upstream_base_url_strips_video_operation_path() {
+        assert_eq!(
+            infer_upstream_base_url("https://video.example/nested/v1/videos/task-123/content")
+                .as_deref(),
+            Some("https://video.example/nested")
+        );
+    }
 }

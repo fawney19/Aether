@@ -2,8 +2,8 @@ use super::shared::{
     admin_api_key_total_tokens_by_ids, admin_api_keys_id_from_path, admin_api_keys_operator_id,
     build_admin_api_key_detail_payload, build_admin_api_keys_bad_request_response,
     build_admin_api_keys_data_unavailable_response, build_admin_api_keys_not_found_response,
-    AdminStandaloneApiKeyCreateRequest, AdminStandaloneApiKeyFieldPresence,
-    AdminStandaloneApiKeyToggleRequest, AdminStandaloneApiKeyUpdateRequest,
+    AdminStandaloneApiKeyCreateRequest, AdminStandaloneApiKeyToggleRequest,
+    AdminStandaloneApiKeyUpdatePatch,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
@@ -106,6 +106,12 @@ pub(super) async fn build_admin_create_api_key_response(
                 allowed_models,
                 rate_limit,
                 concurrent_limit: 5,
+                force_capabilities: None,
+                is_active: true,
+                expires_at_unix_secs: None,
+                auto_delete_on_expiry: false,
+                total_requests: 0,
+                total_cost_usd: 0.0,
             },
         )
         .await?
@@ -162,14 +168,7 @@ pub(super) async fn build_admin_update_api_key_response(
             ));
         }
     };
-    let field_presence = AdminStandaloneApiKeyFieldPresence {
-        allowed_providers: raw_payload.contains_key("allowed_providers"),
-        allowed_api_formats: raw_payload.contains_key("allowed_api_formats"),
-        allowed_models: raw_payload.contains_key("allowed_models"),
-    };
-    let payload = match serde_json::from_value::<AdminStandaloneApiKeyUpdateRequest>(
-        serde_json::Value::Object(raw_payload),
-    ) {
+    let patch = match AdminStandaloneApiKeyUpdatePatch::from_object(raw_payload) {
         Ok(value) => value,
         Err(_) => {
             return Ok(build_admin_api_keys_bad_request_response(
@@ -177,6 +176,7 @@ pub(super) async fn build_admin_update_api_key_response(
             ));
         }
     };
+    let (field_presence, payload) = patch.into_parts();
     if payload.initial_balance_usd.is_some()
         || payload.unlimited_balance.is_some()
         || payload.expire_days.is_some()
@@ -197,7 +197,7 @@ pub(super) async fn build_admin_update_api_key_response(
             "rate_limit 必须大于等于 0",
         ));
     }
-    let allowed_providers = if field_presence.allowed_providers {
+    let allowed_providers = if field_presence.contains("allowed_providers") {
         match normalize_admin_user_string_list(payload.allowed_providers, "allowed_providers") {
             Ok(value) => Some(value),
             Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
@@ -205,7 +205,7 @@ pub(super) async fn build_admin_update_api_key_response(
     } else {
         None
     };
-    let allowed_api_formats = if field_presence.allowed_api_formats {
+    let allowed_api_formats = if field_presence.contains("allowed_api_formats") {
         match normalize_admin_user_api_formats(payload.allowed_api_formats) {
             Ok(value) => Some(value),
             Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
@@ -213,7 +213,7 @@ pub(super) async fn build_admin_update_api_key_response(
     } else {
         None
     };
-    let allowed_models = if field_presence.allowed_models {
+    let allowed_models = if field_presence.contains("allowed_models") {
         match normalize_admin_user_string_list(payload.allowed_models, "allowed_models") {
             Ok(value) => Some(value),
             Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),

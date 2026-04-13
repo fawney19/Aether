@@ -1,6 +1,6 @@
 use super::payloads::{normalize_optional_price, normalize_required_trimmed_string};
 use crate::handlers::admin::model::shared::{
-    AdminGlobalModelCreateRequest, AdminGlobalModelUpdateRequest,
+    AdminGlobalModelCreateRequest, AdminGlobalModelUpdatePatch,
 };
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{normalize_json_object, normalize_string_list};
@@ -49,12 +49,12 @@ pub(crate) async fn build_admin_global_model_create_record(
 pub(crate) async fn build_admin_global_model_update_record(
     _state: &AdminAppState<'_>,
     existing: &StoredAdminGlobalModel,
-    raw_payload: &serde_json::Map<String, serde_json::Value>,
-    payload: AdminGlobalModelUpdateRequest,
+    patch: AdminGlobalModelUpdatePatch,
 ) -> Result<UpdateAdminGlobalModelRecord, String> {
-    let display_name = if let Some(value) = raw_payload.get("display_name") {
+    let (fields, payload) = patch.into_parts();
+    let display_name = if fields.contains("display_name") {
         let Some(display_name) = payload.display_name.as_deref() else {
-            return Err(if value.is_null() {
+            return Err(if fields.is_null("display_name") {
                 "display_name 不能为空".to_string()
             } else {
                 "display_name 必须是字符串".to_string()
@@ -65,7 +65,7 @@ pub(crate) async fn build_admin_global_model_update_record(
         existing.display_name.clone()
     };
 
-    let default_price_per_request = if raw_payload.contains_key("default_price_per_request") {
+    let default_price_per_request = if fields.contains("default_price_per_request") {
         normalize_optional_price(
             payload.default_price_per_request,
             "default_price_per_request",
@@ -74,19 +74,19 @@ pub(crate) async fn build_admin_global_model_update_record(
         existing.default_price_per_request
     };
 
-    let default_tiered_pricing = if raw_payload.contains_key("default_tiered_pricing") {
+    let default_tiered_pricing = if fields.contains("default_tiered_pricing") {
         normalize_json_object(payload.default_tiered_pricing, "default_tiered_pricing")?
     } else {
         existing.default_tiered_pricing.clone()
     };
 
-    let supported_capabilities = if raw_payload.contains_key("supported_capabilities") {
+    let supported_capabilities = if fields.contains("supported_capabilities") {
         normalize_string_list(payload.supported_capabilities).map(|value| json!(value))
     } else {
         existing.supported_capabilities.clone()
     };
 
-    let config = if raw_payload.contains_key("config") {
+    let config = if fields.contains("config") {
         normalize_json_object(payload.config, "config")?
     } else {
         existing.config.clone()

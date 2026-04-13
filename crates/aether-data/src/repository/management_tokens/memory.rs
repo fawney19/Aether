@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,6 +14,7 @@ use crate::DataLayerError;
 #[derive(Debug, Default)]
 pub struct InMemoryManagementTokenRepository {
     items: RwLock<Vec<StoredManagementTokenWithUser>>,
+    hashes: RwLock<BTreeMap<String, String>>,
 }
 
 impl InMemoryManagementTokenRepository {
@@ -22,6 +24,18 @@ impl InMemoryManagementTokenRepository {
     {
         Self {
             items: RwLock::new(items.into_iter().collect()),
+            hashes: RwLock::new(BTreeMap::new()),
+        }
+    }
+
+    pub fn seed_with_hashes<I, J>(items: I, hashes: J) -> Self
+    where
+        I: IntoIterator<Item = StoredManagementTokenWithUser>,
+        J: IntoIterator<Item = (String, String)>,
+    {
+        Self {
+            items: RwLock::new(items.into_iter().collect()),
+            hashes: RwLock::new(hashes.into_iter().collect()),
         }
     }
 
@@ -30,6 +44,10 @@ impl InMemoryManagementTokenRepository {
             .duration_since(UNIX_EPOCH)
             .ok()
             .map(|duration| duration.as_secs())
+    }
+
+    fn remove_hash_for_token(hashes: &mut BTreeMap<String, String>, token_id: &str) {
+        hashes.retain(|_, existing_token_id| existing_token_id != token_id);
     }
 }
 
@@ -77,6 +95,24 @@ impl ManagementTokenReadRepository for InMemoryManagementTokenRepository {
         let items = self.items.read().expect("management token repository lock");
         Ok(items.iter().find(|item| item.token.id == token_id).cloned())
     }
+
+    async fn get_management_token_with_user_by_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<StoredManagementTokenWithUser>, DataLayerError> {
+        let token_id = {
+            let hashes = self
+                .hashes
+                .read()
+                .expect("management token repository lock");
+            hashes.get(token_hash).cloned()
+        };
+        let Some(token_id) = token_id else {
+            return Ok(None);
+        };
+        let items = self.items.read().expect("management token repository lock");
+        Ok(items.iter().find(|item| item.token.id == token_id).cloned())
+    }
 }
 
 #[async_trait]
@@ -89,6 +125,10 @@ impl ManagementTokenWriteRepository for InMemoryManagementTokenRepository {
 
         let mut items = self
             .items
+            .write()
+            .expect("management token repository lock");
+        let mut hashes = self
+            .hashes
             .write()
             .expect("management token repository lock");
         if items
@@ -118,6 +158,7 @@ impl ManagementTokenWriteRepository for InMemoryManagementTokenRepository {
             token.clone(),
             record.user.clone(),
         ));
+        hashes.insert(record.token_hash.clone(), record.id.clone());
         Ok(token)
     }
 
@@ -183,8 +224,13 @@ impl ManagementTokenWriteRepository for InMemoryManagementTokenRepository {
             .items
             .write()
             .expect("management token repository lock");
+        let mut hashes = self
+            .hashes
+            .write()
+            .expect("management token repository lock");
         let original_len = items.len();
         items.retain(|item| item.token.id != token_id);
+        Self::remove_hash_for_token(&mut hashes, token_id);
         Ok(items.len() != original_len)
     }
 
@@ -215,13 +261,38 @@ impl ManagementTokenWriteRepository for InMemoryManagementTokenRepository {
             .items
             .write()
             .expect("management token repository lock");
+        let mut hashes = self
+            .hashes
+            .write()
+            .expect("management token repository lock");
         let Some(item) = items
             .iter_mut()
             .find(|item| item.token.id == mutation.token_id)
         else {
             return Ok(None);
         };
+        Self::remove_hash_for_token(&mut hashes, &mutation.token_id);
+        hashes.insert(mutation.token_hash.clone(), mutation.token_id.clone());
         item.token.token_prefix = mutation.token_prefix.clone();
+        item.token.updated_at_unix_secs = Self::now_unix_secs();
+        Ok(Some(item.token.clone()))
+    }
+
+    async fn record_management_token_usage(
+        &self,
+        token_id: &str,
+        last_used_ip: Option<&str>,
+    ) -> Result<Option<StoredManagementToken>, DataLayerError> {
+        let mut items = self
+            .items
+            .write()
+            .expect("management token repository lock");
+        let Some(item) = items.iter_mut().find(|item| item.token.id == token_id) else {
+            return Ok(None);
+        };
+        item.token.last_used_at_unix_secs = Self::now_unix_secs();
+        item.token.last_used_ip = last_used_ip.map(ToOwned::to_owned);
+        item.token.usage_count = item.token.usage_count.saturating_add(1);
         item.token.updated_at_unix_secs = Self::now_unix_secs();
         Ok(Some(item.token.clone()))
     }
@@ -254,10 +325,16 @@ mod tests {
 
     #[tokio::test]
     async fn lists_filters_and_mutates_management_tokens() {
-        let repository = InMemoryManagementTokenRepository::seed(vec![
-            sample_token("token-1", "user-1", true),
-            sample_token("token-2", "user-2", false),
-        ]);
+        let repository = InMemoryManagementTokenRepository::seed_with_hashes(
+            vec![
+                sample_token("token-1", "user-1", true),
+                sample_token("token-2", "user-2", false),
+            ],
+            vec![
+                ("hash-1".to_string(), "token-1".to_string()),
+                ("hash-2".to_string(), "token-2".to_string()),
+            ],
+        );
 
         let page = repository
             .list_management_tokens(&ManagementTokenListQuery {
@@ -333,10 +410,31 @@ mod tests {
             .expect("token should exist");
         assert_eq!(regenerated.token_prefix.as_deref(), Some("ae_5678"));
 
+        let by_hash = repository
+            .get_management_token_with_user_by_hash("hash-3b")
+            .await
+            .expect("lookup by hash should succeed")
+            .expect("token should exist");
+        assert_eq!(by_hash.token.id, "token-3");
+
+        let used = repository
+            .record_management_token_usage("token-3", Some("127.0.0.1"))
+            .await
+            .expect("usage update should succeed")
+            .expect("token should exist");
+        assert_eq!(used.last_used_ip.as_deref(), Some("127.0.0.1"));
+        assert_eq!(used.usage_count, 1);
+
         let deleted = repository
             .delete_management_token("token-1")
             .await
             .expect("delete should succeed");
         assert!(deleted);
+
+        let deleted_by_hash = repository
+            .get_management_token_with_user_by_hash("hash-1")
+            .await
+            .expect("hash lookup should succeed");
+        assert!(deleted_by_hash.is_none());
     }
 }

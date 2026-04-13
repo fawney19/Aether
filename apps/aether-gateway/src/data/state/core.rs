@@ -224,6 +224,15 @@ impl GatewayDataState {
         self.proxy_node_writer.is_some()
     }
 
+    pub(crate) fn has_system_config_store(&self) -> bool {
+        self.system_config_values.is_some()
+            || self
+                .backends
+                .as_ref()
+                .and_then(|backends| backends.postgres())
+                .is_some()
+    }
+
     pub(crate) fn oauth_refresh_lock_runner(&self) -> Option<RedisLockRunner> {
         self.backends
             .as_ref()

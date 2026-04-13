@@ -1,131 +1,453 @@
+use aether_data_contracts::repository::usage::{
+    parse_usage_body_ref, usage_body_ref, UsageBodyField,
+};
 use async_trait::async_trait;
+use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use futures_util::future::BoxFuture;
+use futures_util::TryStreamExt;
+use serde_json::Map;
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
+use std::io::{Read, Write};
 use uuid::Uuid;
 
 use super::{
-    StoredProviderApiKeyUsageSummary, StoredProviderUsageSummary, StoredRequestUsageAudit,
-    UpsertUsageRecord, UsageAuditListQuery, UsageReadRepository, UsageWriteRepository,
+    strip_deprecated_usage_display_fields, StoredProviderApiKeyUsageSummary,
+    StoredProviderUsageSummary, StoredRequestUsageAudit, UpsertUsageRecord, UsageAuditListQuery,
+    UsageReadRepository, UsageWriteRepository,
 };
 use crate::postgres::PostgresTransactionRunner;
 use crate::{error::SqlxResultExt, DataLayerError};
 
+// Legacy inline body columns on public.usage are deprecated. Keep the threshold at zero so
+// newly captured bodies always spill to usage_body_blobs and resolve through usage_http_audits.
+const MAX_INLINE_USAGE_BODY_BYTES: usize = 0;
+const FIND_USAGE_BODY_BLOB_BY_REF_SQL: &str =
+    r#"SELECT payload_gzip FROM usage_body_blobs WHERE body_ref = $1 LIMIT 1"#;
+const UPSERT_USAGE_BODY_BLOB_SQL: &str = r#"
+INSERT INTO usage_body_blobs (
+  body_ref,
+  request_id,
+  body_field,
+  payload_gzip
+) VALUES (
+  $1,
+  $2,
+  $3,
+  $4
+)
+ON CONFLICT (body_ref)
+DO UPDATE SET
+  payload_gzip = EXCLUDED.payload_gzip,
+  updated_at = NOW()
+"#;
+const DELETE_USAGE_BODY_BLOB_SQL: &str = r#"
+DELETE FROM usage_body_blobs
+WHERE body_ref = $1
+"#;
+const UPSERT_USAGE_HTTP_AUDIT_SQL: &str = r#"
+INSERT INTO usage_http_audits (
+  request_id,
+  request_headers,
+  provider_request_headers,
+  response_headers,
+  client_response_headers,
+  request_body_ref,
+  provider_request_body_ref,
+  response_body_ref,
+  client_response_body_ref,
+  body_capture_mode
+) VALUES (
+  $1,
+  $2::json,
+  $3::json,
+  $4::json,
+  $5::json,
+  $6,
+  $7,
+  $8,
+  $9,
+  $10
+)
+ON CONFLICT (request_id)
+DO UPDATE SET
+  request_headers = COALESCE(EXCLUDED.request_headers, usage_http_audits.request_headers),
+  provider_request_headers = COALESCE(
+    EXCLUDED.provider_request_headers,
+    usage_http_audits.provider_request_headers
+  ),
+  response_headers = COALESCE(EXCLUDED.response_headers, usage_http_audits.response_headers),
+  client_response_headers = COALESCE(
+    EXCLUDED.client_response_headers,
+    usage_http_audits.client_response_headers
+  ),
+  request_body_ref = COALESCE(EXCLUDED.request_body_ref, usage_http_audits.request_body_ref),
+  provider_request_body_ref = COALESCE(
+    EXCLUDED.provider_request_body_ref,
+    usage_http_audits.provider_request_body_ref
+  ),
+  response_body_ref = COALESCE(EXCLUDED.response_body_ref, usage_http_audits.response_body_ref),
+  client_response_body_ref = COALESCE(
+    EXCLUDED.client_response_body_ref,
+    usage_http_audits.client_response_body_ref
+  ),
+  body_capture_mode = COALESCE(
+    NULLIF(EXCLUDED.body_capture_mode, 'none'),
+    usage_http_audits.body_capture_mode,
+    'none'
+  ),
+  updated_at = NOW()
+"#;
+const UPSERT_USAGE_ROUTING_SNAPSHOT_SQL: &str = r#"
+INSERT INTO usage_routing_snapshots (
+  request_id,
+  candidate_id,
+  candidate_index,
+  key_name,
+  planner_kind,
+  route_family,
+  route_kind,
+  execution_path,
+  local_execution_runtime_miss_reason,
+  selected_provider_id,
+  selected_endpoint_id,
+  selected_provider_api_key_id,
+  has_format_conversion
+) VALUES (
+  $1,
+  $2,
+  $3,
+  $4,
+  $5,
+  $6,
+  $7,
+  $8,
+  $9,
+  $10,
+  $11,
+  $12,
+  $13
+)
+ON CONFLICT (request_id)
+DO UPDATE SET
+  candidate_id = COALESCE(EXCLUDED.candidate_id, usage_routing_snapshots.candidate_id),
+  candidate_index = COALESCE(
+    EXCLUDED.candidate_index,
+    usage_routing_snapshots.candidate_index
+  ),
+  key_name = COALESCE(EXCLUDED.key_name, usage_routing_snapshots.key_name),
+  planner_kind = COALESCE(EXCLUDED.planner_kind, usage_routing_snapshots.planner_kind),
+  route_family = COALESCE(EXCLUDED.route_family, usage_routing_snapshots.route_family),
+  route_kind = COALESCE(EXCLUDED.route_kind, usage_routing_snapshots.route_kind),
+  execution_path = COALESCE(EXCLUDED.execution_path, usage_routing_snapshots.execution_path),
+  local_execution_runtime_miss_reason = COALESCE(
+    EXCLUDED.local_execution_runtime_miss_reason,
+    usage_routing_snapshots.local_execution_runtime_miss_reason
+  ),
+  selected_provider_id = COALESCE(
+    EXCLUDED.selected_provider_id,
+    usage_routing_snapshots.selected_provider_id
+  ),
+  selected_endpoint_id = COALESCE(
+    EXCLUDED.selected_endpoint_id,
+    usage_routing_snapshots.selected_endpoint_id
+  ),
+  selected_provider_api_key_id = COALESCE(
+    EXCLUDED.selected_provider_api_key_id,
+    usage_routing_snapshots.selected_provider_api_key_id
+  ),
+  has_format_conversion = COALESCE(
+    EXCLUDED.has_format_conversion,
+    usage_routing_snapshots.has_format_conversion
+  ),
+  updated_at = NOW()
+"#;
+const UPSERT_USAGE_SETTLEMENT_PRICING_SNAPSHOT_SQL: &str = r#"
+INSERT INTO usage_settlement_snapshots (
+  request_id,
+  billing_status,
+  billing_snapshot_schema_version,
+  billing_snapshot_status,
+  rate_multiplier,
+  is_free_tier,
+  input_price_per_1m,
+  output_price_per_1m,
+  cache_creation_price_per_1m,
+  cache_read_price_per_1m,
+  price_per_request
+) VALUES (
+  $1,
+  $2,
+  $3,
+  $4,
+  $5,
+  $6,
+  $7,
+  $8,
+  $9,
+  $10,
+  $11
+)
+ON CONFLICT (request_id)
+DO UPDATE SET
+  billing_snapshot_schema_version = COALESCE(
+    EXCLUDED.billing_snapshot_schema_version,
+    usage_settlement_snapshots.billing_snapshot_schema_version
+  ),
+  billing_snapshot_status = COALESCE(
+    EXCLUDED.billing_snapshot_status,
+    usage_settlement_snapshots.billing_snapshot_status
+  ),
+  rate_multiplier = COALESCE(
+    EXCLUDED.rate_multiplier,
+    usage_settlement_snapshots.rate_multiplier
+  ),
+  is_free_tier = COALESCE(
+    EXCLUDED.is_free_tier,
+    usage_settlement_snapshots.is_free_tier
+  ),
+  input_price_per_1m = COALESCE(
+    EXCLUDED.input_price_per_1m,
+    usage_settlement_snapshots.input_price_per_1m
+  ),
+  output_price_per_1m = COALESCE(
+    EXCLUDED.output_price_per_1m,
+    usage_settlement_snapshots.output_price_per_1m
+  ),
+  cache_creation_price_per_1m = COALESCE(
+    EXCLUDED.cache_creation_price_per_1m,
+    usage_settlement_snapshots.cache_creation_price_per_1m
+  ),
+  cache_read_price_per_1m = COALESCE(
+    EXCLUDED.cache_read_price_per_1m,
+    usage_settlement_snapshots.cache_read_price_per_1m
+  ),
+  price_per_request = COALESCE(
+    EXCLUDED.price_per_request,
+    usage_settlement_snapshots.price_per_request
+  ),
+  updated_at = NOW()
+"#;
+
 const FIND_BY_REQUEST_ID_SQL: &str = r#"
 SELECT
-  id,
-  request_id,
-  user_id,
-  api_key_id,
-  username,
-  api_key_name,
-  provider_name,
-  model,
-  target_model,
-  provider_id,
-  provider_endpoint_id,
-  provider_api_key_id,
-  request_type,
-  api_format,
-  api_family,
-  endpoint_kind,
-  endpoint_api_format,
-  provider_api_family,
-  provider_endpoint_kind,
-  COALESCE(has_format_conversion, FALSE) AS has_format_conversion,
-  COALESCE(is_stream, FALSE) AS is_stream,
-  input_tokens,
-  output_tokens,
-  total_tokens,
-  COALESCE(cache_creation_input_tokens, 0) AS cache_creation_input_tokens,
-  COALESCE(cache_creation_input_tokens_5m, 0) AS cache_creation_ephemeral_5m_input_tokens,
-  COALESCE(cache_creation_input_tokens_1h, 0) AS cache_creation_ephemeral_1h_input_tokens,
-  COALESCE(cache_read_input_tokens, 0) AS cache_read_input_tokens,
-  COALESCE(CAST(cache_creation_cost_usd AS DOUBLE PRECISION), 0) AS cache_creation_cost_usd,
-  COALESCE(CAST(cache_read_cost_usd AS DOUBLE PRECISION), 0) AS cache_read_cost_usd,
-  CAST(output_price_per_1m AS DOUBLE PRECISION) AS output_price_per_1m,
-  COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
-  COALESCE(CAST(actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
-  status_code,
-  error_message,
-  error_category,
-  response_time_ms,
-  first_byte_time_ms,
-  status,
-  billing_status,
-  request_headers,
-  request_body,
-  provider_request_headers,
-  provider_request_body,
-  response_headers,
-  response_body,
-  client_response_headers,
-  client_response_body,
-  request_metadata,
-  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_ms,
-  CAST(EXTRACT(EPOCH FROM COALESCE(finalized_at, created_at)) AS BIGINT) AS updated_at_unix_secs,
-  CAST(EXTRACT(EPOCH FROM finalized_at) AS BIGINT) AS finalized_at_unix_secs
+  "usage".id,
+  "usage".request_id,
+  "usage".user_id,
+  "usage".api_key_id,
+  "usage".username,
+  "usage".api_key_name,
+  "usage".provider_name,
+  "usage".model,
+  "usage".target_model,
+  "usage".provider_id,
+  "usage".provider_endpoint_id,
+  "usage".provider_api_key_id,
+  "usage".request_type,
+  "usage".api_format,
+  "usage".api_family,
+  "usage".endpoint_kind,
+  "usage".endpoint_api_format,
+  "usage".provider_api_family,
+  "usage".provider_endpoint_kind,
+  COALESCE("usage".has_format_conversion, FALSE) AS has_format_conversion,
+  COALESCE("usage".is_stream, FALSE) AS is_stream,
+  "usage".input_tokens,
+  "usage".output_tokens,
+  "usage".total_tokens,
+  COALESCE("usage".cache_creation_input_tokens, 0) AS cache_creation_input_tokens,
+  COALESCE("usage".cache_creation_input_tokens_5m, 0) AS cache_creation_ephemeral_5m_input_tokens,
+  COALESCE("usage".cache_creation_input_tokens_1h, 0) AS cache_creation_ephemeral_1h_input_tokens,
+  COALESCE("usage".cache_read_input_tokens, 0) AS cache_read_input_tokens,
+  COALESCE(CAST("usage".cache_creation_cost_usd AS DOUBLE PRECISION), 0) AS cache_creation_cost_usd,
+  COALESCE(CAST("usage".cache_read_cost_usd AS DOUBLE PRECISION), 0) AS cache_read_cost_usd,
+  COALESCE(
+    CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION),
+    CAST("usage".output_price_per_1m AS DOUBLE PRECISION)
+  ) AS output_price_per_1m,
+  COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
+  "usage".status_code,
+  "usage".error_message,
+  "usage".error_category,
+  "usage".response_time_ms,
+  "usage".first_byte_time_ms,
+  "usage".status,
+  COALESCE(usage_settlement_snapshots.billing_status, "usage".billing_status) AS billing_status,
+  COALESCE(usage_http_audits.request_headers, "usage".request_headers) AS request_headers,
+  "usage".request_body,
+  "usage".request_body_compressed,
+  COALESCE(
+    usage_http_audits.provider_request_headers,
+    "usage".provider_request_headers
+  ) AS provider_request_headers,
+  "usage".provider_request_body,
+  "usage".provider_request_body_compressed,
+  COALESCE(usage_http_audits.response_headers, "usage".response_headers) AS response_headers,
+  "usage".response_body,
+  "usage".response_body_compressed,
+  COALESCE(
+    usage_http_audits.client_response_headers,
+    "usage".client_response_headers
+  ) AS client_response_headers,
+  "usage".client_response_body,
+  "usage".client_response_body_compressed,
+  "usage".request_metadata,
+  usage_http_audits.request_body_ref AS http_request_body_ref,
+  usage_http_audits.provider_request_body_ref AS http_provider_request_body_ref,
+  usage_http_audits.response_body_ref AS http_response_body_ref,
+  usage_http_audits.client_response_body_ref AS http_client_response_body_ref,
+  usage_routing_snapshots.candidate_id AS routing_candidate_id,
+  usage_routing_snapshots.candidate_index AS routing_candidate_index,
+  usage_routing_snapshots.key_name AS routing_key_name,
+  usage_routing_snapshots.planner_kind AS routing_planner_kind,
+  usage_routing_snapshots.route_family AS routing_route_family,
+  usage_routing_snapshots.route_kind AS routing_route_kind,
+  usage_routing_snapshots.execution_path AS routing_execution_path,
+  usage_routing_snapshots.local_execution_runtime_miss_reason AS routing_local_execution_runtime_miss_reason,
+  usage_settlement_snapshots.billing_snapshot_schema_version AS settlement_billing_snapshot_schema_version,
+  usage_settlement_snapshots.billing_snapshot_status AS settlement_billing_snapshot_status,
+  CAST(usage_settlement_snapshots.rate_multiplier AS DOUBLE PRECISION) AS settlement_rate_multiplier,
+  usage_settlement_snapshots.is_free_tier AS settlement_is_free_tier,
+  CAST(usage_settlement_snapshots.input_price_per_1m AS DOUBLE PRECISION) AS settlement_input_price_per_1m,
+  CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION) AS settlement_output_price_per_1m,
+  CAST(usage_settlement_snapshots.cache_creation_price_per_1m AS DOUBLE PRECISION) AS settlement_cache_creation_price_per_1m,
+  CAST(usage_settlement_snapshots.cache_read_price_per_1m AS DOUBLE PRECISION) AS settlement_cache_read_price_per_1m,
+  CAST(usage_settlement_snapshots.price_per_request AS DOUBLE PRECISION) AS settlement_price_per_request,
+  CAST(EXTRACT(EPOCH FROM "usage".created_at) AS BIGINT) AS created_at_unix_ms,
+  CAST(
+    EXTRACT(
+      EPOCH FROM COALESCE(
+        usage_settlement_snapshots.finalized_at,
+        "usage".finalized_at,
+        "usage".created_at
+      )
+    ) AS BIGINT
+  ) AS updated_at_unix_secs,
+  CAST(
+    EXTRACT(
+      EPOCH FROM COALESCE(usage_settlement_snapshots.finalized_at, "usage".finalized_at)
+    ) AS BIGINT
+  ) AS finalized_at_unix_secs
 FROM "usage"
-WHERE request_id = $1
+LEFT JOIN usage_http_audits
+  ON usage_http_audits.request_id = "usage".request_id
+LEFT JOIN usage_routing_snapshots
+  ON usage_routing_snapshots.request_id = "usage".request_id
+LEFT JOIN usage_settlement_snapshots
+  ON usage_settlement_snapshots.request_id = "usage".request_id
+WHERE "usage".request_id = $1
 LIMIT 1
 "#;
 
 const FIND_BY_ID_SQL: &str = r#"
 SELECT
-  id,
-  request_id,
-  user_id,
-  api_key_id,
-  username,
-  api_key_name,
-  provider_name,
-  model,
-  target_model,
-  provider_id,
-  provider_endpoint_id,
-  provider_api_key_id,
-  request_type,
-  api_format,
-  api_family,
-  endpoint_kind,
-  endpoint_api_format,
-  provider_api_family,
-  provider_endpoint_kind,
-  COALESCE(has_format_conversion, FALSE) AS has_format_conversion,
-  COALESCE(is_stream, FALSE) AS is_stream,
-  input_tokens,
-  output_tokens,
-  total_tokens,
-  COALESCE(cache_creation_input_tokens, 0) AS cache_creation_input_tokens,
-  COALESCE(cache_creation_input_tokens_5m, 0) AS cache_creation_ephemeral_5m_input_tokens,
-  COALESCE(cache_creation_input_tokens_1h, 0) AS cache_creation_ephemeral_1h_input_tokens,
-  COALESCE(cache_read_input_tokens, 0) AS cache_read_input_tokens,
-  COALESCE(CAST(cache_creation_cost_usd AS DOUBLE PRECISION), 0) AS cache_creation_cost_usd,
-  COALESCE(CAST(cache_read_cost_usd AS DOUBLE PRECISION), 0) AS cache_read_cost_usd,
-  CAST(output_price_per_1m AS DOUBLE PRECISION) AS output_price_per_1m,
-  COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
-  COALESCE(CAST(actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
-  status_code,
-  error_message,
-  error_category,
-  response_time_ms,
-  first_byte_time_ms,
-  status,
-  billing_status,
-  request_headers,
-  request_body,
-  provider_request_headers,
-  provider_request_body,
-  response_headers,
-  response_body,
-  client_response_headers,
-  client_response_body,
-  request_metadata,
-  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_ms,
-  CAST(EXTRACT(EPOCH FROM COALESCE(finalized_at, created_at)) AS BIGINT) AS updated_at_unix_secs,
-  CAST(EXTRACT(EPOCH FROM finalized_at) AS BIGINT) AS finalized_at_unix_secs
+  "usage".id,
+  "usage".request_id,
+  "usage".user_id,
+  "usage".api_key_id,
+  "usage".username,
+  "usage".api_key_name,
+  "usage".provider_name,
+  "usage".model,
+  "usage".target_model,
+  "usage".provider_id,
+  "usage".provider_endpoint_id,
+  "usage".provider_api_key_id,
+  "usage".request_type,
+  "usage".api_format,
+  "usage".api_family,
+  "usage".endpoint_kind,
+  "usage".endpoint_api_format,
+  "usage".provider_api_family,
+  "usage".provider_endpoint_kind,
+  COALESCE("usage".has_format_conversion, FALSE) AS has_format_conversion,
+  COALESCE("usage".is_stream, FALSE) AS is_stream,
+  "usage".input_tokens,
+  "usage".output_tokens,
+  "usage".total_tokens,
+  COALESCE("usage".cache_creation_input_tokens, 0) AS cache_creation_input_tokens,
+  COALESCE("usage".cache_creation_input_tokens_5m, 0) AS cache_creation_ephemeral_5m_input_tokens,
+  COALESCE("usage".cache_creation_input_tokens_1h, 0) AS cache_creation_ephemeral_1h_input_tokens,
+  COALESCE("usage".cache_read_input_tokens, 0) AS cache_read_input_tokens,
+  COALESCE(CAST("usage".cache_creation_cost_usd AS DOUBLE PRECISION), 0) AS cache_creation_cost_usd,
+  COALESCE(CAST("usage".cache_read_cost_usd AS DOUBLE PRECISION), 0) AS cache_read_cost_usd,
+  COALESCE(
+    CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION),
+    CAST("usage".output_price_per_1m AS DOUBLE PRECISION)
+  ) AS output_price_per_1m,
+  COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
+  "usage".status_code,
+  "usage".error_message,
+  "usage".error_category,
+  "usage".response_time_ms,
+  "usage".first_byte_time_ms,
+  "usage".status,
+  COALESCE(usage_settlement_snapshots.billing_status, "usage".billing_status) AS billing_status,
+  COALESCE(usage_http_audits.request_headers, "usage".request_headers) AS request_headers,
+  "usage".request_body,
+  "usage".request_body_compressed,
+  COALESCE(
+    usage_http_audits.provider_request_headers,
+    "usage".provider_request_headers
+  ) AS provider_request_headers,
+  "usage".provider_request_body,
+  "usage".provider_request_body_compressed,
+  COALESCE(usage_http_audits.response_headers, "usage".response_headers) AS response_headers,
+  "usage".response_body,
+  "usage".response_body_compressed,
+  COALESCE(
+    usage_http_audits.client_response_headers,
+    "usage".client_response_headers
+  ) AS client_response_headers,
+  "usage".client_response_body,
+  "usage".client_response_body_compressed,
+  "usage".request_metadata,
+  usage_http_audits.request_body_ref AS http_request_body_ref,
+  usage_http_audits.provider_request_body_ref AS http_provider_request_body_ref,
+  usage_http_audits.response_body_ref AS http_response_body_ref,
+  usage_http_audits.client_response_body_ref AS http_client_response_body_ref,
+  usage_routing_snapshots.candidate_id AS routing_candidate_id,
+  usage_routing_snapshots.candidate_index AS routing_candidate_index,
+  usage_routing_snapshots.key_name AS routing_key_name,
+  usage_routing_snapshots.planner_kind AS routing_planner_kind,
+  usage_routing_snapshots.route_family AS routing_route_family,
+  usage_routing_snapshots.route_kind AS routing_route_kind,
+  usage_routing_snapshots.execution_path AS routing_execution_path,
+  usage_routing_snapshots.local_execution_runtime_miss_reason AS routing_local_execution_runtime_miss_reason,
+  usage_settlement_snapshots.billing_snapshot_schema_version AS settlement_billing_snapshot_schema_version,
+  usage_settlement_snapshots.billing_snapshot_status AS settlement_billing_snapshot_status,
+  CAST(usage_settlement_snapshots.rate_multiplier AS DOUBLE PRECISION) AS settlement_rate_multiplier,
+  usage_settlement_snapshots.is_free_tier AS settlement_is_free_tier,
+  CAST(usage_settlement_snapshots.input_price_per_1m AS DOUBLE PRECISION) AS settlement_input_price_per_1m,
+  CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION) AS settlement_output_price_per_1m,
+  CAST(usage_settlement_snapshots.cache_creation_price_per_1m AS DOUBLE PRECISION) AS settlement_cache_creation_price_per_1m,
+  CAST(usage_settlement_snapshots.cache_read_price_per_1m AS DOUBLE PRECISION) AS settlement_cache_read_price_per_1m,
+  CAST(usage_settlement_snapshots.price_per_request AS DOUBLE PRECISION) AS settlement_price_per_request,
+  CAST(EXTRACT(EPOCH FROM "usage".created_at) AS BIGINT) AS created_at_unix_ms,
+  CAST(
+    EXTRACT(
+      EPOCH FROM COALESCE(
+        usage_settlement_snapshots.finalized_at,
+        "usage".finalized_at,
+        "usage".created_at
+      )
+    ) AS BIGINT
+  ) AS updated_at_unix_secs,
+  CAST(
+    EXTRACT(
+      EPOCH FROM COALESCE(usage_settlement_snapshots.finalized_at, "usage".finalized_at)
+    ) AS BIGINT
+  ) AS finalized_at_unix_secs
 FROM "usage"
-WHERE id = $1
+LEFT JOIN usage_http_audits
+  ON usage_http_audits.request_id = "usage".request_id
+LEFT JOIN usage_routing_snapshots
+  ON usage_routing_snapshots.request_id = "usage".request_id
+LEFT JOIN usage_settlement_snapshots
+  ON usage_settlement_snapshots.request_id = "usage".request_id
+WHERE "usage".id = $1
 LIMIT 1
 "#;
 
@@ -182,116 +504,200 @@ ORDER BY provider_api_key_id ASC
 
 const LIST_USAGE_AUDITS_PREFIX: &str = r#"
 SELECT
-  id,
-  request_id,
-  user_id,
-  api_key_id,
-  username,
-  api_key_name,
-  provider_name,
-  model,
-  target_model,
-  provider_id,
-  provider_endpoint_id,
-  provider_api_key_id,
-  request_type,
-  api_format,
-  api_family,
-  endpoint_kind,
-  endpoint_api_format,
-  provider_api_family,
-  provider_endpoint_kind,
-  COALESCE(has_format_conversion, FALSE) AS has_format_conversion,
-  COALESCE(is_stream, FALSE) AS is_stream,
-  input_tokens,
-  output_tokens,
-  total_tokens,
-  COALESCE(cache_creation_input_tokens, 0) AS cache_creation_input_tokens,
-  COALESCE(cache_creation_input_tokens_5m, 0) AS cache_creation_ephemeral_5m_input_tokens,
-  COALESCE(cache_creation_input_tokens_1h, 0) AS cache_creation_ephemeral_1h_input_tokens,
-  COALESCE(cache_read_input_tokens, 0) AS cache_read_input_tokens,
-  COALESCE(CAST(cache_creation_cost_usd AS DOUBLE PRECISION), 0) AS cache_creation_cost_usd,
-  COALESCE(CAST(cache_read_cost_usd AS DOUBLE PRECISION), 0) AS cache_read_cost_usd,
-  CAST(output_price_per_1m AS DOUBLE PRECISION) AS output_price_per_1m,
-  COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
-  COALESCE(CAST(actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
-  status_code,
-  error_message,
-  error_category,
-  response_time_ms,
-  first_byte_time_ms,
-  status,
-  billing_status,
+  "usage".id,
+  "usage".request_id,
+  "usage".user_id,
+  "usage".api_key_id,
+  "usage".username,
+  "usage".api_key_name,
+  "usage".provider_name,
+  "usage".model,
+  "usage".target_model,
+  "usage".provider_id,
+  "usage".provider_endpoint_id,
+  "usage".provider_api_key_id,
+  "usage".request_type,
+  "usage".api_format,
+  "usage".api_family,
+  "usage".endpoint_kind,
+  "usage".endpoint_api_format,
+  "usage".provider_api_family,
+  "usage".provider_endpoint_kind,
+  COALESCE("usage".has_format_conversion, FALSE) AS has_format_conversion,
+  COALESCE("usage".is_stream, FALSE) AS is_stream,
+  "usage".input_tokens,
+  "usage".output_tokens,
+  "usage".total_tokens,
+  COALESCE("usage".cache_creation_input_tokens, 0) AS cache_creation_input_tokens,
+  COALESCE("usage".cache_creation_input_tokens_5m, 0) AS cache_creation_ephemeral_5m_input_tokens,
+  COALESCE("usage".cache_creation_input_tokens_1h, 0) AS cache_creation_ephemeral_1h_input_tokens,
+  COALESCE("usage".cache_read_input_tokens, 0) AS cache_read_input_tokens,
+  COALESCE(CAST("usage".cache_creation_cost_usd AS DOUBLE PRECISION), 0) AS cache_creation_cost_usd,
+  COALESCE(CAST("usage".cache_read_cost_usd AS DOUBLE PRECISION), 0) AS cache_read_cost_usd,
+  COALESCE(
+    CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION),
+    CAST("usage".output_price_per_1m AS DOUBLE PRECISION)
+  ) AS output_price_per_1m,
+  COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
+  "usage".status_code,
+  "usage".error_message,
+  "usage".error_category,
+  "usage".response_time_ms,
+  "usage".first_byte_time_ms,
+  "usage".status,
+  COALESCE(usage_settlement_snapshots.billing_status, "usage".billing_status) AS billing_status,
   NULL::json AS request_headers,
   NULL::json AS request_body,
+  NULL::bytea AS request_body_compressed,
   NULL::json AS provider_request_headers,
   NULL::json AS provider_request_body,
+  NULL::bytea AS provider_request_body_compressed,
   NULL::json AS response_headers,
   NULL::json AS response_body,
+  NULL::bytea AS response_body_compressed,
   NULL::json AS client_response_headers,
   NULL::json AS client_response_body,
+  NULL::bytea AS client_response_body_compressed,
   NULL::json AS request_metadata,
-  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_ms,
-  CAST(EXTRACT(EPOCH FROM COALESCE(finalized_at, created_at)) AS BIGINT) AS updated_at_unix_secs,
-  CAST(EXTRACT(EPOCH FROM finalized_at) AS BIGINT) AS finalized_at_unix_secs
+  NULL::varchar AS http_request_body_ref,
+  NULL::varchar AS http_provider_request_body_ref,
+  NULL::varchar AS http_response_body_ref,
+  NULL::varchar AS http_client_response_body_ref,
+  NULL::varchar AS routing_candidate_id,
+  NULL::integer AS routing_candidate_index,
+  NULL::varchar AS routing_key_name,
+  NULL::varchar AS routing_planner_kind,
+  NULL::varchar AS routing_route_family,
+  NULL::varchar AS routing_route_kind,
+  NULL::varchar AS routing_execution_path,
+  NULL::varchar AS routing_local_execution_runtime_miss_reason,
+  usage_settlement_snapshots.billing_snapshot_schema_version AS settlement_billing_snapshot_schema_version,
+  usage_settlement_snapshots.billing_snapshot_status AS settlement_billing_snapshot_status,
+  CAST(usage_settlement_snapshots.rate_multiplier AS DOUBLE PRECISION) AS settlement_rate_multiplier,
+  usage_settlement_snapshots.is_free_tier AS settlement_is_free_tier,
+  CAST(usage_settlement_snapshots.input_price_per_1m AS DOUBLE PRECISION) AS settlement_input_price_per_1m,
+  CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION) AS settlement_output_price_per_1m,
+  CAST(usage_settlement_snapshots.cache_creation_price_per_1m AS DOUBLE PRECISION) AS settlement_cache_creation_price_per_1m,
+  CAST(usage_settlement_snapshots.cache_read_price_per_1m AS DOUBLE PRECISION) AS settlement_cache_read_price_per_1m,
+  CAST(usage_settlement_snapshots.price_per_request AS DOUBLE PRECISION) AS settlement_price_per_request,
+  CAST(EXTRACT(EPOCH FROM "usage".created_at) AS BIGINT) AS created_at_unix_ms,
+  CAST(
+    EXTRACT(
+      EPOCH FROM COALESCE(
+        usage_settlement_snapshots.finalized_at,
+        "usage".finalized_at,
+        "usage".created_at
+      )
+    ) AS BIGINT
+  ) AS updated_at_unix_secs,
+  CAST(
+    EXTRACT(
+      EPOCH FROM COALESCE(usage_settlement_snapshots.finalized_at, "usage".finalized_at)
+    ) AS BIGINT
+  ) AS finalized_at_unix_secs
 FROM "usage"
+LEFT JOIN usage_settlement_snapshots
+  ON usage_settlement_snapshots.request_id = "usage".request_id
 "#;
 
 const LIST_RECENT_USAGE_AUDITS_PREFIX: &str = r#"
 SELECT
-  id,
-  request_id,
-  user_id,
-  api_key_id,
-  username,
-  api_key_name,
-  provider_name,
-  model,
-  target_model,
-  provider_id,
-  provider_endpoint_id,
-  provider_api_key_id,
-  request_type,
-  api_format,
-  api_family,
-  endpoint_kind,
-  endpoint_api_format,
-  provider_api_family,
-  provider_endpoint_kind,
-  COALESCE(has_format_conversion, FALSE) AS has_format_conversion,
-  COALESCE(is_stream, FALSE) AS is_stream,
-  input_tokens,
-  output_tokens,
-  total_tokens,
-  COALESCE(cache_creation_input_tokens, 0) AS cache_creation_input_tokens,
-  COALESCE(cache_creation_input_tokens_5m, 0) AS cache_creation_ephemeral_5m_input_tokens,
-  COALESCE(cache_creation_input_tokens_1h, 0) AS cache_creation_ephemeral_1h_input_tokens,
-  COALESCE(cache_read_input_tokens, 0) AS cache_read_input_tokens,
-  COALESCE(CAST(cache_creation_cost_usd AS DOUBLE PRECISION), 0) AS cache_creation_cost_usd,
-  COALESCE(CAST(cache_read_cost_usd AS DOUBLE PRECISION), 0) AS cache_read_cost_usd,
-  CAST(output_price_per_1m AS DOUBLE PRECISION) AS output_price_per_1m,
-  COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
-  COALESCE(CAST(actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
-  status_code,
-  error_message,
-  error_category,
-  response_time_ms,
-  first_byte_time_ms,
-  status,
-  billing_status,
+  "usage".id,
+  "usage".request_id,
+  "usage".user_id,
+  "usage".api_key_id,
+  "usage".username,
+  "usage".api_key_name,
+  "usage".provider_name,
+  "usage".model,
+  "usage".target_model,
+  "usage".provider_id,
+  "usage".provider_endpoint_id,
+  "usage".provider_api_key_id,
+  "usage".request_type,
+  "usage".api_format,
+  "usage".api_family,
+  "usage".endpoint_kind,
+  "usage".endpoint_api_format,
+  "usage".provider_api_family,
+  "usage".provider_endpoint_kind,
+  COALESCE("usage".has_format_conversion, FALSE) AS has_format_conversion,
+  COALESCE("usage".is_stream, FALSE) AS is_stream,
+  "usage".input_tokens,
+  "usage".output_tokens,
+  "usage".total_tokens,
+  COALESCE("usage".cache_creation_input_tokens, 0) AS cache_creation_input_tokens,
+  COALESCE("usage".cache_creation_input_tokens_5m, 0) AS cache_creation_ephemeral_5m_input_tokens,
+  COALESCE("usage".cache_creation_input_tokens_1h, 0) AS cache_creation_ephemeral_1h_input_tokens,
+  COALESCE("usage".cache_read_input_tokens, 0) AS cache_read_input_tokens,
+  COALESCE(CAST("usage".cache_creation_cost_usd AS DOUBLE PRECISION), 0) AS cache_creation_cost_usd,
+  COALESCE(CAST("usage".cache_read_cost_usd AS DOUBLE PRECISION), 0) AS cache_read_cost_usd,
+  COALESCE(
+    CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION),
+    CAST("usage".output_price_per_1m AS DOUBLE PRECISION)
+  ) AS output_price_per_1m,
+  COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
+  "usage".status_code,
+  "usage".error_message,
+  "usage".error_category,
+  "usage".response_time_ms,
+  "usage".first_byte_time_ms,
+  "usage".status,
+  COALESCE(usage_settlement_snapshots.billing_status, "usage".billing_status) AS billing_status,
   NULL::json AS request_headers,
   NULL::json AS request_body,
+  NULL::bytea AS request_body_compressed,
   NULL::json AS provider_request_headers,
   NULL::json AS provider_request_body,
+  NULL::bytea AS provider_request_body_compressed,
   NULL::json AS response_headers,
   NULL::json AS response_body,
+  NULL::bytea AS response_body_compressed,
   NULL::json AS client_response_headers,
   NULL::json AS client_response_body,
+  NULL::bytea AS client_response_body_compressed,
   NULL::json AS request_metadata,
-  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_ms,
-  CAST(EXTRACT(EPOCH FROM COALESCE(finalized_at, created_at)) AS BIGINT) AS updated_at_unix_secs,
-  CAST(EXTRACT(EPOCH FROM finalized_at) AS BIGINT) AS finalized_at_unix_secs
+  NULL::varchar AS http_request_body_ref,
+  NULL::varchar AS http_provider_request_body_ref,
+  NULL::varchar AS http_response_body_ref,
+  NULL::varchar AS http_client_response_body_ref,
+  NULL::varchar AS routing_candidate_id,
+  NULL::integer AS routing_candidate_index,
+  NULL::varchar AS routing_key_name,
+  NULL::varchar AS routing_planner_kind,
+  NULL::varchar AS routing_route_family,
+  NULL::varchar AS routing_route_kind,
+  NULL::varchar AS routing_execution_path,
+  NULL::varchar AS routing_local_execution_runtime_miss_reason,
+  usage_settlement_snapshots.billing_snapshot_schema_version AS settlement_billing_snapshot_schema_version,
+  usage_settlement_snapshots.billing_snapshot_status AS settlement_billing_snapshot_status,
+  CAST(usage_settlement_snapshots.rate_multiplier AS DOUBLE PRECISION) AS settlement_rate_multiplier,
+  usage_settlement_snapshots.is_free_tier AS settlement_is_free_tier,
+  CAST(usage_settlement_snapshots.input_price_per_1m AS DOUBLE PRECISION) AS settlement_input_price_per_1m,
+  CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION) AS settlement_output_price_per_1m,
+  CAST(usage_settlement_snapshots.cache_creation_price_per_1m AS DOUBLE PRECISION) AS settlement_cache_creation_price_per_1m,
+  CAST(usage_settlement_snapshots.cache_read_price_per_1m AS DOUBLE PRECISION) AS settlement_cache_read_price_per_1m,
+  CAST(usage_settlement_snapshots.price_per_request AS DOUBLE PRECISION) AS settlement_price_per_request,
+  CAST(EXTRACT(EPOCH FROM "usage".created_at) AS BIGINT) AS created_at_unix_ms,
+  CAST(
+    EXTRACT(
+      EPOCH FROM COALESCE(
+        usage_settlement_snapshots.finalized_at,
+        "usage".finalized_at,
+        "usage".created_at
+      )
+    ) AS BIGINT
+  ) AS updated_at_unix_secs,
+  CAST(
+    EXTRACT(
+      EPOCH FROM COALESCE(usage_settlement_snapshots.finalized_at, "usage".finalized_at)
+    ) AS BIGINT
+  ) AS finalized_at_unix_secs
 FROM "usage"
+LEFT JOIN usage_settlement_snapshots
+  ON usage_settlement_snapshots.request_id = "usage".request_id
 "#;
 
 const UPSERT_SQL: &str = r#"
@@ -338,12 +744,16 @@ INSERT INTO "usage" (
   billing_status,
   request_headers,
   request_body,
+  request_body_compressed,
   provider_request_headers,
   provider_request_body,
+  provider_request_body_compressed,
   response_headers,
   response_body,
+  response_body_compressed,
   client_response_headers,
   client_response_body,
+  client_response_body_compressed,
   request_metadata,
   finalized_at,
   created_at
@@ -390,18 +800,22 @@ INSERT INTO "usage" (
   $40,
   $41::json,
   $42::json,
-  $43::json,
+  $43,
   $44::json,
   $45::json,
-  $46::json,
+  $46,
   $47::json,
   $48::json,
-  $49::json,
+  $49,
+  $50::json,
+  $51::json,
+  $52,
+  $53::json,
   CASE
-    WHEN $50 IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($50::double precision)
+    WHEN $54 IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($54::double precision)
   END,
-  COALESCE(TO_TIMESTAMP($51::double precision), NOW())
+  COALESCE(TO_TIMESTAMP($55::double precision), NOW())
 )
 ON CONFLICT (request_id)
 DO UPDATE SET
@@ -433,7 +847,7 @@ DO UPDATE SET
   cache_read_input_tokens = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.cache_read_input_tokens, "usage".cache_read_input_tokens) ELSE "usage".cache_read_input_tokens END,
   cache_creation_cost_usd = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.cache_creation_cost_usd, "usage".cache_creation_cost_usd) ELSE "usage".cache_creation_cost_usd END,
   cache_read_cost_usd = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.cache_read_cost_usd, "usage".cache_read_cost_usd) ELSE "usage".cache_read_cost_usd END,
-  output_price_per_1m = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.output_price_per_1m, "usage".output_price_per_1m) ELSE "usage".output_price_per_1m END,
+  output_price_per_1m = NULL,
   total_cost_usd = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.total_cost_usd, "usage".total_cost_usd) ELSE "usage".total_cost_usd END,
   actual_total_cost_usd = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.actual_total_cost_usd, "usage".actual_total_cost_usd) ELSE "usage".actual_total_cost_usd END,
   status_code = CASE WHEN "usage".billing_status = 'pending' THEN CASE
@@ -452,14 +866,42 @@ DO UPDATE SET
   first_byte_time_ms = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.first_byte_time_ms, "usage".first_byte_time_ms) ELSE "usage".first_byte_time_ms END,
   status = CASE WHEN "usage".billing_status = 'pending' THEN EXCLUDED.status ELSE "usage".status END,
   billing_status = CASE WHEN "usage".billing_status = 'pending' THEN EXCLUDED.billing_status ELSE "usage".billing_status END,
-  request_headers = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.request_headers, "usage".request_headers) ELSE "usage".request_headers END,
-  request_body = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.request_body, "usage".request_body) ELSE "usage".request_body END,
-  provider_request_headers = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.provider_request_headers, "usage".provider_request_headers) ELSE "usage".provider_request_headers END,
-  provider_request_body = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.provider_request_body, "usage".provider_request_body) ELSE "usage".provider_request_body END,
-  response_headers = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.response_headers, "usage".response_headers) ELSE "usage".response_headers END,
-  response_body = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.response_body, "usage".response_body) ELSE "usage".response_body END,
-  client_response_headers = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.client_response_headers, "usage".client_response_headers) ELSE "usage".client_response_headers END,
-  client_response_body = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.client_response_body, "usage".client_response_body) ELSE "usage".client_response_body END,
+  request_headers = NULL,
+  request_body = CASE WHEN "usage".billing_status = 'pending' THEN CASE
+    WHEN EXCLUDED.request_body_compressed IS NOT NULL OR $56 THEN NULL
+    ELSE COALESCE(EXCLUDED.request_body, "usage".request_body)
+  END ELSE "usage".request_body END,
+  request_body_compressed = CASE WHEN "usage".billing_status = 'pending' THEN CASE
+    WHEN EXCLUDED.request_body IS NOT NULL OR $56 THEN NULL
+    ELSE COALESCE(EXCLUDED.request_body_compressed, "usage".request_body_compressed)
+  END ELSE "usage".request_body_compressed END,
+  provider_request_headers = NULL,
+  provider_request_body = CASE WHEN "usage".billing_status = 'pending' THEN CASE
+    WHEN EXCLUDED.provider_request_body_compressed IS NOT NULL OR $57 THEN NULL
+    ELSE COALESCE(EXCLUDED.provider_request_body, "usage".provider_request_body)
+  END ELSE "usage".provider_request_body END,
+  provider_request_body_compressed = CASE WHEN "usage".billing_status = 'pending' THEN CASE
+    WHEN EXCLUDED.provider_request_body IS NOT NULL OR $57 THEN NULL
+    ELSE COALESCE(EXCLUDED.provider_request_body_compressed, "usage".provider_request_body_compressed)
+  END ELSE "usage".provider_request_body_compressed END,
+  response_headers = NULL,
+  response_body = CASE WHEN "usage".billing_status = 'pending' THEN CASE
+    WHEN EXCLUDED.response_body_compressed IS NOT NULL OR $58 THEN NULL
+    ELSE COALESCE(EXCLUDED.response_body, "usage".response_body)
+  END ELSE "usage".response_body END,
+  response_body_compressed = CASE WHEN "usage".billing_status = 'pending' THEN CASE
+    WHEN EXCLUDED.response_body IS NOT NULL OR $58 THEN NULL
+    ELSE COALESCE(EXCLUDED.response_body_compressed, "usage".response_body_compressed)
+  END ELSE "usage".response_body_compressed END,
+  client_response_headers = NULL,
+  client_response_body = CASE WHEN "usage".billing_status = 'pending' THEN CASE
+    WHEN EXCLUDED.client_response_body_compressed IS NOT NULL OR $59 THEN NULL
+    ELSE COALESCE(EXCLUDED.client_response_body, "usage".client_response_body)
+  END ELSE "usage".client_response_body END,
+  client_response_body_compressed = CASE WHEN "usage".billing_status = 'pending' THEN CASE
+    WHEN EXCLUDED.client_response_body IS NOT NULL OR $59 THEN NULL
+    ELSE COALESCE(EXCLUDED.client_response_body_compressed, "usage".client_response_body_compressed)
+  END ELSE "usage".client_response_body_compressed END,
   request_metadata = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.request_metadata, "usage".request_metadata) ELSE "usage".request_metadata END,
   finalized_at = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.finalized_at, "usage".finalized_at) ELSE "usage".finalized_at END
 RETURNING
@@ -505,13 +947,38 @@ RETURNING
   billing_status,
   request_headers,
   request_body,
+  request_body_compressed,
   provider_request_headers,
   provider_request_body,
+  provider_request_body_compressed,
   response_headers,
   response_body,
+  response_body_compressed,
   client_response_headers,
   client_response_body,
+  client_response_body_compressed,
   request_metadata,
+  NULL::varchar AS http_request_body_ref,
+  NULL::varchar AS http_provider_request_body_ref,
+  NULL::varchar AS http_response_body_ref,
+  NULL::varchar AS http_client_response_body_ref,
+  NULL::varchar AS routing_candidate_id,
+  NULL::integer AS routing_candidate_index,
+  NULL::varchar AS routing_key_name,
+  NULL::varchar AS routing_planner_kind,
+  NULL::varchar AS routing_route_family,
+  NULL::varchar AS routing_route_kind,
+  NULL::varchar AS routing_execution_path,
+  NULL::varchar AS routing_local_execution_runtime_miss_reason,
+  NULL::varchar AS settlement_billing_snapshot_schema_version,
+  NULL::varchar AS settlement_billing_snapshot_status,
+  NULL::double precision AS settlement_rate_multiplier,
+  NULL::boolean AS settlement_is_free_tier,
+  NULL::double precision AS settlement_input_price_per_1m,
+  NULL::double precision AS settlement_output_price_per_1m,
+  NULL::double precision AS settlement_cache_creation_price_per_1m,
+  NULL::double precision AS settlement_cache_read_price_per_1m,
+  NULL::double precision AS settlement_price_per_request,
   CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_ms,
   CAST(EXTRACT(EPOCH FROM COALESCE(finalized_at, created_at)) AS BIGINT) AS updated_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM finalized_at) AS BIGINT) AS finalized_at_unix_secs
@@ -546,7 +1013,14 @@ impl SqlxUsageReadRepository {
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
-        row.as_ref().map(map_usage_row).transpose()
+        let usage = row
+            .as_ref()
+            .map(|row| map_usage_row(row, true))
+            .transpose()?;
+        match usage {
+            Some(usage) => self.hydrate_usage_body_refs(usage).await.map(Some),
+            None => Ok(None),
+        }
     }
 
     pub async fn find_by_id(
@@ -558,7 +1032,77 @@ impl SqlxUsageReadRepository {
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
-        row.as_ref().map(map_usage_row).transpose()
+        row.as_ref()
+            .map(|row| map_usage_row(row, false))
+            .transpose()
+    }
+
+    pub async fn resolve_body_ref(&self, body_ref: &str) -> Result<Option<Value>, DataLayerError> {
+        let blob_row = sqlx::query(FIND_USAGE_BODY_BLOB_BY_REF_SQL)
+            .bind(body_ref)
+            .fetch_optional(&self.pool)
+            .await
+            .map_postgres_err()?;
+        if let Some(row) = blob_row.as_ref() {
+            let payload_gzip = row
+                .try_get::<Vec<u8>, _>("payload_gzip")
+                .map_postgres_err()?;
+            return inflate_usage_json_value(&payload_gzip).map(Some);
+        }
+        let Some((request_id, field)) = parse_usage_body_ref(body_ref) else {
+            return Ok(None);
+        };
+        let (inline_column, compressed_column) = usage_body_sql_columns(field);
+        let row = sqlx::query(&format!(
+            "SELECT {inline_column} AS inline_body, {compressed_column} AS compressed_body FROM \"usage\" WHERE request_id = $1 LIMIT 1"
+        ))
+        .bind(request_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_postgres_err()?;
+        row.as_ref()
+            .map(|row| usage_json_column(row, "inline_body", "compressed_body", true))
+            .transpose()
+            .map(|value| value.and_then(|column| column.value))
+    }
+
+    async fn hydrate_usage_body_refs(
+        &self,
+        mut usage: StoredRequestUsageAudit,
+    ) -> Result<StoredRequestUsageAudit, DataLayerError> {
+        if usage.request_body.is_none() {
+            usage.request_body = self
+                .resolve_usage_body_ref(&usage, UsageBodyField::RequestBody)
+                .await?;
+        }
+        if usage.provider_request_body.is_none() {
+            usage.provider_request_body = self
+                .resolve_usage_body_ref(&usage, UsageBodyField::ProviderRequestBody)
+                .await?;
+        }
+        if usage.response_body.is_none() {
+            usage.response_body = self
+                .resolve_usage_body_ref(&usage, UsageBodyField::ResponseBody)
+                .await?;
+        }
+        if usage.client_response_body.is_none() {
+            usage.client_response_body = self
+                .resolve_usage_body_ref(&usage, UsageBodyField::ClientResponseBody)
+                .await?;
+        }
+        Ok(usage)
+    }
+
+    async fn resolve_usage_body_ref(
+        &self,
+        usage: &StoredRequestUsageAudit,
+        field: UsageBodyField,
+    ) -> Result<Option<Value>, DataLayerError> {
+        let body_ref = usage.body_ref(field);
+        match body_ref {
+            Some(body_ref) => self.resolve_body_ref(body_ref).await,
+            None => Ok(None),
+        }
     }
 
     pub async fn summarize_provider_usage_since(
@@ -604,7 +1148,7 @@ impl SqlxUsageReadRepository {
             builder.push(if has_where { " AND " } else { " WHERE " });
             has_where = true;
             builder
-                .push("created_at >= TO_TIMESTAMP(")
+                .push("\"usage\".created_at >= TO_TIMESTAMP(")
                 .push_bind(created_from_unix_secs as f64)
                 .push("::double precision)");
         }
@@ -612,34 +1156,39 @@ impl SqlxUsageReadRepository {
             builder.push(if has_where { " AND " } else { " WHERE " });
             has_where = true;
             builder
-                .push("created_at < TO_TIMESTAMP(")
+                .push("\"usage\".created_at < TO_TIMESTAMP(")
                 .push_bind(created_until_unix_secs as f64)
                 .push("::double precision)");
         }
         if let Some(user_id) = query.user_id.as_deref() {
             builder.push(if has_where { " AND " } else { " WHERE " });
             has_where = true;
-            builder.push("user_id = ").push_bind(user_id.to_string());
+            builder
+                .push("\"usage\".user_id = ")
+                .push_bind(user_id.to_string());
         }
         if let Some(provider_name) = query.provider_name.as_deref() {
             builder.push(if has_where { " AND " } else { " WHERE " });
             has_where = true;
             builder
-                .push("provider_name = ")
+                .push("\"usage\".provider_name = ")
                 .push_bind(provider_name.to_string());
         }
         if let Some(model) = query.model.as_deref() {
             builder.push(if has_where { " AND " } else { " WHERE " });
-            builder.push("model = ").push_bind(model.to_string());
+            builder
+                .push("\"usage\".model = ")
+                .push_bind(model.to_string());
         }
 
-        builder.push(" ORDER BY created_at ASC, request_id ASC");
-        let rows = builder
-            .build()
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_usage_row).collect()
+        builder.push(" ORDER BY \"usage\".created_at ASC, \"usage\".request_id ASC");
+        let query = builder.build();
+        let mut rows = query.fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(map_usage_row(&row, false)?);
+        }
+        Ok(items)
     }
 
     pub async fn list_recent_usage_audits(
@@ -650,20 +1199,21 @@ impl SqlxUsageReadRepository {
         let mut builder = QueryBuilder::<Postgres>::new(LIST_RECENT_USAGE_AUDITS_PREFIX);
         if let Some(user_id) = user_id {
             builder
-                .push(" WHERE user_id = ")
+                .push(" WHERE \"usage\".user_id = ")
                 .push_bind(user_id.to_string());
         }
         builder
-            .push(" ORDER BY created_at DESC, id ASC LIMIT ")
+            .push(" ORDER BY \"usage\".created_at DESC, \"usage\".id ASC LIMIT ")
             .push_bind(i64::try_from(limit).map_err(|_| {
                 DataLayerError::InvalidInput(format!("invalid recent usage limit: {limit}"))
             })?);
-        let rows = builder
-            .build()
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_usage_row).collect()
+        let query = builder.build();
+        let mut rows = query.fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(map_usage_row(&row, false)?);
+        }
+        Ok(items)
     }
 
     pub async fn summarize_total_tokens_by_api_key_ids(
@@ -674,14 +1224,12 @@ impl SqlxUsageReadRepository {
             return Ok(std::collections::BTreeMap::new());
         }
 
-        let rows = sqlx::query(SUMMARIZE_TOTAL_TOKENS_BY_API_KEY_IDS_SQL)
+        let mut rows = sqlx::query(SUMMARIZE_TOTAL_TOKENS_BY_API_KEY_IDS_SQL)
             .bind(api_key_ids)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
+            .fetch(&self.pool);
 
         let mut totals = std::collections::BTreeMap::new();
-        for row in rows {
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
             let api_key_id: String = row.try_get("api_key_id").map_postgres_err()?;
             let total_tokens = row
                 .try_get::<i64, _>("total_tokens")
@@ -701,14 +1249,12 @@ impl SqlxUsageReadRepository {
             return Ok(std::collections::BTreeMap::new());
         }
 
-        let rows = sqlx::query(SUMMARIZE_USAGE_BY_PROVIDER_API_KEY_IDS_SQL)
+        let mut rows = sqlx::query(SUMMARIZE_USAGE_BY_PROVIDER_API_KEY_IDS_SQL)
             .bind(provider_api_key_ids)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
+            .fetch(&self.pool);
 
         let mut summaries = std::collections::BTreeMap::new();
-        for row in rows {
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
             let provider_api_key_id: String =
                 row.try_get("provider_api_key_id").map_postgres_err()?;
             let request_count = row
@@ -767,22 +1313,99 @@ impl SqlxUsageReadRepository {
         usage: UpsertUsageRecord,
     ) -> Result<StoredRequestUsageAudit, DataLayerError> {
         usage.validate()?;
+        let usage = strip_deprecated_usage_display_fields(usage);
         self.tx_runner
             .run_read_write(|tx| {
                 Box::pin(async move {
                     let request_headers_json = json_bind_text(usage.request_headers.as_ref())?;
-                    let request_body_json = json_bind_text(usage.request_body.as_ref())?;
+                    let request_body_storage =
+                        prepare_usage_body_storage(usage.request_body.as_ref())?;
                     let provider_request_headers_json =
                         json_bind_text(usage.provider_request_headers.as_ref())?;
-                    let provider_request_body_json =
-                        json_bind_text(usage.provider_request_body.as_ref())?;
+                    let provider_request_body_storage =
+                        prepare_usage_body_storage(usage.provider_request_body.as_ref())?;
                     let response_headers_json = json_bind_text(usage.response_headers.as_ref())?;
-                    let response_body_json = json_bind_text(usage.response_body.as_ref())?;
+                    let response_body_storage =
+                        prepare_usage_body_storage(usage.response_body.as_ref())?;
                     let client_response_headers_json =
                         json_bind_text(usage.client_response_headers.as_ref())?;
-                    let client_response_body_json =
-                        json_bind_text(usage.client_response_body.as_ref())?;
-                    let request_metadata_json = json_bind_text(usage.request_metadata.as_ref())?;
+                    let client_response_body_storage =
+                        prepare_usage_body_storage(usage.client_response_body.as_ref())?;
+                    let http_audit_refs = UsageHttpAuditRefs {
+                        request_body_ref: resolved_write_usage_body_ref(
+                            usage.request_body_ref.as_deref(),
+                            &usage.request_id,
+                            UsageBodyField::RequestBody,
+                            request_body_storage.has_detached_blob(),
+                            None,
+                        ),
+                        provider_request_body_ref: resolved_write_usage_body_ref(
+                            usage.provider_request_body_ref.as_deref(),
+                            &usage.request_id,
+                            UsageBodyField::ProviderRequestBody,
+                            provider_request_body_storage.has_detached_blob(),
+                            None,
+                        ),
+                        response_body_ref: resolved_write_usage_body_ref(
+                            usage.response_body_ref.as_deref(),
+                            &usage.request_id,
+                            UsageBodyField::ResponseBody,
+                            response_body_storage.has_detached_blob(),
+                            None,
+                        ),
+                        client_response_body_ref: resolved_write_usage_body_ref(
+                            usage.client_response_body_ref.as_deref(),
+                            &usage.request_id,
+                            UsageBodyField::ClientResponseBody,
+                            client_response_body_storage.has_detached_blob(),
+                            None,
+                        ),
+                    };
+                    let request_metadata_value = prepare_request_metadata_for_body_storage(
+                        usage.request_metadata.clone(),
+                        [
+                            (
+                                UsageBodyField::RequestBody,
+                                &request_body_storage,
+                                usage.request_body.as_ref(),
+                                usage.request_body_ref.as_deref(),
+                            ),
+                            (
+                                UsageBodyField::ProviderRequestBody,
+                                &provider_request_body_storage,
+                                usage.provider_request_body.as_ref(),
+                                usage.provider_request_body_ref.as_deref(),
+                            ),
+                            (
+                                UsageBodyField::ResponseBody,
+                                &response_body_storage,
+                                usage.response_body.as_ref(),
+                                usage.response_body_ref.as_deref(),
+                            ),
+                            (
+                                UsageBodyField::ClientResponseBody,
+                                &client_response_body_storage,
+                                usage.client_response_body.as_ref(),
+                                usage.client_response_body_ref.as_deref(),
+                            ),
+                        ],
+                    );
+                    let http_audit_capture_mode = usage_http_audit_capture_mode(
+                        &http_audit_refs,
+                        [
+                            usage.request_body.as_ref(),
+                            usage.provider_request_body.as_ref(),
+                            usage.response_body.as_ref(),
+                            usage.client_response_body.as_ref(),
+                        ],
+                    );
+                    let routing_snapshot =
+                        usage_routing_snapshot_from_usage(&usage, request_metadata_value.as_ref());
+                    let settlement_pricing_snapshot = usage_settlement_pricing_snapshot_from_usage(
+                        &usage,
+                        request_metadata_value.as_ref(),
+                    );
+                    let request_metadata_json = json_bind_text(request_metadata_value.as_ref())?;
                     let row = sqlx::query(UPSERT_SQL)
                         .bind(Uuid::new_v4().to_string())
                         .bind(&usage.request_id)
@@ -835,7 +1458,7 @@ impl SqlxUsageReadRepository {
                         .bind(usage.cache_read_input_tokens.map(to_i32).transpose()?)
                         .bind(usage.cache_creation_cost_usd)
                         .bind(usage.cache_read_cost_usd)
-                        .bind(usage.output_price_per_1m)
+                        .bind(None::<f64>)
                         .bind(usage.total_cost_usd)
                         .bind(usage.actual_total_cost_usd)
                         .bind(usage.status_code.map(i32::from))
@@ -845,21 +1468,144 @@ impl SqlxUsageReadRepository {
                         .bind(usage.first_byte_time_ms.map(to_i32).transpose()?)
                         .bind(&usage.status)
                         .bind(&usage.billing_status)
-                        .bind(&request_headers_json)
-                        .bind(&request_body_json)
-                        .bind(&provider_request_headers_json)
-                        .bind(&provider_request_body_json)
-                        .bind(&response_headers_json)
-                        .bind(&response_body_json)
-                        .bind(&client_response_headers_json)
-                        .bind(&client_response_body_json)
+                        .bind(None::<String>)
+                        .bind(&request_body_storage.inline_json)
+                        .bind(None::<Vec<u8>>)
+                        .bind(None::<String>)
+                        .bind(&provider_request_body_storage.inline_json)
+                        .bind(None::<Vec<u8>>)
+                        .bind(None::<String>)
+                        .bind(&response_body_storage.inline_json)
+                        .bind(None::<Vec<u8>>)
+                        .bind(None::<String>)
+                        .bind(&client_response_body_storage.inline_json)
+                        .bind(None::<Vec<u8>>)
                         .bind(&request_metadata_json)
                         .bind(usage.finalized_at_unix_secs.map(|value| value as f64))
                         .bind(usage.created_at_unix_ms.map(|value| value as f64))
+                        .bind(request_body_storage.has_detached_blob())
+                        .bind(provider_request_body_storage.has_detached_blob())
+                        .bind(response_body_storage.has_detached_blob())
+                        .bind(client_response_body_storage.has_detached_blob())
                         .fetch_one(&mut **tx)
                         .await
                         .map_postgres_err()?;
-                    map_usage_row(&row)
+                    sync_usage_body_blob_storage(
+                        &mut **tx,
+                        &usage.request_id,
+                        UsageBodyField::RequestBody,
+                        usage.request_body.as_ref(),
+                        &request_body_storage,
+                    )
+                    .await?;
+                    sync_usage_body_blob_storage(
+                        &mut **tx,
+                        &usage.request_id,
+                        UsageBodyField::ProviderRequestBody,
+                        usage.provider_request_body.as_ref(),
+                        &provider_request_body_storage,
+                    )
+                    .await?;
+                    sync_usage_body_blob_storage(
+                        &mut **tx,
+                        &usage.request_id,
+                        UsageBodyField::ResponseBody,
+                        usage.response_body.as_ref(),
+                        &response_body_storage,
+                    )
+                    .await?;
+                    sync_usage_body_blob_storage(
+                        &mut **tx,
+                        &usage.request_id,
+                        UsageBodyField::ClientResponseBody,
+                        usage.client_response_body.as_ref(),
+                        &client_response_body_storage,
+                    )
+                    .await?;
+                    let http_audit_headers = UsageHttpAuditHeaders {
+                        request_headers_json: request_headers_json.as_deref(),
+                        provider_request_headers_json: provider_request_headers_json.as_deref(),
+                        response_headers_json: response_headers_json.as_deref(),
+                        client_response_headers_json: client_response_headers_json.as_deref(),
+                    };
+                    sync_usage_http_audit_storage(
+                        &mut **tx,
+                        &usage.request_id,
+                        &http_audit_headers,
+                        &http_audit_refs,
+                        http_audit_capture_mode,
+                    )
+                    .await?;
+                    sync_usage_routing_snapshot_storage(
+                        &mut **tx,
+                        &usage.request_id,
+                        &routing_snapshot,
+                    )
+                    .await?;
+                    sync_usage_settlement_pricing_snapshot_storage(
+                        &mut **tx,
+                        &usage.request_id,
+                        &settlement_pricing_snapshot,
+                    )
+                    .await?;
+
+                    let mut stored = map_usage_row(&row, true)?;
+                    if request_body_storage.has_detached_blob() {
+                        stored.request_body = usage.request_body.clone();
+                    }
+                    stored.request_headers = usage.request_headers.clone();
+                    stored.provider_request_headers = usage.provider_request_headers.clone();
+                    if provider_request_body_storage.has_detached_blob() {
+                        stored.provider_request_body = usage.provider_request_body.clone();
+                    }
+                    stored.response_headers = usage.response_headers.clone();
+                    if response_body_storage.has_detached_blob() {
+                        stored.response_body = usage.response_body.clone();
+                    }
+                    stored.client_response_headers = usage.client_response_headers.clone();
+                    if client_response_body_storage.has_detached_blob() {
+                        stored.client_response_body = usage.client_response_body.clone();
+                    }
+                    stored.request_body_ref = resolved_write_usage_body_ref(
+                        usage.request_body_ref.as_deref(),
+                        &usage.request_id,
+                        UsageBodyField::RequestBody,
+                        request_body_storage.has_detached_blob(),
+                        http_audit_refs.request_body_ref.as_deref(),
+                    );
+                    stored.provider_request_body_ref = resolved_write_usage_body_ref(
+                        usage.provider_request_body_ref.as_deref(),
+                        &usage.request_id,
+                        UsageBodyField::ProviderRequestBody,
+                        provider_request_body_storage.has_detached_blob(),
+                        http_audit_refs.provider_request_body_ref.as_deref(),
+                    );
+                    stored.response_body_ref = resolved_write_usage_body_ref(
+                        usage.response_body_ref.as_deref(),
+                        &usage.request_id,
+                        UsageBodyField::ResponseBody,
+                        response_body_storage.has_detached_blob(),
+                        http_audit_refs.response_body_ref.as_deref(),
+                    );
+                    stored.client_response_body_ref = resolved_write_usage_body_ref(
+                        usage.client_response_body_ref.as_deref(),
+                        &usage.request_id,
+                        UsageBodyField::ClientResponseBody,
+                        client_response_body_storage.has_detached_blob(),
+                        http_audit_refs.client_response_body_ref.as_deref(),
+                    );
+                    stored.candidate_id = routing_snapshot.candidate_id.clone();
+                    stored.candidate_index = routing_snapshot.candidate_index;
+                    stored.key_name = routing_snapshot.key_name.clone();
+                    stored.planner_kind = routing_snapshot.planner_kind.clone();
+                    stored.route_family = routing_snapshot.route_family.clone();
+                    stored.route_kind = routing_snapshot.route_kind.clone();
+                    stored.execution_path = routing_snapshot.execution_path.clone();
+                    stored.local_execution_runtime_miss_reason =
+                        routing_snapshot.local_execution_runtime_miss_reason.clone();
+                    stored.output_price_per_1m = settlement_pricing_snapshot.output_price_per_1m;
+                    stored.request_metadata = request_metadata_value;
+                    Ok(stored)
                 }) as BoxFuture<'_, Result<StoredRequestUsageAudit, DataLayerError>>
             })
             .await
@@ -880,6 +1626,10 @@ impl UsageReadRepository for SqlxUsageReadRepository {
         request_id: &str,
     ) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
         Self::find_by_request_id(self, request_id).await
+    }
+
+    async fn resolve_body_ref(&self, body_ref: &str) -> Result<Option<Value>, DataLayerError> {
+        Self::resolve_body_ref(self, body_ref).await
     }
 
     async fn list_usage_audits(
@@ -931,7 +1681,10 @@ impl UsageWriteRepository for SqlxUsageReadRepository {
     }
 }
 
-fn map_usage_row(row: &sqlx::postgres::PgRow) -> Result<StoredRequestUsageAudit, DataLayerError> {
+fn map_usage_row(
+    row: &sqlx::postgres::PgRow,
+    resolve_compressed_bodies: bool,
+) -> Result<StoredRequestUsageAudit, DataLayerError> {
     let mut usage = StoredRequestUsageAudit::new(
         row.try_get("id").map_postgres_err()?,
         row.try_get("request_id").map_postgres_err()?,
@@ -1002,14 +1755,96 @@ fn map_usage_row(row: &sqlx::postgres::PgRow) -> Result<StoredRequestUsageAudit,
         .map_postgres_err()?;
     usage.output_price_per_1m = row.try_get("output_price_per_1m").map_postgres_err()?;
     usage.request_headers = row.try_get("request_headers").map_postgres_err()?;
-    usage.request_body = row.try_get("request_body").map_postgres_err()?;
+    let request_body = usage_json_column(
+        row,
+        "request_body",
+        "request_body_compressed",
+        resolve_compressed_bodies,
+    )?;
     usage.provider_request_headers = row.try_get("provider_request_headers").map_postgres_err()?;
-    usage.provider_request_body = row.try_get("provider_request_body").map_postgres_err()?;
+    let provider_request_body = usage_json_column(
+        row,
+        "provider_request_body",
+        "provider_request_body_compressed",
+        resolve_compressed_bodies,
+    )?;
     usage.response_headers = row.try_get("response_headers").map_postgres_err()?;
-    usage.response_body = row.try_get("response_body").map_postgres_err()?;
+    let response_body = usage_json_column(
+        row,
+        "response_body",
+        "response_body_compressed",
+        resolve_compressed_bodies,
+    )?;
     usage.client_response_headers = row.try_get("client_response_headers").map_postgres_err()?;
-    usage.client_response_body = row.try_get("client_response_body").map_postgres_err()?;
-    usage.request_metadata = row.try_get("request_metadata").map_postgres_err()?;
+    let client_response_body = usage_json_column(
+        row,
+        "client_response_body",
+        "client_response_body_compressed",
+        resolve_compressed_bodies,
+    )?;
+    let request_metadata: Option<Value> = row.try_get("request_metadata").map_postgres_err()?;
+    let http_audit_refs = UsageHttpAuditRefs {
+        request_body_ref: row.try_get("http_request_body_ref").map_postgres_err()?,
+        provider_request_body_ref: row
+            .try_get("http_provider_request_body_ref")
+            .map_postgres_err()?,
+        response_body_ref: row.try_get("http_response_body_ref").map_postgres_err()?,
+        client_response_body_ref: row
+            .try_get("http_client_response_body_ref")
+            .map_postgres_err()?,
+    };
+    let routing_snapshot = usage_routing_snapshot_from_row(row)?;
+    let settlement_pricing_snapshot = usage_settlement_pricing_snapshot_from_row(row)?;
+    usage.request_body = request_body.value;
+    usage.provider_request_body = provider_request_body.value;
+    usage.response_body = response_body.value;
+    usage.client_response_body = client_response_body.value;
+    let request_metadata_object = request_metadata.as_ref().and_then(Value::as_object);
+    usage.request_body_ref = resolved_read_usage_body_ref(
+        None,
+        request_metadata_object,
+        &usage.request_id,
+        UsageBodyField::RequestBody,
+        request_body.has_compressed_storage,
+        http_audit_refs.request_body_ref.as_deref(),
+    );
+    usage.provider_request_body_ref = resolved_read_usage_body_ref(
+        None,
+        request_metadata_object,
+        &usage.request_id,
+        UsageBodyField::ProviderRequestBody,
+        provider_request_body.has_compressed_storage,
+        http_audit_refs.provider_request_body_ref.as_deref(),
+    );
+    usage.response_body_ref = resolved_read_usage_body_ref(
+        None,
+        request_metadata_object,
+        &usage.request_id,
+        UsageBodyField::ResponseBody,
+        response_body.has_compressed_storage,
+        http_audit_refs.response_body_ref.as_deref(),
+    );
+    usage.client_response_body_ref = resolved_read_usage_body_ref(
+        None,
+        request_metadata_object,
+        &usage.request_id,
+        UsageBodyField::ClientResponseBody,
+        client_response_body.has_compressed_storage,
+        http_audit_refs.client_response_body_ref.as_deref(),
+    );
+    usage.candidate_id = routing_snapshot.candidate_id.clone();
+    usage.candidate_index = routing_snapshot.candidate_index;
+    usage.key_name = routing_snapshot.key_name.clone();
+    usage.planner_kind = routing_snapshot.planner_kind.clone();
+    usage.route_family = routing_snapshot.route_family.clone();
+    usage.route_kind = routing_snapshot.route_kind.clone();
+    usage.execution_path = routing_snapshot.execution_path.clone();
+    usage.local_execution_runtime_miss_reason =
+        routing_snapshot.local_execution_runtime_miss_reason.clone();
+    usage.request_metadata = attach_usage_settlement_pricing_snapshot_metadata(
+        request_metadata,
+        &settlement_pricing_snapshot,
+    );
     Ok(usage)
 }
 
@@ -1024,6 +1859,158 @@ fn to_u64(value: i32, field_name: &str) -> Result<u64, DataLayerError> {
         .map_err(|_| DataLayerError::UnexpectedValue(format!("invalid {field_name}: {value}")))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UsageBodyStorage {
+    inline_json: Option<String>,
+    detached_blob_bytes: Option<Vec<u8>>,
+}
+
+impl UsageBodyStorage {
+    fn has_detached_blob(&self) -> bool {
+        self.detached_blob_bytes.is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct UsageBodyColumn {
+    value: Option<Value>,
+    has_compressed_storage: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct UsageHttpAuditRefs {
+    request_body_ref: Option<String>,
+    provider_request_body_ref: Option<String>,
+    response_body_ref: Option<String>,
+    client_response_body_ref: Option<String>,
+}
+
+impl UsageHttpAuditRefs {
+    fn any_present(&self) -> bool {
+        self.request_body_ref.is_some()
+            || self.provider_request_body_ref.is_some()
+            || self.response_body_ref.is_some()
+            || self.client_response_body_ref.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct UsageHttpAuditHeaders<'a> {
+    request_headers_json: Option<&'a str>,
+    provider_request_headers_json: Option<&'a str>,
+    response_headers_json: Option<&'a str>,
+    client_response_headers_json: Option<&'a str>,
+}
+
+impl UsageHttpAuditHeaders<'_> {
+    fn any_present(&self) -> bool {
+        self.request_headers_json.is_some()
+            || self.provider_request_headers_json.is_some()
+            || self.response_headers_json.is_some()
+            || self.client_response_headers_json.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct UsageRoutingSnapshot {
+    candidate_id: Option<String>,
+    candidate_index: Option<u64>,
+    key_name: Option<String>,
+    planner_kind: Option<String>,
+    route_family: Option<String>,
+    route_kind: Option<String>,
+    execution_path: Option<String>,
+    local_execution_runtime_miss_reason: Option<String>,
+    selected_provider_id: Option<String>,
+    selected_endpoint_id: Option<String>,
+    selected_provider_api_key_id: Option<String>,
+    has_format_conversion: Option<bool>,
+}
+
+impl UsageRoutingSnapshot {
+    fn has_metadata_fields(&self) -> bool {
+        self.candidate_id.is_some()
+            || self.candidate_index.is_some()
+            || self.key_name.is_some()
+            || self.planner_kind.is_some()
+            || self.route_family.is_some()
+            || self.route_kind.is_some()
+            || self.execution_path.is_some()
+            || self.local_execution_runtime_miss_reason.is_some()
+    }
+
+    fn any_present(&self) -> bool {
+        self.has_metadata_fields()
+            || self.selected_provider_id.is_some()
+            || self.selected_endpoint_id.is_some()
+            || self.selected_provider_api_key_id.is_some()
+            || self.has_format_conversion.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+struct UsageSettlementPricingSnapshot {
+    billing_status: Option<String>,
+    billing_snapshot_schema_version: Option<String>,
+    billing_snapshot_status: Option<String>,
+    rate_multiplier: Option<f64>,
+    is_free_tier: Option<bool>,
+    input_price_per_1m: Option<f64>,
+    output_price_per_1m: Option<f64>,
+    cache_creation_price_per_1m: Option<f64>,
+    cache_read_price_per_1m: Option<f64>,
+    price_per_request: Option<f64>,
+}
+
+impl UsageSettlementPricingSnapshot {
+    fn any_present(&self) -> bool {
+        self.billing_status.is_some()
+            || self.billing_snapshot_schema_version.is_some()
+            || self.billing_snapshot_status.is_some()
+            || self.rate_multiplier.is_some()
+            || self.is_free_tier.is_some()
+            || self.input_price_per_1m.is_some()
+            || self.output_price_per_1m.is_some()
+            || self.cache_creation_price_per_1m.is_some()
+            || self.cache_read_price_per_1m.is_some()
+            || self.price_per_request.is_some()
+    }
+}
+
+fn prepare_usage_body_storage(value: Option<&Value>) -> Result<UsageBodyStorage, DataLayerError> {
+    let Some(value) = value else {
+        return Ok(UsageBodyStorage {
+            inline_json: None,
+            detached_blob_bytes: None,
+        });
+    };
+    let bytes = serde_json::to_vec(value).map_err(|err| {
+        DataLayerError::UnexpectedValue(format!("failed to serialize usage json: {err}"))
+    })?;
+    if bytes.len() == MAX_INLINE_USAGE_BODY_BYTES {
+        return Ok(UsageBodyStorage {
+            inline_json: Some(String::from_utf8(bytes).map_err(|err| {
+                DataLayerError::UnexpectedValue(format!(
+                    "failed to encode inline usage body as utf-8: {err}"
+                ))
+            })?),
+            detached_blob_bytes: None,
+        });
+    }
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::new(6));
+    encoder.write_all(&bytes).map_err(|err| {
+        DataLayerError::UnexpectedValue(format!("failed to compress usage json: {err}"))
+    })?;
+    let detached_blob_bytes = encoder.finish().map_err(|err| {
+        DataLayerError::UnexpectedValue(format!("failed to finish usage json compression: {err}"))
+    })?;
+    Ok(UsageBodyStorage {
+        inline_json: None,
+        detached_blob_bytes: Some(detached_blob_bytes),
+    })
+}
+
 fn json_bind_text(value: Option<&Value>) -> Result<Option<String>, DataLayerError> {
     value
         .map(|value| {
@@ -1035,10 +2022,774 @@ fn json_bind_text(value: Option<&Value>) -> Result<Option<String>, DataLayerErro
 }
 
 #[cfg(test)]
+fn usage_http_audit_body_refs(metadata: Option<&Value>) -> UsageHttpAuditRefs {
+    let object = metadata.and_then(Value::as_object);
+    UsageHttpAuditRefs {
+        request_body_ref: metadata_ref_value(object, "request_body_ref"),
+        provider_request_body_ref: metadata_ref_value(object, "provider_request_body_ref"),
+        response_body_ref: metadata_ref_value(object, "response_body_ref"),
+        client_response_body_ref: metadata_ref_value(object, "client_response_body_ref"),
+    }
+}
+
+fn resolved_read_usage_body_ref(
+    explicit_ref: Option<&str>,
+    metadata: Option<&serde_json::Map<String, Value>>,
+    request_id: &str,
+    field: UsageBodyField,
+    has_compressed_storage: bool,
+    http_audit_ref: Option<&str>,
+) -> Option<String> {
+    explicit_ref
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            http_audit_ref
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| has_compressed_storage.then(|| usage_body_ref(request_id, field)))
+        .or_else(|| metadata_usage_body_ref_value(metadata, request_id, field))
+}
+
+fn resolved_write_usage_body_ref(
+    explicit_ref: Option<&str>,
+    request_id: &str,
+    field: UsageBodyField,
+    has_compressed_storage: bool,
+    http_audit_ref: Option<&str>,
+) -> Option<String> {
+    explicit_ref
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| has_compressed_storage.then(|| usage_body_ref(request_id, field)))
+        .or_else(|| {
+            http_audit_ref
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn metadata_ref_value(
+    metadata: Option<&serde_json::Map<String, Value>>,
+    key: &str,
+) -> Option<String> {
+    metadata
+        .and_then(|object| object.get(key))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn metadata_usage_body_ref_value(
+    metadata: Option<&serde_json::Map<String, Value>>,
+    request_id: &str,
+    field: UsageBodyField,
+) -> Option<String> {
+    metadata_ref_value(metadata, field.as_ref_key())
+        .and_then(|value| parse_usage_body_ref(&value))
+        .filter(|(parsed_request_id, parsed_field)| {
+            parsed_request_id == request_id && *parsed_field == field
+        })
+        .map(|(parsed_request_id, parsed_field)| usage_body_ref(&parsed_request_id, parsed_field))
+}
+
+fn metadata_number_value(
+    metadata: Option<&serde_json::Map<String, Value>>,
+    key: &str,
+) -> Option<f64> {
+    metadata
+        .and_then(|object| object.get(key))
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+}
+
+fn metadata_u64_value(metadata: Option<&serde_json::Map<String, Value>>, key: &str) -> Option<u64> {
+    metadata.and_then(|object| {
+        object.get(key).and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))
+        })
+    })
+}
+
+fn metadata_bool_value(
+    metadata: Option<&serde_json::Map<String, Value>>,
+    key: &str,
+) -> Option<bool> {
+    metadata
+        .and_then(|object| object.get(key))
+        .and_then(Value::as_bool)
+}
+
+fn billing_snapshot_object(
+    metadata: Option<&serde_json::Map<String, Value>>,
+) -> Option<&serde_json::Map<String, Value>> {
+    metadata
+        .and_then(|object| object.get("billing_snapshot"))
+        .and_then(Value::as_object)
+}
+
+fn billing_snapshot_string_value(
+    metadata: Option<&serde_json::Map<String, Value>>,
+    key: &str,
+) -> Option<String> {
+    billing_snapshot_object(metadata)
+        .and_then(|snapshot| snapshot.get(key))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn billing_snapshot_resolved_number(
+    metadata: Option<&serde_json::Map<String, Value>>,
+    key: &str,
+) -> Option<f64> {
+    billing_snapshot_object(metadata)
+        .and_then(|snapshot| snapshot.get("resolved_variables"))
+        .and_then(Value::as_object)
+        .and_then(|variables| variables.get(key))
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+}
+
+fn usage_http_audit_capture_mode(
+    refs: &UsageHttpAuditRefs,
+    body_values: [Option<&Value>; 4],
+) -> &'static str {
+    if refs.any_present() {
+        return "ref_backed";
+    }
+    if body_values.iter().any(Option::is_some) {
+        return "inline_legacy";
+    }
+    "none"
+}
+
+fn usage_routing_snapshot_from_usage(
+    usage: &UpsertUsageRecord,
+    metadata: Option<&Value>,
+) -> UsageRoutingSnapshot {
+    let object = metadata.and_then(Value::as_object);
+    let mut snapshot = UsageRoutingSnapshot {
+        candidate_id: usage
+            .candidate_id
+            .clone()
+            .or_else(|| metadata_ref_value(object, "candidate_id")),
+        candidate_index: usage
+            .candidate_index
+            .or_else(|| metadata_u64_value(object, "candidate_index")),
+        key_name: usage
+            .key_name
+            .clone()
+            .or_else(|| metadata_ref_value(object, "key_name")),
+        planner_kind: usage
+            .planner_kind
+            .clone()
+            .or_else(|| metadata_ref_value(object, "planner_kind")),
+        route_family: usage
+            .route_family
+            .clone()
+            .or_else(|| metadata_ref_value(object, "route_family")),
+        route_kind: usage
+            .route_kind
+            .clone()
+            .or_else(|| metadata_ref_value(object, "route_kind")),
+        execution_path: usage
+            .execution_path
+            .clone()
+            .or_else(|| metadata_ref_value(object, "execution_path")),
+        local_execution_runtime_miss_reason: usage
+            .local_execution_runtime_miss_reason
+            .clone()
+            .or_else(|| metadata_ref_value(object, "local_execution_runtime_miss_reason")),
+        selected_provider_id: None,
+        selected_endpoint_id: None,
+        selected_provider_api_key_id: None,
+        has_format_conversion: None,
+    };
+    if !snapshot.has_metadata_fields() {
+        return snapshot;
+    }
+
+    snapshot.selected_provider_id = usage.provider_id.clone();
+    snapshot.selected_endpoint_id = usage.provider_endpoint_id.clone();
+    snapshot.selected_provider_api_key_id = usage.provider_api_key_id.clone();
+    snapshot.has_format_conversion = usage.has_format_conversion;
+    snapshot
+}
+
+fn usage_settlement_pricing_snapshot_from_usage(
+    usage: &UpsertUsageRecord,
+    metadata: Option<&Value>,
+) -> UsageSettlementPricingSnapshot {
+    let object = metadata.and_then(Value::as_object);
+    let snapshot = UsageSettlementPricingSnapshot {
+        billing_status: Some(usage.billing_status.clone()),
+        billing_snapshot_schema_version: metadata_ref_value(
+            object,
+            "billing_snapshot_schema_version",
+        )
+        .or_else(|| billing_snapshot_string_value(object, "schema_version")),
+        billing_snapshot_status: metadata_ref_value(object, "billing_snapshot_status")
+            .or_else(|| billing_snapshot_string_value(object, "status")),
+        rate_multiplier: metadata_number_value(object, "rate_multiplier"),
+        is_free_tier: metadata_bool_value(object, "is_free_tier"),
+        input_price_per_1m: metadata_number_value(object, "input_price_per_1m")
+            .or_else(|| billing_snapshot_resolved_number(object, "input_price_per_1m")),
+        output_price_per_1m: metadata_number_value(object, "output_price_per_1m")
+            .or_else(|| billing_snapshot_resolved_number(object, "output_price_per_1m"))
+            .or(usage.output_price_per_1m),
+        cache_creation_price_per_1m: metadata_number_value(object, "cache_creation_price_per_1m")
+            .or_else(|| billing_snapshot_resolved_number(object, "cache_creation_price_per_1m")),
+        cache_read_price_per_1m: metadata_number_value(object, "cache_read_price_per_1m")
+            .or_else(|| billing_snapshot_resolved_number(object, "cache_read_price_per_1m")),
+        price_per_request: metadata_number_value(object, "price_per_request")
+            .or_else(|| billing_snapshot_resolved_number(object, "price_per_request")),
+    };
+    if snapshot.any_present() {
+        snapshot
+    } else {
+        UsageSettlementPricingSnapshot::default()
+    }
+}
+
+fn usage_json_column(
+    row: &sqlx::postgres::PgRow,
+    inline_column: &str,
+    compressed_column: &str,
+    resolve_compressed: bool,
+) -> Result<UsageBodyColumn, DataLayerError> {
+    let inline = row
+        .try_get::<Option<Value>, _>(inline_column)
+        .map_postgres_err()?;
+    if inline.is_some() {
+        return Ok(UsageBodyColumn {
+            value: inline,
+            has_compressed_storage: false,
+        });
+    }
+    let compressed = row
+        .try_get::<Option<Vec<u8>>, _>(compressed_column)
+        .map_postgres_err()?;
+    let has_compressed_storage = compressed.is_some();
+    let value = if resolve_compressed {
+        compressed
+            .map(|bytes| inflate_usage_json_value(&bytes))
+            .transpose()?
+    } else {
+        None
+    };
+    Ok(UsageBodyColumn {
+        value,
+        has_compressed_storage,
+    })
+}
+
+fn inflate_usage_json_value(bytes: &[u8]) -> Result<Value, DataLayerError> {
+    let mut decoder = GzDecoder::new(bytes);
+    let mut json_bytes = Vec::new();
+    decoder.read_to_end(&mut json_bytes).map_err(|err| {
+        DataLayerError::UnexpectedValue(format!("failed to decompress usage json: {err}"))
+    })?;
+    serde_json::from_slice(&json_bytes).map_err(|err| {
+        DataLayerError::UnexpectedValue(format!("failed to parse decompressed usage json: {err}"))
+    })
+}
+
+#[cfg(test)]
+fn attach_compressed_body_refs(
+    request_id: &str,
+    metadata: Option<Value>,
+    has_request_body_compressed: bool,
+    has_provider_request_body_compressed: bool,
+    has_response_body_compressed: bool,
+    has_client_response_body_compressed: bool,
+) -> Option<Value> {
+    let mut metadata = match metadata {
+        Some(Value::Object(object)) => object,
+        Some(value) => return Some(value),
+        None => Map::new(),
+    };
+    maybe_insert_usage_body_ref(
+        &mut metadata,
+        "request_body_ref",
+        request_id,
+        "request_body",
+        has_request_body_compressed,
+    );
+    maybe_insert_usage_body_ref(
+        &mut metadata,
+        "provider_request_body_ref",
+        request_id,
+        "provider_request_body",
+        has_provider_request_body_compressed,
+    );
+    maybe_insert_usage_body_ref(
+        &mut metadata,
+        "response_body_ref",
+        request_id,
+        "response_body",
+        has_response_body_compressed,
+    );
+    maybe_insert_usage_body_ref(
+        &mut metadata,
+        "client_response_body_ref",
+        request_id,
+        "client_response_body",
+        has_client_response_body_compressed,
+    );
+    (!metadata.is_empty()).then_some(Value::Object(metadata))
+}
+
+#[cfg(test)]
+fn attach_usage_http_audit_body_refs(
+    metadata: Option<Value>,
+    refs: &UsageHttpAuditRefs,
+) -> Option<Value> {
+    if !refs.any_present() {
+        return metadata;
+    }
+
+    let mut metadata = match metadata {
+        Some(Value::Object(object)) => object,
+        Some(value) => return Some(value),
+        None => Map::new(),
+    };
+    maybe_insert_string_value(
+        &mut metadata,
+        "request_body_ref",
+        refs.request_body_ref.as_deref(),
+    );
+    maybe_insert_string_value(
+        &mut metadata,
+        "provider_request_body_ref",
+        refs.provider_request_body_ref.as_deref(),
+    );
+    maybe_insert_string_value(
+        &mut metadata,
+        "response_body_ref",
+        refs.response_body_ref.as_deref(),
+    );
+    maybe_insert_string_value(
+        &mut metadata,
+        "client_response_body_ref",
+        refs.client_response_body_ref.as_deref(),
+    );
+    (!metadata.is_empty()).then_some(Value::Object(metadata))
+}
+
+#[cfg(test)]
+fn attach_usage_routing_snapshot_metadata(
+    metadata: Option<Value>,
+    snapshot: &UsageRoutingSnapshot,
+) -> Option<Value> {
+    if !snapshot.has_metadata_fields() {
+        return metadata;
+    }
+
+    let mut metadata = match metadata {
+        Some(Value::Object(object)) => object,
+        Some(value) => return Some(value),
+        None => Map::new(),
+    };
+    maybe_insert_string_value(
+        &mut metadata,
+        "candidate_id",
+        snapshot.candidate_id.as_deref(),
+    );
+    maybe_insert_string_value(&mut metadata, "key_name", snapshot.key_name.as_deref());
+    maybe_insert_string_value(
+        &mut metadata,
+        "planner_kind",
+        snapshot.planner_kind.as_deref(),
+    );
+    maybe_insert_string_value(
+        &mut metadata,
+        "route_family",
+        snapshot.route_family.as_deref(),
+    );
+    maybe_insert_string_value(&mut metadata, "route_kind", snapshot.route_kind.as_deref());
+    maybe_insert_string_value(
+        &mut metadata,
+        "execution_path",
+        snapshot.execution_path.as_deref(),
+    );
+    maybe_insert_string_value(
+        &mut metadata,
+        "local_execution_runtime_miss_reason",
+        snapshot.local_execution_runtime_miss_reason.as_deref(),
+    );
+    (!metadata.is_empty()).then_some(Value::Object(metadata))
+}
+
+fn prepare_request_metadata_for_body_storage<const N: usize>(
+    metadata: Option<Value>,
+    body_fields: [(
+        UsageBodyField,
+        &UsageBodyStorage,
+        Option<&Value>,
+        Option<&str>,
+    ); N],
+) -> Option<Value> {
+    let mut metadata = match metadata {
+        Some(Value::Object(object)) => object,
+        Some(value) => {
+            let mut object = Map::new();
+            object.insert("request_metadata".to_string(), value);
+            object
+        }
+        None => Map::new(),
+    };
+    let should_replace = !metadata.is_empty()
+        || body_fields.iter().any(|(_, storage, value, explicit_ref)| {
+            storage.has_detached_blob() || value.is_some() || explicit_ref.is_some()
+        });
+    if !should_replace {
+        return None;
+    }
+
+    for (field, storage, value, explicit_ref) in body_fields {
+        if storage.has_detached_blob() || value.is_some() || explicit_ref.is_some() {
+            let ref_key = field.as_ref_key();
+            metadata.remove(ref_key);
+        }
+    }
+
+    Some(Value::Object(metadata))
+}
+
+async fn sync_usage_body_blob_storage<'e, E>(
+    executor: E,
+    request_id: &str,
+    field: UsageBodyField,
+    value: Option<&Value>,
+    storage: &UsageBodyStorage,
+) -> Result<(), DataLayerError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let body_ref = usage_body_ref(request_id, field);
+    if let Some(payload_gzip) = storage.detached_blob_bytes.as_ref() {
+        sqlx::query(UPSERT_USAGE_BODY_BLOB_SQL)
+            .bind(&body_ref)
+            .bind(request_id)
+            .bind(field.as_storage_field())
+            .bind(payload_gzip)
+            .execute(executor)
+            .await
+            .map_postgres_err()?;
+        return Ok(());
+    }
+
+    if value.is_some() {
+        sqlx::query(DELETE_USAGE_BODY_BLOB_SQL)
+            .bind(&body_ref)
+            .execute(executor)
+            .await
+            .map_postgres_err()?;
+    }
+
+    Ok(())
+}
+
+async fn sync_usage_http_audit_storage<'e, E>(
+    executor: E,
+    request_id: &str,
+    headers: &UsageHttpAuditHeaders<'_>,
+    refs: &UsageHttpAuditRefs,
+    body_capture_mode: &str,
+) -> Result<(), DataLayerError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    if !headers.any_present() && !refs.any_present() && body_capture_mode == "none" {
+        return Ok(());
+    }
+
+    sqlx::query(UPSERT_USAGE_HTTP_AUDIT_SQL)
+        .bind(request_id)
+        .bind(headers.request_headers_json)
+        .bind(headers.provider_request_headers_json)
+        .bind(headers.response_headers_json)
+        .bind(headers.client_response_headers_json)
+        .bind(refs.request_body_ref.as_deref())
+        .bind(refs.provider_request_body_ref.as_deref())
+        .bind(refs.response_body_ref.as_deref())
+        .bind(refs.client_response_body_ref.as_deref())
+        .bind(body_capture_mode)
+        .execute(executor)
+        .await
+        .map_postgres_err()?;
+
+    Ok(())
+}
+
+async fn sync_usage_routing_snapshot_storage<'e, E>(
+    executor: E,
+    request_id: &str,
+    snapshot: &UsageRoutingSnapshot,
+) -> Result<(), DataLayerError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    if !snapshot.any_present() {
+        return Ok(());
+    }
+
+    sqlx::query(UPSERT_USAGE_ROUTING_SNAPSHOT_SQL)
+        .bind(request_id)
+        .bind(snapshot.candidate_id.as_deref())
+        .bind(snapshot.candidate_index.map(to_i32).transpose()?)
+        .bind(snapshot.key_name.as_deref())
+        .bind(snapshot.planner_kind.as_deref())
+        .bind(snapshot.route_family.as_deref())
+        .bind(snapshot.route_kind.as_deref())
+        .bind(snapshot.execution_path.as_deref())
+        .bind(snapshot.local_execution_runtime_miss_reason.as_deref())
+        .bind(snapshot.selected_provider_id.as_deref())
+        .bind(snapshot.selected_endpoint_id.as_deref())
+        .bind(snapshot.selected_provider_api_key_id.as_deref())
+        .bind(snapshot.has_format_conversion)
+        .execute(executor)
+        .await
+        .map_postgres_err()?;
+
+    Ok(())
+}
+
+async fn sync_usage_settlement_pricing_snapshot_storage<'e, E>(
+    executor: E,
+    request_id: &str,
+    snapshot: &UsageSettlementPricingSnapshot,
+) -> Result<(), DataLayerError>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    if !snapshot.any_present() {
+        return Ok(());
+    }
+
+    sqlx::query(UPSERT_USAGE_SETTLEMENT_PRICING_SNAPSHOT_SQL)
+        .bind(request_id)
+        .bind(snapshot.billing_status.as_deref().unwrap_or("pending"))
+        .bind(snapshot.billing_snapshot_schema_version.as_deref())
+        .bind(snapshot.billing_snapshot_status.as_deref())
+        .bind(snapshot.rate_multiplier)
+        .bind(snapshot.is_free_tier)
+        .bind(snapshot.input_price_per_1m)
+        .bind(snapshot.output_price_per_1m)
+        .bind(snapshot.cache_creation_price_per_1m)
+        .bind(snapshot.cache_read_price_per_1m)
+        .bind(snapshot.price_per_request)
+        .execute(executor)
+        .await
+        .map_postgres_err()?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn maybe_insert_usage_body_ref(
+    metadata: &mut Map<String, Value>,
+    key: &str,
+    request_id: &str,
+    field: &str,
+    should_insert: bool,
+) {
+    if !should_insert || metadata.contains_key(key) {
+        return;
+    }
+    metadata.insert(
+        key.to_string(),
+        Value::String(usage_body_ref(
+            request_id,
+            UsageBodyField::from_storage_field(field).expect("known usage body field"),
+        )),
+    );
+}
+
+fn maybe_insert_string_value(metadata: &mut Map<String, Value>, key: &str, value: Option<&str>) {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    if metadata.contains_key(key) {
+        return;
+    }
+    metadata.insert(key.to_string(), Value::String(value.to_string()));
+}
+
+fn maybe_insert_number_value(metadata: &mut Map<String, Value>, key: &str, value: Option<f64>) {
+    let Some(value) = value.filter(|value| value.is_finite()) else {
+        return;
+    };
+    if metadata.contains_key(key) {
+        return;
+    }
+    let Some(number) = serde_json::Number::from_f64(value) else {
+        return;
+    };
+    metadata.insert(key.to_string(), Value::Number(number));
+}
+
+fn maybe_insert_bool_value(metadata: &mut Map<String, Value>, key: &str, value: Option<bool>) {
+    let Some(value) = value else {
+        return;
+    };
+    if metadata.contains_key(key) {
+        return;
+    }
+    metadata.insert(key.to_string(), Value::Bool(value));
+}
+
+fn usage_routing_snapshot_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<UsageRoutingSnapshot, DataLayerError> {
+    Ok(UsageRoutingSnapshot {
+        candidate_id: row.try_get("routing_candidate_id").map_postgres_err()?,
+        candidate_index: row
+            .try_get::<Option<i32>, _>("routing_candidate_index")
+            .map_postgres_err()?
+            .map(|value| to_u64(value, "usage_routing_snapshots.candidate_index"))
+            .transpose()?,
+        key_name: row.try_get("routing_key_name").map_postgres_err()?,
+        planner_kind: row.try_get("routing_planner_kind").map_postgres_err()?,
+        route_family: row.try_get("routing_route_family").map_postgres_err()?,
+        route_kind: row.try_get("routing_route_kind").map_postgres_err()?,
+        execution_path: row.try_get("routing_execution_path").map_postgres_err()?,
+        local_execution_runtime_miss_reason: row
+            .try_get("routing_local_execution_runtime_miss_reason")
+            .map_postgres_err()?,
+        selected_provider_id: None,
+        selected_endpoint_id: None,
+        selected_provider_api_key_id: None,
+        has_format_conversion: None,
+    })
+}
+
+fn usage_settlement_pricing_snapshot_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<UsageSettlementPricingSnapshot, DataLayerError> {
+    Ok(UsageSettlementPricingSnapshot {
+        billing_status: None,
+        billing_snapshot_schema_version: row
+            .try_get("settlement_billing_snapshot_schema_version")
+            .map_postgres_err()?,
+        billing_snapshot_status: row
+            .try_get("settlement_billing_snapshot_status")
+            .map_postgres_err()?,
+        rate_multiplier: row
+            .try_get("settlement_rate_multiplier")
+            .map_postgres_err()?,
+        is_free_tier: row.try_get("settlement_is_free_tier").map_postgres_err()?,
+        input_price_per_1m: row
+            .try_get("settlement_input_price_per_1m")
+            .map_postgres_err()?,
+        output_price_per_1m: row
+            .try_get("settlement_output_price_per_1m")
+            .map_postgres_err()?,
+        cache_creation_price_per_1m: row
+            .try_get("settlement_cache_creation_price_per_1m")
+            .map_postgres_err()?,
+        cache_read_price_per_1m: row
+            .try_get("settlement_cache_read_price_per_1m")
+            .map_postgres_err()?,
+        price_per_request: row
+            .try_get("settlement_price_per_request")
+            .map_postgres_err()?,
+    })
+}
+
+fn attach_usage_settlement_pricing_snapshot_metadata(
+    metadata: Option<Value>,
+    snapshot: &UsageSettlementPricingSnapshot,
+) -> Option<Value> {
+    if !snapshot.any_present() {
+        return metadata;
+    }
+
+    let mut metadata = match metadata {
+        Some(Value::Object(object)) => object,
+        Some(value) => return Some(value),
+        None => Map::new(),
+    };
+    maybe_insert_string_value(
+        &mut metadata,
+        "billing_snapshot_schema_version",
+        snapshot.billing_snapshot_schema_version.as_deref(),
+    );
+    maybe_insert_string_value(
+        &mut metadata,
+        "billing_snapshot_status",
+        snapshot.billing_snapshot_status.as_deref(),
+    );
+    maybe_insert_number_value(&mut metadata, "rate_multiplier", snapshot.rate_multiplier);
+    maybe_insert_bool_value(&mut metadata, "is_free_tier", snapshot.is_free_tier);
+    maybe_insert_number_value(
+        &mut metadata,
+        "input_price_per_1m",
+        snapshot.input_price_per_1m,
+    );
+    maybe_insert_number_value(
+        &mut metadata,
+        "output_price_per_1m",
+        snapshot.output_price_per_1m,
+    );
+    maybe_insert_number_value(
+        &mut metadata,
+        "cache_creation_price_per_1m",
+        snapshot.cache_creation_price_per_1m,
+    );
+    maybe_insert_number_value(
+        &mut metadata,
+        "cache_read_price_per_1m",
+        snapshot.cache_read_price_per_1m,
+    );
+    maybe_insert_number_value(
+        &mut metadata,
+        "price_per_request",
+        snapshot.price_per_request,
+    );
+    (!metadata.is_empty()).then_some(Value::Object(metadata))
+}
+
+fn usage_body_sql_columns(field: UsageBodyField) -> (&'static str, &'static str) {
+    match field {
+        UsageBodyField::RequestBody => ("request_body", "request_body_compressed"),
+        UsageBodyField::ProviderRequestBody => {
+            ("provider_request_body", "provider_request_body_compressed")
+        }
+        UsageBodyField::ResponseBody => ("response_body", "response_body_compressed"),
+        UsageBodyField::ClientResponseBody => {
+            ("client_response_body", "client_response_body_compressed")
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use super::SqlxUsageReadRepository;
+    use serde_json::json;
+
+    use super::{
+        attach_compressed_body_refs, attach_usage_http_audit_body_refs,
+        attach_usage_routing_snapshot_metadata, attach_usage_settlement_pricing_snapshot_metadata,
+        inflate_usage_json_value, prepare_request_metadata_for_body_storage,
+        prepare_usage_body_storage, resolved_read_usage_body_ref, resolved_write_usage_body_ref,
+        usage_body_ref, usage_http_audit_body_refs, usage_http_audit_capture_mode,
+        usage_routing_snapshot_from_usage, usage_settlement_pricing_snapshot_from_usage,
+        SqlxUsageReadRepository, UsageHttpAuditRefs, UsageRoutingSnapshot,
+        UsageSettlementPricingSnapshot, MAX_INLINE_USAGE_BODY_BYTES,
+    };
     use crate::postgres::{PostgresPoolConfig, PostgresPoolFactory};
     use crate::repository::usage::UpsertUsageRecord;
+    use aether_data_contracts::repository::usage::UsageBodyField;
 
     #[tokio::test]
     async fn repository_constructs_from_lazy_pool() {
@@ -1119,12 +2870,24 @@ mod tests {
                 billing_status: "pending".to_string(),
                 request_headers: None,
                 request_body: None,
+                request_body_ref: None,
                 provider_request_headers: None,
                 provider_request_body: None,
+                provider_request_body_ref: None,
                 response_headers: None,
                 response_body: None,
+                response_body_ref: None,
                 client_response_headers: None,
                 client_response_body: None,
+                client_response_body_ref: None,
+                candidate_id: None,
+                candidate_index: None,
+                key_name: None,
+                planner_kind: None,
+                route_family: None,
+                route_kind: None,
+                execution_path: None,
+                local_execution_runtime_miss_reason: None,
                 request_metadata: None,
                 finalized_at_unix_secs: None,
                 created_at_unix_ms: Some(100),
@@ -1163,20 +2926,99 @@ mod tests {
     }
 
     #[test]
+    fn usage_sql_reads_http_audits_for_single_record_fetches() {
+        assert!(super::FIND_BY_REQUEST_ID_SQL.contains("LEFT JOIN usage_http_audits"));
+        assert!(super::FIND_BY_ID_SQL.contains("LEFT JOIN usage_http_audits"));
+        assert!(super::FIND_BY_REQUEST_ID_SQL.contains("http_request_body_ref"));
+        assert!(super::FIND_BY_ID_SQL.contains("http_client_response_body_ref"));
+    }
+
+    #[test]
+    fn usage_sql_reads_routing_snapshots_for_single_record_fetches() {
+        assert!(super::FIND_BY_REQUEST_ID_SQL.contains("LEFT JOIN usage_routing_snapshots"));
+        assert!(super::FIND_BY_ID_SQL.contains("LEFT JOIN usage_routing_snapshots"));
+        assert!(super::FIND_BY_REQUEST_ID_SQL.contains("routing_candidate_id"));
+        assert!(super::FIND_BY_REQUEST_ID_SQL.contains("routing_candidate_index"));
+        assert!(super::FIND_BY_ID_SQL.contains("routing_local_execution_runtime_miss_reason"));
+    }
+
+    #[test]
+    fn usage_sql_reads_settlement_snapshots_for_single_record_fetches() {
+        assert!(super::FIND_BY_REQUEST_ID_SQL.contains("LEFT JOIN usage_settlement_snapshots"));
+        assert!(super::FIND_BY_ID_SQL.contains("LEFT JOIN usage_settlement_snapshots"));
+        assert!(
+            super::FIND_BY_REQUEST_ID_SQL.contains("settlement_billing_snapshot_schema_version")
+        );
+        assert!(super::FIND_BY_ID_SQL.contains("settlement_price_per_request"));
+    }
+
+    #[test]
+    fn usage_sql_qualifies_shared_usage_columns_for_single_record_fetches() {
+        for sql in [super::FIND_BY_REQUEST_ID_SQL, super::FIND_BY_ID_SQL] {
+            assert!(sql.contains("\"usage\".request_id"));
+            assert!(
+                sql.contains(
+                    "COALESCE(usage_settlement_snapshots.billing_status, \"usage\".billing_status) AS billing_status"
+                )
+            );
+            assert!(sql.contains(
+                "CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION)"
+            ));
+            assert!(sql.contains("EXTRACT(EPOCH FROM \"usage\".created_at)"));
+            assert!(sql.contains("usage_settlement_snapshots.finalized_at"));
+            assert!(!sql.contains("CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT)"));
+            assert!(!sql.contains("CAST(output_price_per_1m AS DOUBLE PRECISION)"));
+        }
+
+        assert!(super::FIND_BY_REQUEST_ID_SQL.contains("WHERE \"usage\".request_id = $1"));
+        assert!(super::FIND_BY_ID_SQL.contains("WHERE \"usage\".id = $1"));
+    }
+
+    #[test]
     fn usage_sql_uses_json_null_placeholders_for_usage_payload_columns() {
         assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("NULL::json AS request_headers"));
         assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("NULL::json AS provider_request_body"));
+        assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("NULL::bytea AS request_body_compressed"));
+        assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("NULL::varchar AS http_request_body_ref"));
+        assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("NULL::varchar AS routing_candidate_id"));
+        assert!(
+            super::LIST_USAGE_AUDITS_PREFIX.contains("NULL::integer AS routing_candidate_index")
+        );
+        assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("LEFT JOIN usage_settlement_snapshots"));
+        assert!(
+            super::LIST_USAGE_AUDITS_PREFIX.contains("settlement_billing_snapshot_schema_version")
+        );
         assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX.contains("NULL::json AS request_headers"));
         assert!(
             super::LIST_RECENT_USAGE_AUDITS_PREFIX.contains("NULL::json AS provider_request_body")
         );
+        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX
+            .contains("NULL::bytea AS client_response_body_compressed"));
+        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX
+            .contains("NULL::varchar AS http_client_response_body_ref"));
+        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX
+            .contains("NULL::integer AS routing_candidate_index"));
+        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX
+            .contains("NULL::varchar AS routing_execution_path"));
+        assert!(
+            super::LIST_RECENT_USAGE_AUDITS_PREFIX.contains("LEFT JOIN usage_settlement_snapshots")
+        );
+        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX.contains("settlement_price_per_request"));
         assert!(!super::LIST_USAGE_AUDITS_PREFIX.contains("NULL::jsonb"));
         assert!(!super::LIST_RECENT_USAGE_AUDITS_PREFIX.contains("NULL::jsonb"));
     }
 
     #[test]
+    fn usage_sql_reads_list_output_price_from_settlement_snapshots_before_legacy_usage_column() {
+        assert!(super::LIST_USAGE_AUDITS_PREFIX
+            .contains("CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION)"));
+        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX
+            .contains("CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION)"));
+    }
+
+    #[test]
     fn usage_sql_casts_json_payload_bind_parameters_explicitly() {
-        for placeholder in 41..=49 {
+        for placeholder in [41, 42, 44, 45, 47, 48, 50, 51, 53] {
             assert!(
                 super::UPSERT_SQL.contains(format!("${placeholder}::json").as_str()),
                 "missing ::json cast for placeholder ${placeholder}"
@@ -1186,9 +3028,58 @@ mod tests {
 
     #[test]
     fn usage_sql_insert_values_aligns_request_metadata_and_timestamps() {
-        assert!(super::UPSERT_SQL.contains("\n  $48::json,\n  $49::json,\n  CASE"));
-        assert!(super::UPSERT_SQL.contains("WHEN $50 IS NULL THEN NULL"));
-        assert!(super::UPSERT_SQL.contains("TO_TIMESTAMP($51::double precision)"));
+        assert!(super::UPSERT_SQL.contains("\n  $51::json,\n  $52,\n  $53::json,\n  CASE"));
+        assert!(super::UPSERT_SQL.contains("WHEN $54 IS NULL THEN NULL"));
+        assert!(super::UPSERT_SQL.contains("TO_TIMESTAMP($55::double precision)"));
+    }
+
+    #[test]
+    fn usage_sql_upsert_returning_includes_routing_placeholders() {
+        assert!(super::UPSERT_SQL.contains("NULL::varchar AS routing_candidate_id"));
+        assert!(super::UPSERT_SQL.contains("NULL::varchar AS routing_planner_kind"));
+        assert!(super::UPSERT_SQL.contains("NULL::varchar AS routing_execution_path"));
+        assert!(super::UPSERT_SQL
+            .contains("NULL::varchar AS settlement_billing_snapshot_schema_version"));
+        assert!(
+            super::UPSERT_SQL.contains("NULL::double precision AS settlement_input_price_per_1m")
+        );
+    }
+
+    #[test]
+    fn usage_sql_dual_writes_usage_settlement_pricing_snapshots() {
+        assert!(super::UPSERT_USAGE_SETTLEMENT_PRICING_SNAPSHOT_SQL
+            .contains("INSERT INTO usage_settlement_snapshots"));
+        assert!(super::UPSERT_USAGE_SETTLEMENT_PRICING_SNAPSHOT_SQL
+            .contains("billing_snapshot_schema_version"));
+        assert!(super::UPSERT_USAGE_SETTLEMENT_PRICING_SNAPSHOT_SQL.contains("price_per_request"));
+    }
+
+    #[test]
+    fn usage_sql_clears_legacy_output_price_column_on_upsert() {
+        assert!(super::UPSERT_SQL.contains("output_price_per_1m = NULL"));
+        assert!(include_str!("sql.rs").contains(".bind(None::<f64>)"));
+    }
+
+    #[test]
+    fn usage_sql_clears_legacy_header_columns_on_upsert() {
+        assert!(super::UPSERT_SQL.contains("request_headers = NULL"));
+        assert!(super::UPSERT_SQL.contains("provider_request_headers = NULL"));
+        assert!(super::UPSERT_SQL.contains("response_headers = NULL"));
+        assert!(super::UPSERT_SQL.contains("client_response_headers = NULL"));
+    }
+
+    #[test]
+    fn usage_sql_detached_body_flags_clear_inline_and_compressed_columns() {
+        assert!(super::UPSERT_SQL
+            .contains("WHEN EXCLUDED.request_body_compressed IS NOT NULL OR $56 THEN NULL"));
+        assert!(super::UPSERT_SQL.contains(
+            "WHEN EXCLUDED.provider_request_body_compressed IS NOT NULL OR $57 THEN NULL"
+        ));
+        assert!(super::UPSERT_SQL
+            .contains("WHEN EXCLUDED.response_body_compressed IS NOT NULL OR $58 THEN NULL"));
+        assert!(super::UPSERT_SQL.contains(
+            "WHEN EXCLUDED.client_response_body_compressed IS NOT NULL OR $59 THEN NULL"
+        ));
     }
 
     #[test]
@@ -1202,5 +3093,766 @@ mod tests {
         assert!(super::UPSERT_SQL.contains(
             "WHEN EXCLUDED.status IN ('pending', 'streaming', 'completed', 'cancelled') THEN EXCLUDED.error_category"
         ));
+    }
+
+    #[test]
+    fn prepare_usage_body_storage_detaches_small_payloads_into_blob_storage() {
+        let payload = json!({"message": "hello"});
+        let storage = prepare_usage_body_storage(Some(&payload)).expect("storage should serialize");
+
+        assert!(storage.inline_json.is_none());
+        let compressed = storage
+            .detached_blob_bytes
+            .as_deref()
+            .expect("small payload should now be ref-backed");
+        assert_eq!(
+            inflate_usage_json_value(compressed).expect("payload should inflate"),
+            payload
+        );
+    }
+
+    #[test]
+    fn prepare_usage_body_storage_compresses_large_payloads() {
+        let payload = json!({
+            "content": "x".repeat(MAX_INLINE_USAGE_BODY_BYTES + 128)
+        });
+        let storage = prepare_usage_body_storage(Some(&payload)).expect("storage should serialize");
+
+        assert!(storage.inline_json.is_none());
+        let compressed = storage
+            .detached_blob_bytes
+            .as_deref()
+            .expect("large payload should be compressed");
+        assert_eq!(
+            inflate_usage_json_value(compressed).expect("payload should inflate"),
+            payload
+        );
+    }
+
+    #[test]
+    fn prepare_request_metadata_for_body_storage_strips_body_ref_compatibility_keys() {
+        let detached = prepare_usage_body_storage(Some(&json!({
+            "content": "x".repeat(MAX_INLINE_USAGE_BODY_BYTES + 32)
+        })))
+        .expect("detached storage should build");
+        let inline =
+            prepare_usage_body_storage(Some(&json!({"message": "inline"}))).expect("inline body");
+
+        let metadata = prepare_request_metadata_for_body_storage(
+            Some(json!({
+                "trace_id": "trace-1",
+                "request_body_ref": "blob://old-request",
+                "provider_request_body_ref": "blob://old-provider"
+            })),
+            [
+                (
+                    UsageBodyField::RequestBody,
+                    &detached,
+                    Some(&json!({"request": true})),
+                    Some("usage://request/req-123/request_body"),
+                ),
+                (
+                    UsageBodyField::ProviderRequestBody,
+                    &inline,
+                    Some(&json!({"provider": true})),
+                    None,
+                ),
+            ],
+        )
+        .expect("metadata should be present");
+
+        assert_eq!(
+            metadata,
+            json!({
+                "trace_id": "trace-1"
+            })
+        );
+    }
+
+    #[test]
+    fn attach_compressed_body_refs_adds_missing_ref_metadata() {
+        let metadata = attach_compressed_body_refs(
+            "req-123",
+            Some(json!({
+                "candidate_id": "cand-1",
+                "provider_request_body_ref": "blob://existing"
+            })),
+            true,
+            true,
+            true,
+            false,
+        )
+        .expect("metadata should remain");
+
+        assert_eq!(
+            metadata,
+            json!({
+                "candidate_id": "cand-1",
+                "request_body_ref": usage_body_ref("req-123", UsageBodyField::RequestBody),
+                "provider_request_body_ref": "blob://existing",
+                "response_body_ref": usage_body_ref("req-123", UsageBodyField::ResponseBody)
+            })
+        );
+    }
+
+    #[test]
+    fn usage_http_audit_body_refs_extracts_only_non_empty_values() {
+        let refs = usage_http_audit_body_refs(Some(&json!({
+            "request_body_ref": "usage://request/req-123/request_body",
+            "provider_request_body_ref": "  ",
+            "response_body_ref": "usage://request/req-123/response_body"
+        })));
+
+        assert_eq!(
+            refs,
+            UsageHttpAuditRefs {
+                request_body_ref: Some("usage://request/req-123/request_body".to_string()),
+                provider_request_body_ref: None,
+                response_body_ref: Some("usage://request/req-123/response_body".to_string()),
+                client_response_body_ref: None,
+            }
+        );
+    }
+
+    #[test]
+    fn resolved_read_usage_body_ref_prefers_typed_then_http_audit_then_compressed_then_metadata() {
+        let metadata = json!({
+            "request_body_ref": "usage://request/req-123/request_body"
+        });
+        let invalid_metadata = json!({
+            "request_body_ref": "blob://metadata-request"
+        });
+        let mismatched_metadata = json!({
+            "request_body_ref": "usage://request/req-other/request_body"
+        });
+
+        assert_eq!(
+            resolved_read_usage_body_ref(
+                Some("usage://request/req-123/request_body"),
+                metadata.as_object(),
+                "req-123",
+                UsageBodyField::RequestBody,
+                true,
+                Some("usage://request/req-123/request_body"),
+            ),
+            Some("usage://request/req-123/request_body".to_string())
+        );
+        assert_eq!(
+            resolved_read_usage_body_ref(
+                None,
+                metadata.as_object(),
+                "req-123",
+                UsageBodyField::RequestBody,
+                false,
+                Some("usage://request/req-123/request_body"),
+            ),
+            Some("usage://request/req-123/request_body".to_string())
+        );
+        assert_eq!(
+            resolved_read_usage_body_ref(
+                None,
+                metadata.as_object(),
+                "req-123",
+                UsageBodyField::RequestBody,
+                true,
+                None,
+            ),
+            Some(usage_body_ref("req-123", UsageBodyField::RequestBody))
+        );
+        assert_eq!(
+            resolved_read_usage_body_ref(
+                None,
+                invalid_metadata.as_object(),
+                "req-123",
+                UsageBodyField::RequestBody,
+                false,
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            resolved_read_usage_body_ref(
+                None,
+                mismatched_metadata.as_object(),
+                "req-123",
+                UsageBodyField::RequestBody,
+                false,
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            resolved_read_usage_body_ref(
+                None,
+                None,
+                "req-123",
+                UsageBodyField::ResponseBody,
+                true,
+                Some("usage://request/req-123/response_body"),
+            ),
+            Some(usage_body_ref("req-123", UsageBodyField::ResponseBody))
+        );
+        assert_eq!(
+            resolved_read_usage_body_ref(
+                None,
+                None,
+                "req-123",
+                UsageBodyField::ClientResponseBody,
+                false,
+                Some("usage://request/req-123/client_response_body"),
+            ),
+            Some("usage://request/req-123/client_response_body".to_string())
+        );
+    }
+
+    #[test]
+    fn resolved_write_usage_body_ref_ignores_metadata_compatibility_keys() {
+        assert_eq!(
+            resolved_write_usage_body_ref(
+                None,
+                "req-123",
+                UsageBodyField::RequestBody,
+                false,
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            resolved_write_usage_body_ref(
+                Some("usage://request/req-123/request_body"),
+                "req-123",
+                UsageBodyField::RequestBody,
+                true,
+                Some("usage://request/req-123/request_body"),
+            ),
+            Some("usage://request/req-123/request_body".to_string())
+        );
+        assert_eq!(
+            resolved_write_usage_body_ref(
+                None,
+                "req-123",
+                UsageBodyField::ResponseBody,
+                true,
+                Some("usage://request/req-123/response_body"),
+            ),
+            Some(usage_body_ref("req-123", UsageBodyField::ResponseBody))
+        );
+        assert_eq!(
+            resolved_write_usage_body_ref(
+                None,
+                "req-123",
+                UsageBodyField::ClientResponseBody,
+                false,
+                Some("usage://request/req-123/client_response_body"),
+            ),
+            Some("usage://request/req-123/client_response_body".to_string())
+        );
+    }
+
+    #[test]
+    fn usage_http_audit_capture_mode_prefers_refs_over_inline_legacy() {
+        let refs = UsageHttpAuditRefs {
+            request_body_ref: Some("usage://request/req-123/request_body".to_string()),
+            ..UsageHttpAuditRefs::default()
+        };
+        assert_eq!(
+            usage_http_audit_capture_mode(
+                &refs,
+                [Some(&json!({"request": true})), None, None, None]
+            ),
+            "ref_backed"
+        );
+        assert_eq!(
+            usage_http_audit_capture_mode(
+                &UsageHttpAuditRefs::default(),
+                [Some(&json!({"request": true})), None, None, None]
+            ),
+            "inline_legacy"
+        );
+        assert_eq!(
+            usage_http_audit_capture_mode(&UsageHttpAuditRefs::default(), [None, None, None, None]),
+            "none"
+        );
+    }
+
+    #[test]
+    fn attach_usage_http_audit_body_refs_adds_missing_metadata_without_overwriting_existing_keys() {
+        let metadata = attach_usage_http_audit_body_refs(
+            Some(json!({
+                "candidate_id": "cand-1",
+                "request_body_ref": "blob://existing"
+            })),
+            &UsageHttpAuditRefs {
+                request_body_ref: Some("usage://request/req-123/request_body".to_string()),
+                provider_request_body_ref: Some(
+                    "usage://request/req-123/provider_request_body".to_string(),
+                ),
+                response_body_ref: None,
+                client_response_body_ref: Some(
+                    "usage://request/req-123/client_response_body".to_string(),
+                ),
+            },
+        )
+        .expect("metadata should remain");
+
+        assert_eq!(
+            metadata,
+            json!({
+                "candidate_id": "cand-1",
+                "request_body_ref": "blob://existing",
+                "provider_request_body_ref": "usage://request/req-123/provider_request_body",
+                "client_response_body_ref": "usage://request/req-123/client_response_body"
+            })
+        );
+    }
+
+    #[test]
+    fn usage_routing_snapshot_from_usage_only_activates_for_routing_metadata() {
+        let snapshot = usage_routing_snapshot_from_usage(
+            &UpsertUsageRecord {
+                request_id: "req-123".to_string(),
+                user_id: None,
+                api_key_id: None,
+                username: None,
+                api_key_name: None,
+                provider_name: "openai".to_string(),
+                model: "gpt-5".to_string(),
+                target_model: None,
+                provider_id: Some("provider-1".to_string()),
+                provider_endpoint_id: Some("endpoint-1".to_string()),
+                provider_api_key_id: Some("provider-key-1".to_string()),
+                request_type: Some("chat".to_string()),
+                api_format: Some("openai:chat".to_string()),
+                api_family: Some("openai".to_string()),
+                endpoint_kind: Some("chat".to_string()),
+                endpoint_api_format: Some("openai:chat".to_string()),
+                provider_api_family: Some("openai".to_string()),
+                provider_endpoint_kind: Some("chat".to_string()),
+                has_format_conversion: Some(false),
+                is_stream: Some(false),
+                input_tokens: Some(1),
+                output_tokens: Some(2),
+                total_tokens: Some(3),
+                cache_creation_input_tokens: None,
+                cache_creation_ephemeral_5m_input_tokens: None,
+                cache_creation_ephemeral_1h_input_tokens: None,
+                cache_read_input_tokens: None,
+                cache_creation_cost_usd: None,
+                cache_read_cost_usd: None,
+                output_price_per_1m: None,
+                total_cost_usd: None,
+                actual_total_cost_usd: None,
+                status_code: Some(200),
+                error_message: None,
+                error_category: None,
+                response_time_ms: Some(100),
+                first_byte_time_ms: None,
+                status: "completed".to_string(),
+                billing_status: "pending".to_string(),
+                request_headers: None,
+                request_body: None,
+                request_body_ref: None,
+                provider_request_headers: None,
+                provider_request_body: None,
+                provider_request_body_ref: None,
+                response_headers: None,
+                response_body: None,
+                response_body_ref: None,
+                client_response_headers: None,
+                client_response_body: None,
+                client_response_body_ref: None,
+                candidate_id: None,
+                candidate_index: None,
+                key_name: None,
+                planner_kind: None,
+                route_family: None,
+                route_kind: None,
+                execution_path: None,
+                local_execution_runtime_miss_reason: None,
+                request_metadata: None,
+                finalized_at_unix_secs: None,
+                created_at_unix_ms: Some(100),
+                updated_at_unix_secs: 100,
+            },
+            Some(&json!({
+                "candidate_id": "cand-1",
+                "key_name": "primary",
+                "planner_kind": "claude_cli_sync",
+                "route_family": "claude",
+                "route_kind": "cli",
+                "execution_path": "local_execution_runtime_miss",
+                "local_execution_runtime_miss_reason": "all_candidates_skipped"
+            })),
+        );
+
+        assert_eq!(
+            snapshot,
+            UsageRoutingSnapshot {
+                candidate_id: Some("cand-1".to_string()),
+                candidate_index: None,
+                key_name: Some("primary".to_string()),
+                planner_kind: Some("claude_cli_sync".to_string()),
+                route_family: Some("claude".to_string()),
+                route_kind: Some("cli".to_string()),
+                execution_path: Some("local_execution_runtime_miss".to_string()),
+                local_execution_runtime_miss_reason: Some("all_candidates_skipped".to_string()),
+                selected_provider_id: Some("provider-1".to_string()),
+                selected_endpoint_id: Some("endpoint-1".to_string()),
+                selected_provider_api_key_id: Some("provider-key-1".to_string()),
+                has_format_conversion: Some(false),
+            }
+        );
+
+        let empty_snapshot = usage_routing_snapshot_from_usage(
+            &UpsertUsageRecord {
+                request_id: "req-124".to_string(),
+                user_id: None,
+                api_key_id: None,
+                username: None,
+                api_key_name: None,
+                provider_name: "openai".to_string(),
+                model: "gpt-5".to_string(),
+                target_model: None,
+                provider_id: Some("provider-2".to_string()),
+                provider_endpoint_id: Some("endpoint-2".to_string()),
+                provider_api_key_id: Some("provider-key-2".to_string()),
+                request_type: Some("chat".to_string()),
+                api_format: Some("openai:chat".to_string()),
+                api_family: Some("openai".to_string()),
+                endpoint_kind: Some("chat".to_string()),
+                endpoint_api_format: Some("openai:chat".to_string()),
+                provider_api_family: Some("openai".to_string()),
+                provider_endpoint_kind: Some("chat".to_string()),
+                has_format_conversion: Some(true),
+                is_stream: Some(false),
+                input_tokens: Some(1),
+                output_tokens: Some(2),
+                total_tokens: Some(3),
+                cache_creation_input_tokens: None,
+                cache_creation_ephemeral_5m_input_tokens: None,
+                cache_creation_ephemeral_1h_input_tokens: None,
+                cache_read_input_tokens: None,
+                cache_creation_cost_usd: None,
+                cache_read_cost_usd: None,
+                output_price_per_1m: None,
+                total_cost_usd: None,
+                actual_total_cost_usd: None,
+                status_code: Some(200),
+                error_message: None,
+                error_category: None,
+                response_time_ms: Some(100),
+                first_byte_time_ms: None,
+                status: "completed".to_string(),
+                billing_status: "pending".to_string(),
+                request_headers: None,
+                request_body: None,
+                request_body_ref: None,
+                provider_request_headers: None,
+                provider_request_body: None,
+                provider_request_body_ref: None,
+                response_headers: None,
+                response_body: None,
+                response_body_ref: None,
+                client_response_headers: None,
+                client_response_body: None,
+                client_response_body_ref: None,
+                candidate_id: None,
+                candidate_index: None,
+                key_name: None,
+                planner_kind: None,
+                route_family: None,
+                route_kind: None,
+                execution_path: None,
+                local_execution_runtime_miss_reason: None,
+                request_metadata: None,
+                finalized_at_unix_secs: None,
+                created_at_unix_ms: Some(100),
+                updated_at_unix_secs: 100,
+            },
+            Some(&json!({"trace_id": "trace-1"})),
+        );
+
+        assert_eq!(empty_snapshot, UsageRoutingSnapshot::default());
+    }
+
+    #[test]
+    fn usage_routing_snapshot_from_usage_prefers_typed_routing_fields_without_metadata() {
+        let snapshot = usage_routing_snapshot_from_usage(
+            &UpsertUsageRecord {
+                request_id: "req-typed-routing-1".to_string(),
+                user_id: None,
+                api_key_id: None,
+                username: None,
+                api_key_name: None,
+                provider_name: "openai".to_string(),
+                model: "gpt-5".to_string(),
+                target_model: None,
+                provider_id: Some("provider-1".to_string()),
+                provider_endpoint_id: Some("endpoint-1".to_string()),
+                provider_api_key_id: Some("provider-key-1".to_string()),
+                request_type: Some("chat".to_string()),
+                api_format: Some("openai:chat".to_string()),
+                api_family: Some("openai".to_string()),
+                endpoint_kind: Some("chat".to_string()),
+                endpoint_api_format: Some("openai:chat".to_string()),
+                provider_api_family: Some("openai".to_string()),
+                provider_endpoint_kind: Some("chat".to_string()),
+                has_format_conversion: Some(true),
+                is_stream: Some(false),
+                input_tokens: Some(1),
+                output_tokens: Some(2),
+                total_tokens: Some(3),
+                cache_creation_input_tokens: None,
+                cache_creation_ephemeral_5m_input_tokens: None,
+                cache_creation_ephemeral_1h_input_tokens: None,
+                cache_read_input_tokens: None,
+                cache_creation_cost_usd: None,
+                cache_read_cost_usd: None,
+                output_price_per_1m: None,
+                total_cost_usd: None,
+                actual_total_cost_usd: None,
+                status_code: Some(200),
+                error_message: None,
+                error_category: None,
+                response_time_ms: Some(100),
+                first_byte_time_ms: None,
+                status: "completed".to_string(),
+                billing_status: "pending".to_string(),
+                request_headers: None,
+                request_body: None,
+                request_body_ref: None,
+                provider_request_headers: None,
+                provider_request_body: None,
+                provider_request_body_ref: None,
+                response_headers: None,
+                response_body: None,
+                response_body_ref: None,
+                client_response_headers: None,
+                client_response_body: None,
+                client_response_body_ref: None,
+                candidate_id: Some("cand-typed".to_string()),
+                candidate_index: Some(2),
+                key_name: Some("primary".to_string()),
+                planner_kind: Some("claude_cli_sync".to_string()),
+                route_family: Some("claude".to_string()),
+                route_kind: Some("cli".to_string()),
+                execution_path: Some("local_execution_runtime_miss".to_string()),
+                local_execution_runtime_miss_reason: Some("all_candidates_skipped".to_string()),
+                request_metadata: Some(json!({
+                    "trace_id": "trace-1"
+                })),
+                finalized_at_unix_secs: None,
+                created_at_unix_ms: Some(100),
+                updated_at_unix_secs: 100,
+            },
+            None,
+        );
+
+        assert_eq!(
+            snapshot,
+            UsageRoutingSnapshot {
+                candidate_id: Some("cand-typed".to_string()),
+                candidate_index: Some(2),
+                key_name: Some("primary".to_string()),
+                planner_kind: Some("claude_cli_sync".to_string()),
+                route_family: Some("claude".to_string()),
+                route_kind: Some("cli".to_string()),
+                execution_path: Some("local_execution_runtime_miss".to_string()),
+                local_execution_runtime_miss_reason: Some("all_candidates_skipped".to_string()),
+                selected_provider_id: Some("provider-1".to_string()),
+                selected_endpoint_id: Some("endpoint-1".to_string()),
+                selected_provider_api_key_id: Some("provider-key-1".to_string()),
+                has_format_conversion: Some(true),
+            }
+        );
+    }
+
+    #[test]
+    fn attach_usage_routing_snapshot_metadata_adds_missing_keys_without_overwriting_existing_values(
+    ) {
+        let metadata = attach_usage_routing_snapshot_metadata(
+            Some(json!({
+                "candidate_id": "cand-existing",
+                "route_kind": "cli"
+            })),
+            &UsageRoutingSnapshot {
+                candidate_id: Some("cand-1".to_string()),
+                candidate_index: Some(2),
+                key_name: Some("primary".to_string()),
+                planner_kind: Some("claude_cli_sync".to_string()),
+                route_family: Some("claude".to_string()),
+                route_kind: Some("chat".to_string()),
+                execution_path: Some("local_execution_runtime_miss".to_string()),
+                local_execution_runtime_miss_reason: Some("all_candidates_skipped".to_string()),
+                selected_provider_id: None,
+                selected_endpoint_id: None,
+                selected_provider_api_key_id: None,
+                has_format_conversion: None,
+            },
+        )
+        .expect("metadata should remain");
+
+        assert_eq!(
+            metadata,
+            json!({
+                "candidate_id": "cand-existing",
+                "key_name": "primary",
+                "planner_kind": "claude_cli_sync",
+                "route_family": "claude",
+                "route_kind": "cli",
+                "execution_path": "local_execution_runtime_miss",
+                "local_execution_runtime_miss_reason": "all_candidates_skipped"
+            })
+        );
+    }
+
+    #[test]
+    fn usage_settlement_pricing_snapshot_from_usage_extracts_typed_billing_fields() {
+        let snapshot = usage_settlement_pricing_snapshot_from_usage(
+            &UpsertUsageRecord {
+                request_id: "req-125".to_string(),
+                user_id: None,
+                api_key_id: None,
+                username: None,
+                api_key_name: None,
+                provider_name: "openai".to_string(),
+                model: "gpt-5".to_string(),
+                target_model: None,
+                provider_id: Some("provider-1".to_string()),
+                provider_endpoint_id: Some("endpoint-1".to_string()),
+                provider_api_key_id: Some("provider-key-1".to_string()),
+                request_type: Some("chat".to_string()),
+                api_format: Some("openai:chat".to_string()),
+                api_family: Some("openai".to_string()),
+                endpoint_kind: Some("chat".to_string()),
+                endpoint_api_format: Some("openai:chat".to_string()),
+                provider_api_family: Some("openai".to_string()),
+                provider_endpoint_kind: Some("chat".to_string()),
+                has_format_conversion: Some(false),
+                is_stream: Some(false),
+                input_tokens: Some(1),
+                output_tokens: Some(2),
+                total_tokens: Some(3),
+                cache_creation_input_tokens: None,
+                cache_creation_ephemeral_5m_input_tokens: None,
+                cache_creation_ephemeral_1h_input_tokens: None,
+                cache_read_input_tokens: None,
+                cache_creation_cost_usd: None,
+                cache_read_cost_usd: None,
+                output_price_per_1m: Some(15.0),
+                total_cost_usd: None,
+                actual_total_cost_usd: None,
+                status_code: Some(200),
+                error_message: None,
+                error_category: None,
+                response_time_ms: Some(100),
+                first_byte_time_ms: None,
+                status: "completed".to_string(),
+                billing_status: "pending".to_string(),
+                request_headers: None,
+                request_body: None,
+                request_body_ref: None,
+                provider_request_headers: None,
+                provider_request_body: None,
+                provider_request_body_ref: None,
+                response_headers: None,
+                response_body: None,
+                response_body_ref: None,
+                client_response_headers: None,
+                client_response_body: None,
+                client_response_body_ref: None,
+                candidate_id: None,
+                candidate_index: None,
+                key_name: None,
+                planner_kind: None,
+                route_family: None,
+                route_kind: None,
+                execution_path: None,
+                local_execution_runtime_miss_reason: None,
+                request_metadata: None,
+                finalized_at_unix_secs: None,
+                created_at_unix_ms: Some(100),
+                updated_at_unix_secs: 100,
+            },
+            Some(&json!({
+                "rate_multiplier": 0.5,
+                "is_free_tier": false,
+                "billing_snapshot": {
+                    "schema_version": "2.0",
+                    "status": "complete",
+                    "resolved_variables": {
+                        "input_price_per_1m": 3.0,
+                        "output_price_per_1m": 15.0,
+                        "cache_creation_price_per_1m": 3.75,
+                        "cache_read_price_per_1m": 0.30,
+                        "price_per_request": 0.02
+                    }
+                }
+            })),
+        );
+
+        assert_eq!(
+            snapshot,
+            UsageSettlementPricingSnapshot {
+                billing_status: Some("pending".to_string()),
+                billing_snapshot_schema_version: Some("2.0".to_string()),
+                billing_snapshot_status: Some("complete".to_string()),
+                rate_multiplier: Some(0.5),
+                is_free_tier: Some(false),
+                input_price_per_1m: Some(3.0),
+                output_price_per_1m: Some(15.0),
+                cache_creation_price_per_1m: Some(3.75),
+                cache_read_price_per_1m: Some(0.30),
+                price_per_request: Some(0.02),
+            }
+        );
+    }
+
+    #[test]
+    fn usage_settlement_pricing_snapshot_with_billing_status_only_is_still_persisted() {
+        let snapshot = UsageSettlementPricingSnapshot {
+            billing_status: Some("pending".to_string()),
+            ..UsageSettlementPricingSnapshot::default()
+        };
+
+        assert!(snapshot.any_present());
+    }
+
+    #[test]
+    fn attach_usage_settlement_pricing_snapshot_metadata_adds_missing_values_without_overwriting() {
+        let metadata = attach_usage_settlement_pricing_snapshot_metadata(
+            Some(json!({
+                "rate_multiplier": 1.0,
+                "billing_snapshot_status": "complete"
+            })),
+            &UsageSettlementPricingSnapshot {
+                billing_status: None,
+                billing_snapshot_schema_version: Some("2.0".to_string()),
+                billing_snapshot_status: Some("incomplete".to_string()),
+                rate_multiplier: Some(0.5),
+                is_free_tier: Some(false),
+                input_price_per_1m: Some(3.0),
+                output_price_per_1m: Some(15.0),
+                cache_creation_price_per_1m: Some(3.75),
+                cache_read_price_per_1m: Some(0.30),
+                price_per_request: Some(0.02),
+            },
+        )
+        .expect("metadata should remain");
+
+        assert_eq!(
+            metadata,
+            json!({
+                "rate_multiplier": 1.0,
+                "billing_snapshot_status": "complete",
+                "billing_snapshot_schema_version": "2.0",
+                "is_free_tier": false,
+                "input_price_per_1m": 3.0,
+                "output_price_per_1m": 15.0,
+                "cache_creation_price_per_1m": 3.75,
+                "cache_read_price_per_1m": 0.30,
+                "price_per_request": 0.02
+            })
+        );
     }
 }

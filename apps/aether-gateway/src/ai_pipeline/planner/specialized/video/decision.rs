@@ -263,7 +263,7 @@ pub(super) async fn maybe_build_local_video_create_decision_payload_for_candidat
             "client_api_format": spec.api_format,
             "mapped_model": mapped_model,
             "original_headers": collect_control_headers(&parts.headers),
-            "original_request_body": body_json,
+            "original_request_body": crate::ai_pipeline::build_report_context_original_request_echo(body_json),
             "has_envelope": false,
             "needs_conversion": false,
         })),

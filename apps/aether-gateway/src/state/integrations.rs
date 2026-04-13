@@ -92,6 +92,19 @@ impl ModelFetchTransportRuntime for AppState {
     ) -> Option<ProxySnapshot> {
         resolve_transport_proxy_snapshot_with_tunnel_affinity(self, transport).await
     }
+
+    async fn execute_model_fetch_execution_plan(
+        &self,
+        plan: &ExecutionPlan,
+    ) -> Result<ExecutionResult, String> {
+        execution_runtime::execute_execution_runtime_sync_plan(self, None, plan)
+            .await
+            .map_err(|err| match err {
+                GatewayError::UpstreamUnavailable { message, .. }
+                | GatewayError::ControlUnavailable { message, .. }
+                | GatewayError::Internal(message) => message,
+            })
+    }
 }
 
 #[async_trait]

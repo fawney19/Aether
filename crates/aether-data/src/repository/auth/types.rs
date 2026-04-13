@@ -352,15 +352,24 @@ pub struct StandaloneApiKeyExportListQuery {
     pub is_active: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CreateUserApiKeyRecord {
     pub user_id: String,
     pub api_key_id: String,
     pub key_hash: String,
     pub key_encrypted: Option<String>,
     pub name: Option<String>,
+    pub allowed_providers: Option<Vec<String>>,
+    pub allowed_api_formats: Option<Vec<String>>,
+    pub allowed_models: Option<Vec<String>>,
     pub rate_limit: i32,
     pub concurrent_limit: i32,
+    pub force_capabilities: Option<serde_json::Value>,
+    pub is_active: bool,
+    pub expires_at_unix_secs: Option<u64>,
+    pub auto_delete_on_expiry: bool,
+    pub total_requests: u64,
+    pub total_cost_usd: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -371,7 +380,7 @@ pub struct UpdateUserApiKeyBasicRecord {
     pub rate_limit: Option<i32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CreateStandaloneApiKeyRecord {
     pub user_id: String,
     pub api_key_id: String,
@@ -383,6 +392,12 @@ pub struct CreateStandaloneApiKeyRecord {
     pub allowed_models: Option<Vec<String>>,
     pub rate_limit: i32,
     pub concurrent_limit: i32,
+    pub force_capabilities: Option<serde_json::Value>,
+    pub is_active: bool,
+    pub expires_at_unix_secs: Option<u64>,
+    pub auto_delete_on_expiry: bool,
+    pub total_requests: u64,
+    pub total_cost_usd: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,6 +1,48 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::{AppState, GatewayError};
 
 impl AppState {
+    pub(crate) async fn resolve_auth_user_summaries_by_ids(
+        &self,
+        user_ids: &[String],
+    ) -> Result<BTreeMap<String, aether_data::repository::users::StoredUserSummary>, GatewayError>
+    {
+        let user_ids = user_ids
+            .iter()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if user_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+
+        let mut users = BTreeMap::new();
+        if self.has_user_data_reader() {
+            for user in self.list_users_by_ids(&user_ids).await? {
+                users.insert(user.id.clone(), user);
+            }
+        }
+
+        for user_id in &user_ids {
+            if users.contains_key(user_id) {
+                continue;
+            }
+            let Some(user) = self.find_user_auth_by_id(user_id).await? else {
+                continue;
+            };
+            let summary = user
+                .to_summary()
+                .map_err(|err| GatewayError::Internal(err.to_string()))?;
+            users.insert(summary.id.clone(), summary);
+        }
+
+        Ok(users)
+    }
+
     pub(crate) async fn find_user_auth_by_id(
         &self,
         user_id: &str,

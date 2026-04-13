@@ -91,7 +91,7 @@ pub(super) async fn materialize_local_standard_candidate_attempts(
     trace_id: &str,
     input: &LocalStandardDecisionInput,
     spec: LocalStandardSpec,
-) -> Result<Vec<LocalStandardCandidateAttempt>, GatewayError> {
+) -> Result<(Vec<LocalStandardCandidateAttempt>, usize), GatewayError> {
     let planner_state = PlannerAppState::new(state);
     let mut seen_candidates = BTreeSet::new();
     let mut candidates = Vec::new();
@@ -144,6 +144,7 @@ pub(super) async fn materialize_local_standard_candidate_attempts(
         input.required_capabilities.as_ref(),
     )
     .await;
+    let candidate_count = candidates.len();
 
     let created_at_unix_ms = current_unix_ms();
     let mut attempts = Vec::with_capacity(candidates.len());
@@ -257,7 +258,7 @@ pub(super) async fn materialize_local_standard_candidate_attempts(
         });
     }
 
-    Ok(attempts)
+    Ok((attempts, candidate_count))
 }
 
 fn auth_snapshot_allows_cross_format_candidate(

@@ -1,6 +1,7 @@
 mod association_sync;
 mod config;
 mod logic;
+mod strategy;
 mod transport;
 
 pub use association_sync::{
@@ -12,6 +13,13 @@ pub use config::{
 pub use logic::{
     aggregate_models_for_cache, apply_model_filters, build_models_fetch_url,
     endpoint_supports_rust_models_fetch, extract_error_message, json_string_list,
-    parse_models_response, select_models_fetch_endpoint, ModelFetchRunSummary, ModelsFetchSuccess,
+    merge_upstream_metadata, parse_models_response, parse_models_response_page,
+    preset_models_for_provider, provider_type_uses_preset_models, select_models_fetch_endpoint,
+    selected_models_fetch_endpoints, ModelFetchRunSummary, ModelsFetchPage, ModelsFetchSuccess,
 };
-pub use transport::{build_models_fetch_execution_plan, ModelFetchTransportRuntime};
+pub use strategy::{fetch_models_from_transports, ModelsFetchOutcome};
+pub use transport::{
+    build_antigravity_fetch_available_models_plan, build_gemini_cli_load_code_assist_plan,
+    build_models_fetch_execution_plan, build_standard_models_fetch_execution_plan,
+    build_vertex_models_fetch_execution_plan, ModelFetchTransportRuntime,
+};

@@ -5,8 +5,11 @@ export interface ProxyNodeRemoteConfig {
   allowed_ports?: number[]
   log_level?: string
   heartbeat_interval?: number
+  scheduling_state?: ProxyNodeSchedulingState | null
   upgrade_to?: string | null
 }
+
+export type ProxyNodeSchedulingState = 'active' | 'draining' | 'cordoned'
 
 export interface ProxyNode {
   id: string
@@ -50,11 +53,50 @@ export interface ProxyNodeEvent {
   created_at: string
 }
 
+export interface ProxyNodeUpgradeRolloutProbe {
+  url: string
+  timeout_secs: number
+}
+
+export type ProxyNodeUpgradeRolloutTrackedNodeState =
+  | 'awaiting_version'
+  | 'awaiting_traffic'
+  | 'cooling_down'
+  | 'unhealthy'
+  | 'ready_to_finalize'
+
+export interface ProxyNodeUpgradeRolloutTrackedNode {
+  node_id: string
+  state: ProxyNodeUpgradeRolloutTrackedNodeState
+  dispatched_at: string | null
+  version_confirmed_at: string | null
+  traffic_confirmed_at: string | null
+  cooldown_remaining_secs: number | null
+}
+
+export interface ProxyNodeUpgradeRolloutStatus {
+  version: string
+  batch_size: number
+  cooldown_secs: number
+  started_at: string | null
+  last_dispatched_at: string | null
+  updated_at: string | null
+  probe: ProxyNodeUpgradeRolloutProbe | null
+  blocked: boolean
+  online_eligible_total: number
+  completed_node_ids: string[]
+  pending_node_ids: string[]
+  conflict_node_ids: string[]
+  skipped_node_ids: string[]
+  tracked_nodes: ProxyNodeUpgradeRolloutTrackedNode[]
+}
+
 export interface ProxyNodeListResponse {
   items: ProxyNode[]
   total: number
   skip: number
   limit: number
+  rollout: ProxyNodeUpgradeRolloutStatus | null
 }
 
 export interface ManualProxyNodeCreateRequest {
@@ -78,6 +120,69 @@ export interface ProxyNodeTestResult {
   latency_ms: number | null
   exit_ip: string | null
   error: string | null
+}
+
+export interface ProxyNodeBatchUpgradeResult {
+  version: string
+  batch_size: number
+  cooldown_secs: number
+  probe_url?: string | null
+  probe_timeout_secs?: number | null
+  updated: number
+  skipped: number
+  node_ids: string[]
+  blocked: boolean
+  pending_node_ids: string[]
+  rollout_active: boolean
+  completed: number
+  remaining: number
+}
+
+export interface ProxyNodeUpgradeRolloutCancelResult {
+  cancelled: boolean
+  rollout_active?: boolean
+  version?: string | null
+  pending_node_ids?: string[]
+  conflict_node_ids?: string[]
+  completed?: number
+  remaining?: number
+}
+
+export interface ProxyNodeUpgradeRolloutClearConflictsResult {
+  version: string | null
+  cleared: number
+  node_ids: string[]
+  updated: number
+  blocked: boolean
+  pending_node_ids: string[]
+  rollout_active: boolean
+  completed: number
+  remaining: number
+}
+
+export interface ProxyNodeUpgradeRolloutRestoreSkippedResult {
+  version: string | null
+  restored: number
+  node_ids: string[]
+  skipped_node_ids: string[]
+  updated: number
+  blocked: boolean
+  pending_node_ids: string[]
+  rollout_active: boolean
+  completed: number
+  remaining: number
+}
+
+export interface ProxyNodeUpgradeRolloutNodeActionResult {
+  version: string | null
+  node_id: string
+  skipped_node_ids: string[]
+  updated: number
+  blocked: boolean
+  pending_node_ids: string[]
+  rollout_active: boolean
+  completed: number
+  remaining: number
 }
 
 export const proxyNodesApi = {
@@ -111,10 +216,53 @@ export const proxyNodesApi = {
     return response.data
   },
 
-  async batchUpgrade(version: string): Promise<{ version: string; updated: number; skipped: number; node_ids: string[] }> {
-    const response = await apiClient.post<{ version: string; updated: number; skipped: number; node_ids: string[] }>(
+  async batchUpgrade(
+    version: string,
+    options?: {
+      batch_size?: number
+      cooldown_secs?: number
+      probe_url?: string | null
+      probe_timeout_secs?: number
+    },
+  ): Promise<ProxyNodeBatchUpgradeResult> {
+    const response = await apiClient.post<ProxyNodeBatchUpgradeResult>(
       '/api/admin/proxy-nodes/upgrade',
-      { version }
+      { version, ...options }
+    )
+    return response.data
+  },
+
+  async cancelUpgradeRollout(): Promise<ProxyNodeUpgradeRolloutCancelResult> {
+    const response = await apiClient.post<ProxyNodeUpgradeRolloutCancelResult>(
+      '/api/admin/proxy-nodes/upgrade/cancel'
+    )
+    return response.data
+  },
+
+  async clearUpgradeConflicts(): Promise<ProxyNodeUpgradeRolloutClearConflictsResult> {
+    const response = await apiClient.post<ProxyNodeUpgradeRolloutClearConflictsResult>(
+      '/api/admin/proxy-nodes/upgrade/clear-conflicts'
+    )
+    return response.data
+  },
+
+  async restoreSkippedUpgradeNodes(): Promise<ProxyNodeUpgradeRolloutRestoreSkippedResult> {
+    const response = await apiClient.post<ProxyNodeUpgradeRolloutRestoreSkippedResult>(
+      '/api/admin/proxy-nodes/upgrade/restore-skipped'
+    )
+    return response.data
+  },
+
+  async skipUpgradeNode(nodeId: string): Promise<ProxyNodeUpgradeRolloutNodeActionResult> {
+    const response = await apiClient.post<ProxyNodeUpgradeRolloutNodeActionResult>(
+      `/api/admin/proxy-nodes/${nodeId}/upgrade/skip`
+    )
+    return response.data
+  },
+
+  async retryUpgradeNode(nodeId: string): Promise<ProxyNodeUpgradeRolloutNodeActionResult> {
+    const response = await apiClient.post<ProxyNodeUpgradeRolloutNodeActionResult>(
+      `/api/admin/proxy-nodes/${nodeId}/upgrade/retry`
     )
     return response.data
   },

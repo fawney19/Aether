@@ -1,6 +1,9 @@
 use aether_contracts::{ExecutionError, ExecutionPlan, ExecutionTelemetry};
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
 use aether_scheduler_core::SchedulerRequestCandidateStatusUpdate;
+use aether_usage_runtime::{
+    build_sync_terminal_usage_payload_seed, build_terminal_usage_context_seed,
+};
 use axum::body::Body;
 use axum::http::Response;
 use base64::Engine as _;
@@ -119,10 +122,11 @@ async fn record_stream_sync_failure(
     failure: &StreamFailureReport,
     started_at_unix_ms: Option<u64>,
 ) {
+    let context_seed = build_terminal_usage_context_seed(plan, report_context);
+    let payload_seed = build_sync_terminal_usage_payload_seed(payload);
     state
         .usage_runtime
-        .record_sync_terminal(state.data.as_ref(), plan, report_context, payload)
-        .await;
+        .record_sync_terminal(state.data.as_ref(), &context_seed, &payload_seed);
     let terminal_unix_secs = current_request_candidate_unix_ms();
     record_report_request_candidate_status(
         state,

@@ -7,6 +7,7 @@ use aether_data_contracts::DataLayerError;
 use async_trait::async_trait;
 use tracing::warn;
 
+use crate::executor::spawn_on_usage_background_runtime;
 use crate::{
     build_upsert_usage_record_from_event, settle_usage_if_needed, UsageEvent, UsageQueue,
     UsageRuntimeConfig, UsageSettlementWriter,
@@ -69,7 +70,7 @@ impl UsageQueueWorker {
     }
 
     pub fn spawn(self) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move { self.run_forever().await })
+        spawn_on_usage_background_runtime(async move { self.run_forever().await })
     }
 
     async fn run_forever(self) {

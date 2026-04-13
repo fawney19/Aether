@@ -69,6 +69,10 @@ pub(super) fn hash_api_key(value: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+pub(super) fn hash_management_token(value: &str) -> String {
+    hash_api_key(value)
+}
+
 pub(super) fn test_auth_secret() -> String {
     std::env::var("JWT_SECRET_KEY")
         .ok()

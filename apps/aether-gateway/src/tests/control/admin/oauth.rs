@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use aether_contracts::{ExecutionPlan, EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER};
 use aether_crypto::{
     decrypt_python_fernet_ciphertext, encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY,
 };
@@ -10,6 +11,7 @@ use aether_data::repository::oauth_providers::{
     InMemoryOAuthProviderRepository, OAuthProviderReadRepository,
 };
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+use aether_data::repository::proxy_nodes::InMemoryProxyNodeRepository;
 use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
 use axum::body::{to_bytes, Body, Bytes};
 use axum::response::{IntoResponse, Response};
@@ -19,8 +21,9 @@ use http::{HeaderMap, HeaderValue, StatusCode};
 use serde_json::json;
 
 use super::super::{
-    build_router_with_state, sample_endpoint, sample_key, sample_management_token,
-    sample_oauth_provider_config, sample_provider, start_server, AppState,
+    build_router_with_state, build_state_with_execution_runtime_override, sample_endpoint,
+    sample_key, sample_management_token, sample_oauth_provider_config, sample_provider,
+    sample_proxy_node, start_server, AppState,
 };
 use crate::admin_api::{
     maybe_build_local_admin_provider_oauth_response, AdminAppState, AdminRequestContext,
@@ -547,6 +550,152 @@ async fn local_admin_provider_oauth_device_poll_attaches_audit_only_when_transit
     );
 
     token_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_provider_oauth_device_authorize_via_execution_runtime_proxy_node() {
+    let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
+    let execution_plans_clone = Arc::clone(&execution_plans);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| {
+            let execution_plans_inner = Arc::clone(&execution_plans_clone);
+            async move {
+                execution_plans_inner
+                    .lock()
+                    .expect("mutex should lock")
+                    .push(plan.clone());
+                let proxy = plan.proxy.as_ref().expect("proxy snapshot should exist");
+                assert_eq!(proxy.node_id.as_deref(), Some("proxy-node-kiro"));
+                assert_eq!(
+                    plan.headers.get("host").map(String::as_str),
+                    Some("oidc.us-east-1.amazonaws.com")
+                );
+                assert_eq!(
+                    plan.headers
+                        .get(EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER)
+                        .map(String::as_str),
+                    Some("true")
+                );
+                if plan.request_id == "kiro_device_register" {
+                    assert_eq!(plan.url, "https://oidc.us-east-1.amazonaws.com/client/register");
+                    Json(json!({
+                        "request_id": plan.request_id,
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {
+                                "clientId": "kiro-device-client",
+                                "clientSecret": "kiro-device-secret"
+                            }
+                        }
+                    }))
+                } else {
+                    assert_eq!(plan.request_id, "kiro_device_authorize");
+                    assert_eq!(
+                        plan.url,
+                        "https://oidc.us-east-1.amazonaws.com/device_authorization"
+                    );
+                    Json(json!({
+                        "request_id": plan.request_id,
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {
+                                "deviceCode": "device-code-123",
+                                "userCode": "USER-CODE",
+                                "verificationUri": "https://device.example.com/verify",
+                                "verificationUriComplete": "https://device.example.com/verify?user_code=USER-CODE",
+                                "expiresIn": 600,
+                                "interval": 5
+                            }
+                        }
+                    }))
+                }
+            }
+        }),
+    );
+
+    let mut provider = sample_provider("provider-kiro", "kiro", 10);
+    provider.provider_type = "kiro".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![],
+        vec![],
+    ));
+    let mut manual_node = sample_proxy_node("proxy-node-kiro");
+    manual_node.status = "online".to_string();
+    manual_node.is_manual = true;
+    manual_node.tunnel_mode = false;
+    manual_node.tunnel_connected = false;
+    manual_node.proxy_url = Some("http://proxy.example:8080".to_string());
+    let proxy_node_repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![manual_node]));
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let state = build_state_with_execution_runtime_override(execution_runtime_url)
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_reader_for_tests(provider_catalog_repository)
+                .attach_proxy_node_repository_for_tests(proxy_node_repository),
+        )
+        .with_provider_oauth_device_session_entry_for_tests(
+            "seed-session",
+            json!({"status":"seed"}),
+        )
+        .with_provider_oauth_token_url_for_tests(
+            "kiro_device_register",
+            "https://oidc.us-east-1.amazonaws.com/client/register",
+        )
+        .with_provider_oauth_token_url_for_tests(
+            "kiro_device_authorize",
+            "https://oidc.us-east-1.amazonaws.com/device_authorization",
+        );
+    let gateway = build_router_with_state(state.clone());
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-oauth/providers/provider-kiro/device-authorize"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "start_url": "https://view.awsapps.com/start",
+            "region": "us-east-1",
+            "proxy_node_id": "proxy-node-kiro",
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    let status = response.status();
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(status, StatusCode::OK, "payload={payload}");
+    let session_id = payload["session_id"]
+        .as_str()
+        .expect("session_id should exist")
+        .to_string();
+    assert_eq!(payload["user_code"], "USER-CODE");
+    assert_eq!(payload["expires_in"], 600);
+    assert_eq!(payload["interval"], 5);
+
+    let stored = state
+        .load_provider_oauth_device_session_for_tests(&format!("device_auth_session:{session_id}"))
+        .expect("device session should be stored");
+    let stored: serde_json::Value =
+        serde_json::from_str(&stored).expect("device session json should parse");
+    assert_eq!(stored["proxy_node_id"], "proxy-node-kiro");
+
+    let plans = execution_plans.lock().expect("mutex should lock");
+    assert_eq!(plans.len(), 2);
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
 }
 
 #[tokio::test]
@@ -1656,6 +1805,134 @@ async fn gateway_imports_admin_provider_oauth_refresh_token_locally_with_trusted
 }
 
 #[tokio::test]
+async fn gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtime_proxy_node() {
+    let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
+    let execution_plans_clone = Arc::clone(&execution_plans);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| {
+            let execution_plans_inner = Arc::clone(&execution_plans_clone);
+            async move {
+                execution_plans_inner
+                    .lock()
+                    .expect("mutex should lock")
+                    .push(plan.clone());
+                let proxy = plan.proxy.as_ref().expect("proxy snapshot should exist");
+                assert_eq!(proxy.node_id.as_deref(), Some("proxy-node-codex-import"));
+                assert_eq!(plan.request_id, "provider-oauth:refresh-token");
+                assert_eq!(plan.method, "POST");
+                assert_eq!(plan.url, "https://oauth.example/oauth/token");
+                assert_eq!(
+                    plan.headers.get("content-type").map(String::as_str),
+                    Some("application/x-www-form-urlencoded")
+                );
+                assert_eq!(
+                    plan.headers
+                        .get(EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER)
+                        .map(String::as_str),
+                    Some("true")
+                );
+                Json(json!({
+                    "request_id": plan.request_id,
+                    "status_code": 200,
+                    "headers": {
+                        "content-type": "application/json"
+                    },
+                    "body": {
+                        "json_body": {
+                            "access_token": "imported-codex-access-token",
+                            "refresh_token": "imported-codex-refresh-token",
+                            "token_type": "Bearer",
+                            "expires_in": 1800,
+                            "scope": "openid email profile offline_access",
+                            "email": "alice@example.com",
+                            "account_id": "acct-codex-123",
+                            "plan_type": "plus"
+                        }
+                    }
+                }))
+            }
+        }),
+    );
+
+    let mut provider = sample_provider("provider-codex", "codex", 10);
+    provider.provider_type = "codex".to_string();
+    let endpoint = sample_endpoint(
+        "endpoint-codex-chat",
+        "provider-codex",
+        "openai:chat",
+        "https://chatgpt.com/backend-api/codex",
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![],
+    ));
+    let mut manual_node = sample_proxy_node("proxy-node-codex-import");
+    manual_node.status = "online".to_string();
+    manual_node.is_manual = true;
+    manual_node.tunnel_mode = false;
+    manual_node.tunnel_connected = false;
+    manual_node.proxy_url = Some("http://proxy.example:8080".to_string());
+    let proxy_node_repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![manual_node]));
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                )
+                .attach_proxy_node_repository_for_tests(proxy_node_repository)
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+            .with_provider_oauth_token_url_for_tests("codex", "https://oauth.example/oauth/token"),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-oauth/providers/provider-codex/import-refresh-token"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "refresh_token": "provider-import-refresh-token",
+            "proxy_node_id": "proxy-node-codex-import",
+            "name": "codex-import"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    let status = response.status();
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(status, StatusCode::OK, "payload={payload}");
+    assert_eq!(payload["provider_type"], "codex");
+    assert_eq!(payload["has_refresh_token"], true);
+    assert_eq!(payload["email"], "alice@example.com");
+    assert_eq!(payload["replaced"], false);
+
+    let keys = provider_catalog_repository
+        .list_keys_by_provider_ids(&["provider-codex".to_string()])
+        .await
+        .expect("keys should load");
+    assert_eq!(keys.len(), 1);
+    assert_eq!(
+        keys[0].proxy,
+        Some(json!({"node_id":"proxy-node-codex-import","enabled":true}))
+    );
+
+    let plans = execution_plans.lock().expect("mutex should lock");
+    assert_eq!(plans.len(), 1);
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_batch_imports_admin_provider_oauth_kiro_locally_with_trusted_admin_principal() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
@@ -1795,6 +2072,168 @@ async fn gateway_batch_imports_admin_provider_oauth_kiro_locally_with_trusted_ad
     gateway_handle.abort();
     refresh_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_batch_imports_admin_provider_oauth_kiro_via_execution_runtime_proxy_node() {
+    let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
+    let execution_plans_clone = Arc::clone(&execution_plans);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| {
+            let execution_plans_inner = Arc::clone(&execution_plans_clone);
+            async move {
+                execution_plans_inner
+                    .lock()
+                    .expect("mutex should lock")
+                    .push(plan.clone());
+                assert_eq!(plan.request_id, "kiro_batch_refresh:social");
+                assert_eq!(plan.url, "https://oauth.example/refreshToken");
+                assert_eq!(
+                    plan.proxy
+                        .as_ref()
+                        .and_then(|proxy| proxy.node_id.as_deref()),
+                    Some("proxy-node-kiro-batch-runtime")
+                );
+                assert_eq!(
+                    plan.headers
+                        .get(EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER)
+                        .map(String::as_str),
+                    Some("true")
+                );
+                Json(json!({
+                    "request_id": plan.request_id,
+                    "status_code": 200,
+                    "headers": {
+                        "content-type": "application/json"
+                    },
+                    "body": {
+                        "json_body": {
+                            "accessToken": sample_kiro_device_access_token("kiro-runtime@example.com"),
+                            "refreshToken": "kiro-runtime-refresh-token-new",
+                            "expiresIn": 1800,
+                        }
+                    }
+                }))
+            }
+        }),
+    );
+
+    let mut provider = sample_provider("provider-kiro", "kiro", 10);
+    provider.provider_type = "kiro".to_string();
+    let endpoint = sample_endpoint(
+        "endpoint-kiro-chat",
+        "provider-kiro",
+        "kiro:generateAssistantResponse",
+        "https://service.kiro.dev",
+    );
+
+    let mut existing_key = sample_key(
+        "key-kiro-batch-runtime",
+        "provider-kiro",
+        "kiro:generateAssistantResponse",
+        "stale-kiro-runtime-access-token",
+    );
+    existing_key.auth_type = "oauth".to_string();
+    existing_key.is_active = false;
+    existing_key.encrypted_auth_config = Some(
+        encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"kiro","auth_method":"social","email":"kiro-runtime@example.com","refresh_token":"kiro-runtime-refresh-token-old"}"#,
+        )
+        .expect("auth config ciphertext should build"),
+    );
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![existing_key],
+    ));
+    let mut manual_node = sample_proxy_node("proxy-node-kiro-batch-runtime");
+    manual_node.status = "online".to_string();
+    manual_node.is_manual = true;
+    manual_node.tunnel_mode = false;
+    manual_node.tunnel_connected = false;
+    manual_node.proxy_url = Some("http://proxy.example:8080".to_string());
+    let proxy_node_repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![manual_node]));
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                )
+                .attach_proxy_node_repository_for_tests(proxy_node_repository)
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+            .with_provider_oauth_token_url_for_tests(
+                "kiro_social_refresh",
+                "https://oauth.example",
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-oauth/providers/provider-kiro/batch-import"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "credentials": "kiro-runtime-refresh-token-old",
+            "proxy_node_id": "proxy-node-kiro-batch-runtime"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("payload should parse");
+    assert_eq!(payload["total"], 1);
+    assert_eq!(payload["success"], 1);
+    assert_eq!(payload["failed"], 0);
+    assert_eq!(payload["results"][0]["status"], "success");
+    assert_eq!(payload["results"][0]["key_id"], "key-kiro-batch-runtime");
+    assert_eq!(payload["results"][0]["replaced"], true);
+
+    {
+        let plans = execution_plans.lock().expect("mutex should lock");
+        assert_eq!(plans.len(), 1);
+    }
+
+    let stored_key = provider_catalog_repository
+        .list_keys_by_ids(&["key-kiro-batch-runtime".to_string()])
+        .await
+        .expect("keys should load")
+        .into_iter()
+        .next()
+        .expect("persisted key should exist");
+    assert!(stored_key.is_active);
+    assert_eq!(
+        stored_key.proxy,
+        Some(json!({"node_id":"proxy-node-kiro-batch-runtime","enabled":true}))
+    );
+    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        stored_key
+            .encrypted_auth_config
+            .as_deref()
+            .expect("auth config should exist"),
+    )
+    .expect("auth config should decrypt");
+    let auth_config: serde_json::Value =
+        serde_json::from_str(&decrypted_auth_config).expect("auth config should parse");
+    assert_eq!(auth_config["email"], "kiro-runtime@example.com");
+    assert_eq!(
+        auth_config["refresh_token"],
+        "kiro-runtime-refresh-token-new"
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
 }
 
 #[tokio::test]

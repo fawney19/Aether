@@ -1,5 +1,6 @@
 use async_trait::async_trait;
-use sqlx::{PgPool, Row};
+use futures_util::{stream::TryStream, TryStreamExt};
+use sqlx::{postgres::PgRow, PgPool, Row};
 
 use super::types::{
     AuthApiKeyExportSummary, AuthApiKeyLookupKey, AuthApiKeyReadRepository,
@@ -311,10 +312,14 @@ INSERT INTO api_keys (
   key_hash,
   key_encrypted,
   name,
+  allowed_providers,
+  allowed_api_formats,
+  allowed_models,
   rate_limit,
   concurrent_limit,
   force_capabilities,
   is_active,
+  expires_at,
   is_locked,
   is_standalone,
   auto_delete_on_expiry,
@@ -331,13 +336,17 @@ VALUES (
   $5,
   $6,
   $7,
-  NULL,
-  TRUE,
+  $8,
+  $9,
+  $10,
+  $11,
+  $12,
+  $13,
   FALSE,
   FALSE,
-  FALSE,
-  0,
-  0,
+  $14,
+  $15,
+  $16,
   NOW(),
   NOW()
 )
@@ -375,6 +384,7 @@ INSERT INTO api_keys (
   concurrent_limit,
   force_capabilities,
   is_active,
+  expires_at,
   is_locked,
   is_standalone,
   auto_delete_on_expiry,
@@ -394,13 +404,14 @@ VALUES (
   $8,
   $9,
   $10,
-  NULL,
-  TRUE,
+  $11,
+  $12,
+  $13,
   FALSE,
   TRUE,
-  FALSE,
-  0,
-  0,
+  $14,
+  $15,
+  $16,
   NOW(),
   NOW()
 )
@@ -644,6 +655,20 @@ impl SqlxAuthApiKeySnapshotReadRepository {
         &self.pool
     }
 
+    async fn collect_query_rows<T, S>(
+        mut rows: S,
+        map_row: fn(&PgRow) -> Result<T, DataLayerError>,
+    ) -> Result<Vec<T>, DataLayerError>
+    where
+        S: TryStream<Ok = PgRow, Error = sqlx::Error> + Unpin,
+    {
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(map_row(&row)?);
+        }
+        Ok(items)
+    }
+
     pub async fn find_api_key_snapshot(
         &self,
         key: AuthApiKeyLookupKey<'_>,
@@ -681,12 +706,13 @@ impl SqlxAuthApiKeySnapshotReadRepository {
             return Ok(Vec::new());
         }
 
-        let rows = sqlx::query(LIST_BY_API_KEY_IDS_SQL)
-            .bind(api_key_ids)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_auth_api_key_snapshot_row).collect()
+        Self::collect_query_rows(
+            sqlx::query(LIST_BY_API_KEY_IDS_SQL)
+                .bind(api_key_ids)
+                .fetch(&self.pool),
+            map_auth_api_key_snapshot_row,
+        )
+        .await
     }
 
     pub async fn list_export_api_keys_by_user_ids(
@@ -697,12 +723,13 @@ impl SqlxAuthApiKeySnapshotReadRepository {
             return Ok(Vec::new());
         }
 
-        let rows = sqlx::query(LIST_EXPORT_BY_USER_IDS_SQL)
-            .bind(user_ids)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_auth_api_key_export_row).collect()
+        Self::collect_query_rows(
+            sqlx::query(LIST_EXPORT_BY_USER_IDS_SQL)
+                .bind(user_ids)
+                .fetch(&self.pool),
+            map_auth_api_key_export_row,
+        )
+        .await
     }
 
     pub async fn list_export_api_keys_by_ids(
@@ -713,12 +740,13 @@ impl SqlxAuthApiKeySnapshotReadRepository {
             return Ok(Vec::new());
         }
 
-        let rows = sqlx::query(LIST_EXPORT_BY_API_KEY_IDS_SQL)
-            .bind(api_key_ids)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_auth_api_key_export_row).collect()
+        Self::collect_query_rows(
+            sqlx::query(LIST_EXPORT_BY_API_KEY_IDS_SQL)
+                .bind(api_key_ids)
+                .fetch(&self.pool),
+            map_auth_api_key_export_row,
+        )
+        .await
     }
 
     pub async fn summarize_export_api_keys_by_user_ids(
@@ -760,11 +788,11 @@ impl SqlxAuthApiKeySnapshotReadRepository {
     pub async fn list_export_standalone_api_keys(
         &self,
     ) -> Result<Vec<StoredAuthApiKeyExportRecord>, DataLayerError> {
-        let rows = sqlx::query(LIST_EXPORT_STANDALONE_SQL)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_auth_api_key_export_row).collect()
+        Self::collect_query_rows(
+            sqlx::query(LIST_EXPORT_STANDALONE_SQL).fetch(&self.pool),
+            map_auth_api_key_export_row,
+        )
+        .await
     }
 
     pub async fn list_export_standalone_api_keys_page(
@@ -775,14 +803,15 @@ impl SqlxAuthApiKeySnapshotReadRepository {
             .map_err(|_| DataLayerError::InvalidInput("limit is too large".to_string()))?;
         let skip = i64::try_from(query.skip)
             .map_err(|_| DataLayerError::InvalidInput("skip is too large".to_string()))?;
-        let rows = sqlx::query(LIST_EXPORT_STANDALONE_PAGE_SQL)
-            .bind(query.is_active)
-            .bind(skip)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_auth_api_key_export_row).collect()
+        Self::collect_query_rows(
+            sqlx::query(LIST_EXPORT_STANDALONE_PAGE_SQL)
+                .bind(query.is_active)
+                .bind(skip)
+                .bind(limit)
+                .fetch(&self.pool),
+            map_auth_api_key_export_row,
+        )
+        .await
     }
 
     pub async fn count_export_standalone_api_keys(
@@ -920,14 +949,46 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
         &self,
         record: CreateUserApiKeyRecord,
     ) -> Result<Option<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        let allowed_providers = record
+            .allowed_providers
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+        let allowed_api_formats = record
+            .allowed_api_formats
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+        let allowed_models = record
+            .allowed_models
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+        let expires_at = record
+            .expires_at_unix_secs
+            .map(|value| {
+                chrono::DateTime::<chrono::Utc>::from_timestamp(value as i64, 0).ok_or_else(|| {
+                    DataLayerError::UnexpectedValue(format!("invalid api_keys.expires_at: {value}"))
+                })
+            })
+            .transpose()?;
         let row = sqlx::query(CREATE_USER_API_KEY_SQL)
             .bind(record.api_key_id)
             .bind(record.user_id)
             .bind(record.key_hash)
             .bind(record.key_encrypted)
             .bind(record.name)
+            .bind(allowed_providers)
+            .bind(allowed_api_formats)
+            .bind(allowed_models)
             .bind(record.rate_limit)
             .bind(record.concurrent_limit)
+            .bind(record.force_capabilities)
+            .bind(record.is_active)
+            .bind(expires_at)
+            .bind(record.auto_delete_on_expiry)
+            .bind(record.total_requests as i64)
+            .bind(record.total_cost_usd)
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -953,6 +1014,14 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .map(serde_json::to_value)
             .transpose()
             .map_err(|err| DataLayerError::UnexpectedValue(err.to_string()))?;
+        let expires_at = record
+            .expires_at_unix_secs
+            .map(|value| {
+                chrono::DateTime::<chrono::Utc>::from_timestamp(value as i64, 0).ok_or_else(|| {
+                    DataLayerError::UnexpectedValue(format!("invalid api_keys.expires_at: {value}"))
+                })
+            })
+            .transpose()?;
         let row = sqlx::query(CREATE_STANDALONE_API_KEY_SQL)
             .bind(record.api_key_id)
             .bind(record.user_id)
@@ -964,6 +1033,12 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .bind(allowed_models)
             .bind(record.rate_limit)
             .bind(record.concurrent_limit)
+            .bind(record.force_capabilities)
+            .bind(record.is_active)
+            .bind(expires_at)
+            .bind(record.auto_delete_on_expiry)
+            .bind(record.total_requests as i64)
+            .bind(record.total_cost_usd)
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;

@@ -451,12 +451,20 @@ impl StoredProviderCatalogKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ProviderCatalogKeyListOrder {
+    #[default]
+    Name,
+    CreatedAt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProviderCatalogKeyListQuery {
     pub provider_id: String,
     pub search: Option<String>,
     pub is_active: Option<bool>,
     pub offset: usize,
     pub limit: usize,
+    pub order: ProviderCatalogKeyListOrder,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -525,6 +533,11 @@ pub trait ProviderCatalogReadRepository: Send + Sync {
     ) -> Result<Vec<StoredProviderCatalogKey>, crate::DataLayerError>;
 
     async fn list_keys_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderCatalogKey>, crate::DataLayerError>;
+
+    async fn list_key_summaries_by_provider_ids(
         &self,
         provider_ids: &[String],
     ) -> Result<Vec<StoredProviderCatalogKey>, crate::DataLayerError>;

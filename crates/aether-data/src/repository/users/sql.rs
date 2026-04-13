@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures_util::TryStreamExt;
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 
 use super::types::{
@@ -189,30 +190,31 @@ impl SqlxUserReadRepository {
         if user_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let rows = sqlx::query(LIST_USERS_BY_IDS_SQL)
-            .bind(user_ids)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_user_row).collect()
+        collect_query_rows(
+            sqlx::query(LIST_USERS_BY_IDS_SQL)
+                .bind(user_ids)
+                .fetch(&self.pool),
+            map_user_row,
+        )
+        .await
     }
 
     pub async fn list_non_admin_export_users(
         &self,
     ) -> Result<Vec<StoredUserExportRow>, DataLayerError> {
-        let rows = sqlx::query(LIST_NON_ADMIN_EXPORT_USERS_SQL)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_user_export_row).collect()
+        collect_query_rows(
+            sqlx::query(LIST_NON_ADMIN_EXPORT_USERS_SQL).fetch(&self.pool),
+            map_user_export_row,
+        )
+        .await
     }
 
     pub async fn list_export_users(&self) -> Result<Vec<StoredUserExportRow>, DataLayerError> {
-        let rows = sqlx::query(LIST_EXPORT_USERS_SQL)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_user_export_row).collect()
+        collect_query_rows(
+            sqlx::query(LIST_EXPORT_USERS_SQL).fetch(&self.pool),
+            map_user_export_row,
+        )
+        .await
     }
 
     pub async fn list_export_users_page(
@@ -240,12 +242,8 @@ impl SqlxUserReadRepository {
                 DataLayerError::InvalidInput(format!("invalid user export limit: {}", query.limit))
             })?);
 
-        let rows = builder
-            .build()
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_user_export_row).collect()
+        let query = builder.build();
+        collect_query_rows(query.fetch(&self.pool), map_user_export_row).await
     }
 
     pub async fn summarize_export_users(&self) -> Result<UserExportSummary, DataLayerError> {
@@ -279,12 +277,13 @@ impl SqlxUserReadRepository {
             return Ok(Vec::new());
         }
 
-        let rows = sqlx::query(LIST_USER_AUTH_BY_IDS_SQL)
-            .bind(user_ids)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_user_auth_row).collect()
+        collect_query_rows(
+            sqlx::query(LIST_USER_AUTH_BY_IDS_SQL)
+                .bind(user_ids)
+                .fetch(&self.pool),
+            map_user_auth_row,
+        )
+        .await
     }
 
     pub async fn find_user_auth_by_id(
@@ -359,6 +358,20 @@ fn map_user_auth_row(row: &sqlx::postgres::PgRow) -> Result<StoredUserAuthRecord
         row.try_get("created_at").map_postgres_err()?,
         row.try_get("last_login_at").map_postgres_err()?,
     )
+}
+
+async fn collect_query_rows<T, S>(
+    mut rows: S,
+    mapper: fn(&sqlx::postgres::PgRow) -> Result<T, DataLayerError>,
+) -> Result<Vec<T>, DataLayerError>
+where
+    S: futures_util::TryStream<Ok = sqlx::postgres::PgRow, Error = sqlx::Error> + Unpin,
+{
+    let mut items = Vec::new();
+    while let Some(row) = rows.try_next().await.map_postgres_err()? {
+        items.push(mapper(&row)?);
+    }
+    Ok(items)
 }
 
 #[async_trait]

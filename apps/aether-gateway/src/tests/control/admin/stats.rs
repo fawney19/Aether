@@ -1,7 +1,9 @@
 use std::sync::{Arc, Mutex};
 
 use aether_data::repository::auth::{
-    InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeySnapshot,
+    AuthApiKeyExportSummary, AuthApiKeyLookupKey, AuthApiKeyReadRepository,
+    InMemoryAuthApiKeySnapshotRepository, StandaloneApiKeyExportListQuery,
+    StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
 };
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::usage::InMemoryUsageReadRepository;
@@ -9,6 +11,7 @@ use aether_data::repository::users::{
     InMemoryUserReadRepository, StoredUserAuthRecord, StoredUserSummary,
 };
 use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
+use async_trait::async_trait;
 use axum::body::Body;
 use axum::routing::{any, get};
 use axum::{extract::Request, Router};
@@ -151,6 +154,103 @@ fn sample_api_key_snapshot(
     let mut snapshot = sample_currently_usable_auth_snapshot(api_key_id, user_id);
     snapshot.api_key_name = Some(api_key_name.to_string());
     snapshot
+}
+
+#[derive(Debug)]
+struct PartialListAuthApiKeyRepository {
+    lookup: InMemoryAuthApiKeySnapshotRepository,
+}
+
+#[async_trait]
+impl AuthApiKeyReadRepository for PartialListAuthApiKeyRepository {
+    async fn find_api_key_snapshot(
+        &self,
+        key: AuthApiKeyLookupKey<'_>,
+    ) -> Result<Option<StoredAuthApiKeySnapshot>, aether_data::DataLayerError> {
+        self.lookup.find_api_key_snapshot(key).await
+    }
+
+    async fn list_api_key_snapshots_by_ids(
+        &self,
+        _api_key_ids: &[String],
+    ) -> Result<Vec<StoredAuthApiKeySnapshot>, aether_data::DataLayerError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_export_api_keys_by_user_ids(
+        &self,
+        user_ids: &[String],
+    ) -> Result<Vec<StoredAuthApiKeyExportRecord>, aether_data::DataLayerError> {
+        self.lookup.list_export_api_keys_by_user_ids(user_ids).await
+    }
+
+    async fn list_export_api_keys_by_ids(
+        &self,
+        api_key_ids: &[String],
+    ) -> Result<Vec<StoredAuthApiKeyExportRecord>, aether_data::DataLayerError> {
+        self.lookup.list_export_api_keys_by_ids(api_key_ids).await
+    }
+
+    async fn list_export_standalone_api_keys_page(
+        &self,
+        query: &StandaloneApiKeyExportListQuery,
+    ) -> Result<Vec<StoredAuthApiKeyExportRecord>, aether_data::DataLayerError> {
+        self.lookup
+            .list_export_standalone_api_keys_page(query)
+            .await
+    }
+
+    async fn count_export_standalone_api_keys(
+        &self,
+        is_active: Option<bool>,
+    ) -> Result<u64, aether_data::DataLayerError> {
+        self.lookup
+            .count_export_standalone_api_keys(is_active)
+            .await
+    }
+
+    async fn summarize_export_api_keys_by_user_ids(
+        &self,
+        user_ids: &[String],
+        now_unix_secs: u64,
+    ) -> Result<AuthApiKeyExportSummary, aether_data::DataLayerError> {
+        self.lookup
+            .summarize_export_api_keys_by_user_ids(user_ids, now_unix_secs)
+            .await
+    }
+
+    async fn summarize_export_non_standalone_api_keys(
+        &self,
+        now_unix_secs: u64,
+    ) -> Result<AuthApiKeyExportSummary, aether_data::DataLayerError> {
+        self.lookup
+            .summarize_export_non_standalone_api_keys(now_unix_secs)
+            .await
+    }
+
+    async fn summarize_export_standalone_api_keys(
+        &self,
+        now_unix_secs: u64,
+    ) -> Result<AuthApiKeyExportSummary, aether_data::DataLayerError> {
+        self.lookup
+            .summarize_export_standalone_api_keys(now_unix_secs)
+            .await
+    }
+
+    async fn find_export_standalone_api_key_by_id(
+        &self,
+        api_key_id: &str,
+    ) -> Result<Option<StoredAuthApiKeyExportRecord>, aether_data::DataLayerError> {
+        self.lookup
+            .find_export_standalone_api_key_by_id(api_key_id)
+            .await
+    }
+
+    async fn list_export_standalone_api_keys(
+        &self,
+    ) -> Result<Vec<StoredAuthApiKeyExportRecord>, aether_data::DataLayerError> {
+        self.lookup.list_export_standalone_api_keys().await
+    }
 }
 
 #[tokio::test]
@@ -1103,6 +1203,63 @@ async fn gateway_handles_admin_stats_leaderboard_api_keys_locally_without_auth_s
 }
 
 #[tokio::test]
+async fn gateway_handles_admin_stats_leaderboard_api_keys_with_auth_snapshot_single_lookup_fallback(
+) {
+    let (_upstream_url, upstream_hits, upstream_handle) =
+        start_stats_upstream("/api/admin/stats/leaderboard/api-keys").await;
+
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![sample_usage_row(
+        "usage-key-partial-list",
+        "req-key-partial-list",
+        Some("user-1"),
+        Some("key-1"),
+        Some("legacy-key"),
+        "OpenAI",
+        "gpt-5",
+        80,
+        20,
+        0.3,
+        0.3,
+        DAY_1_UNIX_SECS,
+    )]));
+    let auth_repository = Arc::new(PartialListAuthApiKeyRepository {
+        lookup: InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            None,
+            sample_api_key_snapshot("key-1", "user-1", "fresh-key"),
+        )]),
+    });
+
+    let data_state = GatewayDataState::with_usage_reader_for_tests(usage_repository)
+        .with_auth_api_key_reader(auth_repository);
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(data_state),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(
+        reqwest::Client::new().get(format!(
+            "{gateway_url}/api/admin/stats/leaderboard/api-keys?start_date=2024-03-21&end_date=2024-03-21&metric=cost&order=desc&tz_offset_minutes=0"
+        )),
+    )
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["total"], 1);
+    assert_eq!(payload["items"][0]["id"], "key-1");
+    assert_eq!(payload["items"][0]["name"], "fresh-key");
+    assert_eq!(payload["items"][0]["value"], 0.3);
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_stats_leaderboard_api_keys_locally_without_usage_reader() {
     let (upstream_url, upstream_hits, upstream_handle) =
         start_stats_upstream("/api/admin/stats/leaderboard/api-keys").await;
@@ -1206,21 +1363,23 @@ async fn gateway_handles_admin_stats_leaderboard_users_locally_without_user_read
     let (upstream_url, upstream_hits, upstream_handle) =
         start_stats_upstream("/api/admin/stats/leaderboard/users").await;
 
+    let mut usage_user = sample_usage_row(
+        "usage-user-a-fallback",
+        "req-user-a-fallback",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary-key"),
+        "OpenAI",
+        "gpt-5",
+        60,
+        20,
+        0.4,
+        0.4,
+        DAY_1_UNIX_SECS,
+    );
+    usage_user.username = Some("stale-alice".to_string());
     let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
-        sample_usage_row(
-            "usage-user-a-fallback",
-            "req-user-a-fallback",
-            Some("user-1"),
-            Some("key-1"),
-            Some("primary-key"),
-            "OpenAI",
-            "gpt-5",
-            60,
-            20,
-            0.4,
-            0.4,
-            DAY_1_UNIX_SECS,
-        ),
+        usage_user,
         sample_usage_row(
             "usage-user-b-fallback",
             "req-user-b-fallback",
@@ -1266,6 +1425,61 @@ async fn gateway_handles_admin_stats_leaderboard_users_locally_without_user_read
     assert_eq!(payload["items"][0]["name"], "alice");
     assert_eq!(payload["items"][0]["cost"], 0.4);
     assert_eq!(payload["items"][0]["value"], 0.4);
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_stats_leaderboard_users_without_legacy_username_fallback_when_user_reader_exists(
+) {
+    let (_upstream_url, upstream_hits, upstream_handle) =
+        start_stats_upstream("/api/admin/stats/leaderboard/users").await;
+
+    let mut usage_user = sample_usage_row(
+        "usage-user-no-legacy-fallback",
+        "req-user-no-legacy-fallback",
+        Some("user-missing"),
+        Some("key-1"),
+        Some("primary-key"),
+        "OpenAI",
+        "gpt-5",
+        60,
+        20,
+        0.4,
+        0.4,
+        DAY_1_UNIX_SECS,
+    );
+    usage_user.username = Some("stale-alice".to_string());
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![usage_user]));
+    let data_state = GatewayDataState::with_usage_reader_for_tests(usage_repository)
+        .with_user_reader(Arc::new(InMemoryUserReadRepository::seed_auth_users(
+            Vec::<StoredUserAuthRecord>::new(),
+        )));
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(data_state)
+            .without_auth_user_store_for_tests(),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(
+        reqwest::Client::new().get(format!(
+            "{gateway_url}/api/admin/stats/leaderboard/users?start_date=2024-03-21&end_date=2024-03-21&metric=cost&order=desc&tz_offset_minutes=0"
+        )),
+    )
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["total"], 1);
+    assert_eq!(payload["items"][0]["id"], "user-missing");
+    assert_eq!(payload["items"][0]["name"], "user-missing");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

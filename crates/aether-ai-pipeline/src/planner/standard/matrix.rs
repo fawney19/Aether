@@ -14,7 +14,7 @@ use crate::conversion::request::{
 };
 
 use super::{
-    codex::apply_codex_openai_cli_special_body_edits,
+    apply_openai_compact_special_body_edits, codex::apply_codex_openai_cli_special_body_edits,
     normalize::build_local_openai_chat_request_body,
 };
 
@@ -52,6 +52,7 @@ pub fn build_standard_request_body(
         body_rules,
         user_api_key_id,
     );
+    apply_openai_compact_special_body_edits(&mut provider_request_body, provider_api_format);
     Some(provider_request_body)
 }
 

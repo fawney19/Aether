@@ -820,7 +820,11 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
             };
 
             let response = match state.apply_proxy_node_heartbeat(&mutation).await {
-                Ok(Some(node)) => Json(build_internal_tunnel_heartbeat_ack(&node)).into_response(),
+                Ok(Some(node)) => Json(build_internal_tunnel_heartbeat_ack(
+                    &node,
+                    payload.heartbeat_id,
+                ))
+                .into_response(),
                 Ok(None) => build_internal_control_error_response(
                     http::StatusCode::INTERNAL_SERVER_ERROR,
                     format!("heartbeat sync failed: ProxyNode {node_id} 不存在"),
@@ -850,7 +854,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                 connected: payload.connected,
                 conn_count: payload.conn_count,
                 detail: None,
-                observed_at_unix_secs: None,
+                observed_at_unix_secs: payload.observed_at_unix_secs,
             };
 
             let response = match state.update_proxy_node_tunnel_status(&mutation).await {

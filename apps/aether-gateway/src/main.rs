@@ -137,6 +137,8 @@ impl From<GatewayLogRotationArg> for LogRotation {
     }
 }
 
+const GATEWAY_TOKIO_WORKER_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+
 fn env_var_trimmed(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -527,6 +529,9 @@ struct Args {
     )]
     node_role: NodeRoleArg,
 
+    #[arg(long, default_value_t = false)]
+    migrate: bool,
+
     /// Path to frontend static files directory (SPA). When set, the gateway
     /// serves the frontend directly without nginx.
     #[arg(long, env = "AETHER_GATEWAY_STATIC_DIR")]
@@ -608,11 +613,16 @@ struct Args {
 
 impl Args {
     fn runtime_config(&self) -> Result<ServiceRuntimeConfig, std::io::Error> {
+        let default_log_filter = if self.migrate {
+            "aether_gateway=info,aether_data=info"
+        } else {
+            "aether_gateway=info"
+        };
         let config = self
             .logging
             .apply_to_runtime_config(ServiceRuntimeConfig::new(
                 "aether-gateway",
-                "aether_gateway=info",
+                default_log_filter,
             ))?;
         Ok(config
             .with_node_role(self.node_role.as_str())
@@ -741,9 +751,20 @@ fn validate_deployment_topology(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(GATEWAY_TOKIO_WORKER_STACK_SIZE_BYTES)
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    if args.migrate {
+        init_service_runtime(args.runtime_config()?)?;
+        return run_explicit_migrations(&args).await;
+    }
     let app_port = validate_app_port(args.app_port)?;
     let bind_addr = gateway_bind_addr(app_port)?;
     set_gateway_frontdoor_app_port(app_port);
@@ -899,10 +920,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         execution_runtime_configured = state.execution_runtime_configured(),
         "aether-gateway data layer configured"
     );
-    // Run pending database migrations before serving traffic
-    info!("running database migrations...");
-    if state.run_postgres_migrations().await? {
-        info!("database migrations complete");
+    ensure_postgres_schema_is_current(&state).await?;
+    let reset_stale_proxy_nodes = state.reset_stale_proxy_node_tunnel_statuses().await?;
+    if reset_stale_proxy_nodes > 0 {
+        info!(
+            reset_stale_proxy_nodes,
+            "reset stale tunnel-connected proxy nodes on startup"
+        );
     }
     state.bootstrap_admin_from_env().await?;
 
@@ -958,9 +982,161 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+async fn run_explicit_migrations(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    if args.data.effective_postgres_url().is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "AETHER_GATEWAY_DATA_POSTGRES_URL or DATABASE_URL is required when running --migrate",
+        )
+        .into());
+    }
+
+    if args.data.configured_encryption_key_mismatch() {
+        warn!(
+            "AETHER_GATEWAY_DATA_ENCRYPTION_KEY differs from ENCRYPTION_KEY; aether-gateway will prefer the gateway-specific value"
+        );
+    }
+
+    let state = AppState::new()?.with_data_config(args.data.to_config())?;
+    let pending = state
+        .pending_postgres_migrations()
+        .await?
+        .unwrap_or_default();
+    if pending.is_empty() {
+        info!(
+            pending_migrations = 0,
+            "database migrations already up to date"
+        );
+        return Ok(());
+    }
+
+    let next = pending
+        .first()
+        .expect("pending migrations should have a first element");
+    info!(
+        pending_migrations = pending.len(),
+        next_version = next.version,
+        next_description = %next.description,
+        pending_versions = %format_pending_migrations(&pending),
+        "running database migrations by explicit request..."
+    );
+    if state.run_postgres_migrations().await? {
+        info!("database migrations complete");
+    }
+    Ok(())
+}
+
+fn format_pending_migrations(pending: &[aether_data::migrate::PendingMigrationInfo]) -> String {
+    pending
+        .iter()
+        .map(|migration| format!("{} ({})", migration.version, migration.description))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+async fn ensure_postgres_schema_is_current(
+    state: &AppState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(pending) = state.prepare_postgres_for_startup().await? else {
+        return Ok(());
+    };
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    let next = pending
+        .first()
+        .expect("pending migrations should have a first element");
+    Err(pending_schema_error(pending.len(), next.version, &next.description).into())
+}
+
+fn pending_schema_error(
+    pending_count: usize,
+    next_version: i64,
+    next_description: &str,
+) -> std::io::Error {
+    std::io::Error::other(format!(
+        "database schema is behind by {} migration(s); next pending migration is {} ({})\nrun `aether-gateway --migrate` before starting the service",
+        pending_count,
+        next_version,
+        next_description
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resolve_healthcheck_url;
+    use super::{
+        ensure_postgres_schema_is_current, pending_schema_error, resolve_healthcheck_url, Args,
+        DeploymentTopologyArg, GatewayDataArgs, GatewayFrontdoorArgs, GatewayLogDestinationArg,
+        GatewayLogFormatArg, GatewayLogRotationArg, GatewayLoggingArgs, GatewayRateLimitArgs,
+        GatewayUsageArgs, NodeRoleArg, VideoTaskTruthSourceArg,
+    };
+    use aether_gateway::AppState;
+
+    fn test_args() -> Args {
+        Args {
+            app_port: 8084,
+            healthcheck: false,
+            healthcheck_timeout_ms: 3_000,
+            deployment_topology: DeploymentTopologyArg::SingleNode,
+            node_role: NodeRoleArg::All,
+            migrate: false,
+            static_dir: None,
+            video_task_truth_source_mode: VideoTaskTruthSourceArg::PythonSyncReport,
+            video_task_poller_interval_ms: 5_000,
+            video_task_poller_batch_size: 32,
+            video_task_store_path: None,
+            max_in_flight_requests: None,
+            distributed_request_limit: None,
+            distributed_request_redis_url: None,
+            distributed_request_redis_key_prefix: None,
+            distributed_request_lease_ttl_ms: 30_000,
+            distributed_request_renew_interval_ms: 10_000,
+            distributed_request_command_timeout_ms: 1_000,
+            data: GatewayDataArgs {
+                postgres_url: None,
+                encryption_key: None,
+                redis_url: None,
+                redis_key_prefix: None,
+                postgres_min_connections: 1,
+                postgres_max_connections: 30,
+                postgres_acquire_timeout_ms: 3_000,
+                postgres_idle_timeout_ms: 60_000,
+                postgres_max_lifetime_ms: 1_800_000,
+                postgres_statement_cache_capacity: 100,
+                postgres_require_ssl: false,
+            },
+            usage: GatewayUsageArgs {
+                queue_stream_key: "usage:events".to_string(),
+                queue_group: "usage_consumers".to_string(),
+                queue_dlq_stream_key: "usage:events:dlq".to_string(),
+                queue_stream_maxlen: 2_000,
+                queue_batch_size: 200,
+                queue_block_ms: 500,
+                queue_reclaim_idle_ms: 30_000,
+                queue_reclaim_count: 200,
+                queue_reclaim_interval_ms: 5_000,
+            },
+            frontdoor: GatewayFrontdoorArgs {
+                environment: "development".to_string(),
+                cors_origins: None,
+                cors_allow_credentials: true,
+            },
+            rate_limit: GatewayRateLimitArgs {
+                bucket_seconds: 60,
+                key_ttl_seconds: 120,
+                fail_open: true,
+            },
+            logging: GatewayLoggingArgs {
+                log_format: GatewayLogFormatArg::Pretty,
+                log_destination: GatewayLogDestinationArg::Stdout,
+                log_dir: None,
+                log_rotation: GatewayLogRotationArg::Daily,
+                log_retention_days: 7,
+                log_max_files: 30,
+            },
+        }
+    }
 
     #[test]
     fn resolves_healthcheck_url_from_app_port() {
@@ -974,5 +1150,66 @@ mod tests {
     fn rejects_zero_app_port() {
         let error = resolve_healthcheck_url(0).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn explicit_migrate_runtime_config_enables_data_logs() {
+        let mut args = test_args();
+        args.migrate = true;
+        let config = args.runtime_config().expect("runtime config should build");
+        assert_eq!(
+            config.default_log_filter,
+            "aether_gateway=info,aether_data=info"
+        );
+    }
+
+    #[test]
+    fn normal_runtime_config_keeps_gateway_only_logs() {
+        let config = test_args()
+            .runtime_config()
+            .expect("runtime config should build");
+        assert_eq!(config.default_log_filter, "aether_gateway=info");
+    }
+
+    #[test]
+    fn pending_schema_error_mentions_explicit_migrate_command() {
+        let error = pending_schema_error(2, 20260413020000, "squash usage schema split");
+        let message = error.to_string();
+        assert!(message.contains("database schema is behind by 2 migration(s)"));
+        assert!(message.contains("20260413020000"));
+        assert!(message.contains("squash usage schema split"));
+        assert!(message.contains("aether-gateway --migrate"));
+    }
+
+    #[tokio::test]
+    async fn ensure_postgres_schema_is_current_is_noop_without_postgres_pool() {
+        let state = AppState::new().expect("state should build");
+        ensure_postgres_schema_is_current(&state)
+            .await
+            .expect("disabled data backend should not block startup");
+    }
+
+    #[tokio::test]
+    async fn explicit_migrate_requires_postgres_url() {
+        let args = test_args();
+        let error = super::run_explicit_migrations(&args)
+            .await
+            .expect_err("missing postgres URL should fail");
+        let message = error.to_string();
+        assert!(message.contains("AETHER_GATEWAY_DATA_POSTGRES_URL or DATABASE_URL"));
+        assert!(message.contains("--migrate"));
+    }
+
+    #[tokio::test]
+    async fn explicit_migrate_does_not_depend_on_app_port_validation() {
+        let mut args = test_args();
+        args.app_port = 0;
+
+        let error = super::run_explicit_migrations(&args)
+            .await
+            .expect_err("missing postgres URL should fail before any app port validation");
+        let message = error.to_string();
+        assert!(message.contains("AETHER_GATEWAY_DATA_POSTGRES_URL or DATABASE_URL"));
+        assert!(!message.contains("APP_PORT"));
     }
 }

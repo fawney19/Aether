@@ -1,7 +1,7 @@
 use crate::error::SqlxResultExt;
 use crate::postgres::{DatabaseRecordId, PostgresTransactionOptions, PostgresTransactionRunner};
 use crate::DataLayerError;
-use futures_util::FutureExt;
+use futures_util::{FutureExt, TryStreamExt};
 use sqlx::query_scalar;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,13 +105,15 @@ impl PostgresLeaseRunner {
         self.transaction_runner
             .run(tx_options, |tx| {
                 async move {
-                    let rows = query_scalar::<_, String>(&sql)
+                    let mut rows = query_scalar::<_, String>(&sql)
                         .bind(owner)
                         .bind(lease_ms)
-                        .fetch_all(&mut **tx)
-                        .await
-                        .map_postgres_err()?;
-                    Ok(rows.into_iter().map(DatabaseRecordId).collect())
+                        .fetch(&mut **tx);
+                    let mut ids = Vec::new();
+                    while let Some(id) = rows.try_next().await.map_postgres_err()? {
+                        ids.push(DatabaseRecordId(id));
+                    }
+                    Ok(ids)
                 }
                 .boxed()
             })
@@ -140,13 +142,15 @@ impl PostgresLeaseRunner {
         self.transaction_runner
             .run(tx_options, |tx| {
                 async move {
-                    let rows = query_scalar::<_, String>(&sql)
+                    let mut rows = query_scalar::<_, String>(&sql)
                         .bind(ids)
                         .bind(owner)
-                        .fetch_all(&mut **tx)
-                        .await
-                        .map_postgres_err()?;
-                    Ok(rows.into_iter().map(DatabaseRecordId).collect())
+                        .fetch(&mut **tx);
+                    let mut released = Vec::new();
+                    while let Some(id) = rows.try_next().await.map_postgres_err()? {
+                        released.push(DatabaseRecordId(id));
+                    }
+                    Ok(released)
                 }
                 .boxed()
             })
@@ -184,14 +188,16 @@ impl PostgresLeaseRunner {
         self.transaction_runner
             .run(tx_options, |tx| {
                 async move {
-                    let rows = query_scalar::<_, String>(&sql)
+                    let mut rows = query_scalar::<_, String>(&sql)
                         .bind(ids)
                         .bind(owner)
                         .bind(lease_ms)
-                        .fetch_all(&mut **tx)
-                        .await
-                        .map_postgres_err()?;
-                    Ok(rows.into_iter().map(DatabaseRecordId).collect())
+                        .fetch(&mut **tx);
+                    let mut renewed = Vec::new();
+                    while let Some(id) = rows.try_next().await.map_postgres_err()? {
+                        renewed.push(DatabaseRecordId(id));
+                    }
+                    Ok(renewed)
                 }
                 .boxed()
             })

@@ -1,5 +1,5 @@
 use crate::handlers::admin::provider::shared::paths::admin_update_key_id;
-use crate::handlers::admin::provider::shared::payloads::AdminProviderKeyUpdateRequest;
+use crate::handlers::admin::provider::shared::payloads::AdminProviderKeyUpdatePatch;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::GatewayError;
 use axum::{
@@ -46,8 +46,8 @@ pub(super) async fn maybe_handle(
     let Some(raw_payload) = raw_value.as_object().cloned() else {
         return Ok(Some(bad_request_response("请求体必须是合法的 JSON 对象")));
     };
-    let payload = match serde_json::from_value::<AdminProviderKeyUpdateRequest>(raw_value) {
-        Ok(payload) => payload,
+    let patch = match AdminProviderKeyUpdatePatch::from_object(raw_payload) {
+        Ok(patch) => patch,
         Err(_) => return Ok(Some(bad_request_response("请求体必须是合法的 JSON 对象"))),
     };
 
@@ -72,7 +72,7 @@ pub(super) async fn maybe_handle(
     };
 
     let updated_record = match state
-        .build_admin_update_provider_key_record(&provider, &existing_key, &raw_payload, payload)
+        .build_admin_update_provider_key_record(&provider, &existing_key, patch)
         .await
     {
         Ok(record) => record,

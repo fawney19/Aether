@@ -1029,7 +1029,8 @@ pub fn build_admin_stats_cost_savings_response(
     let mut estimated_full_cost: f64 = usage
         .iter()
         .map(|item| {
-            item.output_price_per_1m.unwrap_or(0.0) * item.cache_read_input_tokens as f64
+            item.settlement_output_price_per_1m().unwrap_or(0.0)
+                * item.cache_read_input_tokens as f64
                 / 1_000_000.0
         })
         .sum();
@@ -1295,6 +1296,7 @@ pub fn build_model_leaderboard_items(
 pub fn build_user_leaderboard_items(
     items: &[StoredRequestUsageAudit],
     users: &std::collections::BTreeMap<String, AdminStatsUserMetadata>,
+    auth_user_reader_available: bool,
     include_inactive: bool,
     exclude_admin: bool,
 ) -> Vec<AdminStatsLeaderboardItem> {
@@ -1325,12 +1327,16 @@ pub fn build_user_leaderboard_items(
             if exclude_admin {
                 continue;
             }
-            item.username
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| user_id.to_string())
+            if auth_user_reader_available {
+                user_id.to_string()
+            } else {
+                item.username
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| user_id.to_string())
+            }
         };
 
         let entry =
@@ -1359,6 +1365,7 @@ pub fn build_user_leaderboard_items(
 pub fn build_api_key_leaderboard_items(
     items: &[StoredRequestUsageAudit],
     snapshots: Option<&[StoredAuthApiKeySnapshot]>,
+    api_key_names: &std::collections::BTreeMap<String, String>,
     include_inactive: bool,
     exclude_admin: bool,
 ) -> Vec<AdminStatsLeaderboardItem> {
@@ -1391,17 +1398,18 @@ pub fn build_api_key_leaderboard_items(
             if exclude_admin && snapshot.user_role.eq_ignore_ascii_case("admin") {
                 continue;
             }
-            snapshot
-                .api_key_name
-                .clone()
-                .or_else(|| item.api_key_name.clone())
+            api_key_names
+                .get(api_key_id)
+                .cloned()
                 .unwrap_or_else(|| api_key_id.to_string())
         } else {
             if snapshots_available {
                 continue;
             }
-            item.api_key_name
-                .clone()
+            api_key_names
+                .get(api_key_id)
+                .cloned()
+                .or_else(|| item.api_key_name.clone())
                 .unwrap_or_else(|| api_key_id.to_string())
         };
 
@@ -1426,6 +1434,166 @@ pub fn build_api_key_leaderboard_items(
     }
 
     grouped.into_values().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::{
+        build_api_key_leaderboard_items, build_user_leaderboard_items, AdminStatsUserMetadata,
+    };
+    use aether_data::repository::auth::StoredAuthApiKeySnapshot;
+    use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
+
+    fn sample_usage(api_key_name: Option<&str>) -> StoredRequestUsageAudit {
+        StoredRequestUsageAudit::new(
+            "usage-1".to_string(),
+            "req-1".to_string(),
+            Some("user-1".to_string()),
+            Some("key-1".to_string()),
+            Some("alice".to_string()),
+            api_key_name.map(str::to_string),
+            "OpenAI".to_string(),
+            "gpt-5".to_string(),
+            None,
+            Some("provider-1".to_string()),
+            Some("endpoint-1".to_string()),
+            Some("provider-key-1".to_string()),
+            Some("chat".to_string()),
+            Some("openai:chat".to_string()),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            Some("openai:chat".to_string()),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            false,
+            false,
+            10,
+            20,
+            30,
+            0.3,
+            0.3,
+            Some(200),
+            None,
+            None,
+            Some(400),
+            Some(120),
+            "completed".to_string(),
+            "settled".to_string(),
+            1_711_000_000,
+            1_711_000_001,
+            Some(1_711_000_002),
+        )
+        .expect("usage should build")
+    }
+
+    fn sample_api_key_snapshot(api_key_name: Option<&str>) -> StoredAuthApiKeySnapshot {
+        StoredAuthApiKeySnapshot {
+            user_id: "user-1".to_string(),
+            username: "alice".to_string(),
+            email: Some("alice@example.com".to_string()),
+            user_role: "user".to_string(),
+            user_auth_source: "local".to_string(),
+            user_is_active: true,
+            user_is_deleted: false,
+            user_rate_limit: None,
+            user_allowed_providers: None,
+            user_allowed_api_formats: None,
+            user_allowed_models: None,
+            api_key_id: "key-1".to_string(),
+            api_key_name: api_key_name.map(str::to_string),
+            api_key_is_active: true,
+            api_key_is_locked: false,
+            api_key_is_standalone: false,
+            api_key_rate_limit: None,
+            api_key_concurrent_limit: None,
+            api_key_expires_at_unix_secs: None,
+            api_key_allowed_providers: None,
+            api_key_allowed_api_formats: None,
+            api_key_allowed_models: None,
+        }
+    }
+
+    #[test]
+    fn api_key_leaderboard_prefers_resolved_names_over_legacy_usage_names_when_snapshots_exist() {
+        let leaderboard = build_api_key_leaderboard_items(
+            &[sample_usage(Some("legacy-default"))],
+            Some(&[sample_api_key_snapshot(None)]),
+            &BTreeMap::from([("key-1".to_string(), "fresh-default".to_string())]),
+            false,
+            false,
+        );
+
+        assert_eq!(leaderboard.len(), 1);
+        assert_eq!(leaderboard[0].id, "key-1");
+        assert_eq!(leaderboard[0].name, "fresh-default");
+    }
+
+    #[test]
+    fn api_key_leaderboard_keeps_legacy_usage_name_fallback_without_snapshot_reader() {
+        let leaderboard = build_api_key_leaderboard_items(
+            &[sample_usage(Some("legacy-default"))],
+            None,
+            &BTreeMap::new(),
+            false,
+            false,
+        );
+
+        assert_eq!(leaderboard.len(), 1);
+        assert_eq!(leaderboard[0].name, "legacy-default");
+    }
+
+    #[test]
+    fn user_leaderboard_prefers_resolved_names_over_legacy_usage_names_when_reader_exists() {
+        let leaderboard = build_user_leaderboard_items(
+            &[sample_usage(Some("legacy-default"))],
+            &BTreeMap::from([(
+                "user-1".to_string(),
+                AdminStatsUserMetadata {
+                    name: "fresh-alice".to_string(),
+                    role: "user".to_string(),
+                    is_active: true,
+                    is_deleted: false,
+                },
+            )]),
+            true,
+            false,
+            false,
+        );
+
+        assert_eq!(leaderboard.len(), 1);
+        assert_eq!(leaderboard[0].id, "user-1");
+        assert_eq!(leaderboard[0].name, "fresh-alice");
+    }
+
+    #[test]
+    fn user_leaderboard_does_not_fallback_to_legacy_usage_name_when_reader_exists() {
+        let leaderboard = build_user_leaderboard_items(
+            &[sample_usage(Some("legacy-default"))],
+            &BTreeMap::new(),
+            true,
+            false,
+            false,
+        );
+
+        assert_eq!(leaderboard.len(), 1);
+        assert_eq!(leaderboard[0].name, "user-1");
+    }
+
+    #[test]
+    fn user_leaderboard_keeps_legacy_usage_name_fallback_without_reader() {
+        let leaderboard = build_user_leaderboard_items(
+            &[sample_usage(Some("legacy-default"))],
+            &BTreeMap::new(),
+            false,
+            false,
+            false,
+        );
+
+        assert_eq!(leaderboard.len(), 1);
+        assert_eq!(leaderboard[0].name, "alice");
+    }
 }
 
 pub fn compare_leaderboard_items(

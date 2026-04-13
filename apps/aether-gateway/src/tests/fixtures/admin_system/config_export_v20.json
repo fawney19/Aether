@@ -1,0 +1,97 @@
+{
+  "version": "2.0",
+  "exported_at": "2026-04-11T10:00:00Z",
+  "global_models": [
+    {
+      "name": "legacy-gpt-5-v20",
+      "display_name": "Legacy GPT 5 v20",
+      "default_price_per_request": 0.03,
+      "default_tiered_pricing": {
+        "tiers": [
+          {
+            "up_to": null,
+            "input_price_per_1m": 4.0,
+            "output_price_per_1m": 20.0
+          }
+        ]
+      },
+      "supported_capabilities": [
+        "streaming",
+        "vision"
+      ],
+      "config": {
+        "quality": "balanced"
+      },
+      "is_active": true
+    }
+  ],
+  "providers": [
+    {
+      "name": "legacy-provider-v20",
+      "provider_type": "custom",
+      "website": "https://legacy-v20.example.com",
+      "billing_type": "pay_as_you_go",
+      "provider_priority": 10,
+      "keep_priority_on_conversion": false,
+      "enable_format_conversion": true,
+      "is_active": true,
+      "max_retries": 2,
+      "request_timeout": 30.0,
+      "stream_first_byte_timeout": 15.0,
+      "config": {
+        "provider_ops": {
+          "connector": {
+            "credentials": {
+              "api_key": "ops-secret-v20"
+            }
+          }
+        }
+      },
+      "endpoints": [
+        {
+          "api_format": "openai:chat",
+          "base_url": "https://legacy-v20.example.com/v1",
+          "max_retries": 2,
+          "is_active": true
+        }
+      ],
+      "api_keys": [
+        {
+          "name": "legacy-key-v20",
+          "api_formats": [
+            "openai:chat"
+          ],
+          "auth_type": "api_key",
+          "api_key": "sk-legacy-v20",
+          "internal_priority": 5,
+          "is_active": true
+        }
+      ],
+      "models": [
+        {
+          "global_model_name": "legacy-gpt-5-v20",
+          "provider_model_name": "legacy-gpt-5-v20",
+          "price_per_request": 0.03,
+          "tiered_pricing": {
+            "tiers": [
+              {
+                "up_to": null,
+                "input_price_per_1m": 4.0,
+                "output_price_per_1m": 20.0
+              }
+            ]
+          },
+          "supports_vision": true,
+          "supports_function_calling": true,
+          "supports_streaming": true,
+          "supports_extended_thinking": false,
+          "supports_image_generation": false,
+          "is_active": true,
+          "config": {
+            "kind": "chat"
+          }
+        }
+      ]
+    }
+  ]
+}

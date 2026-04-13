@@ -855,8 +855,13 @@ const traceRequestMetadata = computed<Record<string, unknown> | null>(() => {
   return meta as Record<string, unknown>
 })
 
+const settlementInfo = computed<JsonRecord | null>(() =>
+  asRecord(detail.value?.settlement ?? null),
+)
+
 const billingSnapshot = computed<JsonRecord | null>(() =>
-  asRecord(traceRequestMetadata.value?.billing_snapshot),
+  asRecord(settlementInfo.value?.billing_snapshot)
+  ?? asRecord(traceRequestMetadata.value?.billing_snapshot),
 )
 
 const billingResolvedVariables = computed<JsonRecord | null>(() =>

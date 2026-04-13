@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures_util::TryStreamExt;
 use sqlx::{postgres::PgRow, PgPool, Row};
 
 use super::types::{
@@ -181,11 +182,12 @@ impl OAuthProviderReadRepository for SqlxOAuthProviderRepository {
     async fn list_oauth_provider_configs(
         &self,
     ) -> Result<Vec<StoredOAuthProviderConfig>, DataLayerError> {
-        let rows = sqlx::query(LIST_OAUTH_PROVIDER_CONFIGS_SQL)
-            .fetch_all(&self.pool)
-            .await
-            .map_postgres_err()?;
-        rows.iter().map(map_oauth_provider_row).collect()
+        let mut rows = sqlx::query(LIST_OAUTH_PROVIDER_CONFIGS_SQL).fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(map_oauth_provider_row(&row)?);
+        }
+        Ok(items)
     }
 
     async fn get_oauth_provider_config(
