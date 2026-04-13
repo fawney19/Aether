@@ -204,7 +204,7 @@ async fn gateway_handles_admin_dashboard_stats_locally_without_proxying_upstream
                 json!("session-dashboard-stats-admin"),
             ),
         ]),
-        now + chrono::Duration::hours(1),
+        chrono::Utc::now() + chrono::Duration::hours(1),
     );
     let session = sample_auth_session(
         "admin-auth-1",
