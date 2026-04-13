@@ -65,29 +65,56 @@ pub(crate) async fn perform_model_fetch_once(
     perform_model_fetch_once_with_state(state).await
 }
 
+pub(crate) async fn perform_model_fetch_for_key(
+    state: &AppState,
+    provider_id: &str,
+    key_id: &str,
+) -> Result<ModelFetchRunSummary, GatewayError> {
+    perform_model_fetch_for_key_with_state(state, provider_id, key_id).await
+}
+
 async fn perform_model_fetch_once_with_state<S>(
     state: &S,
 ) -> Result<ModelFetchRunSummary, GatewayError>
 where
     S: ModelFetchRuntimeState + ?Sized,
 {
+    let targets = collect_fetch_targets(state, None, None).await?;
+    execute_fetch_targets(state, targets).await
+}
+
+async fn perform_model_fetch_for_key_with_state<S>(
+    state: &S,
+    provider_id: &str,
+    key_id: &str,
+) -> Result<ModelFetchRunSummary, GatewayError>
+where
+    S: ModelFetchRuntimeState + ?Sized,
+{
+    let targets = collect_fetch_targets(state, Some(provider_id), Some(key_id)).await?;
+    execute_fetch_targets(state, targets).await
+}
+
+async fn collect_fetch_targets<S>(
+    state: &S,
+    provider_id_filter: Option<&str>,
+    key_id_filter: Option<&str>,
+) -> Result<Vec<SelectedFetchTarget>, GatewayError>
+where
+    S: ModelFetchRuntimeState + ?Sized,
+{
     if !state.has_provider_catalog_data_reader() || !state.has_provider_catalog_data_writer() {
-        return Ok(ModelFetchRunSummary {
-            attempted: 0,
-            succeeded: 0,
-            failed: 0,
-            skipped: 0,
-        });
+        return Ok(Vec::new());
     }
 
-    let providers = state.list_provider_catalog_providers(true).await?;
+    let providers = state
+        .list_provider_catalog_providers(true)
+        .await?
+        .into_iter()
+        .filter(|provider| provider_id_filter.is_none_or(|provider_id| provider.id == provider_id))
+        .collect::<Vec<_>>();
     if providers.is_empty() {
-        return Ok(ModelFetchRunSummary {
-            attempted: 0,
-            succeeded: 0,
-            failed: 0,
-            skipped: 0,
-        });
+        return Ok(Vec::new());
     }
 
     let provider_ids = providers
@@ -125,6 +152,9 @@ where
             .unwrap_or_default();
         let keys = keys_by_provider.remove(&provider.id).unwrap_or_default();
         for key in keys {
+            if key_id_filter.is_some_and(|key_id| key.id != key_id) {
+                continue;
+            }
             if !key.is_active || !key.auto_fetch_models {
                 continue;
             }
@@ -136,7 +166,16 @@ where
             });
         }
     }
+    Ok(targets)
+}
 
+async fn execute_fetch_targets<S>(
+    state: &S,
+    targets: Vec<SelectedFetchTarget>,
+) -> Result<ModelFetchRunSummary, GatewayError>
+where
+    S: ModelFetchRuntimeState + ?Sized,
+{
     let mut summary = ModelFetchRunSummary {
         attempted: targets.len(),
         succeeded: 0,

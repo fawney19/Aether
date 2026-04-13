@@ -124,7 +124,7 @@
               v-if="showAutoFetchWarning"
               class="text-xs text-amber-600 dark:text-amber-400"
             >
-              已配置的模型权限将在下次获取时被覆盖
+              {{ autoFetchWarningMessage }}
             </p>
           </div>
           <Switch v-model="form.auto_fetch_models" />
@@ -218,6 +218,15 @@ const showAutoFetchWarning = computed(() => {
   if (Array.isArray(allowedModels) && allowedModels.length === 0) return false
   if (typeof allowedModels === 'object' && Object.keys(allowedModels).length === 0) return false
   return true
+})
+
+const autoFetchWarningMessage = computed(() => {
+  if (!showAutoFetchWarning.value || !props.editingKey?.allowed_models) return ''
+  const models = Array.isArray(props.editingKey.allowed_models)
+    ? props.editingKey.allowed_models
+    : []
+  if (models.length === 0) return ''
+  return `当前 Key 模型权限存在以下模型：${models.map(model => `“${model}”`).join('、')}，开启自动获取后将被覆盖`
 })
 
 // 表单是否可以保存
@@ -345,6 +354,7 @@ async function handleSave() {
 
   saving.value = true
   try {
+    const shouldClearAllowedModels = !!props.editingKey.auto_fetch_models && !form.value.auto_fetch_models
     const updateData: EndpointAPIKeyUpdate = {
       name: form.value.name,
       internal_priority: form.value.internal_priority,
@@ -352,6 +362,7 @@ async function handleSave() {
       cache_ttl_minutes: form.value.cache_ttl_minutes,
       max_probe_interval_minutes: form.value.max_probe_interval_minutes,
       note: form.value.note,
+      allowed_models: shouldClearAllowedModels ? null : undefined,
       auto_fetch_models: form.value.auto_fetch_models,
       model_include_patterns: parsePatternText(form.value.model_include_patterns_text),
       model_exclude_patterns: parsePatternText(form.value.model_exclude_patterns_text)

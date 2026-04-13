@@ -276,7 +276,7 @@
               v-if="showAutoFetchWarning"
               class="text-xs text-amber-600 dark:text-amber-400"
             >
-              已配置的模型权限将在下次获取时被覆盖
+              {{ autoFetchWarningMessage }}
             </p>
           </div>
           <Switch v-model="form.auto_fetch_models" />
@@ -439,6 +439,15 @@ const showAutoFetchWarning = computed(() => {
   if (Array.isArray(allowedModels) && allowedModels.length === 0) return false
   if (typeof allowedModels === 'object' && Object.keys(allowedModels).length === 0) return false
   return true
+})
+
+const autoFetchWarningMessage = computed(() => {
+  if (!showAutoFetchWarning.value || !props.editingKey?.allowed_models) return ''
+  const models = Array.isArray(props.editingKey.allowed_models)
+    ? props.editingKey.allowed_models
+    : []
+  if (models.length === 0) return ''
+  return `当前 Key 模型权限存在以下模型：${models.map(model => `“${model}”`).join('、')}，开启自动获取后将被覆盖`
 })
 
 // 检查是否正在切换认证类型
@@ -754,6 +763,7 @@ async function handleSave() {
     const authConfig = parseAuthConfig()
 
     if (props.editingKey) {
+      const shouldClearAllowedModels = !!props.editingKey.auto_fetch_models && !form.value.auto_fetch_models
       // 更新模式
       // 注意：rpm_limit 使用 null 表示自适应模式
       // undefined 表示"保持原值不变"（会在 JSON 序列化时被忽略）
@@ -769,6 +779,7 @@ async function handleSave() {
         note: form.value.note,
         is_active: form.value.is_active,
         capabilities: capabilitiesData,
+        allowed_models: shouldClearAllowedModels ? null : undefined,
         auto_fetch_models: form.value.auto_fetch_models,
         model_include_patterns: parsePatternText(form.value.model_include_patterns_text),
         model_exclude_patterns: parsePatternText(form.value.model_exclude_patterns_text)

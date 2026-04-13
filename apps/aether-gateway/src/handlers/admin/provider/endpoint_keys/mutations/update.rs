@@ -1,7 +1,7 @@
 use crate::handlers::admin::provider::shared::paths::admin_update_key_id;
 use crate::handlers::admin::provider::shared::payloads::AdminProviderKeyUpdatePatch;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
-use crate::GatewayError;
+use crate::{model_fetch::perform_model_fetch_for_key, GatewayError};
 use axum::{
     body::{Body, Bytes},
     http,
@@ -80,6 +80,33 @@ pub(super) async fn maybe_handle(
     };
     let Some(updated) = state.update_provider_catalog_key(&updated_record).await? else {
         return Ok(None);
+    };
+    let should_overwrite_allowed_models_immediately =
+        !existing_key.auto_fetch_models && updated.auto_fetch_models;
+    let updated = if should_overwrite_allowed_models_immediately {
+        let summary =
+            perform_model_fetch_for_key(state.as_ref(), &provider.id, &updated.id).await?;
+        if summary.succeeded == 0 {
+            let detail = state
+                .read_provider_catalog_keys_by_ids(std::slice::from_ref(&key_id))
+                .await?
+                .into_iter()
+                .next()
+                .and_then(|key| key.last_models_fetch_error)
+                .unwrap_or_else(|| "未获取到可用上游模型".to_string());
+            return Err(GatewayError::Internal(format!(
+                "开启自动获取模型后同步上游模型失败: {detail}"
+            )));
+        }
+
+        state
+            .read_provider_catalog_keys_by_ids(std::slice::from_ref(&key_id))
+            .await?
+            .into_iter()
+            .next()
+            .unwrap_or(updated)
+    } else {
+        updated
     };
     let now_unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)

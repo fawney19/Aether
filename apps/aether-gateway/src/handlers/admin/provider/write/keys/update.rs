@@ -22,6 +22,8 @@ pub(crate) async fn build_admin_update_provider_key_record(
     let state = state.as_ref();
     let mut updated = existing.clone();
     let (fields, payload) = patch.into_parts();
+    let auto_fetch_disabled =
+        existing.auto_fetch_models && matches!(payload.auto_fetch_models, Some(false));
     let current_auth_type = normalize_auth_type(Some(&existing.auth_type))?;
     let target_auth_type = payload
         .auth_type
@@ -244,6 +246,9 @@ pub(crate) async fn build_admin_update_provider_key_record(
     }
     if let Some(auto_fetch_models) = payload.auto_fetch_models {
         updated.auto_fetch_models = auto_fetch_models;
+    }
+    if auto_fetch_disabled {
+        updated.allowed_models = None;
     }
     if fields.contains("locked_models") {
         updated.locked_models =
