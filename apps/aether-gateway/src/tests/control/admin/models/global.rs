@@ -619,8 +619,16 @@ async fn gateway_handles_admin_global_model_routing_locally_with_trusted_admin_p
         None,
         None,
     );
+    let unlinked_provider = sample_provider("provider-unlinked", "shadow", 30).with_billing_fields(
+        Some("quota".to_string()),
+        Some(30.0),
+        Some(6.0),
+        None,
+        None,
+        None,
+    );
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
-        vec![openai_provider, alt_provider],
+        vec![openai_provider, alt_provider, unlinked_provider],
         vec![
             sample_endpoint(
                 "endpoint-openai-chat",
@@ -633,6 +641,12 @@ async fn gateway_handles_admin_global_model_routing_locally_with_trusted_admin_p
                 "provider-alt",
                 "openai:chat",
                 "https://api.alt.example",
+            ),
+            sample_endpoint(
+                "endpoint-unlinked-chat",
+                "provider-unlinked",
+                "openai:chat",
+                "https://api.shadow.example",
             ),
         ],
         {
@@ -668,7 +682,17 @@ async fn gateway_handles_admin_global_model_routing_locally_with_trusted_admin_p
             mapped_key.allowed_models = Some(json!(["gpt-5-upstream"]));
             mapped_key.rpm_limit = Some(120);
 
-            vec![primary_key, mapped_key]
+            let mut unlinked_key = sample_key(
+                "key-unlinked-routing",
+                "provider-unlinked",
+                "openai:chat",
+                "sk-unlinked-routing-9999",
+            );
+            unlinked_key.name = "unlinked".to_string();
+            unlinked_key.internal_priority = 40;
+            unlinked_key.allowed_models = Some(json!(["gpt-5-upstream-shadow"]));
+
+            vec![primary_key, mapped_key, unlinked_key]
         },
     ));
     let global_model_repository = Arc::new(
@@ -774,13 +798,16 @@ async fn gateway_handles_admin_global_model_routing_locally_with_trusted_admin_p
     let whitelist = payload["all_keys_whitelist"]
         .as_array()
         .expect("whitelist array");
-    assert_eq!(whitelist.len(), 2);
+    assert_eq!(whitelist.len(), 3);
     assert!(whitelist
         .iter()
         .any(|item| item["key_id"] == "key-openai-routing"));
     assert!(whitelist
         .iter()
         .any(|item| item["key_id"] == "key-alt-routing"));
+    assert!(whitelist
+        .iter()
+        .any(|item| item["key_id"] == "key-unlinked-routing"));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

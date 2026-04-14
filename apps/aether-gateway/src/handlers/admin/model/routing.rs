@@ -7,7 +7,9 @@ use aether_data_contracts::repository::global_models::{
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
 };
-use aether_scheduler_core::{is_provider_key_circuit_open, provider_key_health_score};
+use aether_scheduler_core::{
+    is_provider_key_circuit_open, matches_model_mapping, provider_key_health_score,
+};
 use serde_json::json;
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -121,6 +123,13 @@ pub(crate) async fn build_admin_global_model_routing_payload(
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|key| provider_catalog_key_supports_format(key, &endpoint.api_format))
+                .filter(|key| {
+                    key_allowed_models_match_global_model_for_routing(
+                        key.allowed_models.as_ref(),
+                        &global_model.name,
+                        &global_model_mappings,
+                    )
+                })
                 .collect::<Vec<_>>();
             endpoint_keys.sort_by(|left, right| {
                 left.internal_priority
@@ -170,14 +179,6 @@ pub(crate) async fn build_admin_global_model_routing_payload(
                         "circuit_breaker_formats": circuit_breaker_formats,
                         "next_probe_at": next_probe_at,
                     });
-                    all_keys_whitelist.push(json!({
-                        "key_id": &key.id,
-                        "key_name": &key.name,
-                        "masked_key": state.masked_catalog_api_key(key),
-                        "provider_id": &provider.id,
-                        "provider_name": &provider.name,
-                        "allowed_models": json_string_list(key.allowed_models.as_ref()),
-                    }));
                     payload
                 })
                 .collect::<Vec<_>>();
@@ -218,6 +219,53 @@ pub(crate) async fn build_admin_global_model_routing_payload(
             "active_endpoints": active_endpoints,
         }));
     }
+
+    // 与 Python 逻辑对齐：供前端实时匹配的白名单数据来自“全站活跃 Provider 的活跃 Key”
+    // （仅保留配置了非空 allowed_models 的 Key），而不是仅当前 GlobalModel 关联 Provider。
+    let active_providers = state
+        .list_provider_catalog_providers(true)
+        .await
+        .ok()
+        .unwrap_or_default();
+    let active_provider_ids = active_providers
+        .iter()
+        .map(|provider| provider.id.clone())
+        .collect::<Vec<_>>();
+    let active_provider_name_by_id = active_providers
+        .into_iter()
+        .map(|provider| (provider.id, provider.name))
+        .collect::<BTreeMap<_, _>>();
+    let active_keys = if active_provider_ids.is_empty() {
+        Vec::new()
+    } else {
+        state
+            .list_provider_catalog_keys_by_provider_ids(&active_provider_ids)
+            .await
+            .ok()
+            .unwrap_or_default()
+    };
+    for key in active_keys {
+        if !key.is_active {
+            continue;
+        }
+        let allowed_models = json_string_list(key.allowed_models.as_ref());
+        if allowed_models.is_empty() {
+            continue;
+        }
+        let provider_name = active_provider_name_by_id
+            .get(&key.provider_id)
+            .cloned()
+            .unwrap_or_default();
+        all_keys_whitelist.push(json!({
+            "key_id": key.id,
+            "key_name": key.name,
+            "masked_key": state.masked_catalog_api_key(&key),
+            "provider_id": key.provider_id,
+            "provider_name": provider_name,
+            "allowed_models": allowed_models,
+        }));
+    }
+
     providers_payload.sort_by(|left, right| {
         left.get("provider_priority")
             .and_then(serde_json::Value::as_i64)
@@ -255,6 +303,35 @@ pub(crate) async fn build_admin_global_model_routing_payload(
         "keep_priority_on_conversion": keep_priority_on_conversion,
         "all_keys_whitelist": all_keys_whitelist,
     }))
+}
+
+fn key_allowed_models_match_global_model_for_routing(
+    raw_allowed_models: Option<&serde_json::Value>,
+    global_model_name: &str,
+    global_model_mappings: &[String],
+) -> bool {
+    // 兼容 Python 预览逻辑：None/[] 视为“不限制”，在链路预览中保留该 Key。
+    let allowed_models = json_string_list(raw_allowed_models);
+    if raw_allowed_models.is_none() || allowed_models.is_empty() {
+        return true;
+    }
+
+    if allowed_models
+        .iter()
+        .any(|value| value == global_model_name)
+    {
+        return true;
+    }
+
+    for allowed_model in &allowed_models {
+        for pattern in global_model_mappings {
+            if matches_model_mapping(pattern, allowed_model) {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 pub(crate) async fn build_admin_assign_global_model_to_providers_payload(

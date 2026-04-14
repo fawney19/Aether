@@ -1,7 +1,7 @@
 use aether_data_contracts::repository::candidate_selection::{
     StoredMinimalCandidateSelectionRow, StoredProviderModelMapping,
 };
-use regex::Regex;
+use aether_scheduler_core::matches_model_mapping;
 
 use super::GatewayPublicRequestContext;
 
@@ -103,10 +103,7 @@ fn candidate_model_names_for_models(
 }
 
 pub(crate) fn matches_model_mapping_for_models(pattern: &str, model_name: &str) -> bool {
-    let Ok(compiled) = Regex::new(&format!("^(?:{pattern})$")) else {
-        return false;
-    };
-    compiled.is_match(model_name)
+    matches_model_mapping(pattern, model_name)
 }
 
 fn row_exposes_global_model_for_models(

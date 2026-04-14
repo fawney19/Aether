@@ -4,7 +4,7 @@ use aether_data_contracts::repository::candidate_selection::{
     StoredMinimalCandidateSelectionRow, StoredProviderModelMapping,
 };
 use aether_data_contracts::DataLayerError;
-use regex::Regex;
+use regex::RegexBuilder;
 
 pub fn resolve_requested_global_model_name(
     rows: &[StoredMinimalCandidateSelectionRow],
@@ -201,7 +201,15 @@ fn capabilities_support_required_capability(
 }
 
 pub fn matches_model_mapping(pattern: &str, model_name: &str) -> bool {
-    let Ok(compiled) = Regex::new(&format!("^(?:{pattern})$")) else {
+    if pattern.eq_ignore_ascii_case(model_name) {
+        return true;
+    }
+
+    let regex_pattern = format!("^(?:{pattern})$");
+    let Ok(compiled) = RegexBuilder::new(&regex_pattern)
+        .case_insensitive(true)
+        .build()
+    else {
         return false;
     };
     compiled.is_match(model_name)
@@ -252,4 +260,26 @@ pub fn extract_global_priority_for_format(
 
 pub fn normalize_api_format(value: &str) -> String {
     value.trim().to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matches_model_mapping;
+
+    #[test]
+    fn model_mapping_match_is_case_insensitive() {
+        assert!(matches_model_mapping("gpt-4o", "GPT-4O"));
+        assert!(matches_model_mapping("gpt-5(?:\\.\\d+)?", "GPT-5.1"));
+    }
+
+    #[test]
+    fn model_mapping_match_is_anchored_to_full_text() {
+        assert!(matches_model_mapping("gpt-4o", "gpt-4o"));
+        assert!(!matches_model_mapping("gpt-4o", "gpt-4o-mini"));
+    }
+
+    #[test]
+    fn invalid_model_mapping_pattern_returns_false() {
+        assert!(!matches_model_mapping("([a-z", "gpt-4o"));
+    }
 }

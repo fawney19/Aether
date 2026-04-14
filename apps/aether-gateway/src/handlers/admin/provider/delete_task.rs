@@ -7,11 +7,20 @@ use crate::handlers::admin::shared::{decrypt_catalog_secret_with_fallbacks, json
 use crate::handlers::public::matches_model_mapping_for_models;
 use crate::{GatewayError, LocalProviderDeleteTaskState};
 use aether_data_contracts::repository::global_models::{
-    AdminProviderModelListQuery, PublicGlobalModelQuery, StoredPublicGlobalModel,
+    AdminGlobalModelListQuery, AdminProviderModelListQuery, PublicGlobalModelQuery,
 };
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Clone)]
+struct MappingPreviewGlobalModel {
+    id: String,
+    name: String,
+    display_name: String,
+    is_active: bool,
+    mappings: Vec<String>,
+}
 
 pub(crate) async fn run_admin_provider_delete_task(
     state: &AdminAppState<'_>,
@@ -141,10 +150,10 @@ pub(crate) async fn run_admin_provider_delete_task(
     Ok(task)
 }
 
-pub(crate) fn public_global_model_mapping_patterns(model: &StoredPublicGlobalModel) -> Vec<String> {
-    model
-        .config
-        .as_ref()
+pub(crate) fn global_model_mapping_patterns_from_config(
+    config: Option<&serde_json::Value>,
+) -> Vec<String> {
+    config
         .and_then(serde_json::Value::as_object)
         .and_then(|config| config.get("model_mappings"))
         .and_then(serde_json::Value::as_array)
@@ -211,8 +220,8 @@ pub(crate) async fn build_admin_provider_mapping_preview_payload(
         keys.truncate(ADMIN_PROVIDER_MAPPING_PREVIEW_MAX_KEYS);
     }
 
-    let public_models = app
-        .list_public_global_models(&PublicGlobalModelQuery {
+    let admin_models = state
+        .list_admin_global_models(&AdminGlobalModelListQuery {
             offset: 0,
             limit: ADMIN_PROVIDER_MAPPING_PREVIEW_FETCH_LIMIT,
             is_active: None,
@@ -221,19 +230,56 @@ pub(crate) async fn build_admin_provider_mapping_preview_payload(
         .await
         .ok()
         .unwrap_or_else(|| {
-            aether_data_contracts::repository::global_models::StoredPublicGlobalModelPage {
+            aether_data_contracts::repository::global_models::StoredAdminGlobalModelPage {
                 items: Vec::new(),
                 total: 0,
             }
         })
         .items;
-    let mut models_with_mappings = public_models
+    let mut models_with_mappings = admin_models
         .into_iter()
         .filter_map(|model| {
-            let mappings = public_global_model_mapping_patterns(&model);
-            (!mappings.is_empty()).then_some((model, mappings))
+            let mappings = global_model_mapping_patterns_from_config(model.config.as_ref());
+            (!mappings.is_empty()).then_some(MappingPreviewGlobalModel {
+                id: model.id,
+                name: model.name,
+                display_name: model.display_name,
+                is_active: model.is_active,
+                mappings,
+            })
         })
         .collect::<Vec<_>>();
+    if models_with_mappings.is_empty() {
+        let public_models = app
+            .list_public_global_models(&PublicGlobalModelQuery {
+                offset: 0,
+                limit: ADMIN_PROVIDER_MAPPING_PREVIEW_FETCH_LIMIT,
+                is_active: None,
+                search: None,
+            })
+            .await
+            .ok()
+            .unwrap_or_else(|| {
+                aether_data_contracts::repository::global_models::StoredPublicGlobalModelPage {
+                    items: Vec::new(),
+                    total: 0,
+                }
+            })
+            .items;
+        models_with_mappings = public_models
+            .into_iter()
+            .filter_map(|model| {
+                let mappings = global_model_mapping_patterns_from_config(model.config.as_ref());
+                (!mappings.is_empty()).then_some(MappingPreviewGlobalModel {
+                    id: model.id,
+                    name: model.name.clone(),
+                    display_name: model.display_name.unwrap_or(model.name),
+                    is_active: model.is_active,
+                    mappings,
+                })
+            })
+            .collect::<Vec<_>>();
+    }
     let total_models_with_mappings = models_with_mappings.len();
     let truncated_models =
         total_models_with_mappings.saturating_sub(ADMIN_PROVIDER_MAPPING_PREVIEW_MAX_MODELS);
@@ -263,10 +309,10 @@ pub(crate) async fn build_admin_provider_mapping_preview_payload(
         }
 
         let mut matching_global_models = Vec::new();
-        for (global_model, mappings) in &models_with_mappings {
+        for global_model in &models_with_mappings {
             let mut matched_models = Vec::new();
             for allowed_model in &allowed_models {
-                for mapping_pattern in mappings {
+                for mapping_pattern in &global_model.mappings {
                     if matches_model_mapping_for_models(mapping_pattern, allowed_model) {
                         matched_models.push(json!({
                             "allowed_model": allowed_model,
@@ -281,10 +327,7 @@ pub(crate) async fn build_admin_provider_mapping_preview_payload(
                 matching_global_models.push(json!({
                     "global_model_id": global_model.id,
                     "global_model_name": global_model.name,
-                    "display_name": global_model
-                        .display_name
-                        .clone()
-                        .unwrap_or_else(|| global_model.name.clone()),
+                    "display_name": global_model.display_name,
                     "is_active": global_model.is_active,
                     "matched_models": matched_models,
                 }));
