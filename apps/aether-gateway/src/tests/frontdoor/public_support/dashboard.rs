@@ -158,6 +158,7 @@ async fn gateway_handles_dashboard_stats_locally_without_proxying_upstream() {
     assert_eq!(payload["today"]["tokens"], 150);
     assert_eq!(payload["api_keys"]["total"], 2);
     assert_eq!(payload["api_keys"]["active"], 1);
+    assert_eq!(payload["stats"][3]["subValue"], json!("输入 240 / 输出 60"));
     assert_eq!(payload["token_breakdown"]["input"], 240);
     assert_eq!(payload["token_breakdown"]["output"], 60);
     assert_eq!(payload["token_breakdown"]["cache_creation"], 20);
@@ -242,6 +243,8 @@ async fn gateway_handles_admin_dashboard_stats_locally_without_proxying_upstream
     claude_usage.input_tokens = 900;
     claude_usage.output_tokens = 100;
     claude_usage.total_tokens = 1_000;
+    claude_usage.api_format = Some("claude:chat".to_string());
+    claude_usage.endpoint_api_format = Some("claude:chat".to_string());
     claude_usage.cache_creation_input_tokens = 50;
     claude_usage.cache_creation_ephemeral_5m_input_tokens = 20;
     claude_usage.cache_creation_ephemeral_1h_input_tokens = 30;
@@ -403,7 +406,7 @@ async fn gateway_handles_admin_dashboard_stats_locally_without_proxying_upstream
     assert_eq!(payload["stats"][1]["value"], json!("16K"));
     assert_eq!(
         payload["stats"][1]["subValue"],
-        json!("输入 12.9K / 输出 3.1K · 写缓存 1.25K / 读缓存 1K")
+        json!("输入 12.1K / 输出 3.1K · 写缓存 1.25K / 读缓存 1K")
     );
     assert_eq!(payload["users"]["total"], 2);
     assert_eq!(payload["users"]["active"], 1);

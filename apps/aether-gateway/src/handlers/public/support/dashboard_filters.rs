@@ -2,7 +2,9 @@ use super::{
     build_auth_error_response, query_param_value, resolve_authenticated_local_user, AppState,
     GatewayError, GatewayPublicRequestContext,
 };
-use aether_billing::normalize_total_input_context_for_cache_hit_rate;
+use aether_billing::{
+    normalize_input_tokens_for_billing, normalize_total_input_context_for_cache_hit_rate,
+};
 use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageAuditListQuery};
 use axum::{
     body::Body,
@@ -25,6 +27,7 @@ struct DashboardDateRange {
 struct DashboardUsageTotals {
     requests: u64,
     input_tokens: u64,
+    effective_input_tokens: u64,
     output_tokens: u64,
     total_tokens: u64,
     cache_creation_tokens: u64,
@@ -74,6 +77,7 @@ impl DashboardUsageTotals {
         let cache_creation_tokens = dashboard_cache_creation_tokens(item);
         self.requests += 1;
         self.input_tokens += item.input_tokens;
+        self.effective_input_tokens += dashboard_effective_input_tokens(item);
         self.output_tokens += item.output_tokens;
         self.total_tokens += item.total_tokens;
         self.cache_creation_tokens += cache_creation_tokens;
@@ -150,6 +154,16 @@ fn dashboard_total_input_context(item: &StoredRequestUsageAudit) -> u64 {
     ) as u64
 }
 
+fn dashboard_effective_input_tokens(item: &StoredRequestUsageAudit) -> u64 {
+    let api_format = item
+        .endpoint_api_format
+        .as_deref()
+        .or(item.api_format.as_deref());
+    let input_tokens = i64::try_from(item.input_tokens).unwrap_or(i64::MAX);
+    let cache_read_tokens = i64::try_from(item.cache_read_input_tokens).unwrap_or(i64::MAX);
+    normalize_input_tokens_for_billing(api_format, input_tokens, cache_read_tokens) as u64
+}
+
 fn dashboard_round_f64(value: f64, decimals: u32) -> f64 {
     let factor = 10_f64.powi(i32::try_from(decimals).unwrap_or_default());
     (value * factor).round() / factor
@@ -219,7 +233,7 @@ fn dashboard_format_token_subvalue(totals: &DashboardUsageTotals) -> String {
 fn dashboard_format_today_token_subvalue(totals: &DashboardUsageTotals) -> String {
     format!(
         "输入 {} / 输出 {} · 写缓存 {} / 读缓存 {}",
-        dashboard_format_token_compact(totals.input_tokens),
+        dashboard_format_token_compact(totals.effective_input_tokens),
         dashboard_format_token_compact(totals.output_tokens),
         dashboard_format_token_compact(totals.cache_creation_tokens),
         dashboard_format_token_compact(totals.cache_read_tokens)
@@ -602,7 +616,7 @@ pub(super) async fn handle_dashboard_stats_get(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("dashboard api key stats lookup failed: {err:?}"),
                 false,
-            )
+            );
         }
     };
 
@@ -638,7 +652,7 @@ pub(super) async fn handle_dashboard_stats_get(
                         http::StatusCode::INTERNAL_SERVER_ERROR,
                         format!("dashboard user stats lookup failed: {err:?}"),
                         false,
-                    )
+                    );
                 }
             };
         let success_rate = if today_totals.requests == 0 {
@@ -725,7 +739,7 @@ pub(super) async fn handle_dashboard_stats_get(
                     http::StatusCode::INTERNAL_SERVER_ERROR,
                     format!("dashboard wallet lookup failed: {err:?}"),
                     false,
-                )
+                );
             }
         }
     } else {
@@ -1049,7 +1063,7 @@ pub(super) async fn handle_dashboard_recent_requests_get(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("dashboard recent requests lookup failed: {err:?}"),
                 false,
-            )
+            );
         }
     };
 
@@ -1067,7 +1081,7 @@ pub(super) async fn handle_dashboard_recent_requests_get(
                     http::StatusCode::INTERNAL_SERVER_ERROR,
                     format!("dashboard user lookup failed: {err:?}"),
                     false,
-                )
+                );
             }
         };
     let mut usernames_by_id: BTreeMap<String, String> = users_by_id
@@ -1127,7 +1141,7 @@ pub(super) async fn handle_dashboard_provider_status_get(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("dashboard provider catalog lookup failed: {err:?}"),
                 false,
-            )
+            );
         }
     };
     let since_unix_secs = u64::try_from(chrono::Utc::now().timestamp())
@@ -1149,7 +1163,7 @@ pub(super) async fn handle_dashboard_provider_status_get(
                 http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("dashboard provider usage lookup failed: {err:?}"),
                 false,
-            )
+            );
         }
     };
 
