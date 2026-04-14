@@ -11,6 +11,7 @@ use crate::log_ids::short_request_id;
 use crate::request_candidate_runtime::record_report_request_candidate_status;
 use crate::{AppState, GatewayError};
 
+mod codex_realtime_quota;
 mod context;
 use context::{report_context_is_locally_actionable, resolve_locally_actionable_report_context};
 
@@ -214,6 +215,22 @@ async fn handle_local_sync_report(state: &AppState, payload: &GatewaySyncReportR
         },
     )
     .await;
+    if let Err(err) = codex_realtime_quota::sync_codex_quota_from_response_headers(
+        state,
+        payload.report_context.as_ref(),
+        &payload.headers,
+    )
+    .await
+    {
+        warn!(
+            event_name = "codex_realtime_quota_sync_failed",
+            log_type = "ops",
+            report_kind = %payload.report_kind,
+            report_request_id = %short_request_id(report_request_id(payload.report_context.as_ref())),
+            error = ?err,
+            "gateway failed to persist codex realtime quota from sync response headers"
+        );
+    }
 }
 
 async fn handle_local_stream_report(state: &AppState, payload: &GatewayStreamReportRequest) {
@@ -236,6 +253,22 @@ async fn handle_local_stream_report(state: &AppState, payload: &GatewayStreamRep
         },
     )
     .await;
+    if let Err(err) = codex_realtime_quota::sync_codex_quota_from_response_headers(
+        state,
+        payload.report_context.as_ref(),
+        &payload.headers,
+    )
+    .await
+    {
+        warn!(
+            event_name = "codex_realtime_quota_sync_failed",
+            log_type = "ops",
+            report_kind = %payload.report_kind,
+            report_request_id = %short_request_id(report_request_id(payload.report_context.as_ref())),
+            error = ?err,
+            "gateway failed to persist codex realtime quota from stream response headers"
+        );
+    }
 }
 
 async fn apply_local_gemini_file_mapping_side_effect(
@@ -379,10 +412,14 @@ mod tests {
     use aether_data::repository::gemini_file_mappings::{
         GeminiFileMappingReadRepository, InMemoryGeminiFileMappingRepository,
     };
+    use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
     use aether_data::repository::usage::InMemoryUsageReadRepository;
     use aether_data::repository::video_tasks::InMemoryVideoTaskRepository;
     use aether_data_contracts::repository::candidates::{
         RequestCandidateReadRepository, RequestCandidateStatus, StoredRequestCandidate,
+    };
+    use aether_data_contracts::repository::provider_catalog::{
+        ProviderCatalogReadRepository, StoredProviderCatalogKey, StoredProviderCatalogProvider,
     };
     use aether_data_contracts::repository::video_tasks::{
         UpsertVideoTask, VideoTaskStatus, VideoTaskWriteRepository,
@@ -501,6 +538,91 @@ mod tests {
                 gemini_file_mapping_repository,
             ),
         )
+    }
+
+    fn build_provider_catalog_test_state(
+        repository: Arc<InMemoryProviderCatalogReadRepository>,
+    ) -> AppState {
+        AppState::new()
+            .expect("gateway state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(repository),
+            )
+    }
+
+    fn sample_provider_catalog_provider(
+        provider_id: &str,
+        provider_type: &str,
+    ) -> StoredProviderCatalogProvider {
+        StoredProviderCatalogProvider::new(
+            provider_id.to_string(),
+            provider_type.to_string(),
+            None,
+            provider_type.to_string(),
+        )
+        .expect("provider should build")
+    }
+
+    fn sample_provider_catalog_key(key_id: &str, provider_id: &str) -> StoredProviderCatalogKey {
+        StoredProviderCatalogKey::new(
+            key_id.to_string(),
+            provider_id.to_string(),
+            "default".to_string(),
+            "bearer".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+        .with_transport_fields(
+            Some(json!(["openai:cli"])),
+            "sk-codex-test".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("key transport should build")
+    }
+
+    fn sample_codex_paid_headers() -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("x-codex-plan-type".to_string(), "team".to_string()),
+            (
+                "x-codex-primary-used-percent".to_string(),
+                "100".to_string(),
+            ),
+            (
+                "x-codex-secondary-used-percent".to_string(),
+                "31".to_string(),
+            ),
+            (
+                "x-codex-primary-window-minutes".to_string(),
+                "300".to_string(),
+            ),
+            (
+                "x-codex-secondary-window-minutes".to_string(),
+                "10080".to_string(),
+            ),
+            (
+                "x-codex-primary-reset-after-seconds".to_string(),
+                "15160".to_string(),
+            ),
+            (
+                "x-codex-secondary-reset-after-seconds".to_string(),
+                "524059".to_string(),
+            ),
+            (
+                "x-codex-primary-reset-at".to_string(),
+                "1776148929".to_string(),
+            ),
+            (
+                "x-codex-secondary-reset-at".to_string(),
+                "1776657828".to_string(),
+            ),
+        ])
     }
 
     async fn seed_video_task(
@@ -698,6 +820,111 @@ mod tests {
             stored[0].endpoint_id.as_deref(),
             Some("endpoint-reporting-tests-123")
         );
+    }
+
+    #[tokio::test]
+    async fn submit_sync_report_updates_codex_quota_from_response_headers() {
+        super::codex_realtime_quota::clear_codex_quota_fingerprint_cache();
+
+        let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider_catalog_provider(
+                "provider-codex-sync",
+                "codex",
+            )],
+            Vec::new(),
+            vec![sample_provider_catalog_key(
+                "key-codex-sync",
+                "provider-codex-sync",
+            )],
+        ));
+        let state = build_provider_catalog_test_state(Arc::clone(&provider_catalog_repository));
+
+        submit_sync_report(
+            &state,
+            "trace-codex-reporting-sync",
+            GatewaySyncReportRequest {
+                trace_id: "trace-codex-reporting-sync".to_string(),
+                report_kind: "openai_cli_sync_success".to_string(),
+                report_context: Some(json!({
+                    "request_id": "req-codex-reporting-sync",
+                    "key_id": "key-codex-sync"
+                })),
+                status_code: 200,
+                headers: sample_codex_paid_headers(),
+                body_json: None,
+                client_body_json: None,
+                body_base64: None,
+                telemetry: None,
+            },
+        )
+        .await
+        .expect("sync report should stay local");
+
+        let reloaded = provider_catalog_repository
+            .list_keys_by_ids(&["key-codex-sync".to_string()])
+            .await
+            .expect("keys should list");
+        let codex = reloaded[0]
+            .upstream_metadata
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .and_then(|metadata| metadata.get("codex"))
+            .and_then(serde_json::Value::as_object)
+            .expect("codex metadata should exist");
+        assert_eq!(codex.get("primary_used_percent"), Some(&json!(31.0)));
+        assert_eq!(codex.get("secondary_used_percent"), Some(&json!(100.0)));
+    }
+
+    #[tokio::test]
+    async fn submit_stream_report_updates_codex_quota_from_response_headers() {
+        super::codex_realtime_quota::clear_codex_quota_fingerprint_cache();
+
+        let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider_catalog_provider(
+                "provider-codex-stream",
+                "codex",
+            )],
+            Vec::new(),
+            vec![sample_provider_catalog_key(
+                "key-codex-stream",
+                "provider-codex-stream",
+            )],
+        ));
+        let state = build_provider_catalog_test_state(Arc::clone(&provider_catalog_repository));
+
+        submit_stream_report(
+            &state,
+            "trace-codex-reporting-stream",
+            GatewayStreamReportRequest {
+                trace_id: "trace-codex-reporting-stream".to_string(),
+                report_kind: "openai_cli_stream_success".to_string(),
+                report_context: Some(json!({
+                    "request_id": "req-codex-reporting-stream",
+                    "key_id": "key-codex-stream"
+                })),
+                status_code: 200,
+                headers: sample_codex_paid_headers(),
+                provider_body_base64: None,
+                client_body_base64: None,
+                telemetry: None,
+            },
+        )
+        .await
+        .expect("stream report should stay local");
+
+        let reloaded = provider_catalog_repository
+            .list_keys_by_ids(&["key-codex-stream".to_string()])
+            .await
+            .expect("keys should list");
+        let codex = reloaded[0]
+            .upstream_metadata
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .and_then(|metadata| metadata.get("codex"))
+            .and_then(serde_json::Value::as_object)
+            .expect("codex metadata should exist");
+        assert_eq!(codex.get("primary_used_percent"), Some(&json!(31.0)));
+        assert_eq!(codex.get("secondary_used_percent"), Some(&json!(100.0)));
     }
 
     #[tokio::test]
