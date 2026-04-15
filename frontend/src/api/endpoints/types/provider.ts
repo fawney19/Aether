@@ -307,10 +307,12 @@ export interface CodexUpstreamMetadata {
   plan_type?: string  // 套餐类型
   primary_used_percent?: number  // 周限额窗口使用百分比
   primary_reset_seconds?: number  // 周限额重置剩余秒数
+  primary_reset_after_seconds?: number  // 周限额重置剩余秒数（兼容字段）
   primary_reset_at?: number  // 周限额重置时间（Unix 时间戳）
   primary_window_minutes?: number  // 周限额窗口大小（分钟）
   secondary_used_percent?: number  // 5H限额窗口使用百分比
   secondary_reset_seconds?: number  // 5H限额重置剩余秒数
+  secondary_reset_after_seconds?: number  // 5H限额重置剩余秒数（兼容字段）
   secondary_reset_at?: number  // 5H限额重置时间（Unix 时间戳）
   secondary_window_minutes?: number  // 5H限额窗口大小（分钟）
   has_credits?: boolean  // 是否有积分

@@ -1,6 +1,11 @@
 import client from '../client'
 import { dedupedRequest } from '@/utils/cache'
-import type { AllowedModels, OAuthOrganizationInfo, ProxyConfig } from './types/provider'
+import type {
+  AllowedModels,
+  OAuthOrganizationInfo,
+  ProxyConfig,
+  UpstreamMetadata,
+} from './types/provider'
 import type { ProviderKeyStatusSnapshot } from './types/statusSnapshot'
 
 const POOL_BATCH_ACTION_TIMEOUT_MS = 5 * 60 * 1000
@@ -114,6 +119,7 @@ export interface PoolKeyDetail {
   account_status_recoverable?: boolean  // 兼容字段；优先使用 status_snapshot.account
   account_status_source?: string | null  // 兼容字段；优先使用 status_snapshot.account
   status_snapshot?: ProviderKeyStatusSnapshot | null
+  upstream_metadata?: UpstreamMetadata | null
   quota_updated_at?: number | null
   health_score?: number
   circuit_breaker_open?: boolean

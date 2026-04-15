@@ -754,6 +754,10 @@ pub(super) fn build_admin_pool_key_payload(
         "model_exclude_patterns".to_string(),
         json!(admin_pool_string_list(key.model_exclude_patterns.as_ref())),
     );
+    payload.insert(
+        "upstream_metadata".to_string(),
+        json!(key.upstream_metadata.clone()),
+    );
     payload.insert("proxy".to_string(), json!(key.proxy.clone()));
     payload.insert("fingerprint".to_string(), json!(key.fingerprint.clone()));
     payload.insert(
