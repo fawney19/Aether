@@ -21,6 +21,8 @@ use self::test_support::{
 mod flow;
 #[path = "wallet/reads.rs"]
 mod reads;
+#[path = "wallet/redeem.rs"]
+mod redeem;
 #[path = "wallet/recharge.rs"]
 mod recharge;
 #[path = "wallet/refunds.rs"]
@@ -32,6 +34,7 @@ use self::reads::{
     parse_wallet_limit, parse_wallet_offset, wallet_fixed_offset, wallet_today_billing_date_string,
     wallet_transaction_payload_from_record,
 };
+use self::redeem::handle_wallet_redeem;
 use self::recharge::{
     handle_wallet_create_recharge, handle_wallet_recharge_detail, handle_wallet_recharge_list,
     wallet_recharge_detail_path_matches,
@@ -151,6 +154,12 @@ pub(super) async fn maybe_build_local_wallet_response(
         return Some(
             handle_wallet_create_recharge(state, request_context, headers, request_body).await,
         );
+    }
+
+    if decision.route_kind.as_deref() == Some("redeem")
+        && request_context.request_path == "/api/wallet/redeem"
+    {
+        return Some(handle_wallet_redeem(state, request_context, headers, request_body).await);
     }
 
     if decision.route_kind.as_deref() == Some("list_recharge_orders")

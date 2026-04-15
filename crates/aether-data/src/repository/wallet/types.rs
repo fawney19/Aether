@@ -443,6 +443,139 @@ pub struct StoredAdminPaymentCallbackPage {
     pub total: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct AdminRedeemCodeBatchListQuery {
+    pub status: Option<String>,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StoredAdminRedeemCodeBatch {
+    pub id: String,
+    pub name: String,
+    pub amount_usd: f64,
+    pub currency: String,
+    pub balance_bucket: String,
+    pub total_count: u64,
+    pub redeemed_count: u64,
+    pub active_count: u64,
+    pub status: String,
+    pub description: Option<String>,
+    pub created_by: Option<String>,
+    pub expires_at_unix_secs: Option<u64>,
+    pub created_at_unix_ms: u64,
+    pub updated_at_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct StoredAdminRedeemCodeBatchPage {
+    pub items: Vec<StoredAdminRedeemCodeBatch>,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct AdminRedeemCodeListQuery {
+    pub batch_id: String,
+    pub status: Option<String>,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StoredAdminRedeemCode {
+    pub id: String,
+    pub batch_id: String,
+    pub batch_name: Option<String>,
+    pub code_prefix: String,
+    pub code_suffix: String,
+    pub masked_code: String,
+    pub status: String,
+    pub redeemed_by_user_id: Option<String>,
+    pub redeemed_by_user_name: Option<String>,
+    pub redeemed_wallet_id: Option<String>,
+    pub redeemed_payment_order_id: Option<String>,
+    pub redeemed_order_no: Option<String>,
+    pub redeemed_at_unix_secs: Option<u64>,
+    pub disabled_by: Option<String>,
+    pub expires_at_unix_secs: Option<u64>,
+    pub created_at_unix_ms: u64,
+    pub updated_at_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct StoredAdminRedeemCodePage {
+    pub items: Vec<StoredAdminRedeemCode>,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CreatedAdminRedeemCodePlaintext {
+    pub code_id: String,
+    pub code: String,
+    pub masked_code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CreateAdminRedeemCodeBatchInput {
+    pub name: String,
+    pub amount_usd: f64,
+    pub currency: String,
+    pub balance_bucket: String,
+    pub total_count: usize,
+    pub expires_at_unix_secs: Option<u64>,
+    pub description: Option<String>,
+    pub created_by: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CreateAdminRedeemCodeBatchResult {
+    pub batch: StoredAdminRedeemCodeBatch,
+    pub codes: Vec<CreatedAdminRedeemCodePlaintext>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DisableAdminRedeemCodeBatchInput {
+    pub batch_id: String,
+    pub operator_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DeleteAdminRedeemCodeBatchInput {
+    pub batch_id: String,
+    pub operator_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DisableAdminRedeemCodeInput {
+    pub code_id: String,
+    pub operator_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RedeemWalletCodeInput {
+    pub code: String,
+    pub user_id: String,
+    pub order_no: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum RedeemWalletCodeOutcome {
+    Redeemed {
+        wallet: StoredWalletSnapshot,
+        order: StoredAdminPaymentOrder,
+        amount_usd: f64,
+        batch_name: String,
+    },
+    InvalidCode,
+    CodeNotFound,
+    CodeDisabled,
+    BatchDisabled,
+    CodeExpired,
+    CodeRedeemed,
+    WalletInactive,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CreateWalletRechargeOrderInput {
     pub preferred_wallet_id: Option<String>,
@@ -686,6 +819,21 @@ pub trait WalletReadRepository: Send + Sync {
         limit: usize,
         offset: usize,
     ) -> Result<StoredAdminPaymentCallbackPage, crate::DataLayerError>;
+
+    async fn list_admin_redeem_code_batches(
+        &self,
+        query: &AdminRedeemCodeBatchListQuery,
+    ) -> Result<StoredAdminRedeemCodeBatchPage, crate::DataLayerError>;
+
+    async fn find_admin_redeem_code_batch(
+        &self,
+        batch_id: &str,
+    ) -> Result<Option<StoredAdminRedeemCodeBatch>, crate::DataLayerError>;
+
+    async fn list_admin_redeem_codes(
+        &self,
+        query: &AdminRedeemCodeListQuery,
+    ) -> Result<StoredAdminRedeemCodePage, crate::DataLayerError>;
 }
 
 #[async_trait]
@@ -758,6 +906,31 @@ pub trait WalletWriteRepository: Send + Sync {
         &self,
         input: CreditAdminPaymentOrderInput,
     ) -> Result<WalletMutationOutcome<(StoredAdminPaymentOrder, bool)>, crate::DataLayerError>;
+
+    async fn create_admin_redeem_code_batch(
+        &self,
+        input: CreateAdminRedeemCodeBatchInput,
+    ) -> Result<CreateAdminRedeemCodeBatchResult, crate::DataLayerError>;
+
+    async fn disable_admin_redeem_code_batch(
+        &self,
+        input: DisableAdminRedeemCodeBatchInput,
+    ) -> Result<WalletMutationOutcome<StoredAdminRedeemCodeBatch>, crate::DataLayerError>;
+
+    async fn delete_admin_redeem_code_batch(
+        &self,
+        input: DeleteAdminRedeemCodeBatchInput,
+    ) -> Result<WalletMutationOutcome<StoredAdminRedeemCodeBatch>, crate::DataLayerError>;
+
+    async fn disable_admin_redeem_code(
+        &self,
+        input: DisableAdminRedeemCodeInput,
+    ) -> Result<WalletMutationOutcome<StoredAdminRedeemCode>, crate::DataLayerError>;
+
+    async fn redeem_wallet_code(
+        &self,
+        input: RedeemWalletCodeInput,
+    ) -> Result<RedeemWalletCodeOutcome, crate::DataLayerError>;
 }
 
 pub trait WalletRepository: WalletReadRepository + WalletWriteRepository + Send + Sync {}

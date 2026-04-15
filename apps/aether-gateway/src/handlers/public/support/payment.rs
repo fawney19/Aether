@@ -8,6 +8,8 @@ mod payment_postgres;
 mod payment_route;
 #[path = "payment/shared.rs"]
 mod payment_shared;
+#[path = "payment/gateway.rs"]
+pub(super) mod payment_gateway;
 #[cfg(test)]
 #[path = "payment/test_support.rs"]
 mod payment_test_support;

@@ -10,33 +10,33 @@ pub(super) const PAYMENT_CALLBACK_TOKEN_HEADER: &str = "x-payment-callback-token
 pub(super) const PAYMENT_CALLBACK_SIGNATURE_HEADER: &str = "x-payment-callback-signature";
 
 #[derive(Debug, Deserialize)]
-pub(super) struct PaymentCallbackRequest {
-    pub(super) callback_key: String,
+pub(crate) struct PaymentCallbackRequest {
+    pub(crate) callback_key: String,
     #[serde(default)]
-    pub(super) order_no: Option<String>,
+    pub(crate) order_no: Option<String>,
     #[serde(default)]
-    pub(super) gateway_order_id: Option<String>,
-    pub(super) amount_usd: f64,
+    pub(crate) gateway_order_id: Option<String>,
+    pub(crate) amount_usd: f64,
     #[serde(default)]
-    pub(super) pay_amount: Option<f64>,
+    pub(crate) pay_amount: Option<f64>,
     #[serde(default)]
-    pub(super) pay_currency: Option<String>,
+    pub(crate) pay_currency: Option<String>,
     #[serde(default)]
-    pub(super) exchange_rate: Option<f64>,
+    pub(crate) exchange_rate: Option<f64>,
     #[serde(default)]
-    pub(super) payload: Option<serde_json::Map<String, serde_json::Value>>,
+    pub(crate) payload: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct NormalizedPaymentCallbackRequest {
-    pub(super) callback_key: String,
-    pub(super) order_no: Option<String>,
-    pub(super) gateway_order_id: Option<String>,
-    pub(super) amount_usd: f64,
-    pub(super) pay_amount: Option<f64>,
-    pub(super) pay_currency: Option<String>,
-    pub(super) exchange_rate: Option<f64>,
-    pub(super) payload: serde_json::Value,
+pub(crate) struct NormalizedPaymentCallbackRequest {
+    pub(crate) callback_key: String,
+    pub(crate) order_no: Option<String>,
+    pub(crate) gateway_order_id: Option<String>,
+    pub(crate) amount_usd: f64,
+    pub(crate) pay_amount: Option<f64>,
+    pub(crate) pay_currency: Option<String>,
+    pub(crate) exchange_rate: Option<f64>,
+    pub(crate) payload: serde_json::Value,
 }
 
 pub(super) fn payment_callback_secret() -> Option<String> {

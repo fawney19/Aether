@@ -56,6 +56,52 @@
         </Card>
       </div>
 
+      <Card class="p-5 space-y-4">
+        <div class="flex items-center justify-between">
+          <div>
+            <h3 class="text-base font-semibold">
+              兑换码充值
+            </h3>
+            <p class="text-xs text-muted-foreground mt-1">
+              输入卡密后会直接充值到钱包的充值余额
+            </p>
+          </div>
+          <RefreshButton
+            :loading="loadingOrders || loadingTransactions"
+            @click="() => Promise.all([loadBalance(), loadOrders(), loadTransactions()])"
+          />
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-3">
+          <Input
+            v-model="redeemForm.code"
+            placeholder="输入兑换码，例如 ABCD-EFGH-IJKL-MNOP"
+            autocomplete="off"
+          />
+          <Button
+            :disabled="submittingRedeem"
+            @click="submitRedeem"
+          >
+            {{ submittingRedeem ? '兑换中...' : '立即兑换' }}
+          </Button>
+        </div>
+
+        <div
+          v-if="latestRedeem"
+          class="rounded-xl border border-border/60 bg-muted/20 p-3 text-xs text-muted-foreground space-y-1.5"
+        >
+          <div>
+            已兑换批次: <span class="font-medium text-foreground">{{ latestRedeem.batch_name }}</span>
+          </div>
+          <div>
+            充值金额: <span class="font-medium text-foreground">{{ formatCurrency(latestRedeem.amount_usd) }}</span>
+          </div>
+          <div>
+            关联订单: <span class="font-mono text-foreground">{{ latestRedeem.order.order_no }}</span>
+          </div>
+        </div>
+      </Card>
+
       <!-- TODO(wallet): 充值/退款用户主动操作入口暂未启用，待支付链路联调完成后再开放 -->
       <div
         v-if="ENABLE_WALLET_ACTION_FORMS"
@@ -572,6 +618,7 @@ import {
   type PaymentOrder,
   type RefundRequest,
   type WalletBalanceResponse,
+  type WalletRedeemResponse,
 } from '@/api/wallet'
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
@@ -601,11 +648,13 @@ const loadingInitial = ref(true)
 const loadingTransactions = ref(false)
 const loadingOrders = ref(false)
 const loadingRefunds = ref(false)
+const submittingRedeem = ref(false)
 const submittingRecharge = ref(false)
 const submittingRefund = ref(false)
 
 const walletBalance = ref<WalletBalanceResponse | null>(null)
 const latestRecharge = ref<{ order: PaymentOrder; payment_instructions: Record<string, unknown> } | null>(null)
+const latestRedeem = ref<WalletRedeemResponse | null>(null)
 
 const flowItems = ref<FlowItem[]>([])
 const todayUsage = ref<DailyUsageRecord | null>(null)
@@ -636,6 +685,10 @@ const refundForm = reactive({
   payment_order_id: '__none__',
   refund_mode: 'offline_payout',
   reason: '',
+})
+
+const redeemForm = reactive({
+  code: '',
 })
 
 const refundableOrders = computed(() =>
@@ -747,6 +800,29 @@ async function loadRefunds() {
     showError(parseApiError(error, '加载退款记录失败'))
   } finally {
     loadingRefunds.value = false
+  }
+}
+
+async function submitRedeem() {
+  if (!redeemForm.code.trim()) {
+    showError('请输入兑换码')
+    return
+  }
+
+  submittingRedeem.value = true
+  try {
+    latestRedeem.value = await walletApi.redeemCode({
+      code: redeemForm.code.trim(),
+    })
+    redeemForm.code = ''
+    success('兑换成功')
+    await Promise.all([loadBalance(), loadOrders(), loadTransactions(), loadTodayCost()])
+    activeTab.value = 'orders'
+  } catch (error) {
+    log.error('兑换码充值失败:', error)
+    showError(parseApiError(error, '兑换码充值失败'))
+  } finally {
+    submittingRedeem.value = false
   }
 }
 

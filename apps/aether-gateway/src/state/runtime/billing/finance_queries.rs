@@ -1,8 +1,9 @@
 use aether_data::repository::wallet::{
-    AdminPaymentOrderListQuery, AdminWalletLedgerQuery, AdminWalletListQuery,
-    AdminWalletRefundRequestListQuery, StoredAdminPaymentCallback, StoredAdminPaymentOrder,
-    StoredAdminWalletLedgerItem, StoredAdminWalletListItem, StoredAdminWalletRefund,
-    StoredAdminWalletRefundRequestItem, StoredAdminWalletTransaction,
+    AdminPaymentOrderListQuery, AdminRedeemCodeBatchListQuery, AdminRedeemCodeListQuery,
+    AdminWalletLedgerQuery, AdminWalletListQuery, AdminWalletRefundRequestListQuery,
+    StoredAdminPaymentCallback, StoredAdminPaymentOrder, StoredAdminRedeemCodeBatch,
+    StoredAdminRedeemCodePage, StoredAdminWalletLedgerItem, StoredAdminWalletListItem,
+    StoredAdminWalletRefund, StoredAdminWalletRefundRequestItem, StoredAdminWalletTransaction,
 };
 
 use crate::{
@@ -385,6 +386,61 @@ impl AppState {
             )),
             None => Ok(AdminWalletMutationOutcome::NotFound),
         }
+    }
+
+    pub(crate) async fn list_admin_redeem_code_batches(
+        &self,
+        status: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<StoredAdminRedeemCodeBatch>, u64), GatewayError> {
+        let page = self
+            .data
+            .list_admin_redeem_code_batches(&AdminRedeemCodeBatchListQuery {
+                status: status.map(ToOwned::to_owned),
+                limit,
+                offset,
+            })
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        Ok((page.items, page.total))
+    }
+
+    pub(crate) async fn read_admin_redeem_code_batch(
+        &self,
+        batch_id: &str,
+    ) -> Result<AdminWalletMutationOutcome<StoredAdminRedeemCodeBatch>, GatewayError> {
+        if !self.has_wallet_data_reader() {
+            return Ok(AdminWalletMutationOutcome::Unavailable);
+        }
+
+        match self
+            .data
+            .find_admin_redeem_code_batch(batch_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?
+        {
+            Some(batch) => Ok(AdminWalletMutationOutcome::Applied(batch)),
+            None => Ok(AdminWalletMutationOutcome::NotFound),
+        }
+    }
+
+    pub(crate) async fn list_admin_redeem_codes(
+        &self,
+        batch_id: &str,
+        status: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<StoredAdminRedeemCodePage, GatewayError> {
+        self.data
+            .list_admin_redeem_codes(&AdminRedeemCodeListQuery {
+                batch_id: batch_id.to_string(),
+                status: status.map(ToOwned::to_owned),
+                limit,
+                offset,
+            })
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 }
 

@@ -510,6 +510,93 @@ pub(super) fn classify_admin_basic_family_route(
             "admin:payments",
             false,
         ))
+    } else if method == http::Method::GET
+        && matches!(
+            normalized_path,
+            "/api/admin/payments/redeem-codes/batches"
+                | "/api/admin/payments/redeem-codes/batches/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "payments_manage",
+            "list_redeem_code_batches",
+            "admin:payments",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && matches!(
+            normalized_path,
+            "/api/admin/payments/redeem-codes/batches"
+                | "/api/admin/payments/redeem-codes/batches/"
+        )
+    {
+        Some(classified(
+            "admin_proxy",
+            "payments_manage",
+            "create_redeem_code_batch",
+            "admin:payments",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && normalized_path_no_trailing.starts_with("/api/admin/payments/redeem-codes/batches/")
+        && normalized_path_no_trailing.matches('/').count() == 6
+    {
+        Some(classified(
+            "admin_proxy",
+            "payments_manage",
+            "get_redeem_code_batch",
+            "admin:payments",
+            false,
+        ))
+    } else if method == http::Method::GET
+        && normalized_path_no_trailing.starts_with("/api/admin/payments/redeem-codes/batches/")
+        && normalized_path_no_trailing.ends_with("/codes")
+        && normalized_path_no_trailing.matches('/').count() == 7
+    {
+        Some(classified(
+            "admin_proxy",
+            "payments_manage",
+            "list_redeem_codes",
+            "admin:payments",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && normalized_path_no_trailing.starts_with("/api/admin/payments/redeem-codes/batches/")
+        && normalized_path_no_trailing.ends_with("/disable")
+        && normalized_path_no_trailing.matches('/').count() == 7
+    {
+        Some(classified(
+            "admin_proxy",
+            "payments_manage",
+            "disable_redeem_code_batch",
+            "admin:payments",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && normalized_path_no_trailing.starts_with("/api/admin/payments/redeem-codes/batches/")
+        && normalized_path_no_trailing.ends_with("/delete")
+        && normalized_path_no_trailing.matches('/').count() == 7
+    {
+        Some(classified(
+            "admin_proxy",
+            "payments_manage",
+            "delete_redeem_code_batch",
+            "admin:payments",
+            false,
+        ))
+    } else if method == http::Method::POST
+        && normalized_path_no_trailing.starts_with("/api/admin/payments/redeem-codes/codes/")
+        && normalized_path_no_trailing.ends_with("/disable")
+        && normalized_path_no_trailing.matches('/').count() == 7
+    {
+        Some(classified(
+            "admin_proxy",
+            "payments_manage",
+            "disable_redeem_code",
+            "admin:payments",
+            false,
+        ))
     } else {
         None
     }

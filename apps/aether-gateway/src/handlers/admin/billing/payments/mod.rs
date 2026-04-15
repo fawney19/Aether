@@ -4,6 +4,7 @@ use axum::{body::Body, response::Response};
 
 mod callbacks;
 mod orders;
+mod redeem_codes;
 #[path = "../../payment/postgres.rs"]
 mod payment_postgres;
 mod routes;

@@ -1,8 +1,8 @@
 use axum::{body::Body, http, response::Response};
 
+use super::payment_gateway::{PaymentGatewayRegistry, VerifyCallbackInput};
 use super::payment_shared::{
-    normalize_payment_callback_request, payment_callback_payment_method_from_path,
-    payment_callback_secret, payment_callback_signature_matches, PaymentCallbackRequest,
+    payment_callback_payment_method_from_path, payment_callback_secret, PaymentCallbackRequest,
     PAYMENT_CALLBACK_SIGNATURE_HEADER, PAYMENT_CALLBACK_TOKEN_HEADER,
 };
 use super::{
@@ -72,16 +72,6 @@ pub(super) async fn maybe_build_local_payment_callback_route_response(
             ));
         }
     };
-    let payload = match normalize_payment_callback_request(raw_payload) {
-        Ok(value) => value,
-        Err(detail) => {
-            return Some(build_auth_error_response(
-                http::StatusCode::BAD_REQUEST,
-                detail,
-                false,
-            ));
-        }
-    };
     let Some(payment_method) =
         payment_callback_payment_method_from_path(&request_context.request_path)
     else {
@@ -91,17 +81,28 @@ pub(super) async fn maybe_build_local_payment_callback_route_response(
             false,
         ));
     };
-    let signature_valid =
-        match payment_callback_signature_matches(&payload.payload, &signature, &secret) {
-            Ok(value) => value,
-            Err(err) => {
-                return Some(build_auth_error_response(
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    err,
-                    false,
-                ));
-            }
-        };
+    let Some(adapter) = PaymentGatewayRegistry::get(&payment_method) else {
+        return Some(build_auth_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "unsupported payment_method",
+            false,
+        ));
+    };
+    let verified = match adapter.verify_callback(VerifyCallbackInput {
+        secret: &secret,
+        signature: &signature,
+        payload: raw_payload,
+    }) {
+        Ok(value) => value,
+        Err(err) => {
+            let status = if err == "输入验证失败" {
+                http::StatusCode::BAD_REQUEST
+            } else {
+                http::StatusCode::INTERNAL_SERVER_ERROR
+            };
+            return Some(build_auth_error_response(status, err, false));
+        }
+    };
 
     if state.postgres_pool().is_some() {
         return Some(
@@ -109,8 +110,8 @@ pub(super) async fn maybe_build_local_payment_callback_route_response(
                 state,
                 &payment_method,
                 request_context,
-                &payload,
-                signature_valid,
+                &verified.normalized_payload,
+                verified.signature_valid,
             )
             .await,
         );
@@ -122,8 +123,8 @@ pub(super) async fn maybe_build_local_payment_callback_route_response(
             super::payment_test_support::handle_payment_callback_with_test_store(
                 &payment_method,
                 request_context,
-                &payload,
-                signature_valid,
+                &verified.normalized_payload,
+                verified.signature_valid,
             )
             .await,
         );
