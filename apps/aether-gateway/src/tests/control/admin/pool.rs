@@ -1110,6 +1110,162 @@ async fn gateway_formats_codex_quota_countdown_from_reset_after_seconds() {
 }
 
 #[tokio::test]
+async fn gateway_marks_exhausted_codex_pool_key_as_blocked_when_flag_enabled() {
+    let mut provider = sample_provider("provider-codex", "codex", 10).with_transport_fields(
+        true,
+        false,
+        true,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(json!({
+            "pool_advanced": {
+                "enabled": true,
+                "skip_exhausted_accounts": true
+            }
+        })),
+    );
+    provider.provider_type = "codex".to_string();
+
+    let mut key = sample_key(
+        "key-codex-exhausted",
+        "provider-codex",
+        "openai:cli",
+        "oauth-placeholder",
+    );
+    key.name = "codex exhausted".to_string();
+    key.auth_type = "oauth".to_string();
+    key.upstream_metadata = Some(json!({
+        "codex": {
+            "secondary_used_percent": 100.0,
+            "plan_type": "plus"
+        }
+    }));
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![key],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+            provider_catalog_repository,
+        ));
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-codex/keys?page=1&page_size=50&status=all",
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    let keys = payload["keys"].as_array().expect("keys should be array");
+
+    assert_eq!(keys[0]["scheduling_status"], json!("blocked"));
+    assert_eq!(
+        keys[0]["scheduling_reason"],
+        json!("account_quota_exhausted")
+    );
+    assert_eq!(keys[0]["scheduling_label"], json!("额度耗尽"));
+    assert_eq!(
+        keys[0]["scheduling_reasons"][0],
+        json!({
+            "code": "account_quota_exhausted",
+            "label": "额度耗尽",
+            "blocking": true,
+            "source": "quota",
+            "ttl_seconds": serde_json::Value::Null,
+            "detail": serde_json::Value::Null,
+        })
+    );
+    assert_eq!(keys[0]["account_quota"], json!("5H剩余 0.0%"));
+}
+
+#[tokio::test]
+async fn gateway_marks_exhausted_kiro_pool_key_as_blocked_when_flag_enabled() {
+    let mut provider = sample_provider("provider-kiro", "kiro", 10).with_transport_fields(
+        true,
+        false,
+        true,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(json!({
+            "pool_advanced": {
+                "enabled": true,
+                "skip_exhausted_accounts": true
+            }
+        })),
+    );
+    provider.provider_type = "kiro".to_string();
+
+    let mut key = sample_key(
+        "key-kiro-exhausted",
+        "provider-kiro",
+        "claude:cli",
+        "oauth-placeholder",
+    );
+    key.name = "kiro exhausted".to_string();
+    key.auth_type = "oauth".to_string();
+    key.upstream_metadata = Some(json!({
+        "kiro": {
+            "remaining": 0.0,
+            "usage_limit": 100.0,
+            "current_usage": 100.0
+        }
+    }));
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![key],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+            provider_catalog_repository,
+        ));
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-kiro/keys?page=1&page_size=50&status=all",
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    let keys = payload["keys"].as_array().expect("keys should be array");
+
+    assert_eq!(keys[0]["scheduling_status"], json!("blocked"));
+    assert_eq!(
+        keys[0]["scheduling_reason"],
+        json!("account_quota_exhausted")
+    );
+    assert_eq!(keys[0]["scheduling_label"], json!("额度耗尽"));
+    assert_eq!(keys[0]["account_quota"], json!("剩余 0/100"));
+}
+
+#[tokio::test]
 async fn gateway_codex_quota_resets_to_full_after_countdown_elapsed() {
     let mut provider = sample_provider("provider-codex", "codex", 10).with_transport_fields(
         true,

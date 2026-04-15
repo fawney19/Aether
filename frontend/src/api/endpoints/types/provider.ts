@@ -492,6 +492,7 @@ export interface PoolAdvancedConfig {
   global_priority?: number | null
   sticky_session_ttl_seconds?: number | null
   load_threshold_percent?: number | null
+  skip_exhausted_accounts?: boolean | null
   // 旧字段（兼容读取）
   lru_enabled?: boolean
   scheduling_mode?: 'lru' | 'multi_score' | null

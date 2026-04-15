@@ -13,6 +13,7 @@ pub(crate) const ADMIN_PROVIDER_OAUTH_DATA_UNAVAILABLE_DETAIL: &str =
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AdminProviderPoolConfig {
     pub(crate) lru_enabled: bool,
+    pub(crate) skip_exhausted_accounts: bool,
     pub(crate) cost_window_seconds: u64,
     pub(crate) cost_limit_per_key_tokens: Option<u64>,
 }

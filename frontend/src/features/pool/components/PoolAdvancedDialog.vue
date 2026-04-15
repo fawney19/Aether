@@ -467,6 +467,7 @@ const form = ref({
   probing_enabled: false,
   probing_interval_minutes: null as number | null | undefined,
   auto_remove_banned_keys: false,
+  skip_exhausted_accounts: false,
 })
 
 interface ClaudeFormState {
@@ -503,6 +504,8 @@ function getHealthToggleValue(key: PoolHealthToggleKey): boolean {
       return form.value.probing_enabled
     case 'auto_remove_banned_keys':
       return form.value.auto_remove_banned_keys
+    case 'skip_exhausted_accounts':
+      return form.value.skip_exhausted_accounts
   }
 }
 
@@ -516,6 +519,9 @@ function updateHealthToggleValue(key: PoolHealthToggleKey, value: boolean): void
       return
     case 'auto_remove_banned_keys':
       form.value.auto_remove_banned_keys = value
+      return
+    case 'skip_exhausted_accounts':
+      form.value.skip_exhausted_accounts = value
   }
 }
 
@@ -536,6 +542,7 @@ watch(() => props.modelValue, (open) => {
     probing_enabled: cfg?.probing_enabled ?? false,
     probing_interval_minutes: cfg?.probing_interval_minutes ?? null,
     auto_remove_banned_keys: cfg?.auto_remove_banned_keys ?? false,
+    skip_exhausted_accounts: cfg?.skip_exhausted_accounts ?? false,
   }
 
   const cc = props.currentClaudeConfig
@@ -570,6 +577,7 @@ async function handleSave() {
         ? (form.value.probing_interval_minutes ?? undefined)
         : undefined,
       auto_remove_banned_keys: form.value.auto_remove_banned_keys,
+      skip_exhausted_accounts: form.value.skip_exhausted_accounts,
     }
 
     const payload: Parameters<typeof updateProvider>[1] = {

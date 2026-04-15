@@ -3,6 +3,7 @@ use crate::handlers::admin::provider::shared::support::{
 };
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{provider_key_status_snapshot_payload, unix_secs_to_rfc3339};
+use aether_admin::provider::pool as admin_provider_pool_pure;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use serde_json::json;
 
@@ -551,6 +552,7 @@ fn admin_pool_scheduling_payload(
     cooldown_ttl_seconds: Option<u64>,
     health_score: f64,
     circuit_breaker_open: bool,
+    account_quota_exhausted: bool,
 ) -> (String, String, String, Vec<serde_json::Value>) {
     if !key.is_active {
         return (
@@ -562,6 +564,21 @@ fn admin_pool_scheduling_payload(
                 "label": "已禁用",
                 "blocking": true,
                 "source": "manual",
+                "ttl_seconds": serde_json::Value::Null,
+                "detail": serde_json::Value::Null,
+            })],
+        );
+    }
+    if account_quota_exhausted {
+        return (
+            "blocked".to_string(),
+            "account_quota_exhausted".to_string(),
+            "额度耗尽".to_string(),
+            vec![json!({
+                "code": "account_quota_exhausted",
+                "label": "额度耗尽",
+                "blocking": true,
+                "source": "quota",
                 "ttl_seconds": serde_json::Value::Null,
                 "detail": serde_json::Value::Null,
             })],
@@ -632,6 +649,8 @@ pub(super) fn build_admin_pool_key_payload(
         .and_then(|_| runtime.cooldown_ttl_by_key.get(&key.id).copied());
     let health_score = admin_pool_health_score(key);
     let circuit_breaker_open = admin_pool_circuit_breaker_open(key);
+    let account_quota_exhausted = pool_config.is_some_and(|config| config.skip_exhausted_accounts)
+        && admin_provider_pool_pure::admin_pool_key_account_quota_exhausted(key, provider_type);
     let (scheduling_status, scheduling_reason, scheduling_label, scheduling_reasons) =
         admin_pool_scheduling_payload(
             key,
@@ -639,6 +658,7 @@ pub(super) fn build_admin_pool_key_payload(
             cooldown_ttl_seconds,
             health_score,
             circuit_breaker_open,
+            account_quota_exhausted,
         );
     let auth_config = state.parse_catalog_auth_config_json(key);
     let oauth_expires_at = admin_pool_derive_oauth_expires_at(key, auth_config.as_ref());
