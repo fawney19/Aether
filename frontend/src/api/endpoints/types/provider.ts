@@ -229,7 +229,7 @@ export interface EndpointAPIKey {
   api_formats: string[]  // 支持的 endpoint signature 列表（如 "openai:chat"）
   api_key_masked: string
   api_key_plain?: string | null
-  auth_type: 'api_key' | 'service_account' | 'oauth'  // 认证类型（必返回）
+  auth_type: 'api_key' | 'service_account' | 'oauth' | 'bearer'  // 认证类型（必返回）
   name: string  // 密钥名称（必填，用于识别）
   rate_multipliers?: Record<string, number> | null  // 按 endpoint signature 的成本倍率
   internal_priority: number  // Key 内部优先级

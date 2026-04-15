@@ -94,6 +94,12 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
             "该 Provider 不是固定类型，无法使用 provider-oauth",
         ));
     }
+    if provider_type == "kiro" {
+        return Ok(build_internal_control_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "Kiro 不支持单条 Refresh Token 导入，请使用批量导入或设备授权。",
+        ));
+    }
     let Some(template) = admin_provider_oauth_template(&provider_type) else {
         return Ok(build_admin_provider_oauth_backend_unavailable_response());
     };

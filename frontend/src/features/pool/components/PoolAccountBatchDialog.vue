@@ -454,7 +454,7 @@ function downloadJsonFile(data: unknown, filename: string): void {
 
 function normalizeAuthTypeLabel(authType: string): string {
   const text = normalizeText(authType)
-  if (text === 'oauth') return 'OAuth'
+  if (text === 'oauth' || text === 'bearer') return 'OAuth'
   if (text === 'service_account') return 'Service'
   return 'API Key'
 }

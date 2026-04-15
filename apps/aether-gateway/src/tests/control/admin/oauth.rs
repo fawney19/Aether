@@ -1793,6 +1793,51 @@ async fn gateway_imports_admin_provider_oauth_refresh_token_locally_with_trusted
 }
 
 #[tokio::test]
+async fn gateway_rejects_kiro_single_refresh_token_import_with_clear_error() {
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![{
+            let mut provider = sample_provider("provider-kiro", "kiro", 10);
+            provider.provider_type = "kiro".to_string();
+            provider
+        }],
+        vec![sample_endpoint(
+            "endpoint-kiro-chat",
+            "provider-kiro",
+            "kiro:generateAssistantResponse",
+            "https://service.kiro.dev",
+        )],
+        Vec::new(),
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+            provider_catalog_repository,
+        ));
+
+    let response = local_admin_provider_oauth_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/provider-oauth/providers/provider-kiro/import-refresh-token",
+        Some(json!({
+            "refresh_token": "kiro-refresh-token"
+        })),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    assert_eq!(
+        payload["detail"],
+        json!("Kiro 不支持单条 Refresh Token 导入，请使用批量导入或设备授权。")
+    );
+}
+
+#[tokio::test]
 async fn gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtime_proxy_node() {
     let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
     let execution_plans_clone = Arc::clone(&execution_plans);

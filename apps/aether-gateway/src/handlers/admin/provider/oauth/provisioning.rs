@@ -83,6 +83,15 @@ pub(crate) async fn create_provider_oauth_catalog_key(
     proxy: Option<serde_json::Value>,
     expires_at_unix_secs: Option<u64>,
 ) -> Result<Option<StoredProviderCatalogKey>, GatewayError> {
+    let auth_type = if auth_config
+        .get("provider_type")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case("kiro"))
+    {
+        "bearer"
+    } else {
+        "oauth"
+    };
     let Some(encrypted_api_key) = state.encrypt_catalog_secret_with_fallbacks(access_token) else {
         return Ok(None);
     };
@@ -102,7 +111,7 @@ pub(crate) async fn create_provider_oauth_catalog_key(
         Uuid::new_v4().to_string(),
         provider_id.to_string(),
         name.to_string(),
-        "oauth".to_string(),
+        auth_type.to_string(),
         None,
         true,
     )
@@ -157,6 +166,13 @@ pub(crate) async fn update_existing_provider_oauth_catalog_key(
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
     let mut updated = existing_key.clone();
+    if auth_config
+        .get("provider_type")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case("kiro"))
+    {
+        updated.auth_type = "bearer".to_string();
+    }
     updated.encrypted_api_key = encrypted_api_key;
     updated.encrypted_auth_config = Some(encrypted_auth_config);
     updated.is_active = true;

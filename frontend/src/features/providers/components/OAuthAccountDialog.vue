@@ -939,8 +939,8 @@ async function handleImport() {
   let keepImporting = false
   try {
     const proxyNodeId = selectedProxyNodeId.value || undefined
-    // 检测是否为批量导入
-    if (isBatchImport(inputText)) {
+    // Kiro 的单条 JSON 凭据也必须走 batch-import 路径，后端需要完整 auth_config。
+    if (isKiroProvider.value || isBatchImport(inputText)) {
       const task = await startBatchImportOAuthTask(props.providerId, inputText, proxyNodeId)
       importTask.value = {
         task_id: task.task_id,

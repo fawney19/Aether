@@ -715,7 +715,7 @@ const requestBodyDraft = computed(() => props.requestBodyDraft ?? '')
 const traceCandidates = computed(() => props.trace?.candidates ?? [])
 const showSetup = computed(() => props.open && !props.testing && !props.result)
 const showResult = computed(() => !!props.result)
-const showTraceTimeline = computed(() => Boolean(props.requestId))
+const showTraceTimeline = computed(() => Boolean(props.requestId) && traceCandidates.value.length > 0)
 const isDark = computed(() => typeof document !== 'undefined' && document.documentElement.classList.contains('dark'))
 const { copyToClipboard } = useClipboard()
 

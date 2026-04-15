@@ -1837,7 +1837,7 @@ watch(searchQuery, () => {
 })
 
 function normalizeAuthTypeForEdit(authType: string): EndpointAPIKey['auth_type'] {
-  if (authType === 'oauth' || authType === 'service_account') return authType
+  if (authType === 'oauth' || authType === 'service_account' || authType === 'bearer') return authType
   return 'api_key'
 }
 
