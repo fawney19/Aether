@@ -717,6 +717,19 @@ RETURNING id
         &self,
         global_model_id: &str,
     ) -> Result<bool, DataLayerError> {
+        let mut tx = self.pool.begin().await.map_postgres_err()?;
+
+        sqlx::query(
+            r#"
+DELETE FROM models
+WHERE global_model_id = $1
+            "#,
+        )
+        .bind(global_model_id)
+        .execute(&mut *tx)
+        .await
+        .map_postgres_err()?;
+
         let deleted = sqlx::query(
             r#"
 DELETE FROM global_models
@@ -725,9 +738,11 @@ RETURNING id
             "#,
         )
         .bind(global_model_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_postgres_err()?;
+
+        tx.commit().await.map_postgres_err()?;
 
         Ok(deleted.is_some())
     }
