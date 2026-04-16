@@ -6,7 +6,8 @@ use crate::handlers::admin::shared::query_param_value;
 use crate::GatewayError;
 use aether_admin::observability::usage::{
     admin_usage_bad_request_response, admin_usage_data_unavailable_response,
-    admin_usage_matches_search, admin_usage_matches_username, admin_usage_parse_ids,
+    admin_usage_has_fallback, admin_usage_matches_search, admin_usage_matches_username,
+    admin_usage_parse_ids,
     admin_usage_parse_limit, admin_usage_parse_offset, build_admin_usage_active_requests_response,
     build_admin_usage_records_response, build_admin_usage_summary_stats_response_from_summary,
     ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL,
@@ -59,6 +60,7 @@ fn apply_admin_usage_status_filter(query: &mut UsageAuditListQuery, status: Opti
         "pending" | "streaming" | "completed" | "cancelled" => {
             query.statuses = Some(vec![status.to_string()]);
         }
+        "has_fallback" => {}
         _ => {}
     }
 }
@@ -210,6 +212,9 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                 Ok(value) => value,
                 Err(detail) => return Ok(Some(admin_usage_bad_request_response(detail))),
             };
+            let has_fallback_only = query_param_value(query, "status")
+                .as_deref()
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case("has_fallback"));
             let search = query_param_value(query, "search");
             let username_filter = query_param_value(query, "username");
             let limit = match admin_usage_parse_limit(query) {
@@ -242,7 +247,7 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                 None,
                 None,
             );
-            let use_metadata_fallback = search.is_some() || username_filter.is_some();
+            let use_metadata_fallback = search.is_some() || username_filter.is_some() || has_fallback_only;
             let (usage, total) = if use_metadata_fallback {
                 let mut usage = state.list_usage_audits(&base_query).await?;
                 let user_ids: Vec<String> = usage
@@ -270,7 +275,7 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                         username_filter.as_deref(),
                         &users_by_id,
                         state.has_auth_user_data_reader(),
-                    )
+                    ) && (!has_fallback_only || admin_usage_has_fallback(item))
                 });
                 sort_usage_newest_first(&mut usage);
                 let total = usage.len();

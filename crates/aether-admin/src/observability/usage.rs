@@ -238,6 +238,10 @@ pub fn admin_usage_is_failed(item: &StoredRequestUsageAudit) -> bool {
             .is_some_and(|value| !value.trim().is_empty())
 }
 
+pub fn admin_usage_has_fallback(item: &StoredRequestUsageAudit) -> bool {
+    item.has_fallback()
+}
+
 pub fn admin_usage_matches_status(item: &StoredRequestUsageAudit, status: Option<&str>) -> bool {
     let Some(status) = status.map(str::trim).filter(|value| !value.is_empty()) else {
         return true;
@@ -251,6 +255,7 @@ pub fn admin_usage_matches_status(item: &StoredRequestUsageAudit, status: Option
         "pending" | "streaming" | "completed" | "cancelled" => item.status == status,
         "failed" => admin_usage_is_failed(item),
         "active" => matches!(item.status.as_str(), "pending" | "streaming"),
+        "has_fallback" => admin_usage_has_fallback(item),
         _ => true,
     }
 }
@@ -594,7 +599,7 @@ pub fn admin_usage_record_json(
         "status_code": item.status_code,
         "error_message": item.error_message,
         "status": item.status,
-        "has_fallback": false,
+        "has_fallback": admin_usage_has_fallback(item),
         "has_retry": false,
         "has_rectified": false,
         "is_free_tier": is_free_tier,
@@ -1766,9 +1771,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        admin_usage_has_body_value, admin_usage_is_failed, admin_usage_matches_search,
-        admin_usage_matches_status, admin_usage_matches_username, admin_usage_record_json,
-        build_admin_usage_detail_payload,
+        admin_usage_has_body_value, admin_usage_has_fallback, admin_usage_is_failed,
+        admin_usage_matches_search, admin_usage_matches_status, admin_usage_matches_username,
+        admin_usage_record_json, build_admin_usage_detail_payload,
     };
     use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageBodyField};
 
@@ -1838,6 +1843,25 @@ mod tests {
         };
         assert!(admin_usage_is_failed(&item));
         assert!(admin_usage_matches_status(&item, Some("failed")));
+    }
+
+    #[test]
+    fn admin_usage_fallback_flag_uses_routing_candidate_index() {
+        let mut item = sample_usage("completed", Some(200), None);
+        item.candidate_index = Some(2);
+
+        assert!(admin_usage_has_fallback(&item));
+        assert!(admin_usage_matches_status(&item, Some("has_fallback")));
+
+        let payload = admin_usage_record_json(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            Some("primary"),
+        );
+        assert_eq!(payload["has_fallback"], true);
     }
 
     #[test]
