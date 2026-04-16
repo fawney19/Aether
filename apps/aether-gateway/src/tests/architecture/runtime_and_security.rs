@@ -803,7 +803,7 @@ fn model_fetch_runtime_paths_depend_on_shared_crates_not_local_pure_helpers() {
         "execute_execution_runtime_sync_plan(state, None, &plan)",
         "resolve_local_standard_auth(",
         "resolve_local_gemini_auth(",
-        "resolve_local_openai_chat_auth(",
+        "resolve_local_openai_bearer_auth(",
         "resolve_local_vertex_api_key_query_auth(",
         "apply_local_header_rules(",
         "ensure_upstream_auth_header(",

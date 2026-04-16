@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use aether_provider_transport::auth::{
-    resolve_local_gemini_auth, resolve_local_openai_chat_auth, resolve_local_standard_auth,
+    resolve_local_gemini_auth, resolve_local_openai_bearer_auth, resolve_local_standard_auth,
 };
 use aether_provider_transport::policy::{
     local_gemini_transport_unsupported_reason_with_network,
@@ -276,11 +276,11 @@ pub fn request_conversion_direct_auth(
         .to_ascii_lowercase()
         .as_str()
     {
-        "openai:chat" => resolve_local_openai_chat_auth(transport),
-        "gemini:chat" | "gemini:cli" => resolve_local_gemini_auth(transport),
-        "openai:cli" | "openai:compact" | "claude:chat" | "claude:cli" => {
-            resolve_local_standard_auth(transport)
+        "openai:chat" | "openai:cli" | "openai:compact" => {
+            resolve_local_openai_bearer_auth(transport)
         }
+        "gemini:chat" | "gemini:cli" => resolve_local_gemini_auth(transport),
+        "claude:chat" | "claude:cli" => resolve_local_standard_auth(transport),
         _ => None,
     }
 }

@@ -202,7 +202,7 @@ pub(super) async fn maybe_build_local_test_connection_route_response(
 
     let auth = match format_value.as_str() {
         "openai:chat" => {
-            crate::provider_transport::auth::resolve_local_openai_chat_auth(&transport)
+            crate::provider_transport::auth::resolve_local_openai_bearer_auth(&transport)
                 .or(oauth_auth.clone())
         }
         "claude:chat" => crate::provider_transport::auth::resolve_local_standard_auth(&transport)

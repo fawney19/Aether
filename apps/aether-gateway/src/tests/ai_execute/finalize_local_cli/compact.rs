@@ -87,7 +87,7 @@ async fn gateway_executes_openai_compact_openai_family_upstream_stream_via_local
             endpoint_is_active: true,
             key_id: "key-openai-compact-finalize-local-1".to_string(),
             key_name: "prod".to_string(),
-            key_auth_type: "bearer".to_string(),
+            key_auth_type: "api_key".to_string(),
             key_is_active: true,
             key_api_formats: Some(vec!["openai:compact".to_string()]),
             key_allowed_models: None,
@@ -162,7 +162,7 @@ async fn gateway_executes_openai_compact_openai_family_upstream_stream_via_local
             "key-openai-compact-finalize-local-1".to_string(),
             "provider-openai-compact-finalize-local-1".to_string(),
             "prod".to_string(),
-            "bearer".to_string(),
+            "api_key".to_string(),
             None,
             true,
         )

@@ -6,7 +6,7 @@ use aether_provider_transport::antigravity::{
     AntigravityRequestAuthSupport, ANTIGRAVITY_REQUEST_USER_AGENT,
 };
 use aether_provider_transport::auth::{
-    ensure_upstream_auth_header, resolve_local_gemini_auth, resolve_local_openai_chat_auth,
+    ensure_upstream_auth_header, resolve_local_gemini_auth, resolve_local_openai_bearer_auth,
     resolve_local_standard_auth,
 };
 use aether_provider_transport::vertex::resolve_local_vertex_api_key_query_auth;
@@ -309,7 +309,7 @@ async fn resolve_standard_header_auth(
 
     let api_format = transport.endpoint.api_format.trim().to_ascii_lowercase();
     if api_format.starts_with("openai:") {
-        return Ok(resolve_local_openai_chat_auth(transport));
+        return Ok(resolve_local_openai_bearer_auth(transport));
     }
     if api_format.starts_with("claude:") {
         return Ok(resolve_local_standard_auth(transport));
@@ -337,7 +337,7 @@ async fn resolve_bearer_or_oauth_header_auth(
         return Ok(Some(auth));
     }
 
-    if let Some((name, value)) = resolve_local_openai_chat_auth(transport) {
+    if let Some((name, value)) = resolve_local_openai_bearer_auth(transport) {
         return Ok(Some((name, value)));
     }
 
@@ -593,6 +593,25 @@ mod tests {
             plan.headers.get("user-agent").map(String::as_str),
             Some("openai-codex/1.0")
         );
+        assert_eq!(
+            plan.headers.get("authorization").map(String::as_str),
+            Some("Bearer secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn builds_openai_compact_models_fetch_plan_with_bearer_authorization() {
+        let runtime = TestRuntime {
+            oauth_auth: None,
+            proxy: None,
+        };
+        let mut transport = sample_transport("openai", "openai:compact", "api_key");
+        transport.key.decrypted_auth_config = None;
+        let plan = build_models_fetch_execution_plan(&runtime, &transport)
+            .await
+            .expect("plan");
+
+        assert_eq!(plan.url, "https://example.com/v1/models");
         assert_eq!(
             plan.headers.get("authorization").map(String::as_str),
             Some("Bearer secret")
