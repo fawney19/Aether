@@ -69,6 +69,7 @@ export interface UsageRecordDetail {
   cache_creation_price_per_1m?: number
   cache_read_price_per_1m?: number
   price_per_request?: number  // 按次计费价格
+  has_fallback?: boolean
   api_key?: {
     id: string
     name: string

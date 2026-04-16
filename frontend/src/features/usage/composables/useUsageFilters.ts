@@ -1,6 +1,6 @@
 import { ref, computed, type Ref } from 'vue'
 import type { UsageRecord, FilterStatusValue } from '../types'
-import { isUsageRecordFailed } from '../utils/status'
+import { hasUsageFallback, isUsageRecordFailed } from '../utils/status'
 
 export interface UseUsageFiltersOptions {
   /** 所有记录的响应式引用 */
@@ -79,6 +79,8 @@ export function useUsageFilters(options: UseUsageFiltersOptions) {
         records = records.filter(record => isUsageRecordFailed(record))
       } else if (filterStatus.value === 'cancelled') {
         records = records.filter(record => record.status === 'cancelled')
+      } else if (filterStatus.value === 'has_fallback') {
+        records = records.filter(record => hasUsageFallback(record))
       }
     }
 
