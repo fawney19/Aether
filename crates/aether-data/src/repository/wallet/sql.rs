@@ -5,9 +5,10 @@ use sqlx::{postgres::PgRow, PgPool, Row};
 use uuid::Uuid;
 
 use super::types::{
-    AdjustWalletBalanceInput, AdminPaymentOrderListQuery, AdminRedeemCodeBatchListQuery,
-    AdminRedeemCodeListQuery, AdminWalletLedgerQuery, AdminWalletListQuery,
-    AdminWalletRefundRequestListQuery, CompleteAdminWalletRefundInput,
+    redeem_code_credits_recharge_balance, redeem_code_payment_method,
+    redeem_code_refundable_amount, AdjustWalletBalanceInput, AdminPaymentOrderListQuery,
+    AdminRedeemCodeBatchListQuery, AdminRedeemCodeListQuery, AdminWalletLedgerQuery,
+    AdminWalletListQuery, AdminWalletRefundRequestListQuery, CompleteAdminWalletRefundInput,
     CreateAdminRedeemCodeBatchInput, CreateAdminRedeemCodeBatchResult,
     CreateManualWalletRechargeInput, CreateWalletRechargeOrderInput,
     CreateWalletRechargeOrderOutcome, CreateWalletRefundRequestInput,
@@ -4154,6 +4155,7 @@ SELECT
   codes.status,
   batches.name AS batch_name,
   batches.status AS batch_status,
+  batches.balance_bucket,
   CAST(batches.amount_usd AS DOUBLE PRECISION) AS amount_usd,
   CAST(EXTRACT(EPOCH FROM batches.expires_at) AS BIGINT) AS batch_expires_at_unix_secs,
   CAST(EXTRACT(EPOCH FROM codes.redeemed_at) AS BIGINT) AS redeemed_at_unix_secs
@@ -4177,11 +4179,14 @@ FOR UPDATE OF codes, batches
                     let batch_name: String = row_get(&code_row, "batch_name")?;
                     let code_status: String = row_get(&code_row, "status")?;
                     let batch_status: String = row_get(&code_row, "batch_status")?;
+                    let balance_bucket: String = row_get(&code_row, "balance_bucket")?;
                     let amount_usd: f64 = row_get(&code_row, "amount_usd")?;
                     let batch_expires_at_unix_secs = parse_optional_timestamp(
                         row_get(&code_row, "batch_expires_at_unix_secs")?,
                         "redeem_code_batches.expires_at",
                     )?;
+                    let credits_recharge_balance =
+                        redeem_code_credits_recharge_balance(&balance_bucket);
 
                     if code_status == "disabled" {
                         return Ok(RedeemWalletCodeOutcome::CodeDisabled);
@@ -4258,6 +4263,8 @@ VALUES (
   NOW(),
   NOW()
 )
+ON CONFLICT (user_id) DO UPDATE
+SET updated_at = wallets.updated_at
 RETURNING
   id,
   user_id,
@@ -4289,14 +4296,24 @@ RETURNING
                     let before_recharge = wallet_snapshot.balance;
                     let before_gift = wallet_snapshot.gift_balance;
                     let before_total = before_recharge + before_gift;
-                    let after_recharge = before_recharge + amount_usd;
+                    let after_recharge = if credits_recharge_balance {
+                        before_recharge + amount_usd
+                    } else {
+                        before_recharge
+                    };
+                    let after_gift = if credits_recharge_balance {
+                        before_gift
+                    } else {
+                        before_gift + amount_usd
+                    };
 
                     let wallet_row = sqlx::query(
                         r#"
 UPDATE wallets
 SET
   balance = $2,
-  total_recharged = total_recharged + $3,
+  gift_balance = $3,
+  total_recharged = total_recharged + $4,
   updated_at = NOW()
 WHERE id = $1
 RETURNING
@@ -4317,6 +4334,7 @@ RETURNING
                     )
                     .bind(&wallet_snapshot.id)
                     .bind(after_recharge)
+                    .bind(after_gift)
                     .bind(amount_usd)
                     .fetch_one(&mut **tx)
                     .await
@@ -4325,10 +4343,14 @@ RETURNING
 
                     let order_id = Uuid::new_v4().to_string();
                     let gateway_order_id = format!("card_{}", Uuid::new_v4().simple());
+                    let payment_method = redeem_code_payment_method(&balance_bucket);
+                    let refundable_amount_usd =
+                        redeem_code_refundable_amount(&balance_bucket, amount_usd);
                     let gateway_response = serde_json::json!({
                         "source": "redeem_code",
                         "batch_id": batch_id,
                         "batch_name": batch_name,
+                        "balance_bucket": balance_bucket,
                     });
                     let order_row = sqlx::query(
                         r#"
@@ -4355,10 +4377,10 @@ VALUES (
   $4,
   $5,
   0,
-  $5,
-  'card_code',
   $6,
   $7,
+  $8,
+  $9,
   'credited',
   NOW(),
   NOW(),
@@ -4390,6 +4412,8 @@ RETURNING
                     .bind(&wallet.id)
                     .bind(&input.user_id)
                     .bind(amount_usd)
+                    .bind(refundable_amount_usd)
+                    .bind(payment_method)
                     .bind(&gateway_order_id)
                     .bind(&gateway_response)
                     .fetch_one(&mut **tx)
@@ -4427,9 +4451,9 @@ VALUES (
   $6,
   $7,
   $8,
-  $8,
-  'payment_order',
   $9,
+  'payment_order',
+  $10,
   NULL,
   '兑换码充值',
   NOW()
@@ -4440,10 +4464,11 @@ VALUES (
                     .bind(&wallet.id)
                     .bind(amount_usd)
                     .bind(before_total)
-                    .bind(after_recharge + before_gift)
+                    .bind(after_recharge + after_gift)
                     .bind(before_recharge)
                     .bind(after_recharge)
                     .bind(before_gift)
+                    .bind(after_gift)
                     .bind(&order_id)
                     .execute(&mut **tx)
                     .await

@@ -4,9 +4,10 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 
 use super::types::{
-    AdjustWalletBalanceInput, AdminPaymentOrderListQuery, AdminRedeemCodeBatchListQuery,
-    AdminRedeemCodeListQuery, AdminWalletLedgerQuery, AdminWalletListQuery,
-    AdminWalletRefundRequestListQuery, CompleteAdminWalletRefundInput,
+    redeem_code_credits_recharge_balance, redeem_code_payment_method,
+    redeem_code_refundable_amount, AdjustWalletBalanceInput, AdminPaymentOrderListQuery,
+    AdminRedeemCodeBatchListQuery, AdminRedeemCodeListQuery, AdminWalletLedgerQuery,
+    AdminWalletListQuery, AdminWalletRefundRequestListQuery, CompleteAdminWalletRefundInput,
     CreateAdminRedeemCodeBatchInput, CreateAdminRedeemCodeBatchResult,
     CreateManualWalletRechargeInput, CreateWalletRechargeOrderInput,
     CreateWalletRechargeOrderOutcome, CreateWalletRefundRequestInput,
@@ -1035,7 +1036,7 @@ impl WalletWriteRepository for InMemoryWalletRepository {
 
         let now_secs = current_unix_secs();
         let now_ms = current_unix_ms();
-        let (batch_id, batch_name, amount_usd) = {
+        let (batch_id, batch_name, balance_bucket, amount_usd) = {
             let batches = self.redeem_batches_by_id.read().expect("wallet repo lock");
             let codes = self.redeem_codes_by_id.read().expect("wallet repo lock");
             let Some(code) = codes.get(&code_id) else {
@@ -1064,8 +1065,14 @@ impl WalletWriteRepository for InMemoryWalletRepository {
             {
                 return Ok(RedeemWalletCodeOutcome::CodeExpired);
             }
-            (code.batch_id.clone(), batch.name.clone(), batch.amount_usd)
+            (
+                code.batch_id.clone(),
+                batch.name.clone(),
+                batch.balance_bucket.clone(),
+                batch.amount_usd,
+            )
         };
+        let credits_recharge_balance = redeem_code_credits_recharge_balance(&balance_bucket);
 
         let (wallet, balance_before, gift_before) = {
             let mut wallets = self.wallets_by_id.write().expect("wallet repo lock");
@@ -1078,7 +1085,11 @@ impl WalletWriteRepository for InMemoryWalletRepository {
                 }
                 let balance_before = wallet.balance;
                 let gift_before = wallet.gift_balance;
-                wallet.balance += amount_usd;
+                if credits_recharge_balance {
+                    wallet.balance += amount_usd;
+                } else {
+                    wallet.gift_balance += amount_usd;
+                }
                 wallet.total_recharged += amount_usd;
                 wallet.updated_at_unix_secs = now_secs;
                 (wallet.clone(), balance_before, gift_before)
@@ -1087,8 +1098,16 @@ impl WalletWriteRepository for InMemoryWalletRepository {
                     format!("wallet-{}", uuid::Uuid::new_v4()),
                     Some(input.user_id.clone()),
                     None,
-                    amount_usd,
-                    0.0,
+                    if credits_recharge_balance {
+                        amount_usd
+                    } else {
+                        0.0
+                    },
+                    if credits_recharge_balance {
+                        0.0
+                    } else {
+                        amount_usd
+                    },
                     "finite".to_string(),
                     "USD".to_string(),
                     "active".to_string(),
@@ -1113,13 +1132,14 @@ impl WalletWriteRepository for InMemoryWalletRepository {
             pay_currency: None,
             exchange_rate: None,
             refunded_amount_usd: 0.0,
-            refundable_amount_usd: amount_usd,
-            payment_method: "card_code".to_string(),
+            refundable_amount_usd: redeem_code_refundable_amount(&balance_bucket, amount_usd),
+            payment_method: redeem_code_payment_method(&balance_bucket).to_string(),
             gateway_order_id: Some(format!("card_{}", uuid::Uuid::new_v4().simple())),
             gateway_response: Some(serde_json::json!({
                 "source": "redeem_code",
                 "batch_id": batch_id,
                 "batch_name": batch_name,
+                "balance_bucket": balance_bucket,
             })),
             status: "credited".to_string(),
             created_at_unix_ms: now_ms,

@@ -256,7 +256,7 @@ async fn build_admin_create_redeem_code_batch_response(
                 name,
                 amount_usd: payload.amount_usd,
                 currency: "USD".to_string(),
-                balance_bucket: "recharge".to_string(),
+                balance_bucket: "gift".to_string(),
                 total_count: payload.total_count,
                 expires_at_unix_secs,
                 description,

@@ -559,6 +559,26 @@ pub struct RedeemWalletCodeInput {
     pub order_no: String,
 }
 
+pub(crate) fn redeem_code_credits_recharge_balance(balance_bucket: &str) -> bool {
+    balance_bucket.trim().eq_ignore_ascii_case("recharge")
+}
+
+pub(crate) fn redeem_code_payment_method(balance_bucket: &str) -> &'static str {
+    if redeem_code_credits_recharge_balance(balance_bucket) {
+        "card_code"
+    } else {
+        "gift_code"
+    }
+}
+
+pub(crate) fn redeem_code_refundable_amount(balance_bucket: &str, amount_usd: f64) -> f64 {
+    if redeem_code_credits_recharge_balance(balance_bucket) {
+        amount_usd
+    } else {
+        0.0
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum RedeemWalletCodeOutcome {
@@ -940,7 +960,10 @@ impl<T> WalletRepository for T where T: WalletReadRepository + WalletWriteReposi
 
 #[cfg(test)]
 mod tests {
-    use super::StoredWalletSnapshot;
+    use super::{
+        redeem_code_credits_recharge_balance, redeem_code_payment_method,
+        redeem_code_refundable_amount, StoredWalletSnapshot,
+    };
     use crate::repository::settlement::UsageSettlementInput;
 
     #[test]
@@ -977,5 +1000,21 @@ mod tests {
             finalized_at_unix_secs: None,
         };
         assert!(input.validate().is_err());
+    }
+
+    #[test]
+    fn redeem_code_bucket_defaults_to_non_refundable_gift_semantics() {
+        assert!(!redeem_code_credits_recharge_balance("gift"));
+        assert_eq!(redeem_code_payment_method("gift"), "gift_code");
+        assert_eq!(redeem_code_refundable_amount("gift", 8.5), 0.0);
+        assert_eq!(redeem_code_payment_method("mystery"), "gift_code");
+    }
+
+    #[test]
+    fn recharge_bucket_preserves_refundable_recharge_semantics() {
+        assert!(redeem_code_credits_recharge_balance("recharge"));
+        assert!(redeem_code_credits_recharge_balance(" Recharge "));
+        assert_eq!(redeem_code_payment_method("recharge"), "card_code");
+        assert_eq!(redeem_code_refundable_amount("recharge", 8.5), 8.5);
     }
 }

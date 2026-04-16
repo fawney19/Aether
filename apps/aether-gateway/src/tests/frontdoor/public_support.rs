@@ -3264,7 +3264,7 @@ async fn gateway_redeems_wallet_code_locally() {
                 name: "测试兑换".to_string(),
                 amount_usd: 6.5,
                 currency: "USD".to_string(),
-                balance_bucket: "recharge".to_string(),
+                balance_bucket: "gift".to_string(),
                 total_count: 1,
                 expires_at_unix_secs: None,
                 description: Some("public support".to_string()),
@@ -3308,9 +3308,12 @@ async fn gateway_redeems_wallet_code_locally() {
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["batch_name"], "测试兑换");
     assert_eq!(payload["amount_usd"], 6.5);
-    assert_eq!(payload["order"]["payment_method"], "card_code");
+    assert_eq!(payload["order"]["payment_method"], "gift_code");
+    assert_eq!(payload["order"]["refundable_amount_usd"], 0.0);
     assert_eq!(payload["wallet"]["total_recharged"], 26.5);
-    assert_eq!(payload["wallet"]["recharge_balance"], 19.0);
+    assert_eq!(payload["wallet"]["recharge_balance"], 12.5);
+    assert_eq!(payload["wallet"]["gift_balance"], 9.5);
+    assert_eq!(payload["wallet"]["refundable_balance"], 12.5);
 
     gateway_handle.abort();
 }

@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS public.redeem_code_batches (
     name character varying(120) NOT NULL,
     amount_usd numeric(20,8) NOT NULL,
     currency character varying(3) DEFAULT 'USD'::character varying NOT NULL,
-    balance_bucket character varying(20) DEFAULT 'recharge'::character varying NOT NULL,
+    balance_bucket character varying(20) DEFAULT 'gift'::character varying NOT NULL,
     total_count integer NOT NULL,
     status character varying(20) DEFAULT 'active'::character varying NOT NULL,
     description text,

@@ -794,6 +794,7 @@ async fn gateway_handles_admin_redeem_code_batch_lifecycle_locally() {
         .expect("batch id should exist")
         .to_string();
     assert_eq!(create_payload["batch"]["name"], "五月渠道卡");
+    assert_eq!(create_payload["batch"]["balance_bucket"], "gift");
     assert_eq!(create_payload["codes"].as_array().map(Vec::len), Some(2));
 
     let list_response = admin_request(client.get(format!(
@@ -806,6 +807,7 @@ async fn gateway_handles_admin_redeem_code_batch_lifecycle_locally() {
     let list_payload: serde_json::Value =
         list_response.json().await.expect("json body should parse");
     assert_eq!(list_payload["items"][0]["id"], batch_id);
+    assert_eq!(list_payload["items"][0]["balance_bucket"], "gift");
 
     let codes_response = admin_request(client.get(format!(
         "{gateway_url}/api/admin/payments/redeem-codes/batches/{batch_id}/codes?limit=20&offset=0"
@@ -817,6 +819,7 @@ async fn gateway_handles_admin_redeem_code_batch_lifecycle_locally() {
     let codes_payload: serde_json::Value =
         codes_response.json().await.expect("json body should parse");
     assert_eq!(codes_payload["batch"]["id"], batch_id);
+    assert_eq!(codes_payload["batch"]["balance_bucket"], "gift");
     assert_eq!(codes_payload["items"].as_array().map(Vec::len), Some(2));
 
     let disable_response = admin_request(client.post(format!(
