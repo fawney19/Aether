@@ -4711,6 +4711,7 @@ async fn gateway_handles_users_me_usage_locally_without_proxying_upstream() {
         "streaming",
         now - chrono::Duration::minutes(5),
     );
+    streaming_usage.candidate_index = Some(2);
     streaming_usage.request_metadata = Some(json!({
         "rate_multiplier": 0.5,
         "input_price_per_1m": 3.0,
@@ -4802,6 +4803,7 @@ async fn gateway_handles_users_me_usage_locally_without_proxying_upstream() {
     assert_eq!(payload["records"][0]["output_price_per_1m"], 9.0);
     assert_eq!(payload["records"][0]["cache_creation_price_per_1m"], 3.75);
     assert_eq!(payload["records"][0]["cache_read_price_per_1m"], 0.3);
+    assert_eq!(payload["records"][0]["has_fallback"], true);
     assert_eq!(payload["records"][0]["api_key"]["name"], "renamed-key");
     assert_eq!(payload["records"][0]["api_key"]["display"], "renamed-key");
     assert_eq!(

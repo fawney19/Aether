@@ -227,6 +227,7 @@ fn build_users_me_usage_record_payload(
         "first_byte_time_ms": item.first_byte_time_ms,
         "is_stream": item.is_stream,
         "status": item.status,
+        "has_fallback": item.has_fallback(),
         "created_at": unix_secs_to_rfc3339(item.created_at_unix_ms),
         "cache_creation_input_tokens": item.cache_creation_input_tokens,
         "cache_creation_ephemeral_5m_input_tokens": item.cache_creation_ephemeral_5m_input_tokens,
@@ -275,6 +276,7 @@ fn build_users_me_usage_active_payload(item: &StoredRequestUsageAudit) -> serde_
         "endpoint_api_format": item.endpoint_api_format,
         "has_format_conversion": item.has_format_conversion,
         "target_model": item.target_model,
+        "has_fallback": item.has_fallback(),
     });
     if item.api_format.is_none() {
         payload
