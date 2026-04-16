@@ -899,8 +899,13 @@ pub(super) async fn handle_users_me_usage_active_get(
             user_id: Some(auth.user.id.clone()),
             provider_name: None,
             model: None,
+            api_format: None,
             statuses: None,
+            is_stream: None,
+            error_only: false,
             limit: None,
+            offset: None,
+            newest_first: false,
         })
         .await
     {
@@ -972,8 +977,13 @@ pub(super) async fn handle_users_me_usage_interval_timeline_get(
             user_id: Some(auth.user.id.clone()),
             provider_name: None,
             model: None,
+            api_format: None,
             statuses: None,
+            is_stream: None,
+            error_only: false,
             limit: None,
+            offset: None,
+            newest_first: false,
         })
         .await
     {

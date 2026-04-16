@@ -45,6 +45,56 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn count_usage_audits(
+        &self,
+        query: &usage::UsageAuditListQuery,
+    ) -> Result<u64, GatewayError> {
+        self.data
+            .count_usage_audits(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn aggregate_usage_audits(
+        &self,
+        query: &usage::UsageAuditAggregationQuery,
+    ) -> Result<Vec<usage::StoredUsageAuditAggregation>, GatewayError> {
+        self.data
+            .aggregate_usage_audits(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn summarize_usage_audits(
+        &self,
+        query: &usage::UsageAuditSummaryQuery,
+    ) -> Result<usage::StoredUsageAuditSummary, GatewayError> {
+        self.data
+            .summarize_usage_audits(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn summarize_usage_time_series(
+        &self,
+        query: &usage::UsageTimeSeriesQuery,
+    ) -> Result<Vec<usage::StoredUsageTimeSeriesBucket>, GatewayError> {
+        self.data
+            .summarize_usage_time_series(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn summarize_usage_leaderboard(
+        &self,
+        query: &usage::UsageLeaderboardQuery,
+    ) -> Result<Vec<usage::StoredUsageLeaderboardSummary>, GatewayError> {
+        self.data
+            .summarize_usage_leaderboard(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn summarize_usage_daily_heatmap(
         &self,
         query: &UsageDailyHeatmapQuery,

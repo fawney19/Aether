@@ -666,6 +666,68 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn count_usage_audits(
+        &self,
+        query: &UsageAuditListQuery,
+    ) -> Result<u64, DataLayerError> {
+        match &self.usage_reader {
+            Some(repository) => repository.count_usage_audits(query).await,
+            None => Ok(0),
+        }
+    }
+
+    pub(crate) async fn aggregate_usage_audits(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageAuditAggregationQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredUsageAuditAggregation>,
+        DataLayerError,
+    > {
+        match &self.usage_reader {
+            Some(repository) => repository.aggregate_usage_audits(query).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub(crate) async fn summarize_usage_audits(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageAuditSummaryQuery,
+    ) -> Result<aether_data_contracts::repository::usage::StoredUsageAuditSummary, DataLayerError>
+    {
+        match &self.usage_reader {
+            Some(repository) => repository.summarize_usage_audits(query).await,
+            None => {
+                Ok(aether_data_contracts::repository::usage::StoredUsageAuditSummary::default())
+            }
+        }
+    }
+
+    pub(crate) async fn summarize_usage_time_series(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageTimeSeriesQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredUsageTimeSeriesBucket>,
+        DataLayerError,
+    > {
+        match &self.usage_reader {
+            Some(repository) => repository.summarize_usage_time_series(query).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub(crate) async fn summarize_usage_leaderboard(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageLeaderboardQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredUsageLeaderboardSummary>,
+        DataLayerError,
+    > {
+        match &self.usage_reader {
+            Some(repository) => repository.summarize_usage_leaderboard(query).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub(crate) async fn summarize_usage_daily_heatmap(
         &self,
         query: &UsageDailyHeatmapQuery,

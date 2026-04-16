@@ -1,6 +1,7 @@
 use aether_data::repository::auth::StoredAuthApiKeySnapshot;
 use aether_data_contracts::repository::{
-    provider_catalog::StoredProviderCatalogProvider, usage::StoredRequestUsageAudit,
+    provider_catalog::StoredProviderCatalogProvider,
+    usage::{StoredRequestUsageAudit, StoredUsageLeaderboardSummary, StoredUsageTimeSeriesBucket},
 };
 use axum::{
     body::Body,
@@ -811,7 +812,20 @@ pub fn build_admin_stats_comparison_response(
 ) -> Response<Body> {
     let current = aggregate_usage_stats(current_usage);
     let comparison = aggregate_usage_stats(comparison_usage);
+    build_admin_stats_comparison_response_from_aggregates(
+        &current,
+        &comparison,
+        current_range,
+        comparison_range,
+    )
+}
 
+pub fn build_admin_stats_comparison_response_from_aggregates(
+    current: &AdminStatsAggregate,
+    comparison: &AdminStatsAggregate,
+    current_range: &AdminStatsTimeRange,
+    comparison_range: &AdminStatsTimeRange,
+) -> Response<Body> {
     Json(json!({
         "current": {
             "total_requests": current.total_requests,
@@ -970,6 +984,171 @@ pub fn build_admin_stats_time_series_response(
         granularity,
         usage,
     )))
+    .into_response()
+}
+
+fn admin_stats_time_series_bucket_from_summary(
+    bucket: &StoredUsageTimeSeriesBucket,
+) -> AdminStatsTimeSeriesBucket {
+    AdminStatsTimeSeriesBucket {
+        total_requests: bucket.total_requests,
+        input_tokens: bucket.input_tokens,
+        output_tokens: bucket.output_tokens,
+        cache_creation_tokens: bucket.cache_creation_tokens,
+        cache_read_tokens: bucket.cache_read_tokens,
+        total_cost: bucket.total_cost_usd,
+        total_response_time_ms: bucket.total_response_time_ms,
+    }
+}
+
+fn build_daily_time_series_buckets_from_summaries(
+    time_range: &AdminStatsTimeRange,
+    buckets: &[StoredUsageTimeSeriesBucket],
+) -> std::collections::BTreeMap<chrono::NaiveDate, AdminStatsTimeSeriesBucket> {
+    let mut values: std::collections::BTreeMap<chrono::NaiveDate, AdminStatsTimeSeriesBucket> =
+        time_range
+            .local_dates()
+            .into_iter()
+            .map(|date| (date, AdminStatsTimeSeriesBucket::default()))
+            .collect();
+
+    for bucket in buckets {
+        let Ok(date) = chrono::NaiveDate::parse_from_str(&bucket.bucket_key, "%Y-%m-%d") else {
+            continue;
+        };
+        let Some(value) = values.get_mut(&date) else {
+            continue;
+        };
+        value.merge(&admin_stats_time_series_bucket_from_summary(bucket));
+    }
+
+    values
+}
+
+fn build_daily_time_series_payload_from_summaries(
+    time_range: &AdminStatsTimeRange,
+    buckets: &[StoredUsageTimeSeriesBucket],
+) -> Vec<serde_json::Value> {
+    build_daily_time_series_buckets_from_summaries(time_range, buckets)
+        .into_iter()
+        .map(|(date, bucket)| bucket.to_json_with_avg(date.to_string()))
+        .collect()
+}
+
+fn build_weekly_time_series_payload_from_summaries(
+    time_range: &AdminStatsTimeRange,
+    buckets: &[StoredUsageTimeSeriesBucket],
+) -> Vec<serde_json::Value> {
+    let mut weekly: std::collections::BTreeMap<
+        (i32, u32),
+        (chrono::NaiveDate, AdminStatsTimeSeriesBucket),
+    > = std::collections::BTreeMap::new();
+
+    for (date, bucket) in build_daily_time_series_buckets_from_summaries(time_range, buckets) {
+        let iso = date.iso_week();
+        let entry = weekly
+            .entry((iso.year(), iso.week()))
+            .or_insert_with(|| (date, AdminStatsTimeSeriesBucket::default()));
+        entry.0 = entry.0.min(date);
+        entry.1.merge(&bucket);
+    }
+
+    weekly
+        .into_values()
+        .map(|(date, bucket)| bucket.to_json_with_avg(date.to_string()))
+        .collect()
+}
+
+fn build_monthly_time_series_payload_from_summaries(
+    time_range: &AdminStatsTimeRange,
+    buckets: &[StoredUsageTimeSeriesBucket],
+) -> Vec<serde_json::Value> {
+    let mut monthly: std::collections::BTreeMap<
+        (i32, u32),
+        (chrono::NaiveDate, AdminStatsTimeSeriesBucket),
+    > = std::collections::BTreeMap::new();
+
+    for (date, bucket) in build_daily_time_series_buckets_from_summaries(time_range, buckets) {
+        let Some(month_start) = chrono::NaiveDate::from_ymd_opt(date.year(), date.month(), 1)
+        else {
+            continue;
+        };
+        let entry = monthly
+            .entry((date.year(), date.month()))
+            .or_insert_with(|| (month_start, AdminStatsTimeSeriesBucket::default()));
+        entry.1.merge(&bucket);
+    }
+
+    monthly
+        .into_values()
+        .map(|(date, bucket)| bucket.to_json_with_avg(date.to_string()))
+        .collect()
+}
+
+fn build_hourly_time_series_payload_from_summaries(
+    time_range: &AdminStatsTimeRange,
+    buckets: &[StoredUsageTimeSeriesBucket],
+) -> Vec<serde_json::Value> {
+    let Some((mut current, end)) = time_range.to_utc_datetime_bounds() else {
+        return Vec::new();
+    };
+    let offset = chrono::Duration::minutes(i64::from(time_range.tz_offset_minutes));
+    let mut values: std::collections::BTreeMap<String, AdminStatsTimeSeriesBucket> =
+        std::collections::BTreeMap::new();
+
+    while current < end {
+        let label = (current + offset)
+            .format("%Y-%m-%dT%H:00:00+00:00")
+            .to_string();
+        values.insert(label, AdminStatsTimeSeriesBucket::default());
+        let Some(next) = current.checked_add_signed(chrono::Duration::hours(1)) else {
+            break;
+        };
+        current = next;
+    }
+
+    for bucket in buckets {
+        let Some(value) = values.get_mut(&bucket.bucket_key) else {
+            continue;
+        };
+        value.merge(&admin_stats_time_series_bucket_from_summary(bucket));
+    }
+
+    values
+        .into_iter()
+        .map(|(date, bucket)| bucket.to_json_without_avg(date))
+        .collect()
+}
+
+pub fn build_time_series_payload_from_summaries(
+    time_range: &AdminStatsTimeRange,
+    granularity: AdminStatsGranularity,
+    buckets: &[StoredUsageTimeSeriesBucket],
+) -> Vec<serde_json::Value> {
+    match granularity {
+        AdminStatsGranularity::Hour => {
+            build_hourly_time_series_payload_from_summaries(time_range, buckets)
+        }
+        AdminStatsGranularity::Day => {
+            build_daily_time_series_payload_from_summaries(time_range, buckets)
+        }
+        AdminStatsGranularity::Week => {
+            build_weekly_time_series_payload_from_summaries(time_range, buckets)
+        }
+        AdminStatsGranularity::Month => {
+            build_monthly_time_series_payload_from_summaries(time_range, buckets)
+        }
+    }
+}
+
+pub fn build_admin_stats_time_series_response_from_summaries(
+    time_range: &AdminStatsTimeRange,
+    granularity: AdminStatsGranularity,
+    buckets: &[StoredUsageTimeSeriesBucket],
+) -> Response<Body> {
+    Json(serde_json::Value::Array(
+        build_time_series_payload_from_summaries(time_range, granularity, buckets),
+    ))
     .into_response()
 }
 
@@ -1293,6 +1472,21 @@ pub fn build_model_leaderboard_items(
     grouped.into_values().collect()
 }
 
+pub fn build_model_leaderboard_items_from_summaries(
+    items: &[StoredUsageLeaderboardSummary],
+) -> Vec<AdminStatsLeaderboardItem> {
+    items
+        .iter()
+        .map(|item| AdminStatsLeaderboardItem {
+            id: item.group_key.clone(),
+            name: item.group_key.clone(),
+            requests: item.request_count,
+            tokens: item.total_tokens,
+            cost: item.total_cost_usd,
+        })
+        .collect()
+}
+
 pub fn build_user_leaderboard_items(
     items: &[StoredRequestUsageAudit],
     users: &std::collections::BTreeMap<String, AdminStatsUserMetadata>,
@@ -1360,6 +1554,57 @@ pub fn build_user_leaderboard_items(
     }
 
     grouped.into_values().collect()
+}
+
+pub fn build_user_leaderboard_items_from_summaries(
+    items: &[StoredUsageLeaderboardSummary],
+    users: &std::collections::BTreeMap<String, AdminStatsUserMetadata>,
+    auth_user_reader_available: bool,
+    user_reader_available: bool,
+    include_inactive: bool,
+    exclude_admin: bool,
+) -> Vec<AdminStatsLeaderboardItem> {
+    let mut grouped = Vec::new();
+
+    for item in items {
+        let user_id = item.group_key.as_str();
+        let entry_name = if let Some(user) = users.get(user_id) {
+            if user.is_deleted {
+                continue;
+            }
+            if !include_inactive && !user.is_active {
+                continue;
+            }
+            if exclude_admin && user.role.eq_ignore_ascii_case("admin") {
+                continue;
+            }
+            user.name.clone()
+        } else {
+            if exclude_admin {
+                continue;
+            }
+            if auth_user_reader_available || user_reader_available {
+                user_id.to_string()
+            } else {
+                item.legacy_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| user_id.to_string())
+            }
+        };
+
+        grouped.push(AdminStatsLeaderboardItem {
+            id: user_id.to_string(),
+            name: entry_name,
+            requests: item.request_count,
+            tokens: item.total_tokens,
+            cost: item.total_cost_usd,
+        });
+    }
+
+    grouped
 }
 
 pub fn build_api_key_leaderboard_items(
@@ -1434,6 +1679,60 @@ pub fn build_api_key_leaderboard_items(
     }
 
     grouped.into_values().collect()
+}
+
+pub fn build_api_key_leaderboard_items_from_summaries(
+    items: &[StoredUsageLeaderboardSummary],
+    snapshots: Option<&[StoredAuthApiKeySnapshot]>,
+    api_key_names: &std::collections::BTreeMap<String, String>,
+    include_inactive: bool,
+    exclude_admin: bool,
+) -> Vec<AdminStatsLeaderboardItem> {
+    let snapshot_by_api_key_id: std::collections::BTreeMap<_, _> = snapshots
+        .unwrap_or(&[])
+        .iter()
+        .map(|snapshot| (snapshot.api_key_id.as_str(), snapshot))
+        .collect();
+    let snapshots_available = snapshots.is_some();
+    let mut grouped = Vec::new();
+
+    for item in items {
+        let api_key_id = item.group_key.as_str();
+        let entry_name = if let Some(snapshot) = snapshot_by_api_key_id.get(api_key_id) {
+            if snapshot.user_is_deleted {
+                continue;
+            }
+            if !include_inactive && !snapshot.api_key_is_active {
+                continue;
+            }
+            if exclude_admin && snapshot.user_role.eq_ignore_ascii_case("admin") {
+                continue;
+            }
+            api_key_names
+                .get(api_key_id)
+                .cloned()
+                .unwrap_or_else(|| api_key_id.to_string())
+        } else {
+            if snapshots_available {
+                continue;
+            }
+            api_key_names
+                .get(api_key_id)
+                .cloned()
+                .or_else(|| item.legacy_name.clone())
+                .unwrap_or_else(|| api_key_id.to_string())
+        };
+
+        grouped.push(AdminStatsLeaderboardItem {
+            id: api_key_id.to_string(),
+            name: entry_name,
+            requests: item.request_count,
+            tokens: item.total_tokens,
+            cost: item.total_cost_usd,
+        });
+    }
+
+    grouped
 }
 
 pub fn compare_leaderboard_items(

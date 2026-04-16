@@ -480,8 +480,134 @@ pub struct UsageAuditListQuery {
     pub user_id: Option<String>,
     pub provider_name: Option<String>,
     pub model: Option<String>,
+    pub api_format: Option<String>,
     pub statuses: Option<Vec<String>>,
+    pub is_stream: Option<bool>,
+    pub error_only: bool,
     pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    pub newest_first: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageAuditAggregationGroupBy {
+    Model,
+    Provider,
+    ApiFormat,
+    User,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UsageAuditAggregationQuery {
+    pub created_from_unix_secs: u64,
+    pub created_until_unix_secs: u64,
+    pub group_by: UsageAuditAggregationGroupBy,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct UsageAuditSummaryQuery {
+    pub created_from_unix_secs: u64,
+    pub created_until_unix_secs: u64,
+    pub user_id: Option<String>,
+    pub provider_name: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StoredUsageAuditAggregation {
+    pub group_key: String,
+    pub display_name: Option<String>,
+    pub secondary_name: Option<String>,
+    pub request_count: u64,
+    pub total_tokens: u64,
+    pub output_tokens: u64,
+    pub effective_input_tokens: u64,
+    pub total_input_context: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_creation_ephemeral_5m_tokens: u64,
+    pub cache_creation_ephemeral_1h_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub total_cost_usd: f64,
+    pub actual_total_cost_usd: f64,
+    pub avg_response_time_ms: Option<f64>,
+    pub success_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct StoredUsageAuditSummary {
+    pub total_requests: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub recorded_total_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_creation_ephemeral_5m_tokens: u64,
+    pub cache_creation_ephemeral_1h_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub total_cost_usd: f64,
+    pub actual_total_cost_usd: f64,
+    pub cache_creation_cost_usd: f64,
+    pub cache_read_cost_usd: f64,
+    pub total_response_time_ms: f64,
+    pub error_requests: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageTimeSeriesGranularity {
+    Hour,
+    Day,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UsageTimeSeriesQuery {
+    pub created_from_unix_secs: u64,
+    pub created_until_unix_secs: u64,
+    pub granularity: UsageTimeSeriesGranularity,
+    pub tz_offset_minutes: i32,
+    pub user_id: Option<String>,
+    pub provider_name: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct StoredUsageTimeSeriesBucket {
+    pub bucket_key: String,
+    pub total_requests: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub total_cost_usd: f64,
+    pub total_response_time_ms: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageLeaderboardGroupBy {
+    Model,
+    User,
+    ApiKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UsageLeaderboardQuery {
+    pub created_from_unix_secs: u64,
+    pub created_until_unix_secs: u64,
+    pub group_by: UsageLeaderboardGroupBy,
+    pub user_id: Option<String>,
+    pub provider_name: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct StoredUsageLeaderboardSummary {
+    pub group_key: String,
+    pub legacy_name: Option<String>,
+    pub request_count: u64,
+    pub total_tokens: u64,
+    pub total_cost_usd: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
@@ -582,6 +708,31 @@ pub trait UsageReadRepository: Send + Sync {
         &self,
         query: &UsageAuditListQuery,
     ) -> Result<Vec<StoredRequestUsageAudit>, crate::DataLayerError>;
+
+    async fn count_usage_audits(
+        &self,
+        query: &UsageAuditListQuery,
+    ) -> Result<u64, crate::DataLayerError>;
+
+    async fn aggregate_usage_audits(
+        &self,
+        query: &UsageAuditAggregationQuery,
+    ) -> Result<Vec<StoredUsageAuditAggregation>, crate::DataLayerError>;
+
+    async fn summarize_usage_audits(
+        &self,
+        query: &UsageAuditSummaryQuery,
+    ) -> Result<StoredUsageAuditSummary, crate::DataLayerError>;
+
+    async fn summarize_usage_time_series(
+        &self,
+        query: &UsageTimeSeriesQuery,
+    ) -> Result<Vec<StoredUsageTimeSeriesBucket>, crate::DataLayerError>;
+
+    async fn summarize_usage_leaderboard(
+        &self,
+        query: &UsageLeaderboardQuery,
+    ) -> Result<Vec<StoredUsageLeaderboardSummary>, crate::DataLayerError>;
 
     async fn list_recent_usage_audits(
         &self,

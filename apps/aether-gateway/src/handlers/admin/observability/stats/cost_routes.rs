@@ -1,14 +1,30 @@
 use super::range::{build_time_range_from_days, parse_bounded_u32, parse_tz_offset_minutes};
+use super::resolve_admin_usage_time_range;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::query_param_value;
 use crate::GatewayError;
 use aether_admin::observability::stats::{
     admin_stats_bad_request_response, admin_stats_cost_forecast_empty_response,
     admin_stats_cost_savings_empty_response, build_admin_stats_cost_forecast_response,
-    build_admin_stats_cost_savings_response, AdminStatsGranularity, AdminStatsTimeRange,
-    AdminStatsUsageFilter,
+    build_admin_stats_cost_savings_response, AdminStatsGranularity, AdminStatsUsageFilter,
 };
 use axum::{body::Body, http, response::Response};
+
+fn resolve_cost_forecast_time_range(
+    query: Option<&str>,
+) -> Result<super::AdminStatsTimeRange, String> {
+    match super::AdminStatsTimeRange::resolve_optional(query)? {
+        Some(value) => Ok(value),
+        None => {
+            let tz_offset_minutes = parse_tz_offset_minutes(query)?;
+            let days = query_param_value(query, "days")
+                .map(|value| parse_bounded_u32("days", &value, 7, 365))
+                .transpose()?
+                .unwrap_or(30);
+            build_time_range_from_days(days, tz_offset_minutes)
+        }
+    }
+}
 
 pub(super) async fn maybe_build_local_admin_stats_cost_response(
     state: &AdminAppState<'_>,
@@ -34,30 +50,11 @@ pub(super) async fn maybe_build_local_admin_stats_cost_response(
             .map(|value| parse_bounded_u32("forecast_days", &value, 1, 90))
             .transpose()
         {
-            Ok(Some(value)) => value,
-            Ok(None) => 7,
+            Ok(value) => value.unwrap_or(7),
             Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
         };
-        let tz_offset_minutes = match parse_tz_offset_minutes(query) {
+        let time_range = match resolve_cost_forecast_time_range(query) {
             Ok(value) => value,
-            Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
-        };
-        let time_range = match AdminStatsTimeRange::resolve_optional(query) {
-            Ok(Some(value)) => value,
-            Ok(None) => {
-                let days = match query_param_value(query, "days")
-                    .map(|value| parse_bounded_u32("days", &value, 7, 365))
-                    .transpose()
-                {
-                    Ok(Some(value)) => value,
-                    Ok(None) => 30,
-                    Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
-                };
-                match build_time_range_from_days(days, tz_offset_minutes) {
-                    Ok(value) => value,
-                    Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
-                }
-            }
             Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
         };
         if let Err(detail) = time_range.validate_for_time_series(AdminStatsGranularity::Day) {
@@ -84,13 +81,10 @@ pub(super) async fn maybe_build_local_admin_stats_cost_response(
             "/api/admin/stats/cost/savings" | "/api/admin/stats/cost/savings/"
         )
     {
-        let time_range = match AdminStatsTimeRange::resolve_optional(query) {
+        let time_range = match resolve_admin_usage_time_range(query) {
             Ok(value) => value,
             Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
         };
-        if time_range.is_none() {
-            return Ok(Some(admin_stats_cost_savings_empty_response()));
-        }
         if !state.has_usage_data_reader() {
             return Ok(Some(admin_stats_cost_savings_empty_response()));
         }
@@ -101,7 +95,7 @@ pub(super) async fn maybe_build_local_admin_stats_cost_response(
             model: query_param_value(query, "model"),
         };
         let usage = state
-            .list_admin_usage_for_range(time_range.as_ref().expect("time range exists"), &filters)
+            .list_admin_usage_for_range(&time_range, &filters)
             .await?;
 
         return Ok(Some(build_admin_stats_cost_savings_response(&usage)));

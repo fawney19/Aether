@@ -347,6 +347,72 @@ async fn gateway_handles_admin_usage_stats_locally_with_trusted_admin_principal(
 }
 
 #[tokio::test]
+async fn gateway_defaults_admin_usage_stats_to_bounded_recent_window_when_query_missing() {
+    let (upstream_url, upstream_hits, upstream_handle) =
+        start_usage_upstream("/api/admin/usage/stats").await;
+
+    let recent_created_at = recent_unix_secs(5);
+    let stale_created_at = recent_unix_secs(60 * 48);
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        sample_usage_row(
+            "usage-recent",
+            "req-recent",
+            Some("user-1"),
+            Some("key-1"),
+            Some("primary"),
+            "OpenAI",
+            "gpt-5",
+            "completed",
+            120,
+            30,
+            0.3,
+            0.36,
+            recent_created_at,
+        ),
+        sample_usage_row(
+            "usage-stale",
+            "req-stale",
+            Some("user-2"),
+            Some("key-2"),
+            Some("secondary"),
+            "Anthropic",
+            "claude-3-7",
+            "failed",
+            40,
+            10,
+            0.1,
+            0.12,
+            stale_created_at,
+        ),
+    ]));
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_usage_reader_for_tests(
+                usage_repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response =
+        admin_request(reqwest::Client::new().get(format!("{gateway_url}/api/admin/usage/stats")))
+            .send()
+            .await
+            .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["total_requests"], 1);
+    assert_eq!(payload["total_tokens"], 170);
+    assert_eq!(payload["error_count"], 0);
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_returns_service_unavailable_for_admin_usage_stats_without_usage_reader() {
     assert_admin_usage_route_returns_local_503(
         GatewayDataState::disabled(),
@@ -435,7 +501,7 @@ async fn gateway_handles_admin_usage_aggregation_stats_locally_with_trusted_admi
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let response = admin_request(reqwest::Client::new().get(format!(
-        "{gateway_url}/api/admin/usage/aggregation/stats?group_by=model&limit=10"
+        "{gateway_url}/api/admin/usage/aggregation/stats?group_by=model&limit=10&start_date=2024-03-21&end_date=2024-03-22&tz_offset_minutes=0"
     )))
     .send()
     .await
@@ -458,7 +524,7 @@ async fn gateway_handles_admin_usage_aggregation_stats_locally_with_trusted_admi
     assert_eq!(items[1]["output_tokens"], 20);
 
     let provider_response = admin_request(reqwest::Client::new().get(format!(
-        "{gateway_url}/api/admin/usage/aggregation/stats?group_by=provider&limit=10"
+        "{gateway_url}/api/admin/usage/aggregation/stats?group_by=provider&limit=10&start_date=2024-03-21&end_date=2024-03-22&tz_offset_minutes=0"
     )))
     .send()
     .await
@@ -477,7 +543,7 @@ async fn gateway_handles_admin_usage_aggregation_stats_locally_with_trusted_admi
     assert_eq!(provider_items[1]["output_tokens"], 20);
 
     let api_format_response = admin_request(reqwest::Client::new().get(format!(
-        "{gateway_url}/api/admin/usage/aggregation/stats?group_by=api_format&limit=10"
+        "{gateway_url}/api/admin/usage/aggregation/stats?group_by=api_format&limit=10&start_date=2024-03-21&end_date=2024-03-22&tz_offset_minutes=0"
     )))
     .send()
     .await
@@ -578,7 +644,7 @@ async fn gateway_handles_admin_usage_aggregation_stats_locally_with_bearer_admin
 
     let response = reqwest::Client::new()
         .get(format!(
-            "{gateway_url}/api/admin/usage/aggregation/stats?group_by=user"
+            "{gateway_url}/api/admin/usage/aggregation/stats?group_by=user&start_date=2024-03-21&end_date=2024-03-22&tz_offset_minutes=0"
         ))
         .header("authorization", format!("Bearer {access_token}"))
         .header("x-client-device-id", "device-admin-usage")
@@ -739,10 +805,12 @@ async fn gateway_handles_admin_usage_active_locally_with_trusted_admin_principal
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let response =
-        admin_request(reqwest::Client::new().get(format!("{gateway_url}/api/admin/usage/active")))
-            .send()
-            .await
-            .expect("request should succeed");
+        admin_request(reqwest::Client::new().get(format!(
+            "{gateway_url}/api/admin/usage/active?start_date=2024-03-21&end_date=2024-03-22&tz_offset_minutes=0"
+        )))
+        .send()
+        .await
+        .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
@@ -755,6 +823,136 @@ async fn gateway_handles_admin_usage_active_locally_with_trusted_admin_principal
         payload["requests"][0]["provider_key_name"],
         "upstream-primary"
     );
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_defaults_admin_usage_active_to_recent_window_when_query_missing() {
+    let (upstream_url, upstream_hits, upstream_handle) =
+        start_usage_upstream("/api/admin/usage/active").await;
+
+    let recent_created_at = recent_unix_secs(3);
+    let stale_created_at = recent_unix_secs(60 * 48);
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        sample_usage_row(
+            "usage-recent-pending",
+            "req-recent-pending",
+            Some("user-1"),
+            Some("key-1"),
+            Some("primary"),
+            "OpenAI",
+            "gpt-5",
+            "pending",
+            10,
+            0,
+            0.0,
+            0.0,
+            recent_created_at,
+        ),
+        sample_usage_row(
+            "usage-stale-pending",
+            "req-stale-pending",
+            Some("user-2"),
+            Some("key-2"),
+            Some("secondary"),
+            "Anthropic",
+            "claude-3-7",
+            "pending",
+            40,
+            10,
+            0.1,
+            0.12,
+            stale_created_at,
+        ),
+        sample_usage_row(
+            "usage-recent-completed",
+            "req-recent-completed",
+            Some("user-3"),
+            Some("key-3"),
+            Some("tertiary"),
+            "Google",
+            "gemini-2.5-pro",
+            "completed",
+            20,
+            5,
+            0.2,
+            0.22,
+            recent_created_at + 1,
+        ),
+    ]));
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_usage_reader_for_tests(
+                usage_repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response =
+        admin_request(reqwest::Client::new().get(format!("{gateway_url}/api/admin/usage/active")))
+            .send()
+            .await
+            .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    let requests = payload["requests"].as_array().expect("array");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["id"], "usage-recent-pending");
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_usage_active_ids_for_terminal_updates() {
+    let (upstream_url, upstream_hits, upstream_handle) =
+        start_usage_upstream("/api/admin/usage/active").await;
+
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![sample_usage_row(
+        "usage-completed",
+        "req-completed",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-5",
+        "completed",
+        20,
+        5,
+        0.2,
+        0.24,
+        recent_unix_secs(2),
+    )]));
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_usage_reader_for_tests(
+                usage_repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/usage/active?ids=usage-completed"
+    )))
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    let requests = payload["requests"].as_array().expect("array");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["id"], "usage-completed");
+    assert_eq!(requests[0]["status"], "completed");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -825,7 +1023,7 @@ async fn gateway_handles_admin_usage_records_locally_with_trusted_admin_principa
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let response = admin_request(reqwest::Client::new().get(format!(
-        "{gateway_url}/api/admin/usage/records?status=failed&provider=Anthropic&limit=10&offset=0"
+        "{gateway_url}/api/admin/usage/records?start_date=2024-03-21&end_date=2024-03-22&tz_offset_minutes=0&status=failed&provider=Anthropic&limit=10&offset=0"
     )))
     .send()
     .await
@@ -949,7 +1147,7 @@ async fn gateway_handles_admin_usage_records_with_snapshot_first_user_and_api_ke
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
     let response = admin_request(reqwest::Client::new().get(format!(
-        "{gateway_url}/api/admin/usage/records?search=fresh-secondary&username=fresh-bob&limit=10&offset=0"
+        "{gateway_url}/api/admin/usage/records?start_date=2024-03-21&end_date=2024-03-22&tz_offset_minutes=0&search=fresh-secondary&username=fresh-bob&limit=10&offset=0"
     )))
     .send()
     .await

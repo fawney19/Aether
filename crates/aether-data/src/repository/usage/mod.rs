@@ -4,8 +4,12 @@ mod sql;
 #[allow(unused_imports)]
 pub(crate) use aether_data_contracts::repository::usage::{
     StoredProviderApiKeyUsageSummary, StoredProviderUsageSummary, StoredProviderUsageWindow,
-    StoredRequestUsageAudit, StoredUsageDailySummary, UpsertUsageRecord, UsageAuditListQuery,
-    UsageDailyHeatmapQuery, UsageReadRepository, UsageRepository, UsageWriteRepository,
+    StoredRequestUsageAudit, StoredUsageAuditAggregation, StoredUsageAuditSummary,
+    StoredUsageDailySummary, StoredUsageLeaderboardSummary, StoredUsageTimeSeriesBucket,
+    UpsertUsageRecord, UsageAuditAggregationGroupBy, UsageAuditAggregationQuery,
+    UsageAuditListQuery, UsageAuditSummaryQuery, UsageDailyHeatmapQuery, UsageLeaderboardGroupBy,
+    UsageLeaderboardQuery, UsageReadRepository, UsageRepository, UsageTimeSeriesGranularity,
+    UsageTimeSeriesQuery, UsageWriteRepository,
 };
 pub use memory::InMemoryUsageReadRepository;
 pub use sql::SqlxUsageReadRepository;

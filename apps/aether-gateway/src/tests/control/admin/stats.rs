@@ -156,6 +156,11 @@ fn sample_api_key_snapshot(
     snapshot
 }
 
+fn recent_unix_secs(minutes_ago: u64) -> i64 {
+    let now = chrono::Utc::now().timestamp();
+    now.saturating_sub((minutes_ago * 60) as i64)
+}
+
 #[derive(Debug)]
 struct PartialListAuthApiKeyRepository {
     lookup: InMemoryAuthApiKeySnapshotRepository,
@@ -674,6 +679,83 @@ async fn gateway_handles_admin_stats_error_distribution_locally_without_usage_re
 }
 
 #[tokio::test]
+async fn gateway_defaults_admin_stats_error_distribution_to_bounded_recent_window_when_query_missing(
+) {
+    let (_upstream_url, upstream_hits, upstream_handle) =
+        start_stats_upstream("/api/admin/stats/errors/distribution").await;
+
+    let mut recent_error = sample_usage_row(
+        "usage-error-recent",
+        "req-error-recent",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-5",
+        20,
+        10,
+        0.02,
+        0.02,
+        recent_unix_secs(5),
+    );
+    recent_error.status_code = Some(429);
+    recent_error.error_category = Some("rate_limit".to_string());
+    recent_error.error_message = Some("rate limited".to_string());
+
+    let mut stale_error = sample_usage_row(
+        "usage-error-stale",
+        "req-error-stale",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-5",
+        20,
+        10,
+        0.02,
+        0.02,
+        recent_unix_secs(60 * 48),
+    );
+    stale_error.status_code = Some(401);
+    stale_error.error_category = Some("auth".to_string());
+    stale_error.error_message = Some("bad key".to_string());
+
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        recent_error,
+        stale_error,
+    ]));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_usage_reader_for_tests(
+                usage_repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(
+        reqwest::Client::new().get(format!("{gateway_url}/api/admin/stats/errors/distribution")),
+    )
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(
+        payload["distribution"].as_array().map(|items| items.len()),
+        Some(1)
+    );
+    assert_eq!(payload["distribution"][0]["category"], "rate_limit");
+    assert_eq!(payload["distribution"][0]["count"], 1);
+    assert_eq!(payload["trend"][0]["total"], 1);
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_stats_performance_percentiles_locally_with_trusted_admin_principal()
 {
     let (upstream_url, upstream_hits, upstream_handle) =
@@ -833,6 +915,80 @@ async fn gateway_handles_admin_stats_time_series_locally_with_trusted_admin_prin
     assert_eq!(payload[0]["cache_read_tokens"], 7);
     assert_eq!(payload[1]["date"], "2024-03-22");
     assert_eq!(payload[1]["total_cost"], 0.2);
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_stats_time_series_hourly_locally_with_model_filter() {
+    let (_upstream_url, upstream_hits, upstream_handle) =
+        start_stats_upstream("/api/admin/stats/time-series").await;
+
+    let mut matching_row = sample_usage_row(
+        "usage-ts-hour-match",
+        "req-ts-hour-match",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-5",
+        80,
+        20,
+        0.12,
+        0.12,
+        1_710_997_800,
+    );
+    matching_row.cache_creation_input_tokens = 4;
+    matching_row.cache_read_input_tokens = 6;
+
+    let other_model_row = sample_usage_row(
+        "usage-ts-hour-other",
+        "req-ts-hour-other",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-4o-mini",
+        200,
+        40,
+        0.22,
+        0.22,
+        1_710_998_400,
+    );
+
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        matching_row,
+        other_model_row,
+    ]));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_usage_reader_for_tests(
+                usage_repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(
+        reqwest::Client::new().get(format!(
+            "{gateway_url}/api/admin/stats/time-series?start_date=2024-03-21&end_date=2024-03-21&granularity=hour&model=gpt-5&tz_offset_minutes=0"
+        )),
+    )
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload.as_array().map(|items| items.len()), Some(24));
+    assert_eq!(payload[5]["date"], "2024-03-21T05:00:00+00:00");
+    assert_eq!(payload[5]["total_requests"], 1);
+    assert_eq!(payload[5]["input_tokens"], 80);
+    assert_eq!(payload[5]["cache_creation_tokens"], 4);
+    assert_eq!(payload[5]["cache_read_tokens"], 6);
+    assert_eq!(payload[6]["total_requests"], 0);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -1049,6 +1205,71 @@ async fn gateway_handles_admin_stats_leaderboard_models_locally_without_usage_re
     assert_eq!(payload["items"], serde_json::Value::Array(vec![]));
     assert_eq!(payload["total"], 0);
     assert_eq!(payload["metric"], "tokens");
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_defaults_admin_stats_leaderboard_models_to_bounded_recent_window_when_query_missing(
+) {
+    let (_upstream_url, upstream_hits, upstream_handle) =
+        start_stats_upstream("/api/admin/stats/leaderboard/models").await;
+
+    let recent_row = sample_usage_row(
+        "usage-model-recent",
+        "req-model-recent",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-5",
+        100,
+        50,
+        0.4,
+        0.4,
+        recent_unix_secs(10),
+    );
+    let stale_row = sample_usage_row(
+        "usage-model-stale",
+        "req-model-stale",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "Anthropic",
+        "claude-3-5-sonnet",
+        60,
+        20,
+        0.2,
+        0.2,
+        recent_unix_secs(60 * 48),
+    );
+
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        recent_row, stale_row,
+    ]));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_usage_reader_for_tests(
+                usage_repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/stats/leaderboard/models?metric=tokens&order=desc"
+    )))
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["total"], 1);
+    assert_eq!(payload["items"][0]["id"], "gpt-5");
+    assert_eq!(payload["items"][0]["value"], 150);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

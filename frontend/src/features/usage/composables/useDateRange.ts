@@ -1,15 +1,5 @@
 import type { PeriodValue, DateRangeParams } from '../types'
 
-/**
- * 格式化日期为 ISO 格式（不带毫秒，兼容 FastAPI datetime 解析）
- */
-function formatDateForApi(date: Date): string {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
 function getTimezoneParams() {
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
   const tz_offset_minutes = -new Date().getTimezoneOffset()
@@ -20,36 +10,18 @@ function getTimezoneParams() {
  * 根据时间段值计算日期范围
  */
 export function getDateRangeFromPeriod(period: PeriodValue): DateRangeParams {
-  const now = new Date()
-  let startDate: Date
-  let endDate = new Date(now)
-
   switch (period) {
     case 'today':
-      startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-      break
     case 'yesterday':
-      startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
-      endDate = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-      break
     case 'last7days':
-      startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
-      break
     case 'last30days':
-      startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
-      break
     case 'last90days':
-      startDate = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000)
-      break
+      return {
+        preset: period,
+        ...getTimezoneParams()
+      }
     default:
       return {} // 返回空对象表示不过滤时间
-  }
-
-  return {
-    start_date: formatDateForApi(startDate),
-    end_date: formatDateForApi(endDate),
-    preset: period,
-    ...getTimezoneParams()
   }
 }
 

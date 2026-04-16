@@ -8,6 +8,22 @@ pub(super) use aether_admin::observability::stats::{
 use aether_admin::observability::stats::{AdminStatsTimeRange, AdminStatsUsageFilter};
 use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageAuditListQuery};
 
+pub(crate) fn resolve_admin_usage_time_range(
+    query: Option<&str>,
+) -> Result<AdminStatsTimeRange, String> {
+    match AdminStatsTimeRange::resolve_optional(query)? {
+        Some(time_range) => Ok(time_range),
+        None => {
+            let tz_offset_minutes = parse_tz_offset_minutes(query)?;
+            let default_days = u32::try_from(admin_usage_default_days())
+                .ok()
+                .filter(|value| *value > 0)
+                .unwrap_or(1);
+            build_time_range_from_days(default_days, tz_offset_minutes)
+        }
+    }
+}
+
 pub(crate) async fn list_usage_for_range(
     state: &AdminAppState<'_>,
     time_range: &AdminStatsTimeRange,
@@ -25,8 +41,13 @@ pub(crate) async fn list_usage_for_range(
             user_id: filters.user_id.clone(),
             provider_name: filters.provider_name.clone(),
             model: filters.model.clone(),
+            api_format: None,
             statuses: None,
+            is_stream: None,
+            error_only: false,
             limit: None,
+            offset: None,
+            newest_first: false,
         })
         .await
 }
@@ -39,17 +60,9 @@ pub(crate) async fn list_usage_for_optional_range(
     match time_range {
         Some(time_range) => list_usage_for_range(state, time_range, filters).await,
         None => {
-            state
-                .list_usage_audits(&UsageAuditListQuery {
-                    created_from_unix_secs: None,
-                    created_until_unix_secs: None,
-                    user_id: filters.user_id.clone(),
-                    provider_name: filters.provider_name.clone(),
-                    model: filters.model.clone(),
-                    statuses: None,
-                    limit: None,
-                })
-                .await
+            let default_time_range = build_time_range_from_days(1, 0)
+                .map_err(|detail| GatewayError::Internal(detail.to_string()))?;
+            list_usage_for_range(state, &default_time_range, filters).await
         }
     }
 }

@@ -217,8 +217,13 @@ pub(super) async fn handle_wallet_today_cost(
             user_id: Some(auth.user.id.clone()),
             provider_name: None,
             model: None,
+            api_format: None,
             statuses: None,
+            is_stream: None,
+            error_only: false,
             limit: None,
+            offset: None,
+            newest_first: false,
         })
         .await
     {

@@ -1,16 +1,18 @@
 use super::leaderboard::{
-    build_admin_stats_leaderboard_response, build_api_key_leaderboard_items,
-    build_model_leaderboard_items, build_user_leaderboard_items, compare_leaderboard_items,
-    load_user_leaderboard_metadata, AdminStatsLeaderboardNameMode,
+    build_admin_stats_leaderboard_response, build_api_key_leaderboard_items_from_summaries,
+    build_model_leaderboard_items_from_summaries, build_user_leaderboard_items_from_summaries,
+    compare_leaderboard_items, load_user_leaderboard_metadata, AdminStatsLeaderboardNameMode,
 };
 use super::range::{parse_bounded_u32, parse_nonnegative_usize};
+use super::resolve_admin_usage_time_range;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{query_param_bool, query_param_value};
 use crate::GatewayError;
 use aether_admin::observability::stats::{
     admin_stats_bad_request_response, admin_stats_leaderboard_empty_response,
-    AdminStatsLeaderboardMetric, AdminStatsSortOrder, AdminStatsTimeRange, AdminStatsUsageFilter,
+    AdminStatsLeaderboardMetric, AdminStatsSortOrder, AdminStatsUsageFilter,
 };
+use aether_data_contracts::repository::usage::{UsageLeaderboardGroupBy, UsageLeaderboardQuery};
 use axum::{body::Body, http, response::Response};
 
 pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
@@ -29,7 +31,7 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
             "/api/admin/stats/leaderboard/models" | "/api/admin/stats/leaderboard/models/"
         )
     {
-        let time_range = match AdminStatsTimeRange::resolve_optional(query) {
+        let time_range = match resolve_admin_usage_time_range(query) {
             Ok(value) => value,
             Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
         };
@@ -60,19 +62,33 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
         if !state.has_usage_data_reader() {
             return Ok(Some(admin_stats_leaderboard_empty_response(
                 metric,
-                time_range.as_ref(),
+                Some(&time_range),
             )));
         }
         let filters = AdminStatsUsageFilter::from_query(query);
-        let usage = state
-            .list_admin_usage_for_optional_range(time_range.as_ref(), &filters)
+        let Some((created_from_unix_secs, created_until_unix_secs)) = time_range.to_unix_bounds()
+        else {
+            return Ok(Some(admin_stats_leaderboard_empty_response(
+                metric,
+                Some(&time_range),
+            )));
+        };
+        let summaries = state
+            .summarize_usage_leaderboard(&UsageLeaderboardQuery {
+                created_from_unix_secs,
+                created_until_unix_secs,
+                group_by: UsageLeaderboardGroupBy::Model,
+                user_id: filters.user_id,
+                provider_name: filters.provider_name,
+                model: filters.model,
+            })
             .await?;
-        let mut leaderboard = build_model_leaderboard_items(&usage);
+        let mut leaderboard = build_model_leaderboard_items_from_summaries(&summaries);
         leaderboard.sort_by(|left, right| compare_leaderboard_items(metric, order, left, right));
 
         return Ok(Some(build_admin_stats_leaderboard_response(
             metric,
-            time_range.as_ref(),
+            Some(&time_range),
             &leaderboard,
             offset,
             limit,
@@ -90,7 +106,7 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
             "/api/admin/stats/leaderboard/api-keys" | "/api/admin/stats/leaderboard/api-keys/"
         )
     {
-        let time_range = match AdminStatsTimeRange::resolve_optional(query) {
+        let time_range = match resolve_admin_usage_time_range(query) {
             Ok(value) => value,
             Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
         };
@@ -121,20 +137,32 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
         if !state.has_usage_data_reader() {
             return Ok(Some(admin_stats_leaderboard_empty_response(
                 metric,
-                time_range.as_ref(),
+                Some(&time_range),
             )));
         }
         let include_inactive = query_param_bool(query, "include_inactive", false);
         let exclude_admin = query_param_bool(query, "exclude_admin", false);
         let filters = AdminStatsUsageFilter::from_query(query);
-        let usage = state
-            .list_admin_usage_for_optional_range(time_range.as_ref(), &filters)
+        let Some((created_from_unix_secs, created_until_unix_secs)) = time_range.to_unix_bounds()
+        else {
+            return Ok(Some(admin_stats_leaderboard_empty_response(
+                metric,
+                Some(&time_range),
+            )));
+        };
+        let summaries = state
+            .summarize_usage_leaderboard(&UsageLeaderboardQuery {
+                created_from_unix_secs,
+                created_until_unix_secs,
+                group_by: UsageLeaderboardGroupBy::ApiKey,
+                user_id: filters.user_id,
+                provider_name: filters.provider_name,
+                model: filters.model,
+            })
             .await?;
-        let api_key_ids: Vec<String> = usage
+        let api_key_ids: Vec<String> = summaries
             .iter()
-            .filter_map(|item| item.api_key_id.clone())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
+            .map(|item| item.group_key.clone())
             .collect();
         let snapshots = if state.has_auth_api_key_data_reader() {
             Some(
@@ -152,8 +180,8 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
         } else {
             std::collections::BTreeMap::new()
         };
-        let mut leaderboard = build_api_key_leaderboard_items(
-            &usage,
+        let mut leaderboard = build_api_key_leaderboard_items_from_summaries(
+            &summaries,
             snapshots.as_deref(),
             &api_key_names,
             include_inactive,
@@ -163,7 +191,7 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
 
         return Ok(Some(build_admin_stats_leaderboard_response(
             metric,
-            time_range.as_ref(),
+            Some(&time_range),
             &leaderboard,
             offset,
             limit,
@@ -181,7 +209,7 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
             "/api/admin/stats/leaderboard/users" | "/api/admin/stats/leaderboard/users/"
         )
     {
-        let time_range = match AdminStatsTimeRange::resolve_optional(query) {
+        let time_range = match resolve_admin_usage_time_range(query) {
             Ok(value) => value,
             Err(detail) => return Ok(Some(admin_stats_bad_request_response(detail))),
         };
@@ -212,26 +240,39 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
         if !state.has_usage_data_reader() {
             return Ok(Some(admin_stats_leaderboard_empty_response(
                 metric,
-                time_range.as_ref(),
+                Some(&time_range),
             )));
         }
         let include_inactive = query_param_bool(query, "include_inactive", false);
         let exclude_admin = query_param_bool(query, "exclude_admin", false);
         let filters = AdminStatsUsageFilter::from_query(query);
-        let usage = state
-            .list_admin_usage_for_optional_range(time_range.as_ref(), &filters)
+        let Some((created_from_unix_secs, created_until_unix_secs)) = time_range.to_unix_bounds()
+        else {
+            return Ok(Some(admin_stats_leaderboard_empty_response(
+                metric,
+                Some(&time_range),
+            )));
+        };
+        let summaries = state
+            .summarize_usage_leaderboard(&UsageLeaderboardQuery {
+                created_from_unix_secs,
+                created_until_unix_secs,
+                group_by: UsageLeaderboardGroupBy::User,
+                user_id: filters.user_id,
+                provider_name: filters.provider_name,
+                model: filters.model,
+            })
             .await?;
-        let user_ids: Vec<String> = usage
+        let user_ids: Vec<String> = summaries
             .iter()
-            .filter_map(|item| item.user_id.clone())
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
+            .map(|item| item.group_key.clone())
             .collect();
         let user_metadata = load_user_leaderboard_metadata(state, &user_ids).await?;
-        let mut leaderboard = build_user_leaderboard_items(
-            &usage,
+        let mut leaderboard = build_user_leaderboard_items_from_summaries(
+            &summaries,
             &user_metadata,
             state.has_auth_user_data_reader(),
+            state.has_user_data_reader(),
             include_inactive,
             exclude_admin,
         );
@@ -239,7 +280,7 @@ pub(super) async fn maybe_build_local_admin_stats_leaderboard_response(
 
         return Ok(Some(build_admin_stats_leaderboard_response(
             metric,
-            time_range.as_ref(),
+            Some(&time_range),
             &leaderboard,
             offset,
             limit,

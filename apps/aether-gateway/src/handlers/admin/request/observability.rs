@@ -40,6 +40,51 @@ impl<'a> AdminAppState<'a> {
         self.app.list_usage_audits(query).await
     }
 
+    pub(crate) async fn count_usage_audits(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageAuditListQuery,
+    ) -> Result<u64, GatewayError> {
+        self.app.count_usage_audits(query).await
+    }
+
+    pub(crate) async fn aggregate_usage_audits(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageAuditAggregationQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredUsageAuditAggregation>,
+        GatewayError,
+    > {
+        self.app.aggregate_usage_audits(query).await
+    }
+
+    pub(crate) async fn summarize_usage_audits(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageAuditSummaryQuery,
+    ) -> Result<aether_data_contracts::repository::usage::StoredUsageAuditSummary, GatewayError>
+    {
+        self.app.summarize_usage_audits(query).await
+    }
+
+    pub(crate) async fn summarize_usage_time_series(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageTimeSeriesQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredUsageTimeSeriesBucket>,
+        GatewayError,
+    > {
+        self.app.summarize_usage_time_series(query).await
+    }
+
+    pub(crate) async fn summarize_usage_leaderboard(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageLeaderboardQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredUsageLeaderboardSummary>,
+        GatewayError,
+    > {
+        self.app.summarize_usage_leaderboard(query).await
+    }
+
     pub(crate) async fn summarize_usage_daily_heatmap(
         &self,
         query: &aether_data_contracts::repository::usage::UsageDailyHeatmapQuery,

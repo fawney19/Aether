@@ -485,8 +485,13 @@ async fn dashboard_list_usage_for_range(
             user_id: user_id.map(ToOwned::to_owned),
             provider_name: None,
             model: None,
+            api_format: None,
             statuses: None,
+            is_stream: None,
+            error_only: false,
             limit: None,
+            offset: None,
+            newest_first: false,
         })
         .await
     {
@@ -1215,8 +1220,13 @@ pub(super) async fn handle_dashboard_provider_status_get(
             user_id: None,
             provider_name: None,
             model: None,
+            api_format: None,
             statuses: None,
+            is_stream: None,
+            error_only: false,
             limit: None,
+            offset: None,
+            newest_first: false,
         })
         .await
     {

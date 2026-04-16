@@ -2,9 +2,13 @@ use std::collections::BTreeMap;
 use std::sync::RwLock;
 
 use aether_data_contracts::repository::usage::{
-    parse_usage_body_ref, usage_body_ref, UsageBodyField,
+    parse_usage_body_ref, usage_body_ref, StoredUsageAuditAggregation, StoredUsageAuditSummary,
+    StoredUsageLeaderboardSummary, StoredUsageTimeSeriesBucket, UsageAuditAggregationGroupBy,
+    UsageAuditAggregationQuery, UsageAuditSummaryQuery, UsageBodyField, UsageLeaderboardGroupBy,
+    UsageLeaderboardQuery, UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
 };
 use async_trait::async_trait;
+use chrono::Utc;
 use serde_json::Value;
 
 use super::{
@@ -109,6 +113,309 @@ fn usage_status_is_lifecycle(status: &str) -> bool {
     matches!(status, "pending" | "streaming")
 }
 
+fn usage_matches_list_query(item: &StoredRequestUsageAudit, query: &UsageAuditListQuery) -> bool {
+    // The field is historically named `created_at_unix_ms`, but usage audit rows
+    // across gateway handlers, SQL repositories and tests are stored as epoch seconds.
+    if let Some(created_from_unix_secs) = query.created_from_unix_secs {
+        if item.created_at_unix_ms < created_from_unix_secs {
+            return false;
+        }
+    }
+    if let Some(created_until_unix_secs) = query.created_until_unix_secs {
+        if item.created_at_unix_ms >= created_until_unix_secs {
+            return false;
+        }
+    }
+    if let Some(user_id) = query.user_id.as_deref() {
+        if item.user_id.as_deref() != Some(user_id) {
+            return false;
+        }
+    }
+    if let Some(provider_name) = query.provider_name.as_deref() {
+        if item.provider_name != provider_name {
+            return false;
+        }
+    }
+    if let Some(model) = query.model.as_deref() {
+        if item.model != model {
+            return false;
+        }
+    }
+    if let Some(api_format) = query.api_format.as_deref() {
+        if item.api_format.as_deref() != Some(api_format) {
+            return false;
+        }
+    }
+    if let Some(statuses) = query.statuses.as_ref() {
+        if !statuses.iter().any(|status| status == &item.status) {
+            return false;
+        }
+    }
+    if let Some(is_stream) = query.is_stream {
+        if item.is_stream != is_stream {
+            return false;
+        }
+    }
+    if query.error_only
+        && item.status != "failed"
+        && item.status_code.unwrap_or_default() < 400
+        && item
+            .error_message
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+    {
+        return false;
+    }
+
+    true
+}
+
+fn usage_matches_summary_query(
+    item: &StoredRequestUsageAudit,
+    query: &UsageAuditSummaryQuery,
+) -> bool {
+    if item.created_at_unix_ms < query.created_from_unix_secs
+        || item.created_at_unix_ms >= query.created_until_unix_secs
+    {
+        return false;
+    }
+    if let Some(user_id) = query.user_id.as_deref() {
+        if item.user_id.as_deref() != Some(user_id) {
+            return false;
+        }
+    }
+    if let Some(provider_name) = query.provider_name.as_deref() {
+        if item.provider_name != provider_name {
+            return false;
+        }
+    }
+    if let Some(model) = query.model.as_deref() {
+        if item.model != model {
+            return false;
+        }
+    }
+    true
+}
+
+fn usage_matches_time_series_query(
+    item: &StoredRequestUsageAudit,
+    query: &UsageTimeSeriesQuery,
+) -> bool {
+    if item.created_at_unix_ms < query.created_from_unix_secs
+        || item.created_at_unix_ms >= query.created_until_unix_secs
+    {
+        return false;
+    }
+    if let Some(user_id) = query.user_id.as_deref() {
+        if item.user_id.as_deref() != Some(user_id) {
+            return false;
+        }
+    }
+    if let Some(provider_name) = query.provider_name.as_deref() {
+        if item.provider_name != provider_name {
+            return false;
+        }
+    }
+    if let Some(model) = query.model.as_deref() {
+        if item.model != model {
+            return false;
+        }
+    }
+    true
+}
+
+fn usage_time_series_bucket_key(
+    item: &StoredRequestUsageAudit,
+    granularity: UsageTimeSeriesGranularity,
+    tz_offset_minutes: i32,
+) -> Option<String> {
+    let timestamp =
+        chrono::DateTime::<Utc>::from_timestamp(i64::try_from(item.created_at_unix_ms).ok()?, 0)?;
+    let local =
+        timestamp.checked_add_signed(chrono::Duration::minutes(i64::from(tz_offset_minutes)))?;
+    Some(match granularity {
+        UsageTimeSeriesGranularity::Day => local.date_naive().to_string(),
+        UsageTimeSeriesGranularity::Hour => local.format("%Y-%m-%dT%H:00:00+00:00").to_string(),
+    })
+}
+
+fn usage_matches_leaderboard_query(
+    item: &StoredRequestUsageAudit,
+    query: &UsageLeaderboardQuery,
+) -> bool {
+    if item.created_at_unix_ms < query.created_from_unix_secs
+        || item.created_at_unix_ms >= query.created_until_unix_secs
+        || matches!(item.status.as_str(), "pending" | "streaming")
+        || matches!(item.provider_name.as_str(), "unknown" | "pending")
+    {
+        return false;
+    }
+    if let Some(user_id) = query.user_id.as_deref() {
+        if item.user_id.as_deref() != Some(user_id) {
+            return false;
+        }
+    }
+    if let Some(provider_name) = query.provider_name.as_deref() {
+        if item.provider_name != provider_name {
+            return false;
+        }
+    }
+    if let Some(model) = query.model.as_deref() {
+        if item.model != model {
+            return false;
+        }
+    }
+    true
+}
+
+fn sort_usage_items(items: &mut [StoredRequestUsageAudit], newest_first: bool) {
+    items.sort_by(|left, right| {
+        let created_order = if newest_first {
+            right.created_at_unix_ms.cmp(&left.created_at_unix_ms)
+        } else {
+            left.created_at_unix_ms.cmp(&right.created_at_unix_ms)
+        };
+        if newest_first {
+            created_order.then_with(|| left.id.cmp(&right.id))
+        } else {
+            created_order.then_with(|| left.request_id.cmp(&right.request_id))
+        }
+    });
+}
+
+fn usage_cache_creation_tokens(item: &StoredRequestUsageAudit) -> u64 {
+    let classified = item
+        .cache_creation_ephemeral_5m_input_tokens
+        .saturating_add(item.cache_creation_ephemeral_1h_input_tokens);
+    if item.cache_creation_input_tokens == 0 && classified > 0 {
+        classified
+    } else {
+        item.cache_creation_input_tokens
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UsageApiFamily {
+    OpenAi,
+    Claude,
+    Gemini,
+    Unknown,
+}
+
+fn usage_api_family(api_format: Option<&str>) -> UsageApiFamily {
+    let Some(api_format) = api_format else {
+        return UsageApiFamily::Unknown;
+    };
+    let family = api_format
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    match family.as_str() {
+        "openai" => UsageApiFamily::OpenAi,
+        "claude" | "anthropic" => UsageApiFamily::Claude,
+        "gemini" | "google" => UsageApiFamily::Gemini,
+        _ => UsageApiFamily::Unknown,
+    }
+}
+
+fn normalize_usage_input_tokens(
+    api_format: Option<&str>,
+    input_tokens: i64,
+    cache_read_tokens: i64,
+) -> i64 {
+    if input_tokens <= 0 {
+        return input_tokens.max(0);
+    }
+    if cache_read_tokens <= 0 {
+        return input_tokens;
+    }
+
+    match usage_api_family(api_format) {
+        UsageApiFamily::OpenAi | UsageApiFamily::Gemini => {
+            (input_tokens - cache_read_tokens).max(0)
+        }
+        UsageApiFamily::Claude | UsageApiFamily::Unknown => input_tokens,
+    }
+}
+
+fn normalize_usage_total_input_context(
+    api_format: Option<&str>,
+    input_tokens: i64,
+    cache_creation_tokens: i64,
+    cache_read_tokens: i64,
+) -> i64 {
+    let normalized_input_tokens = input_tokens.max(0);
+    let normalized_cache_creation_tokens = cache_creation_tokens.max(0);
+    let normalized_cache_read_tokens = cache_read_tokens.max(0);
+
+    let fresh_input_tokens = match usage_api_family(api_format) {
+        UsageApiFamily::Claude => {
+            normalized_input_tokens.saturating_add(normalized_cache_creation_tokens)
+        }
+        UsageApiFamily::OpenAi | UsageApiFamily::Gemini => normalize_usage_input_tokens(
+            api_format,
+            normalized_input_tokens,
+            normalized_cache_read_tokens,
+        ),
+        UsageApiFamily::Unknown => {
+            if normalized_cache_creation_tokens > 0 {
+                normalized_input_tokens.saturating_add(normalized_cache_creation_tokens)
+            } else {
+                normalized_input_tokens
+            }
+        }
+    };
+
+    fresh_input_tokens.saturating_add(normalized_cache_read_tokens)
+}
+
+fn usage_total_input_context(item: &StoredRequestUsageAudit) -> u64 {
+    let api_format = item
+        .endpoint_api_format
+        .as_deref()
+        .or(item.api_format.as_deref());
+    let input_tokens = i64::try_from(item.input_tokens).unwrap_or(i64::MAX);
+    let cache_creation_tokens =
+        i64::try_from(usage_cache_creation_tokens(item)).unwrap_or(i64::MAX);
+    let cache_read_tokens = i64::try_from(item.cache_read_input_tokens).unwrap_or(i64::MAX);
+    normalize_usage_total_input_context(
+        api_format,
+        input_tokens,
+        cache_creation_tokens,
+        cache_read_tokens,
+    ) as u64
+}
+
+fn usage_effective_input_tokens(item: &StoredRequestUsageAudit) -> u64 {
+    let api_format = item
+        .endpoint_api_format
+        .as_deref()
+        .or(item.api_format.as_deref());
+    let input_tokens = i64::try_from(item.input_tokens).unwrap_or(i64::MAX);
+    let cache_read_tokens = i64::try_from(item.cache_read_input_tokens).unwrap_or(i64::MAX);
+    normalize_usage_input_tokens(api_format, input_tokens, cache_read_tokens) as u64
+}
+
+fn usage_is_success(item: &StoredRequestUsageAudit) -> bool {
+    matches!(
+        item.status.as_str(),
+        "completed" | "success" | "ok" | "billed" | "settled"
+    ) && item.status_code.is_none_or(|code| code < 400)
+}
+
+fn usage_provider_display_name(item: &StoredRequestUsageAudit) -> Option<String> {
+    let provider_name = item.provider_name.trim();
+    if provider_name.is_empty() || matches!(provider_name, "unknown" | "pending") {
+        None
+    } else {
+        Some(item.provider_name.clone())
+    }
+}
+
 #[async_trait]
 impl UsageReadRepository for InMemoryUsageReadRepository {
     async fn find_by_id(
@@ -172,52 +479,300 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
             .read()
             .expect("usage repository lock")
             .values()
-            .filter(|item| {
-                // The field is historically named `created_at_unix_ms`, but usage audit rows
-                // across gateway handlers, SQL repositories and tests are stored as epoch seconds.
-                if let Some(created_from_unix_secs) = query.created_from_unix_secs {
-                    if item.created_at_unix_ms < created_from_unix_secs {
-                        return false;
-                    }
-                }
-                if let Some(created_until_unix_secs) = query.created_until_unix_secs {
-                    if item.created_at_unix_ms >= created_until_unix_secs {
-                        return false;
-                    }
-                }
-                if let Some(user_id) = query.user_id.as_deref() {
-                    if item.user_id.as_deref() != Some(user_id) {
-                        return false;
-                    }
-                }
-                if let Some(provider_name) = query.provider_name.as_deref() {
-                    if item.provider_name != provider_name {
-                        return false;
-                    }
-                }
-                if let Some(model) = query.model.as_deref() {
-                    if item.model != model {
-                        return false;
-                    }
-                }
-                if let Some(statuses) = query.statuses.as_ref() {
-                    if !statuses.iter().any(|s| s == &item.status) {
-                        return false;
-                    }
-                }
-                true
-            })
+            .filter(|item| usage_matches_list_query(item, query))
             .cloned()
             .collect();
-        items.sort_by(|left, right| {
-            left.created_at_unix_ms
-                .cmp(&right.created_at_unix_ms)
-                .then_with(|| left.request_id.cmp(&right.request_id))
-        });
+        sort_usage_items(&mut items, query.newest_first);
+        if let Some(offset) = query.offset {
+            if offset >= items.len() {
+                items.clear();
+            } else {
+                items.drain(..offset);
+            }
+        }
         if let Some(limit) = query.limit {
             items.truncate(limit);
         }
         Ok(items)
+    }
+
+    async fn count_usage_audits(&self, query: &UsageAuditListQuery) -> Result<u64, DataLayerError> {
+        Ok(self
+            .by_request_id
+            .read()
+            .expect("usage repository lock")
+            .values()
+            .filter(|item| usage_matches_list_query(item, query))
+            .count() as u64)
+    }
+
+    async fn aggregate_usage_audits(
+        &self,
+        query: &UsageAuditAggregationQuery,
+    ) -> Result<Vec<StoredUsageAuditAggregation>, DataLayerError> {
+        #[derive(Default)]
+        struct AggregateBucket {
+            display_name: Option<String>,
+            secondary_name: Option<String>,
+            request_count: u64,
+            total_tokens: u64,
+            output_tokens: u64,
+            effective_input_tokens: u64,
+            total_input_context: u64,
+            cache_creation_tokens: u64,
+            cache_creation_ephemeral_5m_tokens: u64,
+            cache_creation_ephemeral_1h_tokens: u64,
+            cache_read_tokens: u64,
+            total_cost_usd: f64,
+            actual_total_cost_usd: f64,
+            response_time_ms_sum: u64,
+            success_count: u64,
+        }
+
+        let mut grouped: BTreeMap<String, AggregateBucket> = BTreeMap::new();
+        for item in self
+            .by_request_id
+            .read()
+            .expect("usage repository lock")
+            .values()
+        {
+            if item.created_at_unix_ms < query.created_from_unix_secs
+                || item.created_at_unix_ms >= query.created_until_unix_secs
+                || matches!(item.status.as_str(), "pending" | "streaming")
+            {
+                continue;
+            }
+
+            let group_key = match query.group_by {
+                UsageAuditAggregationGroupBy::Model => item.model.clone(),
+                UsageAuditAggregationGroupBy::Provider => item
+                    .provider_id
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                UsageAuditAggregationGroupBy::ApiFormat => item
+                    .api_format
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                UsageAuditAggregationGroupBy::User => match item.user_id.clone() {
+                    Some(value) => value,
+                    None => continue,
+                },
+            };
+            let bucket = grouped.entry(group_key).or_default();
+            if matches!(query.group_by, UsageAuditAggregationGroupBy::Provider)
+                && (bucket.display_name.is_none()
+                    || bucket.display_name.as_deref() == Some("Unknown"))
+            {
+                bucket.display_name =
+                    usage_provider_display_name(item).or(Some("Unknown".to_string()));
+            }
+            bucket.request_count = bucket.request_count.saturating_add(1);
+            bucket.total_tokens = bucket.total_tokens.saturating_add(item.total_tokens);
+            bucket.output_tokens = bucket.output_tokens.saturating_add(item.output_tokens);
+            bucket.effective_input_tokens = bucket
+                .effective_input_tokens
+                .saturating_add(usage_effective_input_tokens(item));
+            bucket.total_input_context = bucket
+                .total_input_context
+                .saturating_add(usage_total_input_context(item));
+            bucket.cache_creation_tokens = bucket
+                .cache_creation_tokens
+                .saturating_add(usage_cache_creation_tokens(item));
+            bucket.cache_creation_ephemeral_5m_tokens = bucket
+                .cache_creation_ephemeral_5m_tokens
+                .saturating_add(item.cache_creation_ephemeral_5m_input_tokens);
+            bucket.cache_creation_ephemeral_1h_tokens = bucket
+                .cache_creation_ephemeral_1h_tokens
+                .saturating_add(item.cache_creation_ephemeral_1h_input_tokens);
+            bucket.cache_read_tokens = bucket
+                .cache_read_tokens
+                .saturating_add(item.cache_read_input_tokens);
+            bucket.total_cost_usd += item.total_cost_usd;
+            bucket.actual_total_cost_usd += item.actual_total_cost_usd;
+            bucket.response_time_ms_sum = bucket
+                .response_time_ms_sum
+                .saturating_add(item.response_time_ms.unwrap_or_default());
+            bucket.success_count = bucket
+                .success_count
+                .saturating_add(if usage_is_success(item) { 1 } else { 0 });
+        }
+
+        let mut items = grouped
+            .into_iter()
+            .map(|(group_key, bucket)| StoredUsageAuditAggregation {
+                group_key,
+                display_name: bucket.display_name,
+                secondary_name: bucket.secondary_name,
+                request_count: bucket.request_count,
+                total_tokens: bucket.total_tokens,
+                output_tokens: bucket.output_tokens,
+                effective_input_tokens: bucket.effective_input_tokens,
+                total_input_context: bucket.total_input_context,
+                cache_creation_tokens: bucket.cache_creation_tokens,
+                cache_creation_ephemeral_5m_tokens: bucket.cache_creation_ephemeral_5m_tokens,
+                cache_creation_ephemeral_1h_tokens: bucket.cache_creation_ephemeral_1h_tokens,
+                cache_read_tokens: bucket.cache_read_tokens,
+                total_cost_usd: bucket.total_cost_usd,
+                actual_total_cost_usd: bucket.actual_total_cost_usd,
+                avg_response_time_ms: match query.group_by {
+                    UsageAuditAggregationGroupBy::Provider
+                    | UsageAuditAggregationGroupBy::ApiFormat => {
+                        Some(if bucket.request_count == 0 {
+                            0.0
+                        } else {
+                            bucket.response_time_ms_sum as f64 / bucket.request_count as f64
+                        })
+                    }
+                    _ => None,
+                },
+                success_count: match query.group_by {
+                    UsageAuditAggregationGroupBy::Provider => Some(bucket.success_count),
+                    _ => None,
+                },
+            })
+            .collect::<Vec<_>>();
+
+        items.sort_by(|left, right| {
+            right
+                .request_count
+                .cmp(&left.request_count)
+                .then_with(|| left.group_key.cmp(&right.group_key))
+        });
+        items.truncate(query.limit);
+        Ok(items)
+    }
+
+    async fn summarize_usage_audits(
+        &self,
+        query: &UsageAuditSummaryQuery,
+    ) -> Result<StoredUsageAuditSummary, DataLayerError> {
+        let mut summary = StoredUsageAuditSummary::default();
+        for item in self
+            .by_request_id
+            .read()
+            .expect("usage repository lock")
+            .values()
+        {
+            if !usage_matches_summary_query(item, query) {
+                continue;
+            }
+            summary.total_requests = summary.total_requests.saturating_add(1);
+            summary.input_tokens = summary.input_tokens.saturating_add(item.input_tokens);
+            summary.output_tokens = summary.output_tokens.saturating_add(item.output_tokens);
+            summary.recorded_total_tokens = summary
+                .recorded_total_tokens
+                .saturating_add(item.total_tokens);
+            summary.cache_creation_tokens = summary
+                .cache_creation_tokens
+                .saturating_add(usage_cache_creation_tokens(item));
+            summary.cache_creation_ephemeral_5m_tokens = summary
+                .cache_creation_ephemeral_5m_tokens
+                .saturating_add(item.cache_creation_ephemeral_5m_input_tokens);
+            summary.cache_creation_ephemeral_1h_tokens = summary
+                .cache_creation_ephemeral_1h_tokens
+                .saturating_add(item.cache_creation_ephemeral_1h_input_tokens);
+            summary.cache_read_tokens = summary
+                .cache_read_tokens
+                .saturating_add(item.cache_read_input_tokens);
+            summary.total_cost_usd += item.total_cost_usd;
+            summary.actual_total_cost_usd += item.actual_total_cost_usd;
+            summary.cache_creation_cost_usd += item.cache_creation_cost_usd;
+            summary.cache_read_cost_usd += item.cache_read_cost_usd;
+            summary.total_response_time_ms += item.response_time_ms.unwrap_or(0) as f64;
+            if item.status_code.is_some_and(|value| value >= 400) || item.error_message.is_some() {
+                summary.error_requests = summary.error_requests.saturating_add(1);
+            }
+        }
+        Ok(summary)
+    }
+
+    async fn summarize_usage_time_series(
+        &self,
+        query: &UsageTimeSeriesQuery,
+    ) -> Result<Vec<StoredUsageTimeSeriesBucket>, DataLayerError> {
+        let mut buckets = BTreeMap::<String, StoredUsageTimeSeriesBucket>::new();
+        for item in self
+            .by_request_id
+            .read()
+            .expect("usage repository lock")
+            .values()
+        {
+            if !usage_matches_time_series_query(item, query) {
+                continue;
+            }
+            let Some(bucket_key) =
+                usage_time_series_bucket_key(item, query.granularity, query.tz_offset_minutes)
+            else {
+                continue;
+            };
+            let bucket =
+                buckets
+                    .entry(bucket_key.clone())
+                    .or_insert_with(|| StoredUsageTimeSeriesBucket {
+                        bucket_key,
+                        ..Default::default()
+                    });
+            bucket.total_requests = bucket.total_requests.saturating_add(1);
+            bucket.input_tokens = bucket.input_tokens.saturating_add(item.input_tokens);
+            bucket.output_tokens = bucket.output_tokens.saturating_add(item.output_tokens);
+            bucket.cache_creation_tokens = bucket
+                .cache_creation_tokens
+                .saturating_add(item.cache_creation_input_tokens);
+            bucket.cache_read_tokens = bucket
+                .cache_read_tokens
+                .saturating_add(item.cache_read_input_tokens);
+            bucket.total_cost_usd += item.total_cost_usd;
+            bucket.total_response_time_ms += item.response_time_ms.unwrap_or(0) as f64;
+        }
+        Ok(buckets.into_values().collect())
+    }
+
+    async fn summarize_usage_leaderboard(
+        &self,
+        query: &UsageLeaderboardQuery,
+    ) -> Result<Vec<StoredUsageLeaderboardSummary>, DataLayerError> {
+        let mut grouped = BTreeMap::<String, StoredUsageLeaderboardSummary>::new();
+        for item in self
+            .by_request_id
+            .read()
+            .expect("usage repository lock")
+            .values()
+        {
+            if !usage_matches_leaderboard_query(item, query) {
+                continue;
+            }
+            let (group_key, legacy_name) = match query.group_by {
+                UsageLeaderboardGroupBy::Model => (item.model.clone(), None),
+                UsageLeaderboardGroupBy::User => match item.user_id.clone() {
+                    Some(user_id) => (user_id, item.username.clone()),
+                    None => continue,
+                },
+                UsageLeaderboardGroupBy::ApiKey => match item.api_key_id.clone() {
+                    Some(api_key_id) => (api_key_id, item.api_key_name.clone()),
+                    None => continue,
+                },
+            };
+            let entry =
+                grouped
+                    .entry(group_key.clone())
+                    .or_insert_with(|| StoredUsageLeaderboardSummary {
+                        group_key,
+                        legacy_name: legacy_name.clone(),
+                        ..Default::default()
+                    });
+            if entry.legacy_name.is_none() {
+                entry.legacy_name = legacy_name;
+            }
+            entry.request_count = entry.request_count.saturating_add(1);
+            entry.total_tokens = entry.total_tokens.saturating_add(
+                item.input_tokens
+                    .saturating_add(item.output_tokens)
+                    .saturating_add(item.cache_creation_input_tokens)
+                    .saturating_add(item.cache_read_input_tokens),
+            );
+            entry.total_cost_usd += item.total_cost_usd;
+        }
+        Ok(grouped.into_values().collect())
     }
 
     async fn list_recent_usage_audits(

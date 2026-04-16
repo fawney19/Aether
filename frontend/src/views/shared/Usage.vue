@@ -347,7 +347,7 @@ const discoveredActiveRequestIds = new Set<string>()
 
 async function loadActiveRequestUpdates(ids?: string[]) {
   if (isAdminPage.value) {
-    return usageApi.getActiveRequests(ids)
+    return usageApi.getActiveRequests(ids, timeRange.value)
   }
   const idsParam = ids?.length ? ids.join(',') : undefined
   return meApi.getActiveRequests(idsParam)

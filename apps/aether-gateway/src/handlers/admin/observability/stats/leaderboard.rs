@@ -4,9 +4,11 @@ use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
 
 pub(super) use aether_admin::observability::stats::{
     build_admin_stats_leaderboard_response, build_api_key_leaderboard_items,
-    build_model_leaderboard_items, build_user_leaderboard_items, compare_leaderboard_items,
-    compute_dense_rank, AdminStatsLeaderboardItem, AdminStatsLeaderboardMetric,
-    AdminStatsLeaderboardNameMode, AdminStatsSortOrder, AdminStatsUserMetadata,
+    build_api_key_leaderboard_items_from_summaries, build_model_leaderboard_items,
+    build_model_leaderboard_items_from_summaries, build_user_leaderboard_items,
+    build_user_leaderboard_items_from_summaries, compare_leaderboard_items, compute_dense_rank,
+    AdminStatsLeaderboardItem, AdminStatsLeaderboardMetric, AdminStatsLeaderboardNameMode,
+    AdminStatsSortOrder, AdminStatsUserMetadata,
 };
 
 pub(super) async fn load_user_leaderboard_metadata(

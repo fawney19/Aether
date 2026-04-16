@@ -16,8 +16,13 @@ pub(in super::super) async fn list_recent_completed_usage_for_cache_affinity(
             user_id: user_id.map(ToOwned::to_owned),
             provider_name: None,
             model: None,
+            api_format: None,
             statuses: None,
+            is_stream: None,
+            error_only: false,
             limit: None,
+            offset: None,
+            newest_first: false,
         })
         .await?;
     items.retain(|item| item.status == "completed");
