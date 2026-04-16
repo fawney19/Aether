@@ -2709,6 +2709,36 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_p
     key.auth_type = "oauth".to_string();
     key.oauth_invalid_at_unix_secs = Some(1_700_000_000);
     key.oauth_invalid_reason = Some("[REFRESH_FAILED] stale token".to_string());
+    key.status_snapshot = Some(json!({
+        "oauth": {
+            "code": "expired",
+            "label": "已过期",
+            "reason": "Token 已过期，请重新授权",
+            "expires_at": 1u64,
+            "invalid_at": 1_700_000_000u64,
+            "source": "expires_at",
+            "requires_reauth": true,
+            "expiring_soon": false
+        },
+        "account": {
+            "code": "ok",
+            "label": null,
+            "reason": null,
+            "blocked": false,
+            "source": null,
+            "recoverable": false
+        },
+        "quota": {
+            "code": "unknown",
+            "label": null,
+            "reason": null,
+            "exhausted": false,
+            "usage_ratio": null,
+            "updated_at": null,
+            "reset_seconds": null,
+            "plan_type": null
+        }
+    }));
     key.encrypted_auth_config = Some(
         encrypt_python_fernet_plaintext(
             DEVELOPMENT_ENCRYPTION_KEY,
@@ -2826,6 +2856,44 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_p
     assert_eq!(
         auth_config["email"],
         serde_json::Value::String("alice@example.com".to_string())
+    );
+    let status_snapshot = stored_key
+        .status_snapshot
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .expect("status snapshot should exist");
+    let oauth_snapshot = status_snapshot
+        .get("oauth")
+        .and_then(serde_json::Value::as_object)
+        .expect("oauth snapshot should exist");
+    assert_eq!(
+        oauth_snapshot
+            .get("code")
+            .and_then(serde_json::Value::as_str),
+        Some("expiring")
+    );
+    assert_eq!(
+        oauth_snapshot
+            .get("label")
+            .and_then(serde_json::Value::as_str),
+        Some("即将过期")
+    );
+    assert_eq!(
+        oauth_snapshot.get("expires_at"),
+        auth_config.get("expires_at")
+    );
+    assert_eq!(oauth_snapshot.get("reason"), Some(&serde_json::Value::Null));
+    assert_eq!(
+        oauth_snapshot
+            .get("requires_reauth")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        oauth_snapshot
+            .get("expiring_soon")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
     );
 
     gateway_handle.abort();

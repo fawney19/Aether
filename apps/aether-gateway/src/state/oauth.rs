@@ -3,22 +3,177 @@ use super::{
     GatewayError, ProviderTransportSnapshotCacheKey, PROVIDER_TRANSPORT_SNAPSHOT_CACHE_MAX_ENTRIES,
     PROVIDER_TRANSPORT_SNAPSHOT_CACHE_TTL,
 };
+use crate::handlers::shared::default_provider_key_status_snapshot;
 use crate::provider_transport::LocalOAuthHttpExecutor;
 
 use super::super::provider_transport;
 use aether_contracts::{ExecutionPlan, ExecutionTimeouts, RequestBody};
+use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use flate2::read::{DeflateDecoder, GzDecoder};
+use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aether_crypto::encrypt_python_fernet_plaintext;
 
 const LOCAL_OAUTH_HTTP_TIMEOUT_MS: u64 = 30_000;
+const OAUTH_ACCOUNT_BLOCK_PREFIX: &str = "[ACCOUNT_BLOCK] ";
+const OAUTH_EXPIRED_PREFIX: &str = "[OAUTH_EXPIRED] ";
+const OAUTH_REFRESH_FAILED_PREFIX: &str = "[REFRESH_FAILED] ";
+const OAUTH_REQUEST_FAILED_PREFIX: &str = "[REQUEST_FAILED] ";
 
 struct GatewayLocalOAuthHttpExecutor<'a> {
     state: &'a AppState,
+}
+
+fn trimmed_reason(reason: Option<&str>) -> Option<String> {
+    reason
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn tagged_reason(reason: Option<&str>, prefix: &str) -> Option<String> {
+    reason.and_then(|value| {
+        value
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix(prefix))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn default_oauth_status_snapshot_value() -> Value {
+    default_provider_key_status_snapshot()
+        .get("oauth")
+        .cloned()
+        .unwrap_or_else(|| {
+            json!({
+                "code": "none",
+                "label": Value::Null,
+                "reason": Value::Null,
+                "expires_at": Value::Null,
+                "invalid_at": Value::Null,
+                "source": Value::Null,
+                "requires_reauth": false,
+                "expiring_soon": false,
+            })
+        })
+}
+
+fn build_oauth_status_snapshot_value(key: &StoredProviderCatalogKey) -> Value {
+    if !key.auth_type.trim().eq_ignore_ascii_case("oauth") {
+        return default_oauth_status_snapshot_value();
+    }
+
+    let now_unix_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let expires_at_unix_secs = key.expires_at_unix_secs;
+    let invalid_at_unix_secs = key.oauth_invalid_at_unix_secs;
+    let invalid_reason = trimmed_reason(key.oauth_invalid_reason.as_deref());
+
+    if let Some(reason) = tagged_reason(invalid_reason.as_deref(), OAUTH_EXPIRED_PREFIX) {
+        return json!({
+            "code": "invalid",
+            "label": "已失效",
+            "reason": reason,
+            "expires_at": expires_at_unix_secs,
+            "invalid_at": invalid_at_unix_secs,
+            "source": "oauth_invalid",
+            "requires_reauth": true,
+            "expiring_soon": false,
+        });
+    }
+    if let Some(reason) = tagged_reason(invalid_reason.as_deref(), OAUTH_REFRESH_FAILED_PREFIX) {
+        return json!({
+            "code": "invalid",
+            "label": "已失效",
+            "reason": reason,
+            "expires_at": expires_at_unix_secs,
+            "invalid_at": invalid_at_unix_secs,
+            "source": "oauth_refresh",
+            "requires_reauth": true,
+            "expiring_soon": false,
+        });
+    }
+    if let Some(reason) = tagged_reason(invalid_reason.as_deref(), OAUTH_REQUEST_FAILED_PREFIX) {
+        return json!({
+            "code": "check_failed",
+            "label": "检查失败",
+            "reason": reason,
+            "expires_at": expires_at_unix_secs,
+            "invalid_at": Value::Null,
+            "source": "oauth_request",
+            "requires_reauth": false,
+            "expiring_soon": false,
+        });
+    }
+    if invalid_reason
+        .as_deref()
+        .is_some_and(|reason| !reason.starts_with(OAUTH_ACCOUNT_BLOCK_PREFIX))
+        || invalid_at_unix_secs.is_some()
+    {
+        return json!({
+            "code": "invalid",
+            "label": "已失效",
+            "reason": invalid_reason,
+            "expires_at": expires_at_unix_secs,
+            "invalid_at": invalid_at_unix_secs,
+            "source": "oauth_invalid",
+            "requires_reauth": true,
+            "expiring_soon": false,
+        });
+    }
+
+    let Some(expires_at_unix_secs) = expires_at_unix_secs else {
+        return default_oauth_status_snapshot_value();
+    };
+    if expires_at_unix_secs <= now_unix_secs {
+        return json!({
+            "code": "expired",
+            "label": "已过期",
+            "reason": "Token 已过期，请重新授权",
+            "expires_at": expires_at_unix_secs,
+            "invalid_at": Value::Null,
+            "source": "expires_at",
+            "requires_reauth": true,
+            "expiring_soon": false,
+        });
+    }
+
+    let expiring_soon = expires_at_unix_secs.saturating_sub(now_unix_secs) < 24 * 60 * 60;
+    json!({
+        "code": if expiring_soon { "expiring" } else { "valid" },
+        "label": if expiring_soon { "即将过期" } else { "有效" },
+        "reason": Value::Null,
+        "expires_at": expires_at_unix_secs,
+        "invalid_at": Value::Null,
+        "source": "expires_at",
+        "requires_reauth": false,
+        "expiring_soon": expiring_soon,
+    })
+}
+
+fn sync_provider_key_oauth_status_snapshot(
+    status_snapshot: Option<Value>,
+    key: &StoredProviderCatalogKey,
+) -> Option<Value> {
+    let mut snapshot = status_snapshot
+        .and_then(|value| match value {
+            Value::Object(object) => Some(object),
+            _ => None,
+        })
+        .or_else(|| default_provider_key_status_snapshot().as_object().cloned())
+        .unwrap_or_default();
+    snapshot.insert("oauth".to_string(), build_oauth_status_snapshot_value(key));
+    Some(Value::Object(snapshot))
 }
 
 #[async_trait::async_trait]
@@ -555,13 +710,34 @@ impl AppState {
             .transpose()
             .map_err(|err| GatewayError::Internal(err.to_string()))?;
 
-        self.update_provider_catalog_key_oauth_credentials(
-            key_id,
-            encrypted_api_key.as_str(),
-            encrypted_auth_config.as_deref(),
-            entry.expires_at_unix_secs,
-        )
-        .await?;
+        let Some(mut latest_key) = self
+            .data
+            .list_provider_catalog_keys_by_ids(&[key_id.to_string()])
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?
+            .into_iter()
+            .next()
+        else {
+            return Ok(());
+        };
+
+        latest_key.encrypted_api_key = encrypted_api_key;
+        latest_key.encrypted_auth_config = encrypted_auth_config;
+        latest_key.is_active = true;
+        latest_key.expires_at_unix_secs = entry.expires_at_unix_secs;
+        latest_key.oauth_invalid_at_unix_secs = None;
+        latest_key.oauth_invalid_reason = None;
+        latest_key.updated_at_unix_secs = Some(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0),
+        );
+        let current_status_snapshot = latest_key.status_snapshot.take();
+        latest_key.status_snapshot =
+            sync_provider_key_oauth_status_snapshot(current_status_snapshot, &latest_key);
+        self.update_provider_catalog_key(&latest_key).await?;
         Ok(())
     }
 
