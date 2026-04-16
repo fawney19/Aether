@@ -361,6 +361,10 @@ impl StoredRequestUsageAudit {
             .or_else(|| self.request_metadata_u64("candidate_index"))
     }
 
+    pub fn has_fallback(&self) -> bool {
+        self.routing_candidate_index().is_some_and(|index| index > 0)
+    }
+
     pub fn routing_key_name(&self) -> Option<&str> {
         self.key_name
             .as_deref()

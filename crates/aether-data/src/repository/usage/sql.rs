@@ -586,14 +586,42 @@ SELECT
   NULL::varchar AS http_provider_request_body_ref,
   NULL::varchar AS http_response_body_ref,
   NULL::varchar AS http_client_response_body_ref,
-  NULL::varchar AS routing_candidate_id,
-  NULL::integer AS routing_candidate_index,
-  NULL::varchar AS routing_key_name,
-  NULL::varchar AS routing_planner_kind,
-  NULL::varchar AS routing_route_family,
-  NULL::varchar AS routing_route_kind,
-  NULL::varchar AS routing_execution_path,
-  NULL::varchar AS routing_local_execution_runtime_miss_reason,
+  COALESCE(
+    usage_routing_snapshots.candidate_id,
+    NULLIF(BTRIM("usage".request_metadata->>'candidate_id'), '')
+  ) AS routing_candidate_id,
+  COALESCE(
+    usage_routing_snapshots.candidate_index,
+    CASE
+      WHEN ("usage".request_metadata->>'candidate_index') ~ '^[0-9]+$'
+        THEN ("usage".request_metadata->>'candidate_index')::integer
+      ELSE NULL
+    END
+  ) AS routing_candidate_index,
+  COALESCE(
+    usage_routing_snapshots.key_name,
+    NULLIF(BTRIM("usage".request_metadata->>'key_name'), '')
+  ) AS routing_key_name,
+  COALESCE(
+    usage_routing_snapshots.planner_kind,
+    NULLIF(BTRIM("usage".request_metadata->>'planner_kind'), '')
+  ) AS routing_planner_kind,
+  COALESCE(
+    usage_routing_snapshots.route_family,
+    NULLIF(BTRIM("usage".request_metadata->>'route_family'), '')
+  ) AS routing_route_family,
+  COALESCE(
+    usage_routing_snapshots.route_kind,
+    NULLIF(BTRIM("usage".request_metadata->>'route_kind'), '')
+  ) AS routing_route_kind,
+  COALESCE(
+    usage_routing_snapshots.execution_path,
+    NULLIF(BTRIM("usage".request_metadata->>'execution_path'), '')
+  ) AS routing_execution_path,
+  COALESCE(
+    usage_routing_snapshots.local_execution_runtime_miss_reason,
+    NULLIF(BTRIM("usage".request_metadata->>'local_execution_runtime_miss_reason'), '')
+  ) AS routing_local_execution_runtime_miss_reason,
   usage_settlement_snapshots.billing_snapshot_schema_version AS settlement_billing_snapshot_schema_version,
   usage_settlement_snapshots.billing_snapshot_status AS settlement_billing_snapshot_status,
   CAST(usage_settlement_snapshots.rate_multiplier AS DOUBLE PRECISION) AS settlement_rate_multiplier,
@@ -619,6 +647,8 @@ SELECT
     ) AS BIGINT
   ) AS finalized_at_unix_secs
 FROM "usage"
+LEFT JOIN usage_routing_snapshots
+  ON usage_routing_snapshots.request_id = "usage".request_id
 LEFT JOIN usage_settlement_snapshots
   ON usage_settlement_snapshots.request_id = "usage".request_id
 "#;
@@ -772,14 +802,42 @@ SELECT
   NULL::varchar AS http_provider_request_body_ref,
   NULL::varchar AS http_response_body_ref,
   NULL::varchar AS http_client_response_body_ref,
-  NULL::varchar AS routing_candidate_id,
-  NULL::integer AS routing_candidate_index,
-  NULL::varchar AS routing_key_name,
-  NULL::varchar AS routing_planner_kind,
-  NULL::varchar AS routing_route_family,
-  NULL::varchar AS routing_route_kind,
-  NULL::varchar AS routing_execution_path,
-  NULL::varchar AS routing_local_execution_runtime_miss_reason,
+  COALESCE(
+    usage_routing_snapshots.candidate_id,
+    NULLIF(BTRIM("usage".request_metadata->>'candidate_id'), '')
+  ) AS routing_candidate_id,
+  COALESCE(
+    usage_routing_snapshots.candidate_index,
+    CASE
+      WHEN ("usage".request_metadata->>'candidate_index') ~ '^[0-9]+$'
+        THEN ("usage".request_metadata->>'candidate_index')::integer
+      ELSE NULL
+    END
+  ) AS routing_candidate_index,
+  COALESCE(
+    usage_routing_snapshots.key_name,
+    NULLIF(BTRIM("usage".request_metadata->>'key_name'), '')
+  ) AS routing_key_name,
+  COALESCE(
+    usage_routing_snapshots.planner_kind,
+    NULLIF(BTRIM("usage".request_metadata->>'planner_kind'), '')
+  ) AS routing_planner_kind,
+  COALESCE(
+    usage_routing_snapshots.route_family,
+    NULLIF(BTRIM("usage".request_metadata->>'route_family'), '')
+  ) AS routing_route_family,
+  COALESCE(
+    usage_routing_snapshots.route_kind,
+    NULLIF(BTRIM("usage".request_metadata->>'route_kind'), '')
+  ) AS routing_route_kind,
+  COALESCE(
+    usage_routing_snapshots.execution_path,
+    NULLIF(BTRIM("usage".request_metadata->>'execution_path'), '')
+  ) AS routing_execution_path,
+  COALESCE(
+    usage_routing_snapshots.local_execution_runtime_miss_reason,
+    NULLIF(BTRIM("usage".request_metadata->>'local_execution_runtime_miss_reason'), '')
+  ) AS routing_local_execution_runtime_miss_reason,
   usage_settlement_snapshots.billing_snapshot_schema_version AS settlement_billing_snapshot_schema_version,
   usage_settlement_snapshots.billing_snapshot_status AS settlement_billing_snapshot_status,
   CAST(usage_settlement_snapshots.rate_multiplier AS DOUBLE PRECISION) AS settlement_rate_multiplier,
@@ -805,6 +863,8 @@ SELECT
     ) AS BIGINT
   ) AS finalized_at_unix_secs
 FROM "usage"
+LEFT JOIN usage_routing_snapshots
+  ON usage_routing_snapshots.request_id = "usage".request_id
 LEFT JOIN usage_settlement_snapshots
   ON usage_settlement_snapshots.request_id = "usage".request_id
 "#;
@@ -3874,10 +3934,12 @@ mod tests {
         assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("NULL::json AS provider_request_body"));
         assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("NULL::bytea AS request_body_compressed"));
         assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("NULL::varchar AS http_request_body_ref"));
-        assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("NULL::varchar AS routing_candidate_id"));
+        assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("usage_routing_snapshots.candidate_id"));
         assert!(
-            super::LIST_USAGE_AUDITS_PREFIX.contains("NULL::integer AS routing_candidate_index")
+            super::LIST_USAGE_AUDITS_PREFIX.contains("usage_routing_snapshots.candidate_index")
         );
+        assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("request_metadata->>'candidate_index'"));
+        assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("LEFT JOIN usage_routing_snapshots"));
         assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("LEFT JOIN usage_settlement_snapshots"));
         assert!(
             super::LIST_USAGE_AUDITS_PREFIX.contains("settlement_billing_snapshot_schema_version")
@@ -3891,9 +3953,12 @@ mod tests {
         assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX
             .contains("NULL::varchar AS http_client_response_body_ref"));
         assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX
-            .contains("NULL::integer AS routing_candidate_index"));
+            .contains("usage_routing_snapshots.candidate_index"));
         assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX
-            .contains("NULL::varchar AS routing_execution_path"));
+            .contains("request_metadata->>'candidate_index'"));
+        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX.contains("LEFT JOIN usage_routing_snapshots"));
+        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX
+            .contains("usage_routing_snapshots.execution_path"));
         assert!(
             super::LIST_RECENT_USAGE_AUDITS_PREFIX.contains("LEFT JOIN usage_settlement_snapshots")
         );
