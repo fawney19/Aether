@@ -601,6 +601,7 @@ pub fn build_admin_pool_selection_payload(keys: &[StoredProviderCatalogKey]) -> 
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::admin_pool_key_account_quota_exhausted;
     use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;

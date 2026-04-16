@@ -85,6 +85,9 @@ pub(crate) async fn refresh_provider_oauth_account_state_after_update(
     else {
         return Ok((false, None));
     };
+    if provider_type == "kiro" && !key.auth_type.trim().eq_ignore_ascii_case("bearer") {
+        return Ok((false, None));
+    }
 
     let payload = match provider_type.as_str() {
         "codex" => {

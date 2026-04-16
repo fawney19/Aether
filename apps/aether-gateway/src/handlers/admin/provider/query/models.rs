@@ -613,7 +613,7 @@ async fn provider_query_execute_kiro_test_candidate(
         provider_request_body: &provider_request_body,
         original_request_body: &request_body,
         header_rules: transport.endpoint.header_rules.as_ref(),
-        auth_header: &kiro_auth.name,
+        auth_header: kiro_auth.name,
         auth_value: &kiro_auth.value,
         auth_config: &kiro_auth.auth_config,
         machine_id: kiro_auth.machine_id.as_str(),
