@@ -40,22 +40,26 @@ pub fn parse_provider_oauth_callback_params(callback_url: &str) -> BTreeMap<Stri
     let Ok(url) = Url::parse(callback_url.trim()) else {
         return merged;
     };
-    for (key, value) in url.query_pairs() {
+    for (key, value) in form_urlencoded::parse(url.query().unwrap_or_default().as_bytes()) {
         merged.insert(key.into_owned(), value.into_owned());
     }
     if let Some(fragment) = url.fragment() {
-        for (key, value) in form_urlencoded::parse(fragment.as_bytes()) {
-            merged
-                .entry(key.into_owned())
-                .or_insert_with(|| value.into_owned());
+        for (key, value) in form_urlencoded::parse(fragment.trim_start_matches('#').as_bytes()) {
+            merged.insert(key.into_owned(), value.into_owned());
         }
     }
     if let Some(code) = merged.get("code").cloned() {
-        if let Some((code_part, state_part)) = code.split_once("#state=") {
+        if let Some((code_part, state_part)) = code.split_once('#') {
             merged.insert("code".to_string(), code_part.to_string());
-            merged
-                .entry("state".to_string())
-                .or_insert_with(|| state_part.to_string());
+            if !merged.contains_key("state") && !state_part.is_empty() {
+                let normalized_state = state_part
+                    .strip_prefix("state=")
+                    .unwrap_or(state_part)
+                    .trim();
+                if !normalized_state.is_empty() {
+                    merged.insert("state".to_string(), normalized_state.to_string());
+                }
+            }
         }
     }
     merged
@@ -306,4 +310,49 @@ pub fn build_kiro_device_key_name(email: Option<&str>, refresh_token: Option<&st
         })
         .unwrap_or_else(|| "unknown".to_string());
     format!("kiro_{fallback} (idc)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_provider_oauth_callback_params;
+
+    #[test]
+    fn parse_provider_oauth_callback_params_reads_openai_query_state() {
+        let params = parse_provider_oauth_callback_params(
+            "http://localhost:1455/auth/callback?code=ac_test123&scope=openid+email+profile+offline_access&state=4a138f8c65814df691b1a567fd425fb3d7010e86df9b4eb48dcadd94de233d93",
+        );
+
+        assert_eq!(params.get("code").map(String::as_str), Some("ac_test123"));
+        assert_eq!(
+            params.get("scope").map(String::as_str),
+            Some("openid email profile offline_access")
+        );
+        assert_eq!(
+            params.get("state").map(String::as_str),
+            Some("4a138f8c65814df691b1a567fd425fb3d7010e86df9b4eb48dcadd94de233d93")
+        );
+    }
+
+    #[test]
+    fn parse_provider_oauth_callback_params_prefers_fragment_values_like_python() {
+        let params = parse_provider_oauth_callback_params(
+            "http://localhost:1455/auth/callback?code=query-code&state=stale#code=fragment-code&state=fresh-state",
+        );
+
+        assert_eq!(
+            params.get("code").map(String::as_str),
+            Some("fragment-code")
+        );
+        assert_eq!(params.get("state").map(String::as_str), Some("fresh-state"));
+    }
+
+    #[test]
+    fn parse_provider_oauth_callback_params_extracts_state_from_code_suffix() {
+        let params = parse_provider_oauth_callback_params(
+            "http://localhost:1455/auth/callback?code=code-value%23state%3Dnonce-value",
+        );
+
+        assert_eq!(params.get("code").map(String::as_str), Some("code-value"));
+        assert_eq!(params.get("state").map(String::as_str), Some("nonce-value"));
+    }
 }

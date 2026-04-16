@@ -251,7 +251,7 @@ async fn list_admin_monitoring_cache_affinity_records_matching(
                                 "admin monitoring redis mget failed: {err}"
                             ))
                         })?;
-                    for (key, raw_value) in keys.into_iter().zip(values.into_iter()) {
+                    for (key, raw_value) in keys.into_iter().zip(values) {
                         let Some(raw_value) = raw_value else {
                             continue;
                         };
