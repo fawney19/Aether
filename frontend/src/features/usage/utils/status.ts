@@ -11,6 +11,12 @@ function hasLegacyFailureSignal(
     (typeof record.error_message === 'string' && record.error_message.trim().length > 0)
 }
 
+export function hasUsageFallback(
+  record: Pick<UsageRecord, 'has_fallback'>
+): boolean {
+  return record.has_fallback === true
+}
+
 function hasTerminalSuccessStatusCode(
   record: Pick<UsageRecord, 'status_code'>
 ): boolean {

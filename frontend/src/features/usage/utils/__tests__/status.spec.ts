@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  hasUsageFallback,
   isUsageRecordFailed,
   isUsageRecordSuccessful,
   mapRequestStatusToTimelineStatus,
@@ -89,6 +90,12 @@ describe('usage status helpers', () => {
     expect(resolveTimelineFinalStatus({
       requestStatus: 'failed',
     })).toBe('failed')
+  })
+
+  it('uses explicit has_fallback flag for transfer filtering', () => {
+    expect(hasUsageFallback(buildUsageRecord({ has_fallback: true }))).toBe(true)
+    expect(hasUsageFallback(buildUsageRecord({ has_fallback: false }))).toBe(false)
+    expect(hasUsageFallback(buildUsageRecord({ has_fallback: undefined }))).toBe(false)
   })
 
   it('uses status code only as a last fallback for timeline status', () => {

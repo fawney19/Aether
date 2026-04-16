@@ -144,7 +144,7 @@ import {
   getDateRangeFromPeriod
 } from '@/features/usage/composables'
 import { reconcileActiveRequestDiscovery } from '@/features/usage/utils/activeRequestDiscovery'
-import { isUsageRecordFailed } from '@/features/usage/utils/status'
+import { hasUsageFallback, isUsageRecordFailed } from '@/features/usage/utils/status'
 import type { DateRangeParams, FilterStatusValue } from '@/features/usage/types'
 import type { UserOption } from '@/features/usage/components/UsageRecordsTable.vue'
 import { log } from '@/utils/logger'
@@ -309,6 +309,8 @@ const filteredRecords = computed(() => {
         records = records.filter(record => isUsageRecordFailed(record))
       } else if (filterStatus.value === 'cancelled') {
         records = records.filter(record => record.status === 'cancelled')
+      } else if (filterStatus.value === 'has_fallback') {
+        records = records.filter(record => hasUsageFallback(record))
       }
     }
 
