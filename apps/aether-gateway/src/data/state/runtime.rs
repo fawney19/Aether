@@ -6,24 +6,24 @@ use super::{
     CreateAdminRedeemCodeBatchInput, CreateAdminRedeemCodeBatchResult, CreateAnnouncementRecord,
     CreateManualWalletRechargeInput, CreateWalletRechargeOrderInput,
     CreateWalletRechargeOrderOutcome, CreateWalletRefundRequestInput,
-    CreateWalletRefundRequestOutcome, CreditAdminPaymentOrderInput, DataLayerError,
-    DecisionTrace, DeleteAdminRedeemCodeBatchInput, DisableAdminRedeemCodeBatchInput, DisableAdminRedeemCodeInput,
+    CreateWalletRefundRequestOutcome, CreditAdminPaymentOrderInput, DataLayerError, DecisionTrace,
+    DeleteAdminRedeemCodeBatchInput, DisableAdminRedeemCodeBatchInput, DisableAdminRedeemCodeInput,
     FailAdminWalletRefundInput, GatewayDataState, GatewayProviderTransportSnapshot,
     LocalVideoTaskReadResponse, ProcessAdminWalletRefundInput, ProcessPaymentCallbackInput,
     ProcessPaymentCallbackOutcome, RedeemWalletCodeInput, RedeemWalletCodeOutcome,
-    RedisStreamRunner, RequestAuditBundle, RequestCandidateTrace,
-    StoredAdminPaymentCallbackPage, StoredAdminPaymentOrder, StoredAdminPaymentOrderPage,
-    StoredAdminRedeemCodeBatch, StoredAdminRedeemCodeBatchPage, StoredAdminRedeemCodePage,
-    StoredAdminWalletLedgerPage, StoredAdminWalletListPage, StoredAdminWalletRefund,
-    StoredAdminWalletRefundPage, StoredAdminWalletRefundRequestPage,
-    StoredAdminWalletTransaction, StoredAdminWalletTransactionPage, StoredAnnouncement,
-    StoredAnnouncementPage, StoredBillingModelContext, StoredProviderQuotaSnapshot,
-    StoredProviderUsageSummary, StoredRequestUsageAudit, StoredUsageSettlement,
-    StoredUserAuthRecord, StoredUserExportRow, StoredUserSummary, StoredVideoTask,
-    StoredWalletDailyUsageLedger, StoredWalletDailyUsageLedgerPage, StoredWalletSnapshot,
-    UpdateAnnouncementRecord, UpsertUsageRecord, UpsertVideoTask, UsageSettlementInput,
-    VideoTaskLookupKey, VideoTaskModelCount, VideoTaskQueryFilter, VideoTaskStatusCount,
-    WalletLookupKey, WalletMutationOutcome,
+    RedisStreamRunner, RequestAuditBundle, RequestCandidateTrace, StoredAdminPaymentCallbackPage,
+    StoredAdminPaymentOrder, StoredAdminPaymentOrderPage, StoredAdminRedeemCodeBatch,
+    StoredAdminRedeemCodeBatchPage, StoredAdminRedeemCodePage, StoredAdminWalletLedgerPage,
+    StoredAdminWalletListPage, StoredAdminWalletRefund, StoredAdminWalletRefundPage,
+    StoredAdminWalletRefundRequestPage, StoredAdminWalletTransaction,
+    StoredAdminWalletTransactionPage, StoredAnnouncement, StoredAnnouncementPage,
+    StoredBillingModelContext, StoredProviderQuotaSnapshot, StoredProviderUsageSummary,
+    StoredRequestUsageAudit, StoredUsageSettlement, StoredUserAuthRecord, StoredUserExportRow,
+    StoredUserSummary, StoredVideoTask, StoredWalletDailyUsageLedger,
+    StoredWalletDailyUsageLedgerPage, StoredWalletSnapshot, UpdateAnnouncementRecord,
+    UpsertUsageRecord, UpsertVideoTask, UsageSettlementInput, VideoTaskLookupKey,
+    VideoTaskModelCount, VideoTaskQueryFilter, VideoTaskStatusCount, WalletLookupKey,
+    WalletMutationOutcome,
 };
 use aether_data_contracts::repository::usage::{
     StoredUsageDailySummary, UsageAuditListQuery, UsageDailyHeatmapQuery,
@@ -623,7 +623,10 @@ impl GatewayDataState {
         input: CreateAdminRedeemCodeBatchInput,
     ) -> Result<Option<CreateAdminRedeemCodeBatchResult>, DataLayerError> {
         match &self.wallet_writer {
-            Some(repository) => repository.create_admin_redeem_code_batch(input).await.map(Some),
+            Some(repository) => repository
+                .create_admin_redeem_code_batch(input)
+                .await
+                .map(Some),
             None => Ok(None),
         }
     }
@@ -633,7 +636,10 @@ impl GatewayDataState {
         input: DisableAdminRedeemCodeBatchInput,
     ) -> Result<Option<WalletMutationOutcome<StoredAdminRedeemCodeBatch>>, DataLayerError> {
         match &self.wallet_writer {
-            Some(repository) => repository.disable_admin_redeem_code_batch(input).await.map(Some),
+            Some(repository) => repository
+                .disable_admin_redeem_code_batch(input)
+                .await
+                .map(Some),
             None => Ok(None),
         }
     }
@@ -643,7 +649,10 @@ impl GatewayDataState {
         input: DeleteAdminRedeemCodeBatchInput,
     ) -> Result<Option<WalletMutationOutcome<StoredAdminRedeemCodeBatch>>, DataLayerError> {
         match &self.wallet_writer {
-            Some(repository) => repository.delete_admin_redeem_code_batch(input).await.map(Some),
+            Some(repository) => repository
+                .delete_admin_redeem_code_batch(input)
+                .await
+                .map(Some),
             None => Ok(None),
         }
     }
@@ -651,7 +660,10 @@ impl GatewayDataState {
     pub(crate) async fn disable_admin_redeem_code(
         &self,
         input: DisableAdminRedeemCodeInput,
-    ) -> Result<Option<WalletMutationOutcome<aether_data::repository::wallet::StoredAdminRedeemCode>>, DataLayerError> {
+    ) -> Result<
+        Option<WalletMutationOutcome<aether_data::repository::wallet::StoredAdminRedeemCode>>,
+        DataLayerError,
+    > {
         match &self.wallet_writer {
             Some(repository) => repository.disable_admin_redeem_code(input).await.map(Some),
             None => Ok(None),

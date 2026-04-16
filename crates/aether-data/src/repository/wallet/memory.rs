@@ -11,17 +11,18 @@ use super::types::{
     CreateManualWalletRechargeInput, CreateWalletRechargeOrderInput,
     CreateWalletRechargeOrderOutcome, CreateWalletRefundRequestInput,
     CreateWalletRefundRequestOutcome, CreatedAdminRedeemCodePlaintext,
-    CreditAdminPaymentOrderInput, DeleteAdminRedeemCodeBatchInput, DisableAdminRedeemCodeBatchInput,
-    DisableAdminRedeemCodeInput, FailAdminWalletRefundInput, ProcessAdminWalletRefundInput,
-    ProcessPaymentCallbackInput, ProcessPaymentCallbackOutcome, RedeemWalletCodeInput,
-    RedeemWalletCodeOutcome, StoredAdminPaymentCallback, StoredAdminPaymentCallbackPage,
-    StoredAdminPaymentOrder, StoredAdminPaymentOrderPage, StoredAdminRedeemCode,
-    StoredAdminRedeemCodeBatch, StoredAdminRedeemCodeBatchPage, StoredAdminRedeemCodePage,
-    StoredAdminWalletLedgerPage, StoredAdminWalletListItem, StoredAdminWalletListPage,
-    StoredAdminWalletRefund, StoredAdminWalletRefundPage, StoredAdminWalletRefundRequestPage,
-    StoredAdminWalletTransaction, StoredAdminWalletTransactionPage,
-    StoredWalletDailyUsageLedger, StoredWalletDailyUsageLedgerPage, StoredWalletSnapshot,
-    WalletLookupKey, WalletMutationOutcome, WalletReadRepository, WalletWriteRepository,
+    CreditAdminPaymentOrderInput, DeleteAdminRedeemCodeBatchInput,
+    DisableAdminRedeemCodeBatchInput, DisableAdminRedeemCodeInput, FailAdminWalletRefundInput,
+    ProcessAdminWalletRefundInput, ProcessPaymentCallbackInput, ProcessPaymentCallbackOutcome,
+    RedeemWalletCodeInput, RedeemWalletCodeOutcome, StoredAdminPaymentCallback,
+    StoredAdminPaymentCallbackPage, StoredAdminPaymentOrder, StoredAdminPaymentOrderPage,
+    StoredAdminRedeemCode, StoredAdminRedeemCodeBatch, StoredAdminRedeemCodeBatchPage,
+    StoredAdminRedeemCodePage, StoredAdminWalletLedgerPage, StoredAdminWalletListItem,
+    StoredAdminWalletListPage, StoredAdminWalletRefund, StoredAdminWalletRefundPage,
+    StoredAdminWalletRefundRequestPage, StoredAdminWalletTransaction,
+    StoredAdminWalletTransactionPage, StoredWalletDailyUsageLedger,
+    StoredWalletDailyUsageLedgerPage, StoredWalletSnapshot, WalletLookupKey, WalletMutationOutcome,
+    WalletReadRepository, WalletWriteRepository,
 };
 use crate::DataLayerError;
 
@@ -108,7 +109,12 @@ fn mask_redeem_code(prefix: &str, suffix: &str) -> String {
 }
 
 fn generate_redeem_code() -> String {
-    format_redeem_code(&uuid::Uuid::new_v4().simple().to_string().to_ascii_uppercase())
+    format_redeem_code(
+        &uuid::Uuid::new_v4()
+            .simple()
+            .to_string()
+            .to_ascii_uppercase(),
+    )
 }
 
 #[async_trait]
@@ -246,7 +252,12 @@ impl WalletReadRepository for InMemoryWalletRepository {
             .read()
             .expect("wallet repo lock")
             .values()
-            .filter(|refund| query.status.as_deref().is_none_or(|expected| refund.status == expected))
+            .filter(|refund| {
+                query
+                    .status
+                    .as_deref()
+                    .is_none_or(|expected| refund.status == expected)
+            })
             .filter_map(|refund| {
                 let wallet = wallets.get(&refund.wallet_id)?;
                 Some(super::types::StoredAdminWalletRefundRequestItem {
@@ -281,7 +292,7 @@ impl WalletReadRepository for InMemoryWalletRepository {
                 })
             })
             .collect::<Vec<_>>();
-        items.sort_by(|left, right| right.created_at_unix_ms.cmp(&left.created_at_unix_ms));
+        items.sort_by_key(|item| std::cmp::Reverse(item.created_at_unix_ms));
         let total = items.len() as u64;
         let items = items
             .into_iter()
@@ -305,7 +316,7 @@ impl WalletReadRepository for InMemoryWalletRepository {
             .filter(|tx| tx.wallet_id == wallet_id)
             .cloned()
             .collect::<Vec<_>>();
-        items.sort_by(|left, right| right.created_at_unix_ms.cmp(&left.created_at_unix_ms));
+        items.sort_by_key(|item| std::cmp::Reverse(item.created_at_unix_ms));
         let total = items.len() as u64;
         let items = items.into_iter().skip(offset).take(limit).collect();
         Ok(StoredAdminWalletTransactionPage { items, total })
@@ -342,7 +353,7 @@ impl WalletReadRepository for InMemoryWalletRepository {
             .filter(|refund| refund.wallet_id == wallet_id)
             .cloned()
             .collect::<Vec<_>>();
-        items.sort_by(|left, right| right.created_at_unix_ms.cmp(&left.created_at_unix_ms));
+        items.sort_by_key(|item| std::cmp::Reverse(item.created_at_unix_ms));
         let total = items.len() as u64;
         let items = items.into_iter().skip(offset).take(limit).collect();
         Ok(StoredAdminWalletRefundPage { items, total })
@@ -359,27 +370,23 @@ impl WalletReadRepository for InMemoryWalletRepository {
             .expect("wallet repo lock")
             .values()
             .filter(|order| {
-                query
-                    .status
+                query.status.as_deref().is_none_or(|expected| {
+                    let effective = if order.status == "pending"
+                        && order.expires_at_unix_secs.is_some_and(|value| value < now)
+                    {
+                        "expired"
+                    } else {
+                        order.status.as_str()
+                    };
+                    effective == expected
+                }) && query
+                    .payment_method
                     .as_deref()
-                    .is_none_or(|expected| {
-                        let effective = if order.status == "pending"
-                            && order.expires_at_unix_secs.is_some_and(|value| value < now)
-                        {
-                            "expired"
-                        } else {
-                            order.status.as_str()
-                        };
-                        effective == expected
-                    })
-                    && query
-                        .payment_method
-                        .as_deref()
-                        .is_none_or(|expected| order.payment_method == expected)
+                    .is_none_or(|expected| order.payment_method == expected)
             })
             .cloned()
             .collect::<Vec<_>>();
-        items.sort_by(|left, right| right.created_at_unix_ms.cmp(&left.created_at_unix_ms));
+        items.sort_by_key(|item| std::cmp::Reverse(item.created_at_unix_ms));
         let total = items.len() as u64;
         let items = items
             .into_iter()
@@ -415,7 +422,7 @@ impl WalletReadRepository for InMemoryWalletRepository {
             .filter(|order| order.user_id.as_deref() == Some(user_id))
             .cloned()
             .collect::<Vec<_>>();
-        items.sort_by(|left, right| right.created_at_unix_ms.cmp(&left.created_at_unix_ms));
+        items.sort_by_key(|item| std::cmp::Reverse(item.created_at_unix_ms));
         let total = items.len() as u64;
         let items = items.into_iter().skip(offset).take(limit).collect();
         Ok(StoredAdminPaymentOrderPage { items, total })
@@ -465,7 +472,7 @@ impl WalletReadRepository for InMemoryWalletRepository {
             })
             .cloned()
             .collect::<Vec<_>>();
-        items.sort_by(|left, right| right.created_at_unix_ms.cmp(&left.created_at_unix_ms));
+        items.sort_by_key(|item| std::cmp::Reverse(item.created_at_unix_ms));
         let total = items.len() as u64;
         let items = items.into_iter().skip(offset).take(limit).collect();
         Ok(StoredAdminPaymentCallbackPage { items, total })
@@ -480,10 +487,15 @@ impl WalletReadRepository for InMemoryWalletRepository {
             .read()
             .expect("wallet repo lock")
             .values()
-            .filter(|batch| query.status.as_deref().is_none_or(|expected| batch.status == expected))
+            .filter(|batch| {
+                query
+                    .status
+                    .as_deref()
+                    .is_none_or(|expected| batch.status == expected)
+            })
             .cloned()
             .collect::<Vec<_>>();
-        items.sort_by(|left, right| right.created_at_unix_ms.cmp(&left.created_at_unix_ms));
+        items.sort_by_key(|item| std::cmp::Reverse(item.created_at_unix_ms));
         let total = items.len() as u64;
         let items = items
             .into_iter()
@@ -515,10 +527,15 @@ impl WalletReadRepository for InMemoryWalletRepository {
             .expect("wallet repo lock")
             .values()
             .filter(|code| code.batch_id == query.batch_id)
-            .filter(|code| query.status.as_deref().is_none_or(|expected| code.status == expected))
+            .filter(|code| {
+                query
+                    .status
+                    .as_deref()
+                    .is_none_or(|expected| code.status == expected)
+            })
             .cloned()
             .collect::<Vec<_>>();
-        items.sort_by(|left, right| right.created_at_unix_ms.cmp(&left.created_at_unix_ms));
+        items.sort_by_key(|item| std::cmp::Reverse(item.created_at_unix_ms));
         let total = items.len() as u64;
         let items = items
             .into_iter()
@@ -646,7 +663,9 @@ impl WalletWriteRepository for InMemoryWalletRepository {
                 .map(|refund| refund.amount_usd)
                 .sum::<f64>();
             if input.amount_usd > (order.refundable_amount_usd - reserved_for_order) {
-                return Ok(CreateWalletRefundRequestOutcome::RefundAmountExceedsAvailableOrderAmount);
+                return Ok(
+                    CreateWalletRefundRequestOutcome::RefundAmountExceedsAvailableOrderAmount,
+                );
             }
         }
 
@@ -784,7 +803,10 @@ impl WalletWriteRepository for InMemoryWalletRepository {
         let batch_id = format!("redeem-batch-{}", uuid::Uuid::new_v4());
         let mut plaintext_codes = Vec::with_capacity(input.total_count);
         let mut codes_by_id = self.redeem_codes_by_id.write().expect("wallet repo lock");
-        let mut code_hash_to_id = self.redeem_code_hash_to_id.write().expect("wallet repo lock");
+        let mut code_hash_to_id = self
+            .redeem_code_hash_to_id
+            .write()
+            .expect("wallet repo lock");
 
         for _ in 0..input.total_count {
             loop {
@@ -880,7 +902,10 @@ impl WalletWriteRepository for InMemoryWalletRepository {
         };
 
         let mut codes = self.redeem_codes_by_id.write().expect("wallet repo lock");
-        for code in codes.values_mut().filter(|code| code.batch_id == input.batch_id) {
+        for code in codes
+            .values_mut()
+            .filter(|code| code.batch_id == input.batch_id)
+        {
             if code.status == "active" {
                 code.status = "disabled".to_string();
                 code.disabled_by = input.operator_id.clone();
@@ -1021,7 +1046,10 @@ impl WalletWriteRepository for InMemoryWalletRepository {
                 "redeemed" => return Ok(RedeemWalletCodeOutcome::CodeRedeemed),
                 _ => {}
             }
-            if code.expires_at_unix_secs.is_some_and(|value| value <= now_secs) {
+            if code
+                .expires_at_unix_secs
+                .is_some_and(|value| value <= now_secs)
+            {
                 return Ok(RedeemWalletCodeOutcome::CodeExpired);
             }
             let Some(batch) = batches.get(&code.batch_id) else {
@@ -1030,7 +1058,10 @@ impl WalletWriteRepository for InMemoryWalletRepository {
             if batch.status != "active" {
                 return Ok(RedeemWalletCodeOutcome::BatchDisabled);
             }
-            if batch.expires_at_unix_secs.is_some_and(|value| value <= now_secs) {
+            if batch
+                .expires_at_unix_secs
+                .is_some_and(|value| value <= now_secs)
+            {
                 return Ok(RedeemWalletCodeOutcome::CodeExpired);
             }
             (code.batch_id.clone(), batch.name.clone(), batch.amount_usd)

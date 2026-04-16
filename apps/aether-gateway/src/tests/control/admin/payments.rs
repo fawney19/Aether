@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use aether_data::repository::users::InMemoryUserReadRepository;
-use aether_data::repository::wallet::{InMemoryWalletRepository, WalletWriteRepository};
 use aether_data::repository::wallet::StoredWalletSnapshot;
+use aether_data::repository::wallet::{InMemoryWalletRepository, WalletWriteRepository};
 use axum::body::Body;
 use axum::routing::any;
 use axum::{extract::Request, Router};
@@ -756,7 +756,9 @@ async fn gateway_rejects_admin_payments_empty_order_identifier_locally_with_trus
 #[tokio::test]
 async fn gateway_handles_admin_redeem_code_batch_lifecycle_locally() {
     let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![]));
-    let wallet_repository = Arc::new(InMemoryWalletRepository::seed(Vec::<StoredWalletSnapshot>::new()));
+    let wallet_repository = Arc::new(InMemoryWalletRepository::seed(
+        Vec::<StoredWalletSnapshot>::new(),
+    ));
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
@@ -801,10 +803,8 @@ async fn gateway_handles_admin_redeem_code_batch_lifecycle_locally() {
     .await
     .expect("request should succeed");
     assert_eq!(list_response.status(), StatusCode::OK);
-    let list_payload: serde_json::Value = list_response
-        .json()
-        .await
-        .expect("json body should parse");
+    let list_payload: serde_json::Value =
+        list_response.json().await.expect("json body should parse");
     assert_eq!(list_payload["items"][0]["id"], batch_id);
 
     let codes_response = admin_request(client.get(format!(
@@ -814,10 +814,8 @@ async fn gateway_handles_admin_redeem_code_batch_lifecycle_locally() {
     .await
     .expect("request should succeed");
     assert_eq!(codes_response.status(), StatusCode::OK);
-    let codes_payload: serde_json::Value = codes_response
-        .json()
-        .await
-        .expect("json body should parse");
+    let codes_payload: serde_json::Value =
+        codes_response.json().await.expect("json body should parse");
     assert_eq!(codes_payload["batch"]["id"], batch_id);
     assert_eq!(codes_payload["items"].as_array().map(Vec::len), Some(2));
 

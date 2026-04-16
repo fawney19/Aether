@@ -1,10 +1,12 @@
 use super::{
-    admin_payment_operator_id, build_admin_payments_backend_unavailable_response,
-    build_admin_payments_bad_request_response, build_admin_payment_order_not_found_response,
+    admin_payment_operator_id, build_admin_payment_order_not_found_response,
+    build_admin_payments_backend_unavailable_response, build_admin_payments_bad_request_response,
     parse_admin_payments_limit, parse_admin_payments_offset,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
-use crate::handlers::admin::shared::{attach_admin_audit_response, query_param_value, unix_secs_to_rfc3339};
+use crate::handlers::admin::shared::{
+    attach_admin_audit_response, query_param_value, unix_secs_to_rfc3339,
+};
 use crate::GatewayError;
 use axum::{
     body::Body,
@@ -26,7 +28,11 @@ pub(super) struct AdminRedeemCodeBatchCreateRequest {
     pub(super) description: Option<String>,
 }
 
-fn normalize_required_text(value: &str, field_name: &str, max_len: usize) -> Result<String, String> {
+fn normalize_required_text(
+    value: &str,
+    field_name: &str,
+    max_len: usize,
+) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(format!("{field_name} 不能为空"));
@@ -214,7 +220,11 @@ async fn build_admin_create_redeem_code_batch_response(
     };
     let payload = match serde_json::from_slice::<AdminRedeemCodeBatchCreateRequest>(body) {
         Ok(value) => value,
-        Err(_) => return Ok(build_admin_payments_bad_request_response("请求数据验证失败")),
+        Err(_) => {
+            return Ok(build_admin_payments_bad_request_response(
+                "请求数据验证失败",
+            ))
+        }
     };
 
     let name = match normalize_required_text(&payload.name, "name", 120) {
@@ -222,7 +232,9 @@ async fn build_admin_create_redeem_code_batch_response(
         Err(detail) => return Ok(build_admin_payments_bad_request_response(detail)),
     };
     if !payload.amount_usd.is_finite() || payload.amount_usd <= 0.0 {
-        return Ok(build_admin_payments_bad_request_response("amount_usd 必须大于 0"));
+        return Ok(build_admin_payments_bad_request_response(
+            "amount_usd 必须大于 0",
+        ));
     }
     if payload.total_count == 0 || payload.total_count > 5000 {
         return Ok(build_admin_payments_bad_request_response(
@@ -239,16 +251,18 @@ async fn build_admin_create_redeem_code_batch_response(
     };
 
     let Some(result) = state
-        .admin_create_redeem_code_batch(aether_data::repository::wallet::CreateAdminRedeemCodeBatchInput {
-            name,
-            amount_usd: payload.amount_usd,
-            currency: "USD".to_string(),
-            balance_bucket: "recharge".to_string(),
-            total_count: payload.total_count,
-            expires_at_unix_secs,
-            description,
-            created_by: admin_payment_operator_id(request_context),
-        })
+        .admin_create_redeem_code_batch(
+            aether_data::repository::wallet::CreateAdminRedeemCodeBatchInput {
+                name,
+                amount_usd: payload.amount_usd,
+                currency: "USD".to_string(),
+                balance_bucket: "recharge".to_string(),
+                total_count: payload.total_count,
+                expires_at_unix_secs,
+                description,
+                created_by: admin_payment_operator_id(request_context),
+            },
+        )
         .await?
     else {
         return Ok(build_admin_payments_backend_unavailable_response(
@@ -288,15 +302,17 @@ async fn build_admin_redeem_code_batch_detail_response(
         crate::AdminWalletMutationOutcome::Applied(batch) => {
             Ok(Json(json!({ "batch": build_batch_payload(&batch) })).into_response())
         }
-        crate::AdminWalletMutationOutcome::NotFound => {
-            Ok(build_redeem_code_not_found_response("Redeem code batch not found"))
-        }
+        crate::AdminWalletMutationOutcome::NotFound => Ok(build_redeem_code_not_found_response(
+            "Redeem code batch not found",
+        )),
         crate::AdminWalletMutationOutcome::Invalid(detail) => {
             Ok(build_admin_payments_bad_request_response(detail))
         }
-        crate::AdminWalletMutationOutcome::Unavailable => Ok(
-            build_admin_payments_backend_unavailable_response("Redeem code batch backend unavailable"),
-        ),
+        crate::AdminWalletMutationOutcome::Unavailable => {
+            Ok(build_admin_payments_backend_unavailable_response(
+                "Redeem code batch backend unavailable",
+            ))
+        }
     }
 }
 
@@ -331,15 +347,17 @@ async fn build_admin_redeem_codes_response(
             }))
             .into_response())
         }
-        crate::AdminWalletMutationOutcome::NotFound => {
-            Ok(build_redeem_code_not_found_response("Redeem code batch not found"))
-        }
+        crate::AdminWalletMutationOutcome::NotFound => Ok(build_redeem_code_not_found_response(
+            "Redeem code batch not found",
+        )),
         crate::AdminWalletMutationOutcome::Invalid(detail) => {
             Ok(build_admin_payments_bad_request_response(detail))
         }
-        crate::AdminWalletMutationOutcome::Unavailable => Ok(
-            build_admin_payments_backend_unavailable_response("Redeem code batch backend unavailable"),
-        ),
+        crate::AdminWalletMutationOutcome::Unavailable => {
+            Ok(build_admin_payments_backend_unavailable_response(
+                "Redeem code batch backend unavailable",
+            ))
+        }
     }
 }
 
@@ -347,13 +365,14 @@ async fn build_admin_disable_redeem_code_batch_response(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
 ) -> Result<Response<Body>, GatewayError> {
-    let Some(batch_id) =
-        parse_batch_id_from_suffix_path(request_context.path(), "/disable")
-    else {
+    let Some(batch_id) = parse_batch_id_from_suffix_path(request_context.path(), "/disable") else {
         return Ok(build_admin_payment_order_not_found_response());
     };
     match state
-        .admin_disable_redeem_code_batch(&batch_id, admin_payment_operator_id(request_context).as_deref())
+        .admin_disable_redeem_code_batch(
+            &batch_id,
+            admin_payment_operator_id(request_context).as_deref(),
+        )
         .await?
     {
         crate::AdminWalletMutationOutcome::Applied(batch) => Ok(attach_admin_audit_response(
@@ -363,15 +382,17 @@ async fn build_admin_disable_redeem_code_batch_response(
             "redeem_code_batch",
             &batch_id,
         )),
-        crate::AdminWalletMutationOutcome::NotFound => {
-            Ok(build_redeem_code_not_found_response("Redeem code batch not found"))
-        }
+        crate::AdminWalletMutationOutcome::NotFound => Ok(build_redeem_code_not_found_response(
+            "Redeem code batch not found",
+        )),
         crate::AdminWalletMutationOutcome::Invalid(detail) => {
             Ok(build_admin_payments_bad_request_response(detail))
         }
-        crate::AdminWalletMutationOutcome::Unavailable => Ok(
-            build_admin_payments_backend_unavailable_response("Redeem code batch backend unavailable"),
-        ),
+        crate::AdminWalletMutationOutcome::Unavailable => {
+            Ok(build_admin_payments_backend_unavailable_response(
+                "Redeem code batch backend unavailable",
+            ))
+        }
     }
 }
 
@@ -383,7 +404,10 @@ async fn build_admin_delete_redeem_code_batch_response(
         return Ok(build_admin_payment_order_not_found_response());
     };
     match state
-        .admin_delete_redeem_code_batch(&batch_id, admin_payment_operator_id(request_context).as_deref())
+        .admin_delete_redeem_code_batch(
+            &batch_id,
+            admin_payment_operator_id(request_context).as_deref(),
+        )
         .await?
     {
         crate::AdminWalletMutationOutcome::Applied(batch) => Ok(attach_admin_audit_response(
@@ -393,15 +417,17 @@ async fn build_admin_delete_redeem_code_batch_response(
             "redeem_code_batch",
             &batch_id,
         )),
-        crate::AdminWalletMutationOutcome::NotFound => {
-            Ok(build_redeem_code_not_found_response("Redeem code batch not found"))
-        }
+        crate::AdminWalletMutationOutcome::NotFound => Ok(build_redeem_code_not_found_response(
+            "Redeem code batch not found",
+        )),
         crate::AdminWalletMutationOutcome::Invalid(detail) => {
             Ok(build_admin_payments_bad_request_response(detail))
         }
-        crate::AdminWalletMutationOutcome::Unavailable => Ok(
-            build_admin_payments_backend_unavailable_response("Redeem code batch backend unavailable"),
-        ),
+        crate::AdminWalletMutationOutcome::Unavailable => {
+            Ok(build_admin_payments_backend_unavailable_response(
+                "Redeem code batch backend unavailable",
+            ))
+        }
     }
 }
 
@@ -413,7 +439,10 @@ async fn build_admin_disable_redeem_code_response(
         return Ok(build_admin_payment_order_not_found_response());
     };
     match state
-        .admin_disable_redeem_code(&code_id, admin_payment_operator_id(request_context).as_deref())
+        .admin_disable_redeem_code(
+            &code_id,
+            admin_payment_operator_id(request_context).as_deref(),
+        )
         .await?
     {
         crate::AdminWalletMutationOutcome::Applied(code) => Ok(attach_admin_audit_response(
@@ -423,9 +452,9 @@ async fn build_admin_disable_redeem_code_response(
             "redeem_code",
             &code_id,
         )),
-        crate::AdminWalletMutationOutcome::NotFound => {
-            Ok(build_redeem_code_not_found_response("Redeem code not found"))
-        }
+        crate::AdminWalletMutationOutcome::NotFound => Ok(build_redeem_code_not_found_response(
+            "Redeem code not found",
+        )),
         crate::AdminWalletMutationOutcome::Invalid(detail) => {
             Ok(build_admin_payments_bad_request_response(detail))
         }

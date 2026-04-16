@@ -12,18 +12,19 @@ use super::types::{
     CreateManualWalletRechargeInput, CreateWalletRechargeOrderInput,
     CreateWalletRechargeOrderOutcome, CreateWalletRefundRequestInput,
     CreateWalletRefundRequestOutcome, CreatedAdminRedeemCodePlaintext,
-    CreditAdminPaymentOrderInput, DeleteAdminRedeemCodeBatchInput, DisableAdminRedeemCodeBatchInput,
-    DisableAdminRedeemCodeInput, FailAdminWalletRefundInput, ProcessAdminWalletRefundInput,
-    ProcessPaymentCallbackInput, ProcessPaymentCallbackOutcome, RedeemWalletCodeInput,
-    RedeemWalletCodeOutcome, StoredAdminPaymentCallback, StoredAdminPaymentCallbackPage,
-    StoredAdminPaymentOrder, StoredAdminPaymentOrderPage, StoredAdminRedeemCode,
-    StoredAdminRedeemCodeBatch, StoredAdminRedeemCodeBatchPage, StoredAdminRedeemCodePage,
-    StoredAdminWalletLedgerItem, StoredAdminWalletLedgerPage, StoredAdminWalletListItem,
-    StoredAdminWalletListPage, StoredAdminWalletRefund, StoredAdminWalletRefundPage,
-    StoredAdminWalletRefundRequestItem, StoredAdminWalletRefundRequestPage,
-    StoredAdminWalletTransaction, StoredAdminWalletTransactionPage,
-    StoredWalletDailyUsageLedger, StoredWalletDailyUsageLedgerPage, StoredWalletSnapshot,
-    WalletLookupKey, WalletMutationOutcome, WalletReadRepository, WalletWriteRepository,
+    CreditAdminPaymentOrderInput, DeleteAdminRedeemCodeBatchInput,
+    DisableAdminRedeemCodeBatchInput, DisableAdminRedeemCodeInput, FailAdminWalletRefundInput,
+    ProcessAdminWalletRefundInput, ProcessPaymentCallbackInput, ProcessPaymentCallbackOutcome,
+    RedeemWalletCodeInput, RedeemWalletCodeOutcome, StoredAdminPaymentCallback,
+    StoredAdminPaymentCallbackPage, StoredAdminPaymentOrder, StoredAdminPaymentOrderPage,
+    StoredAdminRedeemCode, StoredAdminRedeemCodeBatch, StoredAdminRedeemCodeBatchPage,
+    StoredAdminRedeemCodePage, StoredAdminWalletLedgerItem, StoredAdminWalletLedgerPage,
+    StoredAdminWalletListItem, StoredAdminWalletListPage, StoredAdminWalletRefund,
+    StoredAdminWalletRefundPage, StoredAdminWalletRefundRequestItem,
+    StoredAdminWalletRefundRequestPage, StoredAdminWalletTransaction,
+    StoredAdminWalletTransactionPage, StoredWalletDailyUsageLedger,
+    StoredWalletDailyUsageLedgerPage, StoredWalletSnapshot, WalletLookupKey, WalletMutationOutcome,
+    WalletReadRepository, WalletWriteRepository,
 };
 use crate::{
     error::{postgres_error, SqlxResultExt},
@@ -1047,7 +1048,9 @@ LIMIT 1
         .fetch_optional(&self.pool)
         .await
         .map_postgres_err()?;
-        row.as_ref().map(map_admin_redeem_code_batch_row).transpose()
+        row.as_ref()
+            .map(map_admin_redeem_code_batch_row)
+            .transpose()
     }
 
     async fn list_admin_redeem_codes(
@@ -3592,11 +3595,13 @@ RETURNING
                     let batch_id = Uuid::new_v4().to_string();
                     let expires_at = input
                         .expires_at_unix_secs
-                        .map(|value| i64::try_from(value).map_err(|_| {
-                            DataLayerError::InvalidInput(
-                                "redeem code batch expires_at overflow".to_string(),
-                            )
-                        }))
+                        .map(|value| {
+                            i64::try_from(value).map_err(|_| {
+                                DataLayerError::InvalidInput(
+                                    "redeem code batch expires_at overflow".to_string(),
+                                )
+                            })
+                        })
                         .transpose()?;
 
                     sqlx::query(
@@ -3688,7 +3693,9 @@ VALUES (
                             .execute(&mut **tx)
                             .await;
                             match insert_result {
-                                Ok(_) => break (normalized.clone(), format_redeem_code(&normalized)),
+                                Ok(_) => {
+                                    break (normalized.clone(), format_redeem_code(&normalized))
+                                }
                                 Err(sqlx::Error::Database(err))
                                     if err.code().as_deref() == Some("23505") =>
                                 {
@@ -4171,8 +4178,10 @@ FOR UPDATE OF codes, batches
                     let code_status: String = row_get(&code_row, "status")?;
                     let batch_status: String = row_get(&code_row, "batch_status")?;
                     let amount_usd: f64 = row_get(&code_row, "amount_usd")?;
-                    let batch_expires_at_unix_secs =
-                        parse_optional_timestamp(row_get(&code_row, "batch_expires_at_unix_secs")?, "redeem_code_batches.expires_at")?;
+                    let batch_expires_at_unix_secs = parse_optional_timestamp(
+                        row_get(&code_row, "batch_expires_at_unix_secs")?,
+                        "redeem_code_batches.expires_at",
+                    )?;
 
                     if code_status == "disabled" {
                         return Ok(RedeemWalletCodeOutcome::CodeDisabled);

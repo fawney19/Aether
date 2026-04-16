@@ -68,8 +68,8 @@ use aether_data::repository::wallet::{
     StoredAdminWalletListPage, StoredAdminWalletRefund, StoredAdminWalletRefundPage,
     StoredAdminWalletRefundRequestPage, StoredAdminWalletTransaction,
     StoredAdminWalletTransactionPage, StoredWalletDailyUsageLedger,
-    StoredWalletDailyUsageLedgerPage, StoredWalletSnapshot, WalletLookupKey,
-    WalletMutationOutcome, WalletReadRepository, WalletWriteRepository,
+    StoredWalletDailyUsageLedgerPage, StoredWalletSnapshot, WalletLookupKey, WalletMutationOutcome,
+    WalletReadRepository, WalletWriteRepository,
 };
 use aether_data::{DataBackends, DataLayerError};
 use aether_data_contracts::repository::billing::{

@@ -559,6 +559,7 @@ pub struct RedeemWalletCodeInput {
     pub order_no: String,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum RedeemWalletCodeOutcome {
     Redeemed {

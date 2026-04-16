@@ -67,7 +67,9 @@ pub(super) async fn handle_wallet_redeem(
     };
     let code = match wallet_normalize_optional_string_field(Some(payload.code), 128) {
         Ok(Some(value)) => value,
-        _ => return build_auth_error_response(http::StatusCode::BAD_REQUEST, "输入验证失败", false),
+        _ => {
+            return build_auth_error_response(http::StatusCode::BAD_REQUEST, "输入验证失败", false)
+        }
     };
 
     let outcome = match state

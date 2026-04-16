@@ -21,10 +21,10 @@ use self::test_support::{
 mod flow;
 #[path = "wallet/reads.rs"]
 mod reads;
-#[path = "wallet/redeem.rs"]
-mod redeem;
 #[path = "wallet/recharge.rs"]
 mod recharge;
+#[path = "wallet/redeem.rs"]
+mod redeem;
 #[path = "wallet/refunds.rs"]
 mod refunds;
 use self::flow::handle_wallet_flow;
@@ -34,7 +34,6 @@ use self::reads::{
     parse_wallet_limit, parse_wallet_offset, wallet_fixed_offset, wallet_today_billing_date_string,
     wallet_transaction_payload_from_record,
 };
-use self::redeem::handle_wallet_redeem;
 use self::recharge::{
     handle_wallet_create_recharge, handle_wallet_recharge_detail, handle_wallet_recharge_list,
     wallet_recharge_detail_path_matches,
@@ -42,6 +41,7 @@ use self::recharge::{
 pub(crate) use self::recharge::{
     sanitize_wallet_gateway_response, wallet_payment_order_payload_from_row,
 };
+use self::redeem::handle_wallet_redeem;
 use self::refunds::{
     handle_wallet_create_refund, handle_wallet_refund_detail, handle_wallet_refunds_list,
     wallet_refund_detail_path_matches,

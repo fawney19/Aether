@@ -514,10 +514,8 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => {
                 self.selected = self.selected.saturating_sub(1);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.selected + 1 < self.total_field_count() {
-                    self.selected += 1;
-                }
+            KeyCode::Down | KeyCode::Char('j') if self.selected + 1 < self.total_field_count() => {
+                self.selected += 1;
             }
             KeyCode::Home => self.selected = 0,
             KeyCode::End => self.selected = self.total_field_count() - 1,
@@ -553,21 +551,17 @@ impl App {
                 }
             }
             // -- Tab navigation --
-            KeyCode::Tab | KeyCode::Right => {
-                if self.server_tabs.len() > 1 {
-                    self.active_tab = (self.active_tab + 1) % self.server_tabs.len();
-                    self.clamp_selection();
-                }
+            KeyCode::Tab | KeyCode::Right if self.server_tabs.len() > 1 => {
+                self.active_tab = (self.active_tab + 1) % self.server_tabs.len();
+                self.clamp_selection();
             }
-            KeyCode::BackTab | KeyCode::Left => {
-                if self.server_tabs.len() > 1 {
-                    self.active_tab = if self.active_tab == 0 {
-                        self.server_tabs.len() - 1
-                    } else {
-                        self.active_tab - 1
-                    };
-                    self.clamp_selection();
-                }
+            KeyCode::BackTab | KeyCode::Left if self.server_tabs.len() > 1 => {
+                self.active_tab = if self.active_tab == 0 {
+                    self.server_tabs.len() - 1
+                } else {
+                    self.active_tab - 1
+                };
+                self.clamp_selection();
             }
             KeyCode::Char(c @ '1'..='9') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let idx = (c as usize) - ('1' as usize);
@@ -623,18 +617,14 @@ impl App {
             KeyCode::Enter => {
                 self.commit_edit_buffer();
             }
-            KeyCode::Backspace => {
-                if self.edit_cursor > 0 {
-                    self.edit_cursor -= 1;
-                    let byte = self.char_byte_pos(self.edit_cursor);
-                    self.edit_buffer.remove(byte);
-                }
+            KeyCode::Backspace if self.edit_cursor > 0 => {
+                self.edit_cursor -= 1;
+                let byte = self.char_byte_pos(self.edit_cursor);
+                self.edit_buffer.remove(byte);
             }
-            KeyCode::Delete => {
-                if self.edit_cursor < self.edit_buffer.chars().count() {
-                    let byte = self.char_byte_pos(self.edit_cursor);
-                    self.edit_buffer.remove(byte);
-                }
+            KeyCode::Delete if self.edit_cursor < self.edit_buffer.chars().count() => {
+                let byte = self.char_byte_pos(self.edit_cursor);
+                self.edit_buffer.remove(byte);
             }
             KeyCode::Left => {
                 self.edit_cursor = self.edit_cursor.saturating_sub(1);

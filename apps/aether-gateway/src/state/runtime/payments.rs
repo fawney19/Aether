@@ -233,8 +233,10 @@ impl AppState {
     pub(crate) async fn admin_create_redeem_code_batch(
         &self,
         input: aether_data::repository::wallet::CreateAdminRedeemCodeBatchInput,
-    ) -> Result<Option<aether_data::repository::wallet::CreateAdminRedeemCodeBatchResult>, GatewayError>
-    {
+    ) -> Result<
+        Option<aether_data::repository::wallet::CreateAdminRedeemCodeBatchResult>,
+        GatewayError,
+    > {
         self.data
             .create_admin_redeem_code_batch(input)
             .await
@@ -315,10 +317,12 @@ impl AppState {
     > {
         match self
             .data
-            .disable_admin_redeem_code(aether_data::repository::wallet::DisableAdminRedeemCodeInput {
-                code_id: code_id.to_string(),
-                operator_id: operator_id.map(ToOwned::to_owned),
-            })
+            .disable_admin_redeem_code(
+                aether_data::repository::wallet::DisableAdminRedeemCodeInput {
+                    code_id: code_id.to_string(),
+                    operator_id: operator_id.map(ToOwned::to_owned),
+                },
+            )
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))?
         {
@@ -338,7 +342,8 @@ impl AppState {
     pub(crate) async fn redeem_wallet_code(
         &self,
         input: aether_data::repository::wallet::RedeemWalletCodeInput,
-    ) -> Result<Option<aether_data::repository::wallet::RedeemWalletCodeOutcome>, GatewayError> {
+    ) -> Result<Option<aether_data::repository::wallet::RedeemWalletCodeOutcome>, GatewayError>
+    {
         self.data
             .redeem_wallet_code(input)
             .await

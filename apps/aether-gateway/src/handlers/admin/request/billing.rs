@@ -282,8 +282,13 @@ impl<'a> AdminAppState<'a> {
         status: Option<&str>,
         limit: usize,
         offset: usize,
-    ) -> Result<(Vec<aether_data::repository::wallet::StoredAdminRedeemCodeBatch>, u64), GatewayError>
-    {
+    ) -> Result<
+        (
+            Vec<aether_data::repository::wallet::StoredAdminRedeemCodeBatch>,
+            u64,
+        ),
+        GatewayError,
+    > {
         self.app
             .list_admin_redeem_code_batches(status, limit, offset)
             .await
@@ -292,8 +297,12 @@ impl<'a> AdminAppState<'a> {
     pub(crate) async fn read_admin_redeem_code_batch(
         &self,
         batch_id: &str,
-    ) -> Result<crate::AdminWalletMutationOutcome<aether_data::repository::wallet::StoredAdminRedeemCodeBatch>, GatewayError>
-    {
+    ) -> Result<
+        crate::AdminWalletMutationOutcome<
+            aether_data::repository::wallet::StoredAdminRedeemCodeBatch,
+        >,
+        GatewayError,
+    > {
         self.app.read_admin_redeem_code_batch(batch_id).await
     }
 
@@ -312,8 +321,10 @@ impl<'a> AdminAppState<'a> {
     pub(crate) async fn admin_create_redeem_code_batch(
         &self,
         input: aether_data::repository::wallet::CreateAdminRedeemCodeBatchInput,
-    ) -> Result<Option<aether_data::repository::wallet::CreateAdminRedeemCodeBatchResult>, GatewayError>
-    {
+    ) -> Result<
+        Option<aether_data::repository::wallet::CreateAdminRedeemCodeBatchResult>,
+        GatewayError,
+    > {
         self.app.admin_create_redeem_code_batch(input).await
     }
 
@@ -321,8 +332,12 @@ impl<'a> AdminAppState<'a> {
         &self,
         batch_id: &str,
         operator_id: Option<&str>,
-    ) -> Result<crate::AdminWalletMutationOutcome<aether_data::repository::wallet::StoredAdminRedeemCodeBatch>, GatewayError>
-    {
+    ) -> Result<
+        crate::AdminWalletMutationOutcome<
+            aether_data::repository::wallet::StoredAdminRedeemCodeBatch,
+        >,
+        GatewayError,
+    > {
         self.app
             .admin_disable_redeem_code_batch(batch_id, operator_id)
             .await
@@ -332,8 +347,12 @@ impl<'a> AdminAppState<'a> {
         &self,
         batch_id: &str,
         operator_id: Option<&str>,
-    ) -> Result<crate::AdminWalletMutationOutcome<aether_data::repository::wallet::StoredAdminRedeemCodeBatch>, GatewayError>
-    {
+    ) -> Result<
+        crate::AdminWalletMutationOutcome<
+            aether_data::repository::wallet::StoredAdminRedeemCodeBatch,
+        >,
+        GatewayError,
+    > {
         self.app
             .admin_delete_redeem_code_batch(batch_id, operator_id)
             .await
@@ -343,9 +362,13 @@ impl<'a> AdminAppState<'a> {
         &self,
         code_id: &str,
         operator_id: Option<&str>,
-    ) -> Result<crate::AdminWalletMutationOutcome<aether_data::repository::wallet::StoredAdminRedeemCode>, GatewayError>
-    {
-        self.app.admin_disable_redeem_code(code_id, operator_id).await
+    ) -> Result<
+        crate::AdminWalletMutationOutcome<aether_data::repository::wallet::StoredAdminRedeemCode>,
+        GatewayError,
+    > {
+        self.app
+            .admin_disable_redeem_code(code_id, operator_id)
+            .await
     }
 
     pub(crate) async fn admin_adjust_wallet_balance(

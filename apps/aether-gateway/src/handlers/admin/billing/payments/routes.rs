@@ -91,9 +91,13 @@ pub(super) async fn maybe_build_local_admin_payments_response(
     {
         return Ok(Some(response));
     }
-    if let Some(response) =
-        maybe_build_local_admin_redeem_codes_response(state, request_context, request_body, route_kind)
-            .await?
+    if let Some(response) = maybe_build_local_admin_redeem_codes_response(
+        state,
+        request_context,
+        request_body,
+        route_kind,
+    )
+    .await?
     {
         return Ok(Some(response));
     }

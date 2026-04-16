@@ -215,8 +215,8 @@ fn classifies_user_monitoring_audit_logs_as_public_support_route() {
 fn classifies_wallet_redeem_as_public_support_route() {
     let headers = headers(&[("authorization", "Bearer sk-test")]);
     let uri: Uri = "/api/wallet/redeem".parse().expect("uri should parse");
-    let decision = classify_control_route(&http::Method::POST, &uri, &headers)
-        .expect("route should classify");
+    let decision =
+        classify_control_route(&http::Method::POST, &uri, &headers).expect("route should classify");
 
     assert_eq!(decision.route_class.as_deref(), Some("public_support"));
     assert_eq!(decision.route_family.as_deref(), Some("wallet"));

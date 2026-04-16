@@ -302,16 +302,8 @@ pub(crate) fn admin_proxy_local_requires_buffered_body(
                 | (Some("billing_manage"), http::Method::POST, Some("create_collector"))
                 | (Some("billing_manage"), http::Method::PUT, Some("update_collector"))
                 | (Some("payments_manage"), http::Method::POST, Some("credit_order"))
-                | (
-                    Some("payments_manage"),
-                    http::Method::POST,
-                    Some("create_redeem_code_batch"),
-                )
-                | (
-                    Some("payments_manage"),
-                    http::Method::POST,
-                    Some("delete_redeem_code_batch"),
-                )
+                | (Some("payments_manage"), http::Method::POST, Some("create_redeem_code_batch"))
+                | (Some("payments_manage"), http::Method::POST, Some("delete_redeem_code_batch"))
                 | (Some("api_keys_manage"), http::Method::POST, Some("create_api_key"))
                 | (Some("api_keys_manage"), http::Method::PUT, Some("update_api_key"))
                 | (Some("api_keys_manage"), http::Method::PATCH, Some("toggle_api_key"))

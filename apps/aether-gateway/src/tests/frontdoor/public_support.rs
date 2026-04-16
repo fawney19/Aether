@@ -3259,16 +3259,18 @@ async fn gateway_redeems_wallet_code_locally() {
         now,
     )]));
     let batch = wallet_repository
-        .create_admin_redeem_code_batch(aether_data::repository::wallet::CreateAdminRedeemCodeBatchInput {
-            name: "测试兑换".to_string(),
-            amount_usd: 6.5,
-            currency: "USD".to_string(),
-            balance_bucket: "recharge".to_string(),
-            total_count: 1,
-            expires_at_unix_secs: None,
-            description: Some("public support".to_string()),
-            created_by: Some("admin-user-1".to_string()),
-        })
+        .create_admin_redeem_code_batch(
+            aether_data::repository::wallet::CreateAdminRedeemCodeBatchInput {
+                name: "测试兑换".to_string(),
+                amount_usd: 6.5,
+                currency: "USD".to_string(),
+                balance_bucket: "recharge".to_string(),
+                total_count: 1,
+                expires_at_unix_secs: None,
+                description: Some("public support".to_string()),
+                created_by: Some("admin-user-1".to_string()),
+            },
+        )
         .await
         .expect("batch should create");
     let redeem_code = batch.codes[0].code.clone();
@@ -3276,10 +3278,12 @@ async fn gateway_redeems_wallet_code_locally() {
     let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![user]));
     let state = AppState::new()
         .expect("gateway should build")
-        .with_data_state_for_tests(crate::data::GatewayDataState::with_user_and_wallet_for_tests(
-            user_repository,
-            wallet_repository,
-        ))
+        .with_data_state_for_tests(
+            crate::data::GatewayDataState::with_user_and_wallet_for_tests(
+                user_repository,
+                wallet_repository,
+            ),
+        )
         .with_auth_sessions_for_tests([sample_auth_session(
             "user-auth-1",
             "session-wallet-redeem-1",
