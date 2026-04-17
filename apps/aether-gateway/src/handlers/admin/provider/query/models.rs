@@ -319,6 +319,7 @@ async fn provider_query_build_kiro_test_candidates(
     state: &AdminAppState<'_>,
     provider: &StoredProviderCatalogProvider,
     payload: &Value,
+    requested_model_override: Option<&str>,
 ) -> Result<Vec<ProviderQueryTestCandidate>, Response<Body>> {
     let provider_ids = vec![provider.id.clone()];
     let endpoints = state
@@ -377,7 +378,9 @@ async fn provider_query_build_kiro_test_candidates(
         }
     }
 
-    let requested_model = provider_query_extract_model(payload)
+    let requested_model = requested_model_override
+        .map(ToOwned::to_owned)
+        .or_else(|| provider_query_extract_model(payload))
         .or_else(|| {
             super::payload::provider_query_extract_failover_models(payload)
                 .first()
@@ -1026,6 +1029,10 @@ fn provider_query_test_attempt_payload(
     })
 }
 
+fn provider_query_supports_standard_test_api_format(api_format: &str) -> bool {
+    matches!(api_format, "openai:chat" | "claude:chat" | "gemini:chat")
+}
+
 async fn build_admin_provider_query_kiro_failover_response(
     state: &AdminAppState<'_>,
     payload: &Value,
@@ -1049,12 +1056,6 @@ async fn build_admin_provider_query_kiro_failover_response(
     };
     let failover_models = super::payload::provider_query_extract_failover_models(payload);
     let is_kiro = provider.provider_type.trim().eq_ignore_ascii_case("kiro");
-    if !is_kiro && failover_models.len() > 1 {
-        return Ok(build_admin_provider_query_test_model_failover_response(
-            provider_id,
-            failover_models,
-        ));
-    }
     let Some(requested_model) =
         provider_query_extract_model(payload).or_else(|| failover_models.first().cloned())
     else {
@@ -1063,11 +1064,37 @@ async fn build_admin_provider_query_kiro_failover_response(
         ));
     };
 
-    let candidates =
-        match provider_query_build_kiro_test_candidates(state, &provider, payload).await {
-            Ok(candidates) => candidates,
+    let requested_models = if is_kiro {
+        vec![requested_model.clone()]
+    } else if failover_models.is_empty() {
+        vec![requested_model.clone()]
+    } else {
+        failover_models.clone()
+    };
+    let mut candidates = Vec::new();
+    for requested_failover_model in &requested_models {
+        match provider_query_build_kiro_test_candidates(
+            state,
+            &provider,
+            payload,
+            Some(requested_failover_model.as_str()),
+        )
+        .await
+        {
+            Ok(mut built_candidates) => candidates.append(&mut built_candidates),
             Err(response) => return Ok(response),
-        };
+        }
+    }
+    if !is_kiro
+        && candidates.iter().all(|candidate| {
+            !provider_query_supports_standard_test_api_format(&candidate.endpoint.api_format)
+        })
+    {
+        return Ok(build_admin_provider_query_test_model_failover_response(
+            provider_id,
+            requested_models,
+        ));
+    }
     let trace_id = provider_query_extract_request_id(payload)
         .unwrap_or_else(|| format!("provider-query-test-{}", Uuid::new_v4().simple()));
     let mut attempts = Vec::new();
