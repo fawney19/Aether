@@ -545,6 +545,7 @@ import {
 import RefreshButton from '@/components/ui/refresh-button.vue'
 import { Plus, Key, Copy, Trash2, Loader2, Activity, CheckCircle, Power, SquarePen } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
+import { buildUserApiKeyMutationPayload } from '@/features/api-keys/utils/userKeyPayload'
 import { log } from '@/utils/logger'
 import { parseApiError } from '@/utils/errorParser'
 import { formatRateLimitSimple } from '@/utils/format'
@@ -635,18 +636,21 @@ async function saveApiKey() {
   creating.value = true
   try {
     if (editingApiKey.value) {
-      await meApi.updateApiKey(editingApiKey.value.id, {
-        name: newKeyName.value,
-        rate_limit: newKeyRateLimit.value ?? 0,
-        concurrent_limit: newKeyConcurrentLimit.value ?? 0,
-      })
+      await meApi.updateApiKey(
+        editingApiKey.value.id,
+        buildUserApiKeyMutationPayload({
+          name: newKeyName.value,
+          rate_limit: newKeyRateLimit.value,
+          concurrent_limit: newKeyConcurrentLimit.value,
+        }),
+      )
       success('API 密钥更新成功')
     } else {
-      const newKey = await meApi.createApiKey({
+      const newKey = await meApi.createApiKey(buildUserApiKeyMutationPayload({
         name: newKeyName.value,
-        rate_limit: newKeyRateLimit.value ?? 0,
-        concurrent_limit: newKeyConcurrentLimit.value ?? 0,
-      })
+        rate_limit: newKeyRateLimit.value,
+        concurrent_limit: newKeyConcurrentLimit.value,
+      }))
       newKeyValue.value = newKey.key || ''
       showKeyDialog.value = true
       success('API 密钥创建成功')

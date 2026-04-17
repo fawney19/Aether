@@ -1092,6 +1092,7 @@ import {
 // 功能组件
 import UserFormDialog, { type UserFormData } from '@/features/users/components/UserFormDialog.vue'
 import WalletOpsDrawer from '@/features/wallet/components/WalletOpsDrawer.vue'
+import { buildUserApiKeyMutationPayload } from '@/features/api-keys/utils/userKeyPayload'
 import { parseApiError } from '@/utils/errorParser'
 import { formatTokens, formatRateLimitInheritable, formatRateLimitSimple, isRateLimitInherited, isRateLimitUnlimited } from '@/utils/format'
 import { parseNumberInput } from '@/utils/form'
@@ -1456,18 +1457,25 @@ async function submitUserApiKeyForm() {
   creatingApiKey.value = true
   try {
     if (editingUserApiKey.value) {
-      await usersStore.updateApiKey(selectedUser.value.id, editingUserApiKey.value.id, {
-        name: userApiKeyForm.value.name,
-        rate_limit: userApiKeyForm.value.rate_limit ?? 0,
-        concurrent_limit: userApiKeyForm.value.concurrent_limit ?? 0,
-      })
+      await usersStore.updateApiKey(
+        selectedUser.value.id,
+        editingUserApiKey.value.id,
+        buildUserApiKeyMutationPayload({
+          name: userApiKeyForm.value.name,
+          rate_limit: userApiKeyForm.value.rate_limit,
+          concurrent_limit: userApiKeyForm.value.concurrent_limit,
+        }),
+      )
       success('API Key已更新')
     } else {
-      const response = await usersStore.createApiKey(selectedUser.value.id, {
-        name: userApiKeyForm.value.name,
-        rate_limit: userApiKeyForm.value.rate_limit ?? 0,
-        concurrent_limit: userApiKeyForm.value.concurrent_limit ?? 0,
-      })
+      const response = await usersStore.createApiKey(
+        selectedUser.value.id,
+        buildUserApiKeyMutationPayload({
+          name: userApiKeyForm.value.name,
+          rate_limit: userApiKeyForm.value.rate_limit,
+          concurrent_limit: userApiKeyForm.value.concurrent_limit,
+        }),
+      )
       newApiKey.value = response.key || ''
       showNewApiKeyDialog.value = true
       success('API Key创建成功')
