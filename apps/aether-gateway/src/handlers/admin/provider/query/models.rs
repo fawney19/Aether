@@ -360,6 +360,18 @@ async fn provider_query_build_kiro_test_candidates(
                             && provider_query_key_supports_endpoint(key, &endpoint.api_format)
                     })
             })
+            .or_else(|| {
+                endpoints.iter().find(|endpoint| {
+                    endpoint.is_active
+                        && all_keys.iter().any(|key| {
+                            key.is_active
+                                && selected_key_id
+                                    .as_deref()
+                                    .is_none_or(|value| value == key.id.as_str())
+                                && provider_query_key_supports_endpoint(key, &endpoint.api_format)
+                        })
+                })
+            })
             .or_else(|| endpoints.iter().find(|endpoint| endpoint.is_active))
             .cloned()
             .ok_or_else(|| {

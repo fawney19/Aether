@@ -1752,6 +1752,69 @@ async fn gateway_prefers_supported_non_kiro_endpoint_with_compatible_key_when_ap
 }
 
 #[tokio::test]
+async fn gateway_uses_compatible_unsupported_endpoint_stub_when_api_format_is_omitted() {
+    let mut provider = sample_provider("provider-openai", "OpenAI", 10);
+    provider.provider_type = "openai".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![
+            sample_endpoint(
+                "endpoint-openai-chat",
+                "provider-openai",
+                "openai:chat",
+                "https://api.openai.example",
+            ),
+            sample_endpoint(
+                "endpoint-openai-cli",
+                "provider-openai",
+                "openai:cli",
+                "https://api.openai.example",
+            ),
+        ],
+        vec![sample_key(
+            "key-openai-cli",
+            "provider-openai",
+            "openai:cli",
+            "sk-test-cli",
+        )],
+    ));
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-openai",
+            "model": "gpt-5.4-mini"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(false));
+    assert_eq!(
+        payload["error"],
+        json!("Rust local provider-query failover simulation is not configured")
+    );
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_provider_query_test_model_failover_with_single_model_name_alias() {
     let execution_runtime = Router::new().route(
         "/v1/execute/sync",
