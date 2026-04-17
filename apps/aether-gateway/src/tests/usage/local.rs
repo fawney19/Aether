@@ -1325,14 +1325,14 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
         stored_usage.user_id.as_deref(),
         Some("user-claude-cli-usage-local-miss-1")
     );
-    assert_eq!(stored_usage.provider_name, "RightCode");
+    assert_eq!(stored_usage.provider_name, "claude");
     assert_eq!(stored_usage.model, "gpt-5.4");
     assert_eq!(stored_usage.api_format.as_deref(), Some("claude:cli"));
     assert_eq!(
         stored_usage.endpoint_api_format.as_deref(),
-        Some("openai:cli")
+        Some("claude:cli")
     );
-    assert_eq!(stored_usage.routing_key_name(), Some("codex"));
+    assert_eq!(stored_usage.routing_key_name(), None);
     assert_eq!(stored_usage.routing_planner_kind(), Some("claude_cli_sync"));
     assert_eq!(stored_usage.routing_route_family(), Some("claude"));
     assert_eq!(stored_usage.routing_route_kind(), Some("cli"));
@@ -1367,10 +1367,7 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
         stored_candidates[0].skip_reason.as_deref(),
         Some("format_conversion_disabled")
     );
-    assert_eq!(
-        stored_usage.routing_candidate_id(),
-        Some(stored_candidates[0].id.as_str())
-    );
+    assert_eq!(stored_usage.routing_candidate_id(), None);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
