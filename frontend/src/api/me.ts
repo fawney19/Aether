@@ -294,6 +294,7 @@ export const meApi = {
       api_format?: string | null
       endpoint_api_format?: string | null
       has_format_conversion?: boolean | null
+      has_fallback?: boolean | null
     }>
   }> {
     const params = ids ? { ids } : {}

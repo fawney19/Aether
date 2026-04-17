@@ -1537,6 +1537,7 @@ pub fn build_admin_usage_active_requests_response(
                 "provider": item.provider_name,
                 "api_key_name": api_key_name,
                 "provider_key_name": provider_key_name,
+                "has_fallback": admin_usage_has_fallback(item),
             });
             if let Some(api_format) = item.api_format.as_ref() {
                 value["api_format"] = json!(api_format);

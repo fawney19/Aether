@@ -401,6 +401,9 @@ async function pollActiveRequests() {
         if (update.api_format != null) record.api_format = update.api_format
         if (update.endpoint_api_format != null) record.endpoint_api_format = update.endpoint_api_format
         if (update.has_format_conversion != null) record.has_format_conversion = update.has_format_conversion
+        if (typeof update.has_fallback === 'boolean') {
+          record.has_fallback = record.has_fallback === true || update.has_fallback
+        }
         // 模型映射：streaming 时已可确定
         if ('target_model' in update && (typeof update.target_model === 'string' || update.target_model === null)) {
           record.target_model = update.target_model

@@ -745,21 +745,25 @@ async fn gateway_handles_admin_usage_active_locally_with_trusted_admin_principal
         start_usage_upstream("/api/admin/usage/active").await;
 
     let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
-        sample_usage_row(
-            "usage-pending",
-            "req-pending",
-            Some("user-1"),
-            Some("key-1"),
-            Some("primary"),
-            "OpenAI",
-            "gpt-5",
-            "pending",
-            10,
-            0,
-            0.0,
-            0.0,
-            DAY_2_UNIX_SECS,
-        ),
+        {
+            let mut row = sample_usage_row(
+                "usage-pending",
+                "req-pending",
+                Some("user-1"),
+                Some("key-1"),
+                Some("primary"),
+                "OpenAI",
+                "gpt-5",
+                "pending",
+                10,
+                0,
+                0.0,
+                0.0,
+                DAY_2_UNIX_SECS,
+            );
+            row.candidate_index = Some(1);
+            row
+        },
         sample_usage_row(
             "usage-done",
             "req-done",
@@ -819,6 +823,7 @@ async fn gateway_handles_admin_usage_active_locally_with_trusted_admin_principal
     assert_eq!(payload["requests"][0]["effective_input_tokens"], 5);
     assert_eq!(payload["requests"][0]["provider"], "OpenAI");
     assert_eq!(payload["requests"][0]["api_key_name"], "fresh-primary");
+    assert_eq!(payload["requests"][0]["has_fallback"], true);
     assert_eq!(
         payload["requests"][0]["provider_key_name"],
         "upstream-primary"

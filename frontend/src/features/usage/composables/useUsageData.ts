@@ -401,6 +401,7 @@ export function useUsageData(options: UseUsageDataOptions) {
           api_format: existing.api_format || record.api_format,
           endpoint_api_format: existing.endpoint_api_format || record.endpoint_api_format,
           has_format_conversion: existing.has_format_conversion ?? record.has_format_conversion,
+          has_fallback: existing.has_fallback === true || record.has_fallback === true,
           api_key_name: existing.api_key_name || record.api_key_name,
           provider_key_name: existing.provider_key_name || record.provider_key_name,
           rate_multiplier: existing.rate_multiplier ?? record.rate_multiplier,
