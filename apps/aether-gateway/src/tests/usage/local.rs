@@ -50,9 +50,7 @@ where
                 .as_ref()
                 .map(|usage| usage.status.as_str())
                 .unwrap_or("<missing>");
-            panic!(
-                "usage should reach status {expected_status}, last observed status: {observed}"
-            );
+            panic!("usage should reach status {expected_status}, last observed status: {observed}");
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
