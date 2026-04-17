@@ -679,6 +679,12 @@
                     >
                       {{ formatRateLimitSimple(apiKey.rate_limit) }}
                     </Badge>
+                    <Badge
+                      variant="secondary"
+                      class="text-xs"
+                    >
+                      {{ formatConcurrentLimitSimple(apiKey.concurrent_limit) }}
+                    </Badge>
                   </div>
                   <div class="flex items-center gap-1 mt-0.5">
                     <code class="text-xs font-mono text-muted-foreground">
@@ -795,7 +801,7 @@
                 {{ editingUserApiKey ? '编辑 API Key' : '创建 API Key' }}
               </h3>
               <p class="text-xs text-muted-foreground">
-                {{ editingUserApiKey ? '更新用户 API Key 的名称和速率限制' : '为用户创建新的 API Key' }}
+                {{ editingUserApiKey ? '更新用户 API Key 的名称、速率限制和并发限制' : '为用户创建新的 API Key' }}
               </p>
             </div>
           </div>
@@ -829,6 +835,25 @@
             class="h-10"
             placeholder="留空不限"
             @update:model-value="(v) => userApiKeyForm.rate_limit = parseNumberInput(v, { min: 0, max: 10000 })"
+          />
+          <p class="text-xs text-muted-foreground">
+            留空表示不限制
+          </p>
+        </div>
+        <div class="space-y-2">
+          <Label
+            for="admin-user-key-concurrent-limit"
+            class="text-sm font-medium"
+          >并发限制</Label>
+          <Input
+            id="admin-user-key-concurrent-limit"
+            :model-value="userApiKeyForm.concurrent_limit ?? ''"
+            type="number"
+            min="0"
+            max="10000"
+            class="h-10"
+            placeholder="留空不限"
+            @update:model-value="(v) => userApiKeyForm.concurrent_limit = parseNumberInput(v, { min: 0, max: 10000 })"
           />
           <p class="text-xs text-muted-foreground">
             留空表示不限制
@@ -1099,6 +1124,7 @@ const editingUserApiKey = ref<ApiKey | null>(null)
 const userApiKeyForm = ref({
   name: '',
   rate_limit: undefined as number | undefined,
+  concurrent_limit: undefined as number | undefined,
 })
 
 // 用户统计
@@ -1253,6 +1279,13 @@ function formatCurrencyValue(value: number | null, nullLabel = '-'): string {
   return `$${value.toFixed(2)}`
 }
 
+function formatConcurrentLimitSimple(concurrentLimit?: number | null): string {
+  if (concurrentLimit == null || concurrentLimit === 0) {
+    return '不限并发'
+  }
+  return `${concurrentLimit} 并发`
+}
+
 function isNegativeWalletValue(value: number | null): boolean {
   return typeof value === 'number' && value < 0
 }
@@ -1387,6 +1420,7 @@ function openCreateUserApiKeyDialog() {
   userApiKeyForm.value = {
     name: `Key-${new Date().toISOString().split('T')[0]}`,
     rate_limit: undefined,
+    concurrent_limit: undefined,
   }
   editingUserApiKey.value = null
   showUserApiKeyFormDialog.value = true
@@ -1397,6 +1431,7 @@ function openEditUserApiKeyDialog(apiKey: ApiKey) {
   userApiKeyForm.value = {
     name: apiKey.name || '',
     rate_limit: apiKey.rate_limit ?? undefined,
+    concurrent_limit: apiKey.concurrent_limit ?? undefined,
   }
   showUserApiKeyFormDialog.value = true
 }
@@ -1407,6 +1442,7 @@ function closeUserApiKeyFormDialog() {
   userApiKeyForm.value = {
     name: '',
     rate_limit: undefined,
+    concurrent_limit: undefined,
   }
 }
 
@@ -1423,12 +1459,14 @@ async function submitUserApiKeyForm() {
       await usersStore.updateApiKey(selectedUser.value.id, editingUserApiKey.value.id, {
         name: userApiKeyForm.value.name,
         rate_limit: userApiKeyForm.value.rate_limit ?? 0,
+        concurrent_limit: userApiKeyForm.value.concurrent_limit ?? 0,
       })
       success('API Key已更新')
     } else {
       const response = await usersStore.createApiKey(selectedUser.value.id, {
         name: userApiKeyForm.value.name,
         rate_limit: userApiKeyForm.value.rate_limit ?? 0,
+        concurrent_limit: userApiKeyForm.value.concurrent_limit ?? 0,
       })
       newApiKey.value = response.key || ''
       showNewApiKeyDialog.value = true
