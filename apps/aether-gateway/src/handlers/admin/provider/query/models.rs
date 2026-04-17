@@ -331,26 +331,47 @@ async fn provider_query_build_kiro_test_candidates(
                 ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL,
             )
         })?;
-    let endpoint = match provider_query_select_kiro_endpoint(
-        &endpoints,
-        provider_query_extract_endpoint_id(payload).as_deref(),
-        provider_query_extract_api_format(payload).as_deref(),
-    ) {
-        Ok(Some(endpoint)) => endpoint.clone(),
-        Ok(None) => {
-            return Err(build_admin_provider_query_not_found_response(
-                ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL,
-            ));
-        }
-        Err("Endpoint not found") => {
-            return Err(build_admin_provider_query_not_found_response(
-                ADMIN_PROVIDER_QUERY_API_KEY_NOT_FOUND_DETAIL,
-            ));
-        }
-        Err(_) => {
-            return Err(build_admin_provider_query_not_found_response(
-                ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL,
-            ));
+    let requested_endpoint_id = provider_query_extract_endpoint_id(payload);
+    let requested_api_format = provider_query_extract_api_format(payload);
+    let endpoint = if requested_endpoint_id.is_none()
+        && requested_api_format.is_none()
+        && !provider.provider_type.trim().eq_ignore_ascii_case("kiro")
+    {
+        endpoints
+            .iter()
+            .find(|endpoint| {
+                endpoint.is_active
+                    && provider_query_supports_standard_test_api_format(&endpoint.api_format)
+            })
+            .or_else(|| endpoints.iter().find(|endpoint| endpoint.is_active))
+            .cloned()
+            .ok_or_else(|| {
+                build_admin_provider_query_not_found_response(
+                    ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL,
+                )
+            })?
+    } else {
+        match provider_query_select_kiro_endpoint(
+            &endpoints,
+            requested_endpoint_id.as_deref(),
+            requested_api_format.as_deref(),
+        ) {
+            Ok(Some(endpoint)) => endpoint.clone(),
+            Ok(None) => {
+                return Err(build_admin_provider_query_not_found_response(
+                    ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL,
+                ));
+            }
+            Err("Endpoint not found") => {
+                return Err(build_admin_provider_query_not_found_response(
+                    ADMIN_PROVIDER_QUERY_API_KEY_NOT_FOUND_DETAIL,
+                ));
+            }
+            Err(_) => {
+                return Err(build_admin_provider_query_not_found_response(
+                    ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL,
+                ));
+            }
         }
     };
 
