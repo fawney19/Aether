@@ -9,6 +9,7 @@ use super::super::helpers::{
 use super::super::paths::admin_user_api_key_parts;
 
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::handlers::shared::normalize_optional_api_key_concurrent_limit;
 use crate::GatewayError;
 use axum::{
     body::Body,
@@ -68,6 +69,17 @@ pub(crate) async fn build_admin_update_user_api_key_response(
         )
             .into_response());
     }
+    let concurrent_limit = match normalize_optional_api_key_concurrent_limit(payload.concurrent_limit)
+    {
+        Ok(value) => value,
+        Err(detail) => {
+            return Ok((
+                http::StatusCode::BAD_REQUEST,
+                Json(json!({ "detail": detail })),
+            )
+                .into_response());
+        }
+    };
 
     let Some(updated) = state
         .update_user_api_key_basic(aether_data::repository::auth::UpdateUserApiKeyBasicRecord {
@@ -75,6 +87,7 @@ pub(crate) async fn build_admin_update_user_api_key_response(
             api_key_id: api_key_id.clone(),
             name,
             rate_limit: payload.rate_limit,
+            concurrent_limit,
         })
         .await?
     else {

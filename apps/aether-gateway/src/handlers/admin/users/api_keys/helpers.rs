@@ -3,7 +3,8 @@ use crate::handlers::admin::shared::{
     attach_admin_audit_response, decrypt_catalog_secret_with_fallbacks,
 };
 use crate::handlers::shared::{
-    api_key_placeholder_display, generate_gateway_api_key_plaintext, masked_gateway_api_key_display,
+    api_key_concurrent_limit_or_default, api_key_placeholder_display,
+    generate_gateway_api_key_plaintext, masked_gateway_api_key_display,
 };
 use axum::{body::Body, response::Response};
 use serde_json::json;
@@ -43,6 +44,7 @@ pub(super) fn build_admin_user_api_key_detail_payload(
         "total_requests": record.total_requests,
         "total_cost_usd": record.total_cost_usd,
         "rate_limit": record.rate_limit,
+        "concurrent_limit": api_key_concurrent_limit_or_default(record.concurrent_limit),
         "expires_at": format_optional_unix_secs_iso8601(record.expires_at_unix_secs),
         "last_used_at": serde_json::Value::Null,
         "created_at": serde_json::Value::Null,

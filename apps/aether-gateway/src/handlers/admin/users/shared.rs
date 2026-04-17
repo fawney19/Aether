@@ -22,6 +22,8 @@ pub(super) struct AdminCreateUserApiKeyRequest {
     #[serde(default)]
     pub(super) rate_limit: Option<i32>,
     #[serde(default)]
+    pub(super) concurrent_limit: Option<i32>,
+    #[serde(default)]
     pub(super) expire_days: Option<i32>,
     #[serde(default)]
     pub(super) expires_at: Option<String>,
@@ -41,6 +43,8 @@ pub(super) struct AdminUpdateUserApiKeyRequest {
     pub(super) name: Option<String>,
     #[serde(default)]
     pub(super) rate_limit: Option<i32>,
+    #[serde(default)]
+    pub(super) concurrent_limit: Option<i32>,
 }
 
 #[derive(Debug, serde::Deserialize)]

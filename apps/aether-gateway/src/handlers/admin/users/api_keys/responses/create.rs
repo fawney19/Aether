@@ -10,6 +10,9 @@ use super::super::helpers::{
 use super::super::paths::admin_user_id_from_api_keys_path;
 
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::handlers::shared::{
+    api_key_concurrent_limit_or_default, normalize_api_key_concurrent_limit_or_default,
+};
 use crate::GatewayError;
 use axum::{
     body::Body,
@@ -69,7 +72,7 @@ pub(crate) async fn build_admin_create_user_api_key_response(
     {
         return Ok((
             http::StatusCode::BAD_REQUEST,
-            Json(json!({ "detail": "当前仅支持 name、rate_limit、allowed_providers 字段" })),
+            Json(json!({ "detail": "当前仅支持 name、rate_limit、concurrent_limit、allowed_providers 字段" })),
         )
             .into_response());
     }
@@ -103,6 +106,17 @@ pub(crate) async fn build_admin_create_user_api_key_response(
         )
             .into_response());
     }
+    let concurrent_limit = match normalize_api_key_concurrent_limit_or_default(payload.concurrent_limit)
+    {
+        Ok(value) => value,
+        Err(detail) => {
+            return Ok((
+                http::StatusCode::BAD_REQUEST,
+                Json(json!({ "detail": detail })),
+            )
+                .into_response());
+        }
+    };
 
     let plaintext_key = generate_admin_user_api_key_plaintext();
     let Some(key_encrypted) = state.encrypt_catalog_secret_with_fallbacks(&plaintext_key) else {
@@ -124,7 +138,7 @@ pub(crate) async fn build_admin_create_user_api_key_response(
             allowed_api_formats: None,
             allowed_models: None,
             rate_limit,
-            concurrent_limit: 5,
+            concurrent_limit,
             force_capabilities: None,
             is_active: true,
             expires_at_unix_secs: None,
@@ -156,6 +170,7 @@ pub(crate) async fn build_admin_create_user_api_key_response(
             "name": created.name,
             "key_display": masked_user_api_key_display(state, created.key_encrypted.as_deref()),
             "rate_limit": created.rate_limit,
+            "concurrent_limit": api_key_concurrent_limit_or_default(created.concurrent_limit),
             "expires_at": format_optional_unix_secs_iso8601(created.expires_at_unix_secs),
             "created_at": chrono::Utc::now().to_rfc3339(),
             "message": "API Key创建成功，请妥善保存完整密钥",

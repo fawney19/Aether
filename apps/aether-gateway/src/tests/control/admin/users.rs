@@ -629,6 +629,7 @@ async fn gateway_handles_admin_user_api_key_routes_locally_with_trusted_admin_pr
         .expect("json body should parse");
     assert_eq!(create_payload["name"], "new-key");
     assert_eq!(create_payload["rate_limit"], 90);
+    assert_eq!(create_payload["concurrent_limit"], 5);
     assert_eq!(
         create_payload["message"],
         "API Key创建成功，请妥善保存完整密钥"
@@ -651,6 +652,7 @@ async fn gateway_handles_admin_user_api_key_routes_locally_with_trusted_admin_pr
         .json(&json!({
             "name": "renamed",
             "rate_limit": 120,
+            "concurrent_limit": 9,
         }))
         .send()
         .await
@@ -664,6 +666,7 @@ async fn gateway_handles_admin_user_api_key_routes_locally_with_trusted_admin_pr
     assert_eq!(update_payload["name"], "renamed");
     assert_eq!(update_payload["is_locked"], false);
     assert_eq!(update_payload["rate_limit"], 120);
+    assert_eq!(update_payload["concurrent_limit"], 9);
     assert_eq!(update_payload["message"], "API Key更新成功");
 
     let lock_response = client
