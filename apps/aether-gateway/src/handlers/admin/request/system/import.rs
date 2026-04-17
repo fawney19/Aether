@@ -1871,9 +1871,8 @@ impl<'a> AdminAppState<'a> {
                 let concurrent_limit = invalid_value!(imported_optional_i32(
                     key.get("concurrent_limit"),
                     "concurrent_limit"
-                ))
-                .unwrap_or(5);
-                if concurrent_limit < 0 {
+                ));
+                if concurrent_limit.is_some_and(|value| value < 0) {
                     return Ok(Err(invalid_request("concurrent_limit 必须是非负整数")));
                 }
                 let force_capabilities = imported_optional_value(key.get("force_capabilities"));
@@ -1916,7 +1915,11 @@ impl<'a> AdminAppState<'a> {
                                         api_key_id: existing_key.api_key_id.clone(),
                                         name: name.clone(),
                                         rate_limit: Some(rate_limit),
-                                        concurrent_limit: Some(concurrent_limit),
+                                        concurrent_limit: if key.contains_key("concurrent_limit") {
+                                            concurrent_limit
+                                        } else {
+                                            None
+                                        },
                                     },
                                 )
                                 .await?;
@@ -2055,9 +2058,8 @@ impl<'a> AdminAppState<'a> {
             let concurrent_limit = invalid_value!(imported_optional_i32(
                 key.get("concurrent_limit"),
                 "concurrent_limit"
-            ))
-            .unwrap_or(5);
-            if concurrent_limit < 0 {
+            ));
+            if concurrent_limit.is_some_and(|value| value < 0) {
                 return Ok(Err(invalid_request("concurrent_limit 必须是非负整数")));
             }
             let force_capabilities = imported_optional_value(key.get("force_capabilities"));
@@ -2106,8 +2108,8 @@ impl<'a> AdminAppState<'a> {
                                     name: name.clone(),
                                     rate_limit_present: true,
                                     rate_limit: Some(rate_limit),
-                                    concurrent_limit_present: true,
-                                    concurrent_limit: Some(concurrent_limit),
+                                    concurrent_limit_present: key.contains_key("concurrent_limit"),
+                                    concurrent_limit,
                                     allowed_providers: Some(allowed_providers.clone()),
                                     allowed_api_formats: Some(allowed_api_formats.clone()),
                                     allowed_models: Some(allowed_models.clone()),

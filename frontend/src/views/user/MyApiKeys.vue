@@ -424,12 +424,12 @@
             type="number"
             min="0"
             max="10000"
-            placeholder="留空不限"
+            placeholder="0 = 不限并发"
             class="h-11 border-border/60"
             @update:model-value="(v) => newKeyConcurrentLimit = parseNumberInput(v, { min: 0, max: 10000 })"
           />
           <p class="text-xs text-muted-foreground">
-            留空不限
+            {{ editingApiKey ? '留空表示保持当前值，填 0 表示不限并发' : '留空表示不限并发，填 0 也表示不限并发' }}
           </p>
         </div>
       </div>
@@ -545,7 +545,6 @@ import {
 import RefreshButton from '@/components/ui/refresh-button.vue'
 import { Plus, Key, Copy, Trash2, Loader2, Activity, CheckCircle, Power, SquarePen } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
-import { buildUserApiKeyMutationPayload } from '@/features/api-keys/utils/userKeyPayload'
 import { log } from '@/utils/logger'
 import { parseApiError } from '@/utils/errorParser'
 import { formatRateLimitSimple } from '@/utils/format'
@@ -636,21 +635,18 @@ async function saveApiKey() {
   creating.value = true
   try {
     if (editingApiKey.value) {
-      await meApi.updateApiKey(
-        editingApiKey.value.id,
-        buildUserApiKeyMutationPayload({
-          name: newKeyName.value,
-          rate_limit: newKeyRateLimit.value,
-          concurrent_limit: newKeyConcurrentLimit.value,
-        }),
-      )
+      await meApi.updateApiKey(editingApiKey.value.id, {
+        name: newKeyName.value,
+        rate_limit: newKeyRateLimit.value ?? 0,
+        concurrent_limit: newKeyConcurrentLimit.value,
+      })
       success('API 密钥更新成功')
     } else {
-      const newKey = await meApi.createApiKey(buildUserApiKeyMutationPayload({
+      const newKey = await meApi.createApiKey({
         name: newKeyName.value,
-        rate_limit: newKeyRateLimit.value,
+        rate_limit: newKeyRateLimit.value ?? 0,
         concurrent_limit: newKeyConcurrentLimit.value,
-      }))
+      })
       newKeyValue.value = newKey.key || ''
       showKeyDialog.value = true
       success('API 密钥创建成功')

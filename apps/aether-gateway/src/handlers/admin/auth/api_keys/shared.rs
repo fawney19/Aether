@@ -3,7 +3,6 @@ use crate::handlers::admin::shared::{query_param_value, AdminTypedObjectPatch};
 use crate::handlers::admin::users::{
     format_optional_unix_secs_iso8601, masked_user_api_key_display,
 };
-use crate::handlers::shared::api_key_concurrent_limit_or_default;
 use crate::GatewayError;
 use aether_admin::system::serialize_admin_system_users_export_wallet;
 use axum::{
@@ -147,7 +146,7 @@ pub(super) fn build_admin_api_key_list_item_payload(
         "total_tokens": total_tokens,
         "total_cost_usd": record.total_cost_usd,
         "rate_limit": record.rate_limit,
-        "concurrent_limit": api_key_concurrent_limit_or_default(record.concurrent_limit),
+        "concurrent_limit": record.concurrent_limit,
         "allowed_providers": record.allowed_providers,
         "allowed_api_formats": record.allowed_api_formats,
         "allowed_models": record.allowed_models,
@@ -177,7 +176,7 @@ pub(super) fn build_admin_api_key_detail_payload(
         "total_tokens": total_tokens,
         "total_cost_usd": record.total_cost_usd,
         "rate_limit": record.rate_limit,
-        "concurrent_limit": api_key_concurrent_limit_or_default(record.concurrent_limit),
+        "concurrent_limit": record.concurrent_limit,
         "allowed_providers": record.allowed_providers,
         "allowed_api_formats": record.allowed_api_formats,
         "allowed_models": record.allowed_models,

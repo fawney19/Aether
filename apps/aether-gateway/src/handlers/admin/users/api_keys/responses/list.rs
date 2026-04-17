@@ -4,7 +4,6 @@ use super::super::paths::admin_user_id_from_api_keys_path;
 
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::query_param_optional_bool;
-use crate::handlers::shared::api_key_concurrent_limit_or_default;
 use crate::GatewayError;
 use axum::{
     body::Body,
@@ -63,7 +62,7 @@ pub(crate) async fn build_admin_list_user_api_keys_response(
                 "total_requests": record.total_requests,
                 "total_cost_usd": record.total_cost_usd,
                 "rate_limit": record.rate_limit,
-                "concurrent_limit": api_key_concurrent_limit_or_default(record.concurrent_limit),
+                "concurrent_limit": record.concurrent_limit,
                 "expires_at": format_optional_unix_secs_iso8601(record.expires_at_unix_secs),
                 "last_used_at": serde_json::Value::Null,
                 "created_at": serde_json::Value::Null,

@@ -13,10 +13,7 @@ use crate::handlers::admin::users::{
     normalize_admin_optional_api_key_name, normalize_admin_user_api_formats,
     normalize_admin_user_string_list,
 };
-use crate::handlers::shared::{
-    api_key_concurrent_limit_or_default, normalize_api_key_concurrent_limit_or_default,
-    normalize_optional_api_key_concurrent_limit,
-};
+use crate::handlers::shared::normalize_optional_api_key_concurrent_limit;
 use crate::GatewayError;
 use aether_admin::system::serialize_admin_system_users_export_wallet;
 use axum::{
@@ -119,7 +116,7 @@ pub(super) async fn build_admin_create_api_key_response(
         ));
     }
     let concurrent_limit =
-        match normalize_api_key_concurrent_limit_or_default(payload.concurrent_limit) {
+        match normalize_optional_api_key_concurrent_limit(payload.concurrent_limit) {
             Ok(value) => value,
             Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
         };
@@ -193,7 +190,7 @@ pub(super) async fn build_admin_create_api_key_response(
             "is_standalone": true,
             "is_active": created.is_active,
             "rate_limit": created.rate_limit,
-            "concurrent_limit": api_key_concurrent_limit_or_default(created.concurrent_limit),
+            "concurrent_limit": created.concurrent_limit,
             "allowed_providers": created.allowed_providers,
             "allowed_api_formats": created.allowed_api_formats,
             "allowed_models": created.allowed_models,

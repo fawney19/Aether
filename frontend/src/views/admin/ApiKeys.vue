@@ -985,7 +985,7 @@ function formatApiKeyTotalTokens(apiKey: AdminApiKey): string {
 }
 
 function formatConcurrentLimitInheritable(concurrentLimit?: number | null): string {
-  if (concurrentLimit == null) return '跟随系统'
+  if (concurrentLimit == null) return '不限并发'
   if (concurrentLimit === 0) return '不限并发'
   return `${concurrentLimit} 并发`
 }

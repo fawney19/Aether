@@ -1,5 +1,4 @@
 const DEFAULT_API_KEY_PREFIX: &str = "sk";
-const DEFAULT_API_KEY_CONCURRENT_LIMIT: i32 = 5;
 
 fn configured_api_key_prefix_from_lookup<F>(lookup: F) -> String
 where
@@ -68,17 +67,6 @@ pub(crate) fn normalize_optional_api_key_concurrent_limit(
         return Err("concurrent_limit 必须是非负整数".to_string());
     }
     Ok(value)
-}
-
-pub(crate) fn normalize_api_key_concurrent_limit_or_default(
-    value: Option<i32>,
-) -> Result<i32, String> {
-    Ok(normalize_optional_api_key_concurrent_limit(value)?
-        .unwrap_or(DEFAULT_API_KEY_CONCURRENT_LIMIT))
-}
-
-pub(crate) fn api_key_concurrent_limit_or_default(value: Option<i32>) -> i32 {
-    value.unwrap_or(DEFAULT_API_KEY_CONCURRENT_LIMIT)
 }
 
 #[cfg(test)]

@@ -447,7 +447,7 @@ async fn gateway_handles_admin_api_keys_create_locally_with_trusted_admin_princi
     assert_eq!(payload["name"], json!("standalone-key"));
     assert_eq!(payload["is_standalone"], json!(true));
     assert_eq!(payload["rate_limit"], serde_json::Value::Null);
-    assert_eq!(payload["concurrent_limit"], json!(5));
+    assert_eq!(payload["concurrent_limit"], serde_json::Value::Null);
     assert_eq!(payload["allowed_providers"], json!(["openai"]));
     assert_eq!(payload["allowed_api_formats"], json!(["openai:chat"]));
     assert_eq!(payload["allowed_models"], json!(["gpt-4.1"]));

@@ -224,7 +224,7 @@
                 <span
                   v-else
                   class="flex h-10 w-full items-center rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-60"
-                >默认值 5</span>
+                >不限制</span>
               </div>
               <Switch
                 v-model="form.concurrent_limit_inherited"
@@ -232,7 +232,7 @@
               />
             </div>
             <p class="text-xs text-muted-foreground">
-              默认值为 5，填 0 表示不限制并发
+              留空表示不限制，填 0 也表示不限制并发
             </p>
           </div>
 
@@ -395,7 +395,7 @@ const form = ref<StandaloneKeyFormState>({
   rate_limit_inherited: true,
   rate_limit: undefined,
   concurrent_limit_inherited: true,
-  concurrent_limit: 5,
+  concurrent_limit: undefined,
   auto_delete_on_expiry: false,
   provider_unrestricted: true,
   api_format_unrestricted: true,
@@ -441,7 +441,7 @@ function resetForm() {
     rate_limit_inherited: true,
     rate_limit: undefined,
     concurrent_limit_inherited: true,
-    concurrent_limit: 5,
+    concurrent_limit: undefined,
     auto_delete_on_expiry: false,
     provider_unrestricted: true,
     api_format_unrestricted: true,
@@ -463,8 +463,8 @@ function loadKeyData() {
     expires_at: props.apiKey.expires_at,
     rate_limit_inherited: props.apiKey.rate_limit == null,
     rate_limit: props.apiKey.rate_limit ?? undefined,
-    concurrent_limit_inherited: props.apiKey.concurrent_limit == null || props.apiKey.concurrent_limit === 5,
-    concurrent_limit: props.apiKey.concurrent_limit ?? 5,
+    concurrent_limit_inherited: props.apiKey.concurrent_limit == null,
+    concurrent_limit: props.apiKey.concurrent_limit ?? undefined,
     auto_delete_on_expiry: props.apiKey.auto_delete_on_expiry,
     provider_unrestricted: props.apiKey.allowed_providers == null,
     api_format_unrestricted: props.apiKey.allowed_api_formats == null,
@@ -515,7 +515,7 @@ function handleSubmit() {
     unlimited_balance: form.value.unlimited_balance,
     expires_at: form.value.expires_at,
     rate_limit: form.value.rate_limit_inherited ? null : (form.value.rate_limit ?? 0),
-    concurrent_limit: form.value.concurrent_limit_inherited ? 5 : (form.value.concurrent_limit ?? 5),
+    concurrent_limit: form.value.concurrent_limit_inherited ? null : (form.value.concurrent_limit ?? 0),
     auto_delete_on_expiry: form.value.auto_delete_on_expiry,
     allowed_providers: form.value.provider_unrestricted ? null : [...form.value.allowed_providers],
     allowed_api_formats: form.value.api_format_unrestricted ? null : [...form.value.allowed_api_formats],
@@ -550,7 +550,7 @@ watch(
   () => form.value.concurrent_limit_inherited,
   (inherited) => {
     if (!inherited && form.value.concurrent_limit == null) {
-      form.value.concurrent_limit = 5
+      form.value.concurrent_limit = 0
     }
   }
 )

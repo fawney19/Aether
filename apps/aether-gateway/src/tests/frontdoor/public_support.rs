@@ -6012,7 +6012,7 @@ async fn gateway_handles_users_me_api_key_writes_locally_without_proxying_upstre
         .to_string();
     assert_eq!(create_payload["name"], "writer-key");
     assert_eq!(create_payload["rate_limit"], 120);
-    assert_eq!(create_payload["concurrent_limit"], 5);
+    assert_eq!(create_payload["concurrent_limit"], serde_json::Value::Null);
     assert_eq!(create_payload["message"], "API密钥创建成功");
     assert!(create_payload["key"]
         .as_str()
