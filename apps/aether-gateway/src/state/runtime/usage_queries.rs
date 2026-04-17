@@ -35,6 +35,26 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn find_request_usage_by_id(
+        &self,
+        usage_id: &str,
+    ) -> Result<Option<usage::StoredRequestUsageAudit>, GatewayError> {
+        self.data
+            .find_request_usage_by_id(usage_id)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn list_request_usage_by_ids(
+        &self,
+        usage_ids: &[String],
+    ) -> Result<Vec<usage::StoredRequestUsageAudit>, GatewayError> {
+        self.data
+            .list_request_usage_by_ids(usage_ids)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn list_usage_audits(
         &self,
         query: &usage::UsageAuditListQuery,
@@ -55,6 +75,26 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn list_usage_audits_by_keyword_search(
+        &self,
+        query: &usage::UsageAuditKeywordSearchQuery,
+    ) -> Result<Vec<usage::StoredRequestUsageAudit>, GatewayError> {
+        self.data
+            .list_usage_audits_by_keyword_search(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn count_usage_audits_by_keyword_search(
+        &self,
+        query: &usage::UsageAuditKeywordSearchQuery,
+    ) -> Result<u64, GatewayError> {
+        self.data
+            .count_usage_audits_by_keyword_search(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn aggregate_usage_audits(
         &self,
         query: &usage::UsageAuditAggregationQuery,
@@ -71,6 +111,136 @@ impl AppState {
     ) -> Result<usage::StoredUsageAuditSummary, GatewayError> {
         self.data
             .summarize_usage_audits(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn summarize_usage_cache_hit_summary(
+        &self,
+        query: &usage::UsageCacheHitSummaryQuery,
+    ) -> Result<usage::StoredUsageCacheHitSummary, GatewayError> {
+        self.data
+            .summarize_usage_cache_hit_summary(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn summarize_usage_settled_cost(
+        &self,
+        query: &usage::UsageSettledCostSummaryQuery,
+    ) -> Result<usage::StoredUsageSettledCostSummary, GatewayError> {
+        self.data
+            .summarize_usage_settled_cost(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn summarize_usage_cache_affinity_hit_summary(
+        &self,
+        query: &usage::UsageCacheAffinityHitSummaryQuery,
+    ) -> Result<usage::StoredUsageCacheAffinityHitSummary, GatewayError> {
+        self.data
+            .summarize_usage_cache_affinity_hit_summary(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn list_usage_cache_affinity_intervals(
+        &self,
+        query: &usage::UsageCacheAffinityIntervalQuery,
+    ) -> Result<Vec<usage::StoredUsageCacheAffinityIntervalRow>, GatewayError> {
+        self.data
+            .list_usage_cache_affinity_intervals(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn summarize_dashboard_usage(
+        &self,
+        query: &usage::UsageDashboardSummaryQuery,
+    ) -> Result<usage::StoredUsageDashboardSummary, GatewayError> {
+        self.data
+            .summarize_dashboard_usage(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn list_dashboard_daily_breakdown(
+        &self,
+        query: &usage::UsageDashboardDailyBreakdownQuery,
+    ) -> Result<Vec<usage::StoredUsageDashboardDailyBreakdownRow>, GatewayError> {
+        self.data
+            .list_dashboard_daily_breakdown(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn summarize_dashboard_provider_counts(
+        &self,
+        query: &usage::UsageDashboardProviderCountsQuery,
+    ) -> Result<Vec<usage::StoredUsageDashboardProviderCount>, GatewayError> {
+        self.data
+            .summarize_dashboard_provider_counts(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn summarize_usage_breakdown(
+        &self,
+        query: &usage::UsageBreakdownSummaryQuery,
+    ) -> Result<Vec<usage::StoredUsageBreakdownSummaryRow>, GatewayError> {
+        self.data
+            .summarize_usage_breakdown(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn count_monitoring_usage_errors(
+        &self,
+        query: &usage::UsageMonitoringErrorCountQuery,
+    ) -> Result<u64, GatewayError> {
+        self.data
+            .count_monitoring_usage_errors(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn list_monitoring_usage_errors(
+        &self,
+        query: &usage::UsageMonitoringErrorListQuery,
+    ) -> Result<Vec<usage::StoredRequestUsageAudit>, GatewayError> {
+        self.data
+            .list_monitoring_usage_errors(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn summarize_usage_error_distribution(
+        &self,
+        query: &usage::UsageErrorDistributionQuery,
+    ) -> Result<Vec<usage::StoredUsageErrorDistributionRow>, GatewayError> {
+        self.data
+            .summarize_usage_error_distribution(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn summarize_usage_performance_percentiles(
+        &self,
+        query: &usage::UsagePerformancePercentilesQuery,
+    ) -> Result<Vec<usage::StoredUsagePerformancePercentilesRow>, GatewayError> {
+        self.data
+            .summarize_usage_performance_percentiles(query)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn summarize_usage_cost_savings(
+        &self,
+        query: &usage::UsageCostSavingsSummaryQuery,
+    ) -> Result<usage::StoredUsageCostSavingsSummary, GatewayError> {
+        self.data
+            .summarize_usage_cost_savings(query)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }

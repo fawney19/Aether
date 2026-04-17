@@ -16,7 +16,8 @@ use crate::ai_pipeline::planner::standard::{
 use crate::ai_pipeline::transport::apply_local_header_rules;
 use crate::ai_pipeline::transport::auth::{
     build_claude_passthrough_headers, build_complete_passthrough_headers_with_auth,
-    build_openai_passthrough_headers, ensure_upstream_auth_header, resolve_local_openai_chat_auth,
+    build_openai_passthrough_headers, ensure_upstream_auth_header,
+    resolve_local_openai_bearer_auth,
 };
 use crate::ai_pipeline::transport::local_openai_chat_transport_unsupported_reason;
 use crate::ai_pipeline::{ConversionMode, ExecutionStrategy, GatewayProviderTransportSnapshot};
@@ -76,7 +77,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             planner_state,
             transport,
             candidate,
-            resolve_local_openai_chat_auth(transport),
+            resolve_local_openai_bearer_auth(transport),
             OauthPreparationContext {
                 trace_id,
                 api_format: "openai:chat",

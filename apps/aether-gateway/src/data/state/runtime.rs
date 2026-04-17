@@ -1,15 +1,19 @@
 use super::{
     read_decision_trace, read_provider_transport_snapshot, read_request_candidate_trace,
-    AdjustWalletBalanceInput, AdminPaymentOrderListQuery, AdminWalletLedgerQuery,
-    AdminWalletListQuery, AdminWalletRefundRequestListQuery, AnnouncementListQuery,
-    CompleteAdminWalletRefundInput, CreateAnnouncementRecord, CreateManualWalletRechargeInput,
-    CreateWalletRechargeOrderInput, CreateWalletRechargeOrderOutcome,
-    CreateWalletRefundRequestInput, CreateWalletRefundRequestOutcome, CreditAdminPaymentOrderInput,
-    DataLayerError, DecisionTrace, FailAdminWalletRefundInput, GatewayDataState,
-    GatewayProviderTransportSnapshot, LocalVideoTaskReadResponse, ProcessAdminWalletRefundInput,
-    ProcessPaymentCallbackInput, ProcessPaymentCallbackOutcome, RedisStreamRunner,
-    RequestAuditBundle, RequestCandidateTrace, StoredAdminPaymentCallbackPage,
-    StoredAdminPaymentOrder, StoredAdminPaymentOrderPage, StoredAdminWalletLedgerPage,
+    AdjustWalletBalanceInput, AdminPaymentOrderListQuery, AdminRedeemCodeBatchListQuery,
+    AdminRedeemCodeListQuery, AdminWalletLedgerQuery, AdminWalletListQuery,
+    AdminWalletRefundRequestListQuery, AnnouncementListQuery, CompleteAdminWalletRefundInput,
+    CreateAdminRedeemCodeBatchInput, CreateAdminRedeemCodeBatchResult, CreateAnnouncementRecord,
+    CreateManualWalletRechargeInput, CreateWalletRechargeOrderInput,
+    CreateWalletRechargeOrderOutcome, CreateWalletRefundRequestInput,
+    CreateWalletRefundRequestOutcome, CreditAdminPaymentOrderInput, DataLayerError, DecisionTrace,
+    DeleteAdminRedeemCodeBatchInput, DisableAdminRedeemCodeBatchInput, DisableAdminRedeemCodeInput,
+    FailAdminWalletRefundInput, GatewayDataState, GatewayProviderTransportSnapshot,
+    LocalVideoTaskReadResponse, ProcessAdminWalletRefundInput, ProcessPaymentCallbackInput,
+    ProcessPaymentCallbackOutcome, RedeemWalletCodeInput, RedeemWalletCodeOutcome,
+    RedisStreamRunner, RequestAuditBundle, RequestCandidateTrace, StoredAdminPaymentCallbackPage,
+    StoredAdminPaymentOrder, StoredAdminPaymentOrderPage, StoredAdminRedeemCodeBatch,
+    StoredAdminRedeemCodeBatchPage, StoredAdminRedeemCodePage, StoredAdminWalletLedgerPage,
     StoredAdminWalletListPage, StoredAdminWalletRefund, StoredAdminWalletRefundPage,
     StoredAdminWalletRefundRequestPage, StoredAdminWalletTransaction,
     StoredAdminWalletTransactionPage, StoredAnnouncement, StoredAnnouncementPage,
@@ -383,6 +387,36 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn list_admin_redeem_code_batches(
+        &self,
+        query: &AdminRedeemCodeBatchListQuery,
+    ) -> Result<StoredAdminRedeemCodeBatchPage, DataLayerError> {
+        match &self.wallet_reader {
+            Some(repository) => repository.list_admin_redeem_code_batches(query).await,
+            None => Ok(StoredAdminRedeemCodeBatchPage::default()),
+        }
+    }
+
+    pub(crate) async fn find_admin_redeem_code_batch(
+        &self,
+        batch_id: &str,
+    ) -> Result<Option<StoredAdminRedeemCodeBatch>, DataLayerError> {
+        match &self.wallet_reader {
+            Some(repository) => repository.find_admin_redeem_code_batch(batch_id).await,
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn list_admin_redeem_codes(
+        &self,
+        query: &AdminRedeemCodeListQuery,
+    ) -> Result<StoredAdminRedeemCodePage, DataLayerError> {
+        match &self.wallet_reader {
+            Some(repository) => repository.list_admin_redeem_codes(query).await,
+            None => Ok(StoredAdminRedeemCodePage::default()),
+        }
+    }
+
     pub(crate) async fn find_admin_payment_order(
         &self,
         order_id: &str,
@@ -584,6 +618,68 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn create_admin_redeem_code_batch(
+        &self,
+        input: CreateAdminRedeemCodeBatchInput,
+    ) -> Result<Option<CreateAdminRedeemCodeBatchResult>, DataLayerError> {
+        match &self.wallet_writer {
+            Some(repository) => repository
+                .create_admin_redeem_code_batch(input)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn disable_admin_redeem_code_batch(
+        &self,
+        input: DisableAdminRedeemCodeBatchInput,
+    ) -> Result<Option<WalletMutationOutcome<StoredAdminRedeemCodeBatch>>, DataLayerError> {
+        match &self.wallet_writer {
+            Some(repository) => repository
+                .disable_admin_redeem_code_batch(input)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn delete_admin_redeem_code_batch(
+        &self,
+        input: DeleteAdminRedeemCodeBatchInput,
+    ) -> Result<Option<WalletMutationOutcome<StoredAdminRedeemCodeBatch>>, DataLayerError> {
+        match &self.wallet_writer {
+            Some(repository) => repository
+                .delete_admin_redeem_code_batch(input)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn disable_admin_redeem_code(
+        &self,
+        input: DisableAdminRedeemCodeInput,
+    ) -> Result<
+        Option<WalletMutationOutcome<aether_data::repository::wallet::StoredAdminRedeemCode>>,
+        DataLayerError,
+    > {
+        match &self.wallet_writer {
+            Some(repository) => repository.disable_admin_redeem_code(input).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn redeem_wallet_code(
+        &self,
+        input: RedeemWalletCodeInput,
+    ) -> Result<Option<RedeemWalletCodeOutcome>, DataLayerError> {
+        match &self.wallet_writer {
+            Some(repository) => repository.redeem_wallet_code(input).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
     pub(crate) async fn settle_usage(
         &self,
         input: UsageSettlementInput,
@@ -646,6 +742,16 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn list_request_usage_by_ids(
+        &self,
+        usage_ids: &[String],
+    ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
+        match &self.usage_reader {
+            Some(repository) => repository.list_by_ids(usage_ids).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub(crate) async fn resolve_request_usage_body_ref(
         &self,
         body_ref: &str,
@@ -676,6 +782,26 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn list_usage_audits_by_keyword_search(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageAuditKeywordSearchQuery,
+    ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
+        match &self.usage_reader {
+            Some(repository) => repository.list_usage_audits_by_keyword_search(query).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub(crate) async fn count_usage_audits_by_keyword_search(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageAuditKeywordSearchQuery,
+    ) -> Result<u64, DataLayerError> {
+        match &self.usage_reader {
+            Some(repository) => repository.count_usage_audits_by_keyword_search(query).await,
+            None => Ok(0),
+        }
+    }
+
     pub(crate) async fn aggregate_usage_audits(
         &self,
         query: &aether_data_contracts::repository::usage::UsageAuditAggregationQuery,
@@ -699,6 +825,181 @@ impl GatewayDataState {
             None => {
                 Ok(aether_data_contracts::repository::usage::StoredUsageAuditSummary::default())
             }
+        }
+    }
+
+    pub(crate) async fn summarize_usage_cache_hit_summary(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageCacheHitSummaryQuery,
+    ) -> Result<aether_data_contracts::repository::usage::StoredUsageCacheHitSummary, DataLayerError>
+    {
+        match &self.usage_reader {
+            Some(repository) => repository.summarize_usage_cache_hit_summary(query).await,
+            None => {
+                Ok(aether_data_contracts::repository::usage::StoredUsageCacheHitSummary::default())
+            }
+        }
+    }
+
+    pub(crate) async fn summarize_usage_settled_cost(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageSettledCostSummaryQuery,
+    ) -> Result<
+        aether_data_contracts::repository::usage::StoredUsageSettledCostSummary,
+        DataLayerError,
+    > {
+        match &self.usage_reader {
+            Some(repository) => repository.summarize_usage_settled_cost(query).await,
+            None => Ok(
+                aether_data_contracts::repository::usage::StoredUsageSettledCostSummary::default(),
+            ),
+        }
+    }
+
+    pub(crate) async fn summarize_usage_cache_affinity_hit_summary(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageCacheAffinityHitSummaryQuery,
+    ) -> Result<
+        aether_data_contracts::repository::usage::StoredUsageCacheAffinityHitSummary,
+        DataLayerError,
+    > {
+        match &self.usage_reader {
+            Some(repository) => repository
+                .summarize_usage_cache_affinity_hit_summary(query)
+                .await,
+            None => Ok(
+                aether_data_contracts::repository::usage::StoredUsageCacheAffinityHitSummary::default(),
+            ),
+        }
+    }
+
+    pub(crate) async fn list_usage_cache_affinity_intervals(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageCacheAffinityIntervalQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredUsageCacheAffinityIntervalRow>,
+        DataLayerError,
+    > {
+        match &self.usage_reader {
+            Some(repository) => repository.list_usage_cache_affinity_intervals(query).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub(crate) async fn summarize_dashboard_usage(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageDashboardSummaryQuery,
+    ) -> Result<aether_data_contracts::repository::usage::StoredUsageDashboardSummary, DataLayerError>
+    {
+        match &self.usage_reader {
+            Some(repository) => repository.summarize_dashboard_usage(query).await,
+            None => Ok(
+                aether_data_contracts::repository::usage::StoredUsageDashboardSummary::default(),
+            ),
+        }
+    }
+
+    pub(crate) async fn list_dashboard_daily_breakdown(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageDashboardDailyBreakdownQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredUsageDashboardDailyBreakdownRow>,
+        DataLayerError,
+    > {
+        match &self.usage_reader {
+            Some(repository) => repository.list_dashboard_daily_breakdown(query).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub(crate) async fn summarize_dashboard_provider_counts(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageDashboardProviderCountsQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredUsageDashboardProviderCount>,
+        DataLayerError,
+    > {
+        match &self.usage_reader {
+            Some(repository) => repository.summarize_dashboard_provider_counts(query).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub(crate) async fn summarize_usage_breakdown(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageBreakdownSummaryQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredUsageBreakdownSummaryRow>,
+        DataLayerError,
+    > {
+        match &self.usage_reader {
+            Some(repository) => repository.summarize_usage_breakdown(query).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub(crate) async fn count_monitoring_usage_errors(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageMonitoringErrorCountQuery,
+    ) -> Result<u64, DataLayerError> {
+        match &self.usage_reader {
+            Some(repository) => repository.count_monitoring_usage_errors(query).await,
+            None => Ok(0),
+        }
+    }
+
+    pub(crate) async fn list_monitoring_usage_errors(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageMonitoringErrorListQuery,
+    ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
+        match &self.usage_reader {
+            Some(repository) => repository.list_monitoring_usage_errors(query).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub(crate) async fn summarize_usage_error_distribution(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageErrorDistributionQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredUsageErrorDistributionRow>,
+        DataLayerError,
+    > {
+        match &self.usage_reader {
+            Some(repository) => repository.summarize_usage_error_distribution(query).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub(crate) async fn summarize_usage_performance_percentiles(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsagePerformancePercentilesQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredUsagePerformancePercentilesRow>,
+        DataLayerError,
+    > {
+        match &self.usage_reader {
+            Some(repository) => {
+                repository
+                    .summarize_usage_performance_percentiles(query)
+                    .await
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub(crate) async fn summarize_usage_cost_savings(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageCostSavingsSummaryQuery,
+    ) -> Result<
+        aether_data_contracts::repository::usage::StoredUsageCostSavingsSummary,
+        DataLayerError,
+    > {
+        match &self.usage_reader {
+            Some(repository) => repository.summarize_usage_cost_savings(query).await,
+            None => Ok(
+                aether_data_contracts::repository::usage::StoredUsageCostSavingsSummary::default(),
+            ),
         }
     }
 
@@ -789,6 +1090,20 @@ impl GatewayDataState {
     ) -> Result<Vec<StoredUserSummary>, DataLayerError> {
         match &self.user_reader {
             Some(repository) => repository.list_users_by_ids(user_ids).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub(crate) async fn list_users_by_username_search(
+        &self,
+        username_search: &str,
+    ) -> Result<Vec<StoredUserSummary>, DataLayerError> {
+        match &self.user_reader {
+            Some(repository) => {
+                repository
+                    .list_users_by_username_search(username_search)
+                    .await
+            }
             None => Ok(Vec::new()),
         }
     }

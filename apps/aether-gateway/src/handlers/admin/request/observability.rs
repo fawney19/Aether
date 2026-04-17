@@ -47,6 +47,29 @@ impl<'a> AdminAppState<'a> {
         self.app.count_usage_audits(query).await
     }
 
+    pub(crate) async fn list_usage_audits_by_keyword_search(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageAuditKeywordSearchQuery,
+    ) -> Result<Vec<aether_data_contracts::repository::usage::StoredRequestUsageAudit>, GatewayError>
+    {
+        self.app.list_usage_audits_by_keyword_search(query).await
+    }
+
+    pub(crate) async fn count_usage_audits_by_keyword_search(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageAuditKeywordSearchQuery,
+    ) -> Result<u64, GatewayError> {
+        self.app.count_usage_audits_by_keyword_search(query).await
+    }
+
+    pub(crate) async fn list_monitoring_usage_errors(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageMonitoringErrorListQuery,
+    ) -> Result<Vec<aether_data_contracts::repository::usage::StoredRequestUsageAudit>, GatewayError>
+    {
+        self.app.list_monitoring_usage_errors(query).await
+    }
+
     pub(crate) async fn aggregate_usage_audits(
         &self,
         query: &aether_data_contracts::repository::usage::UsageAuditAggregationQuery,
@@ -63,6 +86,44 @@ impl<'a> AdminAppState<'a> {
     ) -> Result<aether_data_contracts::repository::usage::StoredUsageAuditSummary, GatewayError>
     {
         self.app.summarize_usage_audits(query).await
+    }
+
+    pub(crate) async fn summarize_usage_cache_hit_summary(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageCacheHitSummaryQuery,
+    ) -> Result<aether_data_contracts::repository::usage::StoredUsageCacheHitSummary, GatewayError>
+    {
+        self.app.summarize_usage_cache_hit_summary(query).await
+    }
+
+    pub(crate) async fn summarize_usage_settled_cost(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageSettledCostSummaryQuery,
+    ) -> Result<aether_data_contracts::repository::usage::StoredUsageSettledCostSummary, GatewayError>
+    {
+        self.app.summarize_usage_settled_cost(query).await
+    }
+
+    pub(crate) async fn summarize_usage_cache_affinity_hit_summary(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageCacheAffinityHitSummaryQuery,
+    ) -> Result<
+        aether_data_contracts::repository::usage::StoredUsageCacheAffinityHitSummary,
+        GatewayError,
+    > {
+        self.app
+            .summarize_usage_cache_affinity_hit_summary(query)
+            .await
+    }
+
+    pub(crate) async fn list_usage_cache_affinity_intervals(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageCacheAffinityIntervalQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredUsageCacheAffinityIntervalRow>,
+        GatewayError,
+    > {
+        self.app.list_usage_cache_affinity_intervals(query).await
     }
 
     pub(crate) async fn summarize_usage_time_series(
@@ -83,6 +144,36 @@ impl<'a> AdminAppState<'a> {
         GatewayError,
     > {
         self.app.summarize_usage_leaderboard(query).await
+    }
+
+    pub(crate) async fn summarize_usage_error_distribution(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageErrorDistributionQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredUsageErrorDistributionRow>,
+        GatewayError,
+    > {
+        self.app.summarize_usage_error_distribution(query).await
+    }
+
+    pub(crate) async fn summarize_usage_performance_percentiles(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsagePerformancePercentilesQuery,
+    ) -> Result<
+        Vec<aether_data_contracts::repository::usage::StoredUsagePerformancePercentilesRow>,
+        GatewayError,
+    > {
+        self.app
+            .summarize_usage_performance_percentiles(query)
+            .await
+    }
+
+    pub(crate) async fn summarize_usage_cost_savings(
+        &self,
+        query: &aether_data_contracts::repository::usage::UsageCostSavingsSummaryQuery,
+    ) -> Result<aether_data_contracts::repository::usage::StoredUsageCostSavingsSummary, GatewayError>
+    {
+        self.app.summarize_usage_cost_savings(query).await
     }
 
     pub(crate) async fn summarize_usage_daily_heatmap(
@@ -107,6 +198,14 @@ impl<'a> AdminAppState<'a> {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn list_request_usage_by_ids(
+        &self,
+        usage_ids: &[String],
+    ) -> Result<Vec<aether_data_contracts::repository::usage::StoredRequestUsageAudit>, GatewayError>
+    {
+        self.app.list_request_usage_by_ids(usage_ids).await
+    }
+
     pub(crate) async fn resolve_request_usage_body_ref(
         &self,
         body_ref: &str,
@@ -116,27 +215,6 @@ impl<'a> AdminAppState<'a> {
             .resolve_request_usage_body_ref(body_ref)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
-    }
-
-    pub(crate) async fn list_admin_usage_for_range(
-        &self,
-        time_range: &crate::handlers::admin::observability::AdminStatsTimeRange,
-        filters: &crate::handlers::admin::observability::AdminStatsUsageFilter,
-    ) -> Result<Vec<aether_data_contracts::repository::usage::StoredRequestUsageAudit>, GatewayError>
-    {
-        crate::handlers::admin::observability::list_usage_for_range(self, time_range, filters).await
-    }
-
-    pub(crate) async fn list_admin_usage_for_optional_range(
-        &self,
-        time_range: Option<&crate::handlers::admin::observability::AdminStatsTimeRange>,
-        filters: &crate::handlers::admin::observability::AdminStatsUsageFilter,
-    ) -> Result<Vec<aether_data_contracts::repository::usage::StoredRequestUsageAudit>, GatewayError>
-    {
-        crate::handlers::admin::observability::list_usage_for_optional_range(
-            self, time_range, filters,
-        )
-        .await
     }
 
     pub(crate) async fn build_api_format_health_monitor_payload(

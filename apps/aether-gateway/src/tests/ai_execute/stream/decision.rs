@@ -449,7 +449,7 @@ async fn gateway_executes_openai_chat_stream_via_local_openai_cli_cross_format_c
         model: String,
         stream: bool,
         accept: String,
-        api_key: String,
+        authorization: String,
         x_client_request_id: String,
         session_id: String,
         conversation_id: String,
@@ -717,9 +717,9 @@ async fn gateway_executes_openai_chat_stream_via_local_openai_cli_cross_format_c
                             .and_then(|value| value.as_str())
                             .unwrap_or_default()
                             .to_string(),
-                        api_key: payload
+                        authorization: payload
                             .get("headers")
-                            .and_then(|value| value.get("x-api-key"))
+                            .and_then(|value| value.get("authorization"))
                             .and_then(|value| value.as_str())
                             .unwrap_or_default()
                             .to_string(),
@@ -871,8 +871,8 @@ async fn gateway_executes_openai_chat_stream_via_local_openai_cli_cross_format_c
     assert!(seen_execution_runtime_request.stream);
     assert_eq!(seen_execution_runtime_request.accept, "text/event-stream");
     assert_eq!(
-        seen_execution_runtime_request.api_key,
-        "sk-upstream-openai-chat-cli"
+        seen_execution_runtime_request.authorization,
+        "Bearer sk-upstream-openai-chat-cli"
     );
     assert_eq!(
         seen_execution_runtime_request.x_client_request_id,

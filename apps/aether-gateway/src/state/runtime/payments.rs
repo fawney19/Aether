@@ -229,6 +229,126 @@ impl AppState {
             None => Ok(AdminWalletMutationOutcome::Unavailable),
         }
     }
+
+    pub(crate) async fn admin_create_redeem_code_batch(
+        &self,
+        input: aether_data::repository::wallet::CreateAdminRedeemCodeBatchInput,
+    ) -> Result<
+        Option<aether_data::repository::wallet::CreateAdminRedeemCodeBatchResult>,
+        GatewayError,
+    > {
+        self.data
+            .create_admin_redeem_code_batch(input)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn admin_disable_redeem_code_batch(
+        &self,
+        batch_id: &str,
+        operator_id: Option<&str>,
+    ) -> Result<
+        AdminWalletMutationOutcome<aether_data::repository::wallet::StoredAdminRedeemCodeBatch>,
+        GatewayError,
+    > {
+        match self
+            .data
+            .disable_admin_redeem_code_batch(
+                aether_data::repository::wallet::DisableAdminRedeemCodeBatchInput {
+                    batch_id: batch_id.to_string(),
+                    operator_id: operator_id.map(ToOwned::to_owned),
+                },
+            )
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?
+        {
+            Some(aether_data::repository::wallet::WalletMutationOutcome::Applied(batch)) => {
+                Ok(AdminWalletMutationOutcome::Applied(batch))
+            }
+            Some(aether_data::repository::wallet::WalletMutationOutcome::NotFound) => {
+                Ok(AdminWalletMutationOutcome::NotFound)
+            }
+            Some(aether_data::repository::wallet::WalletMutationOutcome::Invalid(detail)) => {
+                Ok(AdminWalletMutationOutcome::Invalid(detail))
+            }
+            None => Ok(AdminWalletMutationOutcome::Unavailable),
+        }
+    }
+
+    pub(crate) async fn admin_delete_redeem_code_batch(
+        &self,
+        batch_id: &str,
+        operator_id: Option<&str>,
+    ) -> Result<
+        AdminWalletMutationOutcome<aether_data::repository::wallet::StoredAdminRedeemCodeBatch>,
+        GatewayError,
+    > {
+        match self
+            .data
+            .delete_admin_redeem_code_batch(
+                aether_data::repository::wallet::DeleteAdminRedeemCodeBatchInput {
+                    batch_id: batch_id.to_string(),
+                    operator_id: operator_id.map(ToOwned::to_owned),
+                },
+            )
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?
+        {
+            Some(aether_data::repository::wallet::WalletMutationOutcome::Applied(batch)) => {
+                Ok(AdminWalletMutationOutcome::Applied(batch))
+            }
+            Some(aether_data::repository::wallet::WalletMutationOutcome::NotFound) => {
+                Ok(AdminWalletMutationOutcome::NotFound)
+            }
+            Some(aether_data::repository::wallet::WalletMutationOutcome::Invalid(detail)) => {
+                Ok(AdminWalletMutationOutcome::Invalid(detail))
+            }
+            None => Ok(AdminWalletMutationOutcome::Unavailable),
+        }
+    }
+
+    pub(crate) async fn admin_disable_redeem_code(
+        &self,
+        code_id: &str,
+        operator_id: Option<&str>,
+    ) -> Result<
+        AdminWalletMutationOutcome<aether_data::repository::wallet::StoredAdminRedeemCode>,
+        GatewayError,
+    > {
+        match self
+            .data
+            .disable_admin_redeem_code(
+                aether_data::repository::wallet::DisableAdminRedeemCodeInput {
+                    code_id: code_id.to_string(),
+                    operator_id: operator_id.map(ToOwned::to_owned),
+                },
+            )
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))?
+        {
+            Some(aether_data::repository::wallet::WalletMutationOutcome::Applied(code)) => {
+                Ok(AdminWalletMutationOutcome::Applied(code))
+            }
+            Some(aether_data::repository::wallet::WalletMutationOutcome::NotFound) => {
+                Ok(AdminWalletMutationOutcome::NotFound)
+            }
+            Some(aether_data::repository::wallet::WalletMutationOutcome::Invalid(detail)) => {
+                Ok(AdminWalletMutationOutcome::Invalid(detail))
+            }
+            None => Ok(AdminWalletMutationOutcome::Unavailable),
+        }
+    }
+
+    pub(crate) async fn redeem_wallet_code(
+        &self,
+        input: aether_data::repository::wallet::RedeemWalletCodeInput,
+    ) -> Result<Option<aether_data::repository::wallet::RedeemWalletCodeOutcome>, GatewayError>
+    {
+        self.data
+            .redeem_wallet_code(input)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
 }
 
 fn stored_admin_payment_order_to_gateway(

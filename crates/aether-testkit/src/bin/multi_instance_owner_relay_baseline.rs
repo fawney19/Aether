@@ -381,18 +381,17 @@ async fn connect_protocol_peer(
                 break;
             };
             match message {
-                Message::Binary(data) => {
+                Message::Binary(data)
                     if handle_binary_frame(&mut sink, data.to_vec(), chunk_delay)
                         .await
-                        .is_err()
-                    {
-                        break;
-                    }
+                        .is_err() =>
+                {
+                    break;
                 }
-                Message::Ping(payload) => {
-                    if sink.send(Message::Pong(payload)).await.is_err() {
-                        break;
-                    }
+                Message::Ping(payload)
+                    if sink.send(Message::Pong(payload.clone())).await.is_err() =>
+                {
+                    break;
                 }
                 Message::Close(_) => break,
                 _ => {}

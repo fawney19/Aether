@@ -1,35 +1,25 @@
 use crate::handlers::admin::request::AdminAppState;
 use crate::GatewayError;
-use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageAuditListQuery};
+use aether_data_contracts::repository::usage::{
+    StoredUsageCacheAffinityIntervalRow, UsageCacheAffinityIntervalGroupBy,
+    UsageCacheAffinityIntervalQuery,
+};
 
-pub(in super::super) async fn list_recent_completed_usage_for_cache_affinity(
+pub(in super::super) async fn list_usage_cache_affinity_intervals(
     state: &AdminAppState<'_>,
     hours: u32,
+    group_by: UsageCacheAffinityIntervalGroupBy,
     user_id: Option<&str>,
-) -> Result<Vec<StoredRequestUsageAudit>, GatewayError> {
+    api_key_id: Option<&str>,
+) -> Result<Vec<StoredUsageCacheAffinityIntervalRow>, GatewayError> {
     let now_unix_secs = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default();
-    let created_from_unix_secs = now_unix_secs.saturating_sub(u64::from(hours) * 3600);
-    let mut items = state
-        .list_usage_audits(&UsageAuditListQuery {
-            created_from_unix_secs: Some(created_from_unix_secs),
-            created_until_unix_secs: None,
+    state
+        .list_usage_cache_affinity_intervals(&UsageCacheAffinityIntervalQuery {
+            created_from_unix_secs: now_unix_secs.saturating_sub(u64::from(hours) * 3600),
+            created_until_unix_secs: now_unix_secs.saturating_add(1),
+            group_by,
             user_id: user_id.map(ToOwned::to_owned),
-            provider_name: None,
-            model: None,
-            api_format: None,
-            statuses: None,
-            is_stream: None,
-            error_only: false,
-            limit: None,
-            offset: None,
-            newest_first: false,
+            api_key_id: api_key_id.map(ToOwned::to_owned),
         })
-        .await?;
-    items.retain(|item| item.status == "completed");
-    items.sort_by(|left, right| {
-        left.created_at_unix_ms
-            .cmp(&right.created_at_unix_ms)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    Ok(items)
+        .await
 }

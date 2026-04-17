@@ -171,7 +171,7 @@ async fn provider_query_sort_antigravity_keys(
         };
         ranked.push(((availability, tier_weight), key));
     }
-    ranked.sort_by(|left, right| right.0.cmp(&left.0));
+    ranked.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     Ok(ranked.into_iter().map(|(_, key)| key).collect())
 }
 

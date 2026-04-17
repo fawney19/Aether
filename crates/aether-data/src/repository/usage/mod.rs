@@ -5,11 +5,23 @@ mod sql;
 pub(crate) use aether_data_contracts::repository::usage::{
     StoredProviderApiKeyUsageSummary, StoredProviderUsageSummary, StoredProviderUsageWindow,
     StoredRequestUsageAudit, StoredUsageAuditAggregation, StoredUsageAuditSummary,
-    StoredUsageDailySummary, StoredUsageLeaderboardSummary, StoredUsageTimeSeriesBucket,
-    UpsertUsageRecord, UsageAuditAggregationGroupBy, UsageAuditAggregationQuery,
-    UsageAuditListQuery, UsageAuditSummaryQuery, UsageDailyHeatmapQuery, UsageLeaderboardGroupBy,
-    UsageLeaderboardQuery, UsageReadRepository, UsageRepository, UsageTimeSeriesGranularity,
-    UsageTimeSeriesQuery, UsageWriteRepository,
+    StoredUsageBreakdownSummaryRow, StoredUsageCacheAffinityHitSummary,
+    StoredUsageCacheAffinityIntervalRow, StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary,
+    StoredUsageDailySummary, StoredUsageDashboardDailyBreakdownRow,
+    StoredUsageDashboardProviderCount, StoredUsageDashboardSummary,
+    StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
+    StoredUsagePerformancePercentilesRow, StoredUsageSettledCostSummary,
+    StoredUsageTimeSeriesBucket, UpsertUsageRecord, UsageAuditAggregationGroupBy,
+    UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery, UsageAuditListQuery,
+    UsageAuditSummaryQuery, UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
+    UsageCacheAffinityHitSummaryQuery, UsageCacheAffinityIntervalGroupBy,
+    UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery, UsageCostSavingsSummaryQuery,
+    UsageDailyHeatmapQuery, UsageDashboardDailyBreakdownQuery, UsageDashboardProviderCountsQuery,
+    UsageDashboardSummaryQuery, UsageErrorDistributionQuery, UsageLeaderboardGroupBy,
+    UsageLeaderboardQuery, UsageMonitoringErrorCountQuery, UsageMonitoringErrorListQuery,
+    UsagePerformancePercentilesQuery, UsageReadRepository, UsageRepository,
+    UsageSettledCostSummaryQuery, UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
+    UsageWriteRepository,
 };
 pub use memory::InMemoryUsageReadRepository;
 pub use sql::SqlxUsageReadRepository;

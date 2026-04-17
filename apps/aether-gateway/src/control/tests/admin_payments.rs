@@ -136,3 +136,72 @@ fn classifies_admin_payments_callbacks_as_admin_proxy_route() {
     );
     assert!(!decision.is_execution_runtime_candidate());
 }
+
+#[test]
+fn classifies_admin_payments_redeem_code_routes_as_admin_proxy_route() {
+    let headers = headers(&[]);
+
+    let list_batches_uri: Uri = "/api/admin/payments/redeem-codes/batches"
+        .parse()
+        .expect("uri should parse");
+    let list_batches = classify_control_route(&http::Method::GET, &list_batches_uri, &headers)
+        .expect("route should classify");
+    assert_eq!(
+        list_batches.route_family.as_deref(),
+        Some("payments_manage")
+    );
+    assert_eq!(
+        list_batches.route_kind.as_deref(),
+        Some("list_redeem_code_batches")
+    );
+
+    let create_batch_uri: Uri = "/api/admin/payments/redeem-codes/batches"
+        .parse()
+        .expect("uri should parse");
+    let create_batch = classify_control_route(&http::Method::POST, &create_batch_uri, &headers)
+        .expect("route should classify");
+    assert_eq!(
+        create_batch.route_family.as_deref(),
+        Some("payments_manage")
+    );
+    assert_eq!(
+        create_batch.route_kind.as_deref(),
+        Some("create_redeem_code_batch")
+    );
+
+    let list_codes_uri: Uri = "/api/admin/payments/redeem-codes/batches/batch-1/codes"
+        .parse()
+        .expect("uri should parse");
+    let list_codes = classify_control_route(&http::Method::GET, &list_codes_uri, &headers)
+        .expect("route should classify");
+    assert_eq!(list_codes.route_family.as_deref(), Some("payments_manage"));
+    assert_eq!(list_codes.route_kind.as_deref(), Some("list_redeem_codes"));
+
+    let disable_code_uri: Uri = "/api/admin/payments/redeem-codes/codes/code-1/disable"
+        .parse()
+        .expect("uri should parse");
+    let disable_code = classify_control_route(&http::Method::POST, &disable_code_uri, &headers)
+        .expect("route should classify");
+    assert_eq!(
+        disable_code.route_family.as_deref(),
+        Some("payments_manage")
+    );
+    assert_eq!(
+        disable_code.route_kind.as_deref(),
+        Some("disable_redeem_code")
+    );
+
+    let delete_batch_uri: Uri = "/api/admin/payments/redeem-codes/batches/batch-1/delete"
+        .parse()
+        .expect("uri should parse");
+    let delete_batch = classify_control_route(&http::Method::POST, &delete_batch_uri, &headers)
+        .expect("route should classify");
+    assert_eq!(
+        delete_batch.route_family.as_deref(),
+        Some("payments_manage")
+    );
+    assert_eq!(
+        delete_batch.route_kind.as_deref(),
+        Some("delete_redeem_code_batch")
+    );
+}

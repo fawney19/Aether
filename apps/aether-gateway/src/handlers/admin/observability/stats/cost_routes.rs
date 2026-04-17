@@ -6,7 +6,12 @@ use crate::GatewayError;
 use aether_admin::observability::stats::{
     admin_stats_bad_request_response, admin_stats_cost_forecast_empty_response,
     admin_stats_cost_savings_empty_response, build_admin_stats_cost_forecast_response,
-    build_admin_stats_cost_savings_response, AdminStatsGranularity, AdminStatsUsageFilter,
+    build_admin_stats_cost_forecast_response_from_summaries,
+    build_admin_stats_cost_savings_response, build_admin_stats_cost_savings_response_from_summary,
+    AdminStatsGranularity, AdminStatsUsageFilter,
+};
+use aether_data_contracts::repository::usage::{
+    UsageCostSavingsSummaryQuery, UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
 };
 use axum::{body::Body, http, response::Response};
 
@@ -61,14 +66,28 @@ pub(super) async fn maybe_build_local_admin_stats_cost_response(
             return Ok(Some(admin_stats_bad_request_response(detail)));
         }
 
-        let usage = state
-            .list_admin_usage_for_range(&time_range, &AdminStatsUsageFilter::default())
+        let Some((created_from_unix_secs, created_until_unix_secs)) = time_range.to_unix_bounds()
+        else {
+            return Ok(Some(admin_stats_cost_forecast_empty_response()));
+        };
+        let buckets = state
+            .summarize_usage_time_series(&UsageTimeSeriesQuery {
+                created_from_unix_secs,
+                created_until_unix_secs,
+                granularity: UsageTimeSeriesGranularity::Day,
+                tz_offset_minutes: time_range.tz_offset_minutes,
+                user_id: None,
+                provider_name: None,
+                model: None,
+            })
             .await?;
-        return Ok(Some(build_admin_stats_cost_forecast_response(
-            &time_range,
-            forecast_days,
-            &usage,
-        )));
+        return Ok(Some(
+            build_admin_stats_cost_forecast_response_from_summaries(
+                &time_range,
+                forecast_days,
+                &buckets,
+            ),
+        ));
     }
 
     if request_context
@@ -94,11 +113,23 @@ pub(super) async fn maybe_build_local_admin_stats_cost_response(
             provider_name: query_param_value(query, "provider_name"),
             model: query_param_value(query, "model"),
         };
-        let usage = state
-            .list_admin_usage_for_range(&time_range, &filters)
+        let Some((created_from_unix_secs, created_until_unix_secs)) = time_range.to_unix_bounds()
+        else {
+            return Ok(Some(admin_stats_cost_savings_empty_response()));
+        };
+        let summary = state
+            .summarize_usage_cost_savings(&UsageCostSavingsSummaryQuery {
+                created_from_unix_secs,
+                created_until_unix_secs,
+                user_id: None,
+                provider_name: filters.provider_name,
+                model: filters.model,
+            })
             .await?;
 
-        return Ok(Some(build_admin_stats_cost_savings_response(&usage)));
+        return Ok(Some(build_admin_stats_cost_savings_response_from_summary(
+            &summary,
+        )));
     }
 
     Ok(None)

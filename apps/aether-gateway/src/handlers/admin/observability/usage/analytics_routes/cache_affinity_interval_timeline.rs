@@ -1,13 +1,13 @@
-use super::super::analytics::list_recent_completed_usage_for_cache_affinity;
+use super::super::analytics::list_usage_cache_affinity_intervals;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::{query_param_bool, query_param_value, unix_secs_to_rfc3339};
 use crate::GatewayError;
 use aether_admin::observability::usage::{
     admin_usage_bad_request_response, admin_usage_data_unavailable_response,
-    admin_usage_group_completed_by_user, admin_usage_parse_recent_hours,
-    admin_usage_parse_timeline_limit, admin_usage_point_sort_key, admin_usage_proportional_limits,
-    ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL,
+    admin_usage_parse_recent_hours, admin_usage_parse_timeline_limit, admin_usage_point_sort_key,
+    admin_usage_proportional_limits, ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL,
 };
+use aether_data_contracts::repository::usage::UsageCacheAffinityIntervalGroupBy;
 use axum::{
     body::Body,
     response::{IntoResponse, Response},
@@ -51,50 +51,40 @@ pub(super) async fn build_admin_usage_cache_affinity_interval_timeline_response(
     };
     let user_id = query_param_value(query, "user_id");
     let include_user_info = query_param_bool(query, "include_user_info", false);
-    let usage =
-        list_recent_completed_usage_for_cache_affinity(state, hours, user_id.as_deref()).await?;
+    let intervals = list_usage_cache_affinity_intervals(
+        state,
+        hours,
+        UsageCacheAffinityIntervalGroupBy::User,
+        user_id.as_deref(),
+        None,
+    )
+    .await?;
     let mut grouped: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
     let mut models = BTreeSet::new();
     let mut legacy_usernames_by_user_id = BTreeMap::new();
     let mut usernames_by_user_id = BTreeMap::new();
 
-    for (group_user_id, items) in admin_usage_group_completed_by_user(&usage) {
-        if let Some(ref requested_user_id) = user_id {
-            if &group_user_id != requested_user_id {
-                continue;
+    for row in intervals {
+        if row.interval_minutes > 120.0 {
+            continue;
+        }
+        let mut point = json!({
+            "x": unix_secs_to_rfc3339(row.created_at_unix_secs),
+            "y": ((row.interval_minutes * 100.0).round()) / 100.0,
+        });
+        if !row.model.trim().is_empty() {
+            point["model"] = json!(row.model.clone());
+            models.insert(row.model);
+        }
+        if include_user_info && user_id.is_none() {
+            point["user_id"] = json!(row.group_id.clone());
+            if let Some(username) = row.username {
+                legacy_usernames_by_user_id
+                    .entry(row.group_id.clone())
+                    .or_insert(username);
             }
         }
-
-        let mut previous_created_at_unix_ms = None;
-        for item in items {
-            if let Some(previous) = previous_created_at_unix_ms {
-                let interval_minutes =
-                    item.created_at_unix_ms.saturating_sub(previous) as f64 / 60.0;
-                if interval_minutes <= 120.0 {
-                    let mut point = json!({
-                        "x": unix_secs_to_rfc3339(item.created_at_unix_ms),
-                        "y": ((interval_minutes * 100.0).round()) / 100.0,
-                    });
-                    if !item.model.trim().is_empty() {
-                        point["model"] = json!(item.model.clone());
-                        models.insert(item.model.clone());
-                    }
-                    if include_user_info && user_id.is_none() {
-                        point["user_id"] = json!(group_user_id.clone());
-                        if let Some(username) = item.username.clone() {
-                            legacy_usernames_by_user_id
-                                .entry(group_user_id.clone())
-                                .or_insert(username);
-                        }
-                    }
-                    grouped
-                        .entry(group_user_id.clone())
-                        .or_default()
-                        .push(point);
-                }
-            }
-            previous_created_at_unix_ms = Some(item.created_at_unix_ms);
-        }
+        grouped.entry(row.group_id).or_default().push(point);
     }
 
     if include_user_info && user_id.is_none() {

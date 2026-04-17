@@ -1,3 +1,6 @@
+use super::super::support_payment::payment_gateway::{
+    CreateCheckoutSessionInput, PaymentGatewayRegistry,
+};
 use super::{
     build_auth_error_response, build_auth_json_response, build_wallet_payload,
     build_wallet_recharge_storage_unavailable_response, http, parse_wallet_limit,
@@ -73,60 +76,6 @@ fn wallet_build_order_no(now: chrono::DateTime<chrono::Utc>) -> String {
         now.format("%Y%m%d%H%M%S%6f"),
         &Uuid::new_v4().simple().to_string()[..12]
     )
-}
-
-fn wallet_checkout_payload(
-    payment_method: &str,
-    order_no: &str,
-    expires_at: chrono::DateTime<chrono::Utc>,
-) -> Result<(String, serde_json::Value), String> {
-    let expires_at = expires_at.to_rfc3339();
-    match payment_method {
-        "alipay" => {
-            let gateway_order_id = format!("ali_{order_no}");
-            Ok((
-                gateway_order_id.clone(),
-                json!({
-                    "gateway": "alipay",
-                    "display_name": "支付宝",
-                    "gateway_order_id": gateway_order_id,
-                    "payment_url": format!("/pay/mock/alipay/{order_no}"),
-                    "qr_code": format!("mock://alipay/{order_no}"),
-                    "expires_at": expires_at,
-                }),
-            ))
-        }
-        "wechat" => {
-            let gateway_order_id = format!("wx_{order_no}");
-            Ok((
-                gateway_order_id.clone(),
-                json!({
-                    "gateway": "wechat",
-                    "display_name": "微信支付",
-                    "gateway_order_id": gateway_order_id,
-                    "payment_url": format!("/pay/mock/wechat/{order_no}"),
-                    "qr_code": format!("mock://wechat/{order_no}"),
-                    "expires_at": expires_at,
-                }),
-            ))
-        }
-        "manual" => {
-            let gateway_order_id = format!("manual_{order_no}");
-            Ok((
-                gateway_order_id.clone(),
-                json!({
-                    "gateway": "manual",
-                    "display_name": "人工打款",
-                    "gateway_order_id": gateway_order_id,
-                    "payment_url": serde_json::Value::Null,
-                    "qr_code": serde_json::Value::Null,
-                    "instructions": "请线下确认到账后由管理员处理",
-                    "expires_at": expires_at,
-                }),
-            ))
-        }
-        _ => Err(format!("unsupported payment_method: {payment_method}")),
-    }
 }
 
 fn wallet_order_id_from_path(request_path: &str) -> Option<String> {
@@ -357,17 +306,23 @@ pub(super) async fn handle_wallet_create_recharge(
             let order_id = Uuid::new_v4().to_string();
             let order_no = wallet_build_order_no(now);
             let expires_at = now + chrono::Duration::minutes(30);
-            let (gateway_order_id, gateway_response) =
-                match wallet_checkout_payload(&payload.payment_method, &order_no, expires_at) {
-                    Ok(value) => value,
-                    Err(detail) => {
-                        return build_auth_error_response(
-                            http::StatusCode::BAD_REQUEST,
-                            detail,
-                            false,
-                        );
-                    }
-                };
+            let Some(adapter) = PaymentGatewayRegistry::get(&payload.payment_method) else {
+                return build_auth_error_response(
+                    http::StatusCode::BAD_REQUEST,
+                    format!("unsupported payment_method: {}", payload.payment_method),
+                    false,
+                );
+            };
+            let checkout = match adapter.create_checkout_session(&CreateCheckoutSessionInput {
+                order_no: order_no.clone(),
+                amount_usd: payload.amount_usd,
+                expires_at,
+            }) {
+                Ok(value) => value,
+                Err(detail) => {
+                    return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
+                }
+            };
             let order_payload = build_wallet_payment_order_payload(
                 order_id,
                 order_no,
@@ -380,8 +335,8 @@ pub(super) async fn handle_wallet_create_recharge(
                 0.0,
                 0.0,
                 payload.payment_method,
-                Some(gateway_order_id),
-                Some(gateway_response.clone()),
+                Some(checkout.gateway_order_id.clone()),
+                Some(checkout.gateway_response.clone()),
                 "pending".to_string(),
                 Some(now.to_rfc3339()),
                 None,
@@ -393,7 +348,7 @@ pub(super) async fn handle_wallet_create_recharge(
                 http::StatusCode::OK,
                 json!({
                     "order": order_payload,
-                    "payment_instructions": sanitize_wallet_gateway_response(Some(gateway_response)),
+                    "payment_instructions": sanitize_wallet_gateway_response(Some(checkout.gateway_response)),
                 }),
                 None,
             );
@@ -405,13 +360,23 @@ pub(super) async fn handle_wallet_create_recharge(
     let now = Utc::now();
     let order_no = wallet_build_order_no(now);
     let expires_at = now + chrono::Duration::minutes(30);
-    let (gateway_order_id, gateway_response) =
-        match wallet_checkout_payload(&payload.payment_method, &order_no, expires_at) {
-            Ok(value) => value,
-            Err(detail) => {
-                return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
-            }
-        };
+    let Some(adapter) = PaymentGatewayRegistry::get(&payload.payment_method) else {
+        return build_auth_error_response(
+            http::StatusCode::BAD_REQUEST,
+            format!("unsupported payment_method: {}", payload.payment_method),
+            false,
+        );
+    };
+    let checkout = match adapter.create_checkout_session(&CreateCheckoutSessionInput {
+        order_no: order_no.clone(),
+        amount_usd: payload.amount_usd,
+        expires_at,
+    }) {
+        Ok(value) => value,
+        Err(detail) => {
+            return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
+        }
+    };
     let outcome = match state
         .create_wallet_recharge_order(
             aether_data::repository::wallet::CreateWalletRechargeOrderInput {
@@ -422,8 +387,8 @@ pub(super) async fn handle_wallet_create_recharge(
                 pay_currency: payload.pay_currency.clone(),
                 exchange_rate: payload.exchange_rate,
                 payment_method: payload.payment_method.clone(),
-                gateway_order_id,
-                gateway_response: gateway_response.clone(),
+                gateway_order_id: checkout.gateway_order_id,
+                gateway_response: checkout.gateway_response.clone(),
                 order_no,
                 expires_at_unix_secs: expires_at.timestamp().max(0) as u64,
             },
@@ -456,7 +421,7 @@ pub(super) async fn handle_wallet_create_recharge(
         http::StatusCode::OK,
         json!({
             "order": order_payload,
-            "payment_instructions": sanitize_wallet_gateway_response(Some(gateway_response)),
+            "payment_instructions": sanitize_wallet_gateway_response(Some(checkout.gateway_response)),
         }),
         None,
     )

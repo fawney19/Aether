@@ -68,7 +68,7 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        rows.sort_by(|left, right| right.created_at_unix_ms.cmp(&left.created_at_unix_ms));
+        rows.sort_by_key(|entry| std::cmp::Reverse(entry.created_at_unix_ms));
         rows.truncate(limit);
         Ok(rows)
     }
@@ -90,7 +90,7 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
             .filter(|row| row.provider_id.as_deref() == Some(provider_id))
             .cloned()
             .collect::<Vec<_>>();
-        rows.sort_by(|left, right| right.created_at_unix_ms.cmp(&left.created_at_unix_ms));
+        rows.sort_by_key(|entry| std::cmp::Reverse(entry.created_at_unix_ms));
         rows.truncate(limit);
         Ok(rows)
     }
@@ -125,7 +125,7 @@ impl RequestCandidateReadRepository for InMemoryRequestCandidateRepository {
             })
             .cloned()
             .collect::<Vec<_>>();
-        rows.sort_by(|left, right| right.created_at_unix_ms.cmp(&left.created_at_unix_ms));
+        rows.sort_by_key(|entry| std::cmp::Reverse(entry.created_at_unix_ms));
         rows.truncate(limit);
         Ok(rows)
     }

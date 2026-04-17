@@ -358,12 +358,13 @@ pub(super) fn classify_public_support_route(
     } else if method == http::Method::POST
         && matches!(
             normalized_path,
-            "/api/wallet/recharge" | "/api/wallet/refunds"
+            "/api/wallet/recharge" | "/api/wallet/refunds" | "/api/wallet/redeem"
         )
     {
         let route_kind = match normalized_path {
             "/api/wallet/recharge" => "create_recharge_order",
             "/api/wallet/refunds" => "create_refund",
+            "/api/wallet/redeem" => "redeem",
             _ => "create_recharge_order",
         };
         Some(classified(

@@ -98,7 +98,7 @@ fn set_cached_fingerprint(key_id: &str, fingerprint: String, now: Instant) {
         .iter()
         .map(|(key, (_, expires_at))| (key.clone(), *expires_at))
         .collect::<Vec<_>>();
-    entries.sort_by(|left, right| left.1.cmp(&right.1));
+    entries.sort_by_key(|entry| entry.1);
     for (key, _) in entries.into_iter().take(cache.len() - CACHE_MAX_ENTRIES) {
         cache.remove(&key);
     }

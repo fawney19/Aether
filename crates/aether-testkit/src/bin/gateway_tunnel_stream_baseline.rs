@@ -140,15 +140,15 @@ async fn connect_protocol_peer(
                 break;
             };
             match message {
-                Message::Binary(data) => {
-                    if handle_binary_frame(&mut sink, data.to_vec()).await.is_err() {
-                        break;
-                    }
+                Message::Binary(data)
+                    if handle_binary_frame(&mut sink, data.to_vec()).await.is_err() =>
+                {
+                    break;
                 }
-                Message::Ping(payload) => {
-                    if sink.send(Message::Pong(payload)).await.is_err() {
-                        break;
-                    }
+                Message::Ping(payload)
+                    if sink.send(Message::Pong(payload.clone())).await.is_err() =>
+                {
+                    break;
                 }
                 Message::Close(_) => break,
                 _ => {}
@@ -178,45 +178,43 @@ where
             let payload = protocol::decode_payload(&data, &header).unwrap_or_default();
             let _ = serde_json::from_slice::<protocol::RequestMeta>(&payload);
         }
-        protocol::REQUEST_BODY => {
-            if header.flags & protocol::FLAG_END_STREAM != 0 {
-                let response_meta = protocol::ResponseMeta {
-                    status: 200,
-                    headers: vec![(
-                        "content-type".to_string(),
-                        "text/plain; charset=utf-8".to_string(),
-                    )],
-                };
-                let response_meta_json =
-                    serde_json::to_vec(&response_meta).expect("response metadata should serialize");
-                sink.send(Message::Binary(
-                    protocol::encode_frame(
-                        header.stream_id,
-                        protocol::RESPONSE_HEADERS,
-                        0,
-                        &response_meta_json,
-                    )
-                    .into(),
-                ))
-                .await?;
+        protocol::REQUEST_BODY if header.flags & protocol::FLAG_END_STREAM != 0 => {
+            let response_meta = protocol::ResponseMeta {
+                status: 200,
+                headers: vec![(
+                    "content-type".to_string(),
+                    "text/plain; charset=utf-8".to_string(),
+                )],
+            };
+            let response_meta_json =
+                serde_json::to_vec(&response_meta).expect("response metadata should serialize");
+            sink.send(Message::Binary(
+                protocol::encode_frame(
+                    header.stream_id,
+                    protocol::RESPONSE_HEADERS,
+                    0,
+                    &response_meta_json,
+                )
+                .into(),
+            ))
+            .await?;
 
-                for chunk in [
-                    b"baseline-".as_slice(),
-                    b"tunnel-".as_slice(),
-                    b"stream".as_slice(),
-                ] {
-                    sink.send(Message::Binary(
-                        protocol::encode_frame(header.stream_id, protocol::RESPONSE_BODY, 0, chunk)
-                            .into(),
-                    ))
-                    .await?;
-                }
-
+            for chunk in [
+                b"baseline-".as_slice(),
+                b"tunnel-".as_slice(),
+                b"stream".as_slice(),
+            ] {
                 sink.send(Message::Binary(
-                    protocol::encode_frame(header.stream_id, protocol::STREAM_END, 0, &[]).into(),
+                    protocol::encode_frame(header.stream_id, protocol::RESPONSE_BODY, 0, chunk)
+                        .into(),
                 ))
                 .await?;
             }
+
+            sink.send(Message::Binary(
+                protocol::encode_frame(header.stream_id, protocol::STREAM_END, 0, &[]).into(),
+            ))
+            .await?;
         }
         _ => {}
     }

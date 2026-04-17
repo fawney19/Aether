@@ -4,7 +4,7 @@ use aether_video_tasks_core::{
 };
 use async_trait::async_trait;
 
-use super::auth::{resolve_local_gemini_auth, resolve_local_standard_auth};
+use super::auth::{resolve_local_gemini_auth, resolve_local_openai_bearer_auth};
 use super::network::resolve_transport_execution_timeouts;
 use super::policy::{supports_local_gemini_transport, supports_local_standard_transport};
 use super::snapshot::GatewayProviderTransportSnapshot;
@@ -30,7 +30,7 @@ pub fn resolve_local_video_task_transport(
             if !supports_local_standard_transport(transport, api_format) {
                 return None;
             }
-            resolve_local_standard_auth(transport)?
+            resolve_local_openai_bearer_auth(transport)?
         }
         "gemini:video" => {
             if !supports_local_gemini_transport(transport, api_format) {
@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn resolves_openai_video_transport() {
         let transport = resolve_local_video_task_transport(
-            &sample_transport("openai:video", "bearer"),
+            &sample_transport("openai:video", "api_key"),
             "openai:video",
             Some("sora".to_string()),
         )

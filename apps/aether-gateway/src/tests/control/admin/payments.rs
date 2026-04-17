@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex};
 
+use aether_data::repository::users::InMemoryUserReadRepository;
 use aether_data::repository::wallet::StoredWalletSnapshot;
+use aether_data::repository::wallet::{InMemoryWalletRepository, WalletWriteRepository};
 use axum::body::Body;
 use axum::routing::any;
 use axum::{extract::Request, Router};
@@ -749,4 +751,104 @@ async fn gateway_rejects_admin_payments_empty_order_identifier_locally_with_trus
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_redeem_code_batch_lifecycle_locally() {
+    let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![]));
+    let wallet_repository = Arc::new(InMemoryWalletRepository::seed(
+        Vec::<StoredWalletSnapshot>::new(),
+    ));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                crate::data::GatewayDataState::with_user_and_wallet_for_tests(
+                    user_repository,
+                    wallet_repository.clone(),
+                ),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    let create_response = admin_request(client.post(format!(
+        "{gateway_url}/api/admin/payments/redeem-codes/batches"
+    )))
+    .json(&json!({
+        "name": "五月渠道卡",
+        "amount_usd": 9.9,
+        "total_count": 2,
+        "description": "offline promo",
+    }))
+    .send()
+    .await
+    .expect("request should succeed");
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let create_payload: serde_json::Value = create_response
+        .json()
+        .await
+        .expect("json body should parse");
+    let batch_id = create_payload["batch"]["id"]
+        .as_str()
+        .expect("batch id should exist")
+        .to_string();
+    assert_eq!(create_payload["batch"]["name"], "五月渠道卡");
+    assert_eq!(create_payload["batch"]["balance_bucket"], "gift");
+    assert_eq!(create_payload["codes"].as_array().map(Vec::len), Some(2));
+
+    let list_response = admin_request(client.get(format!(
+        "{gateway_url}/api/admin/payments/redeem-codes/batches?limit=20&offset=0"
+    )))
+    .send()
+    .await
+    .expect("request should succeed");
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_payload: serde_json::Value =
+        list_response.json().await.expect("json body should parse");
+    assert_eq!(list_payload["items"][0]["id"], batch_id);
+    assert_eq!(list_payload["items"][0]["balance_bucket"], "gift");
+
+    let codes_response = admin_request(client.get(format!(
+        "{gateway_url}/api/admin/payments/redeem-codes/batches/{batch_id}/codes?limit=20&offset=0"
+    )))
+    .send()
+    .await
+    .expect("request should succeed");
+    assert_eq!(codes_response.status(), StatusCode::OK);
+    let codes_payload: serde_json::Value =
+        codes_response.json().await.expect("json body should parse");
+    assert_eq!(codes_payload["batch"]["id"], batch_id);
+    assert_eq!(codes_payload["batch"]["balance_bucket"], "gift");
+    assert_eq!(codes_payload["items"].as_array().map(Vec::len), Some(2));
+
+    let disable_response = admin_request(client.post(format!(
+        "{gateway_url}/api/admin/payments/redeem-codes/batches/{batch_id}/disable"
+    )))
+    .json(&json!({}))
+    .send()
+    .await
+    .expect("request should succeed");
+    assert_eq!(disable_response.status(), StatusCode::OK);
+    let disable_payload: serde_json::Value = disable_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(disable_payload["batch"]["status"], "disabled");
+
+    let delete_response = admin_request(client.post(format!(
+        "{gateway_url}/api/admin/payments/redeem-codes/batches/{batch_id}/delete"
+    )))
+    .json(&json!({}))
+    .send()
+    .await
+    .expect("request should succeed");
+    assert_eq!(delete_response.status(), StatusCode::OK);
+    let delete_payload: serde_json::Value = delete_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(delete_payload["batch"]["id"], batch_id);
+
+    gateway_handle.abort();
 }
