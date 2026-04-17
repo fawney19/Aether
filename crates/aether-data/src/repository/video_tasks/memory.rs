@@ -117,7 +117,7 @@ impl VideoTaskReadRepository for InMemoryVideoTaskRepository {
             .filter(|task| task.status.is_active())
             .cloned()
             .collect::<Vec<_>>();
-        tasks.sort_by_key(|task| std::cmp::Reverse(task.updated_at_unix_secs));
+        tasks.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at_unix_secs));
         tasks.truncate(limit);
         Ok(tasks)
     }

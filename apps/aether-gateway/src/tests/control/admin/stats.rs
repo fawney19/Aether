@@ -196,6 +196,15 @@ impl AuthApiKeyReadRepository for PartialListAuthApiKeyRepository {
         self.lookup.list_export_api_keys_by_ids(api_key_ids).await
     }
 
+    async fn list_export_api_keys_by_name_search(
+        &self,
+        name_search: &str,
+    ) -> Result<Vec<StoredAuthApiKeyExportRecord>, aether_data::DataLayerError> {
+        self.lookup
+            .list_export_api_keys_by_name_search(name_search)
+            .await
+    }
+
     async fn list_export_standalone_api_keys_page(
         &self,
         query: &StandaloneApiKeyExportListQuery,

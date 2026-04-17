@@ -4,7 +4,6 @@ use super::route_filters::{
     parse_admin_monitoring_limit, parse_admin_monitoring_offset,
     parse_admin_monitoring_username_filter,
 };
-use super::usage_helpers::admin_monitoring_usage_is_error;
 use crate::constants::INTERNAL_GATEWAY_PATH_PREFIXES;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::query::monitoring as monitoring_query;
@@ -16,7 +15,9 @@ use aether_admin::observability::monitoring::{
     build_admin_monitoring_system_status_payload_response,
     build_admin_monitoring_user_behavior_payload_response,
 };
-use aether_data_contracts::repository::usage::UsageAuditListQuery;
+use aether_data_contracts::repository::usage::{
+    UsageAuditSummaryQuery, UsageMonitoringErrorCountQuery,
+};
 use axum::{body::Body, response::Response};
 
 pub(super) async fn build_admin_monitoring_audit_logs_response(
@@ -196,30 +197,27 @@ pub(super) async fn build_admin_monitoring_system_status_response(
         .saturating_add(standalone_api_key_summary.active);
 
     let today_usage = state
-        .list_usage_audits(&UsageAuditListQuery {
-            created_from_unix_secs: Some(today_start.timestamp().max(0) as u64),
-            ..Default::default()
+        .summarize_usage_audits(&UsageAuditSummaryQuery {
+            created_from_unix_secs: today_start.timestamp().max(0) as u64,
+            created_until_unix_secs: now_unix_secs.saturating_add(1),
+            user_id: None,
+            provider_name: None,
+            model: None,
         })
         .await?;
-    let today_requests = today_usage.len();
-    let today_tokens = today_usage
-        .iter()
-        .map(|item| item.total_tokens)
-        .sum::<u64>();
-    let today_cost = today_usage
-        .iter()
-        .map(|item| item.total_cost_usd)
-        .sum::<f64>();
+    let today_requests = usize::try_from(today_usage.total_requests).unwrap_or(usize::MAX);
+    let today_tokens = today_usage.recorded_total_tokens;
+    let today_cost = today_usage.total_cost_usd;
 
-    let recent_errors = state
-        .list_usage_audits(&UsageAuditListQuery {
-            created_from_unix_secs: Some(recent_error_from.timestamp().max(0) as u64),
-            ..Default::default()
-        })
-        .await?
-        .into_iter()
-        .filter(admin_monitoring_usage_is_error)
-        .count();
+    let recent_errors = usize::try_from(
+        state
+            .count_monitoring_usage_errors(&UsageMonitoringErrorCountQuery {
+                created_from_unix_secs: recent_error_from.timestamp().max(0) as u64,
+                created_until_unix_secs: now_unix_secs.saturating_add(1),
+            })
+            .await?,
+    )
+    .unwrap_or(usize::MAX);
     let tunnel = state.tunnel.stats();
 
     Ok(build_admin_monitoring_system_status_payload_response(

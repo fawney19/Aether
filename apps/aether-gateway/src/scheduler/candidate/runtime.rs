@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use aether_admin::provider::pool as admin_provider_pool_pure;
 use aether_data_contracts::repository::candidates::StoredRequestCandidate;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use aether_scheduler_core::{
@@ -20,6 +21,7 @@ pub(super) struct CandidateRuntimeSelectionSnapshot {
     pub(super) provider_concurrent_limits: BTreeMap<String, usize>,
     pub(super) provider_key_rpm_states: BTreeMap<String, StoredProviderCatalogKey>,
     provider_quota_blocks_requests: BTreeMap<String, bool>,
+    key_account_quota_exhausted: BTreeMap<String, bool>,
     provider_key_rpm_reset_ats: BTreeMap<String, Option<u64>>,
 }
 
@@ -30,7 +32,14 @@ pub(super) async fn read_candidate_runtime_selection_snapshot(
 ) -> Result<CandidateRuntimeSelectionSnapshot, GatewayError> {
     let recent_candidates = state.read_recent_request_candidates(128).await?;
     let provider_concurrent_limits = read_provider_concurrent_limits(state, candidates).await?;
+    let provider_skip_exhausted_accounts =
+        read_provider_skip_exhausted_account_map(state, candidates).await?;
     let provider_key_rpm_states = read_provider_key_rpm_states(state, candidates).await?;
+    let key_account_quota_exhausted = read_key_account_quota_exhaustion_map(
+        candidates,
+        &provider_key_rpm_states,
+        &provider_skip_exhausted_accounts,
+    );
     let provider_quota_blocks_requests =
         read_provider_quota_block_map(state, candidates, now_unix_secs).await?;
     let provider_key_rpm_reset_ats =
@@ -41,6 +50,7 @@ pub(super) async fn read_candidate_runtime_selection_snapshot(
         provider_concurrent_limits,
         provider_key_rpm_states,
         provider_quota_blocks_requests,
+        key_account_quota_exhausted,
         provider_key_rpm_reset_ats,
     })
 }
@@ -89,6 +99,11 @@ pub(super) fn is_candidate_selectable(
             .get(candidate.provider_id.as_str())
             .copied()
             .unwrap_or(false),
+        account_quota_exhausted: snapshot
+            .key_account_quota_exhausted
+            .get(candidate.key_id.as_str())
+            .copied()
+            .unwrap_or(false),
         rpm_reset_at: snapshot
             .provider_key_rpm_reset_ats
             .get(candidate.key_id.as_str())
@@ -122,6 +137,11 @@ pub(super) fn current_candidate_runtime_skip_reason(
         now_unix_secs,
         cached_affinity_target,
         provider_quota_blocks_requests,
+        account_quota_exhausted: snapshot
+            .key_account_quota_exhausted
+            .get(candidate.key_id.as_str())
+            .copied()
+            .unwrap_or(false),
         rpm_reset_at,
     })
 }
@@ -190,6 +210,64 @@ async fn read_provider_quota_block_map(
     }
 
     Ok(quota_blocks)
+}
+
+async fn read_provider_skip_exhausted_account_map(
+    state: &(impl SchedulerRuntimeState + ?Sized),
+    candidates: &[SchedulerMinimalCandidateSelectionCandidate],
+) -> Result<BTreeMap<String, bool>, GatewayError> {
+    let provider_ids = candidates
+        .iter()
+        .map(|candidate| candidate.provider_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if provider_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let providers = state
+        .read_provider_catalog_providers_by_ids(&provider_ids)
+        .await?;
+    Ok(providers
+        .into_iter()
+        .map(|provider| {
+            let skip_exhausted_accounts = provider
+                .config
+                .as_ref()
+                .and_then(|value| value.get("pool_advanced"))
+                .and_then(serde_json::Value::as_object)
+                .and_then(|value| value.get("skip_exhausted_accounts"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            (provider.id, skip_exhausted_accounts)
+        })
+        .collect())
+}
+
+fn read_key_account_quota_exhaustion_map(
+    candidates: &[SchedulerMinimalCandidateSelectionCandidate],
+    provider_key_rpm_states: &BTreeMap<String, StoredProviderCatalogKey>,
+    provider_skip_exhausted_accounts: &BTreeMap<String, bool>,
+) -> BTreeMap<String, bool> {
+    candidates
+        .iter()
+        .map(|candidate| {
+            let exhausted = provider_skip_exhausted_accounts
+                .get(candidate.provider_id.as_str())
+                .copied()
+                .unwrap_or(false)
+                && provider_key_rpm_states
+                    .get(candidate.key_id.as_str())
+                    .is_some_and(|key| {
+                        admin_provider_pool_pure::admin_pool_key_account_quota_exhausted(
+                            key,
+                            candidate.provider_type.as_str(),
+                        )
+                    });
+            (candidate.key_id.clone(), exhausted)
+        })
+        .collect()
 }
 
 fn read_provider_key_rpm_reset_at_map(

@@ -214,7 +214,7 @@ async fn gateway_executes_openai_video_delete_via_reconstructed_data_backed_loca
                         .to_string(),
                     authorization: payload
                         .get("headers")
-                        .and_then(|value| value.get("x-api-key"))
+                        .and_then(|value| value.get("authorization"))
                         .and_then(|value| value.as_str())
                         .unwrap_or_default()
                         .to_string(),
@@ -331,7 +331,7 @@ async fn gateway_executes_openai_video_delete_via_reconstructed_data_backed_loca
     );
     assert_eq!(
         seen_execution_runtime_request.authorization,
-        "sk-upstream-openai-video"
+        "Bearer sk-upstream-openai-video"
     );
 
     let stored_candidates = request_candidate_repository

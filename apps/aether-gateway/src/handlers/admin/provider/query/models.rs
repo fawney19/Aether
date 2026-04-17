@@ -1,17 +1,29 @@
 use super::payload::{
     provider_query_extract_api_key_id, provider_query_extract_force_refresh,
-    provider_query_extract_provider_id,
+    provider_query_extract_model, provider_query_extract_provider_id,
+    provider_query_extract_request_id,
 };
 use super::response::{
     build_admin_provider_query_bad_request_response, build_admin_provider_query_not_found_response,
-    ADMIN_PROVIDER_QUERY_API_KEY_NOT_FOUND_DETAIL, ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL,
+    ADMIN_PROVIDER_QUERY_API_KEY_NOT_FOUND_DETAIL, ADMIN_PROVIDER_QUERY_MODEL_REQUIRED_DETAIL,
+    ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL, ADMIN_PROVIDER_QUERY_NO_LOCAL_MODELS_DETAIL,
     ADMIN_PROVIDER_QUERY_PROVIDER_ID_REQUIRED_DETAIL,
     ADMIN_PROVIDER_QUERY_PROVIDER_NOT_FOUND_DETAIL,
 };
+use crate::ai_pipeline::{maybe_build_sync_finalize_outcome, GatewayControlDecision};
 use crate::execution_runtime;
 use crate::handlers::admin::request::AdminAppState;
 use crate::model_fetch::ModelFetchRuntimeState;
+use crate::provider_transport::kiro::{
+    build_kiro_generate_assistant_response_url, build_kiro_provider_headers,
+    build_kiro_provider_request_body, supports_local_kiro_request_transport_with_network,
+    KiroProviderHeadersInput, KIRO_ENVELOPE_NAME,
+};
+use crate::usage::GatewaySyncReportRequest;
 use crate::{AppState, GatewayError};
+use aether_admin::provider::pool as admin_provider_pool_pure;
+use aether_contracts::{ExecutionPlan, RequestBody};
+use aether_data_contracts::repository::global_models::AdminProviderModelListQuery;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
@@ -19,9 +31,16 @@ use aether_model_fetch::{
     aggregate_models_for_cache, fetch_models_from_transports, json_string_list,
     preset_models_for_provider, selected_models_fetch_endpoints,
 };
-use axum::{body::Body, http::Response, response::IntoResponse, Json};
+use axum::{
+    body::{to_bytes, Body},
+    http::{HeaderMap, HeaderName, HeaderValue},
+    response::{IntoResponse, Response},
+    Json,
+};
+use base64::Engine as _;
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use uuid::Uuid;
 
 pub(crate) const ADMIN_PROVIDER_QUERY_LOCAL_TEST_MODEL_MESSAGE: &str =
     "Rust local provider-query model test is not configured";
@@ -32,7 +51,10 @@ const ADMIN_PROVIDER_QUERY_NO_ACTIVE_ENDPOINT_DETAIL: &str =
 const ADMIN_PROVIDER_QUERY_NO_MODELS_FROM_ENDPOINT_DETAIL: &str =
     "No models returned from any endpoint";
 const ADMIN_PROVIDER_QUERY_NO_MODELS_FROM_KEY_DETAIL: &str = "No models returned from any key";
+const ADMIN_PROVIDER_QUERY_NO_ACTIVE_TEST_CANDIDATE_DETAIL: &str =
+    "No active endpoint or API key found";
 const ANTIGRAVITY_PROVIDER_CACHE_KEY_PREFIX: &str = "upstream_models_provider:";
+const DEFAULT_PROVIDER_QUERY_TEST_MESSAGE: &str = "Hello! This is a test message.";
 
 #[derive(Debug)]
 struct ProviderQueryKeyFetchResult {
@@ -42,12 +64,800 @@ struct ProviderQueryKeyFetchResult {
     has_success: bool,
 }
 
+#[derive(Debug, Clone)]
+struct ProviderQueryTestCandidate {
+    endpoint: StoredProviderCatalogEndpoint,
+    key: StoredProviderCatalogKey,
+    effective_model: String,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderQueryTestAttempt {
+    candidate_index: usize,
+    endpoint_api_format: String,
+    endpoint_base_url: String,
+    key_name: String,
+    key_id: String,
+    auth_type: String,
+    effective_model: String,
+    status: &'static str,
+    skip_reason: Option<String>,
+    error_message: Option<String>,
+    status_code: Option<u16>,
+    latency_ms: Option<u64>,
+    request_url: Option<String>,
+    request_headers: Option<BTreeMap<String, String>>,
+    request_body: Option<Value>,
+    response_headers: Option<BTreeMap<String, String>>,
+    response_body: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderQueryExecutionOutcome {
+    status: &'static str,
+    error_message: Option<String>,
+    status_code: Option<u16>,
+    latency_ms: Option<u64>,
+    request_url: String,
+    request_headers: BTreeMap<String, String>,
+    request_body: Value,
+    response_headers: BTreeMap<String, String>,
+    response_body: Option<Value>,
+}
+
 fn provider_query_provider_payload(provider: &StoredProviderCatalogProvider) -> Value {
     json!({
         "id": provider.id.clone(),
         "name": provider.name.clone(),
         "display_name": provider.name.clone(),
     })
+}
+
+fn provider_query_test_mode(payload: &Value) -> &str {
+    payload
+        .get("mode")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("global")
+}
+
+fn provider_query_extract_endpoint_id(payload: &Value) -> Option<String> {
+    payload
+        .get("endpoint_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn provider_query_extract_api_format(payload: &Value) -> Option<String> {
+    payload
+        .get("api_format")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn provider_query_extract_message(payload: &Value) -> Option<String> {
+    payload
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn provider_query_extract_request_body(payload: &Value) -> Option<Value> {
+    payload
+        .get("request_body")
+        .filter(|value| value.is_object())
+        .cloned()
+}
+
+fn provider_query_extract_request_headers(payload: &Value) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    let Some(values) = payload.get("request_headers").and_then(Value::as_object) else {
+        return headers;
+    };
+    for (key, value) in values {
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let Some(value) = (match value {
+            Value::String(value) => Some(value.trim().to_string()),
+            Value::Bool(value) => Some(value.to_string()),
+            Value::Number(value) => Some(value.to_string()),
+            other => serde_json::to_string(other).ok(),
+        }) else {
+            continue;
+        };
+        if value.is_empty() {
+            continue;
+        }
+        let Ok(name) = HeaderName::from_bytes(key.as_bytes()) else {
+            continue;
+        };
+        let Ok(value) = HeaderValue::from_str(&value) else {
+            continue;
+        };
+        headers.insert(name, value);
+    }
+    headers
+}
+
+fn provider_query_build_test_request_body(payload: &Value, model: &str) -> Value {
+    if let Some(mut body) = provider_query_extract_request_body(payload) {
+        if let Some(object) = body.as_object_mut() {
+            object.insert("model".to_string(), Value::String(model.to_string()));
+        }
+        return body;
+    }
+
+    json!({
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": provider_query_extract_message(payload)
+                .unwrap_or_else(|| DEFAULT_PROVIDER_QUERY_TEST_MESSAGE.to_string())
+        }],
+        "max_tokens": 30,
+        "temperature": 0.7,
+        "stream": true,
+    })
+}
+
+fn provider_query_select_kiro_endpoint<'a>(
+    endpoints: &'a [StoredProviderCatalogEndpoint],
+    endpoint_id: Option<&str>,
+    api_format: Option<&str>,
+) -> Result<Option<&'a StoredProviderCatalogEndpoint>, &'static str> {
+    if let Some(endpoint_id) = endpoint_id {
+        let endpoint = endpoints.iter().find(|endpoint| endpoint.id == endpoint_id);
+        return endpoint
+            .ok_or("Endpoint not found")
+            .map(|endpoint| Some(endpoint));
+    }
+
+    if let Some(api_format) = api_format {
+        let endpoint = endpoints.iter().find(|endpoint| {
+            endpoint.is_active && endpoint.api_format.trim().eq_ignore_ascii_case(api_format)
+        });
+        return Ok(endpoint);
+    }
+
+    Ok(endpoints.iter().find(|endpoint| endpoint.is_active))
+}
+
+fn provider_query_key_supports_endpoint(
+    key: &StoredProviderCatalogKey,
+    endpoint_api_format: &str,
+) -> bool {
+    let formats = json_string_list(key.api_formats.as_ref());
+    formats.is_empty()
+        || formats
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case(endpoint_api_format))
+}
+
+fn provider_query_test_key_sort_key(
+    provider_type: &str,
+    key: &StoredProviderCatalogKey,
+    endpoint_api_format: &str,
+) -> (u8, u8, i32, u64, i32) {
+    let quota_exhausted =
+        admin_provider_pool_pure::admin_pool_key_account_quota_exhausted(key, provider_type);
+    let circuit_open = key
+        .circuit_breaker_by_format
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|value| value.get(endpoint_api_format))
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("open"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let health_score = key
+        .health_by_format
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|value| value.get(endpoint_api_format))
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("health_score"))
+        .and_then(Value::as_f64)
+        .unwrap_or(1.0);
+    let consecutive_failures = key
+        .health_by_format
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|value| value.get(endpoint_api_format))
+        .and_then(Value::as_object)
+        .and_then(|value| value.get("consecutive_failures"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let normalized_health = (health_score.clamp(0.0, 1.0) * 1000.0).round() as i32;
+
+    (
+        if quota_exhausted { 1 } else { 0 },
+        if circuit_open { 1 } else { 0 },
+        -normalized_health,
+        consecutive_failures,
+        key.internal_priority,
+    )
+}
+
+async fn provider_query_resolve_global_effective_model(
+    state: &AdminAppState<'_>,
+    provider_id: &str,
+    requested_model: &str,
+) -> Result<String, GatewayError> {
+    let models = state
+        .list_admin_provider_models(&AdminProviderModelListQuery {
+            provider_id: provider_id.to_string(),
+            is_active: Some(true),
+            offset: 0,
+            limit: 1024,
+        })
+        .await
+        .unwrap_or_default();
+
+    Ok(models
+        .into_iter()
+        .find(|model| {
+            model.is_available
+                && model
+                    .global_model_name
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case(requested_model))
+        })
+        .map(|model| model.provider_model_name)
+        .unwrap_or_else(|| requested_model.to_string()))
+}
+
+async fn provider_query_build_kiro_test_candidates(
+    state: &AdminAppState<'_>,
+    provider: &StoredProviderCatalogProvider,
+    payload: &Value,
+) -> Result<Vec<ProviderQueryTestCandidate>, Response<Body>> {
+    let provider_ids = vec![provider.id.clone()];
+    let endpoints = state
+        .app()
+        .list_provider_catalog_endpoints_by_provider_ids(&provider_ids)
+        .await
+        .map_err(|_| {
+            build_admin_provider_query_bad_request_response(
+                ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL,
+            )
+        })?;
+    let endpoint = match provider_query_select_kiro_endpoint(
+        &endpoints,
+        provider_query_extract_endpoint_id(payload).as_deref(),
+        provider_query_extract_api_format(payload).as_deref(),
+    ) {
+        Ok(Some(endpoint)) => endpoint.clone(),
+        Ok(None) => {
+            return Err(build_admin_provider_query_not_found_response(
+                ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL,
+            ));
+        }
+        Err("Endpoint not found") => {
+            return Err(build_admin_provider_query_not_found_response(
+                ADMIN_PROVIDER_QUERY_API_KEY_NOT_FOUND_DETAIL,
+            ));
+        }
+        Err(_) => {
+            return Err(build_admin_provider_query_not_found_response(
+                ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL,
+            ));
+        }
+    };
+
+    let all_keys = state
+        .app()
+        .list_provider_catalog_keys_by_provider_ids(&provider_ids)
+        .await
+        .map_err(|_| {
+            build_admin_provider_query_bad_request_response(
+                ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL,
+            )
+        })?;
+
+    let selected_key_id = provider_query_extract_api_key_id(payload);
+    if let Some(api_key_id) = selected_key_id.as_deref() {
+        let Some(key) = all_keys.iter().find(|key| key.id == api_key_id) else {
+            return Err(build_admin_provider_query_not_found_response(
+                ADMIN_PROVIDER_QUERY_API_KEY_NOT_FOUND_DETAIL,
+            ));
+        };
+        if !key.is_active || !provider_query_key_supports_endpoint(key, &endpoint.api_format) {
+            return Err(build_admin_provider_query_not_found_response(
+                ADMIN_PROVIDER_QUERY_NO_ACTIVE_TEST_CANDIDATE_DETAIL,
+            ));
+        }
+    }
+
+    let requested_model = provider_query_extract_model(payload).ok_or_else(|| {
+        build_admin_provider_query_bad_request_response(ADMIN_PROVIDER_QUERY_MODEL_REQUIRED_DETAIL)
+    })?;
+    let effective_model = if provider_query_test_mode(payload).eq_ignore_ascii_case("direct") {
+        requested_model.clone()
+    } else {
+        provider_query_resolve_global_effective_model(state, &provider.id, &requested_model)
+            .await
+            .unwrap_or(requested_model.clone())
+    };
+
+    let mut keys = all_keys
+        .into_iter()
+        .filter(|key| key.is_active)
+        .filter(|key| {
+            selected_key_id
+                .as_deref()
+                .is_none_or(|value| value == key.id.as_str())
+        })
+        .filter(|key| provider_query_key_supports_endpoint(key, &endpoint.api_format))
+        .collect::<Vec<_>>();
+    keys.sort_by_key(|key| {
+        provider_query_test_key_sort_key(provider.provider_type.as_str(), key, &endpoint.api_format)
+    });
+
+    let candidates = keys
+        .into_iter()
+        .map(|key| ProviderQueryTestCandidate {
+            endpoint: endpoint.clone(),
+            key,
+            effective_model: effective_model.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    if candidates.is_empty() {
+        return Err(build_admin_provider_query_not_found_response(
+            ADMIN_PROVIDER_QUERY_NO_ACTIVE_TEST_CANDIDATE_DETAIL,
+        ));
+    }
+
+    Ok(candidates)
+}
+
+fn provider_query_decode_execution_body(
+    result: &aether_contracts::ExecutionResult,
+) -> Option<Vec<u8>> {
+    result
+        .body
+        .as_ref()
+        .and_then(|body| body.body_bytes_b64.as_deref())
+        .and_then(|value| base64::engine::general_purpose::STANDARD.decode(value).ok())
+}
+
+fn provider_query_extract_error_message(
+    result: &aether_contracts::ExecutionResult,
+) -> Option<String> {
+    result
+        .body
+        .as_ref()
+        .and_then(|body| body.json_body.as_ref())
+        .and_then(Value::as_object)
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(Value::as_object)
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+                .or_else(|| value.get("message").and_then(Value::as_str))
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            provider_query_decode_execution_body(result)
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+        .or_else(|| {
+            result
+                .error
+                .as_ref()
+                .map(|error| error.message.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+}
+
+async fn provider_query_finalize_kiro_result(
+    route_path: &str,
+    trace_id: &str,
+    requested_model: &str,
+    endpoint_api_format: &str,
+    effective_model: &str,
+    original_request_body: &Value,
+    result: &aether_contracts::ExecutionResult,
+) -> Result<Option<Value>, GatewayError> {
+    let decision = GatewayControlDecision::synthetic(
+        route_path,
+        Some("admin_proxy".to_string()),
+        Some("provider_query_manage".to_string()),
+        Some("test_model_failover".to_string()),
+        Some(endpoint_api_format.to_string()),
+    );
+    let payload = GatewaySyncReportRequest {
+        trace_id: trace_id.to_string(),
+        report_kind: "claude_cli_sync_finalize".to_string(),
+        report_context: Some(json!({
+            "client_api_format": endpoint_api_format,
+            "provider_api_format": endpoint_api_format,
+            "model": requested_model,
+            "mapped_model": effective_model,
+            "needs_conversion": false,
+            "has_envelope": true,
+            "envelope_name": KIRO_ENVELOPE_NAME,
+            "original_request_body": original_request_body,
+        })),
+        status_code: result.status_code,
+        headers: result.headers.clone(),
+        body_json: result.body.as_ref().and_then(|body| body.json_body.clone()),
+        client_body_json: None,
+        body_base64: result
+            .body
+            .as_ref()
+            .and_then(|body| body.body_bytes_b64.clone()),
+        telemetry: result.telemetry.clone(),
+    };
+
+    let Some(outcome) = maybe_build_sync_finalize_outcome(trace_id, &decision, &payload)? else {
+        return Ok(None);
+    };
+    let bytes = to_bytes(outcome.response.into_body(), usize::MAX)
+        .await
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    serde_json::from_slice::<Value>(&bytes)
+        .map(Some)
+        .map_err(|err| GatewayError::Internal(err.to_string()))
+}
+
+async fn provider_query_execute_kiro_test_candidate(
+    state: &AdminAppState<'_>,
+    provider: &StoredProviderCatalogProvider,
+    candidate: &ProviderQueryTestCandidate,
+    payload: &Value,
+    route_path: &str,
+    trace_id: &str,
+    requested_model: &str,
+) -> Result<ProviderQueryExecutionOutcome, GatewayError> {
+    let Some(transport) = state
+        .read_provider_transport_snapshot(&provider.id, &candidate.endpoint.id, &candidate.key.id)
+        .await?
+    else {
+        return Ok(ProviderQueryExecutionOutcome {
+            status: "skipped",
+            error_message: None,
+            status_code: None,
+            latency_ms: None,
+            request_url: String::new(),
+            request_headers: BTreeMap::new(),
+            request_body: Value::Null,
+            response_headers: BTreeMap::new(),
+            response_body: None,
+        });
+    };
+
+    if !supports_local_kiro_request_transport_with_network(&transport) {
+        return Ok(ProviderQueryExecutionOutcome {
+            status: "skipped",
+            error_message: None,
+            status_code: None,
+            latency_ms: None,
+            request_url: String::new(),
+            request_headers: BTreeMap::new(),
+            request_body: Value::Null,
+            response_headers: BTreeMap::new(),
+            response_body: None,
+        });
+    }
+
+    let Some(kiro_auth) = state
+        .resolve_local_oauth_kiro_request_auth(&transport)
+        .await?
+    else {
+        return Ok(ProviderQueryExecutionOutcome {
+            status: "failed",
+            error_message: Some("oauth auth failed".to_string()),
+            status_code: None,
+            latency_ms: None,
+            request_url: String::new(),
+            request_headers: BTreeMap::new(),
+            request_body: Value::Null,
+            response_headers: BTreeMap::new(),
+            response_body: None,
+        });
+    };
+
+    let request_body = provider_query_build_test_request_body(payload, &candidate.effective_model);
+    let provider_request_body = match build_kiro_provider_request_body(
+        &request_body,
+        &candidate.effective_model,
+        &kiro_auth.auth_config,
+        transport.endpoint.body_rules.as_ref(),
+    ) {
+        Some(body) => body,
+        None => {
+            return Ok(ProviderQueryExecutionOutcome {
+                status: "failed",
+                error_message: Some("provider request body build failed".to_string()),
+                status_code: None,
+                latency_ms: None,
+                request_url: String::new(),
+                request_headers: BTreeMap::new(),
+                request_body,
+                response_headers: BTreeMap::new(),
+                response_body: None,
+            });
+        }
+    };
+
+    let mut synthetic_request = http::Request::builder()
+        .uri(route_path)
+        .body(())
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    *synthetic_request.headers_mut() = provider_query_extract_request_headers(payload);
+    let (parts, _) = synthetic_request.into_parts();
+
+    let request_url = build_kiro_generate_assistant_response_url(
+        &transport.endpoint.base_url,
+        parts.uri.query(),
+        Some(kiro_auth.auth_config.effective_api_region()),
+    )
+    .ok_or_else(|| GatewayError::Internal("kiro request url is unavailable".to_string()))?;
+    let request_headers = build_kiro_provider_headers(KiroProviderHeadersInput {
+        headers: &parts.headers,
+        provider_request_body: &provider_request_body,
+        original_request_body: &request_body,
+        header_rules: transport.endpoint.header_rules.as_ref(),
+        auth_header: kiro_auth.name,
+        auth_value: &kiro_auth.value,
+        auth_config: &kiro_auth.auth_config,
+        machine_id: kiro_auth.machine_id.as_str(),
+    })
+    .ok_or_else(|| GatewayError::Internal("kiro request headers are unavailable".to_string()))?;
+
+    let plan = ExecutionPlan {
+        request_id: trace_id.to_string(),
+        candidate_id: Some(format!("provider-query-{}", candidate.key.id)),
+        provider_name: Some(provider.name.clone()),
+        provider_id: provider.id.clone(),
+        endpoint_id: candidate.endpoint.id.clone(),
+        key_id: candidate.key.id.clone(),
+        method: "POST".to_string(),
+        url: request_url.clone(),
+        headers: request_headers.clone(),
+        content_type: Some("application/json".to_string()),
+        content_encoding: None,
+        body: RequestBody::from_json(provider_request_body.clone()),
+        stream: true,
+        client_api_format: candidate.endpoint.api_format.clone(),
+        provider_api_format: candidate.endpoint.api_format.clone(),
+        model_name: Some(candidate.effective_model.clone()),
+        proxy: state
+            .resolve_transport_proxy_snapshot_with_tunnel_affinity(&transport)
+            .await,
+        tls_profile: state.resolve_transport_tls_profile(&transport),
+        timeouts: state.resolve_transport_execution_timeouts(&transport),
+    };
+
+    let result = state
+        .execute_execution_runtime_sync_plan(Some(trace_id), &plan)
+        .await?;
+    let response_body = if result.status_code < 400 {
+        provider_query_finalize_kiro_result(
+            route_path,
+            trace_id,
+            requested_model,
+            candidate.endpoint.api_format.as_str(),
+            candidate.effective_model.as_str(),
+            &request_body,
+            &result,
+        )
+        .await?
+    } else {
+        result.body.as_ref().and_then(|body| body.json_body.clone())
+    };
+    let error_message = if result.status_code >= 400 {
+        provider_query_extract_error_message(&result)
+    } else if response_body.is_none()
+        && provider_query_decode_execution_body(&result)
+            .is_some_and(|body| crate::ai_pipeline::stream_body_contains_error_event(&body))
+    {
+        Some("Kiro upstream returned embedded stream error".to_string())
+    } else {
+        None
+    };
+
+    Ok(ProviderQueryExecutionOutcome {
+        status: if error_message.is_some() {
+            "failed"
+        } else {
+            "success"
+        },
+        error_message,
+        status_code: Some(result.status_code),
+        latency_ms: result.telemetry.as_ref().and_then(|value| value.elapsed_ms),
+        request_url,
+        request_headers,
+        request_body: provider_request_body,
+        response_headers: result.headers,
+        response_body,
+    })
+}
+
+fn provider_query_test_attempt_payload(
+    candidate_index: usize,
+    candidate: &ProviderQueryTestCandidate,
+    execution: &ProviderQueryExecutionOutcome,
+) -> Value {
+    json!({
+        "candidate_index": candidate_index,
+        "retry_index": 0,
+        "endpoint_api_format": candidate.endpoint.api_format,
+        "endpoint_base_url": candidate.endpoint.base_url,
+        "key_name": provider_query_key_display_name(&candidate.key),
+        "key_id": candidate.key.id,
+        "auth_type": candidate.key.auth_type,
+        "effective_model": candidate.effective_model,
+        "status": execution.status,
+        "skip_reason": Value::Null,
+        "error_message": execution.error_message,
+        "status_code": execution.status_code,
+        "latency_ms": execution.latency_ms,
+        "request_url": execution.request_url,
+        "request_headers": execution.request_headers,
+        "request_body": execution.request_body,
+        "response_headers": execution.response_headers,
+        "response_body": execution.response_body,
+    })
+}
+
+async fn build_admin_provider_query_kiro_failover_response(
+    state: &AdminAppState<'_>,
+    payload: &Value,
+    route_path: &str,
+) -> Result<Response<Body>, GatewayError> {
+    let Some(provider_id) = provider_query_extract_provider_id(payload) else {
+        return Ok(build_admin_provider_query_bad_request_response(
+            ADMIN_PROVIDER_QUERY_PROVIDER_ID_REQUIRED_DETAIL,
+        ));
+    };
+    let requested_model = match provider_query_extract_model(payload) {
+        Some(model) => model,
+        None => {
+            return Ok(build_admin_provider_query_bad_request_response(
+                ADMIN_PROVIDER_QUERY_MODEL_REQUIRED_DETAIL,
+            ));
+        }
+    };
+    let Some(provider) = state
+        .app()
+        .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id))
+        .await?
+        .into_iter()
+        .find(|item| item.id == provider_id)
+    else {
+        return Ok(build_admin_provider_query_not_found_response(
+            ADMIN_PROVIDER_QUERY_PROVIDER_NOT_FOUND_DETAIL,
+        ));
+    };
+    if !provider.provider_type.trim().eq_ignore_ascii_case("kiro") {
+        return Ok(build_admin_provider_query_test_model_failover_response(
+            provider_id,
+            super::payload::provider_query_extract_failover_models(payload),
+        ));
+    }
+
+    let candidates =
+        match provider_query_build_kiro_test_candidates(state, &provider, payload).await {
+            Ok(candidates) => candidates,
+            Err(response) => return Ok(response),
+        };
+    let trace_id = provider_query_extract_request_id(payload)
+        .unwrap_or_else(|| format!("provider-query-test-{}", Uuid::new_v4().simple()));
+    let mut attempts = Vec::new();
+    let mut total_attempts = 0usize;
+    let mut success_body = None;
+
+    for (candidate_index, candidate) in candidates.iter().enumerate() {
+        let execution = provider_query_execute_kiro_test_candidate(
+            state,
+            &provider,
+            candidate,
+            payload,
+            route_path,
+            &trace_id,
+            &requested_model,
+        )
+        .await?;
+        if execution.status != "skipped" {
+            total_attempts += 1;
+        }
+        let is_success = execution.status == "success";
+        let response_body = execution.response_body.clone();
+        attempts.push(provider_query_test_attempt_payload(
+            candidate_index,
+            candidate,
+            &execution,
+        ));
+        if is_success {
+            success_body = response_body;
+            break;
+        }
+    }
+
+    let success = success_body.is_some();
+    let error = if success {
+        Value::Null
+    } else {
+        attempts
+            .iter()
+            .rev()
+            .find_map(|attempt| {
+                attempt
+                    .get("error_message")
+                    .cloned()
+                    .filter(|value| !value.is_null())
+            })
+            .unwrap_or_else(|| json!(ADMIN_PROVIDER_QUERY_NO_LOCAL_MODELS_DETAIL))
+    };
+
+    Ok(Json(json!({
+        "success": success,
+        "model": requested_model,
+        "provider": provider_query_provider_payload(&provider),
+        "attempts": attempts,
+        "total_candidates": candidates.len(),
+        "total_attempts": total_attempts,
+        "data": success_body.as_ref().map(|body| json!({
+            "stream": true,
+            "response": body,
+        })),
+        "error": error,
+    }))
+    .into_response())
+}
+
+pub(crate) async fn build_admin_provider_query_test_model_local_response(
+    state: &AdminAppState<'_>,
+    payload: &Value,
+) -> Result<Response<Body>, GatewayError> {
+    let response = build_admin_provider_query_kiro_failover_response(
+        state,
+        payload,
+        "/api/admin/provider-query/test-model",
+    )
+    .await?;
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let parsed: Value =
+        serde_json::from_slice(&body).map_err(|err| GatewayError::Internal(err.to_string()))?;
+
+    Ok(Json(json!({
+        "success": parsed.get("success").cloned().unwrap_or(Value::Bool(false)),
+        "error": parsed.get("error").cloned().unwrap_or(Value::Null),
+        "data": parsed.get("data").cloned().unwrap_or(Value::Null),
+        "provider": parsed.get("provider").cloned().unwrap_or(Value::Null),
+        "model": parsed.get("model").cloned().unwrap_or(Value::Null),
+    }))
+    .into_response())
+}
+
+pub(crate) async fn build_admin_provider_query_test_model_failover_local_response(
+    state: &AdminAppState<'_>,
+    payload: &Value,
+) -> Result<Response<Body>, GatewayError> {
+    build_admin_provider_query_kiro_failover_response(
+        state,
+        payload,
+        "/api/admin/provider-query/test-model-failover",
+    )
+    .await
 }
 
 fn provider_query_key_display_name(key: &StoredProviderCatalogKey) -> String {
@@ -171,7 +981,7 @@ async fn provider_query_sort_antigravity_keys(
         };
         ranked.push(((availability, tier_weight), key));
     }
-    ranked.sort_by_key(|item| std::cmp::Reverse(item.0));
+    ranked.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     Ok(ranked.into_iter().map(|(_, key)| key).collect())
 }
 

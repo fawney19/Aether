@@ -24,7 +24,7 @@ use crate::ai_pipeline::transport::apply_local_header_rules;
 use crate::ai_pipeline::transport::auth::{
     build_claude_passthrough_headers, build_complete_passthrough_headers_with_auth,
     build_openai_passthrough_headers, ensure_upstream_auth_header, resolve_local_gemini_auth,
-    resolve_local_standard_auth,
+    resolve_local_openai_bearer_auth, resolve_local_standard_auth,
 };
 use crate::ai_pipeline::transport::local_standard_transport_unsupported_reason_with_network;
 use crate::ai_pipeline::{ConversionMode, ExecutionStrategy};
@@ -107,9 +107,8 @@ pub(crate) async fn resolve_local_openai_cli_candidate_payload_parts(
     let direct_auth = if same_format {
         match provider_api_format {
             "gemini:cli" => resolve_local_gemini_auth(transport),
-            "claude:cli" | "openai:cli" | "openai:compact" => {
-                resolve_local_standard_auth(transport)
-            }
+            "claude:cli" => resolve_local_standard_auth(transport),
+            "openai:cli" | "openai:compact" => resolve_local_openai_bearer_auth(transport),
             _ => None,
         }
     } else {

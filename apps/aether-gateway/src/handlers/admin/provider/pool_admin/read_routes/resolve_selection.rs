@@ -3,6 +3,7 @@ use super::{
     AdminPoolResolveSelectionRequest, ADMIN_POOL_PROVIDER_CATALOG_READER_UNAVAILABLE_DETAIL,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::provider_key_auth::provider_key_auth_semantics;
 use crate::GatewayError;
 use aether_admin::provider::pool as admin_provider_pool_pure;
 use axum::{
@@ -11,6 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use serde_json::json;
 
 pub(super) async fn build_admin_pool_resolve_selection_response(
     state: &AdminAppState<'_>,
@@ -88,5 +90,27 @@ pub(super) async fn build_admin_pool_resolve_selection_response(
             .then_with(|| left.name.cmp(&right.name))
     });
 
-    Ok(Json(admin_provider_pool_pure::build_admin_pool_selection_payload(&keys)).into_response())
+    let items = keys
+        .iter()
+        .map(|key| {
+            let auth_semantics = provider_key_auth_semantics(key, &provider_type);
+            json!({
+                "key_id": key.id,
+                "key_name": key.name,
+                "auth_type": key.auth_type,
+                "credential_kind": auth_semantics.credential_kind().as_str(),
+                "runtime_auth_kind": auth_semantics.runtime_auth_kind().as_str(),
+                "oauth_managed": auth_semantics.oauth_managed(),
+                "can_refresh_oauth": auth_semantics.can_refresh_oauth(),
+                "can_export_oauth": auth_semantics.can_export_oauth(),
+                "can_edit_oauth": auth_semantics.can_edit_oauth(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(Json(json!({
+        "total": items.len(),
+        "items": items,
+    }))
+    .into_response())
 }

@@ -21,6 +21,20 @@ WHERE id = ANY($1::text[])
 ORDER BY id ASC
 "#;
 
+const LIST_USERS_BY_USERNAME_SEARCH_SQL: &str = r#"
+SELECT
+  id,
+  username,
+  email,
+  role::text AS role,
+  is_active,
+  is_deleted
+FROM users
+WHERE is_deleted IS FALSE
+  AND LOWER(username) LIKE $1
+ORDER BY id ASC
+"#;
+
 const LIST_NON_ADMIN_EXPORT_USERS_SQL: &str = r#"
 SELECT
   id,
@@ -193,6 +207,24 @@ impl SqlxUserReadRepository {
         collect_query_rows(
             sqlx::query(LIST_USERS_BY_IDS_SQL)
                 .bind(user_ids)
+                .fetch(&self.pool),
+            map_user_row,
+        )
+        .await
+    }
+
+    pub async fn list_users_by_username_search(
+        &self,
+        username_search: &str,
+    ) -> Result<Vec<StoredUserSummary>, DataLayerError> {
+        let username_search = username_search.trim();
+        if username_search.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        collect_query_rows(
+            sqlx::query(LIST_USERS_BY_USERNAME_SEARCH_SQL)
+                .bind(format!("%{}%", username_search.to_ascii_lowercase()))
                 .fetch(&self.pool),
             map_user_row,
         )
@@ -381,6 +413,13 @@ impl UserReadRepository for SqlxUserReadRepository {
         user_ids: &[String],
     ) -> Result<Vec<StoredUserSummary>, DataLayerError> {
         self.list_users_by_ids(user_ids).await
+    }
+
+    async fn list_users_by_username_search(
+        &self,
+        username_search: &str,
+    ) -> Result<Vec<StoredUserSummary>, DataLayerError> {
+        self.list_users_by_username_search(username_search).await
     }
 
     async fn list_non_admin_export_users(

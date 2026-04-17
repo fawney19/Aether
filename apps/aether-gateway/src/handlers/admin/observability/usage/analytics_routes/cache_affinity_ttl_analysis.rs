@@ -1,15 +1,15 @@
 use super::super::super::stats::round_to;
-use super::super::analytics::list_recent_completed_usage_for_cache_affinity;
+use super::super::analytics::list_usage_cache_affinity_intervals;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::query_param_value;
 use crate::GatewayError;
 use aether_admin::observability::usage::{
     admin_usage_bad_request_response, admin_usage_calculate_recommended_ttl,
-    admin_usage_collect_request_intervals_minutes, admin_usage_data_unavailable_response,
-    admin_usage_group_completed_by_api_key, admin_usage_group_completed_by_user,
-    admin_usage_matches_optional_id, admin_usage_parse_recent_hours, admin_usage_percentile_cont,
-    admin_usage_ttl_recommendation_reason, ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL,
+    admin_usage_data_unavailable_response, admin_usage_parse_recent_hours,
+    admin_usage_percentile_cont, admin_usage_ttl_recommendation_reason,
+    ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL,
 };
+use aether_data_contracts::repository::usage::UsageCacheAffinityIntervalGroupBy;
 use axum::{
     body::Body,
     response::{IntoResponse, Response},
@@ -36,19 +36,28 @@ pub(super) async fn build_admin_usage_cache_affinity_ttl_analysis_response(
     let user_id = query_param_value(query, "user_id");
     let api_key_id = query_param_value(query, "api_key_id");
     let group_by_api_key = api_key_id.is_some();
-    let usage =
-        list_recent_completed_usage_for_cache_affinity(state, hours, user_id.as_deref()).await?;
-
-    let grouped = if group_by_api_key {
-        admin_usage_group_completed_by_api_key(&usage, api_key_id.as_deref())
-    } else {
-        admin_usage_group_completed_by_user(&usage)
+    let intervals = list_usage_cache_affinity_intervals(
+        state,
+        hours,
+        if group_by_api_key {
+            UsageCacheAffinityIntervalGroupBy::ApiKey
+        } else {
+            UsageCacheAffinityIntervalGroupBy::User
+        },
+        user_id.as_deref(),
+        api_key_id.as_deref(),
+    )
+    .await?;
+    let grouped =
+        intervals
             .into_iter()
-            .filter(|(group_user_id, _)| {
-                admin_usage_matches_optional_id(Some(group_user_id.as_str()), user_id.as_deref())
-            })
-            .collect()
-    };
+            .fold(BTreeMap::<String, Vec<f64>>::new(), |mut grouped, row| {
+                grouped
+                    .entry(row.group_id)
+                    .or_default()
+                    .push(row.interval_minutes);
+                grouped
+            });
 
     let user_map: BTreeMap<String, aether_data::repository::users::StoredUserSummary> =
         if !group_by_api_key && state.has_user_data_reader() {
@@ -71,8 +80,7 @@ pub(super) async fn build_admin_usage_cache_affinity_ttl_analysis_response(
     });
     let mut users = Vec::new();
 
-    for (group_id, items) in grouped {
-        let intervals = admin_usage_collect_request_intervals_minutes(&items);
+    for (group_id, intervals) in grouped {
         if intervals.len() < 2 {
             continue;
         }

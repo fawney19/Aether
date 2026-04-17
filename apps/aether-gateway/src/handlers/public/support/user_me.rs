@@ -8,8 +8,8 @@ use super::{
 use crate::admin_api::build_admin_endpoint_health_status_payload;
 use crate::handlers::internal::build_management_token_payload;
 use crate::handlers::shared::{
-    admin_stats_bad_request_response, list_usage_for_optional_range, parse_bounded_u32, round_to,
-    AdminStatsTimeRange, AdminStatsUsageFilter,
+    admin_stats_bad_request_response, parse_bounded_u32, round_to, AdminStatsTimeRange,
+    AdminStatsUsageFilter,
 };
 
 const USERS_ME_AVAILABLE_MODELS_FETCH_LIMIT: usize = 1000;

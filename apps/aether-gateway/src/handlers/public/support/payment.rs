@@ -2,6 +2,8 @@ use axum::{body::Body, http, response::Response};
 
 pub(super) use super::{build_auth_error_response, AppState, GatewayPublicRequestContext};
 
+#[path = "payment/gateway.rs"]
+pub(super) mod payment_gateway;
 #[path = "payment/postgres.rs"]
 mod payment_postgres;
 #[path = "payment/route.rs"]

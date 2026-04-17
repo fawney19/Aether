@@ -229,7 +229,13 @@ export interface EndpointAPIKey {
   api_formats: string[]  // 支持的 endpoint signature 列表（如 "openai:chat"）
   api_key_masked: string
   api_key_plain?: string | null
-  auth_type: 'api_key' | 'service_account' | 'oauth'  // 认证类型（必返回）
+  auth_type: 'api_key' | 'service_account' | 'oauth' | 'bearer'  // 认证类型（必返回）
+  credential_kind?: 'raw_secret' | 'oauth_session' | 'service_account' | string | null
+  runtime_auth_kind?: 'api_key' | 'bearer' | 'service_account' | 'unknown' | string | null
+  oauth_managed?: boolean
+  can_refresh_oauth?: boolean
+  can_export_oauth?: boolean
+  can_edit_oauth?: boolean
   name: string  // 密钥名称（必填，用于识别）
   rate_multipliers?: Record<string, number> | null  // 按 endpoint signature 的成本倍率
   internal_priority: number  // Key 内部优先级
@@ -492,6 +498,7 @@ export interface PoolAdvancedConfig {
   global_priority?: number | null
   sticky_session_ttl_seconds?: number | null
   load_threshold_percent?: number | null
+  skip_exhausted_accounts?: boolean | null
   // 旧字段（兼容读取）
   lru_enabled?: boolean
   scheduling_mode?: 'lru' | 'multi_score' | null

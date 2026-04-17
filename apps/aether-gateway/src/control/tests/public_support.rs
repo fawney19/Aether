@@ -212,6 +212,22 @@ fn classifies_user_monitoring_audit_logs_as_public_support_route() {
 }
 
 #[test]
+fn classifies_wallet_redeem_as_public_support_route() {
+    let headers = headers(&[("authorization", "Bearer sk-test")]);
+    let uri: Uri = "/api/wallet/redeem".parse().expect("uri should parse");
+    let decision =
+        classify_control_route(&http::Method::POST, &uri, &headers).expect("route should classify");
+
+    assert_eq!(decision.route_class.as_deref(), Some("public_support"));
+    assert_eq!(decision.route_family.as_deref(), Some("wallet"));
+    assert_eq!(decision.route_kind.as_deref(), Some("redeem"));
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("user:wallet")
+    );
+}
+
+#[test]
 fn classifies_announcement_unread_count_as_public_support_route() {
     let headers = headers(&[]);
     let uri: Uri = "/api/announcements/users/me/unread-count"

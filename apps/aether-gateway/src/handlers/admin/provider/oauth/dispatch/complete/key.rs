@@ -10,6 +10,7 @@ use super::shared::{
 };
 use crate::handlers::admin::provider::shared::paths::admin_provider_oauth_complete_key_id;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::provider_key_auth::provider_key_is_oauth_managed;
 use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
@@ -76,12 +77,6 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
             "Key 不存在",
         ));
     };
-    if !key.auth_type.eq_ignore_ascii_case("oauth") {
-        return Ok(build_internal_control_error_response(
-            http::StatusCode::BAD_REQUEST,
-            "该 Key 不是 oauth 认证类型",
-        ));
-    }
     if !state_data.provider_id.trim().is_empty() && state_data.provider_id != key.provider_id {
         return Ok(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
@@ -102,6 +97,12 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
         ));
     };
     let provider_type = provider.provider_type.trim().to_ascii_lowercase();
+    if !provider_key_is_oauth_managed(&key, provider_type.as_str()) {
+        return Ok(build_internal_control_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "该 Key 不是 OAuth 管理账号",
+        ));
+    }
     if !is_fixed_provider_type_for_provider_oauth(&provider_type) {
         return Ok(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,

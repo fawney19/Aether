@@ -6,6 +6,7 @@ mod callbacks;
 mod orders;
 #[path = "../../payment/postgres.rs"]
 mod payment_postgres;
+mod redeem_codes;
 mod routes;
 mod shared;
 

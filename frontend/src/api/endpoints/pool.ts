@@ -104,6 +104,12 @@ export interface PoolKeyDetail {
   key_name: string
   is_active: boolean
   auth_type: string
+  credential_kind?: 'raw_secret' | 'oauth_session' | 'service_account' | string | null
+  runtime_auth_kind?: 'api_key' | 'bearer' | 'service_account' | 'unknown' | string | null
+  oauth_managed?: boolean
+  can_refresh_oauth?: boolean
+  can_export_oauth?: boolean
+  can_edit_oauth?: boolean
   oauth_expires_at?: number | null
   oauth_invalid_at?: number | null  // 兼容字段；优先使用 status_snapshot.oauth
   oauth_invalid_reason?: string | null  // 兼容字段；优先使用 status_snapshot.oauth
@@ -200,6 +206,12 @@ export interface PoolKeySelectionItem {
   key_id: string
   key_name: string
   auth_type: string
+  credential_kind?: 'raw_secret' | 'oauth_session' | 'service_account' | string | null
+  runtime_auth_kind?: 'api_key' | 'bearer' | 'service_account' | 'unknown' | string | null
+  oauth_managed?: boolean
+  can_refresh_oauth?: boolean
+  can_export_oauth?: boolean
+  can_edit_oauth?: boolean
 }
 
 export interface PoolKeySelectionResponse {

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aether_runtime::{BoundedQueueSender, MetricKind, MetricSample, QueueSendError};
+use aether_runtime::{BoundedQueueSender, MetricKind, MetricSample, QueueSendError, QueueSnapshot};
 use axum::extract::ws::Message;
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -16,6 +16,8 @@ use super::control_plane::ControlPlaneClient;
 use super::protocol;
 
 const MAX_REQUEST_BODY_FRAME_SIZE: usize = 32 * 1024;
+const SOFT_AVOID_QUEUE_PRESSURE_PERCENT: u64 = 50;
+const SOFT_AVOID_STREAM_PRESSURE_PERCENT: u64 = 85;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendStatus {
@@ -75,6 +77,10 @@ impl BoundedOutbound {
         let _ = self.close_tx.send(true);
         true
     }
+
+    pub fn snapshot(&self) -> QueueSnapshot {
+        self.tx.snapshot()
+    }
 }
 
 pub struct ProxyConn {
@@ -86,6 +92,7 @@ pub struct ProxyConn {
     pub stream_count: AtomicUsize,
     pub max_streams: usize,
     draining: AtomicBool,
+    congested_total: AtomicU64,
 }
 
 impl ProxyConn {
@@ -106,6 +113,7 @@ impl ProxyConn {
             stream_count: AtomicUsize::new(0),
             max_streams,
             draining: AtomicBool::new(false),
+            congested_total: AtomicU64::new(0),
         }
     }
 
@@ -180,6 +188,7 @@ impl ProxyConn {
         let was_closing = self.outbound.is_closing();
         let status = self.outbound.send(msg);
         if status == SendStatus::Congested && !was_closing {
+            self.congested_total.fetch_add(1, Ordering::Relaxed);
             warn!(
                 conn_id = self.id,
                 node_id = %self.node_id,
@@ -189,6 +198,62 @@ impl ProxyConn {
             );
         }
         status
+    }
+
+    fn snapshot(&self) -> ProxyConnSnapshot {
+        let outbound = self.outbound.snapshot();
+        let stream_count = self.stream_count.load(Ordering::Relaxed);
+        let queue_pressure_percent = percent_u64(outbound.depth, outbound.capacity);
+        let stream_pressure_percent = percent_u64(stream_count, self.max_streams);
+        let soft_avoid = queue_pressure_percent >= SOFT_AVOID_QUEUE_PRESSURE_PERCENT
+            || stream_pressure_percent >= SOFT_AVOID_STREAM_PRESSURE_PERCENT;
+        ProxyConnSnapshot {
+            conn_id: self.id,
+            available: self.is_available(),
+            closing: self.outbound.is_closing(),
+            draining: self.is_draining(),
+            stream_count,
+            max_streams: self.max_streams,
+            stream_pressure_percent,
+            outbound,
+            queue_pressure_percent,
+            soft_avoid,
+            congested_total: self.congested_total.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProxyConnSnapshot {
+    conn_id: u64,
+    available: bool,
+    closing: bool,
+    draining: bool,
+    stream_count: usize,
+    max_streams: usize,
+    stream_pressure_percent: u64,
+    outbound: QueueSnapshot,
+    queue_pressure_percent: u64,
+    soft_avoid: bool,
+    congested_total: u64,
+}
+
+#[derive(Clone)]
+struct ProxyConnCandidate {
+    conn: Arc<ProxyConn>,
+    snapshot: ProxyConnSnapshot,
+}
+
+impl ProxyConnCandidate {
+    fn rank_key(&self) -> (u8, u64, u64, usize, usize, u64) {
+        (
+            u8::from(self.snapshot.soft_avoid),
+            self.snapshot.queue_pressure_percent,
+            self.snapshot.stream_pressure_percent,
+            self.snapshot.outbound.depth,
+            self.snapshot.stream_count,
+            self.snapshot.conn_id,
+        )
     }
 }
 
@@ -343,6 +408,9 @@ pub struct HubRouter {
     next_local_stream_id: AtomicU64,
     control_plane: ControlPlaneClient,
     node_status_tx: mpsc::UnboundedSender<NodeStatusEvent>,
+    soft_avoid_selection_total: AtomicU64,
+    selection_retry_total: AtomicU64,
+    selection_unavailable_total: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -391,6 +459,9 @@ impl HubRouter {
             next_local_stream_id: AtomicU64::new(1),
             control_plane,
             node_status_tx,
+            soft_avoid_selection_total: AtomicU64::new(0),
+            selection_retry_total: AtomicU64::new(0),
+            selection_unavailable_total: AtomicU64::new(0),
         })
     }
 
@@ -477,28 +548,28 @@ impl HubRouter {
         }
     }
 
-    fn get_proxy_conn(&self, node_id: &str) -> Option<Arc<ProxyConn>> {
-        let map = self.proxy_conns.read();
-        let conns = map.get(node_id)?;
-        let result = conns
-            .iter()
-            .filter(|c| c.is_available())
-            .min_by_key(|c| c.stream_count.load(Ordering::Relaxed))
-            .cloned();
-        if result.is_none() && !conns.is_empty() {
-            warn!(
-                node_id = %node_id,
-                total_conns = conns.len(),
-                closing = conns.iter().filter(|c| c.outbound.is_closing()).count(),
-                draining = conns.iter().filter(|c| c.is_draining()).count(),
-                "no available proxy connection despite registered connections"
-            );
-        }
-        result
+    fn ranked_proxy_conn_candidates(&self, node_id: &str) -> Vec<ProxyConnCandidate> {
+        let conns = {
+            let map = self.proxy_conns.read();
+            map.get(node_id)
+                .map(|entries| entries.to_vec())
+                .unwrap_or_default()
+        };
+        let mut candidates = conns
+            .into_iter()
+            .filter_map(|conn| {
+                let snapshot = conn.snapshot();
+                snapshot
+                    .available
+                    .then_some(ProxyConnCandidate { conn, snapshot })
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|candidate| candidate.rank_key());
+        candidates
     }
 
     pub fn has_local_proxy(&self, node_id: &str) -> bool {
-        self.get_proxy_conn(node_id).is_some()
+        !self.ranked_proxy_conn_candidates(node_id).is_empty()
     }
 
     pub fn open_local_stream(
@@ -506,12 +577,49 @@ impl HubRouter {
         node_id: &str,
         meta: &protocol::RequestMeta,
     ) -> Result<Arc<LocalStream>, String> {
-        let proxy_conn = self
-            .get_proxy_conn(node_id)
-            .ok_or_else(|| format!("no proxy connection for node {node_id}"))?;
-        let proxy_stream_id = proxy_conn
-            .alloc_stream_id()
-            .ok_or_else(|| format!("stream limit reached for node {node_id}"))?;
+        let candidates = self.ranked_proxy_conn_candidates(node_id);
+        if candidates.is_empty() {
+            self.selection_unavailable_total
+                .fetch_add(1, Ordering::Relaxed);
+            self.warn_no_available_proxy_connection(node_id);
+            return Err(format!("no proxy connection for node {node_id}"));
+        }
+
+        let mut skipped_candidates = 0usize;
+        let mut selected_candidate = None;
+        let mut proxy_stream_id = None;
+        for candidate in candidates {
+            match candidate.conn.alloc_stream_id() {
+                Some(stream_id) => {
+                    proxy_stream_id = Some(stream_id);
+                    selected_candidate = Some(candidate);
+                    break;
+                }
+                None => skipped_candidates = skipped_candidates.saturating_add(1),
+            }
+        }
+
+        let Some(candidate) = selected_candidate else {
+            self.selection_unavailable_total
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(format!("stream limit reached for node {node_id}"));
+        };
+        if skipped_candidates > 0 {
+            self.selection_retry_total.fetch_add(1, Ordering::Relaxed);
+        }
+        if candidate.snapshot.soft_avoid {
+            self.soft_avoid_selection_total
+                .fetch_add(1, Ordering::Relaxed);
+            debug!(
+                node_id = %node_id,
+                conn_id = candidate.snapshot.conn_id,
+                queue_pressure_percent = candidate.snapshot.queue_pressure_percent,
+                stream_pressure_percent = candidate.snapshot.stream_pressure_percent,
+                "selected high-pressure proxy connection because no lower-pressure alternative was available"
+            );
+        }
+        let proxy_conn = candidate.conn;
+        let proxy_stream_id = proxy_stream_id.expect("selected candidate should carry a stream id");
 
         // Encode frames before registering the stream so that encoding failures
         // (practically impossible but theoretically possible) don't leak a stream
@@ -556,6 +664,7 @@ impl HubRouter {
             proxy_stream_id = proxy_stream_id,
             local_stream_id = local_stream_id,
             stream_count = proxy_conn.stream_count.load(Ordering::Relaxed),
+            queue_depth = proxy_conn.outbound.snapshot().depth,
             send_status = ?send_status,
             "open_local_stream dispatched"
         );
@@ -567,6 +676,28 @@ impl HubRouter {
                 Err("proxy connection congested".to_string())
             }
         }
+    }
+
+    fn warn_no_available_proxy_connection(&self, node_id: &str) {
+        let conns = {
+            let map = self.proxy_conns.read();
+            map.get(node_id)
+                .map(|entries| entries.to_vec())
+                .unwrap_or_default()
+        };
+        if conns.is_empty() {
+            return;
+        }
+        let snapshots = conns.iter().map(|conn| conn.snapshot()).collect::<Vec<_>>();
+        warn!(
+            node_id = %node_id,
+            total_conns = snapshots.len(),
+            available = snapshots.iter().filter(|snapshot| snapshot.available).count(),
+            closing = snapshots.iter().filter(|snapshot| snapshot.closing).count(),
+            draining = snapshots.iter().filter(|snapshot| snapshot.draining).count(),
+            soft_avoid = snapshots.iter().filter(|snapshot| snapshot.soft_avoid).count(),
+            "no available proxy connection despite registered connections"
+        );
     }
 
     pub fn push_local_request_body(
@@ -873,15 +1004,72 @@ impl HubRouter {
     }
 
     pub fn stats(&self) -> HubStats {
-        let proxy_conns = self.proxy_conns.read();
-        let total_proxy = proxy_conns.values().map(|v| v.len()).sum();
-        let nodes = proxy_conns.len();
-        drop(proxy_conns);
+        let proxy_conns = self
+            .proxy_conns_by_id
+            .iter()
+            .map(|entry| entry.value().snapshot())
+            .collect::<Vec<_>>();
+        let total_proxy = proxy_conns.len();
+        let nodes = self.proxy_conns.read().len();
+        let available_proxy_connections = proxy_conns
+            .iter()
+            .filter(|snapshot| snapshot.available)
+            .count();
+        let closing_proxy_connections = proxy_conns
+            .iter()
+            .filter(|snapshot| snapshot.closing)
+            .count();
+        let draining_proxy_connections = proxy_conns
+            .iter()
+            .filter(|snapshot| snapshot.draining)
+            .count();
+        let soft_avoid_proxy_connections = proxy_conns
+            .iter()
+            .filter(|snapshot| snapshot.available && snapshot.soft_avoid)
+            .count();
+        let outbound_queue_depth_total = proxy_conns
+            .iter()
+            .map(|snapshot| snapshot.outbound.depth)
+            .sum();
+        let outbound_queue_depth_max = proxy_conns
+            .iter()
+            .map(|snapshot| snapshot.outbound.depth)
+            .max()
+            .unwrap_or(0);
+        let outbound_queue_capacity_total = proxy_conns
+            .iter()
+            .map(|snapshot| snapshot.outbound.capacity)
+            .sum();
+        let outbound_queue_rejected_full_total = proxy_conns
+            .iter()
+            .map(|snapshot| snapshot.outbound.rejected_full_total)
+            .sum();
+        let outbound_queue_rejected_closed_total = proxy_conns
+            .iter()
+            .map(|snapshot| snapshot.outbound.rejected_closed_total)
+            .sum();
+        let proxy_connection_congested_total = proxy_conns
+            .iter()
+            .map(|snapshot| snapshot.congested_total)
+            .sum();
 
         HubStats {
             proxy_connections: total_proxy,
+            available_proxy_connections,
+            closing_proxy_connections,
+            draining_proxy_connections,
+            soft_avoid_proxy_connections,
             nodes,
             active_streams: self.local_streams.len(),
+            outbound_queue_depth_total,
+            outbound_queue_depth_max,
+            outbound_queue_capacity_total,
+            outbound_queue_rejected_full_total,
+            outbound_queue_rejected_closed_total,
+            proxy_connection_congested_total,
+            soft_avoid_selection_total: self.soft_avoid_selection_total.load(Ordering::Relaxed),
+            selection_retry_total: self.selection_retry_total.load(Ordering::Relaxed),
+            selection_unavailable_total: self.selection_unavailable_total.load(Ordering::Relaxed),
         }
     }
 }
@@ -893,11 +1081,31 @@ fn current_unix_secs() -> u64 {
         .as_secs()
 }
 
+fn percent_u64(value: usize, total: usize) -> u64 {
+    if total == 0 {
+        return 0;
+    }
+    ((value as u128) * 100 / (total as u128)) as u64
+}
+
 #[derive(serde::Serialize)]
 pub struct HubStats {
     pub proxy_connections: usize,
+    pub available_proxy_connections: usize,
+    pub closing_proxy_connections: usize,
+    pub draining_proxy_connections: usize,
+    pub soft_avoid_proxy_connections: usize,
     pub nodes: usize,
     pub active_streams: usize,
+    pub outbound_queue_depth_total: usize,
+    pub outbound_queue_depth_max: usize,
+    pub outbound_queue_capacity_total: usize,
+    pub outbound_queue_rejected_full_total: u64,
+    pub outbound_queue_rejected_closed_total: u64,
+    pub proxy_connection_congested_total: u64,
+    pub soft_avoid_selection_total: u64,
+    pub selection_retry_total: u64,
+    pub selection_unavailable_total: u64,
 }
 
 impl HubStats {
@@ -910,6 +1118,30 @@ impl HubStats {
                 self.proxy_connections as u64,
             ),
             MetricSample::new(
+                "tunnel_proxy_connections_available",
+                "Current number of proxy connections available for new work.",
+                MetricKind::Gauge,
+                self.available_proxy_connections as u64,
+            ),
+            MetricSample::new(
+                "tunnel_proxy_connections_closing",
+                "Current number of proxy connections marked closing.",
+                MetricKind::Gauge,
+                self.closing_proxy_connections as u64,
+            ),
+            MetricSample::new(
+                "tunnel_proxy_connections_draining",
+                "Current number of proxy connections marked draining.",
+                MetricKind::Gauge,
+                self.draining_proxy_connections as u64,
+            ),
+            MetricSample::new(
+                "tunnel_proxy_connections_soft_avoid",
+                "Current number of available proxy connections currently soft-avoided by the scheduler.",
+                MetricKind::Gauge,
+                self.soft_avoid_proxy_connections as u64,
+            ),
+            MetricSample::new(
                 "tunnel_nodes",
                 "Current number of connected logical nodes.",
                 MetricKind::Gauge,
@@ -920,6 +1152,60 @@ impl HubStats {
                 "Current number of active local relay streams.",
                 MetricKind::Gauge,
                 self.active_streams as u64,
+            ),
+            MetricSample::new(
+                "tunnel_proxy_outbound_queue_depth_total",
+                "Current aggregate depth across proxy outbound queues.",
+                MetricKind::Gauge,
+                self.outbound_queue_depth_total as u64,
+            ),
+            MetricSample::new(
+                "tunnel_proxy_outbound_queue_depth_max",
+                "Current maximum depth observed on a single proxy outbound queue.",
+                MetricKind::Gauge,
+                self.outbound_queue_depth_max as u64,
+            ),
+            MetricSample::new(
+                "tunnel_proxy_outbound_queue_capacity_total",
+                "Current aggregate capacity across proxy outbound queues.",
+                MetricKind::Gauge,
+                self.outbound_queue_capacity_total as u64,
+            ),
+            MetricSample::new(
+                "tunnel_proxy_outbound_queue_rejected_full_total",
+                "Total proxy outbound queue sends rejected because a queue was full.",
+                MetricKind::Counter,
+                self.outbound_queue_rejected_full_total,
+            ),
+            MetricSample::new(
+                "tunnel_proxy_outbound_queue_rejected_closed_total",
+                "Total proxy outbound queue sends rejected because a queue was closed.",
+                MetricKind::Counter,
+                self.outbound_queue_rejected_closed_total,
+            ),
+            MetricSample::new(
+                "tunnel_proxy_connection_congested_total",
+                "Total number of times a proxy outbound queue became congested.",
+                MetricKind::Counter,
+                self.proxy_connection_congested_total,
+            ),
+            MetricSample::new(
+                "tunnel_proxy_soft_avoid_selection_total",
+                "Total number of times the scheduler had to pick a high-pressure proxy connection.",
+                MetricKind::Counter,
+                self.soft_avoid_selection_total,
+            ),
+            MetricSample::new(
+                "tunnel_proxy_selection_retry_total",
+                "Total number of times the scheduler retried a lower-ranked proxy connection after a race on stream allocation.",
+                MetricKind::Counter,
+                self.selection_retry_total,
+            ),
+            MetricSample::new(
+                "tunnel_proxy_selection_unavailable_total",
+                "Total number of relay selections that failed because no proxy connection was available.",
+                MetricKind::Counter,
+                self.selection_unavailable_total,
             ),
         ]
     }

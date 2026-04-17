@@ -370,6 +370,7 @@ pub struct CandidateRuntimeSelectabilityInput<'a> {
     pub now_unix_secs: u64,
     pub cached_affinity_target: Option<&'a crate::SchedulerAffinityTarget>,
     pub provider_quota_blocks_requests: bool,
+    pub account_quota_exhausted: bool,
     pub rpm_reset_at: Option<u64>,
 }
 
@@ -390,11 +391,15 @@ pub fn candidate_runtime_skip_reason_with_state(
         now_unix_secs,
         cached_affinity_target,
         provider_quota_blocks_requests,
+        account_quota_exhausted,
         rpm_reset_at,
     } = input;
 
     if provider_quota_blocks_requests {
         return Some("provider_quota_blocked");
+    }
+    if account_quota_exhausted {
+        return Some("account_quota_exhausted");
     }
     if crate::is_candidate_in_recent_failure_cooldown(
         recent_candidates,
@@ -808,6 +813,7 @@ mod tests {
                 now_unix_secs: 100,
                 cached_affinity_target: None,
                 provider_quota_blocks_requests: false,
+                account_quota_exhausted: false,
                 rpm_reset_at: None,
             },
         ));
@@ -826,6 +832,7 @@ mod tests {
                 now_unix_secs: 100,
                 cached_affinity_target: None,
                 provider_quota_blocks_requests: false,
+                account_quota_exhausted: false,
                 rpm_reset_at: None,
             },
         ));
@@ -838,6 +845,24 @@ mod tests {
                 now_unix_secs: 100,
                 cached_affinity_target: None,
                 provider_quota_blocks_requests: true,
+                account_quota_exhausted: false,
+                rpm_reset_at: None,
+            },
+        ));
+    }
+
+    #[test]
+    fn candidate_selectability_rejects_exhausted_account_quota() {
+        assert!(!candidate_is_selectable_with_runtime_state(
+            CandidateRuntimeSelectabilityInput {
+                candidate: &sample_candidate("1", None),
+                recent_candidates: &[],
+                provider_concurrent_limits: &BTreeMap::new(),
+                provider_key_rpm_states: &BTreeMap::new(),
+                now_unix_secs: 100,
+                cached_affinity_target: None,
+                provider_quota_blocks_requests: false,
+                account_quota_exhausted: true,
                 rpm_reset_at: None,
             },
         ));

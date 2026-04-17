@@ -936,7 +936,7 @@ fn ai_pipeline_video_routes_request_preparation_through_request_payload_seams() 
         "resolve_candidate_mapped_model(",
         "build_provider_request_body(",
         "build_video_upstream_url(",
-        "resolve_local_openai_chat_auth(",
+        "resolve_local_openai_bearer_auth(",
         "resolve_local_gemini_auth(",
     ] {
         assert!(

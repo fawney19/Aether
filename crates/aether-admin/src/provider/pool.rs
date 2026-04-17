@@ -90,6 +90,81 @@ fn admin_pool_reason_indicates_ban(reason: &str) -> bool {
         .any(|hint| normalized.contains(hint))
 }
 
+fn admin_pool_metadata_bucket<'a>(
+    upstream_metadata: Option<&'a Value>,
+    provider_type: &str,
+) -> Option<&'a serde_json::Map<String, Value>> {
+    upstream_metadata
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get(&provider_type.trim().to_ascii_lowercase()))
+        .and_then(Value::as_object)
+}
+
+fn admin_pool_json_bool(value: Option<&Value>) -> Option<bool> {
+    match value {
+        Some(Value::Bool(value)) => Some(*value),
+        Some(Value::String(value)) => match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn admin_pool_json_f64(value: Option<&Value>) -> Option<f64> {
+    match value {
+        Some(Value::Number(number)) => number.as_f64(),
+        Some(Value::String(value)) => value.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+    .filter(|value| value.is_finite())
+}
+
+pub fn admin_pool_key_account_quota_exhausted(
+    key: &StoredProviderCatalogKey,
+    provider_type: &str,
+) -> bool {
+    let provider_type = provider_type.trim().to_ascii_lowercase();
+    let Some(bucket) = admin_pool_metadata_bucket(key.upstream_metadata.as_ref(), &provider_type)
+    else {
+        return false;
+    };
+
+    match provider_type.as_str() {
+        "codex" => {
+            if admin_pool_json_bool(bucket.get("credits_unlimited")) == Some(true) {
+                return false;
+            }
+            if admin_pool_json_bool(bucket.get("has_credits")) == Some(false) {
+                return true;
+            }
+            admin_pool_json_f64(bucket.get("primary_used_percent"))
+                .is_some_and(|value| value >= 100.0)
+                || admin_pool_json_f64(bucket.get("secondary_used_percent"))
+                    .is_some_and(|value| value >= 100.0)
+        }
+        "kiro" => {
+            if admin_pool_json_f64(bucket.get("remaining")).is_some_and(|value| value <= 0.0) {
+                return true;
+            }
+            if admin_pool_json_f64(bucket.get("usage_percentage"))
+                .is_some_and(|value| value >= 100.0)
+            {
+                return true;
+            }
+            match (
+                admin_pool_json_f64(bucket.get("usage_limit")),
+                admin_pool_json_f64(bucket.get("current_usage")),
+            ) {
+                (Some(limit), Some(current)) if limit > 0.0 => current >= limit,
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
 fn admin_pool_has_proxy(key: &StoredProviderCatalogKey) -> bool {
     match key.proxy.as_ref() {
         Some(Value::Object(values)) => !values.is_empty(),
@@ -523,6 +598,103 @@ pub fn build_admin_pool_selection_payload(keys: &[StoredProviderCatalogKey]) -> 
         "total": items.len(),
         "items": items,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::admin_pool_key_account_quota_exhausted;
+    use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
+    use serde_json::json;
+
+    fn sample_key(upstream_metadata: Option<serde_json::Value>) -> StoredProviderCatalogKey {
+        let mut key = StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "key-1".to_string(),
+            "oauth".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+        key.upstream_metadata = upstream_metadata;
+        key
+    }
+
+    #[test]
+    fn detects_codex_exhaustion_from_metadata() {
+        assert!(admin_pool_key_account_quota_exhausted(
+            &sample_key(Some(json!({
+                "codex": {
+                    "has_credits": false,
+                    "credits_unlimited": false
+                }
+            }))),
+            "codex",
+        ));
+        assert!(admin_pool_key_account_quota_exhausted(
+            &sample_key(Some(json!({
+                "codex": {
+                    "primary_used_percent": 100.0
+                }
+            }))),
+            "codex",
+        ));
+        assert!(admin_pool_key_account_quota_exhausted(
+            &sample_key(Some(json!({
+                "codex": {
+                    "secondary_used_percent": 100.0
+                }
+            }))),
+            "codex",
+        ));
+        assert!(!admin_pool_key_account_quota_exhausted(
+            &sample_key(Some(json!({
+                "codex": {
+                    "has_credits": false,
+                    "credits_unlimited": true
+                }
+            }))),
+            "codex",
+        ));
+        assert!(!admin_pool_key_account_quota_exhausted(
+            &sample_key(None),
+            "codex",
+        ));
+    }
+
+    #[test]
+    fn detects_kiro_exhaustion_from_metadata() {
+        assert!(admin_pool_key_account_quota_exhausted(
+            &sample_key(Some(json!({
+                "kiro": {
+                    "remaining": 0
+                }
+            }))),
+            "kiro",
+        ));
+        assert!(admin_pool_key_account_quota_exhausted(
+            &sample_key(Some(json!({
+                "kiro": {
+                    "usage_percentage": 100.0
+                }
+            }))),
+            "kiro",
+        ));
+        assert!(admin_pool_key_account_quota_exhausted(
+            &sample_key(Some(json!({
+                "kiro": {
+                    "usage_limit": 100.0,
+                    "current_usage": 100.0
+                }
+            }))),
+            "kiro",
+        ));
+        assert!(!admin_pool_key_account_quota_exhausted(
+            &sample_key(None),
+            "kiro",
+        ));
+    }
 }
 
 pub fn build_admin_pool_key_payload(

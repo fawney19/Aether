@@ -441,7 +441,7 @@
                         P{{ key.internal_priority ?? 50 }}
                       </button>
                       <Button
-                        v-if="key.auth_type === 'oauth'"
+                        v-if="canExportOAuthCredential(key)"
                         variant="ghost"
                         size="icon"
                         class="h-4 w-4 shrink-0"
@@ -461,9 +461,9 @@
                         <Copy class="w-2.5 h-2.5" />
                       </Button>
                       <span class="font-mono">
-                        {{ key.auth_type === 'oauth' ? '[OAuth Token]' : (key.auth_type === 'service_account' ? '[Service Account]' : '[Key]') }}
+                        {{ getProviderMaskedSecretLabel(key) }}
                       </span>
-                      <template v-if="key.auth_type === 'oauth'">
+                      <template v-if="canRefreshOAuthCredential(key)">
                         <Button
                           variant="ghost"
                           size="icon"
@@ -853,7 +853,7 @@
                   class="min-w-0 flex-1 flex justify-center"
                 >
                   <Button
-                    v-if="actionId === 'copy_or_download' && key.auth_type === 'oauth'"
+                    v-if="actionId === 'copy_or_download' && canExportOAuthCredential(key)"
                     variant="ghost"
                     size="icon"
                     class="h-7 w-7 shrink-0"
@@ -1207,6 +1207,15 @@ import {
 } from '@/features/pool/utils/poolManagementState'
 import { getOAuthOrgBadge } from '@/utils/oauthIdentity'
 import { getOAuthRefreshFeedback } from '@/utils/oauthRefreshFeedback'
+import {
+  canEditOAuthCredential,
+  canExportOAuthCredential,
+  canRefreshOAuthCredential,
+  getProviderAuthLabel,
+  getProviderMaskedSecretLabel,
+  isOAuthManagedCredential,
+  isServiceAccountCredential,
+} from '@/utils/providerKeyAuth'
 import {
   getAccountStatusDisplay,
   getAccountStatusTitle,
@@ -1836,8 +1845,9 @@ watch(searchQuery, () => {
   }, 300)
 })
 
-function normalizeAuthTypeForEdit(authType: string): EndpointAPIKey['auth_type'] {
-  if (authType === 'oauth' || authType === 'service_account') return authType
+function normalizeAuthTypeForEdit(key: PoolKeyDetail): EndpointAPIKey['auth_type'] {
+  if (isOAuthManagedCredential(key)) return 'oauth'
+  if (isServiceAccountCredential(key)) return 'service_account'
   return 'api_key'
 }
 
@@ -1847,12 +1857,14 @@ function toEndpointApiKey(key: PoolKeyDetail): EndpointAPIKey {
     id: key.key_id,
     provider_id: selectedProviderId.value || '',
     api_formats: key.api_formats || [],
-    api_key_masked: key.auth_type === 'oauth'
-      ? '[OAuth Token]'
-      : key.auth_type === 'service_account'
-        ? '[Service Account]'
-        : '[Key]',
-    auth_type: normalizeAuthTypeForEdit(key.auth_type),
+    api_key_masked: getProviderMaskedSecretLabel(key),
+    auth_type: normalizeAuthTypeForEdit(key),
+    credential_kind: key.credential_kind ?? null,
+    runtime_auth_kind: key.runtime_auth_kind ?? null,
+    oauth_managed: key.oauth_managed ?? undefined,
+    can_refresh_oauth: key.can_refresh_oauth ?? undefined,
+    can_export_oauth: key.can_export_oauth ?? undefined,
+    can_edit_oauth: key.can_edit_oauth ?? undefined,
     name: key.key_name || '未命名',
     rate_multipliers: key.rate_multipliers ?? null,
     internal_priority: key.internal_priority ?? 50,
@@ -1959,7 +1971,7 @@ async function finishEditInternalPriority(
 
 function handleEditKey(key: PoolKeyDetail) {
   editingKeyDetail.value = key
-  if (key.auth_type === 'oauth') {
+  if (canEditOAuthCredential(key)) {
     oauthKeyEditDialogOpen.value = true
   } else {
     keyFormDialogOpen.value = true
@@ -2457,10 +2469,8 @@ function getRowClass(key: PoolKeyDetail): string {
   return ''
 }
 
-function getAuthTypeChipLabel(authType: string): string {
-  if (authType === 'oauth') return 'OAuth'
-  if (authType === 'service_account') return '服务账号'
-  return 'API Key'
+function getAuthTypeChipLabel(key: PoolKeyDetail): string {
+  return getProviderAuthLabel(key)
 }
 
 function getMobileOAuthTone(key: PoolKeyDetail): PoolMobileTagTone | null {
@@ -2482,7 +2492,7 @@ function getMobileTagItems(key: PoolKeyDetail): PoolMobileTagItem[] {
     oauthStatusLabel: oauthState?.text ?? null,
     oauthStatusTone: getMobileOAuthTone(key),
     priorityLabel: `P${key.internal_priority ?? 50}`,
-    authLabel: getAuthTypeChipLabel(key.auth_type),
+    authLabel: getAuthTypeChipLabel(key),
     planLabel: key.oauth_plan_type ? formatOAuthPlanType(key.oauth_plan_type) : null,
     orgLabel: orgBadge?.label ?? null,
     proxyLabel: key.proxy?.node_id ? '独立代理' : null,
@@ -2492,7 +2502,7 @@ function getMobileTagItems(key: PoolKeyDetail): PoolMobileTagItem[] {
 function getMobileActionIds(key: PoolKeyDetail): PoolMobileActionId[] {
   return splitPoolMobileActions({
     canDownloadOrCopy: true,
-    canRefreshToken: key.auth_type === 'oauth',
+    canRefreshToken: canRefreshOAuthCredential(key),
     canClearCooldown: Boolean(key.cooldown_reason),
     canRecoverHealth: key.circuit_breaker_open || (key.health_score ?? 1) < 0.5,
     hasProxy: true,

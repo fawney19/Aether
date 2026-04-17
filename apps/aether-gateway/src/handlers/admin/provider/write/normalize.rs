@@ -13,8 +13,8 @@ pub(crate) fn normalize_provider_type_input(value: &str) -> Result<String, Strin
 pub(crate) fn normalize_auth_type(value: Option<&str>) -> Result<String, String> {
     let auth_type = value.unwrap_or("api_key").trim().to_ascii_lowercase();
     match auth_type.as_str() {
-        "api_key" | "service_account" | "oauth" => Ok(auth_type),
-        _ => Err("auth_type 仅支持 api_key / service_account / oauth".to_string()),
+        "api_key" | "service_account" | "oauth" | "bearer" => Ok(auth_type),
+        _ => Err("auth_type 仅支持 api_key / service_account / oauth / bearer".to_string()),
     }
 }
 
@@ -63,7 +63,7 @@ pub(crate) fn validate_vertex_api_formats(
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_pool_advanced_config;
+    use super::{normalize_auth_type, normalize_pool_advanced_config};
     use serde_json::json;
 
     #[test]
@@ -83,6 +83,14 @@ mod tests {
         assert_eq!(
             normalize_pool_advanced_config(Some(json!(false))).unwrap_err(),
             "pool_advanced 必须是 JSON 对象"
+        );
+    }
+
+    #[test]
+    fn normalize_auth_type_supports_bearer() {
+        assert_eq!(
+            normalize_auth_type(Some("bearer")).expect("bearer should normalize"),
+            "bearer"
         );
     }
 }

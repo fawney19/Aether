@@ -3,7 +3,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use aether_billing::{
     normalize_input_tokens_for_billing, normalize_total_input_context_for_cache_hit_rate,
 };
-use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageAuditListQuery};
+use aether_data_contracts::repository::usage::{
+    StoredRequestUsageAudit, StoredUsageBreakdownSummaryRow, UsageAuditKeywordSearchQuery,
+    UsageAuditListQuery, UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
+    UsageCacheAffinityIntervalGroupBy, UsageCacheAffinityIntervalQuery, UsageDashboardSummaryQuery,
+};
 use axum::{
     body::Body,
     http,
@@ -13,13 +17,12 @@ use axum::{
 use chrono::Utc;
 use serde_json::json;
 
-use crate::admin_api::AdminAppState;
+use crate::GatewayError;
 
 use super::{
     admin_stats_bad_request_response, build_auth_error_response, build_auth_wallet_summary_payload,
-    list_usage_for_optional_range, parse_bounded_u32, query_param_value,
-    resolve_authenticated_local_user, round_to, unix_secs_to_rfc3339, AdminStatsTimeRange,
-    AdminStatsUsageFilter, AppState, GatewayPublicRequestContext,
+    parse_bounded_u32, query_param_value, resolve_authenticated_local_user, round_to,
+    unix_secs_to_rfc3339, AdminStatsTimeRange, AppState, GatewayPublicRequestContext,
 };
 
 const USERS_ME_USAGE_DATA_UNAVAILABLE_DETAIL: &str = "用户用量数据暂不可用";
@@ -161,26 +164,13 @@ fn users_me_usage_api_key_name(
         })
 }
 
-fn users_me_usage_matches_search(
-    item: &StoredRequestUsageAudit,
-    search: Option<&str>,
-    api_key_names: &BTreeMap<String, String>,
-    auth_api_key_reader_available: bool,
-) -> bool {
-    let Some(search) = search.map(str::trim).filter(|value| !value.is_empty()) else {
-        return true;
-    };
-
-    let model = item.model.to_ascii_lowercase();
-    let api_key_name =
-        users_me_usage_api_key_name(item, api_key_names, auth_api_key_reader_available)
-            .as_deref()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-    search.split_whitespace().all(|keyword| {
-        let keyword = keyword.to_ascii_lowercase();
-        model.contains(&keyword) || api_key_name.contains(&keyword)
-    })
+fn parse_users_me_usage_search_keywords(search: &str) -> Vec<String> {
+    search
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .collect()
 }
 
 fn build_users_me_usage_api_key_payload(
@@ -298,368 +288,181 @@ fn build_users_me_usage_active_payload(item: &StoredRequestUsageAudit) -> serde_
 }
 
 fn build_users_me_usage_summary_by_model(
-    items: &[StoredRequestUsageAudit],
+    rows: &[StoredUsageBreakdownSummaryRow],
     include_actual_cost: bool,
 ) -> Vec<serde_json::Value> {
-    let mut grouped: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-    for item in items {
-        let entry = grouped.entry(item.model.clone()).or_insert_with(|| {
-            json!({
-                "model": item.model,
-                "requests": 0_u64,
-                "input_tokens": 0_u64,
-                "effective_input_tokens": 0_u64,
-                "output_tokens": 0_u64,
-                "total_tokens": 0_u64,
-                "cache_read_tokens": 0_u64,
-                "cache_creation_tokens": 0_u64,
-                "cache_creation_ephemeral_5m_tokens": 0_u64,
-                "cache_creation_ephemeral_1h_tokens": 0_u64,
-                "total_input_context": 0_u64,
-                "cache_hit_rate": 0.0,
-                "total_cost_usd": 0.0,
-            })
-        });
-        entry["requests"] = json!(entry["requests"].as_u64().unwrap_or(0).saturating_add(1));
-        entry["input_tokens"] = json!(entry["input_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(item.input_tokens));
-        entry["effective_input_tokens"] = json!(entry["effective_input_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(users_me_usage_effective_input_tokens(item)));
-        entry["output_tokens"] = json!(entry["output_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(item.output_tokens));
-        entry["total_tokens"] = json!(entry["total_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(item.total_tokens));
-        entry["cache_read_tokens"] = json!(entry["cache_read_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(item.cache_read_input_tokens));
-        entry["cache_creation_tokens"] = json!(entry["cache_creation_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(users_me_usage_cache_creation_tokens(item)));
-        entry["cache_creation_ephemeral_5m_tokens"] = json!(entry
-            ["cache_creation_ephemeral_5m_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(item.cache_creation_ephemeral_5m_input_tokens));
-        entry["cache_creation_ephemeral_1h_tokens"] = json!(entry
-            ["cache_creation_ephemeral_1h_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(item.cache_creation_ephemeral_1h_input_tokens));
-        entry["total_input_context"] = json!(entry["total_input_context"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(users_me_usage_total_input_context(item)));
-        entry["total_cost_usd"] =
-            json!(entry["total_cost_usd"].as_f64().unwrap_or(0.0) + item.total_cost_usd);
-        if include_actual_cost {
-            if entry.get("actual_total_cost_usd").is_none() {
-                entry["actual_total_cost_usd"] = json!(0.0);
+    rows.iter()
+        .map(|row| {
+            let mut value = json!({
+                "model": row.group_key,
+                "requests": row.request_count,
+                "input_tokens": row.input_tokens,
+                "effective_input_tokens": row.effective_input_tokens,
+                "output_tokens": row.output_tokens,
+                "total_tokens": row.total_tokens,
+                "cache_read_tokens": row.cache_read_tokens,
+                "cache_creation_tokens": row.cache_creation_tokens,
+                "cache_creation_ephemeral_5m_tokens": row.cache_creation_ephemeral_5m_tokens,
+                "cache_creation_ephemeral_1h_tokens": row.cache_creation_ephemeral_1h_tokens,
+                "total_input_context": row.total_input_context,
+                "cache_hit_rate": users_me_usage_cache_hit_rate(
+                    row.total_input_context,
+                    row.cache_read_tokens,
+                ),
+                "total_cost_usd": round_to(row.total_cost_usd, 6),
+            });
+            if include_actual_cost {
+                value["actual_total_cost_usd"] = json!(round_to(row.actual_total_cost_usd, 6));
             }
-            entry["actual_total_cost_usd"] = json!(
-                entry["actual_total_cost_usd"].as_f64().unwrap_or(0.0) + item.actual_total_cost_usd
-            );
-        }
-    }
-
-    let mut values = grouped.into_values().collect::<Vec<_>>();
-    for value in &mut values {
-        let total_input_context = value["total_input_context"].as_u64().unwrap_or(0);
-        let cache_read_tokens = value["cache_read_tokens"].as_u64().unwrap_or(0);
-        value["cache_hit_rate"] = json!(users_me_usage_cache_hit_rate(
-            total_input_context,
-            cache_read_tokens
-        ));
-        value["total_cost_usd"] =
-            json!(round_to(value["total_cost_usd"].as_f64().unwrap_or(0.0), 6));
-        if include_actual_cost && value.get("actual_total_cost_usd").is_some() {
-            value["actual_total_cost_usd"] = json!(round_to(
-                value["actual_total_cost_usd"].as_f64().unwrap_or(0.0),
-                6,
-            ));
-        }
-    }
-    values.sort_by(|left, right| {
-        right["requests"]
-            .as_u64()
-            .unwrap_or(0)
-            .cmp(&left["requests"].as_u64().unwrap_or(0))
-            .then_with(|| {
-                left["model"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .cmp(right["model"].as_str().unwrap_or_default())
-            })
-    });
-    values
+            value
+        })
+        .collect()
 }
 
 fn build_users_me_usage_summary_by_provider(
-    items: &[StoredRequestUsageAudit],
+    rows: &[StoredUsageBreakdownSummaryRow],
 ) -> Vec<serde_json::Value> {
-    let mut grouped: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-    for item in items {
-        let entry = grouped
-            .entry(item.provider_name.clone())
-            .or_insert_with(|| {
-                json!({
-                    "provider": item.provider_name,
-                    "requests": 0_u64,
-                    "effective_input_tokens": 0_u64,
-                    "total_tokens": 0_u64,
-                    "total_input_context": 0_u64,
-                    "output_tokens": 0_u64,
-                    "cache_read_tokens": 0_u64,
-                    "cache_creation_tokens": 0_u64,
-                    "cache_creation_ephemeral_5m_tokens": 0_u64,
-                    "cache_creation_ephemeral_1h_tokens": 0_u64,
-                    "cache_hit_rate": 0.0,
-                    "total_cost_usd": 0.0,
-                    "success_rate": 0.0,
-                    "avg_response_time_ms": 0.0,
-                    "_success_count": 0_u64,
-                    "_response_time_sum_ms": 0.0,
-                    "_response_time_count": 0_u64,
-                })
-            });
-        entry["requests"] = json!(entry["requests"].as_u64().unwrap_or(0).saturating_add(1));
-        entry["total_tokens"] = json!(entry["total_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(item.total_tokens));
-        entry["total_input_context"] = json!(entry["total_input_context"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(users_me_usage_total_input_context(item)));
-        entry["effective_input_tokens"] = json!(entry["effective_input_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(users_me_usage_effective_input_tokens(item)));
-        entry["output_tokens"] = json!(entry["output_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(item.output_tokens));
-        entry["cache_read_tokens"] = json!(entry["cache_read_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(item.cache_read_input_tokens));
-        entry["cache_creation_tokens"] = json!(entry["cache_creation_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(users_me_usage_cache_creation_tokens(item)));
-        entry["cache_creation_ephemeral_5m_tokens"] = json!(entry
-            ["cache_creation_ephemeral_5m_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(item.cache_creation_ephemeral_5m_input_tokens));
-        entry["cache_creation_ephemeral_1h_tokens"] = json!(entry
-            ["cache_creation_ephemeral_1h_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(item.cache_creation_ephemeral_1h_input_tokens));
-        entry["total_cost_usd"] =
-            json!(entry["total_cost_usd"].as_f64().unwrap_or(0.0) + item.total_cost_usd);
-
-        let is_success = item.status != "failed"
-            && item.status_code.is_none_or(|status| status < 400)
-            && item.error_message.is_none();
-        if is_success {
-            entry["_success_count"] = json!(entry["_success_count"]
-                .as_u64()
-                .unwrap_or(0)
-                .saturating_add(1));
-            if let Some(response_time_ms) = item.response_time_ms {
-                entry["_response_time_sum_ms"] = json!(
-                    entry["_response_time_sum_ms"].as_f64().unwrap_or(0.0)
-                        + response_time_ms as f64
-                );
-                entry["_response_time_count"] = json!(entry["_response_time_count"]
-                    .as_u64()
-                    .unwrap_or(0)
-                    .saturating_add(1));
-            }
-        }
-    }
-
-    let mut values = grouped.into_values().collect::<Vec<_>>();
-    for value in &mut values {
-        let total_input_context = value["total_input_context"].as_u64().unwrap_or(0);
-        let cache_read_tokens = value["cache_read_tokens"].as_u64().unwrap_or(0);
-        let success_count = value["_success_count"].as_u64().unwrap_or(0);
-        let requests = value["requests"].as_u64().unwrap_or(0);
-        let response_time_count = value["_response_time_count"].as_u64().unwrap_or(0);
-        let response_time_sum_ms = value["_response_time_sum_ms"].as_f64().unwrap_or(0.0);
-        value["cache_hit_rate"] = json!(users_me_usage_cache_hit_rate(
-            total_input_context,
-            cache_read_tokens
-        ));
-        value["total_cost_usd"] =
-            json!(round_to(value["total_cost_usd"].as_f64().unwrap_or(0.0), 6));
-        value["success_rate"] = json!(if requests == 0 {
-            100.0
-        } else {
-            round_to(success_count as f64 / requests as f64 * 100.0, 2)
-        });
-        value["avg_response_time_ms"] = json!(if response_time_count == 0 {
-            0.0
-        } else {
-            round_to(response_time_sum_ms / response_time_count as f64, 2)
-        });
-        value
-            .as_object_mut()
-            .expect("object")
-            .remove("_success_count");
-        value
-            .as_object_mut()
-            .expect("object")
-            .remove("_response_time_sum_ms");
-        value
-            .as_object_mut()
-            .expect("object")
-            .remove("_response_time_count");
-    }
-    values.sort_by(|left, right| {
-        right["requests"]
-            .as_u64()
-            .unwrap_or(0)
-            .cmp(&left["requests"].as_u64().unwrap_or(0))
-            .then_with(|| {
-                left["provider"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .cmp(right["provider"].as_str().unwrap_or_default())
+    rows.iter()
+        .map(|row| {
+            json!({
+                "provider": row.group_key,
+                "requests": row.request_count,
+                "effective_input_tokens": row.effective_input_tokens,
+                "total_tokens": row.total_tokens,
+                "total_input_context": row.total_input_context,
+                "output_tokens": row.output_tokens,
+                "cache_read_tokens": row.cache_read_tokens,
+                "cache_creation_tokens": row.cache_creation_tokens,
+                "cache_creation_ephemeral_5m_tokens": row.cache_creation_ephemeral_5m_tokens,
+                "cache_creation_ephemeral_1h_tokens": row.cache_creation_ephemeral_1h_tokens,
+                "cache_hit_rate": users_me_usage_cache_hit_rate(
+                    row.total_input_context,
+                    row.cache_read_tokens,
+                ),
+                "total_cost_usd": round_to(row.total_cost_usd, 6),
+                "success_rate": if row.request_count == 0 {
+                    100.0
+                } else {
+                    round_to(row.success_count as f64 / row.request_count as f64 * 100.0, 2)
+                },
+                "avg_response_time_ms": if row.response_time_samples == 0 {
+                    0.0
+                } else {
+                    round_to(row.response_time_sum_ms / row.response_time_samples as f64, 2)
+                },
             })
-    });
-    values
+        })
+        .collect()
 }
 
 fn build_users_me_usage_summary_by_api_format(
-    items: &[StoredRequestUsageAudit],
+    rows: &[StoredUsageBreakdownSummaryRow],
 ) -> Vec<serde_json::Value> {
-    let mut grouped: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-    for item in items.iter().filter(|item| item.api_format.is_some()) {
-        let api_format = item
-            .api_format
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
-        let entry = grouped.entry(api_format.clone()).or_insert_with(|| {
+    rows.iter()
+        .map(|row| {
             json!({
-                "api_format": api_format,
-                "request_count": 0_u64,
-                "total_tokens": 0_u64,
-                "effective_input_tokens": 0_u64,
-                "total_input_context": 0_u64,
-                "output_tokens": 0_u64,
-                "cache_read_tokens": 0_u64,
-                "cache_creation_tokens": 0_u64,
-                "cache_creation_ephemeral_5m_tokens": 0_u64,
-                "cache_creation_ephemeral_1h_tokens": 0_u64,
-                "cache_hit_rate": 0.0,
-                "total_cost_usd": 0.0,
-                "avg_response_time_ms": 0.0,
-                "_response_time_sum_ms": 0.0,
-                "_response_time_count": 0_u64,
+                "api_format": row.group_key,
+                "request_count": row.request_count,
+                "total_tokens": row.total_tokens,
+                "effective_input_tokens": row.effective_input_tokens,
+                "total_input_context": row.total_input_context,
+                "output_tokens": row.output_tokens,
+                "cache_read_tokens": row.cache_read_tokens,
+                "cache_creation_tokens": row.cache_creation_tokens,
+                "cache_creation_ephemeral_5m_tokens": row.cache_creation_ephemeral_5m_tokens,
+                "cache_creation_ephemeral_1h_tokens": row.cache_creation_ephemeral_1h_tokens,
+                "cache_hit_rate": users_me_usage_cache_hit_rate(
+                    row.total_input_context,
+                    row.cache_read_tokens,
+                ),
+                "total_cost_usd": round_to(row.total_cost_usd, 6),
+                "avg_response_time_ms": if row.overall_response_time_samples == 0 {
+                    0.0
+                } else {
+                    round_to(
+                        row.overall_response_time_sum_ms
+                            / row.overall_response_time_samples as f64,
+                        2,
+                    )
+                },
             })
-        });
-        entry["request_count"] = json!(entry["request_count"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(1));
-        entry["total_tokens"] = json!(entry["total_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(item.total_tokens));
-        entry["total_input_context"] = json!(entry["total_input_context"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(users_me_usage_total_input_context(item)));
-        entry["effective_input_tokens"] = json!(entry["effective_input_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(users_me_usage_effective_input_tokens(item)));
-        entry["output_tokens"] = json!(entry["output_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(item.output_tokens));
-        entry["cache_read_tokens"] = json!(entry["cache_read_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(item.cache_read_input_tokens));
-        entry["cache_creation_tokens"] = json!(entry["cache_creation_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(users_me_usage_cache_creation_tokens(item)));
-        entry["cache_creation_ephemeral_5m_tokens"] = json!(entry
-            ["cache_creation_ephemeral_5m_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(item.cache_creation_ephemeral_5m_input_tokens));
-        entry["cache_creation_ephemeral_1h_tokens"] = json!(entry
-            ["cache_creation_ephemeral_1h_tokens"]
-            .as_u64()
-            .unwrap_or(0)
-            .saturating_add(item.cache_creation_ephemeral_1h_input_tokens));
-        entry["total_cost_usd"] =
-            json!(entry["total_cost_usd"].as_f64().unwrap_or(0.0) + item.total_cost_usd);
-        if let Some(response_time_ms) = item.response_time_ms {
-            entry["_response_time_sum_ms"] = json!(
-                entry["_response_time_sum_ms"].as_f64().unwrap_or(0.0) + response_time_ms as f64
-            );
-            entry["_response_time_count"] = json!(entry["_response_time_count"]
-                .as_u64()
-                .unwrap_or(0)
-                .saturating_add(1));
-        }
+        })
+        .collect()
+}
+
+async fn load_users_me_usage_by_ids(
+    state: &AppState,
+    requested_ids: &BTreeSet<String>,
+    user_id: &str,
+) -> Result<Vec<StoredRequestUsageAudit>, GatewayError> {
+    let usage_ids = requested_ids.iter().cloned().collect::<Vec<_>>();
+    let mut items = state.list_request_usage_by_ids(&usage_ids).await?;
+    items.retain(|item| item.user_id.as_deref() == Some(user_id));
+    Ok(items)
+}
+
+async fn resolve_users_me_api_key_names(
+    state: &AppState,
+    items: &[StoredRequestUsageAudit],
+) -> Result<BTreeMap<String, String>, GatewayError> {
+    if !state.has_auth_api_key_data_reader() {
+        return Ok(BTreeMap::new());
     }
 
-    let mut values = grouped.into_values().collect::<Vec<_>>();
-    for value in &mut values {
-        let total_input_context = value["total_input_context"].as_u64().unwrap_or(0);
-        let cache_read_tokens = value["cache_read_tokens"].as_u64().unwrap_or(0);
-        let response_time_count = value["_response_time_count"].as_u64().unwrap_or(0);
-        let response_time_sum_ms = value["_response_time_sum_ms"].as_f64().unwrap_or(0.0);
-        value["cache_hit_rate"] = json!(users_me_usage_cache_hit_rate(
-            total_input_context,
-            cache_read_tokens
-        ));
-        value["total_cost_usd"] =
-            json!(round_to(value["total_cost_usd"].as_f64().unwrap_or(0.0), 6));
-        value["avg_response_time_ms"] = json!(if response_time_count == 0 {
-            0.0
-        } else {
-            round_to(response_time_sum_ms / response_time_count as f64, 2)
-        });
-        value
-            .as_object_mut()
-            .expect("object")
-            .remove("_response_time_sum_ms");
-        value
-            .as_object_mut()
-            .expect("object")
-            .remove("_response_time_count");
+    let api_key_ids = items
+        .iter()
+        .filter_map(|item| item.api_key_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if api_key_ids.is_empty() {
+        return Ok(BTreeMap::new());
     }
-    values.sort_by(|left, right| {
-        right["request_count"]
-            .as_u64()
-            .unwrap_or(0)
-            .cmp(&left["request_count"].as_u64().unwrap_or(0))
-            .then_with(|| {
-                left["api_format"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .cmp(right["api_format"].as_str().unwrap_or_default())
-            })
-    });
-    values
+
+    state.resolve_auth_api_key_names_by_ids(&api_key_ids).await
+}
+
+async fn resolve_users_me_search_api_key_context(
+    state: &AppState,
+    user_id: &str,
+    keywords: &[String],
+) -> Result<(BTreeMap<String, String>, Vec<Vec<String>>), GatewayError> {
+    if !state.has_auth_api_key_data_reader() {
+        return Ok((BTreeMap::new(), Vec::new()));
+    }
+
+    let user_ids = [user_id.to_string()];
+    let export_records = state
+        .list_auth_api_key_export_records_by_user_ids(&user_ids)
+        .await?;
+    let api_key_names = export_records
+        .iter()
+        .filter_map(|record| {
+            record
+                .name
+                .clone()
+                .map(|name| (record.api_key_id.clone(), name))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let matched_api_key_ids_by_keyword = keywords
+        .iter()
+        .map(|keyword| {
+            export_records
+                .iter()
+                .filter(|record| {
+                    record
+                        .name
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                        .contains(keyword)
+                })
+                .map(|record| record.api_key_id.clone())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    Ok((api_key_names, matched_api_key_ids_by_keyword))
 }
 
 pub(super) async fn handle_users_me_usage_get(
@@ -703,37 +506,214 @@ pub(super) async fn handle_users_me_usage_get(
         })
     });
 
-    let usage = match list_usage_for_optional_range(
-        &AdminAppState::new(state),
-        effective_time_range.as_ref(),
-        &AdminStatsUsageFilter {
-            user_id: Some(auth.user.id.clone()),
-            provider_name: None,
-            model: None,
-        },
-    )
-    .await
+    let include_actual_cost = auth.user.role.eq_ignore_ascii_case("admin");
+    let auth_api_key_reader_available = state.has_auth_api_key_data_reader();
+    let mut usage_summary =
+        aether_data_contracts::repository::usage::StoredUsageDashboardSummary::default();
+    let mut summary_by_model = Vec::<StoredUsageBreakdownSummaryRow>::new();
+    let mut summary_by_provider = Vec::<StoredUsageBreakdownSummaryRow>::new();
+    let mut summary_by_api_format = Vec::<StoredUsageBreakdownSummaryRow>::new();
+    let mut api_key_names = BTreeMap::new();
+    let mut total_record_count = 0usize;
+    let mut record_items = Vec::<StoredRequestUsageAudit>::new();
+
+    if let Some((created_from_unix_secs, created_until_unix_secs)) = effective_time_range
+        .as_ref()
+        .and_then(AdminStatsTimeRange::to_unix_bounds)
     {
-        Ok(value) => value,
-        Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("user usage lookup failed: {err:?}"),
-                false,
-            )
-        }
-    };
-    let api_key_names = if state.has_auth_api_key_data_reader() {
-        let api_key_ids = usage
-            .iter()
-            .filter_map(|item| item.api_key_id.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        if api_key_ids.is_empty() {
-            BTreeMap::new()
+        usage_summary = match state
+            .summarize_dashboard_usage(&UsageDashboardSummaryQuery {
+                created_from_unix_secs,
+                created_until_unix_secs,
+                user_id: Some(auth.user.id.clone()),
+            })
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("user usage summary lookup failed: {err:?}"),
+                    false,
+                )
+            }
+        };
+        summary_by_model = match state
+            .summarize_usage_breakdown(&UsageBreakdownSummaryQuery {
+                created_from_unix_secs,
+                created_until_unix_secs,
+                user_id: Some(auth.user.id.clone()),
+                group_by: UsageBreakdownGroupBy::Model,
+            })
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("user usage model breakdown lookup failed: {err:?}"),
+                    false,
+                )
+            }
+        };
+        summary_by_provider = match state
+            .summarize_usage_breakdown(&UsageBreakdownSummaryQuery {
+                created_from_unix_secs,
+                created_until_unix_secs,
+                user_id: Some(auth.user.id.clone()),
+                group_by: UsageBreakdownGroupBy::Provider,
+            })
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("user usage provider breakdown lookup failed: {err:?}"),
+                    false,
+                )
+            }
+        };
+        summary_by_api_format = match state
+            .summarize_usage_breakdown(&UsageBreakdownSummaryQuery {
+                created_from_unix_secs,
+                created_until_unix_secs,
+                user_id: Some(auth.user.id.clone()),
+                group_by: UsageBreakdownGroupBy::ApiFormat,
+            })
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("user usage api_format breakdown lookup failed: {err:?}"),
+                    false,
+                )
+            }
+        };
+
+        let active_search = search.as_deref().filter(|value| !value.trim().is_empty());
+        if let Some(search) = active_search {
+            let keywords = parse_users_me_usage_search_keywords(search);
+            let matched_api_key_ids_by_keyword;
+            (api_key_names, matched_api_key_ids_by_keyword) =
+                match resolve_users_me_search_api_key_context(state, &auth.user.id, &keywords).await
+                {
+                    Ok(value) => value,
+                    Err(err) => {
+                        return build_auth_error_response(
+                            http::StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("user api key search context lookup failed: {err:?}"),
+                            false,
+                        )
+                    }
+                };
+            let keyword_query = UsageAuditKeywordSearchQuery {
+                created_from_unix_secs: Some(created_from_unix_secs),
+                created_until_unix_secs: Some(created_until_unix_secs),
+                user_id: Some(auth.user.id.clone()),
+                provider_name: None,
+                model: None,
+                api_format: None,
+                statuses: None,
+                is_stream: None,
+                error_only: false,
+                keywords,
+                matched_user_ids_by_keyword: Vec::new(),
+                auth_user_reader_available: false,
+                matched_api_key_ids_by_keyword,
+                auth_api_key_reader_available,
+                username_keyword: None,
+                matched_user_ids_for_username: Vec::new(),
+                limit: None,
+                offset: None,
+                newest_first: true,
+            };
+            total_record_count = match state
+                .count_usage_audits_by_keyword_search(&keyword_query)
+                .await
+            {
+                Ok(value) => usize::try_from(value).unwrap_or(usize::MAX),
+                Err(err) => {
+                    return build_auth_error_response(
+                        http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("user usage search count lookup failed: {err:?}"),
+                        false,
+                    )
+                }
+            };
+            record_items = match state
+                .list_usage_audits_by_keyword_search(&UsageAuditKeywordSearchQuery {
+                    limit: Some(limit),
+                    offset: Some(offset),
+                    ..keyword_query
+                })
+                .await
+            {
+                Ok(value) => value,
+                Err(err) => {
+                    return build_auth_error_response(
+                        http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("user usage search lookup failed: {err:?}"),
+                        false,
+                    )
+                }
+            };
         } else {
-            match state.resolve_auth_api_key_names_by_ids(&api_key_ids).await {
+            total_record_count = match state
+                .count_usage_audits(&UsageAuditListQuery {
+                    created_from_unix_secs: Some(created_from_unix_secs),
+                    created_until_unix_secs: Some(created_until_unix_secs),
+                    user_id: Some(auth.user.id.clone()),
+                    provider_name: None,
+                    model: None,
+                    api_format: None,
+                    statuses: None,
+                    is_stream: None,
+                    error_only: false,
+                    limit: None,
+                    offset: None,
+                    newest_first: true,
+                })
+                .await
+            {
+                Ok(value) => usize::try_from(value).unwrap_or(usize::MAX),
+                Err(err) => {
+                    return build_auth_error_response(
+                        http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("user usage count lookup failed: {err:?}"),
+                        false,
+                    )
+                }
+            };
+            record_items = match state
+                .list_usage_audits(&UsageAuditListQuery {
+                    created_from_unix_secs: Some(created_from_unix_secs),
+                    created_until_unix_secs: Some(created_until_unix_secs),
+                    user_id: Some(auth.user.id.clone()),
+                    provider_name: None,
+                    model: None,
+                    api_format: None,
+                    statuses: None,
+                    is_stream: None,
+                    error_only: false,
+                    limit: Some(limit),
+                    offset: Some(offset),
+                    newest_first: true,
+                })
+                .await
+            {
+                Ok(value) => value,
+                Err(err) => {
+                    return build_auth_error_response(
+                        http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("user usage records lookup failed: {err:?}"),
+                        false,
+                    )
+                }
+            };
+            api_key_names = match resolve_users_me_api_key_names(state, &record_items).await {
                 Ok(value) => value,
                 Err(err) => {
                     return build_auth_error_response(
@@ -742,100 +722,35 @@ pub(super) async fn handle_users_me_usage_get(
                         false,
                     )
                 }
-            }
+            };
         }
-    } else {
-        BTreeMap::new()
-    };
+    }
 
-    let summary_items = usage
-        .iter()
-        .filter(|item| {
-            !matches!(item.status.as_str(), "pending" | "streaming")
-                && !matches!(item.provider_name.as_str(), "unknown" | "pending")
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let include_actual_cost = auth.user.role.eq_ignore_ascii_case("admin");
-    let total_requests = summary_items.len() as u64;
-    let total_input_tokens = summary_items
-        .iter()
-        .map(|item| item.input_tokens)
-        .sum::<u64>();
-    let total_output_tokens = summary_items
-        .iter()
-        .map(|item| item.output_tokens)
-        .sum::<u64>();
-    let total_tokens = summary_items
-        .iter()
-        .map(|item| item.total_tokens)
-        .sum::<u64>();
-    let total_cost = round_to(
-        summary_items
-            .iter()
-            .map(|item| item.total_cost_usd)
-            .sum::<f64>(),
-        6,
-    );
-    let total_actual_cost = round_to(
-        summary_items
-            .iter()
-            .map(|item| item.actual_total_cost_usd)
-            .sum::<f64>(),
-        6,
-    );
-
-    let successful_response_times = summary_items
-        .iter()
-        .filter(|item| {
-            item.status != "failed"
-                && item.status_code.is_none_or(|status| status < 400)
-                && item.error_message.is_none()
-        })
-        .filter_map(|item| item.response_time_ms)
-        .collect::<Vec<_>>();
-    let avg_response_time = if successful_response_times.is_empty() {
+    let total_requests = usage_summary.total_requests;
+    let total_input_tokens = usage_summary.input_tokens;
+    let total_output_tokens = usage_summary.output_tokens;
+    let total_tokens = usage_summary.total_tokens;
+    let total_cost = round_to(usage_summary.total_cost_usd, 6);
+    let total_actual_cost = round_to(usage_summary.actual_total_cost_usd, 6);
+    let avg_response_time = if usage_summary.response_time_samples == 0 {
         0.0
     } else {
         round_to(
-            successful_response_times
-                .iter()
-                .map(|value| *value as f64)
-                .sum::<f64>()
-                / successful_response_times.len() as f64
+            usage_summary.response_time_sum_ms
+                / usage_summary.response_time_samples as f64
                 / 1000.0,
             2,
         )
     };
 
-    let mut records = usage
+    let records = record_items
         .into_iter()
-        .filter(|item| {
-            users_me_usage_matches_search(
-                item,
-                search.as_deref(),
-                &api_key_names,
-                state.has_auth_api_key_data_reader(),
-            )
-        })
-        .collect::<Vec<_>>();
-    records.sort_by(|left, right| {
-        right
-            .created_at_unix_ms
-            .cmp(&left.created_at_unix_ms)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    let total_record_count = records.len();
-    let records = records
-        .into_iter()
-        .skip(offset)
-        .take(limit)
         .map(|item| {
             build_users_me_usage_record_payload(
                 &item,
                 include_actual_cost,
                 &api_key_names,
-                state.has_auth_api_key_data_reader(),
+                auth_api_key_reader_available,
             )
         })
         .collect::<Vec<_>>();
@@ -854,9 +769,9 @@ pub(super) async fn handle_users_me_usage_get(
         "total_cost": total_cost,
         "avg_response_time": avg_response_time,
         "billing": build_auth_wallet_summary_payload(wallet.as_ref()),
-        "summary_by_model": build_users_me_usage_summary_by_model(&summary_items, include_actual_cost),
-        "summary_by_provider": build_users_me_usage_summary_by_provider(&summary_items),
-        "summary_by_api_format": build_users_me_usage_summary_by_api_format(&summary_items),
+        "summary_by_model": build_users_me_usage_summary_by_model(&summary_by_model, include_actual_cost),
+        "summary_by_provider": build_users_me_usage_summary_by_provider(&summary_by_provider),
+        "summary_by_api_format": build_users_me_usage_summary_by_api_format(&summary_by_api_format),
         "pagination": {
             "total": total_record_count,
             "limit": limit,
@@ -887,54 +802,52 @@ pub(super) async fn handle_users_me_usage_active_get(
     let ids = parse_users_me_usage_ids(request_context.request_query_string.as_deref());
     // When polling for active (pending/streaming) requests without specific ids,
     // limit to the last 1 hour to avoid scanning all historical records.
-    let created_from = if ids.is_none() {
-        Some(Utc::now().timestamp().saturating_sub(3600) as u64)
-    } else {
-        None
+    let items = match ids.as_ref() {
+        Some(ids) => match load_users_me_usage_by_ids(state, ids, &auth.user.id).await {
+            Ok(mut value) => {
+                value.sort_by(|left, right| {
+                    right
+                        .created_at_unix_ms
+                        .cmp(&left.created_at_unix_ms)
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+                value
+            }
+            Err(err) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("user active usage lookup failed: {err:?}"),
+                    false,
+                )
+            }
+        },
+        None => match state
+            .list_usage_audits(&UsageAuditListQuery {
+                created_from_unix_secs: Some(Utc::now().timestamp().saturating_sub(3600) as u64),
+                created_until_unix_secs: None,
+                user_id: Some(auth.user.id.clone()),
+                provider_name: None,
+                model: None,
+                api_format: None,
+                statuses: Some(vec!["pending".to_string(), "streaming".to_string()]),
+                is_stream: None,
+                error_only: false,
+                limit: Some(50),
+                offset: None,
+                newest_first: true,
+            })
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                return build_auth_error_response(
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("user active usage lookup failed: {err:?}"),
+                    false,
+                )
+            }
+        },
     };
-    let items = match state
-        .list_usage_audits(&UsageAuditListQuery {
-            created_from_unix_secs: created_from,
-            created_until_unix_secs: None,
-            user_id: Some(auth.user.id.clone()),
-            provider_name: None,
-            model: None,
-            api_format: None,
-            statuses: None,
-            is_stream: None,
-            error_only: false,
-            limit: None,
-            offset: None,
-            newest_first: false,
-        })
-        .await
-    {
-        Ok(value) => value,
-        Err(err) => {
-            return build_auth_error_response(
-                http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("user active usage lookup failed: {err:?}"),
-                false,
-            )
-        }
-    };
-
-    let mut items = items
-        .into_iter()
-        .filter(|item| match ids.as_ref() {
-            Some(ids) => ids.contains(&item.id),
-            None => matches!(item.status.as_str(), "pending" | "streaming"),
-        })
-        .collect::<Vec<_>>();
-    items.sort_by(|left, right| {
-        right
-            .created_at_unix_ms
-            .cmp(&left.created_at_unix_ms)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    if ids.is_none() && items.len() > 50 {
-        items.truncate(50);
-    }
 
     Json(json!({
         "requests": items
@@ -970,20 +883,13 @@ pub(super) async fn handle_users_me_usage_interval_timeline_get(
     let now_unix_secs = u64::try_from(Utc::now().timestamp()).unwrap_or_default();
     let created_from_unix_secs = now_unix_secs.saturating_sub(u64::from(hours) * 3600);
 
-    let mut items = match state
-        .list_usage_audits(&UsageAuditListQuery {
-            created_from_unix_secs: Some(created_from_unix_secs),
-            created_until_unix_secs: None,
+    let intervals = match state
+        .list_usage_cache_affinity_intervals(&UsageCacheAffinityIntervalQuery {
+            created_from_unix_secs,
+            created_until_unix_secs: now_unix_secs.saturating_add(1),
+            group_by: UsageCacheAffinityIntervalGroupBy::User,
             user_id: Some(auth.user.id.clone()),
-            provider_name: None,
-            model: None,
-            api_format: None,
-            statuses: None,
-            is_stream: None,
-            error_only: false,
-            limit: None,
-            offset: None,
-            newest_first: false,
+            api_key_id: None,
         })
         .await
     {
@@ -996,30 +902,19 @@ pub(super) async fn handle_users_me_usage_interval_timeline_get(
             )
         }
     };
-    items.retain(|item| item.status == "completed");
-    items.sort_by(|left, right| {
-        left.created_at_unix_ms
-            .cmp(&right.created_at_unix_ms)
-            .then_with(|| left.id.cmp(&right.id))
-    });
 
     let mut points = Vec::new();
-    let mut previous_created_at_unix_ms = None;
-    for item in items {
-        if let Some(previous) = previous_created_at_unix_ms {
-            let interval_minutes = (item.created_at_unix_ms.saturating_sub(previous) as f64) / 60.0;
-            if interval_minutes <= 120.0 {
-                points.push(json!({
-                    "x": unix_secs_to_rfc3339(item.created_at_unix_ms),
-                    "y": round_to(interval_minutes, 2),
-                    "model": item.model,
-                }));
-                if points.len() >= limit {
-                    break;
-                }
+    for row in intervals {
+        if row.interval_minutes <= 120.0 {
+            points.push(json!({
+                "x": unix_secs_to_rfc3339(row.created_at_unix_secs),
+                "y": round_to(row.interval_minutes, 2),
+                "model": row.model,
+            }));
+            if points.len() >= limit {
+                break;
             }
         }
-        previous_created_at_unix_ms = Some(item.created_at_unix_ms);
     }
 
     Json(json!({

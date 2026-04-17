@@ -182,6 +182,30 @@ WHERE api_keys.id = ANY($1::TEXT[])
 ORDER BY api_keys.id ASC
 "#;
 
+const LIST_EXPORT_BY_NAME_SEARCH_SQL: &str = r#"
+SELECT
+  api_keys.user_id,
+  api_keys.id AS api_key_id,
+  api_keys.key_hash,
+  api_keys.key_encrypted,
+  api_keys.name,
+  api_keys.allowed_providers,
+  api_keys.allowed_api_formats,
+  api_keys.allowed_models,
+  api_keys.rate_limit,
+  api_keys.concurrent_limit,
+  api_keys.force_capabilities,
+  api_keys.is_active,
+  CAST(EXTRACT(EPOCH FROM api_keys.expires_at) AS BIGINT) AS expires_at_unix_secs,
+  api_keys.auto_delete_on_expiry,
+  api_keys.total_requests,
+  COALESCE(CAST(api_keys.total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  api_keys.is_standalone
+FROM api_keys
+WHERE LOWER(COALESCE(api_keys.name, '')) LIKE $1
+ORDER BY api_keys.id ASC
+"#;
+
 const LIST_EXPORT_STANDALONE_SQL: &str = r#"
 SELECT
   api_keys.user_id,
@@ -751,6 +775,24 @@ impl SqlxAuthApiKeySnapshotReadRepository {
         .await
     }
 
+    pub async fn list_export_api_keys_by_name_search(
+        &self,
+        name_search: &str,
+    ) -> Result<Vec<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        let name_search = name_search.trim();
+        if name_search.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        Self::collect_query_rows(
+            sqlx::query(LIST_EXPORT_BY_NAME_SEARCH_SQL)
+                .bind(format!("%{}%", name_search.to_ascii_lowercase()))
+                .fetch(&self.pool),
+            map_auth_api_key_export_row,
+        )
+        .await
+    }
+
     pub async fn summarize_export_api_keys_by_user_ids(
         &self,
         user_ids: &[String],
@@ -884,6 +926,13 @@ impl AuthApiKeyReadRepository for SqlxAuthApiKeySnapshotReadRepository {
         api_key_ids: &[String],
     ) -> Result<Vec<StoredAuthApiKeyExportRecord>, DataLayerError> {
         Self::list_export_api_keys_by_ids(self, api_key_ids).await
+    }
+
+    async fn list_export_api_keys_by_name_search(
+        &self,
+        name_search: &str,
+    ) -> Result<Vec<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        Self::list_export_api_keys_by_name_search(self, name_search).await
     }
 
     async fn list_export_standalone_api_keys_page(

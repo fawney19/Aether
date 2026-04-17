@@ -23,6 +23,8 @@ mod flow;
 mod reads;
 #[path = "wallet/recharge.rs"]
 mod recharge;
+#[path = "wallet/redeem.rs"]
+mod redeem;
 #[path = "wallet/refunds.rs"]
 mod refunds;
 use self::flow::handle_wallet_flow;
@@ -39,6 +41,7 @@ use self::recharge::{
 pub(crate) use self::recharge::{
     sanitize_wallet_gateway_response, wallet_payment_order_payload_from_row,
 };
+use self::redeem::handle_wallet_redeem;
 use self::refunds::{
     handle_wallet_create_refund, handle_wallet_refund_detail, handle_wallet_refunds_list,
     wallet_refund_detail_path_matches,
@@ -151,6 +154,12 @@ pub(super) async fn maybe_build_local_wallet_response(
         return Some(
             handle_wallet_create_recharge(state, request_context, headers, request_body).await,
         );
+    }
+
+    if decision.route_kind.as_deref() == Some("redeem")
+        && request_context.request_path == "/api/wallet/redeem"
+    {
+        return Some(handle_wallet_redeem(state, request_context, headers, request_body).await);
     }
 
     if decision.route_kind.as_deref() == Some("list_recharge_orders")

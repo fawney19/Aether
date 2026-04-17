@@ -1,7 +1,9 @@
 use crate::handlers::admin::provider::query::{
     models::{
         build_admin_provider_query_models_response,
+        build_admin_provider_query_test_model_failover_local_response,
         build_admin_provider_query_test_model_failover_response,
+        build_admin_provider_query_test_model_local_response,
         build_admin_provider_query_test_model_response,
     },
     payload::{
@@ -78,10 +80,25 @@ impl<'a> AdminAppState<'a> {
                         ADMIN_PROVIDER_QUERY_MODEL_REQUIRED_DETAIL,
                     )));
                 };
-                Ok(Some(build_admin_provider_query_test_model_response(
-                    provider_id,
-                    model,
-                )))
+                let provider_type = self
+                    .app()
+                    .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id))
+                    .await?
+                    .into_iter()
+                    .find(|provider| provider.id == provider_id)
+                    .map(|provider| provider.provider_type)
+                    .unwrap_or_default();
+                if provider_type.trim().eq_ignore_ascii_case("kiro") {
+                    Ok(Some(
+                        build_admin_provider_query_test_model_local_response(self, &payload)
+                            .await?,
+                    ))
+                } else {
+                    Ok(Some(build_admin_provider_query_test_model_response(
+                        provider_id,
+                        model,
+                    )))
+                }
             }
             "test_model_failover" => {
                 let Some(provider_id) = provider_query_extract_provider_id(&payload) else {
@@ -107,12 +124,29 @@ impl<'a> AdminAppState<'a> {
                         ADMIN_PROVIDER_QUERY_FAILOVER_MODELS_REQUIRED_DETAIL,
                     )));
                 }
-                Ok(Some(
-                    build_admin_provider_query_test_model_failover_response(
-                        provider_id,
-                        failover_models,
-                    ),
-                ))
+                let provider_type = self
+                    .app()
+                    .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id))
+                    .await?
+                    .into_iter()
+                    .find(|provider| provider.id == provider_id)
+                    .map(|provider| provider.provider_type)
+                    .unwrap_or_default();
+                if provider_type.trim().eq_ignore_ascii_case("kiro") {
+                    Ok(Some(
+                        build_admin_provider_query_test_model_failover_local_response(
+                            self, &payload,
+                        )
+                        .await?,
+                    ))
+                } else {
+                    Ok(Some(
+                        build_admin_provider_query_test_model_failover_response(
+                            provider_id,
+                            failover_models,
+                        ),
+                    ))
+                }
             }
             _ => Ok(Some(
                 build_admin_provider_query_models_response(self, &payload).await?,

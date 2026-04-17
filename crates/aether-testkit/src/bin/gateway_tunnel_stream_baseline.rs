@@ -145,7 +145,7 @@ async fn connect_protocol_peer(
                 {
                     break;
                 }
-                Message::Ping(ref payload)
+                Message::Ping(payload)
                     if sink.send(Message::Pong(payload.clone())).await.is_err() =>
                 {
                     break;

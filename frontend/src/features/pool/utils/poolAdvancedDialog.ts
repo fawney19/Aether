@@ -2,6 +2,7 @@ export type PoolHealthToggleKey =
   | 'health_policy_enabled'
   | 'probing_enabled'
   | 'auto_remove_banned_keys'
+  | 'skip_exhausted_accounts'
 
 export interface PoolHealthToggleCard {
   key: PoolHealthToggleKey
@@ -39,6 +40,11 @@ export function buildPoolHealthToggleCards(): PoolHealthToggleCard[] {
       key: 'auto_remove_banned_keys',
       label: '异常自动清除',
       description: '仅在检测到不可恢复的账号异常时自动从号池移除，不处理纯 Token 失效。',
+    },
+    {
+      key: 'skip_exhausted_accounts',
+      label: '跳过额度耗尽账号',
+      description: '当 Codex / Kiro 账号额度已耗尽时，直接标记为不可调度并在请求侧跳过。',
     },
   ]
 }

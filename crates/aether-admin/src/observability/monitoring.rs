@@ -1,6 +1,7 @@
 use aether_data_contracts::repository::{
-    candidates::{DecisionTrace, DecisionTraceCandidate},
+    candidates::{DecisionTrace, DecisionTraceCandidate, RequestCandidateStatus},
     provider_catalog::StoredProviderCatalogKey,
+    usage::StoredRequestUsageAudit,
 };
 use axum::{
     body::Body,
@@ -261,11 +262,20 @@ pub fn build_admin_monitoring_trace_provider_stats_payload_response(
 
 pub fn build_admin_monitoring_trace_request_payload_response(
     trace: &DecisionTrace,
+    usage: Option<&StoredRequestUsageAudit>,
 ) -> Response<Body> {
+    let usage_candidate_id =
+        usage.and_then(|item| resolve_admin_monitoring_usage_candidate_id(trace, item));
     let candidates = trace
         .candidates
         .iter()
-        .map(build_admin_monitoring_trace_request_candidate_payload)
+        .map(|item| {
+            let matched_usage = usage_candidate_id
+                .as_deref()
+                .filter(|candidate_id| *candidate_id == item.candidate.id.as_str())
+                .and(usage);
+            build_admin_monitoring_trace_request_candidate_payload(item, matched_usage)
+        })
         .collect::<Vec<_>>();
     Json(json!({
         "request_id": trace.request_id,
@@ -279,6 +289,7 @@ pub fn build_admin_monitoring_trace_request_payload_response(
 
 pub fn build_admin_monitoring_trace_request_candidate_payload(
     item: &DecisionTraceCandidate,
+    usage: Option<&StoredRequestUsageAudit>,
 ) -> Value {
     let candidate = &item.candidate;
     json!({
@@ -316,11 +327,131 @@ pub fn build_admin_monitoring_trace_request_candidate_payload(
         "error_message": candidate.error_message,
         "latency_ms": candidate.latency_ms,
         "concurrent_requests": candidate.concurrent_requests,
-        "extra_data": candidate.extra_data,
+        "extra_data": build_admin_monitoring_trace_candidate_extra_data(candidate.extra_data.as_ref(), usage),
         "created_at": unix_ms_to_rfc3339(candidate.created_at_unix_ms),
         "started_at": candidate.started_at_unix_ms.and_then(unix_ms_to_rfc3339),
         "finished_at": candidate.finished_at_unix_ms.and_then(unix_ms_to_rfc3339),
     })
+}
+
+fn resolve_admin_monitoring_usage_candidate_id(
+    trace: &DecisionTrace,
+    usage: &StoredRequestUsageAudit,
+) -> Option<String> {
+    if usage.request_id.trim() != trace.request_id {
+        return None;
+    }
+
+    if let Some(candidate_id) = usage
+        .routing_candidate_id()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(candidate_id.to_string());
+    }
+
+    let candidate_index = usage.routing_candidate_index()?;
+    trace
+        .candidates
+        .iter()
+        .filter(|item| u64::from(item.candidate.candidate_index) == candidate_index)
+        .max_by_key(|item| {
+            (
+                item.candidate.retry_index,
+                item.candidate.finished_at_unix_ms.unwrap_or_default(),
+                item.candidate.started_at_unix_ms.unwrap_or_default(),
+                admin_monitoring_candidate_status_rank(item.candidate.status),
+            )
+        })
+        .map(|item| item.candidate.id.clone())
+}
+
+fn admin_monitoring_candidate_status_rank(status: RequestCandidateStatus) -> u8 {
+    match status {
+        RequestCandidateStatus::Success => 7,
+        RequestCandidateStatus::Streaming => 6,
+        RequestCandidateStatus::Pending => 5,
+        RequestCandidateStatus::Failed => 4,
+        RequestCandidateStatus::Cancelled => 3,
+        RequestCandidateStatus::Skipped => 2,
+        RequestCandidateStatus::Unused => 1,
+        RequestCandidateStatus::Available => 0,
+    }
+}
+
+fn build_admin_monitoring_trace_candidate_extra_data(
+    existing: Option<&Value>,
+    usage: Option<&StoredRequestUsageAudit>,
+) -> Value {
+    let mut extra_data = match existing {
+        Some(Value::Object(object)) => Some(object.clone()),
+        Some(other) => return other.clone(),
+        None => None,
+    };
+
+    if let Some(usage) = usage {
+        let extra_object = extra_data.get_or_insert_with(serde_json::Map::new);
+        if let Some(first_byte_time_ms) = usage.first_byte_time_ms {
+            extra_object
+                .entry("first_byte_time_ms".to_string())
+                .or_insert_with(|| json!(first_byte_time_ms));
+        }
+
+        if let Some(proxy_value) = extra_object.get_mut("proxy") {
+            if let Some(proxy_object) = proxy_value.as_object_mut() {
+                let proxy_timing = parse_admin_monitoring_usage_proxy_timing(usage);
+                let proxy_ttfb_ms = proxy_timing
+                    .as_ref()
+                    .and_then(|timing| timing.get("ttfb_ms"))
+                    .and_then(Value::as_u64)
+                    .or(usage.first_byte_time_ms);
+                if let Some(ttfb_ms) = proxy_ttfb_ms {
+                    proxy_object
+                        .entry("ttfb_ms".to_string())
+                        .or_insert_with(|| json!(ttfb_ms));
+                }
+                if let Some(timing) = proxy_timing {
+                    proxy_object.entry("timing".to_string()).or_insert(timing);
+                }
+            }
+        }
+    }
+
+    match extra_data {
+        Some(object) => Value::Object(object),
+        None => Value::Null,
+    }
+}
+
+fn parse_admin_monitoring_usage_proxy_timing(usage: &StoredRequestUsageAudit) -> Option<Value> {
+    admin_monitoring_header_value(usage.response_headers.as_ref(), "x-proxy-timing")
+        .or_else(|| {
+            admin_monitoring_header_value(usage.client_response_headers.as_ref(), "x-proxy-timing")
+        })
+        .and_then(|raw| parse_admin_monitoring_proxy_timing_value(&raw))
+}
+
+fn admin_monitoring_header_value(headers: Option<&Value>, name: &str) -> Option<String> {
+    headers
+        .and_then(Value::as_object)
+        .and_then(|object| {
+            object
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value)
+        })
+        .and_then(|value| match value {
+            Value::String(text) => Some(text.trim().to_string()),
+            Value::Object(object) => Some(Value::Object(object.clone()).to_string()),
+            _ => None,
+        })
+        .filter(|value| !value.is_empty())
+}
+
+fn parse_admin_monitoring_proxy_timing_value(raw: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .filter(Value::is_object)
 }
 
 #[allow(clippy::too_many_arguments)]

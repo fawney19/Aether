@@ -3,6 +3,8 @@ use crate::handlers::admin::provider::shared::support::{
 };
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{provider_key_status_snapshot_payload, unix_secs_to_rfc3339};
+use crate::provider_key_auth::provider_key_auth_semantics;
+use aether_admin::provider::pool as admin_provider_pool_pure;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use serde_json::json;
 
@@ -122,10 +124,11 @@ fn admin_pool_normalize_oauth_plan_type(value: &str, provider_type: &str) -> Opt
 }
 
 fn admin_pool_derive_oauth_expires_at(
+    provider_type: &str,
     key: &StoredProviderCatalogKey,
     auth_config: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Option<u64> {
-    if !key.auth_type.trim().eq_ignore_ascii_case("oauth") {
+    if !provider_key_auth_semantics(key, provider_type).oauth_managed() {
         return None;
     }
 
@@ -144,7 +147,7 @@ fn admin_pool_derive_oauth_plan_type(
     provider_type: &str,
     auth_config: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Option<String> {
-    if !key.auth_type.trim().eq_ignore_ascii_case("oauth") {
+    if !provider_key_auth_semantics(key, provider_type).oauth_managed() {
         return None;
     }
 
@@ -551,6 +554,7 @@ fn admin_pool_scheduling_payload(
     cooldown_ttl_seconds: Option<u64>,
     health_score: f64,
     circuit_breaker_open: bool,
+    account_quota_exhausted: bool,
 ) -> (String, String, String, Vec<serde_json::Value>) {
     if !key.is_active {
         return (
@@ -562,6 +566,21 @@ fn admin_pool_scheduling_payload(
                 "label": "已禁用",
                 "blocking": true,
                 "source": "manual",
+                "ttl_seconds": serde_json::Value::Null,
+                "detail": serde_json::Value::Null,
+            })],
+        );
+    }
+    if account_quota_exhausted {
+        return (
+            "blocked".to_string(),
+            "account_quota_exhausted".to_string(),
+            "额度耗尽".to_string(),
+            vec![json!({
+                "code": "account_quota_exhausted",
+                "label": "额度耗尽",
+                "blocking": true,
+                "source": "quota",
                 "ttl_seconds": serde_json::Value::Null,
                 "detail": serde_json::Value::Null,
             })],
@@ -632,6 +651,9 @@ pub(super) fn build_admin_pool_key_payload(
         .and_then(|_| runtime.cooldown_ttl_by_key.get(&key.id).copied());
     let health_score = admin_pool_health_score(key);
     let circuit_breaker_open = admin_pool_circuit_breaker_open(key);
+    let auth_semantics = provider_key_auth_semantics(key, provider_type);
+    let account_quota_exhausted = pool_config.is_some_and(|config| config.skip_exhausted_accounts)
+        && admin_provider_pool_pure::admin_pool_key_account_quota_exhausted(key, provider_type);
     let (scheduling_status, scheduling_reason, scheduling_label, scheduling_reasons) =
         admin_pool_scheduling_payload(
             key,
@@ -639,9 +661,11 @@ pub(super) fn build_admin_pool_key_payload(
             cooldown_ttl_seconds,
             health_score,
             circuit_breaker_open,
+            account_quota_exhausted,
         );
     let auth_config = state.parse_catalog_auth_config_json(key);
-    let oauth_expires_at = admin_pool_derive_oauth_expires_at(key, auth_config.as_ref());
+    let oauth_expires_at =
+        admin_pool_derive_oauth_expires_at(provider_type, key, auth_config.as_ref());
     let oauth_plan_type =
         admin_pool_derive_oauth_plan_type(key, provider_type, auth_config.as_ref());
     let status_snapshot = provider_key_status_snapshot_payload(key);
@@ -656,15 +680,29 @@ pub(super) fn build_admin_pool_key_payload(
         .and_then(serde_json::Value::as_object);
     let quota_updated_at =
         admin_pool_json_to_u64(quota_snapshot.and_then(|item| item.get("updated_at")));
-    let oauth_invalid_at =
+    let oauth_invalid_at = if auth_semantics.can_show_oauth_metadata() {
         admin_pool_json_to_u64(oauth_snapshot.and_then(|item| item.get("invalid_at")))
-            .or(key.oauth_invalid_at_unix_secs);
-    let oauth_account_id = admin_pool_trimmed_string_from_map(auth_config.as_ref(), "account_id");
-    let oauth_account_name =
-        admin_pool_trimmed_string_from_map(auth_config.as_ref(), "account_name");
-    let oauth_account_user_id =
-        admin_pool_trimmed_string_from_map(auth_config.as_ref(), "account_user_id");
-    let oauth_organizations = admin_pool_oauth_organizations(auth_config.as_ref());
+            .or(key.oauth_invalid_at_unix_secs)
+    } else {
+        None
+    };
+    let oauth_account_id = auth_semantics
+        .can_show_oauth_metadata()
+        .then(|| admin_pool_trimmed_string_from_map(auth_config.as_ref(), "account_id"))
+        .flatten();
+    let oauth_account_name = auth_semantics
+        .can_show_oauth_metadata()
+        .then(|| admin_pool_trimmed_string_from_map(auth_config.as_ref(), "account_name"))
+        .flatten();
+    let oauth_account_user_id = auth_semantics
+        .can_show_oauth_metadata()
+        .then(|| admin_pool_trimmed_string_from_map(auth_config.as_ref(), "account_user_id"))
+        .flatten();
+    let oauth_organizations = if auth_semantics.can_show_oauth_metadata() {
+        admin_pool_oauth_organizations(auth_config.as_ref())
+    } else {
+        Vec::new()
+    };
     let account_status_code = admin_pool_trimmed_string_from_map(account_snapshot, "code");
     let account_status_label =
         admin_pool_trimmed_string(account_snapshot.and_then(|item| item.get("label")));
@@ -686,11 +724,38 @@ pub(super) fn build_admin_pool_key_payload(
     payload.insert("key_name".to_string(), json!(key.name));
     payload.insert("is_active".to_string(), json!(key.is_active));
     payload.insert("auth_type".to_string(), json!(key.auth_type));
+    payload.insert(
+        "credential_kind".to_string(),
+        json!(auth_semantics.credential_kind().as_str()),
+    );
+    payload.insert(
+        "runtime_auth_kind".to_string(),
+        json!(auth_semantics.runtime_auth_kind().as_str()),
+    );
+    payload.insert(
+        "oauth_managed".to_string(),
+        json!(auth_semantics.oauth_managed()),
+    );
+    payload.insert(
+        "can_refresh_oauth".to_string(),
+        json!(auth_semantics.can_refresh_oauth()),
+    );
+    payload.insert(
+        "can_export_oauth".to_string(),
+        json!(auth_semantics.can_export_oauth()),
+    );
+    payload.insert(
+        "can_edit_oauth".to_string(),
+        json!(auth_semantics.can_edit_oauth()),
+    );
     payload.insert("oauth_expires_at".to_string(), json!(oauth_expires_at));
     payload.insert("oauth_invalid_at".to_string(), json!(oauth_invalid_at));
     payload.insert(
         "oauth_invalid_reason".to_string(),
-        json!(key.oauth_invalid_reason),
+        json!(auth_semantics
+            .can_show_oauth_metadata()
+            .then_some(key.oauth_invalid_reason.clone())
+            .flatten()),
     );
     payload.insert("oauth_plan_type".to_string(), json!(oauth_plan_type));
     payload.insert("oauth_account_id".to_string(), json!(oauth_account_id));

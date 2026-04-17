@@ -127,7 +127,7 @@
                   <Badge
                     variant="outline"
                     class="text-[10px] px-1 py-0 h-4 shrink-0"
-                  >{{ normalizeAuthTypeLabel(key.auth_type) }}</Badge>
+                  >{{ normalizeAuthTypeLabel(key) }}</Badge>
                   <Badge
                     v-if="getStatusBadgeLabel(key)"
                     variant="destructive"
@@ -290,6 +290,11 @@ import { refreshProviderOAuth } from '@/api/endpoints/provider_oauth'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import { getOAuthOrgBadge } from '@/utils/oauthIdentity'
 import {
+  canExportOAuthCredential,
+  canRefreshOAuthCredential,
+  getProviderAuthLabel,
+} from '@/utils/providerKeyAuth'
+import {
   getAccountStatusDisplay,
   getAccountStatusTitle,
   getOAuthStatusDisplay,
@@ -416,10 +421,6 @@ const isCurrentPageFullySelected = computed(() => {
 const canClearSelection = computed(() => selectAllFiltered.value || selectedKeyIds.value.length > 0)
 const activeQuickSelectorSet = computed(() => new Set(activeQuickSelectors.value))
 
-function normalizeText(value: unknown): string {
-  return String(value || '').trim().toLowerCase()
-}
-
 function sanitizeFileNamePart(value: unknown, fallback: string): string {
   const sanitized = String(value || '')
     .trim()
@@ -452,11 +453,8 @@ function downloadJsonFile(data: unknown, filename: string): void {
   URL.revokeObjectURL(url)
 }
 
-function normalizeAuthTypeLabel(authType: string): string {
-  const text = normalizeText(authType)
-  if (text === 'oauth') return 'OAuth'
-  if (text === 'service_account') return 'Service'
-  return 'API Key'
+function normalizeAuthTypeLabel(key: PoolKeyDetail | PoolKeySelectionItem): string {
+  return getProviderAuthLabel(key)
 }
 
 function getStatusBadgeLabel(key: PoolKeyDetail): string | null {
@@ -741,6 +739,12 @@ async function resolveSelectedItems(): Promise<PoolKeySelectionItem[]> {
       key_id: keyId,
       key_name: key?.key_name || '',
       auth_type: key?.auth_type || 'api_key',
+      credential_kind: key?.credential_kind,
+      runtime_auth_kind: key?.runtime_auth_kind,
+      oauth_managed: key?.oauth_managed,
+      can_refresh_oauth: key?.can_refresh_oauth,
+      can_export_oauth: key?.can_export_oauth,
+      can_edit_oauth: key?.can_edit_oauth,
     }
   })
 }
@@ -810,7 +814,7 @@ async function executeAction(actionOverride?: BatchActionValue): Promise<void> {
         progressDone.value = Math.min(i + BATCH_SIZE, targetIds.length)
       }
     } else if (selectedAction.value === 'export') {
-      const exportableKeys = selectedKeys.filter((key) => normalizeText(key.auth_type) === 'oauth')
+      const exportableKeys = selectedKeys.filter((key) => canExportOAuthCredential(key))
       const exportedEntries: Array<Record<string, unknown> | null> = Array.from({ length: exportableKeys.length }, () => null)
 
       skippedCount += selectedKeys.length - exportableKeys.length
@@ -920,7 +924,7 @@ async function executeAction(actionOverride?: BatchActionValue): Promise<void> {
       const CONCURRENCY = props.batchConcurrency || 8
       const tasks: Array<() => Promise<'success' | 'skip'>> = []
       for (const key of selectedKeys) {
-        if (selectedAction.value === 'refresh_oauth' && normalizeText(key.auth_type) !== 'oauth') {
+        if (selectedAction.value === 'refresh_oauth' && !canRefreshOAuthCredential(key)) {
           skippedCount += 1
           progressDone.value += 1
           continue

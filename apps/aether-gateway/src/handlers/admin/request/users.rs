@@ -26,6 +26,15 @@ impl<'a> AdminAppState<'a> {
         self.app.resolve_auth_user_summaries_by_ids(user_ids).await
     }
 
+    pub(crate) async fn search_auth_user_summaries_by_username(
+        &self,
+        username_search: &str,
+    ) -> Result<Vec<aether_data::repository::users::StoredUserSummary>, GatewayError> {
+        self.app
+            .search_auth_user_summaries_by_username(username_search)
+            .await
+    }
+
     pub(crate) async fn list_export_users_page(
         &self,
         query: &aether_data::repository::users::UserExportListQuery,
@@ -381,6 +390,16 @@ impl<'a> AdminAppState<'a> {
             .list_auth_api_key_export_records_by_ids(api_key_ids)
             .await
             .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
+    pub(crate) async fn list_auth_api_key_export_records_by_name_search(
+        &self,
+        name_search: &str,
+    ) -> Result<Vec<aether_data::repository::auth::StoredAuthApiKeyExportRecord>, GatewayError>
+    {
+        self.app
+            .list_auth_api_key_export_records_by_name_search(name_search)
+            .await
     }
 
     pub(crate) async fn list_auth_api_key_export_standalone_records_page(

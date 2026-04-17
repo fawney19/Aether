@@ -7,6 +7,7 @@ use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogEn
 use axum::body::Body;
 use axum::routing::any;
 use axum::{extract::Request, Json, Router};
+use base64::Engine as _;
 use http::StatusCode;
 use serde_json::json;
 
@@ -19,6 +20,56 @@ use crate::constants::{
     TRUSTED_ADMIN_USER_ROLE_HEADER,
 };
 use crate::data::GatewayDataState;
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            let mask = if crc & 1 == 1 { 0xedb8_8320 } else { 0 };
+            crc = (crc >> 1) ^ mask;
+        }
+    }
+    !crc
+}
+
+fn encode_string_header(name: &str, value: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(name.len() as u8);
+    out.extend_from_slice(name.as_bytes());
+    out.push(7);
+    out.extend_from_slice(&(value.len() as u16).to_be_bytes());
+    out.extend_from_slice(value.as_bytes());
+    out
+}
+
+fn encode_frame(headers: Vec<u8>, payload: Vec<u8>) -> Vec<u8> {
+    let total_len = 12 + headers.len() + payload.len() + 4;
+    let header_len = headers.len();
+    let mut out = Vec::with_capacity(total_len);
+    out.extend_from_slice(&(total_len as u32).to_be_bytes());
+    out.extend_from_slice(&(header_len as u32).to_be_bytes());
+    let prelude_crc = crc32(&out[..8]);
+    out.extend_from_slice(&prelude_crc.to_be_bytes());
+    out.extend_from_slice(&headers);
+    out.extend_from_slice(&payload);
+    let message_crc = crc32(&out);
+    out.extend_from_slice(&message_crc.to_be_bytes());
+    out
+}
+
+fn encode_kiro_event_frame(event_type: &str, payload: serde_json::Value) -> Vec<u8> {
+    let mut headers = encode_string_header(":message-type", "event");
+    headers.extend_from_slice(&encode_string_header(":event-type", event_type));
+    let payload = serde_json::to_vec(&payload).expect("payload should encode");
+    encode_frame(headers, payload)
+}
+
+fn encode_kiro_exception_frame(exception_type: &str) -> Vec<u8> {
+    let mut headers = encode_string_header(":message-type", "exception");
+    headers.extend_from_slice(&encode_string_header(":exception-type", exception_type));
+    encode_frame(headers, Vec::new())
+}
 
 async fn assert_admin_provider_query_route(
     path: &str,
@@ -674,6 +725,277 @@ async fn gateway_handles_admin_provider_query_test_model_failover_locally_with_t
         },
     )
     .await;
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_provider_query_test_model_for_kiro_locally() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            assert_eq!(plan.provider_id, "provider-kiro");
+            assert_eq!(plan.endpoint_id, "endpoint-kiro-cli");
+            assert_eq!(plan.key_id, "key-kiro-primary");
+            assert_eq!(plan.provider_api_format, "claude:cli");
+            assert_eq!(plan.model_name.as_deref(), Some("claude-sonnet-4-upstream"));
+            Json(json!({
+                "request_id": plan.request_id,
+                "candidate_id": plan.candidate_id,
+                "status_code": 200,
+                "headers": {
+                    "content-type": "application/vnd.amazon.eventstream"
+                },
+                "body": {
+                    "body_bytes_b64": base64::engine::general_purpose::STANDARD.encode(
+                        [
+                            encode_kiro_event_frame("assistantResponseEvent", json!({"content": "Hello from Kiro"})),
+                            encode_kiro_exception_frame("ContentLengthExceededException"),
+                        ]
+                        .concat()
+                    )
+                },
+                "telemetry": {
+                    "elapsed_ms": 42
+                }
+            }))
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-kiro", "Kiro", 10);
+    provider.provider_type = "kiro".to_string();
+    let mut key = sample_key(
+        "key-kiro-primary",
+        "provider-kiro",
+        "claude:cli",
+        "__placeholder__",
+    );
+    key.auth_type = "oauth".to_string();
+    key.encrypted_auth_config = Some(
+        aether_crypto::encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{
+                "provider_type":"kiro",
+                "auth_method":"idc",
+                "access_token":"cached-kiro-token",
+                "refresh_token":"rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+                "machine_id":"123e4567-e89b-12d3-a456-426614174000",
+                "api_region":"us-east-1",
+                "client_id":"client-id",
+                "client_secret":"client-secret"
+            }"#,
+        )
+        .expect("auth config should encrypt"),
+    );
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![StoredProviderCatalogEndpoint::new(
+            "endpoint-kiro-cli".to_string(),
+            "provider-kiro".to_string(),
+            "claude:cli".to_string(),
+            Some("claude".to_string()),
+            Some("cli".to_string()),
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://q.{region}.amazonaws.com".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build")],
+        vec![key],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-kiro",
+            "model_name": "claude-sonnet-4-upstream",
+            "api_format": "claude:cli"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(payload["provider"]["id"], json!("provider-kiro"));
+    assert_eq!(payload["model"], json!("claude-sonnet-4-upstream"));
+    assert_eq!(
+        payload["data"]["response"]["content"][0]["text"],
+        json!("Hello from Kiro")
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_admin_provider_query_test_model_failover_for_kiro_locally() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            let payload = if plan.key_id == "key-kiro-first" {
+                json!({
+                    "request_id": plan.request_id,
+                    "candidate_id": plan.candidate_id,
+                    "status_code": 429,
+                    "headers": {
+                        "content-type": "application/json"
+                    },
+                    "body": {
+                        "json_body": {
+                            "message": "too many requests"
+                        }
+                    },
+                    "telemetry": {
+                        "elapsed_ms": 11
+                    }
+                })
+            } else {
+                json!({
+                    "request_id": plan.request_id,
+                    "candidate_id": plan.candidate_id,
+                    "status_code": 200,
+                    "headers": {
+                        "content-type": "application/vnd.amazon.eventstream"
+                    },
+                    "body": {
+                        "body_bytes_b64": base64::engine::general_purpose::STANDARD.encode(
+                            [
+                                encode_kiro_event_frame("assistantResponseEvent", json!({"content": "Recovered from failover"})),
+                                encode_kiro_exception_frame("ContentLengthExceededException"),
+                            ]
+                            .concat()
+                        )
+                    },
+                    "telemetry": {
+                        "elapsed_ms": 27
+                    }
+                })
+            };
+            Json(payload)
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-kiro", "Kiro", 10);
+    provider.provider_type = "kiro".to_string();
+    let build_key = |id: &str| {
+        let mut key = sample_key(id, "provider-kiro", "claude:cli", "__placeholder__");
+        key.auth_type = "oauth".to_string();
+        key.encrypted_auth_config = Some(
+            aether_crypto::encrypt_python_fernet_plaintext(
+                DEVELOPMENT_ENCRYPTION_KEY,
+                r#"{
+                    "provider_type":"kiro",
+                    "auth_method":"idc",
+                    "access_token":"cached-kiro-token",
+                    "refresh_token":"rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+                    "machine_id":"123e4567-e89b-12d3-a456-426614174000",
+                    "api_region":"us-east-1",
+                    "client_id":"client-id",
+                    "client_secret":"client-secret"
+                }"#,
+            )
+            .expect("auth config should encrypt"),
+        );
+        key
+    };
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![StoredProviderCatalogEndpoint::new(
+            "endpoint-kiro-cli".to_string(),
+            "provider-kiro".to_string(),
+            "claude:cli".to_string(),
+            Some("claude".to_string()),
+            Some("cli".to_string()),
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://q.{region}.amazonaws.com".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build")],
+        vec![build_key("key-kiro-first"), build_key("key-kiro-second")],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-query/test-model-failover"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-kiro",
+            "mode": "direct",
+            "model_name": "claude-sonnet-4-upstream",
+            "failover_models": ["claude-sonnet-4-upstream"],
+            "api_format": "claude:cli",
+            "request_id": "provider-test-kiro"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(payload["total_candidates"], json!(2));
+    assert_eq!(payload["total_attempts"], json!(2));
+    let attempts = payload["attempts"]
+        .as_array()
+        .expect("attempts should be an array");
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0]["status"], json!("failed"));
+    assert_eq!(attempts[0]["status_code"], json!(429));
+    assert_eq!(attempts[1]["status"], json!("success"));
+    assert_eq!(
+        payload["data"]["response"]["content"][0]["text"],
+        json!("Recovered from failover")
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
 }
 
 #[tokio::test]

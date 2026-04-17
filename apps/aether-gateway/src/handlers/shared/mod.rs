@@ -51,6 +51,6 @@ pub(crate) use self::system_config_values::{
     module_available_from_env, system_config_bool, system_config_string,
 };
 pub(crate) use self::usage_stats::{
-    admin_stats_bad_request_response, list_usage_for_optional_range, parse_bounded_u32, round_to,
-    AdminStatsTimeRange, AdminStatsUsageFilter,
+    admin_stats_bad_request_response, parse_bounded_u32, round_to, AdminStatsTimeRange,
+    AdminStatsUsageFilter,
 };

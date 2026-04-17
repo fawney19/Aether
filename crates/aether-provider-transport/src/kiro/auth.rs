@@ -53,12 +53,7 @@ pub fn resolve_local_kiro_bearer_auth(
     if transport.key.decrypted_auth_config.is_some() {
         return None;
     }
-    if !transport
-        .key
-        .auth_type
-        .trim()
-        .eq_ignore_ascii_case("bearer")
-    {
+    if !kiro_auth_type_supported(transport.key.auth_type.as_str()) {
         return None;
     }
 
@@ -90,12 +85,7 @@ pub fn resolve_local_kiro_request_auth(
     {
         return None;
     }
-    if !transport
-        .key
-        .auth_type
-        .trim()
-        .eq_ignore_ascii_case("bearer")
-    {
+    if !kiro_auth_type_supported(transport.key.auth_type.as_str()) {
         return None;
     }
 
@@ -137,13 +127,16 @@ pub fn supports_local_kiro_request_auth_resolution(
                     .provider_type
                     .trim()
                     .eq_ignore_ascii_case(PROVIDER_TYPE)
-                    && transport
-                        .key
-                        .auth_type
-                        .trim()
-                        .eq_ignore_ascii_case("bearer")
+                    && kiro_auth_type_supported(transport.key.auth_type.as_str())
                     && auth_config.can_refresh_access_token()
             })
+}
+
+fn kiro_auth_type_supported(auth_type: &str) -> bool {
+    matches!(
+        auth_type.trim().to_ascii_lowercase().as_str(),
+        "bearer" | "oauth"
+    )
 }
 
 #[cfg(test)]
@@ -233,6 +226,27 @@ mod tests {
         let mut transport = sample_transport();
         transport.key.auth_type = "api_key".to_string();
         assert!(resolve_local_kiro_bearer_auth(&transport).is_none());
+    }
+
+    #[test]
+    fn resolves_request_auth_when_legacy_oauth_auth_type_is_used() {
+        let mut transport = sample_transport();
+        transport.key.auth_type = "oauth".to_string();
+        transport.key.decrypted_api_key = "__placeholder__".to_string();
+        transport.key.decrypted_auth_config = Some(
+            r#"{
+                "access_token":"cached-token",
+                "refresh_token":"rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+                "machine_id":"123e4567-e89b-12d3-a456-426614174000",
+                "api_region":"us-west-2"
+            }"#
+            .to_string(),
+        );
+
+        let auth = resolve_local_kiro_request_auth(&transport)
+            .expect("request auth should resolve from legacy oauth auth_type");
+        assert_eq!(auth.value, "Bearer cached-token");
+        assert!(supports_local_kiro_request_auth_resolution(&transport));
     }
 
     #[test]

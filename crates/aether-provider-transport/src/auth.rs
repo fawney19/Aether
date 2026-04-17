@@ -227,7 +227,7 @@ fn merge_comma_header_values(left: Option<&str>, right: Option<&str>) -> Option<
     }
 }
 
-pub fn resolve_local_openai_chat_auth(
+pub fn resolve_local_openai_bearer_auth(
     transport: &GatewayProviderTransportSnapshot,
 ) -> Option<(String, String)> {
     let auth_type = transport.key.auth_type.trim().to_ascii_lowercase();
@@ -274,7 +274,7 @@ fn resolved_local_secret(transport: &GatewayProviderTransportSnapshot) -> Option
 mod tests {
     use super::{
         build_claude_passthrough_headers, build_complete_passthrough_headers_with_auth,
-        resolve_local_standard_auth,
+        resolve_local_openai_bearer_auth, resolve_local_standard_auth,
     };
     use crate::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
@@ -441,5 +441,29 @@ mod tests {
     #[test]
     fn local_standard_auth_rejects_placeholder_secret() {
         assert!(resolve_local_standard_auth(&sample_transport()).is_none());
+    }
+
+    #[test]
+    fn local_openai_bearer_auth_maps_api_key_to_bearer_authorization() {
+        let mut transport = sample_transport();
+        transport.key.auth_type = "api_key".to_string();
+        transport.key.decrypted_api_key = "sk-openai".to_string();
+
+        assert_eq!(
+            resolve_local_openai_bearer_auth(&transport),
+            Some(("authorization".to_string(), "Bearer sk-openai".to_string(),))
+        );
+    }
+
+    #[test]
+    fn local_openai_bearer_auth_preserves_bearer_header_shape() {
+        let mut transport = sample_transport();
+        transport.key.auth_type = "bearer".to_string();
+        transport.key.decrypted_api_key = "sk-openai".to_string();
+
+        assert_eq!(
+            resolve_local_openai_bearer_auth(&transport),
+            Some(("authorization".to_string(), "Bearer sk-openai".to_string(),))
+        );
     }
 }

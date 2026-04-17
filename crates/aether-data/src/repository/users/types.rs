@@ -393,6 +393,11 @@ pub trait UserReadRepository: Send + Sync {
         user_ids: &[String],
     ) -> Result<Vec<StoredUserSummary>, crate::DataLayerError>;
 
+    async fn list_users_by_username_search(
+        &self,
+        username_search: &str,
+    ) -> Result<Vec<StoredUserSummary>, crate::DataLayerError>;
+
     async fn list_export_users(&self) -> Result<Vec<StoredUserExportRow>, crate::DataLayerError>;
 
     async fn list_export_users_page(

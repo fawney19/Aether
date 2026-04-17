@@ -161,8 +161,6 @@ fn admin_wrapped_state_owns_observability_capabilities() {
         "pub(crate) fn has_auth_api_key_data_reader(&self) -> bool",
         "pub(crate) fn has_user_data_reader(&self) -> bool",
         "pub(crate) async fn list_provider_catalog_providers(",
-        "pub(crate) async fn list_admin_usage_for_range(",
-        "pub(crate) async fn list_admin_usage_for_optional_range(",
         "pub(crate) async fn aggregate_finalized_request_candidate_timeline_by_endpoint_ids_since(",
         "pub(crate) async fn read_recent_request_candidates(",
         "pub(crate) fn provider_key_rpm_reset_at(",
@@ -173,6 +171,15 @@ fn admin_wrapped_state_owns_observability_capabilities() {
         assert!(
             admin_request.contains(pattern),
             "handlers/admin/request/mod.rs should expose observability capability {pattern}"
+        );
+    }
+    for pattern in [
+        "pub(crate) async fn list_admin_usage_for_range(",
+        "pub(crate) async fn list_admin_usage_for_optional_range(",
+    ] {
+        assert!(
+            !admin_request.contains(pattern),
+            "handlers/admin/request/mod.rs should not expose deprecated unbounded usage helper {pattern}"
         );
     }
 }

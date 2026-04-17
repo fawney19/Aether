@@ -32,7 +32,9 @@ use aether_data::repository::usage::InMemoryUsageReadRepository;
 use aether_data::repository::users::{
     InMemoryUserReadRepository, StoredUserAuthRecord, StoredUserExportRow,
 };
-use aether_data::repository::wallet::{InMemoryWalletRepository, StoredWalletSnapshot};
+use aether_data::repository::wallet::{
+    InMemoryWalletRepository, StoredWalletSnapshot, WalletWriteRepository,
+};
 use aether_data_contracts::repository::global_models::StoredProviderActiveGlobalModel;
 use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
 use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageRepository};
@@ -3235,6 +3237,88 @@ async fn gateway_rejects_invalid_nested_announcement_paths_as_local_not_found_wi
 }
 
 #[tokio::test]
+async fn gateway_redeems_wallet_code_locally() {
+    let now = Utc::now();
+    let user = sample_auth_user(now);
+    let access_token = build_test_auth_token(
+        "access",
+        serde_json::Map::from_iter([
+            ("user_id".to_string(), json!(user.id.clone())),
+            ("role".to_string(), json!(user.role.clone())),
+            (
+                "created_at".to_string(),
+                json!(user.created_at.map(|value| value.to_rfc3339())),
+            ),
+            ("session_id".to_string(), json!("session-wallet-redeem-1")),
+        ]),
+        now + chrono::Duration::hours(1),
+    );
+
+    let wallet_repository = Arc::new(InMemoryWalletRepository::seed(vec![sample_auth_wallet(
+        "user-auth-1",
+        now,
+    )]));
+    let batch = wallet_repository
+        .create_admin_redeem_code_batch(
+            aether_data::repository::wallet::CreateAdminRedeemCodeBatchInput {
+                name: "测试兑换".to_string(),
+                amount_usd: 6.5,
+                currency: "USD".to_string(),
+                balance_bucket: "gift".to_string(),
+                total_count: 1,
+                expires_at_unix_secs: None,
+                description: Some("public support".to_string()),
+                created_by: Some("admin-user-1".to_string()),
+            },
+        )
+        .await
+        .expect("batch should create");
+    let redeem_code = batch.codes[0].code.clone();
+
+    let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![user]));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            crate::data::GatewayDataState::with_user_and_wallet_for_tests(
+                user_repository,
+                wallet_repository,
+            ),
+        )
+        .with_auth_sessions_for_tests([sample_auth_session(
+            "user-auth-1",
+            "session-wallet-redeem-1",
+            "device-wallet-redeem-1",
+            "refresh-token-wallet-redeem-1",
+            now,
+        )]);
+    let gateway = build_router_with_state(state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/wallet/redeem"))
+        .header("authorization", format!("Bearer {access_token}"))
+        .header("x-client-device-id", "device-wallet-redeem-1")
+        .header("user-agent", "AetherTest/1.0")
+        .json(&json!({ "code": redeem_code }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["batch_name"], "测试兑换");
+    assert_eq!(payload["amount_usd"], 6.5);
+    assert_eq!(payload["order"]["payment_method"], "gift_code");
+    assert_eq!(payload["order"]["refundable_amount_usd"], 0.0);
+    assert_eq!(payload["wallet"]["total_recharged"], 26.5);
+    assert_eq!(payload["wallet"]["recharge_balance"], 12.5);
+    assert_eq!(payload["wallet"]["gift_balance"], 9.5);
+    assert_eq!(payload["wallet"]["refundable_balance"], 12.5);
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_creates_wallet_recharge_orders_locally_without_proxying_upstream() {
     let now = Utc::now();
     let user = StoredUserAuthRecord::new(
@@ -4910,6 +4994,114 @@ async fn gateway_handles_users_me_usage_without_legacy_api_key_name_fallback_whe
         payload["records"].as_array().expect("records array").len(),
         0
     );
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_handles_users_me_usage_search_with_model_and_api_key_keywords() {
+    let now = Utc::now();
+    let user = sample_auth_user(now);
+    let access_token = build_test_auth_token(
+        "access",
+        serde_json::Map::from_iter([
+            ("user_id".to_string(), json!(user.id)),
+            ("role".to_string(), json!(user.role)),
+            (
+                "created_at".to_string(),
+                json!(user.created_at.map(|value| value.to_rfc3339())),
+            ),
+            (
+                "session_id".to_string(),
+                json!("session-users-me-usage-multi-keyword-search"),
+            ),
+        ]),
+        now + chrono::Duration::hours(1),
+    );
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        sample_user_usage_audit(
+            "usage-users-me-completed-multi-keyword-search",
+            "req-users-me-completed-multi-keyword-search",
+            "user-auth-1",
+            "gpt-4.1",
+            "OpenAI",
+            "completed",
+            now - chrono::Duration::minutes(20),
+        ),
+        sample_user_usage_audit(
+            "usage-users-me-failed-multi-keyword-search",
+            "req-users-me-failed-multi-keyword-search",
+            "user-auth-1",
+            "claude-3.5-sonnet",
+            "Anthropic",
+            "failed",
+            now - chrono::Duration::minutes(10),
+        ),
+        sample_user_usage_audit(
+            "usage-users-me-streaming-multi-keyword-search",
+            "req-users-me-streaming-multi-keyword-search",
+            "user-auth-1",
+            "gpt-4.1-mini",
+            "OpenAI",
+            "streaming",
+            now - chrono::Duration::minutes(5),
+        ),
+    ]));
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some("hash-api-key-user-1".to_string()),
+        sample_usage_auth_snapshot("api-key-user-1", "user-auth-1", "renamed-key"),
+    )]));
+    let (gateway_url, upstream_hits, gateway_handle, upstream_handle) =
+        start_auth_gateway_with_builder(|| {
+            let data_state = crate::data::GatewayDataState::with_user_wallet_and_usage_for_tests(
+                Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
+                    user.clone()
+                ])),
+                Arc::new(InMemoryWalletRepository::seed(vec![sample_auth_wallet(
+                    "user-auth-1",
+                    now,
+                )])),
+                Arc::clone(&usage_repository),
+            )
+            .with_auth_api_key_reader(auth_repository);
+            AppState::new()
+                .expect("gateway should build")
+                .with_data_state_for_tests(data_state)
+                .with_auth_sessions_for_tests([sample_auth_session(
+                    "user-auth-1",
+                    "session-users-me-usage-multi-keyword-search",
+                    "device-users-me-usage-multi-keyword-search",
+                    "refresh-token-users-me-usage-multi-keyword-search",
+                    now,
+                )])
+        })
+        .await;
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{gateway_url}/api/users/me/usage?limit=10&offset=0&search=gpt%20renamed-key"
+        ))
+        .header("authorization", format!("Bearer {access_token}"))
+        .header(
+            "x-client-device-id",
+            "device-users-me-usage-multi-keyword-search",
+        )
+        .header("user-agent", "AetherTest/1.0")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["pagination"]["total"], 2);
+    assert_eq!(
+        payload["records"].as_array().expect("records array").len(),
+        2
+    );
+    assert_eq!(payload["records"][0]["model"], "gpt-4.1-mini");
+    assert_eq!(payload["records"][1]["model"], "gpt-4.1");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

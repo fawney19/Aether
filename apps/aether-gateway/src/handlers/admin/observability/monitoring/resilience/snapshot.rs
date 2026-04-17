@@ -3,7 +3,7 @@ use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{provider_key_health_summary, unix_secs_to_rfc3339};
 use crate::GatewayError;
 use aether_data_contracts::repository::{
-    provider_catalog::StoredProviderCatalogKey, usage::UsageAuditListQuery,
+    provider_catalog::StoredProviderCatalogKey, usage::UsageMonitoringErrorListQuery,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -152,9 +152,10 @@ pub(super) async fn build_admin_monitoring_resilience_snapshot(
     }
 
     let mut recent_usage_errors = state
-        .list_usage_audits(&UsageAuditListQuery {
-            created_from_unix_secs: Some(recent_error_from.timestamp().max(0) as u64),
-            ..Default::default()
+        .list_monitoring_usage_errors(&UsageMonitoringErrorListQuery {
+            created_from_unix_secs: recent_error_from.timestamp().max(0) as u64,
+            created_until_unix_secs: (now.timestamp().max(0) as u64).saturating_add(1),
+            limit: None,
         })
         .await?
         .into_iter()

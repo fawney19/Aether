@@ -8,6 +8,7 @@ use crate::handlers::admin::provider::shared::paths::{
     admin_provider_oauth_start_key_id, admin_provider_oauth_start_provider_id,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::provider_key_auth::provider_key_is_oauth_managed;
 use crate::GatewayError;
 use axum::{
     body::Body,
@@ -37,13 +38,6 @@ pub(super) async fn handle_admin_provider_oauth_start_key(
             "Key 不存在",
         ));
     };
-    if !key.auth_type.eq_ignore_ascii_case("oauth") {
-        return Ok(build_internal_control_error_response(
-            http::StatusCode::BAD_REQUEST,
-            "该 Key 不是 oauth 认证类型",
-        ));
-    }
-
     let provider_id = key.provider_id.clone();
     let provider = state
         .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id))
@@ -57,6 +51,12 @@ pub(super) async fn handle_admin_provider_oauth_start_key(
         ));
     };
     let provider_type = provider.provider_type.trim().to_ascii_lowercase();
+    if !provider_key_is_oauth_managed(&key, provider_type.as_str()) {
+        return Ok(build_internal_control_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "该 Key 不是 OAuth 管理账号",
+        ));
+    }
     if !is_fixed_provider_type_for_provider_oauth(&provider_type) {
         return Ok(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,

@@ -104,4 +104,24 @@ describe('providerKeyStatus', () => {
       },
     }, 0)).toContain('Token 剩余有效期:')
   })
+
+  it('treats oauth_managed bearer credentials as oauth for legacy countdown fallback', () => {
+    const future = Math.floor(Date.now() / 1000) + 2 * 24 * 3600
+    const status = getOAuthStatusDisplay(
+      {
+        auth_type: 'bearer',
+        oauth_managed: true,
+        oauth_expires_at: future,
+      },
+      0,
+    )
+
+    expect(status).not.toBeNull()
+    expect(status?.isExpired).toBe(false)
+    expect(getOAuthStatusTitle({
+      auth_type: 'bearer',
+      oauth_managed: true,
+      oauth_expires_at: future,
+    }, 0)).toContain('Token 剩余有效期:')
+  })
 })

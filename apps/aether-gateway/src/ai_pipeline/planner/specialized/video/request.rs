@@ -5,7 +5,8 @@ use serde_json::Value;
 use crate::ai_pipeline::planner::candidate_preparation::resolve_candidate_mapped_model;
 use crate::ai_pipeline::planner::spec_metadata::local_video_create_spec_metadata;
 use crate::ai_pipeline::transport::auth::{
-    build_passthrough_headers_with_auth, resolve_local_gemini_auth, resolve_local_openai_chat_auth,
+    build_passthrough_headers_with_auth, resolve_local_gemini_auth,
+    resolve_local_openai_bearer_auth,
 };
 use crate::ai_pipeline::transport::url::{
     build_gemini_video_predict_long_running_url, build_passthrough_path_url,
@@ -72,7 +73,7 @@ pub(super) async fn resolve_local_video_create_candidate_payload_parts(
     }
 
     let auth = match spec.family {
-        LocalVideoCreateFamily::OpenAi => resolve_local_openai_chat_auth(transport),
+        LocalVideoCreateFamily::OpenAi => resolve_local_openai_bearer_auth(transport),
         LocalVideoCreateFamily::Gemini => resolve_local_gemini_auth(transport),
     };
     let Some((auth_header, auth_value)) = auth else {
