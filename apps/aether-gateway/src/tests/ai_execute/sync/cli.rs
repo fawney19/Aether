@@ -14,12 +14,16 @@ use aether_data_contracts::repository::candidate_selection::{
     StoredMinimalCandidateSelectionRow, StoredProviderModelMapping,
 };
 use aether_data_contracts::repository::candidates::{
-    RequestCandidateReadRepository, RequestCandidateStatus,
+    RequestCandidateReadRepository, RequestCandidateStatus, RequestCandidateWriteRepository,
+    UpsertRequestCandidateRecord,
 };
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use sha2::{Digest, Sha256};
+use crate::constants::{
+    EXECUTION_PATH_LOCAL_API_KEY_CONCURRENCY_LIMITED, LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER,
+};
 
 #[tokio::test]
 async fn gateway_executes_openai_cli_sync_via_local_decision_gate_with_local_sync_decision() {
@@ -528,6 +532,725 @@ async fn gateway_executes_openai_cli_sync_via_local_decision_gate_with_local_syn
 
     assert_eq!(*decision_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*plan_hits.lock().expect("mutex should lock"), 0);
+    assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_waits_for_api_key_concurrency_slot_then_executes_openai_cli_sync(
+) {
+    fn hash_api_key(value: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(value.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn sample_auth_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnapshot {
+        StoredAuthApiKeySnapshot::new(
+            user_id.to_string(),
+            "alice".to_string(),
+            Some("alice@example.com".to_string()),
+            "user".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            Some(serde_json::json!(["openai"])),
+            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["gpt-5"])),
+            api_key_id.to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            Some(60),
+            Some(5),
+            Some(4_102_444_800),
+            Some(serde_json::json!(["openai"])),
+            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["gpt-5"])),
+        )
+        .expect("auth snapshot should build")
+    }
+
+    fn sample_candidate_row() -> StoredMinimalCandidateSelectionRow {
+        StoredMinimalCandidateSelectionRow {
+            provider_id: "provider-openai-cli-local-limit-1".to_string(),
+            provider_name: "openai".to_string(),
+            provider_type: "custom".to_string(),
+            provider_priority: 10,
+            provider_is_active: true,
+            endpoint_id: "endpoint-openai-cli-local-limit-1".to_string(),
+            endpoint_api_format: "openai:cli".to_string(),
+            endpoint_api_family: Some("openai".to_string()),
+            endpoint_kind: Some("cli".to_string()),
+            endpoint_is_active: true,
+            key_id: "key-openai-cli-local-limit-1".to_string(),
+            key_name: "prod".to_string(),
+            key_auth_type: "api_key".to_string(),
+            key_is_active: true,
+            key_api_formats: Some(vec!["openai:cli".to_string()]),
+            key_allowed_models: None,
+            key_capabilities: None,
+            key_internal_priority: 5,
+            key_global_priority_by_format: Some(serde_json::json!({"openai:cli": 1})),
+            model_id: "model-openai-cli-local-limit-1".to_string(),
+            global_model_id: "global-model-openai-cli-local-limit-1".to_string(),
+            global_model_name: "gpt-5".to_string(),
+            global_model_mappings: None,
+            global_model_supports_streaming: Some(true),
+            model_provider_model_name: "gpt-5-upstream".to_string(),
+            model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
+                name: "gpt-5-upstream".to_string(),
+                priority: 1,
+                api_formats: Some(vec!["openai:cli".to_string()]),
+            }]),
+            model_supports_streaming: Some(true),
+            model_is_active: true,
+            model_is_available: true,
+        }
+    }
+
+    fn sample_provider_catalog_provider() -> StoredProviderCatalogProvider {
+        StoredProviderCatalogProvider::new(
+            "provider-openai-cli-local-limit-1".to_string(),
+            "openai".to_string(),
+            Some("https://example.com".to_string()),
+            "custom".to_string(),
+        )
+        .expect("provider should build")
+        .with_transport_fields(
+            true,
+            false,
+            false,
+            None,
+            Some(2),
+            None,
+            Some(20.0),
+            None,
+            None,
+        )
+    }
+
+    fn sample_provider_catalog_endpoint() -> StoredProviderCatalogEndpoint {
+        StoredProviderCatalogEndpoint::new(
+            "endpoint-openai-cli-local-limit-1".to_string(),
+            "provider-openai-cli-local-limit-1".to_string(),
+            "openai:cli".to_string(),
+            Some("openai".to_string()),
+            Some("cli".to_string()),
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://api.openai.example/custom/v1/responses".to_string(),
+            None,
+            None,
+            Some(2),
+            Some("/custom/v1/responses".to_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build")
+    }
+
+    fn sample_provider_catalog_key() -> StoredProviderCatalogKey {
+        StoredProviderCatalogKey::new(
+            "key-openai-cli-local-limit-1".to_string(),
+            "provider-openai-cli-local-limit-1".to_string(),
+            "prod".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+        .with_transport_fields(
+            Some(serde_json::json!(["openai:cli"])),
+            encrypt_python_fernet_plaintext(
+                DEVELOPMENT_ENCRYPTION_KEY,
+                "sk-upstream-openai-cli-limit",
+            )
+            .expect("api key should encrypt"),
+            None,
+            None,
+            Some(serde_json::json!({"openai:cli": 1})),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("key transport should build")
+    }
+
+    let execution_runtime_hits = Arc::new(Mutex::new(0usize));
+    let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
+    let public_hits = Arc::new(Mutex::new(0usize));
+    let public_hits_clone = Arc::clone(&public_hits);
+    let now_unix_ms = chrono::Utc::now().timestamp_millis().max(0);
+    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::seed(vec![
+        aether_data_contracts::repository::candidates::StoredRequestCandidate::new(
+            "cand-pending-openai-cli-local-limit-1".to_string(),
+            "req-inflight-openai-cli-local-limit-1".to_string(),
+            Some("user-openai-cli-local-limit-123".to_string()),
+            Some("key-openai-cli-local-limit-123".to_string()),
+            Some("alice".to_string()),
+            Some("default".to_string()),
+            0,
+            0,
+            Some("provider-openai-cli-local-limit-1".to_string()),
+            Some("endpoint-openai-cli-local-limit-1".to_string()),
+            Some("key-openai-cli-local-limit-1".to_string()),
+            RequestCandidateStatus::Pending,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            now_unix_ms,
+            Some(now_unix_ms),
+            None,
+        )
+        .expect("pending candidate should build"),
+    ]));
+
+    let upstream = Router::new()
+        .route(
+            "/api/internal/gateway/resolve",
+            any(|_request: Request| async move {
+                Json(json!({
+                    "action": "proxy_public",
+                    "route_class": "ai_public",
+                    "route_family": "openai",
+                    "route_kind": "cli",
+                    "auth_endpoint_signature": "openai:cli",
+                    "execution_runtime_candidate": true,
+                    "auth_context": {
+                        "user_id": "user-openai-cli-local-limit-123",
+                        "api_key_id": "key-openai-cli-local-limit-123",
+                        "access_allowed": true
+                    },
+                    "public_path": "/v1/responses"
+                }))
+            }),
+        )
+        .route(
+            "/api/internal/gateway/decision-sync",
+            any(|_request: Request| async move { Json(json!({"action": "proxy_public"})) }),
+        )
+        .route(
+            "/api/internal/gateway/plan-sync",
+            any(|_request: Request| async move { Json(json!({"action": "proxy_public"})) }),
+        )
+        .route(
+            "/v1/responses",
+            any(move |_request: Request| {
+                let public_hits_inner = Arc::clone(&public_hits_clone);
+                async move {
+                    *public_hits_inner.lock().expect("mutex should lock") += 1;
+                    (StatusCode::IM_A_TEAPOT, Body::from("public-route-hit"))
+                }
+            }),
+        );
+
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |_request: Request| {
+            let execution_runtime_hits_inner = Arc::clone(&execution_runtime_hits_clone);
+            async move {
+                *execution_runtime_hits_inner
+                    .lock()
+                    .expect("mutex should lock") += 1;
+                Json(json!({
+                    "request_id": "trace-openai-cli-local-limit-123",
+                    "status_code": 200,
+                    "headers": {
+                        "content-type": "application/json"
+                    },
+                    "body": {
+                        "json_body": {
+                            "id": "resp-cli-local-limit-123",
+                            "object": "response",
+                            "model": "gpt-5-upstream",
+                            "output": [],
+                            "usage": {
+                                "input_tokens": 1,
+                                "output_tokens": 2,
+                                "total_tokens": 3
+                            }
+                        }
+                    },
+                    "telemetry": {
+                        "elapsed_ms": 21
+                    }
+                }))
+            }
+        }),
+    );
+
+    let mut auth_snapshot =
+        sample_auth_snapshot("key-openai-cli-local-limit-123", "user-openai-cli-local-limit-123");
+    auth_snapshot.api_key_concurrent_limit = Some(1);
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![
+        (Some(hash_api_key("sk-client-openai-cli-local-limit")), auth_snapshot),
+    ]));
+    let candidate_selection_repository =
+        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            sample_candidate_row(),
+        ]));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider_catalog_provider()],
+        vec![sample_provider_catalog_endpoint()],
+        vec![sample_provider_catalog_key()],
+    ));
+
+    let (_upstream_url, upstream_handle) = start_server(upstream).await;
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway_state = build_state_with_execution_runtime_override(execution_runtime_url)
+        .with_data_state_for_tests(
+            crate::data::GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
+                auth_repository,
+                candidate_selection_repository,
+                provider_catalog_repository,
+                Arc::clone(&request_candidate_repository),
+                DEVELOPMENT_ENCRYPTION_KEY,
+            ),
+        );
+    let gateway = build_router_with_state(gateway_state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let request_candidate_repository_for_release = Arc::clone(&request_candidate_repository);
+    let release_inflight_candidate = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        let pending = request_candidate_repository_for_release
+            .list_by_request_id("req-inflight-openai-cli-local-limit-1")
+            .await
+            .expect("inflight candidates should read")
+            .into_iter()
+            .find(|candidate| candidate.id == "cand-pending-openai-cli-local-limit-1")
+            .expect("seeded inflight candidate should exist");
+        request_candidate_repository_for_release
+            .upsert(UpsertRequestCandidateRecord {
+                id: pending.id,
+                request_id: pending.request_id,
+                user_id: pending.user_id,
+                api_key_id: pending.api_key_id,
+                username: pending.username,
+                api_key_name: pending.api_key_name,
+                candidate_index: pending.candidate_index,
+                retry_index: pending.retry_index,
+                provider_id: pending.provider_id,
+                endpoint_id: pending.endpoint_id,
+                key_id: pending.key_id,
+                status: RequestCandidateStatus::Success,
+                skip_reason: None,
+                is_cached: Some(false),
+                status_code: Some(200),
+                error_type: None,
+                error_message: None,
+                latency_ms: Some(1),
+                concurrent_requests: pending.concurrent_requests,
+                extra_data: pending.extra_data,
+                required_capabilities: pending.required_capabilities,
+                created_at_unix_ms: Some(pending.created_at_unix_ms),
+                started_at_unix_ms: pending.started_at_unix_ms,
+                finished_at_unix_ms: Some(pending.created_at_unix_ms.saturating_add(25)),
+            })
+            .await
+            .expect("inflight candidate should update");
+    });
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/responses"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header(
+            http::header::AUTHORIZATION,
+            "Bearer sk-client-openai-cli-local-limit",
+        )
+        .header(TRACE_ID_HEADER, "trace-openai-cli-local-limit-123")
+        .body("{\"model\":\"gpt-5\",\"input\":\"hello\",\"store\":false}")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(EXECUTION_PATH_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some(EXECUTION_PATH_EXECUTION_RUNTIME_SYNC)
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        None
+    );
+    let payload: serde_json::Value = response.json().await.expect("body should parse");
+    assert_eq!(payload["model"], "gpt-5-upstream");
+
+    let stored_candidates = request_candidate_repository
+        .list_by_request_id("trace-openai-cli-local-limit-123")
+        .await
+        .expect("request candidate trace should read");
+    assert_eq!(stored_candidates.len(), 1);
+    assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Success);
+    assert_eq!(stored_candidates[0].skip_reason.as_deref(), None);
+    assert_eq!(*execution_runtime_hits.lock().expect("mutex should lock"), 1);
+    assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
+
+    release_inflight_candidate
+        .await
+        .expect("release task should complete");
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_returns_concurrency_limited_after_wait_budget_expires_for_openai_cli_sync() {
+    fn hash_api_key(value: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(value.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn sample_auth_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnapshot {
+        StoredAuthApiKeySnapshot::new(
+            user_id.to_string(),
+            "alice".to_string(),
+            Some("alice@example.com".to_string()),
+            "user".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            Some(serde_json::json!(["openai"])),
+            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["gpt-5"])),
+            api_key_id.to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            Some(60),
+            Some(5),
+            Some(4_102_444_800),
+            Some(serde_json::json!(["openai"])),
+            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["gpt-5"])),
+        )
+        .expect("auth snapshot should build")
+    }
+
+    fn sample_candidate_row() -> StoredMinimalCandidateSelectionRow {
+        StoredMinimalCandidateSelectionRow {
+            provider_id: "provider-openai-cli-local-timeout-1".to_string(),
+            provider_name: "openai".to_string(),
+            provider_type: "custom".to_string(),
+            provider_priority: 10,
+            provider_is_active: true,
+            endpoint_id: "endpoint-openai-cli-local-timeout-1".to_string(),
+            endpoint_api_format: "openai:cli".to_string(),
+            endpoint_api_family: Some("openai".to_string()),
+            endpoint_kind: Some("cli".to_string()),
+            endpoint_is_active: true,
+            key_id: "key-openai-cli-local-timeout-1".to_string(),
+            key_name: "prod".to_string(),
+            key_auth_type: "api_key".to_string(),
+            key_is_active: true,
+            key_api_formats: Some(vec!["openai:cli".to_string()]),
+            key_allowed_models: None,
+            key_capabilities: None,
+            key_internal_priority: 5,
+            key_global_priority_by_format: Some(serde_json::json!({"openai:cli": 1})),
+            model_id: "model-openai-cli-local-timeout-1".to_string(),
+            global_model_id: "global-model-openai-cli-local-timeout-1".to_string(),
+            global_model_name: "gpt-5".to_string(),
+            global_model_mappings: None,
+            global_model_supports_streaming: Some(true),
+            model_provider_model_name: "gpt-5-upstream".to_string(),
+            model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
+                name: "gpt-5-upstream".to_string(),
+                priority: 1,
+                api_formats: Some(vec!["openai:cli".to_string()]),
+            }]),
+            model_supports_streaming: Some(true),
+            model_is_active: true,
+            model_is_available: true,
+        }
+    }
+
+    fn sample_provider_catalog_provider() -> StoredProviderCatalogProvider {
+        StoredProviderCatalogProvider::new(
+            "provider-openai-cli-local-timeout-1".to_string(),
+            "openai".to_string(),
+            Some("https://example.com".to_string()),
+            "custom".to_string(),
+        )
+        .expect("provider should build")
+        .with_transport_fields(
+            true,
+            false,
+            false,
+            None,
+            Some(2),
+            None,
+            Some(20.0),
+            None,
+            None,
+        )
+    }
+
+    fn sample_provider_catalog_endpoint() -> StoredProviderCatalogEndpoint {
+        StoredProviderCatalogEndpoint::new(
+            "endpoint-openai-cli-local-timeout-1".to_string(),
+            "provider-openai-cli-local-timeout-1".to_string(),
+            "openai:cli".to_string(),
+            Some("openai".to_string()),
+            Some("cli".to_string()),
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://api.openai.example/custom/v1/responses".to_string(),
+            None,
+            None,
+            Some(2),
+            Some("/custom/v1/responses".to_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build")
+    }
+
+    fn sample_provider_catalog_key() -> StoredProviderCatalogKey {
+        StoredProviderCatalogKey::new(
+            "key-openai-cli-local-timeout-1".to_string(),
+            "provider-openai-cli-local-timeout-1".to_string(),
+            "prod".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+        .with_transport_fields(
+            Some(serde_json::json!(["openai:cli"])),
+            encrypt_python_fernet_plaintext(
+                DEVELOPMENT_ENCRYPTION_KEY,
+                "sk-upstream-openai-cli-timeout",
+            )
+            .expect("api key should encrypt"),
+            None,
+            None,
+            Some(serde_json::json!({"openai:cli": 1})),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("key transport should build")
+    }
+
+    let execution_runtime_hits = Arc::new(Mutex::new(0usize));
+    let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
+    let public_hits = Arc::new(Mutex::new(0usize));
+    let public_hits_clone = Arc::clone(&public_hits);
+    let now_unix_ms = chrono::Utc::now().timestamp_millis().max(0);
+    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::seed(vec![
+        aether_data_contracts::repository::candidates::StoredRequestCandidate::new(
+            "cand-pending-openai-cli-local-timeout-1".to_string(),
+            "req-inflight-openai-cli-local-timeout-1".to_string(),
+            Some("user-openai-cli-local-timeout-123".to_string()),
+            Some("key-openai-cli-local-timeout-123".to_string()),
+            Some("alice".to_string()),
+            Some("default".to_string()),
+            0,
+            0,
+            Some("provider-openai-cli-local-timeout-1".to_string()),
+            Some("endpoint-openai-cli-local-timeout-1".to_string()),
+            Some("key-openai-cli-local-timeout-1".to_string()),
+            RequestCandidateStatus::Pending,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            now_unix_ms,
+            Some(now_unix_ms),
+            None,
+        )
+        .expect("pending candidate should build"),
+    ]));
+
+    let upstream = Router::new()
+        .route(
+            "/api/internal/gateway/resolve",
+            any(|_request: Request| async move {
+                Json(json!({
+                    "action": "proxy_public",
+                    "route_class": "ai_public",
+                    "route_family": "openai",
+                    "route_kind": "cli",
+                    "auth_endpoint_signature": "openai:cli",
+                    "execution_runtime_candidate": true,
+                    "auth_context": {
+                        "user_id": "user-openai-cli-local-timeout-123",
+                        "api_key_id": "key-openai-cli-local-timeout-123",
+                        "access_allowed": true
+                    },
+                    "public_path": "/v1/responses"
+                }))
+            }),
+        )
+        .route(
+            "/api/internal/gateway/decision-sync",
+            any(|_request: Request| async move { Json(json!({"action": "proxy_public"})) }),
+        )
+        .route(
+            "/api/internal/gateway/plan-sync",
+            any(|_request: Request| async move { Json(json!({"action": "proxy_public"})) }),
+        )
+        .route(
+            "/v1/responses",
+            any(move |_request: Request| {
+                let public_hits_inner = Arc::clone(&public_hits_clone);
+                async move {
+                    *public_hits_inner.lock().expect("mutex should lock") += 1;
+                    (StatusCode::IM_A_TEAPOT, Body::from("public-route-hit"))
+                }
+            }),
+        );
+
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |_request: Request| {
+            let execution_runtime_hits_inner = Arc::clone(&execution_runtime_hits_clone);
+            async move {
+                *execution_runtime_hits_inner
+                    .lock()
+                    .expect("mutex should lock") += 1;
+                Json(json!({
+                    "request_id": "trace-openai-cli-local-timeout-123",
+                    "status_code": 200,
+                    "headers": {
+                        "content-type": "application/json"
+                    },
+                    "body": {
+                        "json_body": {
+                            "id": "resp-cli-local-timeout-123",
+                            "object": "response",
+                            "model": "gpt-5-upstream",
+                            "output": [],
+                            "usage": {
+                                "input_tokens": 1,
+                                "output_tokens": 2,
+                                "total_tokens": 3
+                            }
+                        }
+                    },
+                    "telemetry": {
+                        "elapsed_ms": 21
+                    }
+                }))
+            }
+        }),
+    );
+
+    let mut auth_snapshot =
+        sample_auth_snapshot("key-openai-cli-local-timeout-123", "user-openai-cli-local-timeout-123");
+    auth_snapshot.api_key_concurrent_limit = Some(1);
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![
+        (Some(hash_api_key("sk-client-openai-cli-local-timeout")), auth_snapshot),
+    ]));
+    let candidate_selection_repository =
+        Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+            sample_candidate_row(),
+        ]));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider_catalog_provider()],
+        vec![sample_provider_catalog_endpoint()],
+        vec![sample_provider_catalog_key()],
+    ));
+
+    let (_upstream_url, upstream_handle) = start_server(upstream).await;
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway_state = build_state_with_execution_runtime_override(execution_runtime_url)
+        .with_data_state_for_tests(
+            crate::data::GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
+                auth_repository,
+                candidate_selection_repository,
+                provider_catalog_repository,
+                Arc::clone(&request_candidate_repository),
+                DEVELOPMENT_ENCRYPTION_KEY,
+            ),
+        );
+    let gateway = build_router_with_state(gateway_state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let started_at = std::time::Instant::now();
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/v1/responses"))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header(
+            http::header::AUTHORIZATION,
+            "Bearer sk-client-openai-cli-local-timeout",
+        )
+        .header(TRACE_ID_HEADER, "trace-openai-cli-local-timeout-123")
+        .body("{\"model\":\"gpt-5\",\"input\":\"hello\",\"store\":false}")
+        .send()
+        .await
+        .expect("request should complete");
+
+    assert!(
+        started_at.elapsed() >= std::time::Duration::from_millis(100),
+        "request should wait for the bounded concurrency window before failing"
+    );
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(EXECUTION_PATH_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some(EXECUTION_PATH_LOCAL_API_KEY_CONCURRENCY_LIMITED)
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        Some("api_key_concurrency_limit_reached")
+    );
+    let payload: serde_json::Value = response.json().await.expect("body should parse");
+    assert_eq!(
+        payload["error"]["message"],
+        serde_json::Value::String("当前 API Key 并发请求数已达上限，请稍后重试".to_string())
+    );
+
+    let stored_candidates = request_candidate_repository
+        .list_by_request_id("trace-openai-cli-local-timeout-123")
+        .await
+        .expect("request candidate trace should read");
+    assert_eq!(stored_candidates.len(), 1);
+    assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Skipped);
+    assert_eq!(
+        stored_candidates[0].skip_reason.as_deref(),
+        Some("api_key_concurrency_limit_reached")
+    );
+    assert_eq!(*execution_runtime_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
