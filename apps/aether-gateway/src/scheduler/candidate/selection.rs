@@ -31,6 +31,20 @@ pub(crate) struct SchedulerSkippedCandidate {
     pub(crate) skip_reason: &'static str,
 }
 
+pub(super) const API_KEY_CONCURRENCY_LIMIT_SKIP_REASON: &str =
+    "api_key_concurrency_limit_reached";
+
+pub(super) fn is_exact_all_skipped_by_auth_limit(
+    selected: &[SchedulerMinimalCandidateSelectionCandidate],
+    skipped: &[SchedulerSkippedCandidate],
+) -> bool {
+    selected.is_empty()
+        && !skipped.is_empty()
+        && skipped
+            .iter()
+            .all(|candidate| candidate.skip_reason == API_KEY_CONCURRENCY_LIMIT_SKIP_REASON)
+}
+
 pub(super) fn reorder_candidates_by_scheduler_health(
     candidates: &mut [SchedulerMinimalCandidateSelectionCandidate],
     provider_key_rpm_states: &BTreeMap<String, StoredProviderCatalogKey>,
@@ -218,7 +232,7 @@ pub(super) async fn collect_selectable_candidates_with_skip_reasons(
                 .into_iter()
                 .map(|candidate| SchedulerSkippedCandidate {
                     candidate,
-                    skip_reason: "api_key_concurrency_limit_reached",
+                    skip_reason: API_KEY_CONCURRENCY_LIMIT_SKIP_REASON,
                 })
                 .collect(),
         ));

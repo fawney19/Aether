@@ -69,6 +69,13 @@ pub(crate) async fn list_selectable_candidates(
     .await
 }
 
+pub(crate) fn is_exact_all_skipped_by_auth_limit(
+    selected: &[SchedulerMinimalCandidateSelectionCandidate],
+    skipped: &[SchedulerSkippedCandidate],
+) -> bool {
+    selection::is_exact_all_skipped_by_auth_limit(selected, skipped)
+}
+
 pub(crate) async fn list_selectable_candidates_with_skip_reasons(
     selection_row_source: &(impl MinimalCandidateSelectionRowSource + Sync),
     runtime_state: &impl SchedulerRuntimeState,
@@ -107,9 +114,33 @@ pub(crate) async fn list_selectable_candidates_for_required_capability_without_r
     auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
     now_unix_secs: u64,
 ) -> Result<Vec<SchedulerMinimalCandidateSelectionCandidate>, GatewayError> {
+    Ok(
+        list_selectable_candidates_for_required_capability_without_requested_model_with_auth_limit_signal(
+            selection_row_source,
+            runtime_state,
+            candidate_api_format,
+            required_capability,
+            require_streaming,
+            auth_snapshot,
+            now_unix_secs,
+        )
+        .await?
+        .0,
+    )
+}
+
+pub(crate) async fn list_selectable_candidates_for_required_capability_without_requested_model_with_auth_limit_signal(
+    selection_row_source: &(impl MinimalCandidateSelectionRowSource + Sync),
+    runtime_state: &impl SchedulerRuntimeState,
+    candidate_api_format: &str,
+    required_capability: &str,
+    require_streaming: bool,
+    auth_snapshot: Option<&GatewayAuthApiKeySnapshot>,
+    now_unix_secs: u64,
+) -> Result<(Vec<SchedulerMinimalCandidateSelectionCandidate>, bool), GatewayError> {
     let normalized_api_format = normalize_api_format(candidate_api_format);
     if normalized_api_format.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     }
 
     let capability_mode = required_capability_match_mode(required_capability);
@@ -136,9 +167,10 @@ pub(crate) async fn list_selectable_candidates_for_required_capability_without_r
     }
     .map_err(|err| GatewayError::Internal(err.to_string()))?;
     let required_capabilities = build_required_capabilities_object(required_capability);
+    let mut all_attempts_blocked_by_auth_limit = !model_names.is_empty();
 
     for global_model_name in model_names {
-        let mut candidates = list_selectable_candidates(
+        let (mut candidates, skipped_candidates) = collect_selectable_candidates_with_skip_reasons(
             selection_row_source,
             runtime_state,
             &normalized_api_format,
@@ -149,6 +181,8 @@ pub(crate) async fn list_selectable_candidates_for_required_capability_without_r
             now_unix_secs,
         )
         .await?;
+        all_attempts_blocked_by_auth_limit &=
+            is_exact_all_skipped_by_auth_limit(&candidates, &skipped_candidates);
         match capability_mode {
             RequiredCapabilityMatchMode::Exclusive => {
                 let filtered = candidates
@@ -158,7 +192,7 @@ pub(crate) async fn list_selectable_candidates_for_required_capability_without_r
                     })
                     .collect::<Vec<_>>();
                 if !filtered.is_empty() {
-                    return Ok(filtered);
+                    return Ok((filtered, false));
                 }
             }
             RequiredCapabilityMatchMode::Compatible => {
@@ -168,12 +202,12 @@ pub(crate) async fn list_selectable_candidates_for_required_capability_without_r
                 candidates.sort_by_key(|candidate| {
                     !candidate_supports_required_capability(candidate, required_capability)
                 });
-                return Ok(candidates);
+                return Ok((candidates, false));
             }
         }
     }
 
-    Ok(Vec::new())
+    Ok((Vec::new(), all_attempts_blocked_by_auth_limit))
 }
 
 fn required_capability_match_mode(required_capability: &str) -> RequiredCapabilityMatchMode {
