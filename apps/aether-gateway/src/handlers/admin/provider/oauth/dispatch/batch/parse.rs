@@ -263,11 +263,11 @@ pub(super) fn build_admin_provider_oauth_batch_task_state(
         .ok()
         .map(|duration| duration.as_secs())
         .unwrap_or(created_at);
-    let progress_percent = if total == 0 {
-        0
-    } else {
-        ((processed * 100) / total).min(100) as u64
-    };
+    let progress_percent = processed
+        .saturating_mul(100)
+        .checked_div(total)
+        .unwrap_or(0)
+        .min(100) as u64;
     json!({
         "task_id": task_id,
         "provider_id": provider_id,

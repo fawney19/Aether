@@ -150,6 +150,17 @@ export interface WalletRefundCreateRequest {
   idempotency_key?: string
 }
 
+export interface WalletRedeemRequest {
+  code: string
+}
+
+export interface WalletRedeemResponse {
+  order: PaymentOrder
+  wallet: WalletSummary
+  amount_usd: number
+  batch_name: string
+}
+
 export const walletApi = {
   async getBalance(): Promise<WalletBalanceResponse> {
     const response = await apiClient.get<WalletBalanceResponse>('/api/wallet/balance')
@@ -211,6 +222,11 @@ export const walletApi = {
 
   async createRefund(payload: WalletRefundCreateRequest): Promise<RefundRequest> {
     const response = await apiClient.post<RefundRequest>('/api/wallet/refunds', payload)
+    return response.data
+  },
+
+  async redeemCode(payload: WalletRedeemRequest): Promise<WalletRedeemResponse> {
+    const response = await apiClient.post<WalletRedeemResponse>('/api/wallet/redeem', payload)
     return response.data
   },
 }

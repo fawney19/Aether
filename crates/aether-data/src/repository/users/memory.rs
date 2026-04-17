@@ -95,6 +95,29 @@ impl UserReadRepository for InMemoryUserReadRepository {
             .collect())
     }
 
+    async fn list_users_by_username_search(
+        &self,
+        username_search: &str,
+    ) -> Result<Vec<StoredUserSummary>, DataLayerError> {
+        let username_search = username_search.trim().to_ascii_lowercase();
+        if username_search.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        Ok(self
+            .by_id
+            .read()
+            .expect("user repository lock")
+            .values()
+            .filter(|user| {
+                user.username
+                    .to_ascii_lowercase()
+                    .contains(&username_search)
+            })
+            .cloned()
+            .collect())
+    }
+
     async fn list_non_admin_export_users(
         &self,
     ) -> Result<Vec<StoredUserExportRow>, DataLayerError> {

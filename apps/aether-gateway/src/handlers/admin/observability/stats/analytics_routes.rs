@@ -8,13 +8,14 @@ use aether_admin::observability::stats::{
     admin_stats_error_distribution_empty_response,
     admin_stats_performance_percentiles_empty_response, admin_stats_time_series_empty_response,
     build_admin_stats_comparison_response_from_aggregates,
-    build_admin_stats_error_distribution_response,
-    build_admin_stats_performance_percentiles_response,
+    build_admin_stats_error_distribution_response_from_summaries,
+    build_admin_stats_performance_percentiles_response_from_summaries,
     build_admin_stats_time_series_response_from_summaries, AdminStatsAggregate,
     AdminStatsComparisonType, AdminStatsGranularity, AdminStatsTimeRange, AdminStatsUsageFilter,
 };
 use aether_data_contracts::repository::usage::{
-    UsageAuditSummaryQuery, UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
+    UsageAuditSummaryQuery, UsageErrorDistributionQuery, UsagePerformancePercentilesQuery,
+    UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
 };
 use axum::{body::Body, http, response::Response};
 
@@ -124,13 +125,20 @@ pub(super) async fn maybe_build_local_admin_stats_analytics_response(
             return Ok(Some(admin_stats_error_distribution_empty_response()));
         }
 
-        let usage = state
-            .list_admin_usage_for_range(&time_range, &AdminStatsUsageFilter::default())
+        let Some((created_from_unix_secs, created_until_unix_secs)) = time_range.to_unix_bounds()
+        else {
+            return Ok(Some(admin_stats_error_distribution_empty_response()));
+        };
+        let rows = state
+            .summarize_usage_error_distribution(&UsageErrorDistributionQuery {
+                created_from_unix_secs,
+                created_until_unix_secs,
+                tz_offset_minutes: time_range.tz_offset_minutes,
+            })
             .await?;
-        return Ok(Some(build_admin_stats_error_distribution_response(
-            &time_range,
-            &usage,
-        )));
+        return Ok(Some(
+            build_admin_stats_error_distribution_response_from_summaries(&rows),
+        ));
     }
 
     if request_context.route_kind() == Some("performance_percentiles")
@@ -149,13 +157,20 @@ pub(super) async fn maybe_build_local_admin_stats_analytics_response(
             return Ok(Some(admin_stats_performance_percentiles_empty_response()));
         }
 
-        let usage = state
-            .list_admin_usage_for_range(&time_range, &AdminStatsUsageFilter::default())
+        let Some((created_from_unix_secs, created_until_unix_secs)) = time_range.to_unix_bounds()
+        else {
+            return Ok(Some(admin_stats_performance_percentiles_empty_response()));
+        };
+        let rows = state
+            .summarize_usage_performance_percentiles(&UsagePerformancePercentilesQuery {
+                created_from_unix_secs,
+                created_until_unix_secs,
+                tz_offset_minutes: time_range.tz_offset_minutes,
+            })
             .await?;
-        return Ok(Some(build_admin_stats_performance_percentiles_response(
-            &time_range,
-            &usage,
-        )));
+        return Ok(Some(
+            build_admin_stats_performance_percentiles_response_from_summaries(&time_range, &rows),
+        ));
     }
 
     if request_context.route_kind() == Some("time_series")

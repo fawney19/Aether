@@ -5,14 +5,21 @@ use sqlx::{postgres::PgRow, PgPool, Row};
 use uuid::Uuid;
 
 use super::types::{
-    AdjustWalletBalanceInput, AdminPaymentOrderListQuery, AdminWalletLedgerQuery,
+    redeem_code_credits_recharge_balance, redeem_code_payment_method,
+    redeem_code_refundable_amount, AdjustWalletBalanceInput, AdminPaymentOrderListQuery,
+    AdminRedeemCodeBatchListQuery, AdminRedeemCodeListQuery, AdminWalletLedgerQuery,
     AdminWalletListQuery, AdminWalletRefundRequestListQuery, CompleteAdminWalletRefundInput,
+    CreateAdminRedeemCodeBatchInput, CreateAdminRedeemCodeBatchResult,
     CreateManualWalletRechargeInput, CreateWalletRechargeOrderInput,
     CreateWalletRechargeOrderOutcome, CreateWalletRefundRequestInput,
-    CreateWalletRefundRequestOutcome, CreditAdminPaymentOrderInput, FailAdminWalletRefundInput,
+    CreateWalletRefundRequestOutcome, CreatedAdminRedeemCodePlaintext,
+    CreditAdminPaymentOrderInput, DeleteAdminRedeemCodeBatchInput,
+    DisableAdminRedeemCodeBatchInput, DisableAdminRedeemCodeInput, FailAdminWalletRefundInput,
     ProcessAdminWalletRefundInput, ProcessPaymentCallbackInput, ProcessPaymentCallbackOutcome,
-    StoredAdminPaymentCallback, StoredAdminPaymentCallbackPage, StoredAdminPaymentOrder,
-    StoredAdminPaymentOrderPage, StoredAdminWalletLedgerItem, StoredAdminWalletLedgerPage,
+    RedeemWalletCodeInput, RedeemWalletCodeOutcome, StoredAdminPaymentCallback,
+    StoredAdminPaymentCallbackPage, StoredAdminPaymentOrder, StoredAdminPaymentOrderPage,
+    StoredAdminRedeemCode, StoredAdminRedeemCodeBatch, StoredAdminRedeemCodeBatchPage,
+    StoredAdminRedeemCodePage, StoredAdminWalletLedgerItem, StoredAdminWalletLedgerPage,
     StoredAdminWalletListItem, StoredAdminWalletListPage, StoredAdminWalletRefund,
     StoredAdminWalletRefundPage, StoredAdminWalletRefundRequestItem,
     StoredAdminWalletRefundRequestPage, StoredAdminWalletTransaction,
@@ -940,6 +947,175 @@ impl WalletReadRepository for SqlxWalletRepository {
         )
         .await?;
         Ok(StoredAdminPaymentCallbackPage { items, total })
+    }
+
+    async fn list_admin_redeem_code_batches(
+        &self,
+        query: &AdminRedeemCodeBatchListQuery,
+    ) -> Result<StoredAdminRedeemCodeBatchPage, DataLayerError> {
+        let total = read_count(
+            sqlx::query(
+                r#"
+SELECT COUNT(*) AS total
+FROM redeem_code_batches
+WHERE $1::TEXT IS NULL OR status = $1
+                "#,
+            )
+            .bind(query.status.as_deref())
+            .fetch_one(&self.pool)
+            .await
+            .map_postgres_err()?,
+        )?;
+        let items = collect_query_rows(
+            sqlx::query(
+                r#"
+SELECT
+  batches.id,
+  batches.name,
+  CAST(batches.amount_usd AS DOUBLE PRECISION) AS amount_usd,
+  batches.currency,
+  batches.balance_bucket,
+  CAST(batches.total_count AS BIGINT) AS total_count,
+  CAST(COALESCE(stats.redeemed_count, 0) AS BIGINT) AS redeemed_count,
+  CAST(COALESCE(stats.active_count, 0) AS BIGINT) AS active_count,
+  batches.status,
+  batches.description,
+  batches.created_by,
+  CAST(EXTRACT(EPOCH FROM batches.expires_at) AS BIGINT) AS expires_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM batches.created_at) AS BIGINT) AS created_at_unix_ms,
+  CAST(EXTRACT(EPOCH FROM batches.updated_at) AS BIGINT) AS updated_at_unix_secs
+FROM redeem_code_batches AS batches
+LEFT JOIN (
+  SELECT
+    batch_id,
+    COUNT(*) FILTER (WHERE status = 'redeemed') AS redeemed_count,
+    COUNT(*) FILTER (WHERE status = 'active') AS active_count
+  FROM redeem_codes
+  GROUP BY batch_id
+) AS stats
+  ON stats.batch_id = batches.id
+WHERE $1::TEXT IS NULL OR batches.status = $1
+ORDER BY batches.created_at DESC, batches.id DESC
+OFFSET $2
+LIMIT $3
+                "#,
+            )
+            .bind(query.status.as_deref())
+            .bind(as_i64(query.offset, "redeem code batch offset")?)
+            .bind(as_i64(query.limit, "redeem code batch limit")?)
+            .fetch(&self.pool),
+            map_admin_redeem_code_batch_row,
+        )
+        .await?;
+        Ok(StoredAdminRedeemCodeBatchPage { items, total })
+    }
+
+    async fn find_admin_redeem_code_batch(
+        &self,
+        batch_id: &str,
+    ) -> Result<Option<StoredAdminRedeemCodeBatch>, DataLayerError> {
+        let row = sqlx::query(
+            r#"
+SELECT
+  batches.id,
+  batches.name,
+  CAST(batches.amount_usd AS DOUBLE PRECISION) AS amount_usd,
+  batches.currency,
+  batches.balance_bucket,
+  CAST(batches.total_count AS BIGINT) AS total_count,
+  CAST(COALESCE(stats.redeemed_count, 0) AS BIGINT) AS redeemed_count,
+  CAST(COALESCE(stats.active_count, 0) AS BIGINT) AS active_count,
+  batches.status,
+  batches.description,
+  batches.created_by,
+  CAST(EXTRACT(EPOCH FROM batches.expires_at) AS BIGINT) AS expires_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM batches.created_at) AS BIGINT) AS created_at_unix_ms,
+  CAST(EXTRACT(EPOCH FROM batches.updated_at) AS BIGINT) AS updated_at_unix_secs
+FROM redeem_code_batches AS batches
+LEFT JOIN (
+  SELECT
+    batch_id,
+    COUNT(*) FILTER (WHERE status = 'redeemed') AS redeemed_count,
+    COUNT(*) FILTER (WHERE status = 'active') AS active_count
+  FROM redeem_codes
+  GROUP BY batch_id
+) AS stats
+  ON stats.batch_id = batches.id
+WHERE batches.id = $1
+LIMIT 1
+            "#,
+        )
+        .bind(batch_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_postgres_err()?;
+        row.as_ref()
+            .map(map_admin_redeem_code_batch_row)
+            .transpose()
+    }
+
+    async fn list_admin_redeem_codes(
+        &self,
+        query: &AdminRedeemCodeListQuery,
+    ) -> Result<StoredAdminRedeemCodePage, DataLayerError> {
+        let total = read_count(
+            sqlx::query(
+                r#"
+SELECT COUNT(*) AS total
+FROM redeem_codes
+WHERE batch_id = $1
+  AND ($2::TEXT IS NULL OR status = $2)
+                "#,
+            )
+            .bind(&query.batch_id)
+            .bind(query.status.as_deref())
+            .fetch_one(&self.pool)
+            .await
+            .map_postgres_err()?,
+        )?;
+        let items = collect_query_rows(
+            sqlx::query(
+                r#"
+SELECT
+  codes.id,
+  codes.batch_id,
+  batches.name AS batch_name,
+  codes.code_prefix,
+  codes.code_suffix,
+  codes.status,
+  codes.redeemed_by_user_id,
+  users.username AS redeemed_by_user_name,
+  codes.redeemed_wallet_id,
+  codes.redeemed_payment_order_id,
+  orders.order_no AS redeemed_order_no,
+  CAST(EXTRACT(EPOCH FROM codes.redeemed_at) AS BIGINT) AS redeemed_at_unix_secs,
+  codes.disabled_by,
+  CAST(EXTRACT(EPOCH FROM batches.expires_at) AS BIGINT) AS expires_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM codes.created_at) AS BIGINT) AS created_at_unix_ms,
+  CAST(EXTRACT(EPOCH FROM codes.updated_at) AS BIGINT) AS updated_at_unix_secs
+FROM redeem_codes AS codes
+JOIN redeem_code_batches AS batches
+  ON batches.id = codes.batch_id
+LEFT JOIN users
+  ON users.id = codes.redeemed_by_user_id
+LEFT JOIN payment_orders AS orders
+  ON orders.id = codes.redeemed_payment_order_id
+WHERE codes.batch_id = $1
+  AND ($2::TEXT IS NULL OR codes.status = $2)
+ORDER BY codes.created_at DESC, codes.id DESC
+OFFSET $3
+LIMIT $4
+                "#,
+            )
+            .bind(&query.batch_id)
+            .bind(query.status.as_deref())
+            .bind(as_i64(query.offset, "redeem code offset")?)
+            .bind(as_i64(query.limit, "redeem code limit")?)
+            .fetch(&self.pool),
+            map_admin_redeem_code_row,
+        )
+        .await?;
+        Ok(StoredAdminRedeemCodePage { items, total })
     }
 }
 
@@ -3409,6 +3585,939 @@ RETURNING
             })
             .await
     }
+
+    async fn create_admin_redeem_code_batch(
+        &self,
+        input: CreateAdminRedeemCodeBatchInput,
+    ) -> Result<CreateAdminRedeemCodeBatchResult, DataLayerError> {
+        self.tx_runner
+            .run_read_write(|tx| {
+                Box::pin(async move {
+                    let batch_id = Uuid::new_v4().to_string();
+                    let expires_at = input
+                        .expires_at_unix_secs
+                        .map(|value| {
+                            i64::try_from(value).map_err(|_| {
+                                DataLayerError::InvalidInput(
+                                    "redeem code batch expires_at overflow".to_string(),
+                                )
+                            })
+                        })
+                        .transpose()?;
+
+                    sqlx::query(
+                        r#"
+INSERT INTO redeem_code_batches (
+  id,
+  name,
+  amount_usd,
+  currency,
+  balance_bucket,
+  total_count,
+  status,
+  description,
+  created_by,
+  expires_at,
+  created_at,
+  updated_at
+)
+VALUES (
+  $1,
+  $2,
+  $3,
+  $4,
+  $5,
+  $6,
+  'active',
+  $7,
+  $8,
+  CASE
+    WHEN $9 IS NULL THEN NULL
+    ELSE to_timestamp($9)
+  END,
+  NOW(),
+  NOW()
+)
+                        "#,
+                    )
+                    .bind(&batch_id)
+                    .bind(&input.name)
+                    .bind(input.amount_usd)
+                    .bind(&input.currency)
+                    .bind(&input.balance_bucket)
+                    .bind(i32::try_from(input.total_count).map_err(|_| {
+                        DataLayerError::InvalidInput(
+                            "redeem code batch total_count overflow".to_string(),
+                        )
+                    })?)
+                    .bind(input.description.as_deref())
+                    .bind(input.created_by.as_deref())
+                    .bind(expires_at)
+                    .execute(&mut **tx)
+                    .await
+                    .map_postgres_err()?;
+
+                    let mut plaintext_codes = Vec::with_capacity(input.total_count);
+                    for _ in 0..input.total_count {
+                        let (normalized_code, display_code) = loop {
+                            let normalized = generate_redeem_code_normalized();
+                            let code_hash = hash_redeem_code(&normalized);
+                            let insert_result = sqlx::query(
+                                r#"
+INSERT INTO redeem_codes (
+  id,
+  batch_id,
+  code_hash,
+  code_prefix,
+  code_suffix,
+  status,
+  created_at,
+  updated_at
+)
+VALUES (
+  $1,
+  $2,
+  $3,
+  $4,
+  $5,
+  'active',
+  NOW(),
+  NOW()
+)
+                                "#,
+                            )
+                            .bind(Uuid::new_v4().to_string())
+                            .bind(&batch_id)
+                            .bind(&code_hash)
+                            .bind(redeem_code_prefix(&normalized))
+                            .bind(redeem_code_suffix(&normalized))
+                            .execute(&mut **tx)
+                            .await;
+                            match insert_result {
+                                Ok(_) => {
+                                    break (normalized.clone(), format_redeem_code(&normalized))
+                                }
+                                Err(sqlx::Error::Database(err))
+                                    if err.code().as_deref() == Some("23505") =>
+                                {
+                                    continue;
+                                }
+                                Err(err) => return Err(DataLayerError::postgres(err)),
+                            }
+                        };
+                        let code_hash = hash_redeem_code(&normalized_code);
+                        let row = sqlx::query(
+                            r#"
+SELECT
+  codes.id,
+  codes.batch_id,
+  batches.name AS batch_name,
+  codes.code_prefix,
+  codes.code_suffix,
+  codes.status,
+  codes.redeemed_by_user_id,
+  NULL::TEXT AS redeemed_by_user_name,
+  codes.redeemed_wallet_id,
+  codes.redeemed_payment_order_id,
+  NULL::TEXT AS redeemed_order_no,
+  CAST(EXTRACT(EPOCH FROM codes.redeemed_at) AS BIGINT) AS redeemed_at_unix_secs,
+  codes.disabled_by,
+  CAST(EXTRACT(EPOCH FROM batches.expires_at) AS BIGINT) AS expires_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM codes.created_at) AS BIGINT) AS created_at_unix_ms,
+  CAST(EXTRACT(EPOCH FROM codes.updated_at) AS BIGINT) AS updated_at_unix_secs
+FROM redeem_codes AS codes
+JOIN redeem_code_batches AS batches
+  ON batches.id = codes.batch_id
+WHERE codes.code_hash = $1
+LIMIT 1
+                            "#,
+                        )
+                        .bind(&code_hash)
+                        .fetch_one(&mut **tx)
+                        .await
+                        .map_postgres_err()?;
+                        let code = map_admin_redeem_code_row(&row)?;
+                        plaintext_codes.push(CreatedAdminRedeemCodePlaintext {
+                            code_id: code.id,
+                            code: display_code,
+                            masked_code: code.masked_code,
+                        });
+                    }
+
+                    let batch_row = sqlx::query(
+                        r#"
+SELECT
+  batches.id,
+  batches.name,
+  CAST(batches.amount_usd AS DOUBLE PRECISION) AS amount_usd,
+  batches.currency,
+  batches.balance_bucket,
+  CAST(batches.total_count AS BIGINT) AS total_count,
+  CAST(COALESCE(stats.redeemed_count, 0) AS BIGINT) AS redeemed_count,
+  CAST(COALESCE(stats.active_count, 0) AS BIGINT) AS active_count,
+  batches.status,
+  batches.description,
+  batches.created_by,
+  CAST(EXTRACT(EPOCH FROM batches.expires_at) AS BIGINT) AS expires_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM batches.created_at) AS BIGINT) AS created_at_unix_ms,
+  CAST(EXTRACT(EPOCH FROM batches.updated_at) AS BIGINT) AS updated_at_unix_secs
+FROM redeem_code_batches AS batches
+LEFT JOIN (
+  SELECT
+    batch_id,
+    COUNT(*) FILTER (WHERE status = 'redeemed') AS redeemed_count,
+    COUNT(*) FILTER (WHERE status = 'active') AS active_count
+  FROM redeem_codes
+  GROUP BY batch_id
+) AS stats
+  ON stats.batch_id = batches.id
+WHERE batches.id = $1
+LIMIT 1
+                        "#,
+                    )
+                    .bind(&batch_id)
+                    .fetch_one(&mut **tx)
+                    .await
+                    .map_postgres_err()?;
+                    Ok(CreateAdminRedeemCodeBatchResult {
+                        batch: map_admin_redeem_code_batch_row(&batch_row)?,
+                        codes: plaintext_codes,
+                    })
+                })
+            })
+            .await
+    }
+
+    async fn disable_admin_redeem_code_batch(
+        &self,
+        input: DisableAdminRedeemCodeBatchInput,
+    ) -> Result<WalletMutationOutcome<StoredAdminRedeemCodeBatch>, DataLayerError> {
+        self.tx_runner
+            .run_read_write(|tx| {
+                Box::pin(async move {
+                    let Some(current_batch) = sqlx::query(
+                        r#"
+SELECT status
+FROM redeem_code_batches
+WHERE id = $1
+FOR UPDATE
+                        "#,
+                    )
+                    .bind(&input.batch_id)
+                    .fetch_optional(&mut **tx)
+                    .await
+                    .map_postgres_err()?
+                    else {
+                        return Ok(WalletMutationOutcome::NotFound);
+                    };
+                    let status: String = row_get(&current_batch, "status")?;
+                    if status == "disabled" {
+                        let row = sqlx::query(
+                            r#"
+SELECT
+  batches.id,
+  batches.name,
+  CAST(batches.amount_usd AS DOUBLE PRECISION) AS amount_usd,
+  batches.currency,
+  batches.balance_bucket,
+  CAST(batches.total_count AS BIGINT) AS total_count,
+  CAST(COALESCE(stats.redeemed_count, 0) AS BIGINT) AS redeemed_count,
+  CAST(COALESCE(stats.active_count, 0) AS BIGINT) AS active_count,
+  batches.status,
+  batches.description,
+  batches.created_by,
+  CAST(EXTRACT(EPOCH FROM batches.expires_at) AS BIGINT) AS expires_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM batches.created_at) AS BIGINT) AS created_at_unix_ms,
+  CAST(EXTRACT(EPOCH FROM batches.updated_at) AS BIGINT) AS updated_at_unix_secs
+FROM redeem_code_batches AS batches
+LEFT JOIN (
+  SELECT
+    batch_id,
+    COUNT(*) FILTER (WHERE status = 'redeemed') AS redeemed_count,
+    COUNT(*) FILTER (WHERE status = 'active') AS active_count
+  FROM redeem_codes
+  GROUP BY batch_id
+) AS stats
+  ON stats.batch_id = batches.id
+WHERE batches.id = $1
+LIMIT 1
+                            "#,
+                        )
+                        .bind(&input.batch_id)
+                        .fetch_one(&mut **tx)
+                        .await
+                        .map_postgres_err()?;
+                        return Ok(WalletMutationOutcome::Applied(
+                            map_admin_redeem_code_batch_row(&row)?,
+                        ));
+                    }
+
+                    sqlx::query(
+                        r#"
+UPDATE redeem_code_batches
+SET
+  status = 'disabled',
+  updated_at = NOW()
+WHERE id = $1
+                        "#,
+                    )
+                    .bind(&input.batch_id)
+                    .execute(&mut **tx)
+                    .await
+                    .map_postgres_err()?;
+
+                    sqlx::query(
+                        r#"
+UPDATE redeem_codes
+SET
+  status = 'disabled',
+  disabled_by = COALESCE($2, disabled_by),
+  updated_at = NOW()
+WHERE batch_id = $1
+  AND status = 'active'
+                        "#,
+                    )
+                    .bind(&input.batch_id)
+                    .bind(input.operator_id.as_deref())
+                    .execute(&mut **tx)
+                    .await
+                    .map_postgres_err()?;
+
+                    let row = sqlx::query(
+                        r#"
+SELECT
+  batches.id,
+  batches.name,
+  CAST(batches.amount_usd AS DOUBLE PRECISION) AS amount_usd,
+  batches.currency,
+  batches.balance_bucket,
+  CAST(batches.total_count AS BIGINT) AS total_count,
+  CAST(COALESCE(stats.redeemed_count, 0) AS BIGINT) AS redeemed_count,
+  CAST(COALESCE(stats.active_count, 0) AS BIGINT) AS active_count,
+  batches.status,
+  batches.description,
+  batches.created_by,
+  CAST(EXTRACT(EPOCH FROM batches.expires_at) AS BIGINT) AS expires_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM batches.created_at) AS BIGINT) AS created_at_unix_ms,
+  CAST(EXTRACT(EPOCH FROM batches.updated_at) AS BIGINT) AS updated_at_unix_secs
+FROM redeem_code_batches AS batches
+LEFT JOIN (
+  SELECT
+    batch_id,
+    COUNT(*) FILTER (WHERE status = 'redeemed') AS redeemed_count,
+    COUNT(*) FILTER (WHERE status = 'active') AS active_count
+  FROM redeem_codes
+  GROUP BY batch_id
+) AS stats
+  ON stats.batch_id = batches.id
+WHERE batches.id = $1
+LIMIT 1
+                        "#,
+                    )
+                    .bind(&input.batch_id)
+                    .fetch_one(&mut **tx)
+                    .await
+                    .map_postgres_err()?;
+                    Ok(WalletMutationOutcome::Applied(
+                        map_admin_redeem_code_batch_row(&row)?,
+                    ))
+                })
+            })
+            .await
+    }
+
+    async fn delete_admin_redeem_code_batch(
+        &self,
+        input: DeleteAdminRedeemCodeBatchInput,
+    ) -> Result<WalletMutationOutcome<StoredAdminRedeemCodeBatch>, DataLayerError> {
+        self.tx_runner
+            .run_read_write(|tx| {
+                Box::pin(async move {
+                    let Some(current_batch) = sqlx::query(
+                        r#"
+SELECT status
+FROM redeem_code_batches
+WHERE id = $1
+FOR UPDATE
+                        "#,
+                    )
+                    .bind(&input.batch_id)
+                    .fetch_optional(&mut **tx)
+                    .await
+                    .map_postgres_err()?
+                    else {
+                        return Ok(WalletMutationOutcome::NotFound);
+                    };
+                    let status: String = row_get(&current_batch, "status")?;
+                    if status != "disabled" {
+                        return Ok(WalletMutationOutcome::Invalid(
+                            "only disabled redeem code batch can be deleted".to_string(),
+                        ));
+                    }
+
+                    let redeemed_count_row = sqlx::query(
+                        r#"
+SELECT COUNT(*) AS total
+FROM redeem_codes
+WHERE batch_id = $1
+  AND status = 'redeemed'
+                        "#,
+                    )
+                    .bind(&input.batch_id)
+                    .fetch_one(&mut **tx)
+                    .await
+                    .map_postgres_err()?;
+                    let redeemed_count = read_count(redeemed_count_row)?;
+                    if redeemed_count > 0 {
+                        return Ok(WalletMutationOutcome::Invalid(
+                            "redeemed batch cannot be deleted".to_string(),
+                        ));
+                    }
+
+                    let row = sqlx::query(
+                        r#"
+SELECT
+  batches.id,
+  batches.name,
+  CAST(batches.amount_usd AS DOUBLE PRECISION) AS amount_usd,
+  batches.currency,
+  batches.balance_bucket,
+  CAST(batches.total_count AS BIGINT) AS total_count,
+  CAST(COALESCE(stats.redeemed_count, 0) AS BIGINT) AS redeemed_count,
+  CAST(COALESCE(stats.active_count, 0) AS BIGINT) AS active_count,
+  batches.status,
+  batches.description,
+  batches.created_by,
+  CAST(EXTRACT(EPOCH FROM batches.expires_at) AS BIGINT) AS expires_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM batches.created_at) AS BIGINT) AS created_at_unix_ms,
+  CAST(EXTRACT(EPOCH FROM batches.updated_at) AS BIGINT) AS updated_at_unix_secs
+FROM redeem_code_batches AS batches
+LEFT JOIN (
+  SELECT
+    batch_id,
+    COUNT(*) FILTER (WHERE status = 'redeemed') AS redeemed_count,
+    COUNT(*) FILTER (WHERE status = 'active') AS active_count
+  FROM redeem_codes
+  GROUP BY batch_id
+) AS stats
+  ON stats.batch_id = batches.id
+WHERE batches.id = $1
+LIMIT 1
+                        "#,
+                    )
+                    .bind(&input.batch_id)
+                    .fetch_one(&mut **tx)
+                    .await
+                    .map_postgres_err()?;
+                    let batch = map_admin_redeem_code_batch_row(&row)?;
+                    let _ = input.operator_id;
+
+                    sqlx::query(
+                        r#"
+DELETE FROM redeem_code_batches
+WHERE id = $1
+                        "#,
+                    )
+                    .bind(&input.batch_id)
+                    .execute(&mut **tx)
+                    .await
+                    .map_postgres_err()?;
+
+                    Ok(WalletMutationOutcome::Applied(batch))
+                })
+            })
+            .await
+    }
+
+    async fn disable_admin_redeem_code(
+        &self,
+        input: DisableAdminRedeemCodeInput,
+    ) -> Result<WalletMutationOutcome<StoredAdminRedeemCode>, DataLayerError> {
+        self.tx_runner
+            .run_read_write(|tx| {
+                Box::pin(async move {
+                    let Some(current_code) = sqlx::query(
+                        r#"
+SELECT batch_id, status
+FROM redeem_codes
+WHERE id = $1
+FOR UPDATE
+                        "#,
+                    )
+                    .bind(&input.code_id)
+                    .fetch_optional(&mut **tx)
+                    .await
+                    .map_postgres_err()?
+                    else {
+                        return Ok(WalletMutationOutcome::NotFound);
+                    };
+                    let batch_id: String = row_get(&current_code, "batch_id")?;
+                    let status: String = row_get(&current_code, "status")?;
+                    if status == "redeemed" {
+                        return Ok(WalletMutationOutcome::Invalid(
+                            "redeemed code cannot be disabled".to_string(),
+                        ));
+                    }
+                    if status != "disabled" {
+                        sqlx::query(
+                            r#"
+UPDATE redeem_codes
+SET
+  status = 'disabled',
+  disabled_by = COALESCE($2, disabled_by),
+  updated_at = NOW()
+WHERE id = $1
+                            "#,
+                        )
+                        .bind(&input.code_id)
+                        .bind(input.operator_id.as_deref())
+                        .execute(&mut **tx)
+                        .await
+                        .map_postgres_err()?;
+                    }
+
+                    let row = sqlx::query(
+                        r#"
+SELECT
+  codes.id,
+  codes.batch_id,
+  batches.name AS batch_name,
+  codes.code_prefix,
+  codes.code_suffix,
+  codes.status,
+  codes.redeemed_by_user_id,
+  users.username AS redeemed_by_user_name,
+  codes.redeemed_wallet_id,
+  codes.redeemed_payment_order_id,
+  orders.order_no AS redeemed_order_no,
+  CAST(EXTRACT(EPOCH FROM codes.redeemed_at) AS BIGINT) AS redeemed_at_unix_secs,
+  codes.disabled_by,
+  CAST(EXTRACT(EPOCH FROM batches.expires_at) AS BIGINT) AS expires_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM codes.created_at) AS BIGINT) AS created_at_unix_ms,
+  CAST(EXTRACT(EPOCH FROM codes.updated_at) AS BIGINT) AS updated_at_unix_secs
+FROM redeem_codes AS codes
+JOIN redeem_code_batches AS batches
+  ON batches.id = codes.batch_id
+LEFT JOIN users
+  ON users.id = codes.redeemed_by_user_id
+LEFT JOIN payment_orders AS orders
+  ON orders.id = codes.redeemed_payment_order_id
+WHERE codes.id = $1
+LIMIT 1
+                        "#,
+                    )
+                    .bind(&input.code_id)
+                    .fetch_one(&mut **tx)
+                    .await
+                    .map_postgres_err()?;
+
+                    sqlx::query(
+                        r#"
+UPDATE redeem_code_batches
+SET
+  updated_at = NOW()
+WHERE id = $1
+                        "#,
+                    )
+                    .bind(&batch_id)
+                    .execute(&mut **tx)
+                    .await
+                    .map_postgres_err()?;
+
+                    Ok(WalletMutationOutcome::Applied(map_admin_redeem_code_row(
+                        &row,
+                    )?))
+                })
+            })
+            .await
+    }
+
+    async fn redeem_wallet_code(
+        &self,
+        input: RedeemWalletCodeInput,
+    ) -> Result<RedeemWalletCodeOutcome, DataLayerError> {
+        self.tx_runner
+            .run_read_write(|tx| {
+                Box::pin(async move {
+                    let normalized_code = match normalize_redeem_code(&input.code) {
+                        Some(value) => value,
+                        None => return Ok(RedeemWalletCodeOutcome::InvalidCode),
+                    };
+                    let code_hash = hash_redeem_code(&normalized_code);
+                    let now = Utc::now();
+                    let now_unix_secs = now.timestamp().max(0) as u64;
+
+                    let Some(code_row) = sqlx::query(
+                        r#"
+SELECT
+  codes.id,
+  codes.batch_id,
+  codes.status,
+  batches.name AS batch_name,
+  batches.status AS batch_status,
+  batches.balance_bucket,
+  CAST(batches.amount_usd AS DOUBLE PRECISION) AS amount_usd,
+  CAST(EXTRACT(EPOCH FROM batches.expires_at) AS BIGINT) AS batch_expires_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM codes.redeemed_at) AS BIGINT) AS redeemed_at_unix_secs
+FROM redeem_codes AS codes
+JOIN redeem_code_batches AS batches
+  ON batches.id = codes.batch_id
+WHERE codes.code_hash = $1
+LIMIT 1
+FOR UPDATE OF codes, batches
+                        "#,
+                    )
+                    .bind(&code_hash)
+                    .fetch_optional(&mut **tx)
+                    .await
+                    .map_postgres_err()?
+                    else {
+                        return Ok(RedeemWalletCodeOutcome::CodeNotFound);
+                    };
+                    let code_id: String = row_get(&code_row, "id")?;
+                    let batch_id: String = row_get(&code_row, "batch_id")?;
+                    let batch_name: String = row_get(&code_row, "batch_name")?;
+                    let code_status: String = row_get(&code_row, "status")?;
+                    let batch_status: String = row_get(&code_row, "batch_status")?;
+                    let balance_bucket: String = row_get(&code_row, "balance_bucket")?;
+                    let amount_usd: f64 = row_get(&code_row, "amount_usd")?;
+                    let batch_expires_at_unix_secs = parse_optional_timestamp(
+                        row_get(&code_row, "batch_expires_at_unix_secs")?,
+                        "redeem_code_batches.expires_at",
+                    )?;
+                    let credits_recharge_balance =
+                        redeem_code_credits_recharge_balance(&balance_bucket);
+
+                    if code_status == "disabled" {
+                        return Ok(RedeemWalletCodeOutcome::CodeDisabled);
+                    }
+                    if code_status == "redeemed" {
+                        return Ok(RedeemWalletCodeOutcome::CodeRedeemed);
+                    }
+                    if batch_status != "active" {
+                        return Ok(RedeemWalletCodeOutcome::BatchDisabled);
+                    }
+                    if batch_expires_at_unix_secs.is_some_and(|value| value <= now_unix_secs) {
+                        return Ok(RedeemWalletCodeOutcome::CodeExpired);
+                    }
+
+                    let wallet_row = match sqlx::query(
+                        r#"
+SELECT
+  id,
+  user_id,
+  api_key_id,
+  CAST(balance AS DOUBLE PRECISION) AS balance,
+  CAST(gift_balance AS DOUBLE PRECISION) AS gift_balance,
+  limit_mode,
+  currency,
+  status,
+  CAST(total_recharged AS DOUBLE PRECISION) AS total_recharged,
+  CAST(total_consumed AS DOUBLE PRECISION) AS total_consumed,
+  CAST(total_refunded AS DOUBLE PRECISION) AS total_refunded,
+  CAST(total_adjusted AS DOUBLE PRECISION) AS total_adjusted,
+  CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs
+FROM wallets
+WHERE user_id = $1
+FOR UPDATE
+LIMIT 1
+                        "#,
+                    )
+                    .bind(&input.user_id)
+                    .fetch_optional(&mut **tx)
+                    .await
+                    .map_postgres_err()?
+                    {
+                        Some(row) => row,
+                        None => {
+                            let wallet_id = Uuid::new_v4().to_string();
+                            sqlx::query(
+                                r#"
+INSERT INTO wallets (
+  id,
+  user_id,
+  balance,
+  gift_balance,
+  limit_mode,
+  currency,
+  status,
+  total_recharged,
+  total_consumed,
+  total_refunded,
+  total_adjusted,
+  created_at,
+  updated_at
+)
+VALUES (
+  $1,
+  $2,
+  0,
+  0,
+  'finite',
+  'USD',
+  'active',
+  0,
+  0,
+  0,
+  0,
+  NOW(),
+  NOW()
+)
+ON CONFLICT (user_id) DO UPDATE
+SET updated_at = wallets.updated_at
+RETURNING
+  id,
+  user_id,
+  api_key_id,
+  CAST(balance AS DOUBLE PRECISION) AS balance,
+  CAST(gift_balance AS DOUBLE PRECISION) AS gift_balance,
+  limit_mode,
+  currency,
+  status,
+  CAST(total_recharged AS DOUBLE PRECISION) AS total_recharged,
+  CAST(total_consumed AS DOUBLE PRECISION) AS total_consumed,
+  CAST(total_refunded AS DOUBLE PRECISION) AS total_refunded,
+  CAST(total_adjusted AS DOUBLE PRECISION) AS total_adjusted,
+  CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs
+                                "#,
+                            )
+                            .bind(&wallet_id)
+                            .bind(&input.user_id)
+                            .fetch_one(&mut **tx)
+                            .await
+                            .map_postgres_err()?
+                        }
+                    };
+                    let wallet_snapshot = map_wallet_row(&wallet_row)?;
+                    if wallet_snapshot.status != "active" {
+                        return Ok(RedeemWalletCodeOutcome::WalletInactive);
+                    }
+
+                    let before_recharge = wallet_snapshot.balance;
+                    let before_gift = wallet_snapshot.gift_balance;
+                    let before_total = before_recharge + before_gift;
+                    let after_recharge = if credits_recharge_balance {
+                        before_recharge + amount_usd
+                    } else {
+                        before_recharge
+                    };
+                    let after_gift = if credits_recharge_balance {
+                        before_gift
+                    } else {
+                        before_gift + amount_usd
+                    };
+
+                    let wallet_row = sqlx::query(
+                        r#"
+UPDATE wallets
+SET
+  balance = $2,
+  gift_balance = $3,
+  total_recharged = total_recharged + $4,
+  updated_at = NOW()
+WHERE id = $1
+RETURNING
+  id,
+  user_id,
+  api_key_id,
+  CAST(balance AS DOUBLE PRECISION) AS balance,
+  CAST(gift_balance AS DOUBLE PRECISION) AS gift_balance,
+  limit_mode,
+  currency,
+  status,
+  CAST(total_recharged AS DOUBLE PRECISION) AS total_recharged,
+  CAST(total_consumed AS DOUBLE PRECISION) AS total_consumed,
+  CAST(total_refunded AS DOUBLE PRECISION) AS total_refunded,
+  CAST(total_adjusted AS DOUBLE PRECISION) AS total_adjusted,
+  CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs
+                        "#,
+                    )
+                    .bind(&wallet_snapshot.id)
+                    .bind(after_recharge)
+                    .bind(after_gift)
+                    .bind(amount_usd)
+                    .fetch_one(&mut **tx)
+                    .await
+                    .map_postgres_err()?;
+                    let wallet = map_wallet_row(&wallet_row)?;
+
+                    let order_id = Uuid::new_v4().to_string();
+                    let gateway_order_id = format!("card_{}", Uuid::new_v4().simple());
+                    let payment_method = redeem_code_payment_method(&balance_bucket);
+                    let refundable_amount_usd =
+                        redeem_code_refundable_amount(&balance_bucket, amount_usd);
+                    let gateway_response = serde_json::json!({
+                        "source": "redeem_code",
+                        "batch_id": batch_id,
+                        "batch_name": batch_name,
+                        "balance_bucket": balance_bucket,
+                    });
+                    let order_row = sqlx::query(
+                        r#"
+INSERT INTO payment_orders (
+  id,
+  order_no,
+  wallet_id,
+  user_id,
+  amount_usd,
+  refunded_amount_usd,
+  refundable_amount_usd,
+  payment_method,
+  gateway_order_id,
+  gateway_response,
+  status,
+  created_at,
+  paid_at,
+  credited_at
+)
+VALUES (
+  $1,
+  $2,
+  $3,
+  $4,
+  $5,
+  0,
+  $6,
+  $7,
+  $8,
+  $9,
+  'credited',
+  NOW(),
+  NOW(),
+  NOW()
+)
+RETURNING
+  id,
+  order_no,
+  wallet_id,
+  user_id,
+  CAST(amount_usd AS DOUBLE PRECISION) AS amount_usd,
+  CAST(pay_amount AS DOUBLE PRECISION) AS pay_amount,
+  pay_currency,
+  CAST(exchange_rate AS DOUBLE PRECISION) AS exchange_rate,
+  CAST(refunded_amount_usd AS DOUBLE PRECISION) AS refunded_amount_usd,
+  CAST(refundable_amount_usd AS DOUBLE PRECISION) AS refundable_amount_usd,
+  payment_method,
+  gateway_order_id,
+  gateway_response,
+  status,
+  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_ms,
+  CAST(EXTRACT(EPOCH FROM paid_at) AS BIGINT) AS paid_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM credited_at) AS BIGINT) AS credited_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM expires_at) AS BIGINT) AS expires_at_unix_secs
+                        "#,
+                    )
+                    .bind(&order_id)
+                    .bind(&input.order_no)
+                    .bind(&wallet.id)
+                    .bind(&input.user_id)
+                    .bind(amount_usd)
+                    .bind(refundable_amount_usd)
+                    .bind(payment_method)
+                    .bind(&gateway_order_id)
+                    .bind(&gateway_response)
+                    .fetch_one(&mut **tx)
+                    .await
+                    .map_postgres_err()?;
+
+                    sqlx::query(
+                        r#"
+INSERT INTO wallet_transactions (
+  id,
+  wallet_id,
+  category,
+  reason_code,
+  amount,
+  balance_before,
+  balance_after,
+  recharge_balance_before,
+  recharge_balance_after,
+  gift_balance_before,
+  gift_balance_after,
+  link_type,
+  link_id,
+  operator_id,
+  description,
+  created_at
+)
+VALUES (
+  $1,
+  $2,
+  'recharge',
+  'topup_card_code',
+  $3,
+  $4,
+  $5,
+  $6,
+  $7,
+  $8,
+  $9,
+  'payment_order',
+  $10,
+  NULL,
+  '兑换码充值',
+  NOW()
+)
+                        "#,
+                    )
+                    .bind(Uuid::new_v4().to_string())
+                    .bind(&wallet.id)
+                    .bind(amount_usd)
+                    .bind(before_total)
+                    .bind(after_recharge + after_gift)
+                    .bind(before_recharge)
+                    .bind(after_recharge)
+                    .bind(before_gift)
+                    .bind(after_gift)
+                    .bind(&order_id)
+                    .execute(&mut **tx)
+                    .await
+                    .map_postgres_err()?;
+
+                    sqlx::query(
+                        r#"
+UPDATE redeem_codes
+SET
+  status = 'redeemed',
+  redeemed_by_user_id = $2,
+  redeemed_wallet_id = $3,
+  redeemed_payment_order_id = $4,
+  redeemed_at = NOW(),
+  updated_at = NOW()
+WHERE id = $1
+                        "#,
+                    )
+                    .bind(&code_id)
+                    .bind(&input.user_id)
+                    .bind(&wallet.id)
+                    .bind(&order_id)
+                    .execute(&mut **tx)
+                    .await
+                    .map_postgres_err()?;
+
+                    sqlx::query(
+                        r#"
+UPDATE redeem_code_batches
+SET
+  updated_at = NOW()
+WHERE id = $1
+                        "#,
+                    )
+                    .bind(&batch_id)
+                    .execute(&mut **tx)
+                    .await
+                    .map_postgres_err()?;
+
+                    Ok(RedeemWalletCodeOutcome::Redeemed {
+                        wallet,
+                        order: map_admin_payment_order_row(&order_row)?,
+                        amount_usd,
+                        batch_name,
+                    })
+                })
+            })
+            .await
+    }
 }
 
 fn as_i64(value: usize, field: &str) -> Result<i64, DataLayerError> {
@@ -3433,6 +4542,57 @@ fn payment_gateway_response_map(
         Some(serde_json::Value::Object(map)) => map,
         _ => serde_json::Map::new(),
     }
+}
+
+fn normalize_redeem_code(value: &str) -> Option<String> {
+    let normalized = value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_uppercase())
+        .collect::<String>();
+    if normalized.len() < 16 {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn generate_redeem_code_normalized() -> String {
+    Uuid::new_v4().simple().to_string().to_ascii_uppercase()
+}
+
+fn format_redeem_code(normalized: &str) -> String {
+    normalized
+        .as_bytes()
+        .chunks(8)
+        .map(|chunk| std::str::from_utf8(chunk).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+fn hash_redeem_code(normalized: &str) -> String {
+    use sha2::Digest;
+
+    format!("{:x}", sha2::Sha256::digest(normalized.as_bytes()))
+}
+
+fn redeem_code_prefix(normalized: &str) -> String {
+    normalized.chars().take(4).collect()
+}
+
+fn redeem_code_suffix(normalized: &str) -> String {
+    normalized
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
+fn mask_redeem_code(prefix: &str, suffix: &str) -> String {
+    format!("{prefix}****{suffix}")
 }
 
 async fn update_payment_callback_failure(
@@ -3765,6 +4925,72 @@ fn map_admin_payment_callback_row(
         processed_at_unix_secs: parse_optional_timestamp(
             row_get(row, "processed_at_unix_secs")?,
             "payment_callbacks.processed_at",
+        )?,
+    })
+}
+
+fn map_admin_redeem_code_batch_row(
+    row: &PgRow,
+) -> Result<StoredAdminRedeemCodeBatch, DataLayerError> {
+    Ok(StoredAdminRedeemCodeBatch {
+        id: row_get(row, "id")?,
+        name: row_get(row, "name")?,
+        amount_usd: row_get(row, "amount_usd")?,
+        currency: row_get(row, "currency")?,
+        balance_bucket: row_get(row, "balance_bucket")?,
+        total_count: row_get::<i64>(row, "total_count")?.max(0) as u64,
+        redeemed_count: row_get::<i64>(row, "redeemed_count")?.max(0) as u64,
+        active_count: row_get::<i64>(row, "active_count")?.max(0) as u64,
+        status: row_get(row, "status")?,
+        description: row_get(row, "description")?,
+        created_by: row_get(row, "created_by")?,
+        expires_at_unix_secs: parse_optional_timestamp(
+            row_get(row, "expires_at_unix_secs")?,
+            "redeem_code_batches.expires_at",
+        )?,
+        created_at_unix_ms: parse_timestamp(
+            row_get(row, "created_at_unix_ms")?,
+            "redeem_code_batches.created_at",
+        )?,
+        updated_at_unix_secs: parse_timestamp(
+            row_get(row, "updated_at_unix_secs")?,
+            "redeem_code_batches.updated_at",
+        )?,
+    })
+}
+
+fn map_admin_redeem_code_row(row: &PgRow) -> Result<StoredAdminRedeemCode, DataLayerError> {
+    let code_prefix: String = row_get(row, "code_prefix")?;
+    let code_suffix: String = row_get(row, "code_suffix")?;
+    Ok(StoredAdminRedeemCode {
+        id: row_get(row, "id")?,
+        batch_id: row_get(row, "batch_id")?,
+        batch_name: row_get(row, "batch_name")?,
+        code_prefix: code_prefix.clone(),
+        code_suffix: code_suffix.clone(),
+        masked_code: mask_redeem_code(&code_prefix, &code_suffix),
+        status: row_get(row, "status")?,
+        redeemed_by_user_id: row_get(row, "redeemed_by_user_id")?,
+        redeemed_by_user_name: row_get(row, "redeemed_by_user_name")?,
+        redeemed_wallet_id: row_get(row, "redeemed_wallet_id")?,
+        redeemed_payment_order_id: row_get(row, "redeemed_payment_order_id")?,
+        redeemed_order_no: row_get(row, "redeemed_order_no")?,
+        redeemed_at_unix_secs: parse_optional_timestamp(
+            row_get(row, "redeemed_at_unix_secs")?,
+            "redeem_codes.redeemed_at",
+        )?,
+        disabled_by: row_get(row, "disabled_by")?,
+        expires_at_unix_secs: parse_optional_timestamp(
+            row_get(row, "expires_at_unix_secs")?,
+            "redeem_code_batches.expires_at",
+        )?,
+        created_at_unix_ms: parse_timestamp(
+            row_get(row, "created_at_unix_ms")?,
+            "redeem_codes.created_at",
+        )?,
+        updated_at_unix_secs: parse_timestamp(
+            row_get(row, "updated_at_unix_secs")?,
+            "redeem_codes.updated_at",
         )?,
     })
 }

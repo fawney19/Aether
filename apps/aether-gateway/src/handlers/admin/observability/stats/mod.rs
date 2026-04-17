@@ -8,10 +8,7 @@ mod leaderboard;
 mod leaderboard_routes;
 mod provider_quota_routes;
 mod range;
-pub(crate) use self::range::{
-    list_usage_for_optional_range, list_usage_for_range, parse_bounded_u32,
-    resolve_admin_usage_time_range,
-};
+pub(crate) use self::range::{parse_bounded_u32, resolve_admin_usage_time_range};
 pub(crate) use aether_admin::observability::stats::{
     admin_stats_bad_request_response, aggregate_usage_stats, round_to, AdminStatsTimeRange,
     AdminStatsUsageFilter,

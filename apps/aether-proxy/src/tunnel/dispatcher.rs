@@ -404,10 +404,12 @@ mod tests {
 
     #[tokio::test]
     async fn try_send_stream_error_emits_stream_error_frame() {
-        let (frame_tx, mut frame_rx) = bounded_queue::<Frame>(4);
+        let (high_tx, mut high_rx) = bounded_queue::<Frame>(4);
+        let (normal_tx, _normal_rx) = bounded_queue::<Frame>(4);
+        let frame_tx = FrameSender::from_test_queues(high_tx, normal_tx);
         try_send_stream_error(&frame_tx, 9, "proxy request body dispatch stalled");
 
-        let frame = frame_rx
+        let frame = high_rx
             .recv()
             .await
             .expect("stream error frame should enqueue");

@@ -1,8 +1,19 @@
 use aether_data_contracts::repository::usage::{
     parse_usage_body_ref, usage_body_ref, StoredUsageAuditAggregation, StoredUsageAuditSummary,
-    StoredUsageLeaderboardSummary, StoredUsageTimeSeriesBucket, UsageAuditAggregationGroupBy,
-    UsageAuditAggregationQuery, UsageAuditSummaryQuery, UsageBodyField, UsageLeaderboardGroupBy,
-    UsageLeaderboardQuery, UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
+    StoredUsageBreakdownSummaryRow, StoredUsageCacheAffinityHitSummary,
+    StoredUsageCacheAffinityIntervalRow, StoredUsageCacheHitSummary, StoredUsageCostSavingsSummary,
+    StoredUsageDashboardDailyBreakdownRow, StoredUsageDashboardProviderCount,
+    StoredUsageDashboardSummary, StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
+    StoredUsagePerformancePercentilesRow, StoredUsageSettledCostSummary,
+    StoredUsageTimeSeriesBucket, UsageAuditAggregationGroupBy, UsageAuditAggregationQuery,
+    UsageAuditKeywordSearchQuery, UsageAuditSummaryQuery, UsageBodyField, UsageBreakdownGroupBy,
+    UsageBreakdownSummaryQuery, UsageCacheAffinityHitSummaryQuery,
+    UsageCacheAffinityIntervalGroupBy, UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery,
+    UsageCostSavingsSummaryQuery, UsageDashboardDailyBreakdownQuery,
+    UsageDashboardProviderCountsQuery, UsageDashboardSummaryQuery, UsageErrorDistributionQuery,
+    UsageLeaderboardGroupBy, UsageLeaderboardQuery, UsageMonitoringErrorCountQuery,
+    UsageMonitoringErrorListQuery, UsagePerformancePercentilesQuery, UsageSettledCostSummaryQuery,
+    UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
 };
 use async_trait::async_trait;
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
@@ -1152,6 +1163,26 @@ impl SqlxUsageReadRepository {
             .transpose()
     }
 
+    pub async fn list_by_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sql = FIND_BY_ID_SQL.replacen(
+            "WHERE \"usage\".id = $1\nLIMIT 1",
+            "WHERE \"usage\".id = ANY($1::TEXT[])\nORDER BY \"usage\".created_at DESC, \"usage\".id ASC",
+            1,
+        );
+        let mut rows = sqlx::query(&sql).bind(ids.to_vec()).fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(map_usage_row(&row, false)?);
+        }
+        Ok(items)
+    }
+
     pub async fn resolve_body_ref(&self, body_ref: &str) -> Result<Option<Value>, DataLayerError> {
         let blob_row = sqlx::query(FIND_USAGE_BODY_BLOB_BY_REF_SQL)
             .bind(body_ref)
@@ -1277,7 +1308,6 @@ impl SqlxUsageReadRepository {
         }
         if let Some(user_id) = query.user_id.as_deref() {
             builder.push(if has_where { " AND " } else { " WHERE " });
-            has_where = true;
             builder
                 .push("\"usage\".user_id = ")
                 .push_bind(user_id.to_string());
@@ -1342,6 +1372,182 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
         }
         let query = builder.build();
         let mut rows = query.fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(map_usage_row(&row, false)?);
+        }
+        Ok(items)
+    }
+
+    pub async fn list_usage_audits_by_keyword_search(
+        &self,
+        query: &UsageAuditKeywordSearchQuery,
+    ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
+        let mut builder = QueryBuilder::<Postgres>::new(LIST_USAGE_AUDITS_PREFIX);
+        let mut has_where = false;
+
+        if let Some(created_from_unix_secs) = query.created_from_unix_secs {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder
+                .push("\"usage\".created_at >= TO_TIMESTAMP(")
+                .push_bind(created_from_unix_secs as f64)
+                .push("::double precision)");
+        }
+        if let Some(created_until_unix_secs) = query.created_until_unix_secs {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder
+                .push("\"usage\".created_at < TO_TIMESTAMP(")
+                .push_bind(created_until_unix_secs as f64)
+                .push("::double precision)");
+        }
+        if let Some(user_id) = query.user_id.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            builder
+                .push("\"usage\".user_id = ")
+                .push_bind(user_id.to_string());
+        }
+        if let Some(provider_name) = query.provider_name.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder
+                .push("\"usage\".provider_name = ")
+                .push_bind(provider_name.to_string());
+        }
+        if let Some(model) = query.model.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder
+                .push("\"usage\".model = ")
+                .push_bind(model.to_string());
+        }
+        if let Some(api_format) = query.api_format.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder
+                .push("\"usage\".api_format = ")
+                .push_bind(api_format.to_string());
+        }
+        if let Some(statuses) = query.statuses.as_deref() {
+            if !statuses.is_empty() {
+                builder.push(if has_where { " AND " } else { " WHERE " });
+                has_where = true;
+                builder.push("\"usage\".status IN (");
+                let mut separated = builder.separated(", ");
+                for status in statuses {
+                    separated.push_bind(status.to_string());
+                }
+                separated.push_unseparated(")");
+            }
+        }
+        if let Some(is_stream) = query.is_stream {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder.push("\"usage\".is_stream = ").push_bind(is_stream);
+        }
+        if query.error_only {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder.push(
+                "(\"usage\".status = 'failed' \
+OR COALESCE(\"usage\".status_code, 0) >= 400 \
+OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''))",
+            );
+        }
+        for (index, keyword) in query.keywords.iter().enumerate() {
+            let keyword = keyword.trim();
+            if keyword.is_empty() {
+                continue;
+            }
+            let pattern = format!("%{}%", keyword.to_ascii_lowercase());
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder.push("(");
+            builder
+                .push("LOWER(COALESCE(\"usage\".model, '')) LIKE ")
+                .push_bind(pattern.clone());
+            builder
+                .push(" OR LOWER(COALESCE(\"usage\".provider_name, '')) LIKE ")
+                .push_bind(pattern.clone());
+            if query.auth_user_reader_available {
+                let matched_user_ids = query
+                    .matched_user_ids_by_keyword
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_default();
+                if !matched_user_ids.is_empty() {
+                    builder.push(" OR \"usage\".user_id IN (");
+                    let mut separated = builder.separated(", ");
+                    for user_id in matched_user_ids {
+                        separated.push_bind(user_id);
+                    }
+                    separated.push_unseparated(")");
+                }
+            } else {
+                builder
+                    .push(" OR LOWER(COALESCE(\"usage\".username, '')) LIKE ")
+                    .push_bind(pattern.clone());
+            }
+            if query.auth_api_key_reader_available {
+                let matched_ids = query
+                    .matched_api_key_ids_by_keyword
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_default();
+                if !matched_ids.is_empty() {
+                    builder.push(" OR \"usage\".api_key_id IN (");
+                    let mut separated = builder.separated(", ");
+                    for api_key_id in matched_ids {
+                        separated.push_bind(api_key_id);
+                    }
+                    separated.push_unseparated(")");
+                }
+            } else {
+                builder
+                    .push(" OR LOWER(COALESCE(\"usage\".api_key_name, '')) LIKE ")
+                    .push_bind(pattern);
+            }
+            builder.push(")");
+        }
+        if let Some(username_keyword) = query
+            .username_keyword
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            if query.auth_user_reader_available {
+                if query.matched_user_ids_for_username.is_empty() {
+                    builder.push("FALSE");
+                } else {
+                    builder.push("\"usage\".user_id IN (");
+                    let mut separated = builder.separated(", ");
+                    for user_id in &query.matched_user_ids_for_username {
+                        separated.push_bind(user_id.clone());
+                    }
+                    separated.push_unseparated(")");
+                }
+            } else {
+                builder
+                    .push("LOWER(COALESCE(\"usage\".username, '')) LIKE ")
+                    .push_bind(format!("%{}%", username_keyword.to_ascii_lowercase()));
+            }
+        }
+
+        if query.newest_first {
+            builder.push(" ORDER BY \"usage\".created_at DESC, \"usage\".id ASC");
+        } else {
+            builder.push(" ORDER BY \"usage\".created_at ASC, \"usage\".request_id ASC");
+        }
+        if let Some(limit) = query.limit {
+            builder.push(" LIMIT ").push_bind(limit as i64);
+        }
+        if let Some(offset) = query.offset {
+            builder.push(" OFFSET ").push_bind(offset as i64);
+        }
+
+        let mut rows = builder.build().fetch(&self.pool);
         let mut items = Vec::new();
         while let Some(row) = rows.try_next().await.map_postgres_err()? {
             items.push(map_usage_row(&row, false)?);
@@ -1435,6 +1641,172 @@ OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''
         Ok(row.try_get::<i64, _>("total").map_postgres_err()?.max(0) as u64)
     }
 
+    pub async fn count_usage_audits_by_keyword_search(
+        &self,
+        query: &UsageAuditKeywordSearchQuery,
+    ) -> Result<u64, DataLayerError> {
+        let mut builder =
+            QueryBuilder::<Postgres>::new(r#"SELECT COUNT(*)::BIGINT AS total FROM "usage""#);
+        let mut has_where = false;
+
+        if let Some(created_from_unix_secs) = query.created_from_unix_secs {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder
+                .push("\"usage\".created_at >= TO_TIMESTAMP(")
+                .push_bind(created_from_unix_secs as f64)
+                .push("::double precision)");
+        }
+        if let Some(created_until_unix_secs) = query.created_until_unix_secs {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder
+                .push("\"usage\".created_at < TO_TIMESTAMP(")
+                .push_bind(created_until_unix_secs as f64)
+                .push("::double precision)");
+        }
+        if let Some(user_id) = query.user_id.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder
+                .push("\"usage\".user_id = ")
+                .push_bind(user_id.to_string());
+        }
+        if let Some(provider_name) = query.provider_name.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder
+                .push("\"usage\".provider_name = ")
+                .push_bind(provider_name.to_string());
+        }
+        if let Some(model) = query.model.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder
+                .push("\"usage\".model = ")
+                .push_bind(model.to_string());
+        }
+        if let Some(api_format) = query.api_format.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder
+                .push("\"usage\".api_format = ")
+                .push_bind(api_format.to_string());
+        }
+        if let Some(statuses) = query.statuses.as_deref() {
+            if !statuses.is_empty() {
+                builder.push(if has_where { " AND " } else { " WHERE " });
+                has_where = true;
+                builder.push("\"usage\".status IN (");
+                let mut separated = builder.separated(", ");
+                for status in statuses {
+                    separated.push_bind(status.to_string());
+                }
+                separated.push_unseparated(")");
+            }
+        }
+        if let Some(is_stream) = query.is_stream {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder.push("\"usage\".is_stream = ").push_bind(is_stream);
+        }
+        if query.error_only {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder.push(
+                "(\"usage\".status = 'failed' \
+OR COALESCE(\"usage\".status_code, 0) >= 400 \
+OR (\"usage\".error_message IS NOT NULL AND BTRIM(\"usage\".error_message) <> ''))",
+            );
+        }
+        for (index, keyword) in query.keywords.iter().enumerate() {
+            let keyword = keyword.trim();
+            if keyword.is_empty() {
+                continue;
+            }
+            let pattern = format!("%{}%", keyword.to_ascii_lowercase());
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder.push("(");
+            builder
+                .push("LOWER(COALESCE(\"usage\".model, '')) LIKE ")
+                .push_bind(pattern.clone());
+            builder
+                .push(" OR LOWER(COALESCE(\"usage\".provider_name, '')) LIKE ")
+                .push_bind(pattern.clone());
+            if query.auth_user_reader_available {
+                let matched_user_ids = query
+                    .matched_user_ids_by_keyword
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_default();
+                if !matched_user_ids.is_empty() {
+                    builder.push(" OR \"usage\".user_id IN (");
+                    let mut separated = builder.separated(", ");
+                    for user_id in matched_user_ids {
+                        separated.push_bind(user_id);
+                    }
+                    separated.push_unseparated(")");
+                }
+            } else {
+                builder
+                    .push(" OR LOWER(COALESCE(\"usage\".username, '')) LIKE ")
+                    .push_bind(pattern.clone());
+            }
+            if query.auth_api_key_reader_available {
+                let matched_ids = query
+                    .matched_api_key_ids_by_keyword
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_default();
+                if !matched_ids.is_empty() {
+                    builder.push(" OR \"usage\".api_key_id IN (");
+                    let mut separated = builder.separated(", ");
+                    for api_key_id in matched_ids {
+                        separated.push_bind(api_key_id);
+                    }
+                    separated.push_unseparated(")");
+                }
+            } else {
+                builder
+                    .push(" OR LOWER(COALESCE(\"usage\".api_key_name, '')) LIKE ")
+                    .push_bind(pattern);
+            }
+            builder.push(")");
+        }
+        if let Some(username_keyword) = query
+            .username_keyword
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            if query.auth_user_reader_available {
+                if query.matched_user_ids_for_username.is_empty() {
+                    builder.push("FALSE");
+                } else {
+                    builder.push("\"usage\".user_id IN (");
+                    let mut separated = builder.separated(", ");
+                    for user_id in &query.matched_user_ids_for_username {
+                        separated.push_bind(user_id.clone());
+                    }
+                    separated.push_unseparated(")");
+                }
+            } else {
+                builder
+                    .push("LOWER(COALESCE(\"usage\".username, '')) LIKE ")
+                    .push_bind(format!("%{}%", username_keyword.to_ascii_lowercase()));
+            }
+        }
+
+        let row = builder
+            .build()
+            .fetch_one(&self.pool)
+            .await
+            .map_postgres_err()?;
+        Ok(row.try_get::<i64, _>("total").map_postgres_err()?.max(0) as u64)
+    }
+
     pub async fn summarize_usage_audits(
         &self,
         query: &UsageAuditSummaryQuery,
@@ -1498,7 +1870,6 @@ FROM "usage"
             .push("::double precision)");
         if let Some(user_id) = query.user_id.as_deref() {
             builder.push(if has_where { " AND " } else { " WHERE " });
-            has_where = true;
             builder
                 .push("\"usage\".user_id = ")
                 .push_bind(user_id.to_string());
@@ -1572,6 +1943,1350 @@ FROM "usage"
                 .try_get::<i64, _>("error_requests")
                 .map_postgres_err()?
                 .max(0) as u64,
+        })
+    }
+
+    pub async fn summarize_usage_cache_hit_summary(
+        &self,
+        query: &UsageCacheHitSummaryQuery,
+    ) -> Result<StoredUsageCacheHitSummary, DataLayerError> {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"
+SELECT
+  COUNT(*)::BIGINT AS total_requests,
+  COUNT(*) FILTER (
+    WHERE GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0) > 0
+  )::BIGINT AS cache_hit_requests
+FROM "usage"
+"#,
+        );
+        let mut has_where = false;
+
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        has_where = true;
+        builder
+            .push("\"usage\".created_at >= TO_TIMESTAMP(")
+            .push_bind(query.created_from_unix_secs as f64)
+            .push("::double precision)");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        builder
+            .push("\"usage\".created_at < TO_TIMESTAMP(")
+            .push_bind(query.created_until_unix_secs as f64)
+            .push("::double precision)");
+        if let Some(user_id) = query.user_id.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            builder
+                .push("\"usage\".user_id = ")
+                .push_bind(user_id.to_string());
+        }
+
+        let row = builder
+            .build()
+            .fetch_one(&self.pool)
+            .await
+            .map_postgres_err()?;
+        Ok(StoredUsageCacheHitSummary {
+            total_requests: row
+                .try_get::<i64, _>("total_requests")
+                .map_postgres_err()?
+                .max(0) as u64,
+            cache_hit_requests: row
+                .try_get::<i64, _>("cache_hit_requests")
+                .map_postgres_err()?
+                .max(0) as u64,
+        })
+    }
+
+    pub async fn summarize_usage_settled_cost(
+        &self,
+        query: &UsageSettledCostSummaryQuery,
+    ) -> Result<StoredUsageSettledCostSummary, DataLayerError> {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"
+SELECT
+  COALESCE(SUM(COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0)), 0)
+    AS total_cost_usd,
+  COUNT(*)::BIGINT AS total_requests,
+  COALESCE(SUM(GREATEST(COALESCE("usage".input_tokens, 0), 0)), 0)::BIGINT AS input_tokens,
+  COALESCE(SUM(GREATEST(COALESCE("usage".output_tokens, 0), 0)), 0)::BIGINT AS output_tokens,
+  COALESCE(SUM(GREATEST(COALESCE("usage".cache_creation_input_tokens, 0), 0)), 0)::BIGINT
+    AS cache_creation_tokens,
+  COALESCE(SUM(GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0)), 0)::BIGINT
+    AS cache_read_tokens,
+  MIN(CAST(EXTRACT(EPOCH FROM "usage".finalized_at) AS BIGINT))
+    AS first_finalized_at_unix_secs,
+  MAX(CAST(EXTRACT(EPOCH FROM "usage".finalized_at) AS BIGINT))
+    AS last_finalized_at_unix_secs
+FROM "usage"
+"#,
+        );
+        let mut has_where = false;
+
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        has_where = true;
+        builder
+            .push("\"usage\".created_at >= TO_TIMESTAMP(")
+            .push_bind(query.created_from_unix_secs as f64)
+            .push("::double precision)");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        builder
+            .push("\"usage\".created_at < TO_TIMESTAMP(")
+            .push_bind(query.created_until_unix_secs as f64)
+            .push("::double precision)");
+        if let Some(user_id) = query.user_id.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            has_where = true;
+            builder
+                .push("\"usage\".user_id = ")
+                .push_bind(user_id.to_string());
+        }
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        has_where = true;
+        builder.push("\"usage\".billing_status = 'settled'");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        builder.push("COALESCE(CAST(\"usage\".total_cost_usd AS DOUBLE PRECISION), 0) > 0");
+
+        let row = builder
+            .build()
+            .fetch_one(&self.pool)
+            .await
+            .map_postgres_err()?;
+        Ok(StoredUsageSettledCostSummary {
+            total_cost_usd: row.try_get::<f64, _>("total_cost_usd").map_postgres_err()?,
+            total_requests: row
+                .try_get::<i64, _>("total_requests")
+                .map_postgres_err()?
+                .max(0) as u64,
+            input_tokens: row
+                .try_get::<i64, _>("input_tokens")
+                .map_postgres_err()?
+                .max(0) as u64,
+            output_tokens: row
+                .try_get::<i64, _>("output_tokens")
+                .map_postgres_err()?
+                .max(0) as u64,
+            cache_creation_tokens: row
+                .try_get::<i64, _>("cache_creation_tokens")
+                .map_postgres_err()?
+                .max(0) as u64,
+            cache_read_tokens: row
+                .try_get::<i64, _>("cache_read_tokens")
+                .map_postgres_err()?
+                .max(0) as u64,
+            first_finalized_at_unix_secs: row
+                .try_get::<Option<i64>, _>("first_finalized_at_unix_secs")
+                .map_postgres_err()?
+                .map(|value| value.max(0) as u64),
+            last_finalized_at_unix_secs: row
+                .try_get::<Option<i64>, _>("last_finalized_at_unix_secs")
+                .map_postgres_err()?
+                .map(|value| value.max(0) as u64),
+        })
+    }
+
+    pub async fn summarize_usage_cache_affinity_hit_summary(
+        &self,
+        query: &UsageCacheAffinityHitSummaryQuery,
+    ) -> Result<StoredUsageCacheAffinityHitSummary, DataLayerError> {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"
+SELECT
+  COUNT(*)::BIGINT AS total_requests,
+  COALESCE(SUM(
+    CASE
+      WHEN GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0) > 0 THEN 1
+      ELSE 0
+    END
+  ), 0)::BIGINT AS requests_with_cache_hit,
+  COALESCE(SUM(GREATEST(COALESCE("usage".input_tokens, 0), 0)), 0)::BIGINT AS input_tokens,
+  COALESCE(SUM(GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0)), 0)::BIGINT
+    AS cache_read_tokens,
+  COALESCE(SUM(
+    CASE
+      WHEN COALESCE("usage".cache_creation_input_tokens, 0) = 0
+           AND (
+             COALESCE("usage".cache_creation_input_tokens_5m, 0)
+             + COALESCE("usage".cache_creation_input_tokens_1h, 0)
+           ) > 0
+      THEN COALESCE("usage".cache_creation_input_tokens_5m, 0)
+         + COALESCE("usage".cache_creation_input_tokens_1h, 0)
+      ELSE COALESCE("usage".cache_creation_input_tokens, 0)
+    END
+  ), 0)::BIGINT AS cache_creation_tokens,
+  COALESCE(SUM(
+    CASE
+      WHEN split_part(lower(COALESCE(COALESCE("usage".endpoint_api_format, "usage".api_format), '')), ':', 1)
+           IN ('claude', 'anthropic')
+      THEN GREATEST(COALESCE("usage".input_tokens, 0), 0)
+         + CASE
+             WHEN COALESCE("usage".cache_creation_input_tokens, 0) = 0
+                  AND (
+                    COALESCE("usage".cache_creation_input_tokens_5m, 0)
+                    + COALESCE("usage".cache_creation_input_tokens_1h, 0)
+                  ) > 0
+             THEN COALESCE("usage".cache_creation_input_tokens_5m, 0)
+                + COALESCE("usage".cache_creation_input_tokens_1h, 0)
+             ELSE COALESCE("usage".cache_creation_input_tokens, 0)
+           END
+         + GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0)
+      WHEN split_part(lower(COALESCE(COALESCE("usage".endpoint_api_format, "usage".api_format), '')), ':', 1)
+           IN ('openai', 'gemini', 'google')
+      THEN (
+        CASE
+          WHEN GREATEST(COALESCE("usage".input_tokens, 0), 0) <= 0 THEN 0
+          WHEN GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0) <= 0
+          THEN GREATEST(COALESCE("usage".input_tokens, 0), 0)
+          ELSE GREATEST(
+            GREATEST(COALESCE("usage".input_tokens, 0), 0)
+              - GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0),
+            0
+          )
+        END
+      ) + GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0)
+      ELSE CASE
+        WHEN (
+          CASE
+            WHEN COALESCE("usage".cache_creation_input_tokens, 0) = 0
+                 AND (
+                   COALESCE("usage".cache_creation_input_tokens_5m, 0)
+                   + COALESCE("usage".cache_creation_input_tokens_1h, 0)
+                 ) > 0
+            THEN COALESCE("usage".cache_creation_input_tokens_5m, 0)
+               + COALESCE("usage".cache_creation_input_tokens_1h, 0)
+            ELSE COALESCE("usage".cache_creation_input_tokens, 0)
+          END
+        ) > 0
+        THEN GREATEST(COALESCE("usage".input_tokens, 0), 0)
+           + (
+             CASE
+               WHEN COALESCE("usage".cache_creation_input_tokens, 0) = 0
+                    AND (
+                      COALESCE("usage".cache_creation_input_tokens_5m, 0)
+                      + COALESCE("usage".cache_creation_input_tokens_1h, 0)
+                    ) > 0
+               THEN COALESCE("usage".cache_creation_input_tokens_5m, 0)
+                  + COALESCE("usage".cache_creation_input_tokens_1h, 0)
+               ELSE COALESCE("usage".cache_creation_input_tokens, 0)
+             END
+           )
+           + GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0)
+        ELSE GREATEST(COALESCE("usage".input_tokens, 0), 0)
+           + GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0)
+      END
+    END
+  ), 0)::BIGINT AS total_input_context,
+  COALESCE(SUM(COALESCE(CAST("usage".cache_read_cost_usd AS DOUBLE PRECISION), 0)), 0)
+    AS cache_read_cost_usd,
+  COALESCE(SUM(COALESCE(CAST("usage".cache_creation_cost_usd AS DOUBLE PRECISION), 0)), 0)
+    AS cache_creation_cost_usd
+FROM "usage"
+"#,
+        );
+        let mut has_where = false;
+
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        has_where = true;
+        builder
+            .push("\"usage\".created_at >= TO_TIMESTAMP(")
+            .push_bind(query.created_from_unix_secs as f64)
+            .push("::double precision)");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        builder
+            .push("\"usage\".created_at < TO_TIMESTAMP(")
+            .push_bind(query.created_until_unix_secs as f64)
+            .push("::double precision)");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        has_where = true;
+        builder.push("\"usage\".status = 'completed'");
+        if let Some(user_id) = query.user_id.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            builder
+                .push("\"usage\".user_id = ")
+                .push_bind(user_id.to_string());
+        }
+        if let Some(api_key_id) = query.api_key_id.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            builder
+                .push("\"usage\".api_key_id = ")
+                .push_bind(api_key_id.to_string());
+        }
+
+        let row = builder
+            .build()
+            .fetch_one(&self.pool)
+            .await
+            .map_postgres_err()?;
+        Ok(StoredUsageCacheAffinityHitSummary {
+            total_requests: row
+                .try_get::<i64, _>("total_requests")
+                .map_postgres_err()?
+                .max(0) as u64,
+            requests_with_cache_hit: row
+                .try_get::<i64, _>("requests_with_cache_hit")
+                .map_postgres_err()?
+                .max(0) as u64,
+            input_tokens: row
+                .try_get::<i64, _>("input_tokens")
+                .map_postgres_err()?
+                .max(0) as u64,
+            cache_read_tokens: row
+                .try_get::<i64, _>("cache_read_tokens")
+                .map_postgres_err()?
+                .max(0) as u64,
+            cache_creation_tokens: row
+                .try_get::<i64, _>("cache_creation_tokens")
+                .map_postgres_err()?
+                .max(0) as u64,
+            total_input_context: row
+                .try_get::<i64, _>("total_input_context")
+                .map_postgres_err()?
+                .max(0) as u64,
+            cache_read_cost_usd: row
+                .try_get::<f64, _>("cache_read_cost_usd")
+                .map_postgres_err()?,
+            cache_creation_cost_usd: row
+                .try_get::<f64, _>("cache_creation_cost_usd")
+                .map_postgres_err()?,
+        })
+    }
+
+    pub async fn list_usage_cache_affinity_intervals(
+        &self,
+        query: &UsageCacheAffinityIntervalQuery,
+    ) -> Result<Vec<StoredUsageCacheAffinityIntervalRow>, DataLayerError> {
+        let group_column = match query.group_by {
+            UsageCacheAffinityIntervalGroupBy::User => "\"usage\".user_id",
+            UsageCacheAffinityIntervalGroupBy::ApiKey => "\"usage\".api_key_id",
+        };
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"
+WITH filtered_usage AS (
+  SELECT
+    "#,
+        );
+        builder.push(group_column);
+        builder.push(
+            r#" AS group_id,
+    "usage".username AS username,
+    "usage".model AS model,
+    "usage".created_at AS created_at,
+    "usage".id AS usage_id
+  FROM "usage"
+"#,
+        );
+        let mut has_where = false;
+
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        has_where = true;
+        builder
+            .push("\"usage\".created_at >= TO_TIMESTAMP(")
+            .push_bind(query.created_from_unix_secs as f64)
+            .push("::double precision)");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        builder
+            .push("\"usage\".created_at < TO_TIMESTAMP(")
+            .push_bind(query.created_until_unix_secs as f64)
+            .push("::double precision)");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        has_where = true;
+        builder.push("\"usage\".status = 'completed'");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        builder.push(group_column).push(" IS NOT NULL");
+        if let Some(user_id) = query.user_id.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            builder
+                .push("\"usage\".user_id = ")
+                .push_bind(user_id.to_string());
+        }
+        if let Some(api_key_id) = query.api_key_id.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            builder
+                .push("\"usage\".api_key_id = ")
+                .push_bind(api_key_id.to_string());
+        }
+        builder.push(
+            r#"
+),
+intervals AS (
+  SELECT
+    group_id,
+    username,
+    model,
+    CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
+    usage_id,
+    EXTRACT(EPOCH FROM (
+      created_at - LAG(created_at) OVER (
+        PARTITION BY group_id
+        ORDER BY created_at ASC, usage_id ASC
+      )
+    )) / 60.0 AS interval_minutes
+  FROM filtered_usage
+)
+SELECT
+  group_id,
+  username,
+  model,
+  created_at_unix_secs,
+  interval_minutes
+FROM intervals
+WHERE interval_minutes IS NOT NULL
+ORDER BY created_at_unix_secs ASC, group_id ASC, usage_id ASC
+"#,
+        );
+
+        let mut rows = builder.build().fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(StoredUsageCacheAffinityIntervalRow {
+                group_id: row.try_get::<String, _>("group_id").map_postgres_err()?,
+                username: row
+                    .try_get::<Option<String>, _>("username")
+                    .map_postgres_err()?,
+                model: row.try_get::<String, _>("model").map_postgres_err()?,
+                created_at_unix_secs: row
+                    .try_get::<i64, _>("created_at_unix_secs")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+                interval_minutes: row
+                    .try_get::<f64, _>("interval_minutes")
+                    .map_postgres_err()?,
+            });
+        }
+        Ok(items)
+    }
+
+    pub async fn summarize_dashboard_usage(
+        &self,
+        query: &UsageDashboardSummaryQuery,
+    ) -> Result<StoredUsageDashboardSummary, DataLayerError> {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"
+SELECT
+  COUNT(*)::BIGINT AS total_requests,
+  COALESCE(SUM(GREATEST(COALESCE("usage".input_tokens, 0), 0)), 0)::BIGINT AS input_tokens,
+  COALESCE(SUM(
+    CASE
+      WHEN GREATEST(COALESCE("usage".input_tokens, 0), 0) <= 0 THEN 0
+      WHEN GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0) <= 0
+      THEN GREATEST(COALESCE("usage".input_tokens, 0), 0)
+      WHEN split_part(lower(COALESCE(COALESCE("usage".endpoint_api_format, "usage".api_format), '')), ':', 1)
+           IN ('openai', 'gemini', 'google')
+      THEN GREATEST(
+        GREATEST(COALESCE("usage".input_tokens, 0), 0)
+          - GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0),
+        0
+      )
+      ELSE GREATEST(COALESCE("usage".input_tokens, 0), 0)
+    END
+  ), 0)::BIGINT AS effective_input_tokens,
+  COALESCE(SUM(GREATEST(COALESCE("usage".output_tokens, 0), 0)), 0)::BIGINT AS output_tokens,
+  COALESCE(SUM(GREATEST(COALESCE("usage".total_tokens, 0), 0)), 0)::BIGINT AS total_tokens,
+  COALESCE(SUM(
+    CASE
+      WHEN COALESCE("usage".cache_creation_input_tokens, 0) = 0
+           AND (
+             COALESCE("usage".cache_creation_input_tokens_5m, 0)
+             + COALESCE("usage".cache_creation_input_tokens_1h, 0)
+           ) > 0
+      THEN COALESCE("usage".cache_creation_input_tokens_5m, 0)
+         + COALESCE("usage".cache_creation_input_tokens_1h, 0)
+      ELSE COALESCE("usage".cache_creation_input_tokens, 0)
+    END
+  ), 0)::BIGINT AS cache_creation_tokens,
+  COALESCE(SUM(GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0)), 0)::BIGINT
+    AS cache_read_tokens,
+  COALESCE(SUM(
+    CASE
+      WHEN split_part(lower(COALESCE(COALESCE("usage".endpoint_api_format, "usage".api_format), '')), ':', 1)
+           IN ('claude', 'anthropic')
+      THEN GREATEST(COALESCE("usage".input_tokens, 0), 0)
+         + CASE
+             WHEN COALESCE("usage".cache_creation_input_tokens, 0) = 0
+                  AND (
+                    COALESCE("usage".cache_creation_input_tokens_5m, 0)
+                    + COALESCE("usage".cache_creation_input_tokens_1h, 0)
+                  ) > 0
+             THEN COALESCE("usage".cache_creation_input_tokens_5m, 0)
+                + COALESCE("usage".cache_creation_input_tokens_1h, 0)
+             ELSE COALESCE("usage".cache_creation_input_tokens, 0)
+           END
+         + GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0)
+      WHEN split_part(lower(COALESCE(COALESCE("usage".endpoint_api_format, "usage".api_format), '')), ':', 1)
+           IN ('openai', 'gemini', 'google')
+      THEN (
+        CASE
+          WHEN GREATEST(COALESCE("usage".input_tokens, 0), 0) <= 0 THEN 0
+          WHEN GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0) <= 0
+          THEN GREATEST(COALESCE("usage".input_tokens, 0), 0)
+          ELSE GREATEST(
+            GREATEST(COALESCE("usage".input_tokens, 0), 0)
+              - GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0),
+            0
+          )
+        END
+      ) + GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0)
+      ELSE CASE
+        WHEN (
+          CASE
+            WHEN COALESCE("usage".cache_creation_input_tokens, 0) = 0
+                 AND (
+                   COALESCE("usage".cache_creation_input_tokens_5m, 0)
+                   + COALESCE("usage".cache_creation_input_tokens_1h, 0)
+                 ) > 0
+            THEN COALESCE("usage".cache_creation_input_tokens_5m, 0)
+               + COALESCE("usage".cache_creation_input_tokens_1h, 0)
+            ELSE COALESCE("usage".cache_creation_input_tokens, 0)
+          END
+        ) > 0
+        THEN GREATEST(COALESCE("usage".input_tokens, 0), 0)
+           + (
+             CASE
+               WHEN COALESCE("usage".cache_creation_input_tokens, 0) = 0
+                    AND (
+                      COALESCE("usage".cache_creation_input_tokens_5m, 0)
+                      + COALESCE("usage".cache_creation_input_tokens_1h, 0)
+                    ) > 0
+               THEN COALESCE("usage".cache_creation_input_tokens_5m, 0)
+                  + COALESCE("usage".cache_creation_input_tokens_1h, 0)
+               ELSE COALESCE("usage".cache_creation_input_tokens, 0)
+             END
+           )
+           + GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0)
+        ELSE GREATEST(COALESCE("usage".input_tokens, 0), 0)
+           + GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0)
+      END
+    END
+  ), 0)::BIGINT AS total_input_context,
+  COALESCE(SUM(COALESCE(CAST("usage".cache_creation_cost_usd AS DOUBLE PRECISION), 0)), 0)
+    AS cache_creation_cost_usd,
+  COALESCE(SUM(COALESCE(CAST("usage".cache_read_cost_usd AS DOUBLE PRECISION), 0)), 0)
+    AS cache_read_cost_usd,
+  COALESCE(SUM(COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0)), 0)
+    AS total_cost_usd,
+  COALESCE(SUM(COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0)), 0)
+    AS actual_total_cost_usd,
+  COALESCE(SUM(
+    CASE
+      WHEN COALESCE("usage".status_code, 0) >= 400
+           OR lower(COALESCE("usage".status, '')) = 'failed'
+      THEN 1
+      ELSE 0
+    END
+  ), 0)::BIGINT AS error_requests,
+  COALESCE(SUM(
+    CASE
+      WHEN "usage".response_time_ms IS NOT NULL
+      THEN GREATEST(COALESCE("usage".response_time_ms, 0), 0)::DOUBLE PRECISION
+      ELSE 0
+    END
+  ), 0) AS response_time_sum_ms,
+  COALESCE(SUM(
+    CASE
+      WHEN "usage".response_time_ms IS NOT NULL THEN 1
+      ELSE 0
+    END
+  ), 0)::BIGINT AS response_time_samples
+FROM "usage"
+"#,
+        );
+        let mut has_where = false;
+
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        has_where = true;
+        builder
+            .push("\"usage\".created_at >= TO_TIMESTAMP(")
+            .push_bind(query.created_from_unix_secs as f64)
+            .push("::double precision)");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        builder
+            .push("\"usage\".created_at < TO_TIMESTAMP(")
+            .push_bind(query.created_until_unix_secs as f64)
+            .push("::double precision)");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        builder.push("\"usage\".status NOT IN ('pending', 'streaming')");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        builder.push("\"usage\".provider_name NOT IN ('unknown', 'pending')");
+        if let Some(user_id) = query.user_id.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            builder
+                .push("\"usage\".user_id = ")
+                .push_bind(user_id.to_string());
+        }
+
+        let row = builder
+            .build()
+            .fetch_one(&self.pool)
+            .await
+            .map_postgres_err()?;
+        Ok(StoredUsageDashboardSummary {
+            total_requests: row
+                .try_get::<i64, _>("total_requests")
+                .map_postgres_err()?
+                .max(0) as u64,
+            input_tokens: row
+                .try_get::<i64, _>("input_tokens")
+                .map_postgres_err()?
+                .max(0) as u64,
+            effective_input_tokens: row
+                .try_get::<i64, _>("effective_input_tokens")
+                .map_postgres_err()?
+                .max(0) as u64,
+            output_tokens: row
+                .try_get::<i64, _>("output_tokens")
+                .map_postgres_err()?
+                .max(0) as u64,
+            total_tokens: row
+                .try_get::<i64, _>("total_tokens")
+                .map_postgres_err()?
+                .max(0) as u64,
+            cache_creation_tokens: row
+                .try_get::<i64, _>("cache_creation_tokens")
+                .map_postgres_err()?
+                .max(0) as u64,
+            cache_read_tokens: row
+                .try_get::<i64, _>("cache_read_tokens")
+                .map_postgres_err()?
+                .max(0) as u64,
+            total_input_context: row
+                .try_get::<i64, _>("total_input_context")
+                .map_postgres_err()?
+                .max(0) as u64,
+            cache_creation_cost_usd: row
+                .try_get::<f64, _>("cache_creation_cost_usd")
+                .map_postgres_err()?,
+            cache_read_cost_usd: row
+                .try_get::<f64, _>("cache_read_cost_usd")
+                .map_postgres_err()?,
+            total_cost_usd: row.try_get::<f64, _>("total_cost_usd").map_postgres_err()?,
+            actual_total_cost_usd: row
+                .try_get::<f64, _>("actual_total_cost_usd")
+                .map_postgres_err()?,
+            error_requests: row
+                .try_get::<i64, _>("error_requests")
+                .map_postgres_err()?
+                .max(0) as u64,
+            response_time_sum_ms: row
+                .try_get::<f64, _>("response_time_sum_ms")
+                .map_postgres_err()?,
+            response_time_samples: row
+                .try_get::<i64, _>("response_time_samples")
+                .map_postgres_err()?
+                .max(0) as u64,
+        })
+    }
+
+    pub async fn list_dashboard_daily_breakdown(
+        &self,
+        query: &UsageDashboardDailyBreakdownQuery,
+    ) -> Result<Vec<StoredUsageDashboardDailyBreakdownRow>, DataLayerError> {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"
+SELECT
+  TO_CHAR(
+    date_trunc('day', "usage".created_at + (
+      "#,
+        );
+        builder.push_bind(query.tz_offset_minutes);
+        builder.push(
+            r#"::integer * INTERVAL '1 minute'
+    )),
+    'YYYY-MM-DD'
+  ) AS date,
+  "usage".model AS model,
+  "usage".provider_name AS provider,
+  COUNT(*)::BIGINT AS requests,
+  COALESCE(SUM(GREATEST(COALESCE("usage".total_tokens, 0), 0)), 0)::BIGINT AS total_tokens,
+  COALESCE(SUM(COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0)), 0)
+    AS total_cost_usd,
+  COALESCE(SUM(
+    CASE
+      WHEN "usage".response_time_ms IS NOT NULL
+      THEN GREATEST(COALESCE("usage".response_time_ms, 0), 0)::DOUBLE PRECISION
+      ELSE 0
+    END
+  ), 0) AS response_time_sum_ms,
+  COALESCE(SUM(
+    CASE
+      WHEN "usage".response_time_ms IS NOT NULL THEN 1
+      ELSE 0
+    END
+  ), 0)::BIGINT AS response_time_samples
+FROM "usage"
+"#,
+        );
+        let mut has_where = false;
+
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        has_where = true;
+        builder
+            .push("\"usage\".created_at >= TO_TIMESTAMP(")
+            .push_bind(query.created_from_unix_secs as f64)
+            .push("::double precision)");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        builder
+            .push("\"usage\".created_at < TO_TIMESTAMP(")
+            .push_bind(query.created_until_unix_secs as f64)
+            .push("::double precision)");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        builder.push("\"usage\".status NOT IN ('pending', 'streaming')");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        builder.push("\"usage\".provider_name NOT IN ('unknown', 'pending')");
+        if let Some(user_id) = query.user_id.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            builder
+                .push("\"usage\".user_id = ")
+                .push_bind(user_id.to_string());
+        }
+        builder.push(
+            r#"
+GROUP BY date, "usage".model, "usage".provider_name
+ORDER BY date ASC, total_cost_usd DESC, "usage".model ASC, "usage".provider_name ASC
+"#,
+        );
+
+        let mut rows = builder.build().fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(StoredUsageDashboardDailyBreakdownRow {
+                date: row.try_get::<String, _>("date").map_postgres_err()?,
+                model: row.try_get::<String, _>("model").map_postgres_err()?,
+                provider: row.try_get::<String, _>("provider").map_postgres_err()?,
+                requests: row.try_get::<i64, _>("requests").map_postgres_err()?.max(0) as u64,
+                total_tokens: row
+                    .try_get::<i64, _>("total_tokens")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+                total_cost_usd: row.try_get::<f64, _>("total_cost_usd").map_postgres_err()?,
+                response_time_sum_ms: row
+                    .try_get::<f64, _>("response_time_sum_ms")
+                    .map_postgres_err()?,
+                response_time_samples: row
+                    .try_get::<i64, _>("response_time_samples")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+            });
+        }
+        Ok(items)
+    }
+
+    pub async fn summarize_dashboard_provider_counts(
+        &self,
+        query: &UsageDashboardProviderCountsQuery,
+    ) -> Result<Vec<StoredUsageDashboardProviderCount>, DataLayerError> {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"
+SELECT
+  "usage".provider_name AS provider_name,
+  COUNT(*)::BIGINT AS request_count
+FROM "usage"
+"#,
+        );
+        let mut has_where = false;
+
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        has_where = true;
+        builder
+            .push("\"usage\".created_at >= TO_TIMESTAMP(")
+            .push_bind(query.created_from_unix_secs as f64)
+            .push("::double precision)");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        builder
+            .push("\"usage\".created_at < TO_TIMESTAMP(")
+            .push_bind(query.created_until_unix_secs as f64)
+            .push("::double precision)");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        builder.push("\"usage\".status NOT IN ('pending', 'streaming')");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        builder.push("\"usage\".provider_name NOT IN ('unknown', 'pending')");
+        if let Some(user_id) = query.user_id.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            builder
+                .push("\"usage\".user_id = ")
+                .push_bind(user_id.to_string());
+        }
+        builder.push(
+            r#"
+GROUP BY "usage".provider_name
+ORDER BY request_count DESC, "usage".provider_name ASC
+"#,
+        );
+
+        let mut rows = builder.build().fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(StoredUsageDashboardProviderCount {
+                provider_name: row
+                    .try_get::<String, _>("provider_name")
+                    .map_postgres_err()?,
+                request_count: row
+                    .try_get::<i64, _>("request_count")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+            });
+        }
+        Ok(items)
+    }
+
+    pub async fn summarize_usage_breakdown(
+        &self,
+        query: &UsageBreakdownSummaryQuery,
+    ) -> Result<Vec<StoredUsageBreakdownSummaryRow>, DataLayerError> {
+        let (group_key_expr, filtered_extra_where) = match query.group_by {
+            UsageBreakdownGroupBy::Model => ("\"usage\".model", ""),
+            UsageBreakdownGroupBy::Provider => ("\"usage\".provider_name", ""),
+            UsageBreakdownGroupBy::ApiFormat => (
+                "\"usage\".api_format",
+                " AND \"usage\".api_format IS NOT NULL",
+            ),
+        };
+
+        let mut builder = QueryBuilder::<Postgres>::new(&format!(
+            r#"
+WITH filtered_usage AS (
+  SELECT
+    {group_key_expr} AS group_key,
+    GREATEST(COALESCE("usage".input_tokens, 0), 0) AS input_tokens,
+    GREATEST(COALESCE("usage".output_tokens, 0), 0) AS output_tokens,
+    GREATEST(COALESCE("usage".total_tokens, 0), 0) AS total_tokens,
+    CASE
+      WHEN COALESCE("usage".cache_creation_input_tokens, 0) = 0
+           AND (
+             COALESCE("usage".cache_creation_input_tokens_5m, 0)
+             + COALESCE("usage".cache_creation_input_tokens_1h, 0)
+           ) > 0
+      THEN COALESCE("usage".cache_creation_input_tokens_5m, 0)
+         + COALESCE("usage".cache_creation_input_tokens_1h, 0)
+      ELSE COALESCE("usage".cache_creation_input_tokens, 0)
+    END AS cache_creation_tokens,
+    GREATEST(COALESCE("usage".cache_creation_input_tokens_5m, 0), 0)
+      AS cache_creation_ephemeral_5m_tokens,
+    GREATEST(COALESCE("usage".cache_creation_input_tokens_1h, 0), 0)
+      AS cache_creation_ephemeral_1h_tokens,
+    GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0) AS cache_read_tokens,
+    COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+    COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
+    CASE
+      WHEN "usage".status <> 'failed'
+           AND ("usage".status_code IS NULL OR "usage".status_code < 400)
+           AND "usage".error_message IS NULL
+      THEN 1
+      ELSE 0
+    END AS success_flag,
+    CASE
+      WHEN "usage".response_time_ms IS NOT NULL
+      THEN GREATEST(COALESCE("usage".response_time_ms, 0), 0)::DOUBLE PRECISION
+      ELSE 0
+    END AS response_time_ms,
+    CASE
+      WHEN "usage".response_time_ms IS NOT NULL
+      THEN 1
+      ELSE 0
+    END AS response_time_samples,
+    CASE
+      WHEN "usage".status <> 'failed'
+           AND ("usage".status_code IS NULL OR "usage".status_code < 400)
+           AND "usage".error_message IS NULL
+           AND "usage".response_time_ms IS NOT NULL
+      THEN GREATEST(COALESCE("usage".response_time_ms, 0), 0)::DOUBLE PRECISION
+      ELSE 0
+    END AS successful_response_time_ms,
+    CASE
+      WHEN "usage".status <> 'failed'
+           AND ("usage".status_code IS NULL OR "usage".status_code < 400)
+           AND "usage".error_message IS NULL
+           AND "usage".response_time_ms IS NOT NULL
+      THEN 1
+      ELSE 0
+    END AS successful_response_time_samples,
+    COALESCE(COALESCE("usage".endpoint_api_format, "usage".api_format), '') AS normalized_api_format
+  FROM "usage"
+"#,
+        ));
+        let mut has_where = false;
+
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        has_where = true;
+        builder
+            .push("\"usage\".created_at >= TO_TIMESTAMP(")
+            .push_bind(query.created_from_unix_secs as f64)
+            .push("::double precision)");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        builder
+            .push("\"usage\".created_at < TO_TIMESTAMP(")
+            .push_bind(query.created_until_unix_secs as f64)
+            .push("::double precision)");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        builder.push("\"usage\".status NOT IN ('pending', 'streaming')");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        builder.push("\"usage\".provider_name NOT IN ('unknown', 'pending')");
+        if let Some(user_id) = query.user_id.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            builder
+                .push("\"usage\".user_id = ")
+                .push_bind(user_id.to_string());
+        }
+        builder.push(filtered_extra_where);
+        builder.push(
+            r#"
+),
+normalized_usage AS (
+  SELECT
+    group_key,
+    input_tokens,
+    total_tokens,
+    output_tokens,
+    cache_creation_tokens,
+    cache_creation_ephemeral_5m_tokens,
+    cache_creation_ephemeral_1h_tokens,
+    cache_read_tokens,
+    total_cost_usd,
+    actual_total_cost_usd,
+    success_flag,
+    response_time_ms,
+    response_time_samples,
+    successful_response_time_ms,
+    successful_response_time_samples,
+    CASE
+      WHEN input_tokens <= 0 THEN 0
+      WHEN cache_read_tokens <= 0 THEN input_tokens
+      WHEN split_part(lower(COALESCE(normalized_api_format, '')), ':', 1)
+           IN ('openai', 'gemini', 'google')
+      THEN GREATEST(input_tokens - cache_read_tokens, 0)
+      ELSE input_tokens
+    END AS effective_input_tokens,
+    CASE
+      WHEN split_part(lower(COALESCE(normalized_api_format, '')), ':', 1)
+           IN ('claude', 'anthropic')
+      THEN input_tokens + cache_creation_tokens + cache_read_tokens
+      WHEN split_part(lower(COALESCE(normalized_api_format, '')), ':', 1)
+           IN ('openai', 'gemini', 'google')
+      THEN (
+        CASE
+          WHEN input_tokens <= 0 THEN 0
+          WHEN cache_read_tokens <= 0 THEN input_tokens
+          WHEN split_part(lower(COALESCE(normalized_api_format, '')), ':', 1)
+               IN ('openai', 'gemini', 'google')
+          THEN GREATEST(input_tokens - cache_read_tokens, 0)
+          ELSE input_tokens
+        END
+      ) + cache_read_tokens
+      ELSE CASE
+        WHEN cache_creation_tokens > 0
+        THEN input_tokens + cache_creation_tokens + cache_read_tokens
+        ELSE input_tokens + cache_read_tokens
+      END
+    END AS total_input_context
+  FROM filtered_usage
+)
+SELECT
+  group_key,
+  COUNT(*)::BIGINT AS request_count,
+  COALESCE(SUM(input_tokens), 0)::BIGINT AS input_tokens,
+  COALESCE(SUM(total_tokens), 0)::BIGINT AS total_tokens,
+  COALESCE(SUM(output_tokens), 0)::BIGINT AS output_tokens,
+  COALESCE(SUM(effective_input_tokens), 0)::BIGINT AS effective_input_tokens,
+  COALESCE(SUM(total_input_context), 0)::BIGINT AS total_input_context,
+  COALESCE(SUM(cache_creation_tokens), 0)::BIGINT AS cache_creation_tokens,
+  COALESCE(SUM(cache_creation_ephemeral_5m_tokens), 0)::BIGINT
+    AS cache_creation_ephemeral_5m_tokens,
+  COALESCE(SUM(cache_creation_ephemeral_1h_tokens), 0)::BIGINT
+    AS cache_creation_ephemeral_1h_tokens,
+  COALESCE(SUM(cache_read_tokens), 0)::BIGINT AS cache_read_tokens,
+  COALESCE(SUM(total_cost_usd), 0) AS total_cost_usd,
+  COALESCE(SUM(actual_total_cost_usd), 0) AS actual_total_cost_usd,
+  COALESCE(SUM(success_flag), 0)::BIGINT AS success_count,
+  COALESCE(SUM(successful_response_time_ms), 0) AS response_time_sum_ms,
+  COALESCE(SUM(successful_response_time_samples), 0)::BIGINT AS response_time_samples,
+  COALESCE(SUM(response_time_ms), 0) AS overall_response_time_sum_ms,
+  COALESCE(SUM(response_time_samples), 0)::BIGINT AS overall_response_time_samples
+FROM normalized_usage
+GROUP BY group_key
+ORDER BY request_count DESC, group_key ASC
+"#,
+        );
+
+        let mut rows = builder.build().fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(StoredUsageBreakdownSummaryRow {
+                group_key: row.try_get::<String, _>("group_key").map_postgres_err()?,
+                request_count: row
+                    .try_get::<i64, _>("request_count")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+                input_tokens: row
+                    .try_get::<i64, _>("input_tokens")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+                total_tokens: row
+                    .try_get::<i64, _>("total_tokens")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+                output_tokens: row
+                    .try_get::<i64, _>("output_tokens")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+                effective_input_tokens: row
+                    .try_get::<i64, _>("effective_input_tokens")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+                total_input_context: row
+                    .try_get::<i64, _>("total_input_context")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+                cache_creation_tokens: row
+                    .try_get::<i64, _>("cache_creation_tokens")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+                cache_creation_ephemeral_5m_tokens: row
+                    .try_get::<i64, _>("cache_creation_ephemeral_5m_tokens")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+                cache_creation_ephemeral_1h_tokens: row
+                    .try_get::<i64, _>("cache_creation_ephemeral_1h_tokens")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+                cache_read_tokens: row
+                    .try_get::<i64, _>("cache_read_tokens")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+                total_cost_usd: row.try_get::<f64, _>("total_cost_usd").map_postgres_err()?,
+                actual_total_cost_usd: row
+                    .try_get::<f64, _>("actual_total_cost_usd")
+                    .map_postgres_err()?,
+                success_count: row
+                    .try_get::<i64, _>("success_count")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+                response_time_sum_ms: row
+                    .try_get::<f64, _>("response_time_sum_ms")
+                    .map_postgres_err()?,
+                response_time_samples: row
+                    .try_get::<i64, _>("response_time_samples")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+                overall_response_time_sum_ms: row
+                    .try_get::<f64, _>("overall_response_time_sum_ms")
+                    .map_postgres_err()?,
+                overall_response_time_samples: row
+                    .try_get::<i64, _>("overall_response_time_samples")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+            });
+        }
+        Ok(items)
+    }
+
+    pub async fn count_monitoring_usage_errors(
+        &self,
+        query: &UsageMonitoringErrorCountQuery,
+    ) -> Result<u64, DataLayerError> {
+        let row = sqlx::query(
+            r#"
+SELECT COUNT(*)::BIGINT AS total
+FROM "usage"
+WHERE "usage".created_at >= TO_TIMESTAMP($1::double precision)
+  AND "usage".created_at < TO_TIMESTAMP($2::double precision)
+  AND (
+    lower(BTRIM(COALESCE("usage".status, ''))) IN ('failed', 'error')
+    OR ("usage".error_category IS NOT NULL AND BTRIM("usage".error_category) <> '')
+    OR (
+      BTRIM(COALESCE("usage".status, '')) = ''
+      AND (
+        COALESCE("usage".status_code, 0) >= 400
+        OR ("usage".error_message IS NOT NULL AND BTRIM("usage".error_message) <> '')
+      )
+    )
+  )
+"#,
+        )
+        .bind(query.created_from_unix_secs as f64)
+        .bind(query.created_until_unix_secs as f64)
+        .fetch_one(&self.pool)
+        .await
+        .map_postgres_err()?;
+
+        Ok(row.try_get::<i64, _>("total").map_postgres_err()?.max(0) as u64)
+    }
+
+    pub async fn list_monitoring_usage_errors(
+        &self,
+        query: &UsageMonitoringErrorListQuery,
+    ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
+        let mut builder = QueryBuilder::<Postgres>::new(LIST_USAGE_AUDITS_PREFIX);
+        builder.push(
+            r#"
+WHERE "usage".created_at >= TO_TIMESTAMP(
+"#,
+        );
+        builder
+            .push_bind(query.created_from_unix_secs as f64)
+            .push(
+                r#"::double precision)
+  AND "usage".created_at < TO_TIMESTAMP(
+"#,
+            )
+            .push_bind(query.created_until_unix_secs as f64)
+            .push(
+                r#"::double precision)
+  AND (
+    lower(BTRIM(COALESCE("usage".status, ''))) IN ('failed', 'error')
+    OR ("usage".error_category IS NOT NULL AND BTRIM("usage".error_category) <> '')
+    OR (
+      BTRIM(COALESCE("usage".status, '')) = ''
+      AND (
+        COALESCE("usage".status_code, 0) >= 400
+        OR ("usage".error_message IS NOT NULL AND BTRIM("usage".error_message) <> '')
+      )
+    )
+  )
+ORDER BY "usage".created_at DESC, "usage".id ASC
+"#,
+            );
+        if let Some(limit) = query.limit {
+            builder.push(" LIMIT ").push_bind(limit as i64);
+        }
+
+        let mut rows = builder.build().fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(map_usage_row(&row, false)?);
+        }
+        Ok(items)
+    }
+
+    pub async fn summarize_usage_error_distribution(
+        &self,
+        query: &UsageErrorDistributionQuery,
+    ) -> Result<Vec<StoredUsageErrorDistributionRow>, DataLayerError> {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"
+SELECT
+  TO_CHAR(
+    date_trunc('day', "usage".created_at + (
+      "#,
+        );
+        builder.push_bind(query.tz_offset_minutes);
+        builder.push(
+            r#"::integer * INTERVAL '1 minute'
+    )),
+    'YYYY-MM-DD'
+  ) AS date,
+  "usage".error_category AS error_category,
+  COUNT(*)::BIGINT AS count
+FROM "usage"
+WHERE "usage".created_at >= TO_TIMESTAMP("#,
+        );
+        builder.push_bind(query.created_from_unix_secs as f64);
+        builder.push(
+            r#"::double precision)
+  AND "usage".created_at < TO_TIMESTAMP("#,
+        );
+        builder.push_bind(query.created_until_unix_secs as f64);
+        builder.push(
+            r#"::double precision)
+  AND "usage".error_category IS NOT NULL
+  AND BTRIM("usage".error_category) <> ''
+GROUP BY date, "usage".error_category
+ORDER BY date ASC, count DESC, "usage".error_category ASC
+"#,
+        );
+
+        let mut rows = builder.build().fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(StoredUsageErrorDistributionRow {
+                date: row.try_get::<String, _>("date").map_postgres_err()?,
+                error_category: row
+                    .try_get::<String, _>("error_category")
+                    .map_postgres_err()?,
+                count: row.try_get::<i64, _>("count").map_postgres_err()?.max(0) as u64,
+            });
+        }
+        Ok(items)
+    }
+
+    pub async fn summarize_usage_performance_percentiles(
+        &self,
+        query: &UsagePerformancePercentilesQuery,
+    ) -> Result<Vec<StoredUsagePerformancePercentilesRow>, DataLayerError> {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"
+WITH filtered_usage AS (
+  SELECT
+    TO_CHAR(
+      date_trunc('day', "usage".created_at + (
+        "#,
+        );
+        builder.push_bind(query.tz_offset_minutes);
+        builder.push(
+            r#"::integer * INTERVAL '1 minute'
+      )),
+      'YYYY-MM-DD'
+    ) AS date,
+    "usage".response_time_ms AS response_time_ms,
+    "usage".first_byte_time_ms AS first_byte_time_ms
+  FROM "usage"
+  WHERE "usage".created_at >= TO_TIMESTAMP("#,
+        );
+        builder.push_bind(query.created_from_unix_secs as f64);
+        builder.push(
+            r#"::double precision)
+    AND "usage".created_at < TO_TIMESTAMP("#,
+        );
+        builder.push_bind(query.created_until_unix_secs as f64);
+        builder.push(
+            r#"::double precision)
+    AND "usage".status = 'completed'
+)
+SELECT
+  date,
+  CASE
+    WHEN COUNT(response_time_ms) >= 10
+    THEN FLOOR(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY response_time_ms))::BIGINT
+    ELSE NULL
+  END AS p50_response_time_ms,
+  CASE
+    WHEN COUNT(response_time_ms) >= 10
+    THEN FLOOR(PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY response_time_ms))::BIGINT
+    ELSE NULL
+  END AS p90_response_time_ms,
+  CASE
+    WHEN COUNT(response_time_ms) >= 10
+    THEN FLOOR(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY response_time_ms))::BIGINT
+    ELSE NULL
+  END AS p99_response_time_ms,
+  CASE
+    WHEN COUNT(first_byte_time_ms) >= 10
+    THEN FLOOR(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY first_byte_time_ms))::BIGINT
+    ELSE NULL
+  END AS p50_first_byte_time_ms,
+  CASE
+    WHEN COUNT(first_byte_time_ms) >= 10
+    THEN FLOOR(PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY first_byte_time_ms))::BIGINT
+    ELSE NULL
+  END AS p90_first_byte_time_ms,
+  CASE
+    WHEN COUNT(first_byte_time_ms) >= 10
+    THEN FLOOR(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY first_byte_time_ms))::BIGINT
+    ELSE NULL
+  END AS p99_first_byte_time_ms
+FROM filtered_usage
+GROUP BY date
+ORDER BY date ASC
+"#,
+        );
+
+        let mut rows = builder.build().fetch(&self.pool);
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(StoredUsagePerformancePercentilesRow {
+                date: row.try_get::<String, _>("date").map_postgres_err()?,
+                p50_response_time_ms: row
+                    .try_get::<Option<i64>, _>("p50_response_time_ms")
+                    .map_postgres_err()?
+                    .map(|value| value.max(0) as u64),
+                p90_response_time_ms: row
+                    .try_get::<Option<i64>, _>("p90_response_time_ms")
+                    .map_postgres_err()?
+                    .map(|value| value.max(0) as u64),
+                p99_response_time_ms: row
+                    .try_get::<Option<i64>, _>("p99_response_time_ms")
+                    .map_postgres_err()?
+                    .map(|value| value.max(0) as u64),
+                p50_first_byte_time_ms: row
+                    .try_get::<Option<i64>, _>("p50_first_byte_time_ms")
+                    .map_postgres_err()?
+                    .map(|value| value.max(0) as u64),
+                p90_first_byte_time_ms: row
+                    .try_get::<Option<i64>, _>("p90_first_byte_time_ms")
+                    .map_postgres_err()?
+                    .map(|value| value.max(0) as u64),
+                p99_first_byte_time_ms: row
+                    .try_get::<Option<i64>, _>("p99_first_byte_time_ms")
+                    .map_postgres_err()?
+                    .map(|value| value.max(0) as u64),
+            });
+        }
+        Ok(items)
+    }
+
+    pub async fn summarize_usage_cost_savings(
+        &self,
+        query: &UsageCostSavingsSummaryQuery,
+    ) -> Result<StoredUsageCostSavingsSummary, DataLayerError> {
+        let mut builder = QueryBuilder::<Postgres>::new(
+            r#"
+SELECT
+  COALESCE(SUM(GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0)), 0)::BIGINT
+    AS cache_read_tokens,
+  COALESCE(SUM(COALESCE(CAST("usage".cache_read_cost_usd AS DOUBLE PRECISION), 0)), 0)
+    AS cache_read_cost_usd,
+  COALESCE(SUM(COALESCE(CAST("usage".cache_creation_cost_usd AS DOUBLE PRECISION), 0)), 0)
+    AS cache_creation_cost_usd,
+  COALESCE(SUM(
+    COALESCE(
+      CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION),
+      CAST("usage".output_price_per_1m AS DOUBLE PRECISION),
+      0
+    ) * GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0)::DOUBLE PRECISION / 1000000.0
+  ), 0) AS estimated_full_cost_usd
+FROM "usage"
+LEFT JOIN usage_settlement_snapshots
+  ON usage_settlement_snapshots.request_id = "usage".request_id
+"#,
+        );
+        let mut has_where = false;
+
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        has_where = true;
+        builder
+            .push("\"usage\".created_at >= TO_TIMESTAMP(")
+            .push_bind(query.created_from_unix_secs as f64)
+            .push("::double precision)");
+        builder.push(if has_where { " AND " } else { " WHERE " });
+        builder
+            .push("\"usage\".created_at < TO_TIMESTAMP(")
+            .push_bind(query.created_until_unix_secs as f64)
+            .push("::double precision)");
+        if let Some(user_id) = query.user_id.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            builder
+                .push("\"usage\".user_id = ")
+                .push_bind(user_id.to_string());
+        }
+        if let Some(provider_name) = query.provider_name.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            builder
+                .push("\"usage\".provider_name = ")
+                .push_bind(provider_name.to_string());
+        }
+        if let Some(model) = query.model.as_deref() {
+            builder.push(if has_where { " AND " } else { " WHERE " });
+            builder
+                .push("\"usage\".model = ")
+                .push_bind(model.to_string());
+        }
+
+        let row = builder
+            .build()
+            .fetch_one(&self.pool)
+            .await
+            .map_postgres_err()?;
+        Ok(StoredUsageCostSavingsSummary {
+            cache_read_tokens: row
+                .try_get::<i64, _>("cache_read_tokens")
+                .map_postgres_err()?
+                .max(0) as u64,
+            cache_read_cost_usd: row
+                .try_get::<f64, _>("cache_read_cost_usd")
+                .map_postgres_err()?,
+            cache_creation_cost_usd: row
+                .try_get::<f64, _>("cache_creation_cost_usd")
+                .map_postgres_err()?,
+            estimated_full_cost_usd: row
+                .try_get::<f64, _>("estimated_full_cost_usd")
+                .map_postgres_err()?,
         })
     }
 
@@ -2476,6 +4191,13 @@ impl UsageReadRepository for SqlxUsageReadRepository {
         Self::find_by_id(self, id).await
     }
 
+    async fn list_by_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
+        Self::list_by_ids(self, ids).await
+    }
+
     async fn find_by_request_id(
         &self,
         request_id: &str,
@@ -2498,6 +4220,20 @@ impl UsageReadRepository for SqlxUsageReadRepository {
         Self::count_usage_audits(self, query).await
     }
 
+    async fn list_usage_audits_by_keyword_search(
+        &self,
+        query: &UsageAuditKeywordSearchQuery,
+    ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
+        Self::list_usage_audits_by_keyword_search(self, query).await
+    }
+
+    async fn count_usage_audits_by_keyword_search(
+        &self,
+        query: &UsageAuditKeywordSearchQuery,
+    ) -> Result<u64, DataLayerError> {
+        Self::count_usage_audits_by_keyword_search(self, query).await
+    }
+
     async fn aggregate_usage_audits(
         &self,
         query: &UsageAuditAggregationQuery,
@@ -2510,6 +4246,97 @@ impl UsageReadRepository for SqlxUsageReadRepository {
         query: &UsageAuditSummaryQuery,
     ) -> Result<StoredUsageAuditSummary, DataLayerError> {
         Self::summarize_usage_audits(self, query).await
+    }
+
+    async fn summarize_usage_cache_hit_summary(
+        &self,
+        query: &UsageCacheHitSummaryQuery,
+    ) -> Result<StoredUsageCacheHitSummary, DataLayerError> {
+        Self::summarize_usage_cache_hit_summary(self, query).await
+    }
+
+    async fn summarize_usage_settled_cost(
+        &self,
+        query: &UsageSettledCostSummaryQuery,
+    ) -> Result<StoredUsageSettledCostSummary, DataLayerError> {
+        Self::summarize_usage_settled_cost(self, query).await
+    }
+
+    async fn summarize_usage_cache_affinity_hit_summary(
+        &self,
+        query: &UsageCacheAffinityHitSummaryQuery,
+    ) -> Result<StoredUsageCacheAffinityHitSummary, DataLayerError> {
+        Self::summarize_usage_cache_affinity_hit_summary(self, query).await
+    }
+
+    async fn list_usage_cache_affinity_intervals(
+        &self,
+        query: &UsageCacheAffinityIntervalQuery,
+    ) -> Result<Vec<StoredUsageCacheAffinityIntervalRow>, DataLayerError> {
+        Self::list_usage_cache_affinity_intervals(self, query).await
+    }
+
+    async fn summarize_dashboard_usage(
+        &self,
+        query: &UsageDashboardSummaryQuery,
+    ) -> Result<StoredUsageDashboardSummary, DataLayerError> {
+        Self::summarize_dashboard_usage(self, query).await
+    }
+
+    async fn list_dashboard_daily_breakdown(
+        &self,
+        query: &UsageDashboardDailyBreakdownQuery,
+    ) -> Result<Vec<StoredUsageDashboardDailyBreakdownRow>, DataLayerError> {
+        Self::list_dashboard_daily_breakdown(self, query).await
+    }
+
+    async fn summarize_dashboard_provider_counts(
+        &self,
+        query: &UsageDashboardProviderCountsQuery,
+    ) -> Result<Vec<StoredUsageDashboardProviderCount>, DataLayerError> {
+        Self::summarize_dashboard_provider_counts(self, query).await
+    }
+
+    async fn summarize_usage_breakdown(
+        &self,
+        query: &UsageBreakdownSummaryQuery,
+    ) -> Result<Vec<StoredUsageBreakdownSummaryRow>, DataLayerError> {
+        Self::summarize_usage_breakdown(self, query).await
+    }
+
+    async fn count_monitoring_usage_errors(
+        &self,
+        query: &UsageMonitoringErrorCountQuery,
+    ) -> Result<u64, DataLayerError> {
+        Self::count_monitoring_usage_errors(self, query).await
+    }
+
+    async fn list_monitoring_usage_errors(
+        &self,
+        query: &UsageMonitoringErrorListQuery,
+    ) -> Result<Vec<StoredRequestUsageAudit>, DataLayerError> {
+        Self::list_monitoring_usage_errors(self, query).await
+    }
+
+    async fn summarize_usage_error_distribution(
+        &self,
+        query: &UsageErrorDistributionQuery,
+    ) -> Result<Vec<StoredUsageErrorDistributionRow>, DataLayerError> {
+        Self::summarize_usage_error_distribution(self, query).await
+    }
+
+    async fn summarize_usage_performance_percentiles(
+        &self,
+        query: &UsagePerformancePercentilesQuery,
+    ) -> Result<Vec<StoredUsagePerformancePercentilesRow>, DataLayerError> {
+        Self::summarize_usage_performance_percentiles(self, query).await
+    }
+
+    async fn summarize_usage_cost_savings(
+        &self,
+        query: &UsageCostSavingsSummaryQuery,
+    ) -> Result<StoredUsageCostSavingsSummary, DataLayerError> {
+        Self::summarize_usage_cost_savings(self, query).await
     }
 
     async fn summarize_usage_time_series(

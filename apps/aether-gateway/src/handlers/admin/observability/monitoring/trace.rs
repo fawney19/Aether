@@ -51,9 +51,15 @@ pub(super) async fn build_admin_monitoring_trace_request_response(
             attempted_only,
         ));
     };
+    let usage = state
+        .data
+        .read_request_usage_audit(&request_id)
+        .await
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
 
     Ok(build_admin_monitoring_trace_request_payload_response(
         &trace,
+        usage.as_ref(),
     ))
 }
 

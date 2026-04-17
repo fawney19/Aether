@@ -4,7 +4,7 @@ use super::{
     GatewayError, GatewayPublicRequestContext, Response, WALLET_LEGACY_TIMEZONE,
 };
 use crate::handlers::shared::round_to;
-use aether_data_contracts::repository::usage::UsageAuditListQuery;
+use aether_data_contracts::repository::usage::UsageSettledCostSummaryQuery;
 use chrono::Utc;
 use serde_json::json;
 
@@ -210,20 +210,11 @@ pub(super) async fn handle_wallet_today_cost(
     .unwrap_or_default();
     let end_unix_secs = start_unix_secs.saturating_add(24 * 3600);
 
-    let items = match state
-        .list_usage_audits(&UsageAuditListQuery {
-            created_from_unix_secs: Some(start_unix_secs),
-            created_until_unix_secs: Some(end_unix_secs),
+    let summary = match state
+        .summarize_usage_settled_cost(&UsageSettledCostSummaryQuery {
+            created_from_unix_secs: start_unix_secs,
+            created_until_unix_secs: end_unix_secs,
             user_id: Some(auth.user.id.clone()),
-            provider_name: None,
-            model: None,
-            api_format: None,
-            statuses: None,
-            is_stream: None,
-            error_only: false,
-            limit: None,
-            offset: None,
-            newest_first: false,
         })
         .await
     {
@@ -237,31 +228,11 @@ pub(super) async fn handle_wallet_today_cost(
         }
     };
 
-    let settled = items
-        .into_iter()
-        .filter(|item| item.billing_status == "settled" && item.total_cost_usd > 0.0)
-        .collect::<Vec<_>>();
-    let total_cost = settled.iter().map(|item| item.total_cost_usd).sum::<f64>();
-    let total_requests = settled.len() as u64;
-    let input_tokens = settled.iter().map(|item| item.input_tokens).sum::<u64>();
-    let output_tokens = settled.iter().map(|item| item.output_tokens).sum::<u64>();
-    let cache_creation_tokens = settled
-        .iter()
-        .map(|item| item.cache_creation_input_tokens)
-        .sum::<u64>();
-    let cache_read_tokens = settled
-        .iter()
-        .map(|item| item.cache_read_input_tokens)
-        .sum::<u64>();
-    let first_finalized_at = settled
-        .iter()
-        .filter_map(|item| item.finalized_at_unix_secs)
-        .min()
+    let first_finalized_at = summary
+        .first_finalized_at_unix_secs
         .and_then(unix_secs_to_rfc3339);
-    let last_finalized_at = settled
-        .iter()
-        .filter_map(|item| item.finalized_at_unix_secs)
-        .max()
+    let last_finalized_at = summary
+        .last_finalized_at_unix_secs
         .and_then(unix_secs_to_rfc3339);
 
     build_auth_json_response(
@@ -270,12 +241,12 @@ pub(super) async fn handle_wallet_today_cost(
             "id": serde_json::Value::Null,
             "date": today.to_string(),
             "timezone": "UTC",
-            "total_cost": round_to(total_cost, 6),
-            "total_requests": total_requests,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "cache_creation_tokens": cache_creation_tokens,
-            "cache_read_tokens": cache_read_tokens,
+            "total_cost": round_to(summary.total_cost_usd, 6),
+            "total_requests": summary.total_requests,
+            "input_tokens": summary.input_tokens,
+            "output_tokens": summary.output_tokens,
+            "cache_creation_tokens": summary.cache_creation_tokens,
+            "cache_read_tokens": summary.cache_read_tokens,
             "first_finalized_at": first_finalized_at,
             "last_finalized_at": last_finalized_at,
             "aggregated_at": Utc::now().to_rfc3339(),

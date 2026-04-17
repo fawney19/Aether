@@ -24,12 +24,24 @@ pub trait UsageBillingEventEnricher: Send + Sync {
     async fn enrich_usage_event(&self, event: &mut UsageEvent) -> Result<(), DataLayerError>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UsageRequestRecordLevel {
+    Basic,
+    #[default]
+    Full,
+}
+
+#[async_trait]
 pub trait UsageRuntimeAccess:
     UsageRecordWriter + UsageSettlementWriter + UsageBillingEventEnricher + Send + Sync
 {
     fn has_usage_writer(&self) -> bool;
     fn has_usage_worker_runner(&self) -> bool;
     fn usage_worker_runner(&self) -> Option<RedisStreamRunner>;
+
+    async fn request_record_level(&self) -> Result<UsageRequestRecordLevel, DataLayerError> {
+        Ok(UsageRequestRecordLevel::Full)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +209,7 @@ impl UsageRuntime {
         spawn_on_usage_background_runtime(boxed_usage_task(async move {
             match build_sync_terminal_usage_event_offthread(input).await {
                 Ok(mut event) => {
+                    apply_request_record_level_from_data(&data, &mut event).await;
                     if let Err(err) = data.enrich_usage_event(&mut event).await {
                         warn!(
                             event_name = "usage_sync_terminal_billing_enrichment_failed",
@@ -244,6 +257,7 @@ impl UsageRuntime {
         spawn_on_usage_background_runtime(boxed_usage_task(async move {
             match build_stream_terminal_usage_event_offthread(input).await {
                 Ok(mut event) => {
+                    apply_request_record_level_from_data(&data, &mut event).await;
                     if let Err(err) = data.enrich_usage_event(&mut event).await {
                         warn!(
                             event_name = "usage_stream_terminal_billing_enrichment_failed",
@@ -289,6 +303,7 @@ impl UsageRuntime {
         if !self.is_enabled() {
             return;
         }
+        apply_request_record_level_from_data(data, &mut event).await;
         if let Err(err) = data.enrich_usage_event(&mut event).await {
             warn!(
                 event_name = "usage_terminal_billing_enrichment_failed",
@@ -431,6 +446,40 @@ fn join_error_to_data_layer(err: tokio::task::JoinError) -> DataLayerError {
     DataLayerError::UnexpectedValue(format!("usage builder task join failed: {err}"))
 }
 
+async fn apply_request_record_level_from_data<T>(data: &T, event: &mut UsageEvent)
+where
+    T: UsageRuntimeAccess,
+{
+    match data.request_record_level().await {
+        Ok(level) => apply_request_record_level(level, event),
+        Err(err) => {
+            warn!(
+                event_name = "usage_request_record_level_read_failed",
+                log_type = "event",
+                request_id = %event.request_id,
+                fallback = "full",
+                error = %err,
+                "usage runtime failed to read request record level; keeping full capture"
+            );
+        }
+    }
+}
+
+fn apply_request_record_level(level: UsageRequestRecordLevel, event: &mut UsageEvent) {
+    if !matches!(level, UsageRequestRecordLevel::Basic) {
+        return;
+    }
+
+    event.data.request_body = None;
+    event.data.request_body_ref = None;
+    event.data.provider_request_body = None;
+    event.data.provider_request_body_ref = None;
+    event.data.response_body = None;
+    event.data.response_body_ref = None;
+    event.data.client_response_body = None;
+    event.data.client_response_body_ref = None;
+}
+
 fn boxed_usage_task<F>(task: F) -> Pin<Box<dyn Future<Output = ()> + Send>>
 where
     F: Future<Output = ()> + Send + 'static,
@@ -443,4 +492,52 @@ fn now_unix_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{apply_request_record_level, UsageRequestRecordLevel};
+    use crate::{UsageEvent, UsageEventData, UsageEventType};
+
+    #[test]
+    fn basic_request_record_level_strips_body_capture_but_preserves_derived_fields() {
+        let mut event = UsageEvent::new(
+            UsageEventType::Failed,
+            "req-basic-1",
+            UsageEventData {
+                provider_name: "OpenAI".to_string(),
+                model: "gpt-5".to_string(),
+                total_tokens: Some(42),
+                error_message: Some("upstream failed".to_string()),
+                request_body: Some(json!({"messages":[{"role":"user","content":"hello"}]})),
+                request_body_ref: Some("usage://request/req-basic-1/request_body".to_string()),
+                provider_request_body: Some(json!({"model":"gpt-5"})),
+                provider_request_body_ref: Some(
+                    "usage://request/req-basic-1/provider_request_body".to_string(),
+                ),
+                response_body: Some(json!({"error":{"message":"bad gateway"}})),
+                response_body_ref: Some("usage://request/req-basic-1/response_body".to_string()),
+                client_response_body: Some(json!({"detail":"bad gateway"})),
+                client_response_body_ref: Some(
+                    "usage://request/req-basic-1/client_response_body".to_string(),
+                ),
+                ..UsageEventData::default()
+            },
+        );
+
+        apply_request_record_level(UsageRequestRecordLevel::Basic, &mut event);
+
+        assert_eq!(event.data.total_tokens, Some(42));
+        assert_eq!(event.data.error_message.as_deref(), Some("upstream failed"));
+        assert!(event.data.request_body.is_none());
+        assert!(event.data.request_body_ref.is_none());
+        assert!(event.data.provider_request_body.is_none());
+        assert!(event.data.provider_request_body_ref.is_none());
+        assert!(event.data.response_body.is_none());
+        assert!(event.data.response_body_ref.is_none());
+        assert!(event.data.client_response_body.is_none());
+        assert!(event.data.client_response_body_ref.is_none());
+    }
 }

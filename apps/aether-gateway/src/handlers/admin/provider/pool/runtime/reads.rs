@@ -60,7 +60,7 @@ pub(crate) async fn read_admin_provider_pool_cooldown_counts(
         Ok(counts) => provider_ids
             .iter()
             .cloned()
-            .zip(counts.into_iter())
+            .zip(counts)
             .map(|(provider_id, count)| (provider_id, count as usize))
             .collect(),
         Err(err) => {
@@ -155,8 +155,8 @@ pub(crate) async fn read_admin_provider_pool_runtime_state(
         for (((key_id, _cooldown_key), reason), ttl) in key_ids
             .iter()
             .zip(cooldown_keys.iter())
-            .zip(cooldown_reasons.into_iter())
-            .zip(cooldown_ttls.into_iter())
+            .zip(cooldown_reasons)
+            .zip(cooldown_ttls)
         {
             if let Some(reason) = reason {
                 runtime
@@ -197,7 +197,7 @@ pub(crate) async fn read_admin_provider_pool_runtime_state(
                 );
                 vec![Vec::new(); cost_keys.len()]
             });
-        for (key_id, members) in key_ids.iter().zip(members_by_key.into_iter()) {
+        for (key_id, members) in key_ids.iter().zip(members_by_key) {
             let total = members
                 .iter()
                 .map(|member| parse_pool_cost_member(member))
@@ -218,7 +218,7 @@ pub(crate) async fn read_admin_provider_pool_runtime_state(
             .query_async::<Vec<Option<f64>>>(&mut connection)
             .await
         {
-            for (key_id, score) in key_ids.iter().zip(scores.into_iter()) {
+            for (key_id, score) in key_ids.iter().zip(scores) {
                 if let Some(score) = score {
                     runtime.lru_score_by_key.insert(key_id.clone(), score);
                 }

@@ -7,7 +7,6 @@ pub(crate) use crate::handlers::admin::{
 
 use crate::handlers::admin::{
     admin_stats_bad_request_response as admin_stats_bad_request_response_impl,
-    list_usage_for_optional_range as list_usage_for_optional_range_impl,
     parse_bounded_u32 as parse_bounded_u32_impl, round_to as round_to_impl,
 };
 use crate::GatewayError;
@@ -59,14 +58,6 @@ pub(crate) async fn maybe_build_local_admin_usage_response(
 
 pub(crate) fn admin_stats_bad_request_response(detail: String) -> Response<Body> {
     admin_stats_bad_request_response_impl(detail)
-}
-
-pub(crate) async fn list_usage_for_optional_range(
-    state: &AdminAppState<'_>,
-    time_range: Option<&AdminStatsTimeRange>,
-    filters: &AdminStatsUsageFilter,
-) -> Result<Vec<aether_data_contracts::repository::usage::StoredRequestUsageAudit>, GatewayError> {
-    list_usage_for_optional_range_impl(state, time_range, filters).await
 }
 
 pub(crate) fn parse_bounded_u32(

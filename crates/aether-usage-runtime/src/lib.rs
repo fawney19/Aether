@@ -30,7 +30,9 @@ pub use report_context::{
     build_locally_actionable_report_context_from_request_candidate,
     build_locally_actionable_report_context_from_video_task, report_context_is_locally_actionable,
 };
-pub use runtime::{UsageBillingEventEnricher, UsageRuntime, UsageRuntimeAccess};
+pub use runtime::{
+    UsageBillingEventEnricher, UsageRequestRecordLevel, UsageRuntime, UsageRuntimeAccess,
+};
 pub use settlement::{settle_usage_if_needed, UsageSettlementWriter};
 pub use standardized_usage::StandardizedUsage;
 pub use usage_mapper::{map_usage, map_usage_from_response, UsageMapper};

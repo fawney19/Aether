@@ -2,10 +2,11 @@ use super::{
     build_auth_error_response, query_param_value, resolve_authenticated_local_user, AppState,
     GatewayError, GatewayPublicRequestContext,
 };
-use aether_billing::{
-    normalize_input_tokens_for_billing, normalize_total_input_context_for_cache_hit_rate,
+use aether_data_contracts::repository::usage::{
+    StoredUsageDashboardDailyBreakdownRow, StoredUsageDashboardSummary,
+    UsageAuditAggregationGroupBy, UsageAuditAggregationQuery, UsageDashboardDailyBreakdownQuery,
+    UsageDashboardProviderCountsQuery, UsageDashboardSummaryQuery,
 };
-use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageAuditListQuery};
 use axum::{
     body::Body,
     http,
@@ -38,7 +39,7 @@ struct DashboardUsageTotals {
     total_cost_usd: f64,
     actual_total_cost_usd: f64,
     error_requests: u64,
-    response_time_sum_ms: u64,
+    response_time_sum_ms: f64,
     response_time_samples: u64,
 }
 
@@ -47,7 +48,7 @@ struct DashboardModelAggregate {
     requests: u64,
     tokens: u64,
     cost: f64,
-    response_time_sum_ms: u64,
+    response_time_sum_ms: f64,
     response_time_samples: u64,
 }
 
@@ -73,29 +74,32 @@ pub(super) fn decision_route_kind(request_context: &GatewayPublicRequestContext)
 }
 
 impl DashboardUsageTotals {
-    fn record(&mut self, item: &StoredRequestUsageAudit) {
-        let cache_creation_tokens = dashboard_cache_creation_tokens(item);
-        self.requests += 1;
-        self.input_tokens += item.input_tokens;
-        self.effective_input_tokens += dashboard_effective_input_tokens(item);
-        self.output_tokens += item.output_tokens;
-        self.total_tokens += item.total_tokens;
-        self.cache_creation_tokens += cache_creation_tokens;
-        self.cache_read_tokens += item.cache_read_input_tokens;
-        self.cache_hit_total_input_context += dashboard_total_input_context(item);
-        self.cache_creation_cost_usd += item.cache_creation_cost_usd;
-        self.cache_read_cost_usd += item.cache_read_cost_usd;
-        self.total_cost_usd += item.total_cost_usd;
-        self.actual_total_cost_usd += item.actual_total_cost_usd;
-        if item.status_code.is_some_and(|value| value >= 400)
-            || item.status.eq_ignore_ascii_case("failed")
-        {
-            self.error_requests += 1;
-        }
-        if let Some(response_time_ms) = item.response_time_ms {
-            self.response_time_sum_ms += response_time_ms;
-            self.response_time_samples += 1;
-        }
+    fn absorb_summary(&mut self, summary: &StoredUsageDashboardSummary) {
+        self.requests = self.requests.saturating_add(summary.total_requests);
+        self.input_tokens = self.input_tokens.saturating_add(summary.input_tokens);
+        self.effective_input_tokens = self
+            .effective_input_tokens
+            .saturating_add(summary.effective_input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(summary.output_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(summary.total_tokens);
+        self.cache_creation_tokens = self
+            .cache_creation_tokens
+            .saturating_add(summary.cache_creation_tokens);
+        self.cache_read_tokens = self
+            .cache_read_tokens
+            .saturating_add(summary.cache_read_tokens);
+        self.cache_hit_total_input_context = self
+            .cache_hit_total_input_context
+            .saturating_add(summary.total_input_context);
+        self.cache_creation_cost_usd += summary.cache_creation_cost_usd;
+        self.cache_read_cost_usd += summary.cache_read_cost_usd;
+        self.total_cost_usd += summary.total_cost_usd;
+        self.actual_total_cost_usd += summary.actual_total_cost_usd;
+        self.error_requests = self.error_requests.saturating_add(summary.error_requests);
+        self.response_time_sum_ms += summary.response_time_sum_ms;
+        self.response_time_samples = self
+            .response_time_samples
+            .saturating_add(summary.response_time_samples);
     }
 
     fn avg_response_time_seconds(&self) -> f64 {
@@ -103,7 +107,7 @@ impl DashboardUsageTotals {
             0.0
         } else {
             dashboard_round_f64(
-                (self.response_time_sum_ms as f64 / self.response_time_samples as f64) / 1000.0,
+                (self.response_time_sum_ms / self.response_time_samples as f64) / 1000.0,
                 4,
             )
         }
@@ -119,49 +123,6 @@ impl DashboardUsageTotals {
             )
         }
     }
-}
-
-fn dashboard_usage_should_count_in_summary(item: &StoredRequestUsageAudit) -> bool {
-    !matches!(item.status.as_str(), "pending" | "streaming")
-        && !matches!(item.provider_name.as_str(), "unknown" | "pending")
-}
-
-fn dashboard_cache_creation_tokens(item: &StoredRequestUsageAudit) -> u64 {
-    let classified = item
-        .cache_creation_ephemeral_5m_input_tokens
-        .saturating_add(item.cache_creation_ephemeral_1h_input_tokens);
-    if item.cache_creation_input_tokens == 0 && classified > 0 {
-        classified
-    } else {
-        item.cache_creation_input_tokens
-    }
-}
-
-fn dashboard_total_input_context(item: &StoredRequestUsageAudit) -> u64 {
-    let api_format = item
-        .endpoint_api_format
-        .as_deref()
-        .or(item.api_format.as_deref());
-    let input_tokens = i64::try_from(item.input_tokens).unwrap_or(i64::MAX);
-    let cache_creation_tokens =
-        i64::try_from(dashboard_cache_creation_tokens(item)).unwrap_or(i64::MAX);
-    let cache_read_tokens = i64::try_from(item.cache_read_input_tokens).unwrap_or(i64::MAX);
-    normalize_total_input_context_for_cache_hit_rate(
-        api_format,
-        input_tokens,
-        cache_creation_tokens,
-        cache_read_tokens,
-    ) as u64
-}
-
-fn dashboard_effective_input_tokens(item: &StoredRequestUsageAudit) -> u64 {
-    let api_format = item
-        .endpoint_api_format
-        .as_deref()
-        .or(item.api_format.as_deref());
-    let input_tokens = i64::try_from(item.input_tokens).unwrap_or(i64::MAX);
-    let cache_read_tokens = i64::try_from(item.cache_read_input_tokens).unwrap_or(i64::MAX);
-    normalize_input_tokens_for_billing(api_format, input_tokens, cache_read_tokens) as u64
 }
 
 fn dashboard_round_f64(value: f64, decimals: u32) -> f64 {
@@ -453,21 +414,12 @@ fn dashboard_range_bounds_unix(range: DashboardDateRange) -> Option<(u64, u64)> 
     Some((start_utc.max(0) as u64, end_utc.max(0) as u64))
 }
 
-fn dashboard_usage_local_date(
-    item: &StoredRequestUsageAudit,
-    tz_offset_minutes: i32,
-) -> Option<chrono::NaiveDate> {
-    let timestamp = i64::try_from(item.created_at_unix_ms).ok()?;
-    let datetime = chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0)?;
-    Some((datetime + chrono::Duration::minutes(i64::from(tz_offset_minutes))).date_naive())
-}
-
-async fn dashboard_list_usage_for_range(
+async fn dashboard_summary_for_range(
     state: &AppState,
     range: DashboardDateRange,
     user_id: Option<&str>,
     error_context: &str,
-) -> Result<Vec<StoredRequestUsageAudit>, Response<Body>> {
+) -> Result<StoredUsageDashboardSummary, Response<Body>> {
     let Some((created_from_unix_secs, created_until_unix_secs)) =
         dashboard_range_bounds_unix(range)
     else {
@@ -479,26 +431,14 @@ async fn dashboard_list_usage_for_range(
     };
 
     match state
-        .list_usage_audits(&UsageAuditListQuery {
-            created_from_unix_secs: Some(created_from_unix_secs),
-            created_until_unix_secs: Some(created_until_unix_secs),
+        .summarize_dashboard_usage(&UsageDashboardSummaryQuery {
+            created_from_unix_secs,
+            created_until_unix_secs,
             user_id: user_id.map(ToOwned::to_owned),
-            provider_name: None,
-            model: None,
-            api_format: None,
-            statuses: None,
-            is_stream: None,
-            error_only: false,
-            limit: None,
-            offset: None,
-            newest_first: false,
         })
         .await
     {
-        Ok(mut value) => {
-            value.retain(dashboard_usage_should_count_in_summary);
-            Ok(value)
-        }
+        Ok(value) => Ok(value),
         Err(err) => Err(build_auth_error_response(
             http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("{error_context}: {err:?}"),
@@ -507,11 +447,45 @@ async fn dashboard_list_usage_for_range(
     }
 }
 
-fn dashboard_usage_totals(usage: &[StoredRequestUsageAudit]) -> DashboardUsageTotals {
-    let mut totals = DashboardUsageTotals::default();
-    for item in usage {
-        totals.record(item);
+async fn dashboard_daily_breakdown_for_range(
+    state: &AppState,
+    range: DashboardDateRange,
+    user_id: Option<&str>,
+    error_context: &str,
+) -> Result<Vec<StoredUsageDashboardDailyBreakdownRow>, Response<Body>> {
+    let Some((created_from_unix_secs, created_until_unix_secs)) =
+        dashboard_range_bounds_unix(range)
+    else {
+        return Err(build_auth_error_response(
+            http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{error_context}: invalid time range"),
+            false,
+        ));
+    };
+
+    match state
+        .list_dashboard_daily_breakdown(&UsageDashboardDailyBreakdownQuery {
+            created_from_unix_secs,
+            created_until_unix_secs,
+            tz_offset_minutes: range.tz_offset_minutes,
+            user_id: user_id.map(ToOwned::to_owned),
+        })
+        .await
+    {
+        Ok(value) => Ok(value),
+        Err(err) => Err(build_auth_error_response(
+            http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{error_context}: {err:?}"),
+            false,
+        )),
     }
+}
+
+fn dashboard_usage_totals_from_summary(
+    summary: &StoredUsageDashboardSummary,
+) -> DashboardUsageTotals {
+    let mut totals = DashboardUsageTotals::default();
+    totals.absorb_summary(summary);
     totals
 }
 
@@ -545,17 +519,28 @@ async fn dashboard_load_api_key_counts(
 
 async fn dashboard_load_user_counts(
     state: &AppState,
-    fallback_user_ids: &[String],
+    range: DashboardDateRange,
 ) -> Result<(u64, u64), GatewayError> {
     let summary = state.summarize_export_users().await?;
     if summary.total > 0 {
         return Ok((summary.total, summary.active));
     }
-    let unique = fallback_user_ids
-        .iter()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    Ok((unique.len() as u64, unique.len() as u64))
+
+    let Some((created_from_unix_secs, created_until_unix_secs)) =
+        dashboard_range_bounds_unix(range)
+    else {
+        return Ok((0, 0));
+    };
+    let fallback = state
+        .aggregate_usage_audits(&UsageAuditAggregationQuery {
+            created_from_unix_secs,
+            created_until_unix_secs,
+            group_by: UsageAuditAggregationGroupBy::User,
+            limit: 10_000,
+        })
+        .await?;
+    let count = fallback.len() as u64;
+    Ok((count, count))
 }
 
 pub(super) async fn handle_dashboard_stats_get(
@@ -605,7 +590,7 @@ pub(super) async fn handle_dashboard_stats_get(
         tz_offset_minutes: summary_range.tz_offset_minutes,
     };
     let user_filter = (!is_admin).then_some(auth.user.id.as_str());
-    let period_usage = match dashboard_list_usage_for_range(
+    let period_summary = match dashboard_summary_for_range(
         state,
         summary_range,
         user_filter,
@@ -616,7 +601,7 @@ pub(super) async fn handle_dashboard_stats_get(
         Ok(value) => value,
         Err(response) => return response,
     };
-    let today_usage = match dashboard_list_usage_for_range(
+    let today_summary = match dashboard_summary_for_range(
         state,
         today_range,
         user_filter,
@@ -628,14 +613,8 @@ pub(super) async fn handle_dashboard_stats_get(
         Err(response) => return response,
     };
 
-    let period_totals = dashboard_usage_totals(&period_usage);
-    let today_totals = dashboard_usage_totals(&today_usage);
-    let fallback_user_ids = period_usage
-        .iter()
-        .filter_map(|item| item.user_id.clone())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let period_totals = dashboard_usage_totals_from_summary(&period_summary);
+    let today_totals = dashboard_usage_totals_from_summary(&today_summary);
 
     let api_key_counts = match dashboard_load_api_key_counts(state, is_admin, &auth.user.id).await {
         Ok(value) => value,
@@ -673,7 +652,7 @@ pub(super) async fn handle_dashboard_stats_get(
 
     if is_admin {
         let (total_users, active_users) =
-            match dashboard_load_user_counts(state, &fallback_user_ids).await {
+            match dashboard_load_user_counts(state, summary_range).await {
                 Ok(value) => value,
                 Err(err) => {
                     return build_auth_error_response(
@@ -834,25 +813,33 @@ pub(super) async fn handle_dashboard_stats_get(
 
 fn dashboard_daily_aggregate_record(
     aggregate: &mut DashboardDailyAggregate,
-    item: &StoredRequestUsageAudit,
+    row: &StoredUsageDashboardDailyBreakdownRow,
 ) {
-    aggregate.totals.record(item);
-    let model = aggregate.models.entry(item.model.clone()).or_default();
-    model.requests += 1;
-    model.tokens += item.total_tokens;
-    model.cost += item.total_cost_usd;
-    if let Some(response_time_ms) = item.response_time_ms {
-        model.response_time_sum_ms += response_time_ms;
-        model.response_time_samples += 1;
-    }
+    aggregate.totals.requests = aggregate.totals.requests.saturating_add(row.requests);
+    aggregate.totals.total_tokens = aggregate
+        .totals
+        .total_tokens
+        .saturating_add(row.total_tokens);
+    aggregate.totals.total_cost_usd += row.total_cost_usd;
+    aggregate.totals.response_time_sum_ms += row.response_time_sum_ms;
+    aggregate.totals.response_time_samples = aggregate
+        .totals
+        .response_time_samples
+        .saturating_add(row.response_time_samples);
 
-    let provider = aggregate
-        .providers
-        .entry(item.provider_name.clone())
-        .or_default();
-    provider.requests += 1;
-    provider.tokens += item.total_tokens;
-    provider.cost += item.total_cost_usd;
+    let model = aggregate.models.entry(row.model.clone()).or_default();
+    model.requests = model.requests.saturating_add(row.requests);
+    model.tokens = model.tokens.saturating_add(row.total_tokens);
+    model.cost += row.total_cost_usd;
+    model.response_time_sum_ms += row.response_time_sum_ms;
+    model.response_time_samples = model
+        .response_time_samples
+        .saturating_add(row.response_time_samples);
+
+    let provider = aggregate.providers.entry(row.provider.clone()).or_default();
+    provider.requests = provider.requests.saturating_add(row.requests);
+    provider.tokens = provider.tokens.saturating_add(row.total_tokens);
+    provider.cost += row.total_cost_usd;
 }
 
 pub(super) async fn handle_dashboard_daily_stats_get(
@@ -896,7 +883,7 @@ pub(super) async fn handle_dashboard_daily_stats_get(
         Err(detail) => return dashboard_bad_request_response(detail),
     };
     let user_filter = (!is_admin).then_some(auth.user.id.as_str());
-    let usage = match dashboard_list_usage_for_range(
+    let usage = match dashboard_daily_breakdown_for_range(
         state,
         range,
         user_filter,
@@ -914,28 +901,26 @@ pub(super) async fn handle_dashboard_daily_stats_get(
     let mut provider_summary =
         std::collections::BTreeMap::<String, DashboardProviderAggregate>::new();
 
-    for item in &usage {
-        let Some(date) = dashboard_usage_local_date(item, range.tz_offset_minutes) else {
+    for row in &usage {
+        let Ok(date) = chrono::NaiveDate::parse_from_str(&row.date, "%Y-%m-%d") else {
             continue;
         };
         let aggregate = by_date.entry(date).or_default();
-        dashboard_daily_aggregate_record(aggregate, item);
+        dashboard_daily_aggregate_record(aggregate, row);
 
-        let model = model_summary.entry(item.model.clone()).or_default();
-        model.requests += 1;
-        model.tokens += item.total_tokens;
-        model.cost += item.total_cost_usd;
-        if let Some(response_time_ms) = item.response_time_ms {
-            model.response_time_sum_ms += response_time_ms;
-            model.response_time_samples += 1;
-        }
+        let model = model_summary.entry(row.model.clone()).or_default();
+        model.requests = model.requests.saturating_add(row.requests);
+        model.tokens = model.tokens.saturating_add(row.total_tokens);
+        model.cost += row.total_cost_usd;
+        model.response_time_sum_ms += row.response_time_sum_ms;
+        model.response_time_samples = model
+            .response_time_samples
+            .saturating_add(row.response_time_samples);
 
-        let provider = provider_summary
-            .entry(item.provider_name.clone())
-            .or_default();
-        provider.requests += 1;
-        provider.tokens += item.total_tokens;
-        provider.cost += item.total_cost_usd;
+        let provider = provider_summary.entry(row.provider.clone()).or_default();
+        provider.requests = provider.requests.saturating_add(row.requests);
+        provider.tokens = provider.tokens.saturating_add(row.total_tokens);
+        provider.cost += row.total_cost_usd;
     }
 
     let mut daily_stats = Vec::new();
@@ -1009,8 +994,7 @@ pub(super) async fn handle_dashboard_daily_stats_get(
                 0.0
             } else {
                 dashboard_round_f64(
-                    (value.response_time_sum_ms as f64 / value.response_time_samples as f64)
-                        / 1000.0,
+                    (value.response_time_sum_ms / value.response_time_samples as f64) / 1000.0,
                     4,
                 )
             };
@@ -1213,20 +1197,12 @@ pub(super) async fn handle_dashboard_provider_status_get(
     let since_unix_secs = u64::try_from(chrono::Utc::now().timestamp())
         .unwrap_or_default()
         .saturating_sub(24 * 3600);
+    let now_unix_secs = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default();
     let usage = match state
-        .list_usage_audits(&UsageAuditListQuery {
-            created_from_unix_secs: Some(since_unix_secs),
-            created_until_unix_secs: None,
+        .summarize_dashboard_provider_counts(&UsageDashboardProviderCountsQuery {
+            created_from_unix_secs: since_unix_secs,
+            created_until_unix_secs: now_unix_secs,
             user_id: None,
-            provider_name: None,
-            model: None,
-            api_format: None,
-            statuses: None,
-            is_stream: None,
-            error_only: false,
-            limit: None,
-            offset: None,
-            newest_first: false,
         })
         .await
     {
@@ -1244,7 +1220,7 @@ pub(super) async fn handle_dashboard_provider_status_get(
     for item in usage {
         *request_counts
             .entry(item.provider_name.to_ascii_lowercase())
-            .or_default() += 1;
+            .or_default() += item.request_count;
     }
 
     let mut entries = providers

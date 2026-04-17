@@ -8,7 +8,7 @@ use tracing::{error, info, warn};
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 static BASELINE_V2_SQL: &str = include_str!("../bootstrap/20260413020000_baseline_v2.sql");
-const BASELINE_V2_CUTOFF_VERSION: i64 = 20260413030000;
+const BASELINE_V2_CUTOFF_VERSION: i64 = 20260415000000;
 const MIGRATIONS_TABLE_EXISTS_SQL: &str =
     "SELECT to_regclass('public._sqlx_migrations') IS NOT NULL";
 const PUBLIC_BASE_TABLE_COUNT_SQL: &str = r#"
@@ -597,6 +597,7 @@ mod tests {
                 20260410000000,
                 20260413020000,
                 20260413030000,
+                20260415000000,
             ]
         );
     }
@@ -687,7 +688,12 @@ mod tests {
 
         assert_eq!(
             pending_versions,
-            vec![20260410000000, 20260413020000, 20260413030000]
+            vec![
+                20260410000000,
+                20260413020000,
+                20260413030000,
+                20260415000000
+            ]
         );
     }
 

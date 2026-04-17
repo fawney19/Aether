@@ -581,10 +581,8 @@ fn convert_assistant_message(message: &Map<String, Value>) -> Option<Value> {
     let mut text_parts = Vec::new();
 
     match content {
-        Some(Value::String(text)) => {
-            if !text.is_empty() {
-                text_parts.push(text.clone());
-            }
+        Some(Value::String(text)) if !text.is_empty() => {
+            text_parts.push(text.clone());
         }
         Some(Value::Array(blocks)) => {
             for block in blocks {

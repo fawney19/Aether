@@ -38,20 +38,14 @@ pub(crate) async fn build_admin_create_provider_key_record(
         .cloned();
 
     match auth_type.as_str() {
-        "api_key" => {
-            if api_key.is_empty() {
-                return Err("API Key 认证模式下 api_key 为必填字段".to_string());
-            }
+        "api_key" if api_key.is_empty() => {
+            return Err("API Key 认证模式下 api_key 为必填字段".to_string());
         }
-        "service_account" => {
-            if auth_config_object.is_none() {
-                return Err("Service Account 认证模式下 auth_config 为必填字段".to_string());
-            }
+        "service_account" if auth_config_object.is_none() => {
+            return Err("Service Account 认证模式下 auth_config 为必填字段".to_string());
         }
-        "oauth" => {
-            if !api_key.is_empty() {
-                return Err("OAuth 认证模式下不允许直接填写 api_key".to_string());
-            }
+        "oauth" if !api_key.is_empty() => {
+            return Err("OAuth 认证模式下不允许直接填写 api_key".to_string());
         }
         _ => {}
     }

@@ -1164,15 +1164,20 @@ fn build_prefixed_request_body(
 mod tests {
     use std::collections::HashMap;
     use std::net::SocketAddr;
+    use std::pin::Pin;
     use std::sync::atomic::AtomicU64;
-    use std::sync::Once;
+    use std::sync::{Mutex, Once};
+    use std::task::{Context, Poll};
 
-    use aether_runtime::{bounded_queue, ConcurrencyGate, DistributedConcurrencyGate};
+    use aether_runtime::{ConcurrencyGate, DistributedConcurrencyGate};
     use arc_swap::ArcSwap;
     use axum::body::Body;
     use axum::http::{header, Response, StatusCode};
     use axum::routing::{get, post};
     use axum::Router;
+    use futures_util::Sink;
+    use tokio::task::JoinHandle;
+    use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 
     use super::*;
     use crate::config::Config;
@@ -1370,14 +1375,22 @@ mod tests {
         let state = sample_state_for_port(addr.port());
         cache_test_host(&state, host, addr).await;
         let server_ctx = sample_server(&state);
-        let (frame_tx, mut frame_rx) = bounded_queue::<TunnelFrame>(16);
+        let (frame_tx, sent, writer_handle) = spawn_test_writer();
         let (_body_tx, body_rx) = mpsc::channel(1);
 
         let mut meta = sample_request_meta();
         meta.url = format!("http://{host}:{}/start", addr.port());
 
-        handle_stream(Arc::clone(&state), server_ctx, 5, meta, body_rx, frame_tx).await;
-        let result = collect_stream_result(&mut frame_rx).await;
+        handle_stream(
+            Arc::clone(&state),
+            server_ctx,
+            5,
+            meta,
+            body_rx,
+            frame_tx.clone(),
+        )
+        .await;
+        let result = collect_stream_result(frame_tx, sent, writer_handle).await;
         server.abort();
 
         assert!(
@@ -1423,14 +1436,22 @@ mod tests {
         let state = sample_state_for_port(addr.port());
         cache_test_host(&state, host, addr).await;
         let server_ctx = sample_server(&state);
-        let (frame_tx, mut frame_rx) = bounded_queue::<TunnelFrame>(16);
+        let (frame_tx, sent, writer_handle) = spawn_test_writer();
         let (_body_tx, body_rx) = mpsc::channel(1);
 
         let mut meta = sample_request_meta();
         meta.url = format!("http://{host}:{}/ok", addr.port());
 
-        handle_stream(Arc::clone(&state), server_ctx, 3, meta, body_rx, frame_tx).await;
-        let result = collect_stream_result(&mut frame_rx).await;
+        handle_stream(
+            Arc::clone(&state),
+            server_ctx,
+            3,
+            meta,
+            body_rx,
+            frame_tx.clone(),
+        )
+        .await;
+        let result = collect_stream_result(frame_tx, sent, writer_handle).await;
         server.abort();
 
         assert!(
@@ -1486,7 +1507,7 @@ mod tests {
         let state = sample_state_for_port(addr.port());
         cache_test_host(&state, host, addr).await;
         let server_ctx = sample_server(&state);
-        let (frame_tx, mut frame_rx) = bounded_queue::<TunnelFrame>(16);
+        let (frame_tx, sent, writer_handle) = spawn_test_writer();
         let (body_tx, body_rx) = mpsc::channel(4);
         body_tx
             .send(TunnelFrame::new(
@@ -1504,8 +1525,16 @@ mod tests {
         meta.url = format!("http://{host}:{}/start", addr.port());
         meta.follow_redirects = Some(true);
 
-        handle_stream(Arc::clone(&state), server_ctx, 1, meta, body_rx, frame_tx).await;
-        let result = collect_stream_result(&mut frame_rx).await;
+        handle_stream(
+            Arc::clone(&state),
+            server_ctx,
+            1,
+            meta,
+            body_rx,
+            frame_tx.clone(),
+        )
+        .await;
+        let result = collect_stream_result(frame_tx, sent, writer_handle).await;
         server.abort();
 
         assert!(
@@ -1553,15 +1582,23 @@ mod tests {
         let state = sample_state_for_port(addr.port());
         cache_test_host(&state, host, addr).await;
         let server_ctx = sample_server(&state);
-        let (frame_tx, mut frame_rx) = bounded_queue::<TunnelFrame>(16);
+        let (frame_tx, sent, writer_handle) = spawn_test_writer();
         let (_body_tx, body_rx) = mpsc::channel(1);
 
         let mut meta = sample_request_meta();
         meta.url = format!("http://{host}:{}/start", addr.port());
         meta.follow_redirects = Some(false);
 
-        handle_stream(Arc::clone(&state), server_ctx, 7, meta, body_rx, frame_tx).await;
-        let result = collect_stream_result(&mut frame_rx).await;
+        handle_stream(
+            Arc::clone(&state),
+            server_ctx,
+            7,
+            meta,
+            body_rx,
+            frame_tx.clone(),
+        )
+        .await;
+        let result = collect_stream_result(frame_tx, sent, writer_handle).await;
         server.abort();
 
         assert!(
@@ -1618,7 +1655,7 @@ mod tests {
         let state = sample_state_for_budget(addr.port(), 0);
         cache_test_host(&state, host, addr).await;
         let server_ctx = sample_server(&state);
-        let (frame_tx, mut frame_rx) = bounded_queue::<TunnelFrame>(16);
+        let (frame_tx, sent, writer_handle) = spawn_test_writer();
         let (body_tx, body_rx) = mpsc::channel(4);
         body_tx
             .send(TunnelFrame::new(
@@ -1636,8 +1673,16 @@ mod tests {
         meta.url = format!("http://{host}:{}/start", addr.port());
         meta.follow_redirects = Some(true);
 
-        handle_stream(Arc::clone(&state), server_ctx, 11, meta, body_rx, frame_tx).await;
-        let result = collect_stream_result(&mut frame_rx).await;
+        handle_stream(
+            Arc::clone(&state),
+            server_ctx,
+            11,
+            meta,
+            body_rx,
+            frame_tx.clone(),
+        )
+        .await;
+        let result = collect_stream_result(frame_tx, sent, writer_handle).await;
         server.abort();
 
         assert!(
@@ -1663,7 +1708,7 @@ mod tests {
         let _permit = gate.try_acquire().expect("first permit");
         let state = sample_state(Some(gate), None);
         let server = sample_server(&state);
-        let (frame_tx, mut frame_rx) = bounded_queue::<TunnelFrame>(4);
+        let (frame_tx, sent, writer_handle) = spawn_test_writer();
         let (_body_tx, body_rx) = mpsc::channel(1);
 
         handle_stream(
@@ -1672,11 +1717,15 @@ mod tests {
             7,
             sample_request_meta(),
             body_rx,
-            frame_tx,
+            frame_tx.clone(),
         )
         .await;
 
-        let frame = frame_rx.recv().await.expect("overload frame");
+        let frame = collect_emitted_frames(frame_tx, sent, writer_handle)
+            .await
+            .into_iter()
+            .find(|frame| frame.msg_type == MsgType::StreamError)
+            .expect("overload frame");
         assert_eq!(frame.stream_id, 7);
         assert_eq!(frame.msg_type, MsgType::StreamError);
         assert_eq!(frame.payload, Bytes::from_static(b"proxy overloaded"));
@@ -1700,7 +1749,7 @@ mod tests {
         let _permit = gate.try_acquire().await.expect("first permit");
         let state = sample_state(None, Some(gate));
         let server = sample_server(&state);
-        let (frame_tx, mut frame_rx) = bounded_queue::<TunnelFrame>(4);
+        let (frame_tx, sent, writer_handle) = spawn_test_writer();
         let (_body_tx, body_rx) = mpsc::channel(1);
 
         handle_stream(
@@ -1709,11 +1758,15 @@ mod tests {
             9,
             sample_request_meta(),
             body_rx,
-            frame_tx,
+            frame_tx.clone(),
         )
         .await;
 
-        let frame = frame_rx.recv().await.expect("overload frame");
+        let frame = collect_emitted_frames(frame_tx, sent, writer_handle)
+            .await
+            .into_iter()
+            .find(|frame| frame.msg_type == MsgType::StreamError)
+            .expect("overload frame");
         assert_eq!(frame.stream_id, 9);
         assert_eq!(frame.msg_type, MsgType::StreamError);
         assert_eq!(frame.payload, Bytes::from_static(b"proxy overloaded"));
@@ -1881,20 +1934,85 @@ mod tests {
             .await;
     }
 
+    #[derive(Clone, Default)]
+    struct VecSink {
+        sent: Arc<Mutex<Vec<Message>>>,
+    }
+
+    impl Sink<Message> for VecSink {
+        type Error = WebSocketError;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+            self.sent.lock().expect("sink lock").push(item);
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn spawn_test_writer() -> (FrameSender, Arc<Mutex<Vec<Message>>>, JoinHandle<()>) {
+        let sink = VecSink::default();
+        let sent = Arc::clone(&sink.sent);
+        let (frame_tx, handle) = crate::tunnel::writer::spawn_writer(sink, Duration::from_secs(60));
+        (frame_tx, sent, handle)
+    }
+
     struct StreamResult {
         response: Option<ResponseMeta>,
         body: Bytes,
         error: Option<String>,
     }
 
+    async fn collect_emitted_frames(
+        frame_tx: FrameSender,
+        sent: Arc<Mutex<Vec<Message>>>,
+        writer_handle: JoinHandle<()>,
+    ) -> Vec<TunnelFrame> {
+        drop(frame_tx);
+        writer_handle.await.expect("writer should exit cleanly");
+
+        sent.lock()
+            .expect("sink lock")
+            .iter()
+            .filter_map(|message| match message {
+                Message::Binary(data) => {
+                    Some(TunnelFrame::decode(data.clone().into()).expect("frame should decode"))
+                }
+                Message::Ping(_) | Message::Pong(_) | Message::Close(_) => None,
+                other => panic!("unexpected writer message: {other:?}"),
+            })
+            .collect()
+    }
+
     async fn collect_stream_result(
-        frame_rx: &mut aether_runtime::BoundedQueueReceiver<TunnelFrame>,
+        frame_tx: FrameSender,
+        sent: Arc<Mutex<Vec<Message>>>,
+        writer_handle: JoinHandle<()>,
     ) -> StreamResult {
         let mut response = None;
         let mut body = BytesMut::new();
         let mut error = None;
 
-        while let Some(frame) = frame_rx.recv().await {
+        for frame in collect_emitted_frames(frame_tx, sent, writer_handle).await {
             match frame.msg_type {
                 MsgType::ResponseHeaders => {
                     let payload = decompress_if_gzip(&frame).expect("headers payload");

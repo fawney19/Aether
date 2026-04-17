@@ -1,7 +1,11 @@
 use aether_data::repository::auth::StoredAuthApiKeySnapshot;
 use aether_data_contracts::repository::{
     provider_catalog::StoredProviderCatalogProvider,
-    usage::{StoredRequestUsageAudit, StoredUsageLeaderboardSummary, StoredUsageTimeSeriesBucket},
+    usage::{
+        StoredRequestUsageAudit, StoredUsageCostSavingsSummary, StoredUsageErrorDistributionRow,
+        StoredUsageLeaderboardSummary, StoredUsagePerformancePercentilesRow,
+        StoredUsageTimeSeriesBucket,
+    },
 };
 use axum::{
     body::Body,
@@ -927,6 +931,62 @@ pub fn build_admin_stats_error_distribution_response(
     .into_response()
 }
 
+pub fn build_admin_stats_error_distribution_response_from_summaries(
+    rows: &[StoredUsageErrorDistributionRow],
+) -> Response<Body> {
+    let mut distribution: std::collections::BTreeMap<String, u64> =
+        std::collections::BTreeMap::new();
+    let mut trend: std::collections::BTreeMap<String, std::collections::BTreeMap<String, u64>> =
+        std::collections::BTreeMap::new();
+
+    for row in rows {
+        *distribution.entry(row.error_category.clone()).or_default() += row.count;
+        *trend
+            .entry(row.date.clone())
+            .or_default()
+            .entry(row.error_category.clone())
+            .or_default() += row.count;
+    }
+
+    let mut distribution_items: Vec<_> = distribution
+        .into_iter()
+        .map(|(category, count)| json!({ "category": category, "count": count }))
+        .collect();
+    distribution_items.sort_by(|left, right| {
+        let left_count = left
+            .get("count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let right_count = right
+            .get("count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        right_count.cmp(&left_count).then_with(|| {
+            left.get("category")
+                .and_then(serde_json::Value::as_str)
+                .cmp(&right.get("category").and_then(serde_json::Value::as_str))
+        })
+    });
+
+    let trend_items: Vec<_> = trend
+        .into_iter()
+        .map(|(date, categories)| {
+            let total: u64 = categories.values().copied().sum();
+            json!({
+                "date": date,
+                "total": total,
+                "categories": categories,
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "distribution": distribution_items,
+        "trend": trend_items,
+    }))
+    .into_response()
+}
+
 pub fn build_admin_stats_performance_percentiles_response(
     time_range: &AdminStatsTimeRange,
     usage: &[StoredRequestUsageAudit],
@@ -967,6 +1027,33 @@ pub fn build_admin_stats_performance_percentiles_response(
                 "p50_first_byte_time_ms": percentile_cont(&mut first_byte_times, 0.5),
                 "p90_first_byte_time_ms": percentile_cont(&mut first_byte_times, 0.9),
                 "p99_first_byte_time_ms": percentile_cont(&mut first_byte_times, 0.99),
+            })
+        })
+        .collect();
+
+    Json(serde_json::Value::Array(payload)).into_response()
+}
+
+pub fn build_admin_stats_performance_percentiles_response_from_summaries(
+    time_range: &AdminStatsTimeRange,
+    rows: &[StoredUsagePerformancePercentilesRow],
+) -> Response<Body> {
+    let by_day: std::collections::BTreeMap<String, &StoredUsagePerformancePercentilesRow> =
+        rows.iter().map(|row| (row.date.clone(), row)).collect();
+
+    let payload: Vec<_> = time_range
+        .local_date_strings()
+        .into_iter()
+        .map(|date| {
+            let row = by_day.get(&date).copied();
+            json!({
+                "date": date,
+                "p50_response_time_ms": row.and_then(|value| value.p50_response_time_ms),
+                "p90_response_time_ms": row.and_then(|value| value.p90_response_time_ms),
+                "p99_response_time_ms": row.and_then(|value| value.p99_response_time_ms),
+                "p50_first_byte_time_ms": row.and_then(|value| value.p50_first_byte_time_ms),
+                "p90_first_byte_time_ms": row.and_then(|value| value.p90_first_byte_time_ms),
+                "p99_first_byte_time_ms": row.and_then(|value| value.p99_first_byte_time_ms),
             })
         })
         .collect();
@@ -1199,6 +1286,53 @@ pub fn build_admin_stats_cost_forecast_response(
     .into_response()
 }
 
+pub fn build_admin_stats_cost_forecast_response_from_summaries(
+    time_range: &AdminStatsTimeRange,
+    forecast_days: u32,
+    buckets: &[StoredUsageTimeSeriesBucket],
+) -> Response<Body> {
+    let history: Vec<AdminStatsForecastPoint> =
+        build_daily_time_series_buckets_from_summaries(time_range, buckets)
+            .into_iter()
+            .map(|(date, bucket)| AdminStatsForecastPoint {
+                date,
+                total_cost: bucket.total_cost,
+            })
+            .collect();
+    let values: Vec<f64> = history.iter().map(|item| item.total_cost).collect();
+    let (slope, intercept) = linear_regression(&values);
+    let last_date = history
+        .last()
+        .map(|item| item.date)
+        .unwrap_or(time_range.end_date);
+    let forecast: Vec<_> = (0..forecast_days)
+        .map(|index| {
+            let idx = values.len() + index as usize;
+            let predicted = (slope * idx as f64 + intercept).max(0.0);
+            json!({
+                "date": last_date
+                    .checked_add_signed(chrono::Duration::days(i64::from(index + 1)))
+                    .unwrap_or(last_date)
+                    .to_string(),
+                "total_cost": round_to(predicted, 4),
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "history": history.into_iter().map(|item| json!({
+            "date": item.date.to_string(),
+            "total_cost": round_to(item.total_cost, 6),
+        })).collect::<Vec<_>>(),
+        "forecast": forecast,
+        "slope": round_to(slope, 6),
+        "intercept": round_to(intercept, 6),
+        "start_date": time_range.start_date.to_string(),
+        "end_date": time_range.end_date.to_string(),
+    }))
+    .into_response()
+}
+
 pub fn build_admin_stats_cost_savings_response(
     usage: &[StoredRequestUsageAudit],
 ) -> Response<Body> {
@@ -1222,6 +1356,27 @@ pub fn build_admin_stats_cost_savings_response(
         "cache_read_tokens": cache_read_tokens,
         "cache_read_cost": round_to(cache_read_cost, 6),
         "cache_creation_cost": round_to(cache_creation_cost, 6),
+        "estimated_full_cost": round_to(estimated_full_cost, 6),
+        "cache_savings": round_to(cache_savings, 6),
+    }))
+    .into_response()
+}
+
+pub fn build_admin_stats_cost_savings_response_from_summary(
+    summary: &StoredUsageCostSavingsSummary,
+) -> Response<Body> {
+    let estimated_full_cost =
+        if summary.estimated_full_cost_usd <= 0.0 && summary.cache_read_cost_usd > 0.0 {
+            summary.cache_read_cost_usd * 10.0
+        } else {
+            summary.estimated_full_cost_usd
+        };
+    let cache_savings = estimated_full_cost - summary.cache_read_cost_usd;
+
+    Json(json!({
+        "cache_read_tokens": summary.cache_read_tokens,
+        "cache_read_cost": round_to(summary.cache_read_cost_usd, 6),
+        "cache_creation_cost": round_to(summary.cache_creation_cost_usd, 6),
         "estimated_full_cost": round_to(estimated_full_cost, 6),
         "cache_savings": round_to(cache_savings, 6),
     }))
