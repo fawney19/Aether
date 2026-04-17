@@ -377,9 +377,17 @@ async fn provider_query_build_kiro_test_candidates(
         }
     }
 
-    let requested_model = provider_query_extract_model(payload).ok_or_else(|| {
-        build_admin_provider_query_bad_request_response(ADMIN_PROVIDER_QUERY_MODEL_REQUIRED_DETAIL)
-    })?;
+    let requested_model = provider_query_extract_model(payload)
+        .or_else(|| {
+            super::payload::provider_query_extract_failover_models(payload)
+                .first()
+                .cloned()
+        })
+        .ok_or_else(|| {
+            build_admin_provider_query_bad_request_response(
+                ADMIN_PROVIDER_QUERY_MODEL_REQUIRED_DETAIL,
+            )
+        })?;
     let effective_model = if provider_query_test_mode(payload).eq_ignore_ascii_case("direct") {
         requested_model.clone()
     } else {
@@ -970,18 +978,15 @@ async fn provider_query_execute_standard_test_candidate(
         .execute_execution_runtime_sync_plan(Some(trace_id), &plan)
         .await?;
     let response_body = result.body.as_ref().and_then(|body| body.json_body.clone());
-    let error_message = if result.status_code >= 400 {
+    let did_fail = result.status_code >= 400;
+    let error_message = if did_fail {
         provider_query_extract_error_message(&result)
     } else {
         None
     };
 
     Ok(ProviderQueryExecutionOutcome {
-        status: if error_message.is_some() {
-            "failed"
-        } else {
-            "success"
-        },
+        status: if did_fail { "failed" } else { "success" },
         error_message,
         status_code: Some(result.status_code),
         latency_ms: result.telemetry.as_ref().and_then(|value| value.elapsed_ms),
@@ -1030,14 +1035,6 @@ async fn build_admin_provider_query_kiro_failover_response(
             ADMIN_PROVIDER_QUERY_PROVIDER_ID_REQUIRED_DETAIL,
         ));
     };
-    let requested_model = match provider_query_extract_model(payload) {
-        Some(model) => model,
-        None => {
-            return Ok(build_admin_provider_query_bad_request_response(
-                ADMIN_PROVIDER_QUERY_MODEL_REQUIRED_DETAIL,
-            ));
-        }
-    };
     let Some(provider) = state
         .app()
         .read_provider_catalog_providers_by_ids(std::slice::from_ref(&provider_id))
@@ -1057,6 +1054,13 @@ async fn build_admin_provider_query_kiro_failover_response(
             failover_models,
         ));
     }
+    let Some(requested_model) =
+        provider_query_extract_model(payload).or_else(|| failover_models.first().cloned())
+    else {
+        return Ok(build_admin_provider_query_bad_request_response(
+            ADMIN_PROVIDER_QUERY_MODEL_REQUIRED_DETAIL,
+        ));
+    };
 
     let candidates =
         match provider_query_build_kiro_test_candidates(state, &provider, payload).await {
@@ -1145,6 +1149,9 @@ pub(crate) async fn build_admin_provider_query_test_model_local_response(
         "/api/admin/provider-query/test-model",
     )
     .await?;
+    if !response.status().is_success() {
+        return Ok(response);
+    }
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .map_err(|err| GatewayError::Internal(err.to_string()))?;

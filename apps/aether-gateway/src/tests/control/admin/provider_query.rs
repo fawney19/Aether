@@ -1307,7 +1307,7 @@ async fn gateway_handles_admin_provider_query_test_model_failover_with_single_mo
         .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
         .json(&json!({
             "provider_id": "provider-openai",
-            "model_name": "gpt-4.1",
+            "failover_models": ["gpt-4.1"],
             "api_format": "openai:chat"
         }))
         .send()
@@ -1326,6 +1326,154 @@ async fn gateway_handles_admin_provider_query_test_model_failover_with_single_mo
 
     gateway_handle.abort();
     execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_retries_non_kiro_failover_after_http_error_without_message() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            let auth = plan
+                .headers
+                .get("authorization")
+                .map(String::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let payload = if auth == "Bearer sk-test-first" {
+                json!({
+                    "request_id": plan.request_id,
+                    "candidate_id": plan.candidate_id,
+                    "status_code": 500,
+                    "headers": {
+                        "content-type": "application/json"
+                    },
+                    "body": {
+                        "json_body": {}
+                    },
+                    "telemetry": {
+                        "elapsed_ms": 7
+                    }
+                })
+            } else {
+                json!({
+                    "request_id": plan.request_id,
+                    "candidate_id": plan.candidate_id,
+                    "status_code": 200,
+                    "headers": {
+                        "content-type": "application/json"
+                    },
+                    "body": {
+                        "json_body": {
+                            "id": "chatcmpl-retry",
+                            "choices": [{
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "Recovered after empty error"
+                                }
+                            }]
+                        }
+                    },
+                    "telemetry": {
+                        "elapsed_ms": 13
+                    }
+                })
+            };
+            Json(payload)
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-openai", "OpenAI", 10);
+    provider.provider_type = "openai".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-openai-chat",
+            "provider-openai",
+            "openai:chat",
+            "https://api.openai.example",
+        )],
+        vec![
+            sample_key(
+                "key-openai-first",
+                "provider-openai",
+                "openai:chat",
+                "sk-test-first",
+            ),
+            sample_key(
+                "key-openai-second",
+                "provider-openai",
+                "openai:chat",
+                "sk-test-second",
+            ),
+        ],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-query/test-model-failover"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-openai",
+            "failover_models": ["gpt-4.1"],
+            "api_format": "openai:chat"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(payload["total_attempts"], json!(2));
+    let attempts = payload["attempts"]
+        .as_array()
+        .expect("attempts should be an array");
+    assert_eq!(attempts[0]["status"], json!("failed"));
+    assert_eq!(attempts[0]["status_code"], json!(500));
+    assert_eq!(attempts[1]["status"], json!("success"));
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_preserves_non_success_status_for_test_model_local_wrapper() {
+    let gateway = build_router_with_state(AppState::new().expect("gateway should build"));
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-does-not-exist",
+            "model": "gpt-4.1"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["detail"], json!("Provider not found"));
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]
