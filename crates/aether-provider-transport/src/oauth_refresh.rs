@@ -238,6 +238,41 @@ impl LocalOAuthRefreshCoordinator {
         distributed_lock: Option<&RedisLockRunner>,
         distributed_owner: Option<&str>,
     ) -> Result<Option<LocalOAuthResolution>, LocalOAuthRefreshError> {
+        self.resolve_with_result_mode(
+            executor,
+            transport,
+            distributed_lock,
+            distributed_owner,
+            false,
+        )
+        .await
+    }
+
+    pub async fn force_refresh_with_result(
+        &self,
+        executor: &dyn LocalOAuthHttpExecutor,
+        transport: &GatewayProviderTransportSnapshot,
+        distributed_lock: Option<&RedisLockRunner>,
+        distributed_owner: Option<&str>,
+    ) -> Result<Option<LocalOAuthResolution>, LocalOAuthRefreshError> {
+        self.resolve_with_result_mode(
+            executor,
+            transport,
+            distributed_lock,
+            distributed_owner,
+            true,
+        )
+        .await
+    }
+
+    async fn resolve_with_result_mode(
+        &self,
+        executor: &dyn LocalOAuthHttpExecutor,
+        transport: &GatewayProviderTransportSnapshot,
+        distributed_lock: Option<&RedisLockRunner>,
+        distributed_owner: Option<&str>,
+        force_refresh: bool,
+    ) -> Result<Option<LocalOAuthResolution>, LocalOAuthRefreshError> {
         let Some(adapter) = self
             .adapters
             .iter()
@@ -252,17 +287,19 @@ impl LocalOAuthRefreshCoordinator {
         } else {
             self.cached_entry(key_id).await
         };
-        if let Some(auth) = cached_entry
-            .as_ref()
-            .and_then(|entry| adapter.resolve_cached(transport, entry))
-        {
-            return Ok(Some(LocalOAuthResolution::resolved(auth, None)));
-        }
-        if let Some(auth) = adapter.resolve_without_refresh(transport) {
-            return Ok(Some(LocalOAuthResolution::resolved(auth, None)));
-        }
-        if !adapter.should_refresh(transport, cached_entry.as_ref()) {
-            return Ok(None);
+        if !force_refresh {
+            if let Some(auth) = cached_entry
+                .as_ref()
+                .and_then(|entry| adapter.resolve_cached(transport, entry))
+            {
+                return Ok(Some(LocalOAuthResolution::resolved(auth, None)));
+            }
+            if let Some(auth) = adapter.resolve_without_refresh(transport) {
+                return Ok(Some(LocalOAuthResolution::resolved(auth, None)));
+            }
+            if !adapter.should_refresh(transport, cached_entry.as_ref()) {
+                return Ok(None);
+            }
         }
         if key_id.is_empty() {
             return Ok(None);
@@ -272,17 +309,19 @@ impl LocalOAuthRefreshCoordinator {
         let _key_guard = key_lock.lock().await;
 
         let cached_entry = self.cached_entry(key_id).await;
-        if let Some(auth) = cached_entry
-            .as_ref()
-            .and_then(|entry| adapter.resolve_cached(transport, entry))
-        {
-            return Ok(Some(LocalOAuthResolution::resolved(auth, None)));
-        }
-        if let Some(auth) = adapter.resolve_without_refresh(transport) {
-            return Ok(Some(LocalOAuthResolution::resolved(auth, None)));
-        }
-        if !adapter.should_refresh(transport, cached_entry.as_ref()) {
-            return Ok(None);
+        if !force_refresh {
+            if let Some(auth) = cached_entry
+                .as_ref()
+                .and_then(|entry| adapter.resolve_cached(transport, entry))
+            {
+                return Ok(Some(LocalOAuthResolution::resolved(auth, None)));
+            }
+            if let Some(auth) = adapter.resolve_without_refresh(transport) {
+                return Ok(Some(LocalOAuthResolution::resolved(auth, None)));
+            }
+            if !adapter.should_refresh(transport, cached_entry.as_ref()) {
+                return Ok(None);
+            }
         }
 
         let distributed_lease = match (distributed_lock, distributed_owner) {
@@ -549,5 +588,29 @@ mod tests {
                 refresh_in_flight: false,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn coordinator_force_refresh_bypasses_runtime_cache() {
+        let refresh_hits = Arc::new(AtomicUsize::new(0));
+        let coordinator =
+            LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![Arc::new(TestAdapter {
+                refresh_hits: Arc::clone(&refresh_hits),
+            })]);
+        let transport = sample_transport();
+        let executor = ReqwestLocalOAuthHttpExecutor::new(reqwest::Client::new());
+
+        let first = coordinator
+            .resolve_with_result(&executor, &transport, None, None)
+            .await
+            .expect("initial resolve should succeed");
+        let forced = coordinator
+            .force_refresh_with_result(&executor, &transport, None, None)
+            .await
+            .expect("forced refresh should succeed");
+
+        assert!(first.and_then(|result| result.refreshed_entry).is_some());
+        assert!(forced.and_then(|result| result.refreshed_entry).is_some());
+        assert_eq!(refresh_hits.load(Ordering::SeqCst), 2);
     }
 }
