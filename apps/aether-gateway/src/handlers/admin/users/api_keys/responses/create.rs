@@ -106,17 +106,17 @@ pub(crate) async fn build_admin_create_user_api_key_response(
         )
             .into_response());
     }
-    let concurrent_limit = match normalize_api_key_concurrent_limit_or_default(payload.concurrent_limit)
-    {
-        Ok(value) => value,
-        Err(detail) => {
-            return Ok((
-                http::StatusCode::BAD_REQUEST,
-                Json(json!({ "detail": detail })),
-            )
-                .into_response());
-        }
-    };
+    let concurrent_limit =
+        match normalize_api_key_concurrent_limit_or_default(payload.concurrent_limit) {
+            Ok(value) => value,
+            Err(detail) => {
+                return Ok((
+                    http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "detail": detail })),
+                )
+                    .into_response());
+            }
+        };
 
     let plaintext_key = generate_admin_user_api_key_plaintext();
     let Some(key_encrypted) = state.encrypt_catalog_secret_with_fallbacks(&plaintext_key) else {

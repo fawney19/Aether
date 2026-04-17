@@ -69,17 +69,17 @@ pub(crate) async fn build_admin_update_user_api_key_response(
         )
             .into_response());
     }
-    let concurrent_limit = match normalize_optional_api_key_concurrent_limit(payload.concurrent_limit)
-    {
-        Ok(value) => value,
-        Err(detail) => {
-            return Ok((
-                http::StatusCode::BAD_REQUEST,
-                Json(json!({ "detail": detail })),
-            )
-                .into_response());
-        }
-    };
+    let concurrent_limit =
+        match normalize_optional_api_key_concurrent_limit(payload.concurrent_limit) {
+            Ok(value) => value,
+            Err(detail) => {
+                return Ok((
+                    http::StatusCode::BAD_REQUEST,
+                    Json(json!({ "detail": detail })),
+                )
+                    .into_response());
+            }
+        };
 
     let Some(updated) = state
         .update_user_api_key_basic(aether_data::repository::auth::UpdateUserApiKeyBasicRecord {

@@ -7,15 +7,15 @@ use super::shared::{
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
-use crate::handlers::shared::{
-    api_key_concurrent_limit_or_default, normalize_api_key_concurrent_limit_or_default,
-    normalize_optional_api_key_concurrent_limit,
-};
 use crate::handlers::admin::users::{
     default_admin_user_api_key_name, format_optional_unix_secs_iso8601,
     generate_admin_user_api_key_plaintext, hash_admin_user_api_key, masked_user_api_key_display,
     normalize_admin_optional_api_key_name, normalize_admin_user_api_formats,
     normalize_admin_user_string_list,
+};
+use crate::handlers::shared::{
+    api_key_concurrent_limit_or_default, normalize_api_key_concurrent_limit_or_default,
+    normalize_optional_api_key_concurrent_limit,
 };
 use crate::GatewayError;
 use aether_admin::system::serialize_admin_system_users_export_wallet;
@@ -118,11 +118,11 @@ pub(super) async fn build_admin_create_api_key_response(
             "rate_limit 必须大于等于 0",
         ));
     }
-    let concurrent_limit = match normalize_api_key_concurrent_limit_or_default(payload.concurrent_limit)
-    {
-        Ok(value) => value,
-        Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
-    };
+    let concurrent_limit =
+        match normalize_api_key_concurrent_limit_or_default(payload.concurrent_limit) {
+            Ok(value) => value,
+            Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+        };
     let (initial_balance_usd, unlimited_balance) = match normalize_standalone_initial_balance(
         payload.initial_balance_usd,
         payload.unlimited_balance,
@@ -280,11 +280,11 @@ pub(super) async fn build_admin_update_api_key_response(
             "rate_limit 必须大于等于 0",
         ));
     }
-    let concurrent_limit = match normalize_optional_api_key_concurrent_limit(payload.concurrent_limit)
-    {
-        Ok(value) => value,
-        Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
-    };
+    let concurrent_limit =
+        match normalize_optional_api_key_concurrent_limit(payload.concurrent_limit) {
+            Ok(value) => value,
+            Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
+        };
     let allowed_providers = if field_presence.contains("allowed_providers") {
         match normalize_admin_user_string_list(payload.allowed_providers, "allowed_providers") {
             Ok(value) => Some(value),
