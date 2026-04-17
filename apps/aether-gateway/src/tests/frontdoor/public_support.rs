@@ -6012,6 +6012,7 @@ async fn gateway_handles_users_me_api_key_writes_locally_without_proxying_upstre
         .to_string();
     assert_eq!(create_payload["name"], "writer-key");
     assert_eq!(create_payload["rate_limit"], 120);
+    assert_eq!(create_payload["concurrent_limit"], 5);
     assert_eq!(create_payload["message"], "API密钥创建成功");
     assert!(create_payload["key"]
         .as_str()
@@ -6025,7 +6026,8 @@ async fn gateway_handles_users_me_api_key_writes_locally_without_proxying_upstre
         .header("user-agent", "AetherTest/1.0")
         .json(&json!({
             "name": "writer-key-renamed",
-            "rate_limit": 30
+            "rate_limit": 30,
+            "concurrent_limit": 4
         }))
         .send()
         .await
@@ -6037,6 +6039,7 @@ async fn gateway_handles_users_me_api_key_writes_locally_without_proxying_upstre
         .expect("json body should parse");
     assert_eq!(update_payload["name"], "writer-key-renamed");
     assert_eq!(update_payload["rate_limit"], 30);
+    assert_eq!(update_payload["concurrent_limit"], 4);
     assert_eq!(update_payload["message"], "API密钥已更新");
 
     let toggle_response = client
@@ -6114,6 +6117,7 @@ async fn gateway_handles_users_me_api_key_writes_locally_without_proxying_upstre
         detail_payload["allowed_providers"],
         json!(["provider-openai"])
     );
+    assert_eq!(detail_payload["concurrent_limit"], 4);
     assert_eq!(detail_payload["force_capabilities"], json!({}));
 
     let delete_response = client
