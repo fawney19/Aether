@@ -440,6 +440,7 @@ UPDATE api_keys
 SET
   name = COALESCE($3, name),
   rate_limit = COALESCE($4, rate_limit),
+  concurrent_limit = COALESCE($5, concurrent_limit),
   updated_at = NOW()
 WHERE user_id = $1
   AND id = $2
@@ -469,11 +470,12 @@ UPDATE api_keys
 SET
   name = COALESCE($2, name),
   rate_limit = CASE WHEN $3 THEN $4 ELSE rate_limit END,
-  allowed_providers = CASE WHEN $5 THEN $6::json ELSE allowed_providers END,
-  allowed_api_formats = CASE WHEN $7 THEN $8::json ELSE allowed_api_formats END,
-  allowed_models = CASE WHEN $9 THEN $10::json ELSE allowed_models END,
-  expires_at = CASE WHEN $11 THEN $12 ELSE expires_at END,
-  auto_delete_on_expiry = CASE WHEN $13 THEN $14 ELSE auto_delete_on_expiry END,
+  concurrent_limit = CASE WHEN $5 THEN $6 ELSE concurrent_limit END,
+  allowed_providers = CASE WHEN $7 THEN $8::json ELSE allowed_providers END,
+  allowed_api_formats = CASE WHEN $9 THEN $10::json ELSE allowed_api_formats END,
+  allowed_models = CASE WHEN $11 THEN $12::json ELSE allowed_models END,
+  expires_at = CASE WHEN $13 THEN $14 ELSE expires_at END,
+  auto_delete_on_expiry = CASE WHEN $15 THEN $16 ELSE auto_delete_on_expiry END,
   updated_at = NOW()
 WHERE id = $1
   AND is_standalone = TRUE
@@ -1056,6 +1058,7 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .bind(record.api_key_id)
             .bind(record.name)
             .bind(record.rate_limit)
+            .bind(record.concurrent_limit)
             .fetch_optional(&self.pool)
             .await
             .map_postgres_err()?;
@@ -1100,6 +1103,8 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .bind(record.name)
             .bind(record.rate_limit_present)
             .bind(record.rate_limit)
+            .bind(record.concurrent_limit_present)
+            .bind(record.concurrent_limit)
             .bind(record.allowed_providers.is_some())
             .bind(allowed_providers)
             .bind(record.allowed_api_formats.is_some())
@@ -1314,18 +1319,20 @@ mod tests {
     #[test]
     fn update_standalone_api_key_basic_sql_casts_json_case_values() {
         assert!(UPDATE_STANDALONE_API_KEY_BASIC_SQL
-            .contains("allowed_providers = CASE WHEN $5 THEN $6::json ELSE allowed_providers END"));
+            .contains("concurrent_limit = CASE WHEN $5 THEN $6 ELSE concurrent_limit END"));
+        assert!(UPDATE_STANDALONE_API_KEY_BASIC_SQL
+            .contains("allowed_providers = CASE WHEN $7 THEN $8::json ELSE allowed_providers END"));
         assert!(UPDATE_STANDALONE_API_KEY_BASIC_SQL.contains(
-            "allowed_api_formats = CASE WHEN $7 THEN $8::json ELSE allowed_api_formats END"
+            "allowed_api_formats = CASE WHEN $9 THEN $10::json ELSE allowed_api_formats END"
         ));
         assert!(UPDATE_STANDALONE_API_KEY_BASIC_SQL
-            .contains("allowed_models = CASE WHEN $9 THEN $10::json ELSE allowed_models END"));
+            .contains("allowed_models = CASE WHEN $11 THEN $12::json ELSE allowed_models END"));
         assert!(UPDATE_STANDALONE_API_KEY_BASIC_SQL
             .contains("rate_limit = CASE WHEN $3 THEN $4 ELSE rate_limit END"));
         assert!(UPDATE_STANDALONE_API_KEY_BASIC_SQL
-            .contains("expires_at = CASE WHEN $11 THEN $12 ELSE expires_at END"));
+            .contains("expires_at = CASE WHEN $13 THEN $14 ELSE expires_at END"));
         assert!(UPDATE_STANDALONE_API_KEY_BASIC_SQL.contains(
-            "auto_delete_on_expiry = CASE WHEN $13 THEN $14 ELSE auto_delete_on_expiry END"
+            "auto_delete_on_expiry = CASE WHEN $15 THEN $16 ELSE auto_delete_on_expiry END"
         ));
     }
 

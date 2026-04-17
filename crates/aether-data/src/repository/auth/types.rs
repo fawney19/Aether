@@ -378,6 +378,7 @@ pub struct UpdateUserApiKeyBasicRecord {
     pub api_key_id: String,
     pub name: Option<String>,
     pub rate_limit: Option<i32>,
+    pub concurrent_limit: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -406,6 +407,8 @@ pub struct UpdateStandaloneApiKeyBasicRecord {
     pub name: Option<String>,
     pub rate_limit_present: bool,
     pub rate_limit: Option<i32>,
+    pub concurrent_limit_present: bool,
+    pub concurrent_limit: Option<i32>,
     pub allowed_providers: Option<Option<Vec<String>>>,
     pub allowed_api_formats: Option<Option<Vec<String>>>,
     pub allowed_models: Option<Option<Vec<String>>>,
