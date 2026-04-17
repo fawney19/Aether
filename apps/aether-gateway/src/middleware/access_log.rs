@@ -212,7 +212,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn access_log_emits_completed_events_by_default() {
         let writer = SharedBuffer::default();
         let subscriber = tracing_subscriber::registry().with(
@@ -271,7 +271,7 @@ mod tests {
         assert_eq!(logs[0]["execution_path"], "local_route");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn access_log_propagates_generated_trace_id_to_downstream_handler() {
         let app = Router::new()
             .route(
@@ -318,7 +318,7 @@ mod tests {
         assert_eq!(seen_trace_id, response_trace_id);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn access_log_shortens_long_request_ids() {
         let writer = SharedBuffer::default();
         let subscriber = tracing_subscriber::registry().with(
@@ -371,7 +371,7 @@ mod tests {
         assert_eq!(logs[0]["request_id"], "d07e1e94");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn access_log_emits_failed_events_by_default_for_server_errors() {
         let writer = SharedBuffer::default();
         let subscriber = tracing_subscriber::registry().with(
@@ -419,7 +419,7 @@ mod tests {
         assert_eq!(logs[0]["execution_path"], "execution_runtime_sync");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn access_log_treats_client_errors_as_completed_events() {
         let writer = SharedBuffer::default();
         let subscriber = tracing_subscriber::registry().with(
@@ -467,7 +467,7 @@ mod tests {
         assert_eq!(logs[0]["execution_path"], "local_auth_denied");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn access_log_emits_completed_events_for_streaming_responses() {
         let writer = SharedBuffer::default();
         let subscriber = tracing_subscriber::registry().with(
@@ -522,7 +522,7 @@ mod tests {
         assert_eq!(logs[0]["execution_path"], "execution_runtime_stream");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn access_log_downgrades_usage_active_polling_to_trace() {
         let writer = SharedBuffer::default();
         let subscriber = tracing_subscriber::registry().with(
