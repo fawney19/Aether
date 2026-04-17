@@ -1066,9 +1066,10 @@ mod tests {
 
     #[tokio::test]
     async fn update_user_api_key_basic_updates_concurrent_limit() {
-        let repository = InMemoryAuthApiKeySnapshotRepository::seed(vec![
-            (Some("hash-1".to_string()), sample_snapshot("key-1", "user-1")),
-        ]);
+        let repository = InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some("hash-1".to_string()),
+            sample_snapshot("key-1", "user-1"),
+        )]);
 
         let updated = repository
             .update_user_api_key_basic(UpdateUserApiKeyBasicRecord {

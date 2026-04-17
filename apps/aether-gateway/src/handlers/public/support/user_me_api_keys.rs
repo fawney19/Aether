@@ -523,13 +523,13 @@ pub(super) async fn handle_users_me_api_key_create(
             false,
         );
     }
-    let concurrent_limit = match normalize_api_key_concurrent_limit_or_default(payload.concurrent_limit)
-    {
-        Ok(value) => value,
-        Err(detail) => {
-            return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
-        }
-    };
+    let concurrent_limit =
+        match normalize_api_key_concurrent_limit_or_default(payload.concurrent_limit) {
+            Ok(value) => value,
+            Err(detail) => {
+                return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
+            }
+        };
 
     let plaintext_key = generate_users_me_api_key_plaintext();
     let Some(key_encrypted) = encrypt_catalog_secret_with_fallbacks(state, &plaintext_key) else {
@@ -637,13 +637,13 @@ pub(super) async fn handle_users_me_api_key_update(
             false,
         );
     }
-    let concurrent_limit = match normalize_optional_api_key_concurrent_limit(payload.concurrent_limit)
-    {
-        Ok(value) => value,
-        Err(detail) => {
-            return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
-        }
-    };
+    let concurrent_limit =
+        match normalize_optional_api_key_concurrent_limit(payload.concurrent_limit) {
+            Ok(value) => value,
+            Err(detail) => {
+                return build_auth_error_response(http::StatusCode::BAD_REQUEST, detail, false);
+            }
+        };
 
     let Some(updated) = (match state
         .update_user_api_key_basic(aether_data::repository::auth::UpdateUserApiKeyBasicRecord {

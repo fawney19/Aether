@@ -4,7 +4,9 @@ use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelect
 use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::quota::InMemoryProviderQuotaRepository;
-use aether_data_contracts::repository::candidates::{RequestCandidateStatus, StoredRequestCandidate};
+use aether_data_contracts::repository::candidates::{
+    RequestCandidateStatus, StoredRequestCandidate,
+};
 
 use crate::data::GatewayDataState;
 use crate::AppState;

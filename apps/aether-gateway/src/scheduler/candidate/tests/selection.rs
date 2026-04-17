@@ -23,8 +23,7 @@ use super::super::runtime::should_skip_provider_quota;
 use super::super::selection::{
     collect_selectable_candidates as collect_selectable_candidates_impl,
     collect_selectable_candidates_with_skip_reasons as collect_selectable_candidates_with_skip_reasons_impl,
-    is_exact_all_skipped_by_auth_limit,
-    select_minimal_candidate as select_candidate_impl,
+    is_exact_all_skipped_by_auth_limit, select_minimal_candidate as select_candidate_impl,
 };
 use super::support::{sample_auth_snapshot, sample_key, sample_provider, sample_row};
 
@@ -916,17 +915,18 @@ async fn returns_none_when_auth_api_key_concurrent_limit_is_reached() {
 
     assert!(selected.is_none());
 
-    let (selected_candidates, skipped_candidates) = collect_selectable_candidates_with_skip_reasons(
-        state.data.as_ref(),
-        &state,
-        "openai:chat",
-        "gpt-4.1",
-        false,
-        Some(&auth_snapshot),
-        100,
-    )
-    .await
-    .expect("selection should succeed");
+    let (selected_candidates, skipped_candidates) =
+        collect_selectable_candidates_with_skip_reasons(
+            state.data.as_ref(),
+            &state,
+            "openai:chat",
+            "gpt-4.1",
+            false,
+            Some(&auth_snapshot),
+            100,
+        )
+        .await
+        .expect("selection should succeed");
     assert!(is_exact_all_skipped_by_auth_limit(
         &selected_candidates,
         &skipped_candidates,

@@ -3,6 +3,9 @@ use super::{
     to_bytes, Arc, Body, Json, Mutex, Request, Router, StatusCode,
     EXECUTION_PATH_EXECUTION_RUNTIME_SYNC, EXECUTION_PATH_HEADER, TRACE_ID_HEADER,
 };
+use crate::constants::{
+    EXECUTION_PATH_LOCAL_API_KEY_CONCURRENCY_LIMITED, LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER,
+};
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::auth::{
     InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeySnapshot,
@@ -21,9 +24,6 @@ use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
 use sha2::{Digest, Sha256};
-use crate::constants::{
-    EXECUTION_PATH_LOCAL_API_KEY_CONCURRENCY_LIMITED, LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER,
-};
 
 #[tokio::test]
 async fn gateway_executes_openai_cli_sync_via_local_decision_gate_with_local_sync_decision() {
@@ -540,8 +540,7 @@ async fn gateway_executes_openai_cli_sync_via_local_decision_gate_with_local_syn
 }
 
 #[tokio::test]
-async fn gateway_waits_for_api_key_concurrency_slot_then_executes_openai_cli_sync(
-) {
+async fn gateway_waits_for_api_key_concurrency_slot_then_executes_openai_cli_sync() {
     fn hash_api_key(value: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(value.as_bytes());
@@ -794,12 +793,15 @@ async fn gateway_waits_for_api_key_concurrency_slot_then_executes_openai_cli_syn
         }),
     );
 
-    let mut auth_snapshot =
-        sample_auth_snapshot("key-openai-cli-local-limit-123", "user-openai-cli-local-limit-123");
+    let mut auth_snapshot = sample_auth_snapshot(
+        "key-openai-cli-local-limit-123",
+        "user-openai-cli-local-limit-123",
+    );
     auth_snapshot.api_key_concurrent_limit = Some(1);
-    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![
-        (Some(hash_api_key("sk-client-openai-cli-local-limit")), auth_snapshot),
-    ]));
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-client-openai-cli-local-limit")),
+        auth_snapshot,
+    )]));
     let candidate_selection_repository =
         Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
             sample_candidate_row(),
@@ -904,7 +906,10 @@ async fn gateway_waits_for_api_key_concurrency_slot_then_executes_openai_cli_syn
     assert_eq!(stored_candidates.len(), 1);
     assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Success);
     assert_eq!(stored_candidates[0].skip_reason.as_deref(), None);
-    assert_eq!(*execution_runtime_hits.lock().expect("mutex should lock"), 1);
+    assert_eq!(
+        *execution_runtime_hits.lock().expect("mutex should lock"),
+        1
+    );
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 
     release_inflight_candidate
@@ -1170,12 +1175,15 @@ async fn gateway_returns_concurrency_limited_after_wait_budget_expires_for_opena
         }),
     );
 
-    let mut auth_snapshot =
-        sample_auth_snapshot("key-openai-cli-local-timeout-123", "user-openai-cli-local-timeout-123");
+    let mut auth_snapshot = sample_auth_snapshot(
+        "key-openai-cli-local-timeout-123",
+        "user-openai-cli-local-timeout-123",
+    );
     auth_snapshot.api_key_concurrent_limit = Some(1);
-    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![
-        (Some(hash_api_key("sk-client-openai-cli-local-timeout")), auth_snapshot),
-    ]));
+    let auth_repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+        Some(hash_api_key("sk-client-openai-cli-local-timeout")),
+        auth_snapshot,
+    )]));
     let candidate_selection_repository =
         Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
             sample_candidate_row(),
@@ -1250,7 +1258,10 @@ async fn gateway_returns_concurrency_limited_after_wait_budget_expires_for_opena
         stored_candidates[0].skip_reason.as_deref(),
         Some("api_key_concurrency_limit_reached")
     );
-    assert_eq!(*execution_runtime_hits.lock().expect("mutex should lock"), 0);
+    assert_eq!(
+        *execution_runtime_hits.lock().expect("mutex should lock"),
+        0
+    );
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
