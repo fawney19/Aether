@@ -33,7 +33,7 @@ use aether_model_fetch::{
 };
 use axum::{
     body::{to_bytes, Body},
-    http::{HeaderMap, HeaderName, HeaderValue},
+    http::{self, HeaderMap, HeaderName, HeaderValue},
     response::{IntoResponse, Response},
     Json,
 };
@@ -689,6 +689,310 @@ async fn provider_query_execute_kiro_test_candidate(
     })
 }
 
+async fn provider_query_execute_standard_test_candidate(
+    state: &AdminAppState<'_>,
+    provider: &StoredProviderCatalogProvider,
+    candidate: &ProviderQueryTestCandidate,
+    payload: &Value,
+    route_path: &str,
+    trace_id: &str,
+) -> Result<ProviderQueryExecutionOutcome, GatewayError> {
+    let Some(transport) = state
+        .read_provider_transport_snapshot(&provider.id, &candidate.endpoint.id, &candidate.key.id)
+        .await?
+    else {
+        return Ok(ProviderQueryExecutionOutcome {
+            status: "skipped",
+            error_message: None,
+            status_code: None,
+            latency_ms: None,
+            request_url: String::new(),
+            request_headers: BTreeMap::new(),
+            request_body: Value::Null,
+            response_headers: BTreeMap::new(),
+            response_body: None,
+        });
+    };
+
+    let original_request_body =
+        provider_query_build_test_request_body(payload, &candidate.effective_model);
+    let mut request_body = original_request_body.clone();
+    if let Some(object) = request_body.as_object_mut() {
+        object.insert("stream".to_string(), Value::Bool(false));
+    }
+
+    let provider_api_format = candidate.endpoint.api_format.as_str();
+    let provider_request_body = match provider_api_format {
+        "openai:chat" => {
+            let Some(mut provider_request_body) =
+                crate::ai_pipeline::build_local_openai_chat_request_body(
+                    &request_body,
+                    &candidate.effective_model,
+                    false,
+                )
+            else {
+                return Ok(ProviderQueryExecutionOutcome {
+                    status: "skipped",
+                    error_message: None,
+                    status_code: None,
+                    latency_ms: None,
+                    request_url: String::new(),
+                    request_headers: BTreeMap::new(),
+                    request_body,
+                    response_headers: BTreeMap::new(),
+                    response_body: None,
+                });
+            };
+            if !crate::provider_transport::apply_local_body_rules(
+                &mut provider_request_body,
+                transport.endpoint.body_rules.as_ref(),
+                Some(&request_body),
+            ) {
+                None
+            } else {
+                Some(provider_request_body)
+            }
+        }
+        "claude:chat" | "gemini:chat" => {
+            let Some(mut provider_request_body) =
+                crate::ai_pipeline::build_cross_format_openai_chat_request_body(
+                    &request_body,
+                    &candidate.effective_model,
+                    provider_api_format,
+                    false,
+                )
+            else {
+                return Ok(ProviderQueryExecutionOutcome {
+                    status: "skipped",
+                    error_message: None,
+                    status_code: None,
+                    latency_ms: None,
+                    request_url: String::new(),
+                    request_headers: BTreeMap::new(),
+                    request_body,
+                    response_headers: BTreeMap::new(),
+                    response_body: None,
+                });
+            };
+            if !crate::provider_transport::apply_local_body_rules(
+                &mut provider_request_body,
+                transport.endpoint.body_rules.as_ref(),
+                Some(&request_body),
+            ) {
+                None
+            } else {
+                Some(provider_request_body)
+            }
+        }
+        _ => None,
+    };
+    let Some(provider_request_body) = provider_request_body else {
+        return Ok(ProviderQueryExecutionOutcome {
+            status: "skipped",
+            error_message: None,
+            status_code: None,
+            latency_ms: None,
+            request_url: String::new(),
+            request_headers: BTreeMap::new(),
+            request_body,
+            response_headers: BTreeMap::new(),
+            response_body: None,
+        });
+    };
+
+    let oauth_auth = match provider_api_format {
+        "openai:chat" | "claude:chat" => state.resolve_local_oauth_header_auth(&transport).await?,
+        _ => None,
+    };
+    let auth = match provider_api_format {
+        "openai:chat" => {
+            crate::provider_transport::auth::resolve_local_openai_bearer_auth(&transport)
+                .or(oauth_auth)
+        }
+        "claude:chat" => {
+            crate::provider_transport::auth::resolve_local_standard_auth(&transport).or(oauth_auth)
+        }
+        "gemini:chat" => state.resolve_local_gemini_auth(&transport),
+        _ => None,
+    };
+    let Some((auth_header, auth_value)) = auth else {
+        return Ok(ProviderQueryExecutionOutcome {
+            status: "skipped",
+            error_message: None,
+            status_code: None,
+            latency_ms: None,
+            request_url: String::new(),
+            request_headers: BTreeMap::new(),
+            request_body: provider_request_body,
+            response_headers: BTreeMap::new(),
+            response_body: None,
+        });
+    };
+
+    let mut synthetic_request = http::Request::builder()
+        .uri(route_path)
+        .body(())
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    *synthetic_request.headers_mut() = provider_query_extract_request_headers(payload);
+    let (parts, _) = synthetic_request.into_parts();
+
+    let request_url = match provider_api_format {
+        "openai:chat" => {
+            let custom_path = transport
+                .endpoint
+                .custom_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            match custom_path {
+                Some(path) => state.build_passthrough_path_url(
+                    &transport.endpoint.base_url,
+                    path,
+                    parts.uri.query(),
+                    &[],
+                ),
+                None => Some(
+                    state.build_openai_chat_url(&transport.endpoint.base_url, parts.uri.query()),
+                ),
+            }
+        }
+        "claude:chat" => {
+            let custom_path = transport
+                .endpoint
+                .custom_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            match custom_path {
+                Some(path) => state.build_passthrough_path_url(
+                    &transport.endpoint.base_url,
+                    path,
+                    parts.uri.query(),
+                    &[],
+                ),
+                None => Some(
+                    state
+                        .build_claude_messages_url(&transport.endpoint.base_url, parts.uri.query()),
+                ),
+            }
+        }
+        "gemini:chat" => {
+            let custom_path = transport
+                .endpoint
+                .custom_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            match custom_path {
+                Some(path) => state.build_passthrough_path_url(
+                    &transport.endpoint.base_url,
+                    path,
+                    parts.uri.query(),
+                    &["key"],
+                ),
+                None => state.build_gemini_content_url(
+                    &transport.endpoint.base_url,
+                    &candidate.effective_model,
+                    false,
+                    parts.uri.query(),
+                ),
+            }
+        }
+        _ => None,
+    }
+    .ok_or_else(|| GatewayError::Internal("provider request url is unavailable".to_string()))?;
+
+    let mut request_headers = match provider_api_format {
+        "claude:chat" => crate::provider_transport::auth::build_claude_passthrough_headers(
+            &parts.headers,
+            &auth_header,
+            &auth_value,
+            &BTreeMap::new(),
+            Some("application/json"),
+        ),
+        _ => state.build_passthrough_headers_with_auth(
+            &parts.headers,
+            &auth_header,
+            &auth_value,
+            &BTreeMap::new(),
+        ),
+    };
+    if !state.apply_local_header_rules(
+        &mut request_headers,
+        transport.endpoint.header_rules.as_ref(),
+        &[auth_header.as_str(), "content-type"],
+        &provider_request_body,
+        Some(&request_body),
+    ) {
+        return Ok(ProviderQueryExecutionOutcome {
+            status: "failed",
+            error_message: Some("provider request headers build failed".to_string()),
+            status_code: None,
+            latency_ms: None,
+            request_url,
+            request_headers,
+            request_body: provider_request_body,
+            response_headers: BTreeMap::new(),
+            response_body: None,
+        });
+    }
+    crate::provider_transport::ensure_upstream_auth_header(
+        &mut request_headers,
+        &auth_header,
+        &auth_value,
+    );
+
+    let plan = ExecutionPlan {
+        request_id: trace_id.to_string(),
+        candidate_id: Some(format!("provider-query-{}", candidate.key.id)),
+        provider_name: Some(provider.name.clone()),
+        provider_id: provider.id.clone(),
+        endpoint_id: candidate.endpoint.id.clone(),
+        key_id: candidate.key.id.clone(),
+        method: "POST".to_string(),
+        url: request_url.clone(),
+        headers: request_headers.clone(),
+        content_type: Some("application/json".to_string()),
+        content_encoding: None,
+        body: RequestBody::from_json(provider_request_body.clone()),
+        stream: false,
+        client_api_format: "openai:chat".to_string(),
+        provider_api_format: candidate.endpoint.api_format.clone(),
+        model_name: Some(candidate.effective_model.clone()),
+        proxy: state
+            .resolve_transport_proxy_snapshot_with_tunnel_affinity(&transport)
+            .await,
+        tls_profile: state.resolve_transport_tls_profile(&transport),
+        timeouts: state.resolve_transport_execution_timeouts(&transport),
+    };
+
+    let result = state
+        .execute_execution_runtime_sync_plan(Some(trace_id), &plan)
+        .await?;
+    let response_body = result.body.as_ref().and_then(|body| body.json_body.clone());
+    let error_message = if result.status_code >= 400 {
+        provider_query_extract_error_message(&result)
+    } else {
+        None
+    };
+
+    Ok(ProviderQueryExecutionOutcome {
+        status: if error_message.is_some() {
+            "failed"
+        } else {
+            "success"
+        },
+        error_message,
+        status_code: Some(result.status_code),
+        latency_ms: result.telemetry.as_ref().and_then(|value| value.elapsed_ms),
+        request_url,
+        request_headers,
+        request_body: provider_request_body,
+        response_headers: result.headers,
+        response_body,
+    })
+}
+
 fn provider_query_test_attempt_payload(
     candidate_index: usize,
     candidate: &ProviderQueryTestCandidate,
@@ -745,10 +1049,12 @@ async fn build_admin_provider_query_kiro_failover_response(
             ADMIN_PROVIDER_QUERY_PROVIDER_NOT_FOUND_DETAIL,
         ));
     };
-    if !provider.provider_type.trim().eq_ignore_ascii_case("kiro") {
+    let failover_models = super::payload::provider_query_extract_failover_models(payload);
+    let is_kiro = provider.provider_type.trim().eq_ignore_ascii_case("kiro");
+    if !is_kiro && failover_models.len() > 1 {
         return Ok(build_admin_provider_query_test_model_failover_response(
             provider_id,
-            super::payload::provider_query_extract_failover_models(payload),
+            failover_models,
         ));
     }
 
@@ -764,16 +1070,23 @@ async fn build_admin_provider_query_kiro_failover_response(
     let mut success_body = None;
 
     for (candidate_index, candidate) in candidates.iter().enumerate() {
-        let execution = provider_query_execute_kiro_test_candidate(
-            state,
-            &provider,
-            candidate,
-            payload,
-            route_path,
-            &trace_id,
-            &requested_model,
-        )
-        .await?;
+        let execution = if is_kiro {
+            provider_query_execute_kiro_test_candidate(
+                state,
+                &provider,
+                candidate,
+                payload,
+                route_path,
+                &trace_id,
+                &requested_model,
+            )
+            .await?
+        } else {
+            provider_query_execute_standard_test_candidate(
+                state, &provider, candidate, payload, route_path, &trace_id,
+            )
+            .await?
+        };
         if execution.status != "skipped" {
             total_attempts += 1;
         }
@@ -814,7 +1127,7 @@ async fn build_admin_provider_query_kiro_failover_response(
         "total_candidates": candidates.len(),
         "total_attempts": total_attempts,
         "data": success_body.as_ref().map(|body| json!({
-            "stream": true,
+            "stream": is_kiro,
             "response": body,
         })),
         "error": error,
