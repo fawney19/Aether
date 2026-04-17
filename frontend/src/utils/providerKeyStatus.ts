@@ -6,9 +6,12 @@ import {
   isAccountLevelBlockReason,
   isRefreshFailedReason,
 } from './accountBlock'
+import {
+  isOAuthManagedCredential,
+  type ProviderKeyAuthCarrier,
+} from './providerKeyAuth'
 
-export interface ProviderKeyStatusCarrier {
-  auth_type?: string | null
+export interface ProviderKeyStatusCarrier extends ProviderKeyAuthCarrier {
   oauth_expires_at?: number | null
   oauth_invalid_at?: number | null  // compatibility only
   oauth_invalid_reason?: string | null  // compatibility only
@@ -107,7 +110,7 @@ function getLegacyOAuthState(
   input: ProviderKeyStatusCarrier,
   tick: number,
 ): OAuthStatusInfo | null {
-  if (normalizeText(input.auth_type) !== 'oauth') return null
+  if (!isOAuthManagedCredential(input)) return null
   if (!input.oauth_expires_at && !input.oauth_invalid_at && !input.oauth_invalid_reason) return null
 
   const rawReason = normalizeText(input.oauth_invalid_reason)

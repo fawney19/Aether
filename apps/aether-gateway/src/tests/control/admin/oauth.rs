@@ -2427,20 +2427,37 @@ async fn gateway_batch_imports_admin_provider_oauth_kiro_via_execution_runtime_p
                     .lock()
                     .expect("mutex should lock")
                     .push(plan.clone());
-                assert_eq!(plan.request_id, "kiro_batch_refresh:social");
-                assert_eq!(plan.url, "https://oauth.example/refreshToken");
                 assert_eq!(
                     plan.proxy
                         .as_ref()
                         .and_then(|proxy| proxy.node_id.as_deref()),
                     Some("proxy-node-kiro-batch-runtime")
                 );
-                assert_eq!(
-                    plan.headers
-                        .get(EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER)
-                        .map(String::as_str),
-                    Some("true")
-                );
+                if plan.request_id == "kiro_batch_refresh:social" {
+                    assert_eq!(plan.url, "https://oauth.example/refreshToken");
+                    assert_eq!(
+                        plan.headers
+                            .get(EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER)
+                            .map(String::as_str),
+                        Some("true")
+                    );
+                    return Json(json!({
+                        "request_id": plan.request_id,
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {
+                                "accessToken": sample_kiro_device_access_token("kiro-runtime@example.com"),
+                                "refreshToken": "kiro-runtime-refresh-token-new",
+                                "expiresIn": 1800,
+                            }
+                        }
+                    }));
+                }
+
+                assert_eq!(plan.request_id, "kiro-quota:key-kiro-batch-runtime");
                 Json(json!({
                     "request_id": plan.request_id,
                     "status_code": 200,
@@ -2449,9 +2466,17 @@ async fn gateway_batch_imports_admin_provider_oauth_kiro_via_execution_runtime_p
                     },
                     "body": {
                         "json_body": {
-                            "accessToken": sample_kiro_device_access_token("kiro-runtime@example.com"),
-                            "refreshToken": "kiro-runtime-refresh-token-new",
-                            "expiresIn": 1800,
+                            "subscriptionInfo": {
+                                "subscriptionTitle": "KIRO PRO+"
+                            },
+                            "usageBreakdownList": [{
+                                "currentUsageWithPrecision": 5.0,
+                                "usageLimitWithPrecision": 20.0,
+                                "nextDateReset": 1_900_000_000u64
+                            }],
+                            "desktopUserInfo": {
+                                "email": "kiro-runtime@example.com"
+                            }
                         }
                     }
                 }))
@@ -2541,7 +2566,7 @@ async fn gateway_batch_imports_admin_provider_oauth_kiro_via_execution_runtime_p
 
     {
         let plans = execution_plans.lock().expect("mutex should lock");
-        assert_eq!(plans.len(), 1);
+        assert_eq!(plans.len(), 2);
     }
 
     let stored_key = provider_catalog_repository

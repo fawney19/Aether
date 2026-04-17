@@ -18,6 +18,7 @@ use super::shared::{
     should_auto_remove_structured_reason, ProviderQuotaExecutionOutcome,
 };
 use crate::handlers::admin::request::AdminAppState;
+use crate::provider_key_auth::provider_key_is_oauth_managed;
 use crate::GatewayError;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
@@ -55,11 +56,12 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
             }
         };
 
-        let resolved_oauth_auth = if key.auth_type.trim().eq_ignore_ascii_case("oauth") {
-            state.resolve_local_oauth_header_auth(&transport).await?
-        } else {
-            None
-        };
+        let resolved_oauth_auth =
+            if provider_key_is_oauth_managed(&key, provider.provider_type.as_str()) {
+                state.resolve_local_oauth_header_auth(&transport).await?
+            } else {
+                None
+            };
 
         let headers = match build_codex_refresh_headers(&transport, resolved_oauth_auth) {
             Ok(headers) => headers,

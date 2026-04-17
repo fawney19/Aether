@@ -1,4 +1,5 @@
 use crate::handlers::shared::{json_string_list, unix_secs_to_rfc3339};
+use crate::provider_key_auth::provider_key_auth_semantics;
 use crate::AppState;
 #[cfg(test)]
 use aether_crypto::DEVELOPMENT_ENCRYPTION_KEY;
@@ -273,7 +274,7 @@ fn derive_catalog_oauth_plan_type(
     provider_type: &str,
     auth_config: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Option<String> {
-    if !key.auth_type.trim().eq_ignore_ascii_case("oauth") {
+    if !provider_key_auth_semantics(key, provider_type).oauth_managed() {
         return None;
     }
 
@@ -339,13 +340,18 @@ pub(crate) fn build_admin_provider_key_response(
     } else {
         0.0
     };
+    let auth_semantics = provider_key_auth_semantics(key, provider_type);
     let auth_config = parse_catalog_auth_config_json(state, key);
-    let oauth_organizations = auth_config
-        .as_ref()
-        .and_then(|config| config.get("organizations"))
-        .and_then(serde_json::Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let oauth_organizations = if auth_semantics.can_show_oauth_metadata() {
+        auth_config
+            .as_ref()
+            .and_then(|config| config.get("organizations"))
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let oauth_plan_type = derive_catalog_oauth_plan_type(key, provider_type, auth_config.as_ref());
     let (
         health_score,
@@ -387,6 +393,30 @@ pub(crate) fn build_admin_provider_key_response(
     );
     payload.insert("api_key_plain".to_string(), serde_json::Value::Null);
     payload.insert("auth_type".to_string(), json!(key.auth_type));
+    payload.insert(
+        "credential_kind".to_string(),
+        json!(auth_semantics.credential_kind().as_str()),
+    );
+    payload.insert(
+        "runtime_auth_kind".to_string(),
+        json!(auth_semantics.runtime_auth_kind().as_str()),
+    );
+    payload.insert(
+        "oauth_managed".to_string(),
+        json!(auth_semantics.oauth_managed()),
+    );
+    payload.insert(
+        "can_refresh_oauth".to_string(),
+        json!(auth_semantics.can_refresh_oauth()),
+    );
+    payload.insert(
+        "can_export_oauth".to_string(),
+        json!(auth_semantics.can_export_oauth()),
+    );
+    payload.insert(
+        "can_edit_oauth".to_string(),
+        json!(auth_semantics.can_edit_oauth()),
+    );
     payload.insert("name".to_string(), json!(key.name));
     payload.insert("rate_multipliers".to_string(), json!(key.rate_multipliers));
     payload.insert(
@@ -410,40 +440,59 @@ pub(crate) fn build_admin_provider_key_response(
     payload.insert("capabilities".to_string(), json!(key.capabilities));
     payload.insert(
         "oauth_expires_at".to_string(),
-        json!(key.expires_at_unix_secs),
+        json!(auth_semantics
+            .can_show_oauth_metadata()
+            .then_some(key.expires_at_unix_secs)
+            .flatten()),
     );
     payload.insert(
         "oauth_email".to_string(),
-        auth_config
-            .as_ref()
-            .and_then(|config| config.get("email"))
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
+        if auth_semantics.can_show_oauth_metadata() {
+            auth_config
+                .as_ref()
+                .and_then(|config| config.get("email"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null)
+        } else {
+            serde_json::Value::Null
+        },
     );
     payload.insert("oauth_plan_type".to_string(), json!(oauth_plan_type));
     payload.insert(
         "oauth_account_id".to_string(),
-        auth_config
-            .as_ref()
-            .and_then(|config| config.get("account_id"))
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
+        if auth_semantics.can_show_oauth_metadata() {
+            auth_config
+                .as_ref()
+                .and_then(|config| config.get("account_id"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null)
+        } else {
+            serde_json::Value::Null
+        },
     );
     payload.insert(
         "oauth_account_name".to_string(),
-        auth_config
-            .as_ref()
-            .and_then(|config| config.get("account_name"))
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
+        if auth_semantics.can_show_oauth_metadata() {
+            auth_config
+                .as_ref()
+                .and_then(|config| config.get("account_name"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null)
+        } else {
+            serde_json::Value::Null
+        },
     );
     payload.insert(
         "oauth_account_user_id".to_string(),
-        auth_config
-            .as_ref()
-            .and_then(|config| config.get("account_user_id"))
-            .cloned()
-            .unwrap_or(serde_json::Value::Null),
+        if auth_semantics.can_show_oauth_metadata() {
+            auth_config
+                .as_ref()
+                .and_then(|config| config.get("account_user_id"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null)
+        } else {
+            serde_json::Value::Null
+        },
     );
     payload.insert(
         "oauth_organizations".to_string(),
@@ -451,11 +500,17 @@ pub(crate) fn build_admin_provider_key_response(
     );
     payload.insert(
         "oauth_invalid_at".to_string(),
-        json!(key.oauth_invalid_at_unix_secs),
+        json!(auth_semantics
+            .can_show_oauth_metadata()
+            .then_some(key.oauth_invalid_at_unix_secs)
+            .flatten()),
     );
     payload.insert(
         "oauth_invalid_reason".to_string(),
-        json!(key.oauth_invalid_reason),
+        json!(auth_semantics
+            .can_show_oauth_metadata()
+            .then_some(key.oauth_invalid_reason.clone())
+            .flatten()),
     );
     payload.insert(
         "status_snapshot".to_string(),

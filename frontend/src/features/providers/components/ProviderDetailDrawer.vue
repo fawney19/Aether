@@ -325,10 +325,10 @@
                           </div>
                           <div class="flex items-center gap-1">
                             <span class="text-[11px] font-mono text-muted-foreground">
-                              {{ key.auth_type === 'oauth' ? '[Refresh Token]' : (key.auth_type === 'service_account' ? '[Service Account]' : key.api_key_masked) }}
+                              {{ isOAuthManagedCredential(key) ? '[Refresh Token]' : (isServiceAccountCredential(key) ? '[Service Account]' : key.api_key_masked) }}
                             </span>
                             <Button
-                              v-if="key.auth_type === 'oauth'"
+                              v-if="canExportOAuthCredential(key)"
                               variant="ghost"
                               size="icon"
                               class="h-4 w-4 shrink-0"
@@ -403,7 +403,7 @@
                             </template>
                             <!-- Antigravity 账号未激活提示 -->
                             <span
-                              v-if="provider.provider_type === 'antigravity' && key.is_active && key.auth_type === 'oauth' && (!key.upstream_metadata || !hasAntigravityQuotaData(key.upstream_metadata))"
+                              v-if="provider.provider_type === 'antigravity' && key.is_active && isOAuthManagedCredential(key) && (!key.upstream_metadata || !hasAntigravityQuotaData(key.upstream_metadata))"
                               class="text-[10px] text-orange-500 dark:text-orange-400"
                               title="该账号尚未完成 Gemini Code Assist 激活，无法获取配额和使用模型"
                             >
@@ -1158,6 +1158,12 @@ import { isOAuthAccountProviderType, isKeyManagedProviderType } from '../utils/p
 import { getOAuthOrgBadge } from '@/utils/oauthIdentity'
 import { getOAuthRefreshFeedback } from '@/utils/oauthRefreshFeedback'
 import {
+  canEditOAuthCredential,
+  canExportOAuthCredential,
+  isOAuthManagedCredential,
+  isServiceAccountCredential,
+} from '@/utils/providerKeyAuth'
+import {
   getAccountStatusDisplay,
   getAccountStatusTitle,
   getOAuthRefreshButtonTitle as resolveOAuthRefreshButtonTitle,
@@ -1579,7 +1585,7 @@ function handleEditKey(endpoint: ProviderEndpoint | undefined, key: EndpointAPIK
   currentEndpoint.value = endpoint || null
   editingKey.value = key
   // OAuth 密钥使用专门的编辑对话框
-  if (key.auth_type === 'oauth') {
+  if (canEditOAuthCredential(key)) {
     oauthKeyEditDialogOpen.value = true
   } else {
     keyFormDialogOpen.value = true

@@ -1584,6 +1584,65 @@ async fn gateway_handles_admin_pool_resolve_selection_locally_with_trusted_admin
 }
 
 #[tokio::test]
+async fn gateway_resolve_selection_marks_legacy_kiro_bearer_keys_as_oauth_managed() {
+    let mut provider = sample_provider("provider-kiro", "kiro", 10);
+    provider.provider_type = "kiro".to_string();
+    let mut key = sample_key(
+        "key-kiro-legacy",
+        "provider-kiro",
+        "kiro:generateAssistantResponse",
+        "kiro-access-token",
+    );
+    key.auth_type = "bearer".to_string();
+    key.encrypted_auth_config = Some(
+        encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"kiro","email":"legacy-kiro@example.com","refresh_token":"legacy-kiro-refresh-token"}"#,
+        )
+        .expect("auth config ciphertext should build"),
+    );
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![key],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_reader_for_tests(provider_catalog_repository)
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        );
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::POST,
+        "/api/admin/pool/provider-kiro/keys/resolve-selection",
+        Some(json!({})),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    assert_eq!(payload["total"], json!(1));
+    let items = payload["items"].as_array().expect("items should be array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["key_id"], json!("key-kiro-legacy"));
+    assert_eq!(items[0]["auth_type"], json!("bearer"));
+    assert_eq!(items[0]["credential_kind"], json!("oauth_session"));
+    assert_eq!(items[0]["runtime_auth_kind"], json!("bearer"));
+    assert_eq!(items[0]["oauth_managed"], json!(true));
+    assert_eq!(items[0]["can_refresh_oauth"], json!(true));
+    assert_eq!(items[0]["can_export_oauth"], json!(true));
+    assert_eq!(items[0]["can_edit_oauth"], json!(true));
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_pool_batch_action_locally_with_trusted_admin_principal() {
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);

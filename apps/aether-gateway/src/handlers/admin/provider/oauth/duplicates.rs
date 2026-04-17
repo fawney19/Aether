@@ -1,4 +1,5 @@
 use crate::handlers::admin::request::AdminAppState;
+use crate::provider_key_auth::provider_key_is_oauth_managed;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 
 fn normalize_codex_plan_group_for_provider_oauth(
@@ -141,8 +142,13 @@ pub(crate) async fn find_duplicate_provider_oauth_key(
         .await
         .map_err(|err| format!("{err:?}"))?;
 
+    let provider_type = auth_config
+        .get("provider_type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     for existing_key in existing_keys.into_iter().filter(|key| {
-        key.auth_type.trim().eq_ignore_ascii_case("oauth")
+        provider_key_is_oauth_managed(key, provider_type.as_str())
             && exclude_key_id.is_none_or(|exclude| key.id != exclude)
     }) {
         let Some(existing_auth_config) = state.parse_catalog_auth_config_json(&existing_key) else {

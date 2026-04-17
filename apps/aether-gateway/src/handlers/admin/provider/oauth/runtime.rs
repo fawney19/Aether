@@ -2,6 +2,7 @@ use super::quota::antigravity::refresh_antigravity_provider_quota_locally;
 use super::quota::codex::refresh_codex_provider_quota_locally;
 use super::quota::kiro::refresh_kiro_provider_quota_locally;
 use crate::handlers::admin::request::AdminAppState;
+use crate::provider_key_auth::provider_key_is_oauth_managed;
 use crate::GatewayError;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogProvider,
@@ -85,7 +86,7 @@ pub(crate) async fn refresh_provider_oauth_account_state_after_update(
     else {
         return Ok((false, None));
     };
-    if provider_type == "kiro" && !key.auth_type.trim().eq_ignore_ascii_case("bearer") {
+    if provider_type == "kiro" && !provider_key_is_oauth_managed(&key, provider_type.as_str()) {
         return Ok((false, None));
     }
 

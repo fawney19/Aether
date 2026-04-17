@@ -1,4 +1,5 @@
 use crate::handlers::admin::request::AdminAppState;
+use crate::provider_key_auth::provider_key_is_oauth_managed;
 use aether_admin::provider::pool as admin_provider_pool_pure;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 
@@ -44,7 +45,7 @@ fn admin_pool_derive_oauth_plan_type(
         }
     };
 
-    if key.auth_type.trim() != "oauth" {
+    if !provider_key_is_oauth_managed(key, provider_type) {
         return None;
     }
 

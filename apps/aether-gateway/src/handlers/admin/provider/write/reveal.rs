@@ -8,17 +8,37 @@ fn normalize_reveal_auth_type(value: &str) -> &str {
 
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::parse_catalog_auth_config_json;
+use crate::provider_key_auth::provider_key_auth_semantics;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use chrono::{SecondsFormat, Utc};
 use serde_json::json;
+
+fn reveal_provider_type_from_auth_config(
+    auth_config: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> String {
+    auth_config
+        .and_then(|value| value.get("provider_type"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
 
 pub(crate) fn build_admin_reveal_key_payload(
     state: &AdminAppState<'_>,
     key: &StoredProviderCatalogKey,
 ) -> Result<serde_json::Value, String> {
-    let auth_type = normalize_reveal_auth_type(&key.auth_type);
+    let parsed_auth_config = state.parse_catalog_auth_config_json(key);
+    let provider_type = reveal_provider_type_from_auth_config(parsed_auth_config.as_ref());
+    let auth_semantics = provider_key_auth_semantics(key, provider_type.as_str());
+    let auth_type = if auth_semantics.oauth_managed() {
+        "oauth"
+    } else {
+        normalize_reveal_auth_type(&key.auth_type)
+    };
     if matches!(auth_type, "service_account") {
-        if let Some(auth_config) = state.parse_catalog_auth_config_json(key) {
+        if let Some(auth_config) = parsed_auth_config {
             return Ok(json!({
                 "auth_type": auth_type,
                 "auth_config": auth_config,
@@ -92,11 +112,6 @@ pub(crate) async fn build_admin_export_key_payload(
     state: &AdminAppState<'_>,
     key: &StoredProviderCatalogKey,
 ) -> Result<serde_json::Value, String> {
-    let auth_type = normalize_reveal_auth_type(&key.auth_type);
-    if auth_type != "oauth" {
-        return Err("仅 OAuth 类型的 Key 支持导出".to_string());
-    }
-
     let ciphertext = key
         .encrypted_auth_config
         .as_deref()
@@ -136,6 +151,9 @@ pub(crate) async fn build_admin_export_key_payload(
             .map(|provider| provider.provider_type)
             .unwrap_or_default()
     };
+    if !provider_key_auth_semantics(key, provider_type.as_str()).can_export_oauth() {
+        return Err("仅 OAuth 管理账号支持导出".to_string());
+    }
 
     let mut payload =
         provider_oauth_export_payload(&provider_type, &auth_config, key.upstream_metadata.as_ref());
