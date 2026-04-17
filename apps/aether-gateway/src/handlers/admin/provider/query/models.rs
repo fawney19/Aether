@@ -12,7 +12,7 @@ use super::response::{
 };
 use crate::ai_pipeline::{maybe_build_sync_finalize_outcome, GatewayControlDecision};
 use crate::execution_runtime;
-use crate::handlers::admin::request::AdminAppState;
+use crate::handlers::admin::request::{AdminAppState, AdminGatewayProviderTransportSnapshot};
 use crate::model_fetch::ModelFetchRuntimeState;
 use crate::provider_transport::kiro::{
     build_kiro_generate_assistant_response_url, build_kiro_provider_headers,
@@ -242,6 +242,73 @@ fn provider_query_key_supports_endpoint(
             .any(|value| value.eq_ignore_ascii_case(endpoint_api_format))
 }
 
+fn provider_query_transport_supports_standard_test_execution(
+    state: &AdminAppState<'_>,
+    transport: &AdminGatewayProviderTransportSnapshot,
+    api_format: &str,
+) -> bool {
+    match api_format {
+        "openai:chat" => {
+            crate::provider_transport::policy::supports_local_openai_chat_transport(transport)
+        }
+        "claude:chat" => {
+            crate::provider_transport::policy::supports_local_standard_transport_with_network(
+                transport, api_format,
+            )
+        }
+        "gemini:chat" => state.supports_local_gemini_transport_with_network(transport, api_format),
+        _ => false,
+    }
+}
+
+async fn provider_query_select_preferred_non_kiro_endpoint(
+    state: &AdminAppState<'_>,
+    provider: &StoredProviderCatalogProvider,
+    endpoints: &[StoredProviderCatalogEndpoint],
+    keys: &[StoredProviderCatalogKey],
+    selected_key_id: Option<&str>,
+) -> Option<StoredProviderCatalogEndpoint> {
+    for endpoint in endpoints.iter().filter(|endpoint| endpoint.is_active) {
+        if !provider_query_supports_standard_test_api_format(&endpoint.api_format) {
+            continue;
+        }
+        for key in keys {
+            if !key.is_active
+                || selected_key_id.is_some_and(|value| value != key.id.as_str())
+                || !provider_query_key_supports_endpoint(key, &endpoint.api_format)
+            {
+                continue;
+            }
+            let Ok(Some(transport)) = state
+                .read_provider_transport_snapshot(&provider.id, &endpoint.id, &key.id)
+                .await
+            else {
+                continue;
+            };
+            if provider_query_transport_supports_standard_test_execution(
+                state,
+                &transport,
+                endpoint.api_format.as_str(),
+            ) {
+                return Some(endpoint.clone());
+            }
+        }
+    }
+
+    endpoints
+        .iter()
+        .find(|endpoint| {
+            endpoint.is_active
+                && keys.iter().any(|key| {
+                    key.is_active
+                        && selected_key_id.is_none_or(|value| value == key.id.as_str())
+                        && provider_query_key_supports_endpoint(key, &endpoint.api_format)
+                })
+        })
+        .or_else(|| endpoints.iter().find(|endpoint| endpoint.is_active))
+        .cloned()
+}
+
 fn provider_query_test_key_sort_key(
     provider_type: &str,
     key: &StoredProviderCatalogKey,
@@ -347,38 +414,19 @@ async fn provider_query_build_kiro_test_candidates(
         && requested_api_format.is_none()
         && !provider.provider_type.trim().eq_ignore_ascii_case("kiro")
     {
-        endpoints
-            .iter()
-            .find(|endpoint| {
-                endpoint.is_active
-                    && provider_query_supports_standard_test_api_format(&endpoint.api_format)
-                    && all_keys.iter().any(|key| {
-                        key.is_active
-                            && selected_key_id
-                                .as_deref()
-                                .is_none_or(|value| value == key.id.as_str())
-                            && provider_query_key_supports_endpoint(key, &endpoint.api_format)
-                    })
-            })
-            .or_else(|| {
-                endpoints.iter().find(|endpoint| {
-                    endpoint.is_active
-                        && all_keys.iter().any(|key| {
-                            key.is_active
-                                && selected_key_id
-                                    .as_deref()
-                                    .is_none_or(|value| value == key.id.as_str())
-                                && provider_query_key_supports_endpoint(key, &endpoint.api_format)
-                        })
-                })
-            })
-            .or_else(|| endpoints.iter().find(|endpoint| endpoint.is_active))
-            .cloned()
-            .ok_or_else(|| {
-                build_admin_provider_query_not_found_response(
-                    ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL,
-                )
-            })?
+        provider_query_select_preferred_non_kiro_endpoint(
+            state,
+            provider,
+            &endpoints,
+            &all_keys,
+            selected_key_id.as_deref(),
+        )
+        .await
+        .ok_or_else(|| {
+            build_admin_provider_query_not_found_response(
+                ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL,
+            )
+        })?
     } else {
         match provider_query_select_kiro_endpoint(
             &endpoints,
@@ -764,6 +812,23 @@ async fn provider_query_execute_standard_test_candidate(
             response_body: None,
         });
     };
+    if !provider_query_transport_supports_standard_test_execution(
+        state,
+        &transport,
+        candidate.endpoint.api_format.as_str(),
+    ) {
+        return Ok(ProviderQueryExecutionOutcome {
+            status: "skipped",
+            error_message: None,
+            status_code: None,
+            latency_ms: None,
+            request_url: String::new(),
+            request_headers: BTreeMap::new(),
+            request_body: Value::Null,
+            response_headers: BTreeMap::new(),
+            response_body: None,
+        });
+    }
 
     let original_request_body =
         provider_query_build_test_request_body(payload, &candidate.effective_model);
@@ -961,11 +1026,12 @@ async fn provider_query_execute_standard_test_candidate(
             &BTreeMap::new(),
             Some("application/json"),
         ),
-        _ => state.build_passthrough_headers_with_auth(
+        _ => crate::provider_transport::auth::build_openai_passthrough_headers(
             &parts.headers,
             &auth_header,
             &auth_value,
             &BTreeMap::new(),
+            Some("application/json"),
         ),
     };
     if !state.apply_local_header_rules(
@@ -1124,11 +1190,30 @@ async fn build_admin_provider_query_kiro_failover_response(
             Err(response) => return Ok(response),
         }
     }
-    if !is_kiro
-        && candidates.iter().all(|candidate| {
-            !provider_query_supports_standard_test_api_format(&candidate.endpoint.api_format)
-        })
-    {
+    if !is_kiro {
+        let mut supported_candidates = Vec::new();
+        for candidate in candidates {
+            let Some(transport) = state
+                .read_provider_transport_snapshot(
+                    &provider.id,
+                    &candidate.endpoint.id,
+                    &candidate.key.id,
+                )
+                .await?
+            else {
+                continue;
+            };
+            if provider_query_transport_supports_standard_test_execution(
+                state,
+                &transport,
+                candidate.endpoint.api_format.as_str(),
+            ) {
+                supported_candidates.push(candidate);
+            }
+        }
+        candidates = supported_candidates;
+    }
+    if !is_kiro && candidates.is_empty() {
         return Ok(build_admin_provider_query_test_model_failover_response(
             provider_id,
             requested_models,

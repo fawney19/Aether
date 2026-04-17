@@ -705,6 +705,10 @@ async fn gateway_handles_admin_provider_query_test_model_locally_with_trusted_ad
             assert_eq!(plan.model_name.as_deref(), Some("gpt-4.1"));
             assert!(!plan.stream);
             assert_eq!(
+                plan.headers.get("content-type").map(String::as_str),
+                Some("application/json")
+            );
+            assert_eq!(
                 plan.headers.get("authorization").map(String::as_str),
                 Some("Bearer sk-test-primary")
             );
@@ -1554,6 +1558,62 @@ async fn gateway_returns_stub_for_unsupported_non_kiro_test_format() {
 }
 
 #[tokio::test]
+async fn gateway_returns_stub_for_transport_unsupported_non_kiro_provider() {
+    let mut provider = sample_provider("provider-antigravity", "Antigravity", 10);
+    provider.provider_type = "antigravity".to_string();
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![sample_endpoint(
+            "endpoint-antigravity-gemini",
+            "provider-antigravity",
+            "gemini:chat",
+            "https://cloudcode-pa.googleapis.com",
+        )],
+        vec![sample_key(
+            "key-antigravity-gemini",
+            "provider-antigravity",
+            "gemini:chat",
+            "sk-test-antigravity",
+        )],
+    ));
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-antigravity",
+            "model": "gemini-2.5-pro",
+            "api_format": "gemini:chat"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(false));
+    assert_eq!(
+        payload["error"],
+        json!("Rust local provider-query failover simulation is not configured")
+    );
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_prefers_supported_non_kiro_endpoint_when_api_format_is_omitted() {
     let execution_runtime = Router::new().route(
         "/v1/execute/sync",
@@ -1649,6 +1709,106 @@ async fn gateway_prefers_supported_non_kiro_endpoint_when_api_format_is_omitted(
     assert_eq!(
         payload["data"]["response"]["choices"][0]["message"]["content"],
         json!("Selected supported endpoint")
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_prefers_transport_supported_non_kiro_endpoint_when_api_format_is_omitted() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            assert_eq!(plan.endpoint_id, "endpoint-openai-chat-supported");
+            assert_eq!(plan.provider_api_format, "openai:chat");
+            assert_eq!(
+                plan.headers.get("content-type").map(String::as_str),
+                Some("application/json")
+            );
+            Json(json!({
+                "request_id": plan.request_id,
+                "candidate_id": plan.candidate_id,
+                "status_code": 200,
+                "headers": {
+                    "content-type": "application/json"
+                },
+                "body": {
+                    "json_body": {
+                        "id": "chatcmpl-supported-transport",
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": "Selected locally supported endpoint"
+                            }
+                        }]
+                    }
+                },
+                "telemetry": {
+                    "elapsed_ms": 12
+                }
+            }))
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-openai", "OpenAI", 10);
+    provider.provider_type = "openai".to_string();
+    let mut unsupported_endpoint = sample_endpoint(
+        "endpoint-openai-chat-unsupported",
+        "provider-openai",
+        "openai:chat",
+        "https://api.openai.example",
+    );
+    unsupported_endpoint.header_rules = Some(json!({"invalid": true}));
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![
+            unsupported_endpoint,
+            sample_endpoint(
+                "endpoint-openai-chat-supported",
+                "provider-openai",
+                "openai:chat",
+                "https://api.openai.example",
+            ),
+        ],
+        vec![sample_key(
+            "key-openai-chat",
+            "provider-openai",
+            "openai:chat",
+            "sk-test-chat",
+        )],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/provider-query/test-model"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-openai",
+            "model": "gpt-5.4-mini"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(
+        payload["data"]["response"]["choices"][0]["message"]["content"],
+        json!("Selected locally supported endpoint")
     );
 
     gateway_handle.abort();
