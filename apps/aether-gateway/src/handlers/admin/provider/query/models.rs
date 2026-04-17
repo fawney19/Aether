@@ -331,6 +331,16 @@ async fn provider_query_build_kiro_test_candidates(
                 ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL,
             )
         })?;
+    let all_keys = state
+        .app()
+        .list_provider_catalog_keys_by_provider_ids(&provider_ids)
+        .await
+        .map_err(|_| {
+            build_admin_provider_query_bad_request_response(
+                ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL,
+            )
+        })?;
+    let selected_key_id = provider_query_extract_api_key_id(payload);
     let requested_endpoint_id = provider_query_extract_endpoint_id(payload);
     let requested_api_format = provider_query_extract_api_format(payload);
     let endpoint = if requested_endpoint_id.is_none()
@@ -342,6 +352,13 @@ async fn provider_query_build_kiro_test_candidates(
             .find(|endpoint| {
                 endpoint.is_active
                     && provider_query_supports_standard_test_api_format(&endpoint.api_format)
+                    && all_keys.iter().any(|key| {
+                        key.is_active
+                            && selected_key_id
+                                .as_deref()
+                                .is_none_or(|value| value == key.id.as_str())
+                            && provider_query_key_supports_endpoint(key, &endpoint.api_format)
+                    })
             })
             .or_else(|| endpoints.iter().find(|endpoint| endpoint.is_active))
             .cloned()
@@ -375,17 +392,6 @@ async fn provider_query_build_kiro_test_candidates(
         }
     };
 
-    let all_keys = state
-        .app()
-        .list_provider_catalog_keys_by_provider_ids(&provider_ids)
-        .await
-        .map_err(|_| {
-            build_admin_provider_query_bad_request_response(
-                ADMIN_PROVIDER_QUERY_NO_ACTIVE_API_KEY_DETAIL,
-            )
-        })?;
-
-    let selected_key_id = provider_query_extract_api_key_id(payload);
     if let Some(api_key_id) = selected_key_id.as_deref() {
         let Some(key) = all_keys.iter().find(|key| key.id == api_key_id) else {
             return Err(build_admin_provider_query_not_found_response(
