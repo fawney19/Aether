@@ -1239,6 +1239,150 @@ async fn gateway_handles_admin_provider_query_test_model_failover_for_kiro_local
 }
 
 #[tokio::test]
+async fn gateway_retries_kiro_failover_after_http_error_without_message() {
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| async move {
+            let payload = if plan.key_id == "key-kiro-first" {
+                json!({
+                    "request_id": plan.request_id,
+                    "candidate_id": plan.candidate_id,
+                    "status_code": 500,
+                    "headers": {
+                        "content-type": "application/json"
+                    },
+                    "body": {
+                        "json_body": {}
+                    },
+                    "telemetry": {
+                        "elapsed_ms": 9
+                    }
+                })
+            } else {
+                json!({
+                    "request_id": plan.request_id,
+                    "candidate_id": plan.candidate_id,
+                    "status_code": 200,
+                    "headers": {
+                        "content-type": "application/vnd.amazon.eventstream"
+                    },
+                    "body": {
+                        "body_bytes_b64": base64::engine::general_purpose::STANDARD.encode(
+                            [
+                                encode_kiro_event_frame("assistantResponseEvent", json!({"content": "Recovered from Kiro empty error"})),
+                                encode_kiro_exception_frame("ContentLengthExceededException"),
+                            ]
+                            .concat()
+                        )
+                    },
+                    "telemetry": {
+                        "elapsed_ms": 21
+                    }
+                })
+            };
+            Json(payload)
+        }),
+    );
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let mut provider = sample_provider("provider-kiro", "Kiro", 10);
+    provider.provider_type = "kiro".to_string();
+    let build_key = |id: &str| {
+        let mut key = sample_key(id, "provider-kiro", "claude:cli", "__placeholder__");
+        key.auth_type = "oauth".to_string();
+        key.encrypted_auth_config = Some(
+            aether_crypto::encrypt_python_fernet_plaintext(
+                DEVELOPMENT_ENCRYPTION_KEY,
+                r#"{
+                    "provider_type":"kiro",
+                    "auth_method":"idc",
+                    "access_token":"cached-kiro-token",
+                    "refresh_token":"rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
+                    "machine_id":"123e4567-e89b-12d3-a456-426614174000",
+                    "api_region":"us-east-1",
+                    "client_id":"client-id",
+                    "client_secret":"client-secret"
+                }"#,
+            )
+            .expect("auth config should encrypt"),
+        );
+        key
+    };
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![StoredProviderCatalogEndpoint::new(
+            "endpoint-kiro-cli".to_string(),
+            "provider-kiro".to_string(),
+            "claude:cli".to_string(),
+            Some("claude".to_string()),
+            Some("cli".to_string()),
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://q.{region}.amazonaws.com".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build")],
+        vec![build_key("key-kiro-first"), build_key("key-kiro-second")],
+    ));
+
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(GatewayDataState::with_provider_transport_reader_for_tests(
+                provider_catalog_repository,
+                DEVELOPMENT_ENCRYPTION_KEY.to_string(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-query/test-model-failover"
+        ))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "provider_id": "provider-kiro",
+            "mode": "direct",
+            "model_name": "claude-sonnet-4-upstream",
+            "failover_models": ["claude-sonnet-4-upstream"],
+            "api_format": "claude:cli",
+            "request_id": "provider-test-kiro-empty-error"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["success"], json!(true));
+    assert_eq!(payload["total_attempts"], json!(2));
+    let attempts = payload["attempts"]
+        .as_array()
+        .expect("attempts should be an array");
+    assert_eq!(attempts[0]["status"], json!("failed"));
+    assert_eq!(attempts[0]["status_code"], json!(500));
+    assert_eq!(attempts[1]["status"], json!("success"));
+    assert_eq!(
+        payload["data"]["response"]["content"][0]["text"],
+        json!("Recovered from Kiro empty error")
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_provider_query_test_model_failover_with_single_model_name_alias() {
     let execution_runtime = Router::new().route(
         "/v1/execute/sync",

@@ -669,7 +669,8 @@ async fn provider_query_execute_kiro_test_candidate(
     } else {
         result.body.as_ref().and_then(|body| body.json_body.clone())
     };
-    let error_message = if result.status_code >= 400 {
+    let did_fail = result.status_code >= 400;
+    let error_message = if did_fail {
         provider_query_extract_error_message(&result)
     } else if response_body.is_none()
         && provider_query_decode_execution_body(&result)
@@ -681,7 +682,7 @@ async fn provider_query_execute_kiro_test_candidate(
     };
 
     Ok(ProviderQueryExecutionOutcome {
-        status: if error_message.is_some() {
+        status: if did_fail || error_message.is_some() {
             "failed"
         } else {
             "success"
