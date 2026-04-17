@@ -1,4 +1,5 @@
 import apiClient from './client'
+import type { UserSession as SessionRecord } from '@/types/session'
 
 export interface User {
   id: string // UUID
@@ -53,6 +54,7 @@ export interface ApiKey {
   is_locked: boolean  // 管理员锁定标志
   is_standalone: boolean  // 是否为独立余额Key
   rate_limit?: number | null  // 普通Key: 0 = 不限制，历史 null 视为跟随系统默认
+  concurrent_limit?: number | null  // 普通Key: 0 = 不限制并发，历史 null 兼容
   total_requests?: number  // 总请求数
   total_cost_usd?: number  // 总费用
 }
@@ -60,9 +62,10 @@ export interface ApiKey {
 export interface UpsertUserApiKeyRequest {
   name?: string
   rate_limit?: number | null
+  concurrent_limit?: number | null
 }
 
-export type { UserSession } from '@/types/session'
+export type UserSession = SessionRecord
 
 export const usersApi = {
   async getAllUsers(): Promise<User[]> {
@@ -94,8 +97,8 @@ export const usersApi = {
     return response.data.api_keys
   },
 
-  async getUserSessions(userId: string): Promise<UserSession[]> {
-    const response = await apiClient.get<UserSession[]>(`/api/admin/users/${userId}/sessions`)
+  async getUserSessions(userId: string): Promise<SessionRecord[]> {
+    const response = await apiClient.get<SessionRecord[]>(`/api/admin/users/${userId}/sessions`)
     return response.data
   },
 

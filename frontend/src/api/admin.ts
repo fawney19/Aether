@@ -1,6 +1,5 @@
 import apiClient from './client'
 import { cachedRequest, buildCacheKey } from '@/utils/cache'
-import type { AxiosRequestConfig } from 'axios'
 import type { BillingSummary } from './auth'
 
 // LDAP 配置导出结构
@@ -353,6 +352,7 @@ export interface AdminApiKey {
   total_tokens?: number | null
   total_cost_usd?: number
   rate_limit?: number | null  // null = 跟随系统默认，0 = 不限制
+  concurrent_limit?: number | null  // null = 跟随系统默认，0 = 不限制
   allowed_providers?: string[] | null  // 允许的提供商列表
   allowed_api_formats?: string[] | null  // 允许的 API 格式列表
   allowed_models?: string[] | null  // 允许的模型列表
@@ -370,6 +370,7 @@ export interface CreateStandaloneApiKeyRequest {
   allowed_api_formats?: string[] | null
   allowed_models?: string[] | null
   rate_limit?: number | null  // null = 跟随系统默认，0 = 不限制
+  concurrent_limit?: number | null  // null = 跟随系统默认，0 = 不限制
   expires_at?: string | null  // RFC3339 时间，null = 永不过期
   initial_balance_usd: number | null  // 初始余额，null = 无限制
   unlimited_balance?: boolean | null  // 编辑时仅切换额度模式，不调整余额数值
@@ -594,7 +595,7 @@ export const adminApi = {
     key: string,
     value: unknown,
     description?: string,
-    requestConfig?: AxiosRequestConfig,
+    requestConfig?: Parameters<typeof apiClient.put>[2],
   ): Promise<{ key: string; value: unknown; description?: string }> {
     const response = await apiClient.put<{ key: string; value: unknown; description?: string }>(
       `/api/admin/system/configs/${key}`,
