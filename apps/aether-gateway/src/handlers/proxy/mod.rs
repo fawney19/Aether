@@ -15,14 +15,13 @@ use crate::constants::{
     EXECUTION_PATH_CONTROL_EXECUTE_SYNC, EXECUTION_PATH_DISTRIBUTED_OVERLOADED,
     EXECUTION_PATH_EXECUTION_RUNTIME_STREAM, EXECUTION_PATH_EXECUTION_RUNTIME_SYNC,
     EXECUTION_PATH_LOCAL_AI_PUBLIC, EXECUTION_PATH_LOCAL_API_KEY_CONCURRENCY_LIMITED,
-    EXECUTION_PATH_LOCAL_AUTH_DENIED,
-    EXECUTION_PATH_LOCAL_EXECUTION_LOOP_DETECTED, EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS,
-    EXECUTION_PATH_LOCAL_OVERLOADED, EXECUTION_PATH_LOCAL_PROXY_PASSTHROUGH_REMOVED,
-    EXECUTION_PATH_LOCAL_RATE_LIMITED, EXECUTION_PATH_LOCAL_ROUTE_NOT_FOUND,
-    EXECUTION_PATH_PUBLIC_PROXY_PASSTHROUGH, EXECUTION_RUNTIME_LOOP_GUARD_HEADER,
-    FORWARDED_FOR_HEADER, FORWARDED_HOST_HEADER, FORWARDED_PROTO_HEADER, GATEWAY_HEADER,
-    LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER, TRACE_ID_HEADER,
-    TRUSTED_AUTH_ACCESS_ALLOWED_HEADER, TRUSTED_AUTH_API_KEY_ID_HEADER,
+    EXECUTION_PATH_LOCAL_AUTH_DENIED, EXECUTION_PATH_LOCAL_EXECUTION_LOOP_DETECTED,
+    EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS, EXECUTION_PATH_LOCAL_OVERLOADED,
+    EXECUTION_PATH_LOCAL_PROXY_PASSTHROUGH_REMOVED, EXECUTION_PATH_LOCAL_RATE_LIMITED,
+    EXECUTION_PATH_LOCAL_ROUTE_NOT_FOUND, EXECUTION_PATH_PUBLIC_PROXY_PASSTHROUGH,
+    EXECUTION_RUNTIME_LOOP_GUARD_HEADER, FORWARDED_FOR_HEADER, FORWARDED_HOST_HEADER,
+    FORWARDED_PROTO_HEADER, GATEWAY_HEADER, LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER,
+    TRACE_ID_HEADER, TRUSTED_AUTH_ACCESS_ALLOWED_HEADER, TRUSTED_AUTH_API_KEY_ID_HEADER,
     TRUSTED_AUTH_BALANCE_HEADER, TRUSTED_AUTH_USER_ID_HEADER, TUNNEL_AFFINITY_FORWARDED_BY_HEADER,
     TUNNEL_AFFINITY_OWNER_INSTANCE_HEADER,
 };
@@ -1193,7 +1192,9 @@ fn local_execution_runtime_miss_detail(
     auth_api_key_concurrency_limited: bool,
     stream_request: bool,
 ) -> Option<String> {
-    if auth_api_key_concurrency_limited || diagnostic_is_auth_api_key_concurrency_limited(diagnostic) {
+    if auth_api_key_concurrency_limited
+        || diagnostic_is_auth_api_key_concurrency_limited(diagnostic)
+    {
         return Some(AUTH_API_KEY_CONCURRENCY_LIMIT_REACHED_DETAIL.to_string());
     }
 
@@ -1276,8 +1277,7 @@ fn local_execution_runtime_miss_route_detail(
 mod tests {
     use super::{
         diagnostic_is_auth_api_key_concurrency_limited, local_execution_runtime_miss_detail,
-        GatewayControlDecision,
-        LocalExecutionRuntimeMissDiagnostic,
+        GatewayControlDecision, LocalExecutionRuntimeMissDiagnostic,
     };
 
     #[test]
@@ -1295,12 +1295,8 @@ mod tests {
             ..LocalExecutionRuntimeMissDiagnostic::default()
         };
 
-        let detail = local_execution_runtime_miss_detail(
-            Some(&decision),
-            Some(&diagnostic),
-            false,
-            true,
-        );
+        let detail =
+            local_execution_runtime_miss_detail(Some(&decision), Some(&diagnostic), false, true);
 
         assert_eq!(
             detail.as_deref(),
@@ -1323,12 +1319,8 @@ mod tests {
             ..LocalExecutionRuntimeMissDiagnostic::default()
         };
 
-        let detail = local_execution_runtime_miss_detail(
-            Some(&decision),
-            Some(&diagnostic),
-            false,
-            false,
-        );
+        let detail =
+            local_execution_runtime_miss_detail(Some(&decision), Some(&diagnostic), false, false);
 
         assert_eq!(
             detail.as_deref(),
@@ -1355,18 +1347,16 @@ mod tests {
             ..LocalExecutionRuntimeMissDiagnostic::default()
         };
 
-        let detail = local_execution_runtime_miss_detail(
-            Some(&decision),
-            Some(&diagnostic),
-            false,
-            false,
-        );
+        let detail =
+            local_execution_runtime_miss_detail(Some(&decision), Some(&diagnostic), false, false);
 
         assert_eq!(
             detail.as_deref(),
             Some("当前 API Key 并发请求数已达上限，请稍后重试")
         );
-        assert!(diagnostic_is_auth_api_key_concurrency_limited(Some(&diagnostic)));
+        assert!(diagnostic_is_auth_api_key_concurrency_limited(Some(
+            &diagnostic
+        )));
     }
 
     #[test]
@@ -1388,12 +1378,8 @@ mod tests {
             ..LocalExecutionRuntimeMissDiagnostic::default()
         };
 
-        let detail = local_execution_runtime_miss_detail(
-            Some(&decision),
-            Some(&diagnostic),
-            true,
-            false,
-        );
+        let detail =
+            local_execution_runtime_miss_detail(Some(&decision), Some(&diagnostic), true, false);
 
         assert_eq!(
             detail.as_deref(),

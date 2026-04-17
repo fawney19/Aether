@@ -183,8 +183,10 @@ pub(crate) async fn build_local_execution_runtime_miss_context(
         auth_api_key_id: auth_context.map(|value| value.api_key_id.clone()),
         auth_username: auth_context.and_then(|value| value.username.clone()),
         auth_api_key_name: auth_context.and_then(|value| value.api_key_name.clone()),
-        candidate_contexts: load_runtime_miss_candidate_contexts_with_retry(state, request_id, decision)
-            .await,
+        candidate_contexts: load_runtime_miss_candidate_contexts_with_retry(
+            state, request_id, decision,
+        )
+        .await,
     }
 }
 
@@ -440,16 +442,16 @@ fn select_last_runtime_miss_executed_candidate(
         .iter()
         .filter(|candidate| request_candidate_represents_provider_execution(&candidate.candidate))
         .max_by_key(|candidate| {
-        (
-            candidate.candidate.retry_index,
-            candidate.candidate.candidate_index,
-            candidate
-                .candidate
-                .finished_at_unix_ms
-                .or(candidate.candidate.started_at_unix_ms)
-                .unwrap_or(candidate.candidate.created_at_unix_ms),
-        )
-    })
+            (
+                candidate.candidate.retry_index,
+                candidate.candidate.candidate_index,
+                candidate
+                    .candidate
+                    .finished_at_unix_ms
+                    .or(candidate.candidate.started_at_unix_ms)
+                    .unwrap_or(candidate.candidate.created_at_unix_ms),
+            )
+        })
 }
 
 fn request_candidate_represents_provider_execution(candidate: &StoredRequestCandidate) -> bool {
@@ -943,7 +945,9 @@ mod tests {
         )
         .expect("candidate should build");
 
-        assert!(!request_candidate_represents_provider_execution(&skipped_candidate));
+        assert!(!request_candidate_represents_provider_execution(
+            &skipped_candidate
+        ));
 
         let contexts = vec![RuntimeMissCandidateContext {
             candidate: skipped_candidate,

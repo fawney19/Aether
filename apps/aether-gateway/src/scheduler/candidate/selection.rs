@@ -31,8 +31,7 @@ pub(crate) struct SchedulerSkippedCandidate {
     pub(crate) skip_reason: &'static str,
 }
 
-pub(super) const API_KEY_CONCURRENCY_LIMIT_SKIP_REASON: &str =
-    "api_key_concurrency_limit_reached";
+pub(super) const API_KEY_CONCURRENCY_LIMIT_SKIP_REASON: &str = "api_key_concurrency_limit_reached";
 
 pub(super) fn is_exact_all_skipped_by_auth_limit(
     selected: &[SchedulerMinimalCandidateSelectionCandidate],

@@ -67,8 +67,7 @@ impl<'a> PlannerAppState<'a> {
             .await?;
 
             if !crate::scheduler::candidate::is_exact_all_skipped_by_auth_limit(
-                &result.0,
-                &result.1,
+                &result.0, &result.1,
             ) {
                 return Ok(result);
             }
