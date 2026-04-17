@@ -12,7 +12,6 @@ use crate::server::SpawnedServer;
 pub struct TunnelHarnessConfig {
     pub max_streams: usize,
     pub ping_interval: Duration,
-    pub idle_timeout: Duration,
     pub outbound_queue_capacity: usize,
     pub max_in_flight_requests: Option<usize>,
     pub distributed_request_gate: Option<DistributedConcurrencyGate>,
@@ -23,7 +22,6 @@ impl Default for TunnelHarnessConfig {
         Self {
             max_streams: 128,
             ping_interval: Duration::from_secs(15),
-            idle_timeout: Duration::ZERO,
             outbound_queue_capacity: 128,
             max_in_flight_requests: None,
             distributed_request_gate: None,
@@ -53,7 +51,7 @@ impl TunnelHarness {
             TunnelControlPlaneClient::disabled(),
             TunnelConnConfig {
                 ping_interval: config.ping_interval,
-                idle_timeout: config.idle_timeout,
+                idle_timeout: Duration::from_secs(0),
                 outbound_queue_capacity: config.outbound_queue_capacity,
             },
             config.max_streams,

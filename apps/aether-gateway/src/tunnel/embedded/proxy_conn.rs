@@ -42,13 +42,51 @@ pub async fn handle_proxy_connection(
 
     hub.register_proxy(conn.clone());
 
+    let writer_conn_id = conn_id;
+    let writer_conn = conn.clone();
     let writer = tokio::spawn(async move {
+        let mut frames_sent: u64 = 0;
         loop {
             tokio::select! {
                 msg = rx.recv() => match msg {
                     Some(msg) => {
-                        if ws_tx.send(msg).await.is_err() {
-                            break;
+                        let is_binary = matches!(&msg, Message::Binary(_));
+                        let msg_len = match &msg {
+                            Message::Binary(b) => b.len(),
+                            _ => 0,
+                        };
+                        let send_result = tokio::time::timeout(
+                            Duration::from_secs(15),
+                            ws_tx.send(msg),
+                        ).await;
+                        match send_result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => {
+                                warn!(
+                                    conn_id = writer_conn_id,
+                                    frames_sent = frames_sent,
+                                    error = %e,
+                                    "writer ws_tx.send failed"
+                                );
+                                break;
+                            }
+                            Err(_) => {
+                                warn!(
+                                    conn_id = writer_conn_id,
+                                    frames_sent = frames_sent,
+                                    "writer ws_tx.send timed out"
+                                );
+                                break;
+                            }
+                        }
+                        frames_sent += 1;
+                        if is_binary && msg_len > protocol::HEADER_SIZE {
+                            debug!(
+                                conn_id = writer_conn_id,
+                                size = msg_len,
+                                frames_sent = frames_sent,
+                                "writer sent binary frame"
+                            );
                         }
                     }
                     None => break,
@@ -60,7 +98,13 @@ pub async fn handle_proxy_connection(
                 }
             }
         }
-        let _ = ws_tx.close().await;
+        info!(
+            conn_id = writer_conn_id,
+            frames_sent = frames_sent,
+            "writer task exiting"
+        );
+        writer_conn.request_close();
+        let _ = tokio::time::timeout(Duration::from_secs(5), ws_tx.close()).await;
     });
 
     let ping_conn = conn.clone();
@@ -102,6 +146,7 @@ async fn run_proxy_reader(
 ) {
     let idle_enabled = !idle_timeout.is_zero();
     let mut oversized_count = 0u32;
+    let mut frames_received: u64 = 0;
     loop {
         let msg = if idle_enabled {
             tokio::select! {
@@ -119,6 +164,7 @@ async fn run_proxy_reader(
 
         match msg {
             Some(Ok(Message::Binary(data))) => {
+                frames_received += 1;
                 let mut data = data.to_vec();
                 if data.len() > MAX_FRAME_SIZE {
                     oversized_count += 1;
@@ -144,12 +190,25 @@ async fn run_proxy_reader(
                 hub.handle_proxy_frame(conn.id, &mut data).await;
             }
             Some(Ok(Message::Close(_))) | None => {
-                info!(conn_id = conn.id, node_id = %conn.node_id, "proxy WebSocket closed");
+                info!(
+                    conn_id = conn.id,
+                    node_id = %conn.node_id,
+                    frames_received = frames_received,
+                    "proxy WebSocket closed"
+                );
                 break;
             }
             Some(Err(e)) => {
-                warn!(conn_id = conn.id, error = %e, "proxy WebSocket error");
+                warn!(
+                    conn_id = conn.id,
+                    frames_received = frames_received,
+                    error = %e,
+                    "proxy WebSocket error"
+                );
                 break;
+            }
+            Some(Ok(Message::Ping(payload))) => {
+                conn.send(Message::Pong(payload));
             }
             _ => {}
         }

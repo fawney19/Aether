@@ -43,6 +43,47 @@ impl AppState {
         Ok(users)
     }
 
+    pub(crate) async fn search_auth_user_summaries_by_username(
+        &self,
+        username_search: &str,
+    ) -> Result<Vec<aether_data::repository::users::StoredUserSummary>, GatewayError> {
+        let username_search = username_search.trim();
+        if username_search.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut users = BTreeMap::new();
+        if self.has_user_data_reader() {
+            for user in self
+                .data
+                .list_users_by_username_search(username_search)
+                .await
+                .map_err(|err| GatewayError::Internal(err.to_string()))?
+            {
+                users.insert(user.id.clone(), user);
+            }
+        }
+
+        #[cfg(test)]
+        if let Some(store) = self.auth_user_store.as_ref() {
+            let username_search = username_search.to_ascii_lowercase();
+            for user in store.lock().expect("auth user store should lock").values() {
+                if user
+                    .username
+                    .to_ascii_lowercase()
+                    .contains(&username_search)
+                {
+                    let summary = user
+                        .to_summary()
+                        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+                    users.entry(summary.id.clone()).or_insert(summary);
+                }
+            }
+        }
+
+        Ok(users.into_values().collect())
+    }
+
     pub(crate) async fn find_user_auth_by_id(
         &self,
         user_id: &str,

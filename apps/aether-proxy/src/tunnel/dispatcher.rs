@@ -19,6 +19,13 @@ use super::protocol::{decompress_if_gzip, Frame, MsgType, RequestMeta};
 use super::stream_handler;
 use super::writer::FrameSender;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamDispatchStatus {
+    Delivered,
+    Closed,
+    TimedOut,
+}
+
 /// Run the dispatcher loop, reading from the WebSocket stream.
 pub async fn run<S>(
     state: Arc<AppState>,
@@ -97,7 +104,7 @@ where
             Message::Ping(_) => continue,
             Message::Pong(_) => continue,
             Message::Close(_) => {
-                info!("received WebSocket close");
+                debug!("received WebSocket close");
                 break None;
             }
             _ => continue,
@@ -209,12 +216,19 @@ where
             }
 
             MsgType::RequestBody => {
-                if let Some(tx) = streams.get(&frame.stream_id) {
+                if let Some(tx) = streams.get(&frame.stream_id).cloned() {
                     let is_end = frame.is_end_stream();
                     let sid = frame.stream_id;
-                    let _ = tx.send(frame).await;
-                    if is_end {
+                    let dispatch = dispatch_stream_frame(&tx, frame).await;
+                    if is_end || dispatch != StreamDispatchStatus::Delivered {
                         streams.remove(&sid);
+                        if dispatch == StreamDispatchStatus::TimedOut {
+                            try_send_stream_error(
+                                &frame_tx,
+                                sid,
+                                "proxy request body dispatch stalled",
+                            );
+                        }
                         if draining && streams.is_empty() {
                             info!("tunnel drained after request body completion");
                             break None;
@@ -226,7 +240,7 @@ where
             MsgType::StreamEnd | MsgType::StreamError => {
                 // Client-side cancellation or end
                 if let Some(tx) = streams.remove(&frame.stream_id) {
-                    let _ = tx.send(frame).await;
+                    let _ = dispatch_stream_frame(&tx, frame).await;
                     if draining && streams.is_empty() {
                         info!("tunnel drained after stream termination");
                         break None;
@@ -280,6 +294,59 @@ where
     }
 }
 
+async fn dispatch_stream_frame(tx: &mpsc::Sender<Frame>, frame: Frame) -> StreamDispatchStatus {
+    let stream_id = frame.stream_id;
+    match tokio::time::timeout(stream_frame_dispatch_timeout(), tx.send(frame)).await {
+        Ok(Ok(())) => StreamDispatchStatus::Delivered,
+        Ok(Err(_)) => {
+            warn!(
+                stream_id,
+                "stream handler channel closed while dispatching tunnel frame"
+            );
+            StreamDispatchStatus::Closed
+        }
+        Err(_) => {
+            warn!(
+                stream_id,
+                timeout_ms = stream_frame_dispatch_timeout().as_millis(),
+                "stream handler channel blocked while dispatching tunnel frame"
+            );
+            StreamDispatchStatus::TimedOut
+        }
+    }
+}
+
+/// Bound how long a single stream handler is allowed to block the shared
+/// WebSocket read loop while receiving request-body frames.
+fn stream_frame_dispatch_timeout() -> Duration {
+    #[cfg(test)]
+    {
+        Duration::from_millis(25)
+    }
+
+    #[cfg(not(test))]
+    {
+        Duration::from_secs(5)
+    }
+}
+
+fn try_send_stream_error(frame_tx: &FrameSender, stream_id: u32, message: &'static str) {
+    if frame_tx
+        .try_send(Frame::new(
+            stream_id,
+            MsgType::StreamError,
+            0,
+            Bytes::from(message),
+        ))
+        .is_err()
+    {
+        warn!(
+            stream_id,
+            "writer channel full, StreamError dropped while aborting stalled stream"
+        );
+    }
+}
+
 /// Wait for all active stream handlers to finish (with a timeout).
 async fn drain_handlers(handles: Vec<JoinHandle<()>>) {
     if handles.is_empty() {
@@ -293,4 +360,64 @@ async fn drain_handlers(handles: Vec<JoinHandle<()>>) {
         }
     })
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aether_runtime::bounded_queue;
+
+    #[tokio::test]
+    async fn dispatch_stream_frame_times_out_when_handler_stops_draining() {
+        let (tx, mut rx) = mpsc::channel::<Frame>(1);
+        tx.send(Frame::new(
+            7,
+            MsgType::RequestBody,
+            0,
+            Bytes::from_static(b"first"),
+        ))
+        .await
+        .expect("first frame should enqueue");
+
+        let stalled_send = tokio::spawn({
+            let tx = tx.clone();
+            async move {
+                dispatch_stream_frame(
+                    &tx,
+                    Frame::new(7, MsgType::RequestBody, 0, Bytes::from_static(b"second")),
+                )
+                .await
+            }
+        });
+
+        assert_eq!(
+            stalled_send.await.expect("dispatch task should join"),
+            StreamDispatchStatus::TimedOut
+        );
+
+        let retained = rx
+            .recv()
+            .await
+            .expect("queued frame should still be present");
+        assert_eq!(retained.payload, Bytes::from_static(b"first"));
+    }
+
+    #[tokio::test]
+    async fn try_send_stream_error_emits_stream_error_frame() {
+        let (high_tx, mut high_rx) = bounded_queue::<Frame>(4);
+        let (normal_tx, _normal_rx) = bounded_queue::<Frame>(4);
+        let frame_tx = FrameSender::from_test_queues(high_tx, normal_tx);
+        try_send_stream_error(&frame_tx, 9, "proxy request body dispatch stalled");
+
+        let frame = high_rx
+            .recv()
+            .await
+            .expect("stream error frame should enqueue");
+        assert_eq!(frame.stream_id, 9);
+        assert_eq!(frame.msg_type, MsgType::StreamError);
+        assert_eq!(
+            frame.payload,
+            Bytes::from_static(b"proxy request body dispatch stalled")
+        );
+    }
 }

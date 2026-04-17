@@ -5,18 +5,20 @@ pub(crate) use crate::ai_pipeline::{
     core_error_default_client_api_format, is_core_error_finalize_kind, LocalCoreSyncErrorKind,
 };
 pub(crate) use crate::ai_pipeline::{
-    request_candidate_api_formats, request_conversion_direct_auth,
-    request_conversion_enabled_for_transport, request_conversion_kind,
-    request_conversion_requires_enable_flag, request_conversion_transport_supported,
-    request_conversion_transport_unsupported_reason, request_pair_allowed_for_transport,
-    sync_chat_response_conversion_kind, sync_cli_response_conversion_kind, RequestConversionKind,
-    SyncChatResponseConversionKind, SyncCliResponseConversionKind,
+    request_candidate_api_format_preference, request_candidate_api_formats,
+    request_conversion_direct_auth, request_conversion_enabled_for_transport,
+    request_conversion_kind, request_conversion_requires_enable_flag,
+    request_conversion_transport_supported, request_conversion_transport_unsupported_reason,
+    request_pair_allowed_for_transport, sync_chat_response_conversion_kind,
+    sync_cli_response_conversion_kind, RequestConversionKind, SyncChatResponseConversionKind,
+    SyncCliResponseConversionKind,
 };
 
 #[cfg(test)]
 mod tests {
     use super::{
-        request_candidate_api_formats, request_conversion_kind, sync_chat_response_conversion_kind,
+        request_candidate_api_format_preference, request_candidate_api_formats,
+        request_conversion_kind, sync_chat_response_conversion_kind,
         sync_cli_response_conversion_kind, RequestConversionKind, SyncChatResponseConversionKind,
         SyncCliResponseConversionKind,
     };
@@ -96,27 +98,54 @@ mod tests {
             request_candidate_api_formats("openai:chat", false),
             vec![
                 "openai:chat",
-                "openai:cli",
                 "claude:chat",
-                "claude:cli",
                 "gemini:chat",
+                "openai:cli",
+                "claude:cli",
                 "gemini:cli",
             ]
         );
         assert_eq!(
             request_candidate_api_formats("openai:cli", false),
             vec![
-                "openai:chat",
                 "openai:cli",
-                "claude:chat",
                 "claude:cli",
-                "gemini:chat",
                 "gemini:cli",
+                "openai:chat",
+                "claude:chat",
+                "gemini:chat",
+            ]
+        );
+        assert_eq!(
+            request_candidate_api_formats("claude:cli", false),
+            vec![
+                "claude:cli",
+                "openai:cli",
+                "gemini:cli",
+                "claude:chat",
+                "openai:chat",
+                "gemini:chat",
             ]
         );
         assert_eq!(
             request_candidate_api_formats("openai:compact", false),
             vec!["openai:compact"]
+        );
+    }
+
+    #[test]
+    fn request_candidate_registry_prefers_same_kind_before_same_family_fallbacks() {
+        assert_eq!(
+            request_candidate_api_format_preference("claude:cli", "openai:cli"),
+            Some((1, 0))
+        );
+        assert_eq!(
+            request_candidate_api_format_preference("claude:cli", "claude:chat"),
+            Some((2, 1))
+        );
+        assert_eq!(
+            request_candidate_api_format_preference("claude:cli", "openai:chat"),
+            Some((3, 0))
         );
     }
 }

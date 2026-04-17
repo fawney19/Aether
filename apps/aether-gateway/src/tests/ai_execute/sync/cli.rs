@@ -501,6 +501,24 @@ async fn gateway_executes_openai_cli_sync_via_local_decision_gate_with_local_syn
         .expect("request candidate trace should read");
     assert_eq!(stored_candidates.len(), 1);
     assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Success);
+    assert_eq!(
+        stored_candidates[0]
+            .extra_data
+            .as_ref()
+            .and_then(|value| value.get("proxy"))
+            .and_then(|value| value.get("node_id"))
+            .and_then(serde_json::Value::as_str),
+        Some("proxy-node-openai-cli-local")
+    );
+    assert_eq!(
+        stored_candidates[0]
+            .extra_data
+            .as_ref()
+            .and_then(|value| value.get("proxy"))
+            .and_then(|value| value.get("source"))
+            .and_then(serde_json::Value::as_str),
+        Some("key")
+    );
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(

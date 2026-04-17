@@ -251,6 +251,30 @@
                     </span>
                   </div>
                   <div
+                    v-if="currentAttemptKeyFormatsDisplay"
+                    class="info-item"
+                  >
+                    <span class="info-label">支持端点</span>
+                    <span class="info-value info-value-stacked">
+                      <code class="format-code">{{ currentAttemptKeyFormatsDisplay }}</code>
+                      <span class="text-xs text-muted-foreground">
+                        同一 Key 的不同 endpoint 会分别参与候选与转换判定
+                      </span>
+                    </span>
+                  </div>
+                  <div
+                    v-if="currentAttemptConversionInfo"
+                    class="info-item"
+                  >
+                    <span class="info-label">转换策略</span>
+                    <span class="info-value info-value-stacked">
+                      <code class="format-code">{{ currentAttemptConversionInfo.summary }}</code>
+                      <span class="text-xs text-muted-foreground">
+                        {{ currentAttemptConversionInfo.hint }}
+                      </span>
+                    </span>
+                  </div>
+                  <div
                     v-if="currentAttempt.extra_data?.proxy"
                     class="info-item"
                   >
@@ -1122,6 +1146,31 @@ const normalizeFormatSignature = (value: string): string => {
   return value.trim().toLowerCase()
 }
 
+const extractObject = (value: unknown): Record<string, unknown> | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null
+  }
+  return value as Record<string, unknown>
+}
+
+const extractStringList = (value: unknown): string[] => {
+  if (Array.isArray(value)) {
+    return value
+      .map(item => typeof item === 'string' ? item.trim() : '')
+      .filter(Boolean)
+  }
+  if (typeof value === 'string') {
+    const raw = value.trim()
+    if (!raw) return []
+    try {
+      return extractStringList(JSON.parse(raw))
+    } catch {
+      return [raw]
+    }
+  }
+  return []
+}
+
 const normalizePriorityNumber = (value: unknown): number | null => {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return Math.trunc(value)
@@ -1163,14 +1212,22 @@ const resolveProviderApiFormat = (attempt: CandidateRecord): string => {
   return ''
 }
 
+const resolveTransportDiagnostics = (attempt: CandidateRecord): Record<string, unknown> | null => {
+  const extra = extractObject(attempt.extra_data)
+  return extractObject(extra?.transport_diagnostics)
+}
+
+const resolveEndpointFormatAcceptanceConfig = (attempt: CandidateRecord): Record<string, unknown> | null => {
+  const fromAttempt = extractObject(attempt.endpoint_format_acceptance_config)
+  if (fromAttempt) return fromAttempt
+  const transport = resolveTransportDiagnostics(attempt)
+  return extractObject(transport?.endpoint_format_acceptance_config)
+}
+
 const currentAttemptFormatDisplay = computed(() => {
   const attempt = currentAttempt.value
   if (!attempt) return ''
-  const extra = (
-    attempt.extra_data && typeof attempt.extra_data === 'object' && !Array.isArray(attempt.extra_data)
-      ? attempt.extra_data
-      : {}
-  ) as Record<string, unknown>
+  const extra = extractObject(attempt.extra_data) ?? {}
 
   const providerRaw = typeof extra.provider_api_format === 'string' ? extra.provider_api_format : ''
   const clientRawFromExtra = typeof extra.client_api_format === 'string' ? extra.client_api_format : ''
@@ -1224,14 +1281,14 @@ const currentAttemptSchedulerInfo = computed<{
   )
   const keepPriorityOnConversion = attempt.provider_keep_priority_on_conversion === true
 
-  let hint = '链路按实际调度顺序展示'
+  let hint = '顺位展示 Provider / Key 优先级；不同 endpoint 独立参与候选'
   if (globalPriority !== null) {
-    hint = `当前格式 ${formatApiFormat(clientApiFormat)} 先看全局 Key 优先级`
+    hint = `当前格式 ${formatApiFormat(clientApiFormat)} 先看全局 Key 优先级；不同 endpoint 单独判定`
   }
   if (isCrossFormat) {
     hint = keepPriorityOnConversion
-      ? '跨格式候选已开启保持优先级'
-      : '跨格式候选默认排在同格式候选之后'
+      ? '跨格式候选已开启保持优先级；同一 Key 的不同 endpoint 独立参与'
+      : '跨格式候选默认排在同格式候选之后；同一 Key 的不同 endpoint 独立参与'
   }
 
   return {
@@ -1240,6 +1297,77 @@ const currentAttemptSchedulerInfo = computed<{
     keyPriorityLabel: keyInternalPriority !== null ? String(keyInternalPriority) : '-',
     hint,
   }
+})
+
+const currentAttemptKeyFormatsDisplay = computed(() => {
+  const attempt = currentAttempt.value
+  if (!attempt) return ''
+
+  const formats = extractStringList(attempt.key_api_formats)
+  if (!formats.length) return ''
+
+  return formats
+    .map(format => formatApiFormat(format))
+    .join(' / ')
+})
+
+const currentAttemptConversionInfo = computed<{
+  summary: string
+  hint: string
+} | null>(() => {
+  const attempt = currentAttempt.value
+  if (!attempt) return null
+
+  const clientApiFormat = resolveClientApiFormat(attempt)
+  const providerApiFormat = resolveProviderApiFormat(attempt)
+  if (!clientApiFormat || !providerApiFormat) return null
+
+  const isCrossFormat = normalizeFormatSignature(clientApiFormat) !== normalizeFormatSignature(providerApiFormat)
+  if (!isCrossFormat) {
+    return {
+      summary: '同格式直连',
+      hint: '当前候选直接命中 endpoint 原生格式',
+    }
+  }
+
+  const transportDiagnostics = resolveTransportDiagnostics(attempt)
+  const providerEnabled = attempt.provider_enable_format_conversion === true
+    || transportDiagnostics?.provider_enable_format_conversion === true
+  const endpointConfig = resolveEndpointFormatAcceptanceConfig(attempt)
+  const endpointRuleEnabled = endpointConfig
+    ? endpointConfig.enabled !== false
+    : false
+  const acceptFormats = extractStringList(endpointConfig?.accept_formats)
+  const rejectFormats = extractStringList(endpointConfig?.reject_formats)
+  const normalizedClientFormat = normalizeFormatSignature(clientApiFormat)
+  const endpointAcceptsClient = acceptFormats.some(
+    format => normalizeFormatSignature(format) === normalizedClientFormat,
+  )
+  const endpointRejectsClient = rejectFormats.some(
+    format => normalizeFormatSignature(format) === normalizedClientFormat,
+  )
+
+  let summary = '未开启格式转换'
+  if (providerEnabled && endpointRuleEnabled) {
+    summary = 'Provider 总开关 + Endpoint 规则'
+  } else if (providerEnabled) {
+    summary = 'Provider 总格式转换'
+  } else if (endpointRuleEnabled) {
+    summary = 'Endpoint 独立格式转换'
+  }
+
+  let hint = '同一 Key 的不同 endpoint 会分别判定格式转换'
+  if (endpointRejectsClient) {
+    hint = `当前 endpoint 明确拒绝 ${formatApiFormat(clientApiFormat)}`
+  } else if (endpointAcceptsClient) {
+    hint = `当前 endpoint 明确接受 ${formatApiFormat(clientApiFormat)}`
+  } else if (providerEnabled) {
+    hint = '当前跨格式由 Provider 总开关放行'
+  } else if (attempt.skip_reason === 'format_conversion_disabled') {
+    hint = 'Provider 总开关关闭，且当前 endpoint 未单独放行'
+  }
+
+  return { summary, hint }
 })
 
 // 计算当前尝试启用的能力标签（请求需要的能力）

@@ -2425,6 +2425,20 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn list_auth_api_key_export_records_by_name_search(
+        &self,
+        name_search: &str,
+    ) -> Result<Vec<StoredAuthApiKeyExportRecord>, DataLayerError> {
+        match &self.auth_api_key_reader {
+            Some(repository) => {
+                repository
+                    .list_export_api_keys_by_name_search(name_search)
+                    .await
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
     pub(crate) async fn list_auth_api_key_export_standalone_records_page(
         &self,
         query: &aether_data::repository::auth::StandaloneApiKeyExportListQuery,

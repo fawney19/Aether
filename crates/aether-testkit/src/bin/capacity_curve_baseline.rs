@@ -306,7 +306,6 @@ async fn run_tunnel_curve(
         let tunnel = TunnelHarness::start(TunnelHarnessConfig {
             max_streams: (*limit).max(128),
             ping_interval: Duration::from_secs(15),
-            idle_timeout: Duration::ZERO,
             outbound_queue_capacity: 128,
             max_in_flight_requests: Some(*limit),
             distributed_request_gate: None,
@@ -657,7 +656,7 @@ async fn connect_protocol_peer(
                 {
                     break;
                 }
-                Message::Ping(ref payload)
+                Message::Ping(payload)
                     if sink.send(Message::Pong(payload.clone())).await.is_err() =>
                 {
                     break;

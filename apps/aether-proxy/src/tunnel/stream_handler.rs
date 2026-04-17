@@ -16,7 +16,7 @@ use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use hyper::body::Frame as BodyFrame;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::state::{AppState, ServerContext};
 use crate::target_filter;
@@ -114,6 +114,110 @@ struct UpstreamResponseContext {
     response: hyper::Response<hyper::body::Incoming>,
     dns_ms: u64,
     request_timing: upstream_client::RequestTiming,
+}
+
+#[derive(Clone, Copy)]
+struct StreamLogContext<'a> {
+    server: &'a ServerContext,
+    stream_id: u32,
+    method: &'a hyper::Method,
+    url: Option<&'a url::Url>,
+    redirect_count: usize,
+    request_body_size: usize,
+}
+
+fn parse_request_method(method: &str) -> hyper::Method {
+    method.parse().unwrap_or(hyper::Method::GET)
+}
+
+fn request_log_host(url: &url::Url) -> &str {
+    url.host_str().unwrap_or("")
+}
+
+fn request_log_port(url: &url::Url) -> u16 {
+    url.port_or_known_default().unwrap_or(0)
+}
+
+fn request_log_path(url: &url::Url) -> &str {
+    let path = url.path();
+    if path.is_empty() {
+        "/"
+    } else {
+        path
+    }
+}
+
+fn stream_log_context<'a>(
+    server: &'a ServerContext,
+    stream_id: u32,
+    method: &'a hyper::Method,
+    url: Option<&'a url::Url>,
+    redirect_count: usize,
+    request_body_size: usize,
+) -> StreamLogContext<'a> {
+    StreamLogContext {
+        server,
+        stream_id,
+        method,
+        url,
+        redirect_count,
+        request_body_size,
+    }
+}
+
+fn log_stream_success(ctx: StreamLogContext<'_>, status: u16, duration: Duration) {
+    let url = ctx
+        .url
+        .expect("successful requests should always have a URL");
+    info!(
+        server = %ctx.server.server_label,
+        stream_id = ctx.stream_id,
+        method = %ctx.method,
+        scheme = url.scheme(),
+        host = request_log_host(url),
+        port = request_log_port(url),
+        path = request_log_path(url),
+        query_present = url.query().is_some(),
+        status,
+        duration_ms = duration.as_millis() as u64,
+        redirect_count = ctx.redirect_count,
+        request_body_bytes = ctx.request_body_size,
+        "proxy request completed"
+    );
+}
+
+fn log_stream_failure(ctx: StreamLogContext<'_>, error: &str, duration: Duration) {
+    match ctx.url {
+        Some(url) => {
+            warn!(
+                server = %ctx.server.server_label,
+                stream_id = ctx.stream_id,
+                method = %ctx.method,
+                scheme = url.scheme(),
+                host = request_log_host(url),
+                port = request_log_port(url),
+                path = request_log_path(url),
+                query_present = url.query().is_some(),
+                error = %error,
+                duration_ms = duration.as_millis() as u64,
+                redirect_count = ctx.redirect_count,
+                request_body_bytes = ctx.request_body_size,
+                "proxy request failed"
+            );
+        }
+        None => {
+            warn!(
+                server = %ctx.server.server_label,
+                stream_id = ctx.stream_id,
+                method = %ctx.method,
+                error = %error,
+                duration_ms = duration.as_millis() as u64,
+                redirect_count = ctx.redirect_count,
+                request_body_bytes = ctx.request_body_size,
+                "proxy request failed"
+            );
+        }
+    }
 }
 
 impl PreparedRequestBody {
@@ -466,6 +570,8 @@ async fn execute_upstream_request(
 async fn relay_upstream_response(
     server: &ServerContext,
     stream_id: u32,
+    method: &hyper::Method,
+    request_url: &url::Url,
     frame_tx: &FrameSender,
     response: hyper::Response<hyper::body::Incoming>,
     total_dns_ms: u64,
@@ -516,6 +622,18 @@ async fn relay_upstream_response(
     )
     .await
     {
+        log_stream_failure(
+            stream_log_context(
+                server,
+                stream_id,
+                method,
+                Some(request_url),
+                redirect_count,
+                request_body_size.load(Ordering::Relaxed),
+            ),
+            "tunnel response headers relay failed",
+            total_elapsed,
+        );
         return Some(total_elapsed);
     }
 
@@ -531,6 +649,18 @@ async fn relay_upstream_response(
                     )
                     .await
                     {
+                        log_stream_failure(
+                            stream_log_context(
+                                server,
+                                stream_id,
+                                method,
+                                Some(request_url),
+                                redirect_count,
+                                request_body_size.load(Ordering::Relaxed),
+                            ),
+                            "tunnel response body relay failed",
+                            total_elapsed,
+                        );
                         return Some(total_elapsed);
                     }
                 } else {
@@ -550,6 +680,18 @@ async fn relay_upstream_response(
                         )
                         .await
                         {
+                            log_stream_failure(
+                                stream_log_context(
+                                    server,
+                                    stream_id,
+                                    method,
+                                    Some(request_url),
+                                    redirect_count,
+                                    request_body_size.load(Ordering::Relaxed),
+                                ),
+                                "tunnel response body relay failed",
+                                total_elapsed,
+                            );
                             return Some(total_elapsed);
                         }
                         offset = end;
@@ -559,13 +701,26 @@ async fn relay_upstream_response(
             Err(error) => {
                 server.metrics.stream_errors.fetch_add(1, Ordering::Release);
                 warn!(stream_id, error = %error, "upstream body read error");
+                let error_message = format!("upstream body read error: {error}");
+                log_stream_failure(
+                    stream_log_context(
+                        server,
+                        stream_id,
+                        method,
+                        Some(request_url),
+                        redirect_count,
+                        request_body_size.load(Ordering::Relaxed),
+                    ),
+                    &error_message,
+                    total_elapsed,
+                );
                 send_error(frame_tx, stream_id, &format!("body read error: {error}")).await;
                 return Some(total_elapsed);
             }
         }
     }
 
-    let _ = send_frame(
+    if !send_frame(
         frame_tx,
         TunnelFrame::new(
             stream_id,
@@ -574,13 +729,40 @@ async fn relay_upstream_response(
             Bytes::new(),
         ),
     )
-    .await;
+    .await
+    {
+        log_stream_failure(
+            stream_log_context(
+                server,
+                stream_id,
+                method,
+                Some(request_url),
+                redirect_count,
+                request_body_size.load(Ordering::Relaxed),
+            ),
+            "tunnel stream end relay failed",
+            total_elapsed,
+        );
+        return Some(total_elapsed);
+    }
 
     debug!(
         stream_id,
         status,
         redirects = redirect_count,
         "stream completed"
+    );
+    log_stream_success(
+        stream_log_context(
+            server,
+            stream_id,
+            method,
+            Some(request_url),
+            redirect_count,
+            request_body_size.load(Ordering::Relaxed),
+        ),
+        status,
+        total_elapsed,
     );
     Some(total_elapsed)
 }
@@ -606,6 +788,8 @@ pub async fn handle_stream(
     body_rx: mpsc::Receiver<TunnelFrame>,
     frame_tx: FrameSender,
 ) {
+    let request_method = parse_request_method(&meta.method);
+    let request_url = url::Url::parse(&meta.url).ok();
     let permit = match state.try_acquire_stream_permit().await {
         Ok(permit) => permit,
         Err(err) => {
@@ -615,6 +799,18 @@ pub async fn handle_stream(
                     "proxy admission unavailable"
                 }
             };
+            log_stream_failure(
+                stream_log_context(
+                    &server,
+                    stream_id,
+                    &request_method,
+                    request_url.as_ref(),
+                    0,
+                    0,
+                ),
+                message,
+                Duration::ZERO,
+            );
             send_error(&frame_tx, stream_id, message).await;
             return;
         }
@@ -660,9 +856,15 @@ async fn handle_stream_inner(
     body_rx: mpsc::Receiver<TunnelFrame>,
     frame_tx: &FrameSender,
 ) -> Option<Duration> {
+    let mut current_method: hyper::Method = parse_request_method(&meta.method);
     let mut current_url = match url::Url::parse(&meta.url) {
         Ok(u) => u,
         Err(e) => {
+            log_stream_failure(
+                stream_log_context(server, stream_id, &current_method, None, 0, 0),
+                &format!("invalid URL: {e}"),
+                Duration::ZERO,
+            );
             send_error(frame_tx, stream_id, &format!("invalid URL: {e}")).await;
             return None;
         }
@@ -672,12 +874,13 @@ async fn handle_stream_inner(
     match current_url.scheme() {
         "http" | "https" => {}
         other => {
-            send_error(
-                frame_tx,
-                stream_id,
-                &format!("unsupported URL scheme: {other}"),
-            )
-            .await;
+            let error_message = format!("unsupported URL scheme: {other}");
+            log_stream_failure(
+                stream_log_context(server, stream_id, &current_method, Some(&current_url), 0, 0),
+                &error_message,
+                Duration::ZERO,
+            );
+            send_error(frame_tx, stream_id, &error_message).await;
             return None;
         }
     }
@@ -685,7 +888,6 @@ async fn handle_stream_inner(
     let deadline = Instant::now()
         + Duration::from_secs(meta.timeout.clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS));
     let follow_redirects = follow_redirects_enabled(&meta);
-    let mut current_method: hyper::Method = meta.method.parse().unwrap_or(hyper::Method::GET);
     let mut current_headers = sanitize_upstream_headers(&meta.headers);
     let timeout = Duration::from_secs(meta.timeout.clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS));
     let request_body_size = Arc::new(AtomicUsize::new(0));
@@ -700,6 +902,18 @@ async fn handle_stream_inner(
         {
             Ok(body) => body,
             Err(message) => {
+                log_stream_failure(
+                    stream_log_context(
+                        server,
+                        stream_id,
+                        &current_method,
+                        Some(&current_url),
+                        0,
+                        request_body_size.load(Ordering::Relaxed),
+                    ),
+                    &message,
+                    Duration::ZERO,
+                );
                 send_error(frame_tx, stream_id, &message).await;
                 return None;
             }
@@ -715,6 +929,18 @@ async fn handle_stream_inner(
 
     loop {
         let Some(remaining) = remaining_timeout(deadline) else {
+            log_stream_failure(
+                stream_log_context(
+                    server,
+                    stream_id,
+                    &current_method,
+                    Some(&current_url),
+                    redirects_followed,
+                    request_body_size.load(Ordering::Relaxed),
+                ),
+                "upstream timeout",
+                overall_start.elapsed(),
+            );
             send_error(frame_tx, stream_id, "upstream timeout").await;
             return None;
         };
@@ -722,12 +948,20 @@ async fn handle_stream_inner(
             Some(mode) => match prepared_body.build_redirect_request_body(mode) {
                 Some(body) => body,
                 None => {
-                    send_error(
-                        frame_tx,
-                        stream_id,
-                        "upstream redirect error: body not replayable",
-                    )
-                    .await;
+                    let error_message = "upstream redirect error: body not replayable";
+                    log_stream_failure(
+                        stream_log_context(
+                            server,
+                            stream_id,
+                            &current_method,
+                            Some(&current_url),
+                            redirects_followed,
+                            request_body_size.load(Ordering::Relaxed),
+                        ),
+                        error_message,
+                        overall_start.elapsed(),
+                    );
+                    send_error(frame_tx, stream_id, error_message).await;
                     return None;
                 }
             },
@@ -748,6 +982,18 @@ async fn handle_stream_inner(
         {
             Ok(context) => context,
             Err(message) => {
+                log_stream_failure(
+                    stream_log_context(
+                        server,
+                        stream_id,
+                        &current_method,
+                        Some(&current_url),
+                        redirects_followed,
+                        request_body_size.load(Ordering::Relaxed),
+                    ),
+                    &message,
+                    overall_start.elapsed(),
+                );
                 send_error(frame_tx, stream_id, &message).await;
                 return None;
             }
@@ -767,6 +1013,8 @@ async fn handle_stream_inner(
                     return relay_upstream_response(
                         server,
                         stream_id,
+                        &current_method,
+                        &current_url,
                         frame_tx,
                         response_ctx.response,
                         total_dns_ms,
@@ -791,12 +1039,20 @@ async fn handle_stream_inner(
                     continue;
                 }
                 RedirectDecision::Error(message) => {
-                    send_error(
-                        frame_tx,
-                        stream_id,
-                        &format!("upstream redirect error: {message}"),
-                    )
-                    .await;
+                    let error_message = format!("upstream redirect error: {message}");
+                    log_stream_failure(
+                        stream_log_context(
+                            server,
+                            stream_id,
+                            &current_method,
+                            Some(&current_url),
+                            redirects_followed,
+                            request_body_size.load(Ordering::Relaxed),
+                        ),
+                        &error_message,
+                        overall_start.elapsed(),
+                    );
+                    send_error(frame_tx, stream_id, &error_message).await;
                     return None;
                 }
             }
@@ -805,6 +1061,8 @@ async fn handle_stream_inner(
         return relay_upstream_response(
             server,
             stream_id,
+            &current_method,
+            &current_url,
             frame_tx,
             response_ctx.response,
             total_dns_ms,
@@ -906,15 +1164,20 @@ fn build_prefixed_request_body(
 mod tests {
     use std::collections::HashMap;
     use std::net::SocketAddr;
+    use std::pin::Pin;
     use std::sync::atomic::AtomicU64;
-    use std::sync::Once;
+    use std::sync::{Mutex, Once};
+    use std::task::{Context, Poll};
 
-    use aether_runtime::{bounded_queue, ConcurrencyGate, DistributedConcurrencyGate};
+    use aether_runtime::{ConcurrencyGate, DistributedConcurrencyGate};
     use arc_swap::ArcSwap;
     use axum::body::Body;
     use axum::http::{header, Response, StatusCode};
     use axum::routing::{get, post};
     use axum::Router;
+    use futures_util::Sink;
+    use tokio::task::JoinHandle;
+    use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 
     use super::*;
     use crate::config::Config;
@@ -1112,14 +1375,22 @@ mod tests {
         let state = sample_state_for_port(addr.port());
         cache_test_host(&state, host, addr).await;
         let server_ctx = sample_server(&state);
-        let (frame_tx, mut frame_rx) = bounded_queue::<TunnelFrame>(16);
+        let (frame_tx, sent, writer_handle) = spawn_test_writer();
         let (_body_tx, body_rx) = mpsc::channel(1);
 
         let mut meta = sample_request_meta();
         meta.url = format!("http://{host}:{}/start", addr.port());
 
-        handle_stream(Arc::clone(&state), server_ctx, 5, meta, body_rx, frame_tx).await;
-        let result = collect_stream_result(&mut frame_rx).await;
+        handle_stream(
+            Arc::clone(&state),
+            server_ctx,
+            5,
+            meta,
+            body_rx,
+            frame_tx.clone(),
+        )
+        .await;
+        let result = collect_stream_result(frame_tx, sent, writer_handle).await;
         server.abort();
 
         assert!(
@@ -1165,14 +1436,22 @@ mod tests {
         let state = sample_state_for_port(addr.port());
         cache_test_host(&state, host, addr).await;
         let server_ctx = sample_server(&state);
-        let (frame_tx, mut frame_rx) = bounded_queue::<TunnelFrame>(16);
+        let (frame_tx, sent, writer_handle) = spawn_test_writer();
         let (_body_tx, body_rx) = mpsc::channel(1);
 
         let mut meta = sample_request_meta();
         meta.url = format!("http://{host}:{}/ok", addr.port());
 
-        handle_stream(Arc::clone(&state), server_ctx, 3, meta, body_rx, frame_tx).await;
-        let result = collect_stream_result(&mut frame_rx).await;
+        handle_stream(
+            Arc::clone(&state),
+            server_ctx,
+            3,
+            meta,
+            body_rx,
+            frame_tx.clone(),
+        )
+        .await;
+        let result = collect_stream_result(frame_tx, sent, writer_handle).await;
         server.abort();
 
         assert!(
@@ -1228,7 +1507,7 @@ mod tests {
         let state = sample_state_for_port(addr.port());
         cache_test_host(&state, host, addr).await;
         let server_ctx = sample_server(&state);
-        let (frame_tx, mut frame_rx) = bounded_queue::<TunnelFrame>(16);
+        let (frame_tx, sent, writer_handle) = spawn_test_writer();
         let (body_tx, body_rx) = mpsc::channel(4);
         body_tx
             .send(TunnelFrame::new(
@@ -1246,8 +1525,16 @@ mod tests {
         meta.url = format!("http://{host}:{}/start", addr.port());
         meta.follow_redirects = Some(true);
 
-        handle_stream(Arc::clone(&state), server_ctx, 1, meta, body_rx, frame_tx).await;
-        let result = collect_stream_result(&mut frame_rx).await;
+        handle_stream(
+            Arc::clone(&state),
+            server_ctx,
+            1,
+            meta,
+            body_rx,
+            frame_tx.clone(),
+        )
+        .await;
+        let result = collect_stream_result(frame_tx, sent, writer_handle).await;
         server.abort();
 
         assert!(
@@ -1295,15 +1582,23 @@ mod tests {
         let state = sample_state_for_port(addr.port());
         cache_test_host(&state, host, addr).await;
         let server_ctx = sample_server(&state);
-        let (frame_tx, mut frame_rx) = bounded_queue::<TunnelFrame>(16);
+        let (frame_tx, sent, writer_handle) = spawn_test_writer();
         let (_body_tx, body_rx) = mpsc::channel(1);
 
         let mut meta = sample_request_meta();
         meta.url = format!("http://{host}:{}/start", addr.port());
         meta.follow_redirects = Some(false);
 
-        handle_stream(Arc::clone(&state), server_ctx, 7, meta, body_rx, frame_tx).await;
-        let result = collect_stream_result(&mut frame_rx).await;
+        handle_stream(
+            Arc::clone(&state),
+            server_ctx,
+            7,
+            meta,
+            body_rx,
+            frame_tx.clone(),
+        )
+        .await;
+        let result = collect_stream_result(frame_tx, sent, writer_handle).await;
         server.abort();
 
         assert!(
@@ -1360,7 +1655,7 @@ mod tests {
         let state = sample_state_for_budget(addr.port(), 0);
         cache_test_host(&state, host, addr).await;
         let server_ctx = sample_server(&state);
-        let (frame_tx, mut frame_rx) = bounded_queue::<TunnelFrame>(16);
+        let (frame_tx, sent, writer_handle) = spawn_test_writer();
         let (body_tx, body_rx) = mpsc::channel(4);
         body_tx
             .send(TunnelFrame::new(
@@ -1378,8 +1673,16 @@ mod tests {
         meta.url = format!("http://{host}:{}/start", addr.port());
         meta.follow_redirects = Some(true);
 
-        handle_stream(Arc::clone(&state), server_ctx, 11, meta, body_rx, frame_tx).await;
-        let result = collect_stream_result(&mut frame_rx).await;
+        handle_stream(
+            Arc::clone(&state),
+            server_ctx,
+            11,
+            meta,
+            body_rx,
+            frame_tx.clone(),
+        )
+        .await;
+        let result = collect_stream_result(frame_tx, sent, writer_handle).await;
         server.abort();
 
         assert!(
@@ -1405,7 +1708,7 @@ mod tests {
         let _permit = gate.try_acquire().expect("first permit");
         let state = sample_state(Some(gate), None);
         let server = sample_server(&state);
-        let (frame_tx, mut frame_rx) = bounded_queue::<TunnelFrame>(4);
+        let (frame_tx, sent, writer_handle) = spawn_test_writer();
         let (_body_tx, body_rx) = mpsc::channel(1);
 
         handle_stream(
@@ -1414,11 +1717,15 @@ mod tests {
             7,
             sample_request_meta(),
             body_rx,
-            frame_tx,
+            frame_tx.clone(),
         )
         .await;
 
-        let frame = frame_rx.recv().await.expect("overload frame");
+        let frame = collect_emitted_frames(frame_tx, sent, writer_handle)
+            .await
+            .into_iter()
+            .find(|frame| frame.msg_type == MsgType::StreamError)
+            .expect("overload frame");
         assert_eq!(frame.stream_id, 7);
         assert_eq!(frame.msg_type, MsgType::StreamError);
         assert_eq!(frame.payload, Bytes::from_static(b"proxy overloaded"));
@@ -1442,7 +1749,7 @@ mod tests {
         let _permit = gate.try_acquire().await.expect("first permit");
         let state = sample_state(None, Some(gate));
         let server = sample_server(&state);
-        let (frame_tx, mut frame_rx) = bounded_queue::<TunnelFrame>(4);
+        let (frame_tx, sent, writer_handle) = spawn_test_writer();
         let (_body_tx, body_rx) = mpsc::channel(1);
 
         handle_stream(
@@ -1451,11 +1758,15 @@ mod tests {
             9,
             sample_request_meta(),
             body_rx,
-            frame_tx,
+            frame_tx.clone(),
         )
         .await;
 
-        let frame = frame_rx.recv().await.expect("overload frame");
+        let frame = collect_emitted_frames(frame_tx, sent, writer_handle)
+            .await
+            .into_iter()
+            .find(|frame| frame.msg_type == MsgType::StreamError)
+            .expect("overload frame");
         assert_eq!(frame.stream_id, 9);
         assert_eq!(frame.msg_type, MsgType::StreamError);
         assert_eq!(frame.payload, Bytes::from_static(b"proxy overloaded"));
@@ -1623,20 +1934,85 @@ mod tests {
             .await;
     }
 
+    #[derive(Clone, Default)]
+    struct VecSink {
+        sent: Arc<Mutex<Vec<Message>>>,
+    }
+
+    impl Sink<Message> for VecSink {
+        type Error = WebSocketError;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+            self.sent.lock().expect("sink lock").push(item);
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn spawn_test_writer() -> (FrameSender, Arc<Mutex<Vec<Message>>>, JoinHandle<()>) {
+        let sink = VecSink::default();
+        let sent = Arc::clone(&sink.sent);
+        let (frame_tx, handle) = crate::tunnel::writer::spawn_writer(sink, Duration::from_secs(60));
+        (frame_tx, sent, handle)
+    }
+
     struct StreamResult {
         response: Option<ResponseMeta>,
         body: Bytes,
         error: Option<String>,
     }
 
+    async fn collect_emitted_frames(
+        frame_tx: FrameSender,
+        sent: Arc<Mutex<Vec<Message>>>,
+        writer_handle: JoinHandle<()>,
+    ) -> Vec<TunnelFrame> {
+        drop(frame_tx);
+        writer_handle.await.expect("writer should exit cleanly");
+
+        sent.lock()
+            .expect("sink lock")
+            .iter()
+            .filter_map(|message| match message {
+                Message::Binary(data) => {
+                    Some(TunnelFrame::decode(data.clone().into()).expect("frame should decode"))
+                }
+                Message::Ping(_) | Message::Pong(_) | Message::Close(_) => None,
+                other => panic!("unexpected writer message: {other:?}"),
+            })
+            .collect()
+    }
+
     async fn collect_stream_result(
-        frame_rx: &mut aether_runtime::BoundedQueueReceiver<TunnelFrame>,
+        frame_tx: FrameSender,
+        sent: Arc<Mutex<Vec<Message>>>,
+        writer_handle: JoinHandle<()>,
     ) -> StreamResult {
         let mut response = None;
         let mut body = BytesMut::new();
         let mut error = None;
 
-        while let Some(frame) = frame_rx.recv().await {
+        for frame in collect_emitted_frames(frame_tx, sent, writer_handle).await {
             match frame.msg_type {
                 MsgType::ResponseHeaders => {
                     let payload = decompress_if_gzip(&frame).expect("headers payload");

@@ -4,7 +4,7 @@ use aether_data_contracts::repository::candidates::{
 };
 use serde_json::Value;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SchedulerRequestCandidateReportContext {
     pub request_id: Option<String>,
     pub candidate_id: Option<String>,
@@ -17,6 +17,7 @@ pub struct SchedulerRequestCandidateReportContext {
     pub key_id: Option<String>,
     pub client_api_format: Option<String>,
     pub provider_api_format: Option<String>,
+    pub proxy: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,6 +110,10 @@ pub fn parse_request_candidate_report_context(
         key_id: string_field(report_context, "key_id"),
         client_api_format: string_field(report_context, "client_api_format"),
         provider_api_format: string_field(report_context, "provider_api_format"),
+        proxy: report_context
+            .get("proxy")
+            .cloned()
+            .filter(|value| !value.is_null()),
     })
 }
 
@@ -164,10 +169,12 @@ pub fn resolve_report_request_candidate_slot(
             .as_ref()
             .and_then(|candidate| candidate.key_id.clone())
             .or(metadata.key_id),
-        extra_data: matched_candidate
-            .as_ref()
-            .and_then(|candidate| candidate.extra_data.clone())
-            .or(synthesized_extra_data),
+        extra_data: merge_request_candidate_extra_data(
+            matched_candidate
+                .as_ref()
+                .and_then(|candidate| candidate.extra_data.clone()),
+            synthesized_extra_data,
+        ),
         created_at_unix_ms,
         started_at_unix_ms: matched_candidate
             .as_ref()
@@ -475,7 +482,26 @@ fn build_report_candidate_extra_data(
             Value::String(provider_api_format),
         );
     }
+    if let Some(proxy) = metadata.proxy.clone() {
+        extra_data.insert("proxy".to_string(), proxy);
+    }
     (!extra_data.is_empty()).then_some(Value::Object(extra_data))
+}
+
+fn merge_request_candidate_extra_data(
+    existing: Option<Value>,
+    overlay: Option<Value>,
+) -> Option<Value> {
+    match (existing, overlay) {
+        (Some(Value::Object(mut existing_object)), Some(Value::Object(overlay_object))) => {
+            existing_object.extend(overlay_object);
+            Some(Value::Object(existing_object))
+        }
+        (Some(existing), None) => Some(existing),
+        (None, Some(overlay)) => Some(overlay),
+        (Some(existing), Some(_overlay)) => Some(existing),
+        (None, None) => None,
+    }
 }
 
 #[cfg(test)]
@@ -579,6 +605,60 @@ mod tests {
         assert_eq!(slot.candidate_index, 1);
         assert_eq!(slot.retry_index, 2);
         assert_eq!(slot.request_id, "req-1");
+    }
+
+    #[test]
+    fn merges_proxy_trace_info_into_existing_candidate_extra_data() {
+        let mut existing = sample_candidate("cand-1", 1, 0);
+        existing.extra_data = Some(json!({
+            "provider_name": "Codex"
+        }));
+
+        let metadata = parse_request_candidate_report_context(Some(&json!({
+            "request_id": "req-1",
+            "candidate_index": 1,
+            "retry_index": 0,
+            "provider_id": "provider-1",
+            "endpoint_id": "endpoint-1",
+            "key_id": "catalog-key-1",
+            "client_api_format": "openai:chat",
+            "provider_api_format": "openai:cli",
+            "proxy": {
+                "node_id": "proxy-node-1",
+                "node_name": "edge-1",
+                "source": "provider"
+            }
+        })))
+        .expect("metadata");
+
+        let slot = resolve_report_request_candidate_slot(
+            &[existing],
+            metadata,
+            123,
+            "generated-1".to_string(),
+        )
+        .expect("slot");
+
+        assert_eq!(
+            slot.extra_data
+                .as_ref()
+                .and_then(|value| value.get("provider_name")),
+            Some(&json!("Codex"))
+        );
+        assert_eq!(
+            slot.extra_data
+                .as_ref()
+                .and_then(|value| value.get("proxy"))
+                .and_then(|value| value.get("node_id")),
+            Some(&json!("proxy-node-1"))
+        );
+        assert_eq!(
+            slot.extra_data
+                .as_ref()
+                .and_then(|value| value.get("proxy"))
+                .and_then(|value| value.get("source")),
+            Some(&json!("provider"))
+        );
     }
 
     #[test]

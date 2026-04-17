@@ -1,6 +1,7 @@
 use serde_json::json;
 
 use crate::ai_pipeline::planner::candidate_materialization::mark_skipped_local_execution_candidate;
+use crate::ai_pipeline::planner::candidate_metadata::build_request_trace_proxy_value;
 use crate::ai_pipeline::planner::materialization_policy::{
     build_local_candidate_persistence_policy, LocalCandidatePersistencePolicyKind,
 };
@@ -60,6 +61,11 @@ pub(crate) async fn maybe_build_local_same_format_provider_decision_payload_for_
         .await;
     let tls_profile = resolve_transport_tls_profile(&resolved.transport);
     let mut extra_fields = serde_json::Map::new();
+    if let Some(proxy_value) =
+        build_request_trace_proxy_value(Some(&resolved.transport), proxy.as_ref())
+    {
+        extra_fields.insert("proxy".to_string(), proxy_value);
+    }
     if resolved.is_kiro {
         extra_fields.insert(
             "envelope_name".to_string(),

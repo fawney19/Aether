@@ -347,7 +347,7 @@ const discoveredActiveRequestIds = new Set<string>()
 
 async function loadActiveRequestUpdates(ids?: string[]) {
   if (isAdminPage.value) {
-    return usageApi.getActiveRequests(ids)
+    return usageApi.getActiveRequests(ids, timeRange.value)
   }
   const idsParam = ids?.length ? ids.join(',') : undefined
   return meApi.getActiveRequests(idsParam)
@@ -362,17 +362,11 @@ async function pollActiveRequests() {
   try {
     const { requests } = await loadActiveRequestUpdates(activeRequestIds.value)
 
-    let shouldRefresh = false
-
     const recordMap = new Map(currentRecords.value.map(record => [record.id, record]))
 
     for (const update of requests) {
       const record = recordMap.get(update.id)
-      if (!record) {
-        // 后端返回了未知的活跃请求，触发刷新以获取完整数据
-        shouldRefresh = true
-        continue
-      }
+      if (!record) continue
 
       // 状态只允许单向推进，避免异步响应回退（pending -> streaming -> completed/failed/cancelled）
       const statusPriority: Record<string, number> = {
@@ -389,10 +383,6 @@ async function pollActiveRequests() {
       if (shouldApply && record.status !== update.status) {
         record.status = update.status
       }
-      if (shouldApply && ['completed', 'failed', 'cancelled'].includes(update.status)) {
-        shouldRefresh = true
-      }
-
       if (shouldApply) {
         // 进行中状态也需要持续更新（provider/key/TTFB 可能在 streaming 后才落库）
         record.input_tokens = update.input_tokens
@@ -430,9 +420,8 @@ async function pollActiveRequests() {
       }
     }
 
-    if (shouldRefresh) {
-      await refreshData()
-    }
+    // 不再因活跃请求完成而全表刷新，字段已在上方就地更新
+    // 未知请求（shouldRefresh 由 !record 触发）理论上不应出现在已知 ID 轮询中，忽略即可
   } catch (error) {
     log.error('轮询活跃请求状态失败:', error)
   } finally {
@@ -484,6 +473,7 @@ function scheduleNextAutoRefresh() {
 function scheduleNextActiveDiscovery() {
   if (activeDiscoveryTimer) return
   if (!isPageVisible.value) return
+  if (!globalAutoRefresh.value) return
   const interval = hasActiveRequests.value || discoveredActiveRequestIds.size > 0
     ? ACTIVE_DISCOVERY_HOT_INTERVAL
     : ACTIVE_DISCOVERY_IDLE_INTERVAL
@@ -502,6 +492,7 @@ function startAutoRefresh() {
 
 function startActiveDiscovery() {
   if (!isPageVisible.value) return
+  if (!globalAutoRefresh.value) return
   if (activeDiscoveryTimer || activeDiscoveryInFlight) return
   void (async () => {
     await discoverActiveRequests()

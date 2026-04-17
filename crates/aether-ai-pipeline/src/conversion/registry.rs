@@ -40,18 +40,57 @@ const NON_COMPACT_STANDARD_CANDIDATE_API_FORMATS: &[&str] = &[
     "gemini:chat",
     "gemini:cli",
 ];
+const STANDARD_API_FAMILY_ORDER: &[&str] = &["openai", "claude", "gemini"];
+
+pub fn request_candidate_api_format_preference(
+    client_api_format: &str,
+    provider_api_format: &str,
+) -> Option<(u8, u8)> {
+    let client_api_format = client_api_format.trim().to_ascii_lowercase();
+    let provider_api_format = provider_api_format.trim().to_ascii_lowercase();
+
+    if client_api_format == "openai:compact" {
+        return (provider_api_format == "openai:compact").then_some((0, 0));
+    }
+
+    let (client_family, client_kind) =
+        parse_non_compact_standard_api_format(client_api_format.as_str())?;
+    let (provider_family, provider_kind) =
+        parse_non_compact_standard_api_format(provider_api_format.as_str())?;
+    let preference_bucket = if client_family == provider_family && client_kind == provider_kind {
+        0
+    } else if client_kind == provider_kind {
+        1
+    } else if client_family == provider_family {
+        2
+    } else {
+        3
+    };
+
+    Some((
+        preference_bucket,
+        standard_api_family_priority(provider_family),
+    ))
+}
 
 pub fn request_candidate_api_formats(
     client_api_format: &str,
     _require_streaming: bool,
 ) -> Vec<&'static str> {
     let client_api_format = client_api_format.trim().to_ascii_lowercase();
-    match client_api_format.as_str() {
-        "openai:chat" | "openai:cli" | "claude:chat" | "claude:cli" | "gemini:chat"
-        | "gemini:cli" => NON_COMPACT_STANDARD_CANDIDATE_API_FORMATS.to_vec(),
-        "openai:compact" => vec!["openai:compact"],
-        _ => Vec::new(),
+    if client_api_format == "openai:compact" {
+        return vec!["openai:compact"];
     }
+    if parse_non_compact_standard_api_format(client_api_format.as_str()).is_none() {
+        return Vec::new();
+    }
+
+    let mut candidate_api_formats = NON_COMPACT_STANDARD_CANDIDATE_API_FORMATS.to_vec();
+    candidate_api_formats.sort_by_key(|provider_api_format| {
+        request_candidate_api_format_preference(client_api_format.as_str(), provider_api_format)
+            .unwrap_or((u8::MAX, u8::MAX))
+    });
+    candidate_api_formats
 }
 
 pub fn request_conversion_kind(
@@ -259,6 +298,21 @@ fn is_standard_api_format(api_format: &str) -> bool {
     )
 }
 
+fn parse_non_compact_standard_api_format(api_format: &str) -> Option<(&str, &str)> {
+    let (family, kind) = api_format.split_once(':')?;
+    if !STANDARD_API_FAMILY_ORDER.contains(&family) || !matches!(kind, "chat" | "cli") {
+        return None;
+    }
+    Some((family, kind))
+}
+
+fn standard_api_family_priority(family: &str) -> u8 {
+    STANDARD_API_FAMILY_ORDER
+        .iter()
+        .position(|candidate| *candidate == family)
+        .unwrap_or(STANDARD_API_FAMILY_ORDER.len()) as u8
+}
+
 fn api_data_format_id(api_format: &str) -> Option<&'static str> {
     match api_format {
         "claude:chat" | "claude:cli" => Some("claude"),
@@ -315,12 +369,12 @@ fn json_format_list_contains(value: &serde_json::Value, api_format: &str) -> boo
 #[cfg(test)]
 mod tests {
     use super::{
-        request_candidate_api_formats, request_conversion_direct_auth,
-        request_conversion_enabled_for_transport, request_conversion_kind,
-        request_conversion_requires_enable_flag, request_conversion_transport_supported,
-        request_pair_allowed_for_transport, sync_chat_response_conversion_kind,
-        sync_cli_response_conversion_kind, RequestConversionKind, SyncChatResponseConversionKind,
-        SyncCliResponseConversionKind,
+        request_candidate_api_format_preference, request_candidate_api_formats,
+        request_conversion_direct_auth, request_conversion_enabled_for_transport,
+        request_conversion_kind, request_conversion_requires_enable_flag,
+        request_conversion_transport_supported, request_pair_allowed_for_transport,
+        sync_chat_response_conversion_kind, sync_cli_response_conversion_kind,
+        RequestConversionKind, SyncChatResponseConversionKind, SyncCliResponseConversionKind,
     };
     use aether_provider_transport::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
@@ -406,38 +460,54 @@ mod tests {
             request_candidate_api_formats("openai:chat", false),
             vec![
                 "openai:chat",
-                "openai:cli",
                 "claude:chat",
-                "claude:cli",
                 "gemini:chat",
+                "openai:cli",
+                "claude:cli",
                 "gemini:cli",
             ]
         );
         assert_eq!(
             request_candidate_api_formats("openai:cli", false),
             vec![
-                "openai:chat",
                 "openai:cli",
-                "claude:chat",
                 "claude:cli",
-                "gemini:chat",
                 "gemini:cli",
+                "openai:chat",
+                "claude:chat",
+                "gemini:chat",
             ]
         );
         assert_eq!(
             request_candidate_api_formats("claude:cli", false),
             vec![
-                "openai:chat",
-                "openai:cli",
-                "claude:chat",
                 "claude:cli",
-                "gemini:chat",
+                "openai:cli",
                 "gemini:cli",
+                "claude:chat",
+                "openai:chat",
+                "gemini:chat",
             ]
         );
         assert_eq!(
             request_candidate_api_formats("openai:compact", false),
             vec!["openai:compact"]
+        );
+    }
+
+    #[test]
+    fn request_candidate_registry_prefers_same_kind_before_same_family_fallbacks() {
+        assert_eq!(
+            request_candidate_api_format_preference("claude:cli", "openai:cli"),
+            Some((1, 0))
+        );
+        assert_eq!(
+            request_candidate_api_format_preference("claude:cli", "claude:chat"),
+            Some((2, 1))
+        );
+        assert_eq!(
+            request_candidate_api_format_preference("claude:cli", "openai:chat"),
+            Some((3, 0))
         );
     }
 

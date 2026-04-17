@@ -1,6 +1,11 @@
 use aether_data::repository::auth::StoredAuthApiKeySnapshot;
 use aether_data_contracts::repository::{
-    provider_catalog::StoredProviderCatalogProvider, usage::StoredRequestUsageAudit,
+    provider_catalog::StoredProviderCatalogProvider,
+    usage::{
+        StoredRequestUsageAudit, StoredUsageCostSavingsSummary, StoredUsageErrorDistributionRow,
+        StoredUsageLeaderboardSummary, StoredUsagePerformancePercentilesRow,
+        StoredUsageTimeSeriesBucket,
+    },
 };
 use axum::{
     body::Body,
@@ -811,7 +816,20 @@ pub fn build_admin_stats_comparison_response(
 ) -> Response<Body> {
     let current = aggregate_usage_stats(current_usage);
     let comparison = aggregate_usage_stats(comparison_usage);
+    build_admin_stats_comparison_response_from_aggregates(
+        &current,
+        &comparison,
+        current_range,
+        comparison_range,
+    )
+}
 
+pub fn build_admin_stats_comparison_response_from_aggregates(
+    current: &AdminStatsAggregate,
+    comparison: &AdminStatsAggregate,
+    current_range: &AdminStatsTimeRange,
+    comparison_range: &AdminStatsTimeRange,
+) -> Response<Body> {
     Json(json!({
         "current": {
             "total_requests": current.total_requests,
@@ -913,6 +931,62 @@ pub fn build_admin_stats_error_distribution_response(
     .into_response()
 }
 
+pub fn build_admin_stats_error_distribution_response_from_summaries(
+    rows: &[StoredUsageErrorDistributionRow],
+) -> Response<Body> {
+    let mut distribution: std::collections::BTreeMap<String, u64> =
+        std::collections::BTreeMap::new();
+    let mut trend: std::collections::BTreeMap<String, std::collections::BTreeMap<String, u64>> =
+        std::collections::BTreeMap::new();
+
+    for row in rows {
+        *distribution.entry(row.error_category.clone()).or_default() += row.count;
+        *trend
+            .entry(row.date.clone())
+            .or_default()
+            .entry(row.error_category.clone())
+            .or_default() += row.count;
+    }
+
+    let mut distribution_items: Vec<_> = distribution
+        .into_iter()
+        .map(|(category, count)| json!({ "category": category, "count": count }))
+        .collect();
+    distribution_items.sort_by(|left, right| {
+        let left_count = left
+            .get("count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let right_count = right
+            .get("count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        right_count.cmp(&left_count).then_with(|| {
+            left.get("category")
+                .and_then(serde_json::Value::as_str)
+                .cmp(&right.get("category").and_then(serde_json::Value::as_str))
+        })
+    });
+
+    let trend_items: Vec<_> = trend
+        .into_iter()
+        .map(|(date, categories)| {
+            let total: u64 = categories.values().copied().sum();
+            json!({
+                "date": date,
+                "total": total,
+                "categories": categories,
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "distribution": distribution_items,
+        "trend": trend_items,
+    }))
+    .into_response()
+}
+
 pub fn build_admin_stats_performance_percentiles_response(
     time_range: &AdminStatsTimeRange,
     usage: &[StoredRequestUsageAudit],
@@ -960,6 +1034,33 @@ pub fn build_admin_stats_performance_percentiles_response(
     Json(serde_json::Value::Array(payload)).into_response()
 }
 
+pub fn build_admin_stats_performance_percentiles_response_from_summaries(
+    time_range: &AdminStatsTimeRange,
+    rows: &[StoredUsagePerformancePercentilesRow],
+) -> Response<Body> {
+    let by_day: std::collections::BTreeMap<String, &StoredUsagePerformancePercentilesRow> =
+        rows.iter().map(|row| (row.date.clone(), row)).collect();
+
+    let payload: Vec<_> = time_range
+        .local_date_strings()
+        .into_iter()
+        .map(|date| {
+            let row = by_day.get(&date).copied();
+            json!({
+                "date": date,
+                "p50_response_time_ms": row.and_then(|value| value.p50_response_time_ms),
+                "p90_response_time_ms": row.and_then(|value| value.p90_response_time_ms),
+                "p99_response_time_ms": row.and_then(|value| value.p99_response_time_ms),
+                "p50_first_byte_time_ms": row.and_then(|value| value.p50_first_byte_time_ms),
+                "p90_first_byte_time_ms": row.and_then(|value| value.p90_first_byte_time_ms),
+                "p99_first_byte_time_ms": row.and_then(|value| value.p99_first_byte_time_ms),
+            })
+        })
+        .collect();
+
+    Json(serde_json::Value::Array(payload)).into_response()
+}
+
 pub fn build_admin_stats_time_series_response(
     time_range: &AdminStatsTimeRange,
     granularity: AdminStatsGranularity,
@@ -970,6 +1071,171 @@ pub fn build_admin_stats_time_series_response(
         granularity,
         usage,
     )))
+    .into_response()
+}
+
+fn admin_stats_time_series_bucket_from_summary(
+    bucket: &StoredUsageTimeSeriesBucket,
+) -> AdminStatsTimeSeriesBucket {
+    AdminStatsTimeSeriesBucket {
+        total_requests: bucket.total_requests,
+        input_tokens: bucket.input_tokens,
+        output_tokens: bucket.output_tokens,
+        cache_creation_tokens: bucket.cache_creation_tokens,
+        cache_read_tokens: bucket.cache_read_tokens,
+        total_cost: bucket.total_cost_usd,
+        total_response_time_ms: bucket.total_response_time_ms,
+    }
+}
+
+fn build_daily_time_series_buckets_from_summaries(
+    time_range: &AdminStatsTimeRange,
+    buckets: &[StoredUsageTimeSeriesBucket],
+) -> std::collections::BTreeMap<chrono::NaiveDate, AdminStatsTimeSeriesBucket> {
+    let mut values: std::collections::BTreeMap<chrono::NaiveDate, AdminStatsTimeSeriesBucket> =
+        time_range
+            .local_dates()
+            .into_iter()
+            .map(|date| (date, AdminStatsTimeSeriesBucket::default()))
+            .collect();
+
+    for bucket in buckets {
+        let Ok(date) = chrono::NaiveDate::parse_from_str(&bucket.bucket_key, "%Y-%m-%d") else {
+            continue;
+        };
+        let Some(value) = values.get_mut(&date) else {
+            continue;
+        };
+        value.merge(&admin_stats_time_series_bucket_from_summary(bucket));
+    }
+
+    values
+}
+
+fn build_daily_time_series_payload_from_summaries(
+    time_range: &AdminStatsTimeRange,
+    buckets: &[StoredUsageTimeSeriesBucket],
+) -> Vec<serde_json::Value> {
+    build_daily_time_series_buckets_from_summaries(time_range, buckets)
+        .into_iter()
+        .map(|(date, bucket)| bucket.to_json_with_avg(date.to_string()))
+        .collect()
+}
+
+fn build_weekly_time_series_payload_from_summaries(
+    time_range: &AdminStatsTimeRange,
+    buckets: &[StoredUsageTimeSeriesBucket],
+) -> Vec<serde_json::Value> {
+    let mut weekly: std::collections::BTreeMap<
+        (i32, u32),
+        (chrono::NaiveDate, AdminStatsTimeSeriesBucket),
+    > = std::collections::BTreeMap::new();
+
+    for (date, bucket) in build_daily_time_series_buckets_from_summaries(time_range, buckets) {
+        let iso = date.iso_week();
+        let entry = weekly
+            .entry((iso.year(), iso.week()))
+            .or_insert_with(|| (date, AdminStatsTimeSeriesBucket::default()));
+        entry.0 = entry.0.min(date);
+        entry.1.merge(&bucket);
+    }
+
+    weekly
+        .into_values()
+        .map(|(date, bucket)| bucket.to_json_with_avg(date.to_string()))
+        .collect()
+}
+
+fn build_monthly_time_series_payload_from_summaries(
+    time_range: &AdminStatsTimeRange,
+    buckets: &[StoredUsageTimeSeriesBucket],
+) -> Vec<serde_json::Value> {
+    let mut monthly: std::collections::BTreeMap<
+        (i32, u32),
+        (chrono::NaiveDate, AdminStatsTimeSeriesBucket),
+    > = std::collections::BTreeMap::new();
+
+    for (date, bucket) in build_daily_time_series_buckets_from_summaries(time_range, buckets) {
+        let Some(month_start) = chrono::NaiveDate::from_ymd_opt(date.year(), date.month(), 1)
+        else {
+            continue;
+        };
+        let entry = monthly
+            .entry((date.year(), date.month()))
+            .or_insert_with(|| (month_start, AdminStatsTimeSeriesBucket::default()));
+        entry.1.merge(&bucket);
+    }
+
+    monthly
+        .into_values()
+        .map(|(date, bucket)| bucket.to_json_with_avg(date.to_string()))
+        .collect()
+}
+
+fn build_hourly_time_series_payload_from_summaries(
+    time_range: &AdminStatsTimeRange,
+    buckets: &[StoredUsageTimeSeriesBucket],
+) -> Vec<serde_json::Value> {
+    let Some((mut current, end)) = time_range.to_utc_datetime_bounds() else {
+        return Vec::new();
+    };
+    let offset = chrono::Duration::minutes(i64::from(time_range.tz_offset_minutes));
+    let mut values: std::collections::BTreeMap<String, AdminStatsTimeSeriesBucket> =
+        std::collections::BTreeMap::new();
+
+    while current < end {
+        let label = (current + offset)
+            .format("%Y-%m-%dT%H:00:00+00:00")
+            .to_string();
+        values.insert(label, AdminStatsTimeSeriesBucket::default());
+        let Some(next) = current.checked_add_signed(chrono::Duration::hours(1)) else {
+            break;
+        };
+        current = next;
+    }
+
+    for bucket in buckets {
+        let Some(value) = values.get_mut(&bucket.bucket_key) else {
+            continue;
+        };
+        value.merge(&admin_stats_time_series_bucket_from_summary(bucket));
+    }
+
+    values
+        .into_iter()
+        .map(|(date, bucket)| bucket.to_json_without_avg(date))
+        .collect()
+}
+
+pub fn build_time_series_payload_from_summaries(
+    time_range: &AdminStatsTimeRange,
+    granularity: AdminStatsGranularity,
+    buckets: &[StoredUsageTimeSeriesBucket],
+) -> Vec<serde_json::Value> {
+    match granularity {
+        AdminStatsGranularity::Hour => {
+            build_hourly_time_series_payload_from_summaries(time_range, buckets)
+        }
+        AdminStatsGranularity::Day => {
+            build_daily_time_series_payload_from_summaries(time_range, buckets)
+        }
+        AdminStatsGranularity::Week => {
+            build_weekly_time_series_payload_from_summaries(time_range, buckets)
+        }
+        AdminStatsGranularity::Month => {
+            build_monthly_time_series_payload_from_summaries(time_range, buckets)
+        }
+    }
+}
+
+pub fn build_admin_stats_time_series_response_from_summaries(
+    time_range: &AdminStatsTimeRange,
+    granularity: AdminStatsGranularity,
+    buckets: &[StoredUsageTimeSeriesBucket],
+) -> Response<Body> {
+    Json(serde_json::Value::Array(
+        build_time_series_payload_from_summaries(time_range, granularity, buckets),
+    ))
     .into_response()
 }
 
@@ -986,6 +1252,53 @@ pub fn build_admin_stats_cost_forecast_response(
             total_cost: bucket.total_cost,
         })
         .collect();
+    let values: Vec<f64> = history.iter().map(|item| item.total_cost).collect();
+    let (slope, intercept) = linear_regression(&values);
+    let last_date = history
+        .last()
+        .map(|item| item.date)
+        .unwrap_or(time_range.end_date);
+    let forecast: Vec<_> = (0..forecast_days)
+        .map(|index| {
+            let idx = values.len() + index as usize;
+            let predicted = (slope * idx as f64 + intercept).max(0.0);
+            json!({
+                "date": last_date
+                    .checked_add_signed(chrono::Duration::days(i64::from(index + 1)))
+                    .unwrap_or(last_date)
+                    .to_string(),
+                "total_cost": round_to(predicted, 4),
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "history": history.into_iter().map(|item| json!({
+            "date": item.date.to_string(),
+            "total_cost": round_to(item.total_cost, 6),
+        })).collect::<Vec<_>>(),
+        "forecast": forecast,
+        "slope": round_to(slope, 6),
+        "intercept": round_to(intercept, 6),
+        "start_date": time_range.start_date.to_string(),
+        "end_date": time_range.end_date.to_string(),
+    }))
+    .into_response()
+}
+
+pub fn build_admin_stats_cost_forecast_response_from_summaries(
+    time_range: &AdminStatsTimeRange,
+    forecast_days: u32,
+    buckets: &[StoredUsageTimeSeriesBucket],
+) -> Response<Body> {
+    let history: Vec<AdminStatsForecastPoint> =
+        build_daily_time_series_buckets_from_summaries(time_range, buckets)
+            .into_iter()
+            .map(|(date, bucket)| AdminStatsForecastPoint {
+                date,
+                total_cost: bucket.total_cost,
+            })
+            .collect();
     let values: Vec<f64> = history.iter().map(|item| item.total_cost).collect();
     let (slope, intercept) = linear_regression(&values);
     let last_date = history
@@ -1043,6 +1356,27 @@ pub fn build_admin_stats_cost_savings_response(
         "cache_read_tokens": cache_read_tokens,
         "cache_read_cost": round_to(cache_read_cost, 6),
         "cache_creation_cost": round_to(cache_creation_cost, 6),
+        "estimated_full_cost": round_to(estimated_full_cost, 6),
+        "cache_savings": round_to(cache_savings, 6),
+    }))
+    .into_response()
+}
+
+pub fn build_admin_stats_cost_savings_response_from_summary(
+    summary: &StoredUsageCostSavingsSummary,
+) -> Response<Body> {
+    let estimated_full_cost =
+        if summary.estimated_full_cost_usd <= 0.0 && summary.cache_read_cost_usd > 0.0 {
+            summary.cache_read_cost_usd * 10.0
+        } else {
+            summary.estimated_full_cost_usd
+        };
+    let cache_savings = estimated_full_cost - summary.cache_read_cost_usd;
+
+    Json(json!({
+        "cache_read_tokens": summary.cache_read_tokens,
+        "cache_read_cost": round_to(summary.cache_read_cost_usd, 6),
+        "cache_creation_cost": round_to(summary.cache_creation_cost_usd, 6),
         "estimated_full_cost": round_to(estimated_full_cost, 6),
         "cache_savings": round_to(cache_savings, 6),
     }))
@@ -1293,6 +1627,21 @@ pub fn build_model_leaderboard_items(
     grouped.into_values().collect()
 }
 
+pub fn build_model_leaderboard_items_from_summaries(
+    items: &[StoredUsageLeaderboardSummary],
+) -> Vec<AdminStatsLeaderboardItem> {
+    items
+        .iter()
+        .map(|item| AdminStatsLeaderboardItem {
+            id: item.group_key.clone(),
+            name: item.group_key.clone(),
+            requests: item.request_count,
+            tokens: item.total_tokens,
+            cost: item.total_cost_usd,
+        })
+        .collect()
+}
+
 pub fn build_user_leaderboard_items(
     items: &[StoredRequestUsageAudit],
     users: &std::collections::BTreeMap<String, AdminStatsUserMetadata>,
@@ -1360,6 +1709,57 @@ pub fn build_user_leaderboard_items(
     }
 
     grouped.into_values().collect()
+}
+
+pub fn build_user_leaderboard_items_from_summaries(
+    items: &[StoredUsageLeaderboardSummary],
+    users: &std::collections::BTreeMap<String, AdminStatsUserMetadata>,
+    auth_user_reader_available: bool,
+    user_reader_available: bool,
+    include_inactive: bool,
+    exclude_admin: bool,
+) -> Vec<AdminStatsLeaderboardItem> {
+    let mut grouped = Vec::new();
+
+    for item in items {
+        let user_id = item.group_key.as_str();
+        let entry_name = if let Some(user) = users.get(user_id) {
+            if user.is_deleted {
+                continue;
+            }
+            if !include_inactive && !user.is_active {
+                continue;
+            }
+            if exclude_admin && user.role.eq_ignore_ascii_case("admin") {
+                continue;
+            }
+            user.name.clone()
+        } else {
+            if exclude_admin {
+                continue;
+            }
+            if auth_user_reader_available || user_reader_available {
+                user_id.to_string()
+            } else {
+                item.legacy_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| user_id.to_string())
+            }
+        };
+
+        grouped.push(AdminStatsLeaderboardItem {
+            id: user_id.to_string(),
+            name: entry_name,
+            requests: item.request_count,
+            tokens: item.total_tokens,
+            cost: item.total_cost_usd,
+        });
+    }
+
+    grouped
 }
 
 pub fn build_api_key_leaderboard_items(
@@ -1434,6 +1834,60 @@ pub fn build_api_key_leaderboard_items(
     }
 
     grouped.into_values().collect()
+}
+
+pub fn build_api_key_leaderboard_items_from_summaries(
+    items: &[StoredUsageLeaderboardSummary],
+    snapshots: Option<&[StoredAuthApiKeySnapshot]>,
+    api_key_names: &std::collections::BTreeMap<String, String>,
+    include_inactive: bool,
+    exclude_admin: bool,
+) -> Vec<AdminStatsLeaderboardItem> {
+    let snapshot_by_api_key_id: std::collections::BTreeMap<_, _> = snapshots
+        .unwrap_or(&[])
+        .iter()
+        .map(|snapshot| (snapshot.api_key_id.as_str(), snapshot))
+        .collect();
+    let snapshots_available = snapshots.is_some();
+    let mut grouped = Vec::new();
+
+    for item in items {
+        let api_key_id = item.group_key.as_str();
+        let entry_name = if let Some(snapshot) = snapshot_by_api_key_id.get(api_key_id) {
+            if snapshot.user_is_deleted {
+                continue;
+            }
+            if !include_inactive && !snapshot.api_key_is_active {
+                continue;
+            }
+            if exclude_admin && snapshot.user_role.eq_ignore_ascii_case("admin") {
+                continue;
+            }
+            api_key_names
+                .get(api_key_id)
+                .cloned()
+                .unwrap_or_else(|| api_key_id.to_string())
+        } else {
+            if snapshots_available {
+                continue;
+            }
+            api_key_names
+                .get(api_key_id)
+                .cloned()
+                .or_else(|| item.legacy_name.clone())
+                .unwrap_or_else(|| api_key_id.to_string())
+        };
+
+        grouped.push(AdminStatsLeaderboardItem {
+            id: api_key_id.to_string(),
+            name: entry_name,
+            requests: item.request_count,
+            tokens: item.total_tokens,
+            cost: item.total_cost_usd,
+        });
+    }
+
+    grouped
 }
 
 pub fn compare_leaderboard_items(

@@ -1,14 +1,15 @@
 use tracing::warn;
 
 use crate::ai_pipeline::{
-    GatewayAuthApiKeySnapshot, GatewayProviderTransportSnapshot, PlannerAppState,
+    request_candidate_api_format_preference, GatewayAuthApiKeySnapshot,
+    GatewayProviderTransportSnapshot, PlannerAppState,
 };
 use crate::scheduler::affinity::SCHEDULER_AFFINITY_TTL;
 use crate::scheduler::config::{read_scheduler_ordering_config, SchedulerOrderingConfig};
 use aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate;
 use aether_scheduler_core::{
     build_scheduler_affinity_cache_key_for_api_key_id, compare_candidates_by_priority_mode,
-    requested_capability_priority_for_candidate, SchedulerAffinityTarget,
+    requested_capability_priority_for_candidate, SchedulerAffinityTarget, SchedulerPriorityMode,
 };
 
 use super::candidate_eligibility::{
@@ -65,6 +66,10 @@ async fn rank_local_execution_candidates(
             .trim()
             .eq_ignore_ascii_case(normalized_client_api_format.as_str());
         let demote_cross_format = !is_same_format && !ordering.keep_priority_on_conversion;
+        let format_preference = candidate_api_format_preference(
+            normalized_client_api_format.as_str(),
+            candidate.endpoint_api_format.as_str(),
+        );
         let capability_priority =
             requested_capability_priority_for_candidate(required_capabilities, &candidate);
         ranked.push((
@@ -72,6 +77,7 @@ async fn rank_local_execution_candidates(
             capability_priority.1,
             ordering.tunnel_bucket,
             demote_cross_format,
+            format_preference,
             original_index,
             candidate,
         ));
@@ -84,19 +90,23 @@ async fn rank_local_execution_candidates(
             .then(left.2.cmp(&right.2))
             .then(left.3.cmp(&right.3))
             .then_with(|| {
+                compare_candidate_priority_slot(&left.6, &right.6, ordering_config.priority_mode)
+            })
+            .then(left.4.cmp(&right.4))
+            .then_with(|| {
                 compare_candidates_by_priority_mode(
-                    &left.5,
-                    &right.5,
+                    &left.6,
+                    &right.6,
                     ordering_config.priority_mode,
                     None,
                 )
             })
-            .then(left.4.cmp(&right.4))
+            .then(left.5.cmp(&right.5))
     });
 
     ranked
         .into_iter()
-        .map(|(_, _, _, _, _, candidate)| candidate)
+        .map(|(_, _, _, _, _, _, candidate)| candidate)
         .collect()
 }
 
@@ -121,6 +131,10 @@ pub(crate) async fn rank_eligible_local_execution_candidates(
             .provider_api_format
             .eq_ignore_ascii_case(normalized_client_api_format.as_str());
         let demote_cross_format = !is_same_format && !ordering.keep_priority_on_conversion;
+        let format_preference = candidate_api_format_preference(
+            normalized_client_api_format.as_str(),
+            eligible.provider_api_format.as_str(),
+        );
         let capability_priority =
             requested_capability_priority_for_candidate(required_capabilities, &eligible.candidate);
         ranked.push((
@@ -128,6 +142,7 @@ pub(crate) async fn rank_eligible_local_execution_candidates(
             capability_priority.1,
             ordering.tunnel_bucket,
             demote_cross_format,
+            format_preference,
             original_index,
             eligible,
         ));
@@ -140,19 +155,27 @@ pub(crate) async fn rank_eligible_local_execution_candidates(
             .then(left.2.cmp(&right.2))
             .then(left.3.cmp(&right.3))
             .then_with(|| {
+                compare_candidate_priority_slot(
+                    &left.6.candidate,
+                    &right.6.candidate,
+                    ordering_config.priority_mode,
+                )
+            })
+            .then(left.4.cmp(&right.4))
+            .then_with(|| {
                 compare_candidates_by_priority_mode(
-                    &left.5.candidate,
-                    &right.5.candidate,
+                    &left.6.candidate,
+                    &right.6.candidate,
                     ordering_config.priority_mode,
                     None,
                 )
             })
-            .then(left.4.cmp(&right.4))
+            .then(left.5.cmp(&right.5))
     });
 
     ranked
         .into_iter()
-        .map(|(_, _, _, _, _, eligible)| eligible)
+        .map(|(_, _, _, _, _, _, eligible)| eligible)
         .collect()
 }
 
@@ -275,6 +298,30 @@ async fn resolve_tunnel_owner_affinity_from_transport(
             );
             TunnelOwnerAffinityBucket::Neutral
         }
+    }
+}
+
+fn candidate_api_format_preference(client_api_format: &str, provider_api_format: &str) -> (u8, u8) {
+    request_candidate_api_format_preference(client_api_format, provider_api_format)
+        .unwrap_or((u8::MAX, u8::MAX))
+}
+
+fn compare_candidate_priority_slot(
+    left: &SchedulerMinimalCandidateSelectionCandidate,
+    right: &SchedulerMinimalCandidateSelectionCandidate,
+    priority_mode: SchedulerPriorityMode,
+) -> std::cmp::Ordering {
+    match priority_mode {
+        SchedulerPriorityMode::Provider => left
+            .provider_priority
+            .cmp(&right.provider_priority)
+            .then(left.key_internal_priority.cmp(&right.key_internal_priority)),
+        SchedulerPriorityMode::GlobalKey => left
+            .key_global_priority_for_format
+            .unwrap_or(i32::MAX)
+            .cmp(&right.key_global_priority_for_format.unwrap_or(i32::MAX))
+            .then(left.provider_priority.cmp(&right.provider_priority))
+            .then(left.key_internal_priority.cmp(&right.key_internal_priority)),
     }
 }
 
@@ -816,6 +863,60 @@ mod tests {
 
         assert_eq!(ranked[0].endpoint_id, "endpoint-provider-first");
         assert_eq!(ranked[1].endpoint_id, "endpoint-global-first");
+    }
+
+    #[tokio::test]
+    async fn local_execution_ranking_prefers_same_kind_endpoint_for_same_key_candidates() {
+        let provider_catalog = InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider_with_options("provider-shared", false, 0)],
+            vec![
+                sample_endpoint_for_provider("provider-shared", "aaa-claude-chat", "claude:chat"),
+                sample_endpoint_for_provider("provider-shared", "zzz-openai-cli", "openai:cli"),
+            ],
+            vec![sample_key_for_provider_with_options(
+                "provider-shared",
+                "key-shared",
+                "",
+                true,
+                Some(json!(["claude:chat", "openai:cli"])),
+                None,
+            )],
+        );
+        let data_state = GatewayDataState::with_provider_transport_reader_for_tests(
+            std::sync::Arc::new(provider_catalog),
+            "development-key",
+        );
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data_state);
+
+        let ranked = rank_local_execution_candidates(
+            PlannerAppState::new(&state),
+            vec![
+                sample_priority_candidate(
+                    "provider-shared",
+                    "aaa-claude-chat",
+                    "key-shared",
+                    "claude:chat",
+                    Some(0),
+                    0,
+                ),
+                sample_priority_candidate(
+                    "provider-shared",
+                    "zzz-openai-cli",
+                    "key-shared",
+                    "openai:cli",
+                    Some(0),
+                    0,
+                ),
+            ],
+            "claude:cli",
+            None,
+        )
+        .await;
+
+        assert_eq!(ranked[0].endpoint_id, "zzz-openai-cli");
+        assert_eq!(ranked[1].endpoint_id, "aaa-claude-chat");
     }
 
     #[tokio::test]

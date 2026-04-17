@@ -1,5 +1,6 @@
 use serde_json::json;
 
+use crate::ai_pipeline::planner::candidate_metadata::build_request_trace_proxy_value;
 use crate::ai_pipeline::planner::payload_metadata::{
     build_local_execution_decision_response, LocalExecutionDecisionResponseParts,
 };
@@ -58,6 +59,9 @@ pub(super) async fn maybe_build_local_gemini_files_decision_payload_for_candidat
         .await;
     let tls_profile = resolve_transport_tls_profile(&transport);
     let mut extra_fields = serde_json::Map::new();
+    if let Some(proxy_value) = build_request_trace_proxy_value(Some(&transport), proxy.as_ref()) {
+        extra_fields.insert("proxy".to_string(), proxy_value);
+    }
     extra_fields.insert("file_key_id".to_string(), json!(candidate.key_id));
     extra_fields.insert("file_name".to_string(), json!(resolved.file_name));
 

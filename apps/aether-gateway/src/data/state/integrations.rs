@@ -16,15 +16,36 @@ use aether_data_contracts::repository::settlement::{StoredUsageSettlement, Usage
 use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UpsertUsageRecord};
 use aether_data_contracts::repository::video_tasks::{StoredVideoTask, VideoTaskLookupKey};
 use aether_usage_runtime::{
-    UsageBillingEventEnricher, UsageEvent, UsageRecordWriter, UsageRuntimeAccess,
-    UsageSettlementWriter,
+    UsageBillingEventEnricher, UsageEvent, UsageRecordWriter, UsageRequestRecordLevel,
+    UsageRuntimeAccess, UsageSettlementWriter,
 };
 use aether_video_tasks_core::StoredVideoTaskReadSide;
 use async_trait::async_trait;
+use serde_json::Value;
 
 use super::GatewayDataState;
 use crate::data::candidate_selection::MinimalCandidateSelectionRowSource;
 use crate::provider_transport::ProviderTransportSnapshotSource;
+
+const REQUEST_RECORD_LEVEL_KEY: &str = "request_record_level";
+const LEGACY_REQUEST_LOG_LEVEL_KEY: &str = "request_log_level";
+
+fn usage_request_record_level_from_value(value: Option<&Value>) -> UsageRequestRecordLevel {
+    let Some(value) = value.and_then(Value::as_str).map(str::trim) else {
+        return UsageRequestRecordLevel::Full;
+    };
+
+    if value.eq_ignore_ascii_case("basic")
+        || value.eq_ignore_ascii_case("base")
+        || value.eq_ignore_ascii_case("headers")
+        || value.eq_ignore_ascii_case("minimal")
+        || value.eq_ignore_ascii_case("none")
+    {
+        UsageRequestRecordLevel::Basic
+    } else {
+        UsageRequestRecordLevel::Full
+    }
+}
 
 #[async_trait]
 impl RequestAuditReader for GatewayDataState {
@@ -161,6 +182,7 @@ impl UsageBillingEventEnricher for GatewayDataState {
     }
 }
 
+#[async_trait]
 impl UsageRuntimeAccess for GatewayDataState {
     fn has_usage_writer(&self) -> bool {
         GatewayDataState::has_usage_writer(self)
@@ -172,6 +194,16 @@ impl UsageRuntimeAccess for GatewayDataState {
 
     fn usage_worker_runner(&self) -> Option<RedisStreamRunner> {
         GatewayDataState::usage_worker_runner(self)
+    }
+
+    async fn request_record_level(&self) -> Result<UsageRequestRecordLevel, DataLayerError> {
+        let value = GatewayDataState::find_system_config_value(self, REQUEST_RECORD_LEVEL_KEY)
+            .await?
+            .or(
+                GatewayDataState::find_system_config_value(self, LEGACY_REQUEST_LOG_LEVEL_KEY)
+                    .await?,
+            );
+        Ok(usage_request_record_level_from_value(value.as_ref()))
     }
 }
 
@@ -188,10 +220,11 @@ impl UsageRecordWriter for GatewayDataState {
 #[cfg(test)]
 mod tests {
     use aether_billing::enrich_usage_event_with_billing;
-    use serde_json::Value;
+    use aether_usage_runtime::UsageRuntimeAccess;
+    use serde_json::{json, Value};
 
     use super::GatewayDataState;
-    use crate::usage::{UsageEvent, UsageEventData, UsageEventType};
+    use crate::usage::{UsageEvent, UsageEventData, UsageEventType, UsageRequestRecordLevel};
 
     #[tokio::test]
     async fn enriches_completed_usage_event_with_billing_snapshot() {
@@ -254,5 +287,44 @@ mod tests {
                 .and_then(Value::as_str),
             Some("complete")
         );
+    }
+
+    #[tokio::test]
+    async fn usage_runtime_access_reads_base_request_record_level_as_basic() {
+        let state = GatewayDataState::disabled().with_system_config_values_for_tests([(
+            "request_record_level".to_string(),
+            json!("base"),
+        )]);
+
+        let level = UsageRuntimeAccess::request_record_level(&state)
+            .await
+            .expect("request record level should read");
+
+        assert_eq!(level, UsageRequestRecordLevel::Basic);
+    }
+
+    #[tokio::test]
+    async fn usage_runtime_access_falls_back_to_legacy_request_log_level_alias() {
+        let state = GatewayDataState::disabled().with_system_config_values_for_tests([(
+            "request_log_level".to_string(),
+            json!("headers"),
+        )]);
+
+        let level = UsageRuntimeAccess::request_record_level(&state)
+            .await
+            .expect("legacy request log level should read");
+
+        assert_eq!(level, UsageRequestRecordLevel::Basic);
+    }
+
+    #[tokio::test]
+    async fn usage_runtime_access_defaults_missing_request_record_level_to_full() {
+        let state = GatewayDataState::disabled();
+
+        let level = UsageRuntimeAccess::request_record_level(&state)
+            .await
+            .expect("missing request record level should fall back");
+
+        assert_eq!(level, UsageRequestRecordLevel::Full);
     }
 }

@@ -243,29 +243,50 @@ fn admin_pool_build_codex_account_quota(
         reset_seconds_key: &str,
         reset_after_seconds_key: &str,
         reset_at_key: &str,
+        now_unix_secs: u64,
+        updated_at_unix_secs: Option<u64>,
     ) -> Option<f64> {
-        admin_pool_json_to_f64(data.get(reset_seconds_key))
-            .or_else(|| admin_pool_json_to_f64(data.get(reset_after_seconds_key)))
-            .or_else(|| {
-                let reset_at = admin_pool_json_to_u64(data.get(reset_at_key))?;
-                let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
-                Some(reset_at.saturating_sub(now_unix_secs) as f64)
-            })
+        if let Some(reset_at) = admin_pool_json_to_u64(data.get(reset_at_key)) {
+            return Some(reset_at.saturating_sub(now_unix_secs) as f64);
+        }
+
+        let remaining = admin_pool_json_to_f64(data.get(reset_seconds_key))
+            .or_else(|| admin_pool_json_to_f64(data.get(reset_after_seconds_key)))?;
+        let elapsed = updated_at_unix_secs
+            .map(|updated_at| now_unix_secs.saturating_sub(updated_at) as f64)
+            .unwrap_or(0.0);
+        Some((remaining - elapsed).max(0.0))
+    }
+
+    fn codex_effective_used_percent(used_percent: f64, reset_seconds: Option<f64>) -> f64 {
+        let normalized = used_percent.clamp(0.0, 100.0);
+        if normalized <= 1e-6 {
+            return 0.0;
+        }
+        if reset_seconds.is_some_and(|value| value <= 0.0) {
+            return 0.0;
+        }
+        normalized
     }
 
     let mut parts = Vec::new();
+    let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
+    let updated_at_unix_secs = admin_pool_json_to_u64(data.get("updated_at"));
 
-    let primary_used = admin_pool_json_to_f64(data.get("primary_used_percent"));
-    if let Some(primary_used) = primary_used {
+    let primary_used_raw = admin_pool_json_to_f64(data.get("primary_used_percent"));
+    if let Some(primary_used_raw) = primary_used_raw {
+        let primary_reset_seconds = codex_reset_seconds(
+            data,
+            "primary_reset_seconds",
+            "primary_reset_after_seconds",
+            "primary_reset_at",
+            now_unix_secs,
+            updated_at_unix_secs,
+        );
+        let primary_used = codex_effective_used_percent(primary_used_raw, primary_reset_seconds);
         let mut part = format!("周剩余 {}", admin_pool_format_percent(100.0 - primary_used));
         if admin_pool_has_quota_consumption(Some(primary_used)) {
-            if let Some(reset_text) = codex_reset_seconds(
-                data,
-                "primary_reset_seconds",
-                "primary_reset_after_seconds",
-                "primary_reset_at",
-            )
-            .and_then(admin_pool_format_reset_after)
+            if let Some(reset_text) = primary_reset_seconds.and_then(admin_pool_format_reset_after)
             {
                 part.push_str(&format!(" ({reset_text})"));
             }
@@ -273,20 +294,25 @@ fn admin_pool_build_codex_account_quota(
         parts.push(part);
     }
 
-    let secondary_used = admin_pool_json_to_f64(data.get("secondary_used_percent"));
-    if let Some(secondary_used) = secondary_used {
+    let secondary_used_raw = admin_pool_json_to_f64(data.get("secondary_used_percent"));
+    if let Some(secondary_used_raw) = secondary_used_raw {
+        let secondary_reset_seconds = codex_reset_seconds(
+            data,
+            "secondary_reset_seconds",
+            "secondary_reset_after_seconds",
+            "secondary_reset_at",
+            now_unix_secs,
+            updated_at_unix_secs,
+        );
+        let secondary_used =
+            codex_effective_used_percent(secondary_used_raw, secondary_reset_seconds);
         let mut part = format!(
             "5H剩余 {}",
             admin_pool_format_percent(100.0 - secondary_used)
         );
         if admin_pool_has_quota_consumption(Some(secondary_used)) {
-            if let Some(reset_text) = codex_reset_seconds(
-                data,
-                "secondary_reset_seconds",
-                "secondary_reset_after_seconds",
-                "secondary_reset_at",
-            )
-            .and_then(admin_pool_format_reset_after)
+            if let Some(reset_text) =
+                secondary_reset_seconds.and_then(admin_pool_format_reset_after)
             {
                 part.push_str(&format!(" ({reset_text})"));
             }
@@ -753,6 +779,10 @@ pub(super) fn build_admin_pool_key_payload(
     payload.insert(
         "model_exclude_patterns".to_string(),
         json!(admin_pool_string_list(key.model_exclude_patterns.as_ref())),
+    );
+    payload.insert(
+        "upstream_metadata".to_string(),
+        json!(key.upstream_metadata.clone()),
     );
     payload.insert("proxy".to_string(), json!(key.proxy.clone()));
     payload.insert("fingerprint".to_string(), json!(key.fingerprint.clone()));

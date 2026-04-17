@@ -1,6 +1,7 @@
 use serde_json::json;
 use tracing::debug;
 
+use crate::ai_pipeline::planner::candidate_metadata::build_request_trace_proxy_value;
 use crate::ai_pipeline::planner::payload_metadata::{
     build_local_execution_decision_response, LocalExecutionDecisionResponseParts,
 };
@@ -62,6 +63,11 @@ pub(crate) async fn maybe_build_local_openai_cli_decision_payload_for_candidate(
     let tls_profile = resolve_transport_tls_profile(&resolved.transport);
     let timeouts = resolve_transport_execution_timeouts(&resolved.transport);
     let mut extra_fields = serde_json::Map::new();
+    if let Some(proxy_value) =
+        build_request_trace_proxy_value(Some(&resolved.transport), proxy.as_ref())
+    {
+        extra_fields.insert("proxy".to_string(), proxy_value);
+    }
     if resolved.is_antigravity {
         extra_fields.insert("envelope_name".to_string(), json!("antigravity:v1internal"));
     }

@@ -69,12 +69,13 @@ pub use crate::conversion::response::{
 };
 pub use crate::conversion::{
     build_core_error_body_for_client_format, is_core_error_finalize_kind,
-    request_candidate_api_formats, request_conversion_direct_auth,
-    request_conversion_enabled_for_transport, request_conversion_kind,
-    request_conversion_requires_enable_flag, request_conversion_transport_supported,
-    request_conversion_transport_unsupported_reason, request_pair_allowed_for_transport,
-    sync_chat_response_conversion_kind, sync_cli_response_conversion_kind, LocalCoreSyncErrorKind,
-    RequestConversionKind, SyncChatResponseConversionKind, SyncCliResponseConversionKind,
+    request_candidate_api_format_preference, request_candidate_api_formats,
+    request_conversion_direct_auth, request_conversion_enabled_for_transport,
+    request_conversion_kind, request_conversion_requires_enable_flag,
+    request_conversion_transport_supported, request_conversion_transport_unsupported_reason,
+    request_pair_allowed_for_transport, sync_chat_response_conversion_kind,
+    sync_cli_response_conversion_kind, LocalCoreSyncErrorKind, RequestConversionKind,
+    SyncChatResponseConversionKind, SyncCliResponseConversionKind,
 };
 pub use crate::finalize::common::{
     build_generated_tool_call_id, build_local_success_background_report,

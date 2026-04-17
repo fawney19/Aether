@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::watch;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::state::{AppState, ServerContext};
 
@@ -83,7 +83,7 @@ pub async fn run(
                 return;
             }
             Ok(client::TunnelOutcome::Disconnected) => {
-                info!(server = %server.server_label, conn = conn_idx, "tunnel disconnected, reconnecting");
+                debug!(server = %server.server_label, conn = conn_idx, "tunnel disconnected, reconnecting");
             }
             Err(e) => {
                 error!(server = %server.server_label, conn = conn_idx, error = %e, "tunnel connection error, reconnecting");
@@ -114,13 +114,23 @@ pub async fn run(
             consecutive_failures,
             reconnect_salt,
         );
-        info!(
-            server = %server.server_label,
-            conn = conn_idx,
-            failures = consecutive_failures,
-            delay_ms = reconnect_delay.as_millis(),
-            "waiting before reconnect"
-        );
+        if reconnect_delay.is_zero() && consecutive_failures <= 1 {
+            debug!(
+                server = %server.server_label,
+                conn = conn_idx,
+                failures = consecutive_failures,
+                delay_ms = reconnect_delay.as_millis(),
+                "waiting before reconnect"
+            );
+        } else {
+            info!(
+                server = %server.server_label,
+                conn = conn_idx,
+                failures = consecutive_failures,
+                delay_ms = reconnect_delay.as_millis(),
+                "waiting before reconnect"
+            );
+        }
 
         tokio::select! {
             _ = tokio::time::sleep(reconnect_delay) => {}

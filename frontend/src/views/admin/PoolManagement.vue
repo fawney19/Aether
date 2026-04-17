@@ -1631,12 +1631,14 @@ interface QuotaProgressItem {
   remainingPercent: number
   detail?: string
   resetAtSeconds?: number | null
+  resetSeconds?: number | null
+  updatedAtSeconds?: number | null
 }
 
 const quotaProgressMap = computed<Record<string, QuotaProgressItem[]>>(() => {
   const map: Record<string, QuotaProgressItem[]> = {}
   for (const key of keyPage.value.keys) {
-    map[key.key_id] = parseQuotaProgressItems(key.account_quota)
+    map[key.key_id] = parseQuotaProgressItems(key)
   }
   return map
 })
@@ -2602,8 +2604,15 @@ function getQuotaProgressLabel(label: string): string {
 }
 
 function getQuotaProgressCountdown(item: QuotaProgressItem) {
-  if ((item.label !== '5H' && item.label !== '周') || item.resetAtSeconds == null) return null
-  return getCodexResetCountdown(item.resetAtSeconds, null, null, countdownTick.value, item.remainingPercent)
+  if (item.label !== '5H' && item.label !== '周') return null
+  if (item.resetAtSeconds == null && item.resetSeconds == null) return null
+  return getCodexResetCountdown(
+    item.resetAtSeconds,
+    item.resetSeconds,
+    item.updatedAtSeconds,
+    countdownTick.value,
+    item.remainingPercent
+  )
 }
 
 function getQuotaProgressCountdownText(item: QuotaProgressItem): string {
@@ -2644,6 +2653,42 @@ function clampPercent(value: number): number {
   return value
 }
 
+function normalizeUnixSeconds(raw: number | null | undefined): number | null {
+  const value = Number(raw ?? 0)
+  if (!Number.isFinite(value) || value <= 0) return null
+  if (value > 1_000_000_000_000) return Math.floor(value / 1000)
+  return Math.floor(value)
+}
+
+function normalizeRemainingSeconds(raw: number | null | undefined): number | null {
+  const value = Number(raw ?? NaN)
+  if (!Number.isFinite(value) || value < 0) return null
+  return Math.floor(value)
+}
+
+function resolveCodexQuotaCountdown(
+  key: PoolKeyDetail,
+  label: string
+): Pick<QuotaProgressItem, 'resetAtSeconds' | 'resetSeconds' | 'updatedAtSeconds'> | null {
+  if (label !== '5H' && label !== '周') return null
+  const codex = key.upstream_metadata?.codex
+  if (!codex) return null
+
+  const isWeeklyWindow = label === '周'
+  const resetAtSeconds = normalizeUnixSeconds(
+    isWeeklyWindow ? codex.primary_reset_at : codex.secondary_reset_at
+  )
+  const resetSeconds = normalizeRemainingSeconds(
+    isWeeklyWindow
+      ? (codex.primary_reset_seconds ?? codex.primary_reset_after_seconds ?? null)
+      : (codex.secondary_reset_seconds ?? codex.secondary_reset_after_seconds ?? null)
+  )
+  const updatedAtSeconds = normalizeUnixSeconds(codex.updated_at)
+
+  if (resetAtSeconds == null && resetSeconds == null) return null
+  return { resetAtSeconds, resetSeconds, updatedAtSeconds }
+}
+
 function parseQuotaResetRemainingSeconds(detail: string | undefined): number | null {
   if (!detail) return null
   const text = detail.replace(/\s+/g, '')
@@ -2667,7 +2712,8 @@ function parseQuotaResetRemainingSeconds(detail: string | undefined): number | n
   return total
 }
 
-function parseQuotaProgressItems(quotaText: string | null | undefined): QuotaProgressItem[] {
+function parseQuotaProgressItems(key: PoolKeyDetail): QuotaProgressItem[] {
+  const quotaText = key.account_quota
   if (!quotaText) return []
 
   const segments = quotaText
@@ -2684,16 +2730,27 @@ function parseQuotaProgressItems(quotaText: string | null | undefined): QuotaPro
     const remainingPercent = clampPercent(Number(rawPercent))
     const label = normalizeQuotaLabel(rawLabel)
     const detail = rawTail.trim().replace(/^[()]+|[()]+$/g, '').trim()
-    const resetRemainingSeconds = parseQuotaResetRemainingSeconds(detail || undefined)
-    const resetAtSeconds = resetRemainingSeconds == null
-      ? null
-      : Math.floor(Date.now() / 1000) + resetRemainingSeconds
+    const codexCountdown = resolveCodexQuotaCountdown(key, label)
+    let resetAtSeconds = codexCountdown?.resetAtSeconds ?? null
+    let resetSeconds = codexCountdown?.resetSeconds ?? null
+    let updatedAtSeconds = codexCountdown?.updatedAtSeconds ?? null
+
+    if (resetAtSeconds == null && resetSeconds == null) {
+      const resetRemainingSeconds = parseQuotaResetRemainingSeconds(detail || undefined)
+      resetAtSeconds = resetRemainingSeconds == null
+        ? null
+        : Math.floor(Date.now() / 1000) + resetRemainingSeconds
+      resetSeconds = null
+      updatedAtSeconds = null
+    }
 
     items.push({
       label,
       remainingPercent,
       detail: detail || undefined,
       resetAtSeconds,
+      resetSeconds,
+      updatedAtSeconds,
     })
   }
 

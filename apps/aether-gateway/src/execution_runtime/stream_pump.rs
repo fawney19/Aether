@@ -240,7 +240,7 @@ mod tests {
 
     use super::build_direct_execution_frame_stream;
     use crate::execution_runtime::transport::{
-        execute_stream_plan_via_local_tunnel, DirectSyncExecutionRuntime,
+        execute_stream_plan_via_local_tunnel, DirectSyncExecutionRuntime, DirectUpstreamResponse,
     };
     use crate::tunnel::{tunnel_protocol, TunnelProxyConn};
     use crate::AppState;
@@ -583,5 +583,169 @@ mod tests {
             !error_message.contains("unexpected EOF during chunk size line"),
             "local tunnel path should preserve the original proxy error text"
         );
+    }
+
+    #[tokio::test]
+    async fn second_local_tunnel_request_works_after_first_completes() {
+        let state = AppState::new().expect("app state should build");
+        let tunnel_app = state.tunnel.app_state();
+        let (proxy_tx, mut proxy_rx) = aether_runtime::bounded_queue(8);
+        let (proxy_close_tx, _) = watch::channel(false);
+        tunnel_app.hub.register_proxy(Arc::new(TunnelProxyConn::new(
+            900,
+            "node-1".to_string(),
+            "Node 1".to_string(),
+            proxy_tx,
+            proxy_close_tx,
+            16,
+        )));
+
+        let plan = ExecutionPlan {
+            request_id: "req-reuse-1".into(),
+            candidate_id: Some("cand-reuse-1".into()),
+            provider_name: Some("openai".into()),
+            provider_id: "prov-1".into(),
+            endpoint_id: "ep-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "https://example.com/chat".into(),
+            headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(serde_json::json!({"stream": true})),
+            stream: true,
+            client_api_format: "openai:chat".into(),
+            provider_api_format: "openai:chat".into(),
+            model_name: Some("gpt-5".into()),
+            proxy: Some(tunnel_proxy_snapshot("http://127.0.0.1:1".to_string())),
+            tls_profile: None,
+            timeouts: Some(ExecutionTimeouts {
+                connect_ms: Some(5_000),
+                total_ms: Some(5_000),
+                ..ExecutionTimeouts::default()
+            }),
+        };
+
+        // --- First request ---
+        let state1 = state.clone();
+        let plan1 = plan.clone();
+        let exec1 =
+            tokio::spawn(
+                async move { execute_stream_plan_via_local_tunnel(&state1, &plan1).await },
+            );
+
+        // Read request frames from proxy side
+        let req1_headers = match proxy_rx.recv().await.expect("req1 headers") {
+            Message::Binary(data) => data,
+            other => panic!("unexpected: {other:?}"),
+        };
+        let req1_header =
+            tunnel_protocol::FrameHeader::parse(&req1_headers).expect("req1 header parse");
+        let _req1_body = proxy_rx.recv().await.expect("req1 body");
+
+        // Simulate proxy response
+        let resp_meta = serde_json::to_vec(&tunnel_protocol::ResponseMeta {
+            status: 200,
+            headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
+        })
+        .unwrap();
+        let mut resp_headers = tunnel_protocol::encode_frame(
+            req1_header.stream_id,
+            tunnel_protocol::RESPONSE_HEADERS,
+            0,
+            &resp_meta,
+        );
+        tunnel_app
+            .hub
+            .handle_proxy_frame(900, &mut resp_headers)
+            .await;
+
+        let execution1 = exec1
+            .await
+            .expect("task")
+            .expect("transport")
+            .expect("execution");
+
+        // Consume the body stream fully
+        let mut resp1 = match execution1.response {
+            DirectUpstreamResponse::LocalTunnel(r) => r,
+            _ => panic!("expected local tunnel response"),
+        };
+
+        // Send body + STREAM_END
+        let mut body_frame = tunnel_protocol::encode_frame(
+            req1_header.stream_id,
+            tunnel_protocol::RESPONSE_BODY,
+            0,
+            b"data: hello\n\n",
+        );
+        tunnel_app
+            .hub
+            .handle_proxy_frame(900, &mut body_frame)
+            .await;
+        let mut end_frame = tunnel_protocol::encode_frame(
+            req1_header.stream_id,
+            tunnel_protocol::STREAM_END,
+            0,
+            &[],
+        );
+        tunnel_app.hub.handle_proxy_frame(900, &mut end_frame).await;
+
+        // Drain the body
+        while let Ok(Some(_)) = resp1.next_chunk().await {}
+        drop(resp1);
+
+        // --- Second request ---
+        let state2 = state.clone();
+        let plan2 = ExecutionPlan {
+            request_id: "req-reuse-2".into(),
+            candidate_id: Some("cand-reuse-2".into()),
+            ..plan.clone()
+        };
+        let exec2 =
+            tokio::spawn(
+                async move { execute_stream_plan_via_local_tunnel(&state2, &plan2).await },
+            );
+
+        // Read second request's frames
+        let req2_headers = tokio::time::timeout(Duration::from_secs(2), proxy_rx.recv())
+            .await
+            .expect("second request should arrive within 2s")
+            .expect("req2 headers");
+        let req2_data = match req2_headers {
+            Message::Binary(data) => data,
+            other => panic!("unexpected: {other:?}"),
+        };
+        let req2_header =
+            tunnel_protocol::FrameHeader::parse(&req2_data).expect("req2 header parse");
+        assert_eq!(req2_header.msg_type, tunnel_protocol::REQUEST_HEADERS);
+
+        // Simulate proxy response for second request
+        let mut resp2_headers = tunnel_protocol::encode_frame(
+            req2_header.stream_id,
+            tunnel_protocol::RESPONSE_HEADERS,
+            0,
+            &resp_meta,
+        );
+        tunnel_app
+            .hub
+            .handle_proxy_frame(900, &mut resp2_headers)
+            .await;
+
+        let execution2 = exec2
+            .await
+            .expect("task")
+            .expect("transport")
+            .expect("second execution should succeed");
+        assert_eq!(execution2.status_code, 200);
+
+        // Clean up
+        let mut end2 = tunnel_protocol::encode_frame(
+            req2_header.stream_id,
+            tunnel_protocol::STREAM_END,
+            0,
+            &[],
+        );
+        tunnel_app.hub.handle_proxy_frame(900, &mut end2).await;
     }
 }

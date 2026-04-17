@@ -1,29 +1,21 @@
 use crate::handlers::admin::request::AdminAppState;
 use crate::GatewayError;
 use aether_admin::observability::stats::round_to;
-use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageAuditListQuery};
+use aether_data_contracts::repository::usage::StoredUsageAuditAggregation;
 use serde_json::json;
 use std::collections::BTreeMap;
 
 pub(in super::super) async fn admin_usage_aggregation_by_user_json(
     state: &AdminAppState<'_>,
-    usage: &[StoredRequestUsageAudit],
-    limit: usize,
+    rows: &[StoredUsageAuditAggregation],
 ) -> Result<serde_json::Value, GatewayError> {
-    let mut grouped: BTreeMap<String, (u64, u64, f64)> = BTreeMap::new();
-    for item in usage {
-        let Some(user_id) = item.user_id.as_ref() else {
-            continue;
-        };
-        let entry = grouped.entry(user_id.clone()).or_insert((0, 0, 0.0));
-        entry.0 = entry.0.saturating_add(1);
-        entry.1 = entry.1.saturating_add(item.total_tokens);
-        entry.2 += item.total_cost_usd;
-    }
-
-    let usernames = if state.has_user_data_reader() && !grouped.is_empty() {
+    let user_ids = rows
+        .iter()
+        .map(|row| row.group_key.clone())
+        .collect::<Vec<_>>();
+    let usernames = if state.has_user_data_reader() && !user_ids.is_empty() {
         state
-            .list_users_by_ids(&grouped.keys().cloned().collect::<Vec<_>>())
+            .list_users_by_ids(&user_ids)
             .await?
             .into_iter()
             .map(|user| (user.id, (user.email, user.username)))
@@ -32,35 +24,25 @@ pub(in super::super) async fn admin_usage_aggregation_by_user_json(
         BTreeMap::new()
     };
 
-    let mut items: Vec<serde_json::Value> = grouped
-        .into_iter()
-        .map(|(user_id, (request_count, total_tokens, total_cost))| {
+    Ok(json!(rows
+        .iter()
+        .map(|row| {
             let (email, username) = usernames
-                .get(&user_id)
+                .get(&row.group_key)
                 .cloned()
                 .unwrap_or((None, String::new()));
             json!({
-                "user_id": user_id,
+                "user_id": row.group_key,
                 "email": email,
-                "username": if username.is_empty() { serde_json::Value::Null } else { json!(username) },
-                "request_count": request_count,
-                "total_tokens": total_tokens,
-                "total_cost": round_to(total_cost, 6),
+                "username": if username.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    json!(username)
+                },
+                "request_count": row.request_count,
+                "total_tokens": row.total_tokens,
+                "total_cost": round_to(row.total_cost_usd, 6),
             })
         })
-        .collect();
-    items.sort_by(|left, right| {
-        right["request_count"]
-            .as_u64()
-            .unwrap_or_default()
-            .cmp(&left["request_count"].as_u64().unwrap_or_default())
-            .then_with(|| {
-                left["user_id"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .cmp(right["user_id"].as_str().unwrap_or_default())
-            })
-    });
-    items.truncate(limit);
-    Ok(json!(items))
+        .collect::<Vec<_>>()))
 }

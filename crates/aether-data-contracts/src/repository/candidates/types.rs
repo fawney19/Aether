@@ -305,11 +305,14 @@ pub struct DecisionTraceCandidate {
     pub provider_type: Option<String>,
     pub provider_priority: Option<i32>,
     pub provider_keep_priority_on_conversion: Option<bool>,
+    pub provider_enable_format_conversion: Option<bool>,
     pub endpoint_api_format: Option<String>,
     pub endpoint_api_family: Option<String>,
     pub endpoint_kind: Option<String>,
+    pub endpoint_format_acceptance_config: Option<serde_json::Value>,
     pub provider_key_name: Option<String>,
     pub provider_key_auth_type: Option<String>,
+    pub provider_key_api_formats: Option<serde_json::Value>,
     pub provider_key_internal_priority: Option<i32>,
     pub provider_key_global_priority_by_format: Option<serde_json::Value>,
     pub provider_key_capabilities: Option<serde_json::Value>,
@@ -384,13 +387,17 @@ fn enrich_decision_trace_candidate(
         provider_type: provider.map(|item| item.provider_type.clone()),
         provider_priority: provider.map(|item| item.provider_priority),
         provider_keep_priority_on_conversion: provider.map(|item| item.keep_priority_on_conversion),
+        provider_enable_format_conversion: provider.map(|item| item.enable_format_conversion),
         endpoint_api_format: endpoint.map(|item| item.api_format.clone()),
         endpoint_api_family: endpoint.and_then(|item| item.api_family.clone()),
         endpoint_kind: endpoint.and_then(|item| item.endpoint_kind.clone()),
+        endpoint_format_acceptance_config: endpoint
+            .and_then(|item| item.format_acceptance_config.clone()),
         provider_key_name: provider_key
             .map(|item| item.name.clone())
             .or_else(|| candidate.api_key_name.clone()),
         provider_key_auth_type: provider_key.map(|item| item.auth_type.clone()),
+        provider_key_api_formats: provider_key.and_then(|item| item.api_formats.clone()),
         provider_key_internal_priority: provider_key.map(|item| item.internal_priority),
         provider_key_global_priority_by_format: provider_key
             .and_then(|item| item.global_priority_by_format.clone()),

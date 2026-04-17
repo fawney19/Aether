@@ -1,4 +1,5 @@
 use crate::ai_pipeline::planner::candidate_materialization::mark_skipped_local_execution_candidate;
+use crate::ai_pipeline::planner::candidate_metadata::build_request_trace_proxy_value;
 use crate::ai_pipeline::planner::materialization_policy::{
     build_local_candidate_persistence_policy, LocalCandidatePersistencePolicyKind,
 };
@@ -41,6 +42,15 @@ pub(super) async fn maybe_build_local_standard_decision_payload_for_candidate(
         state, parts, trace_id, body_json, input, &attempt, spec,
     )
     .await?;
+    let proxy = state
+        .resolve_transport_proxy_snapshot_with_tunnel_affinity(&resolved.transport)
+        .await;
+    let mut extra_fields = serde_json::Map::new();
+    if let Some(proxy_value) =
+        build_request_trace_proxy_value(Some(&resolved.transport), proxy.as_ref())
+    {
+        extra_fields.insert("proxy".to_string(), proxy_value);
+    }
 
     Some(build_local_execution_decision_response(
         LocalExecutionDecisionResponseParts {
@@ -68,9 +78,7 @@ pub(super) async fn maybe_build_local_standard_decision_payload_for_candidate(
             provider_request_body: Some(resolved.provider_request_body.clone()),
             provider_request_body_base64: None,
             content_type: Some("application/json".to_string()),
-            proxy: state
-                .resolve_transport_proxy_snapshot_with_tunnel_affinity(&resolved.transport)
-                .await,
+            proxy,
             tls_profile: resolve_transport_tls_profile(&resolved.transport),
             timeouts: resolve_transport_execution_timeouts(&resolved.transport),
             upstream_is_stream: resolved.upstream_is_stream,
@@ -99,7 +107,7 @@ pub(super) async fn maybe_build_local_standard_decision_payload_for_candidate(
                         original_request_body: body_json,
                         has_envelope: false,
                         needs_conversion: true,
-                        extra_fields: serde_json::Map::new(),
+                        extra_fields,
                     }),
                     ExecutionStrategy::LocalCrossFormat,
                     ConversionMode::Bidirectional,

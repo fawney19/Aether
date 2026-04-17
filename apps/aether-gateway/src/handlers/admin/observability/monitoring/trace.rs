@@ -15,22 +15,6 @@ use axum::{
 };
 use tracing::debug;
 
-const HIDDEN_TRACE_SKIP_REASONS: &[&str] = &["format_conversion_disabled"];
-
-fn filter_admin_monitoring_trace_candidates(mut trace: DecisionTrace) -> DecisionTrace {
-    trace.candidates.retain(|item| {
-        let skip_reason = item
-            .candidate
-            .skip_reason
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        !skip_reason.is_some_and(|reason| HIDDEN_TRACE_SKIP_REASONS.contains(&reason))
-    });
-    trace.total_candidates = trace.candidates.len();
-    trace
-}
-
 pub(super) async fn build_admin_monitoring_trace_request_response(
     state: &AdminAppState<'_>,
     request_context: &AdminRequestContext<'_>,
@@ -67,10 +51,15 @@ pub(super) async fn build_admin_monitoring_trace_request_response(
             attempted_only,
         ));
     };
-    let trace = filter_admin_monitoring_trace_candidates(trace);
+    let usage = state
+        .data
+        .read_request_usage_audit(&request_id)
+        .await
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
 
     Ok(build_admin_monitoring_trace_request_payload_response(
         &trace,
+        usage.as_ref(),
     ))
 }
 

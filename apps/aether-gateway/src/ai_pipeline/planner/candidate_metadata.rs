@@ -1,3 +1,4 @@
+use aether_contracts::ProxySnapshot;
 use aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate;
 use serde_json::{json, Map, Value};
 
@@ -22,6 +23,29 @@ pub(crate) struct LocalExecutionCandidateMetadataParts<'a> {
     pub(crate) provider_api_format: &'a str,
     pub(crate) client_api_format: &'a str,
     pub(crate) extra_fields: Map<String, Value>,
+}
+
+pub(crate) fn build_request_trace_proxy_value(
+    transport: Option<&GatewayProviderTransportSnapshot>,
+    resolved_proxy: Option<&ProxySnapshot>,
+) -> Option<Value> {
+    let resolved_proxy = resolved_proxy?;
+    let mut object = Map::new();
+
+    if let Some(node_id) = trimmed_non_empty(resolved_proxy.node_id.as_deref()) {
+        object.insert("node_id".to_string(), Value::String(node_id));
+    }
+    if let Some(node_name) = trimmed_non_empty(resolved_proxy.label.as_deref()) {
+        object.insert("node_name".to_string(), Value::String(node_name));
+    }
+    if let Some(url) = sanitize_trace_proxy_url(resolved_proxy.url.as_deref()) {
+        object.insert("url".to_string(), Value::String(url));
+    }
+    if let Some(source) = resolve_request_trace_proxy_source(transport, true) {
+        object.insert("source".to_string(), Value::String(source.to_string()));
+    }
+
+    (!object.is_empty()).then_some(Value::Object(object))
 }
 
 pub(crate) fn build_local_execution_candidate_metadata(
@@ -248,6 +272,67 @@ fn summarize_proxy_config(proxy: Option<&Value>) -> Value {
         "label": object.get("label").cloned().unwrap_or(Value::Null),
         "has_url": has_url,
     })
+}
+
+fn resolve_request_trace_proxy_source(
+    transport: Option<&GatewayProviderTransportSnapshot>,
+    has_resolved_proxy: bool,
+) -> Option<&'static str> {
+    let transport = transport?;
+    if transport_has_explicit_proxy(transport.key.proxy.as_ref()) {
+        return Some("key");
+    }
+    if transport_has_explicit_proxy(transport.endpoint.proxy.as_ref()) {
+        return Some("endpoint");
+    }
+    if transport_has_explicit_proxy(transport.provider.proxy.as_ref()) {
+        return Some("provider");
+    }
+    has_resolved_proxy.then_some("system")
+}
+
+fn transport_has_explicit_proxy(proxy: Option<&Value>) -> bool {
+    let Some(object) = proxy.and_then(Value::as_object) else {
+        return false;
+    };
+    let enabled = object
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if !enabled {
+        return false;
+    }
+
+    object
+        .get("node_id")
+        .or_else(|| object.get("url"))
+        .or_else(|| object.get("proxy_url"))
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn sanitize_trace_proxy_url(url: Option<&str>) -> Option<String> {
+    let raw = url.map(str::trim).filter(|value| !value.is_empty())?;
+    let parsed = url::Url::parse(raw).ok()?;
+    let scheme = parsed.scheme().trim();
+    let host = parsed.host_str()?.trim();
+    if scheme.is_empty() || host.is_empty() {
+        return None;
+    }
+
+    let mut safe = format!("{scheme}://{host}");
+    if let Some(port) = parsed.port() {
+        safe.push(':');
+        safe.push_str(port.to_string().as_str());
+    }
+    Some(safe)
+}
+
+fn trimmed_non_empty(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn resolve_request_transport_unsupported_reason(

@@ -27,13 +27,6 @@ struct Args {
 
     #[arg(
         long,
-        default_value_t = 0,
-        env = "AETHER_TUNNEL_STANDALONE_PROXY_IDLE_TIMEOUT"
-    )]
-    proxy_idle_timeout: u64,
-
-    #[arg(
-        long,
         default_value_t = 15,
         env = "AETHER_TUNNEL_STANDALONE_PING_INTERVAL"
     )]
@@ -48,7 +41,7 @@ struct Args {
 
     #[arg(
         long,
-        default_value_t = 128,
+        default_value_t = 512,
         env = "AETHER_TUNNEL_STANDALONE_OUTBOUND_QUEUE_CAPACITY"
     )]
     outbound_queue_capacity: usize,
@@ -111,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         TunnelControlPlaneClient::new(args.app_base_url),
         TunnelConnConfig {
             ping_interval,
-            idle_timeout: Duration::from_secs(args.proxy_idle_timeout),
+            idle_timeout: Duration::from_secs(0),
             outbound_queue_capacity,
         },
         args.max_streams,

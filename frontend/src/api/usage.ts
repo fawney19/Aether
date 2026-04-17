@@ -284,7 +284,10 @@ export const usageApi = {
    * 获取活跃请求的状态（轻量级接口，用于轮询更新）
    * @param ids 可选，逗号分隔的请求 ID 列表
    */
-  async getActiveRequests(ids?: string[]): Promise<{
+  async getActiveRequests(
+    ids?: string[],
+    timeRange?: Pick<UsageFilters, 'start_date' | 'end_date' | 'preset' | 'timezone' | 'tz_offset_minutes'>
+  ): Promise<{
     requests: Array<{
       id: string
       status: 'pending' | 'streaming' | 'completed' | 'failed' | 'cancelled'
@@ -307,7 +310,25 @@ export const usageApi = {
       target_model?: string | null
     }>
   }> {
-    const params = ids?.length ? { ids: ids.join(',') } : {}
+    const params: Record<string, string | number> = {}
+    if (ids?.length) {
+      params.ids = ids.join(',')
+    }
+    if (timeRange?.start_date) {
+      params.start_date = timeRange.start_date
+    }
+    if (timeRange?.end_date) {
+      params.end_date = timeRange.end_date
+    }
+    if (timeRange?.preset) {
+      params.preset = timeRange.preset
+    }
+    if (timeRange?.timezone) {
+      params.timezone = timeRange.timezone
+    }
+    if (typeof timeRange?.tz_offset_minutes === 'number') {
+      params.tz_offset_minutes = timeRange.tz_offset_minutes
+    }
     const response = await apiClient.get('/api/admin/usage/active', { params })
     return response.data
   },

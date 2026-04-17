@@ -29,7 +29,6 @@ fn non_admin_handlers_do_not_depend_on_admin_stats_module() {
     let shared_mod = read_workspace_file("apps/aether-gateway/src/handlers/shared/mod.rs");
     for pattern in [
         "admin_stats_bad_request_response",
-        "list_usage_for_optional_range",
         "parse_bounded_u32",
         "round_to",
         "AdminStatsTimeRange",
@@ -40,6 +39,10 @@ fn non_admin_handlers_do_not_depend_on_admin_stats_module() {
             "handlers/shared/mod.rs should expose shared usage stats helper {pattern}"
         );
     }
+    assert!(
+        !shared_mod.contains("list_usage_for_optional_range"),
+        "handlers/shared/mod.rs should not expose unbounded usage range helpers"
+    );
 
     let admin_observability_mod =
         read_workspace_file("apps/aether-gateway/src/handlers/admin/observability/mod.rs");
@@ -57,7 +60,6 @@ fn non_admin_handlers_do_not_depend_on_admin_stats_module() {
     }
     for pattern in [
         "admin_stats_bad_request_response",
-        "list_usage_for_optional_range",
         "parse_bounded_u32",
         "round_to",
         "AdminStatsTimeRange",
@@ -66,6 +68,12 @@ fn non_admin_handlers_do_not_depend_on_admin_stats_module() {
         assert!(
             admin_observability_mod.contains(pattern),
             "handlers/admin/observability/mod.rs should expose admin stats facade helper {pattern}"
+        );
+    }
+    for pattern in ["list_usage_for_optional_range", "list_usage_for_range"] {
+        assert!(
+            !admin_observability_mod.contains(pattern),
+            "handlers/admin/observability/mod.rs should not re-export deprecated usage helper {pattern}"
         );
     }
 
@@ -193,14 +201,15 @@ fn admin_stats_root_stays_thin() {
         stats_mod.contains("pub(crate) use self::range::{"),
         "handlers/admin/observability/stats/mod.rs should re-export the split range seam"
     );
-    for pattern in [
-        "list_usage_for_optional_range",
-        "list_usage_for_range",
-        "parse_bounded_u32",
-    ] {
+    let pattern = "parse_bounded_u32";
+    assert!(
+        stats_mod.contains(pattern),
+        "handlers/admin/observability/stats/mod.rs should keep range re-export {pattern}"
+    );
+    for pattern in ["list_usage_for_optional_range", "list_usage_for_range"] {
         assert!(
-            stats_mod.contains(pattern),
-            "handlers/admin/observability/stats/mod.rs should keep range re-export {pattern}"
+            !stats_mod.contains(pattern),
+            "handlers/admin/observability/stats/mod.rs should not re-export deprecated range helper {pattern}"
         );
     }
 
@@ -471,7 +480,7 @@ fn admin_usage_root_stays_thin() {
         "mod cache_affinity;",
         "mod filters;",
         "pub(super) use aggregations::admin_usage_aggregation_by_user_json;",
-        "pub(super) use cache_affinity::list_recent_completed_usage_for_cache_affinity;",
+        "pub(super) use cache_affinity::list_usage_cache_affinity_intervals;",
         "pub(super) use filters::admin_usage_provider_key_names;",
     ] {
         assert!(
@@ -574,9 +583,8 @@ fn admin_usage_root_stays_thin() {
         "apps/aether-gateway/src/handlers/admin/observability/usage/analytics/cache_affinity.rs",
     );
     assert!(
-        analytics_cache_affinity.contains(
-            "pub(in super::super) async fn list_recent_completed_usage_for_cache_affinity("
-        ),
+        analytics_cache_affinity
+            .contains("pub(in super::super) async fn list_usage_cache_affinity_intervals("),
         "usage/analytics/cache_affinity.rs should own cache-affinity analytics helpers"
     );
     let analytics_filters = read_workspace_file(

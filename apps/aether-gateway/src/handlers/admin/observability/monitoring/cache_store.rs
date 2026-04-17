@@ -8,7 +8,7 @@ use crate::handlers::admin::observability::stats::round_to;
 use crate::handlers::admin::request::AdminAppState;
 use crate::scheduler::affinity::SCHEDULER_AFFINITY_TTL;
 use crate::GatewayError;
-use aether_data_contracts::repository::usage::UsageAuditListQuery;
+use aether_data_contracts::repository::usage::UsageCacheHitSummaryQuery;
 
 async fn count_admin_monitoring_cache_affinity_entries(state: &AdminAppState<'_>) -> usize {
     list_admin_monitoring_cache_affinity_records(state)
@@ -325,27 +325,26 @@ pub(super) async fn build_admin_monitoring_cache_snapshot(
         .unwrap_or_else(|| "provider".to_string());
 
     let now = chrono::Utc::now();
-    let usage = if state.has_usage_data_reader() {
+    let usage_summary = if state.has_usage_data_reader() {
         state
-            .list_usage_audits(&UsageAuditListQuery {
-                created_from_unix_secs: Some(
-                    (now - chrono::Duration::hours(24)).timestamp().max(0) as u64,
-                ),
-                ..Default::default()
+            .summarize_usage_cache_hit_summary(&UsageCacheHitSummaryQuery {
+                created_from_unix_secs: (now - chrono::Duration::hours(24)).timestamp().max(0)
+                    as u64,
+                created_until_unix_secs: now.timestamp().max(0) as u64,
+                user_id: None,
             })
             .await?
     } else {
-        Vec::new()
+        Default::default()
     };
-    let cache_hits = usage
-        .iter()
-        .filter(|item| item.cache_read_input_tokens > 0)
-        .count();
-    let cache_misses = usage.len().saturating_sub(cache_hits);
-    let cache_hit_rate = if usage.is_empty() {
+    let cache_hits = usage_summary.cache_hit_requests as usize;
+    let cache_misses = usage_summary
+        .total_requests
+        .saturating_sub(usage_summary.cache_hit_requests) as usize;
+    let cache_hit_rate = if usage_summary.total_requests == 0 {
         0.0
     } else {
-        round_to(cache_hits as f64 / usage.len() as f64, 4)
+        round_to(cache_hits as f64 / usage_summary.total_requests as f64, 4)
     };
     let total_affinities = count_admin_monitoring_cache_affinity_entries(state).await;
     let storage_type = if state.redis_kv_runner().is_some() {

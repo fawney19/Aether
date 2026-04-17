@@ -5,7 +5,7 @@ use aether_billing::{
 use aether_data::repository::users::StoredUserSummary;
 use aether_data_contracts::repository::{
     provider_catalog::{StoredProviderCatalogEndpoint, StoredProviderCatalogProvider},
-    usage::{StoredRequestUsageAudit, UsageBodyField},
+    usage::{StoredRequestUsageAudit, StoredUsageAuditSummary, UsageBodyField},
 };
 use axum::{
     body::Body,
@@ -1426,51 +1426,81 @@ pub fn admin_usage_build_curl_command(
     parts.join(" \\\n  ")
 }
 
-pub fn build_admin_usage_summary_stats_response(
-    usage: &[StoredRequestUsageAudit],
-) -> Response<Body> {
+fn summarize_admin_usage_stats(usage: &[StoredRequestUsageAudit]) -> StoredUsageAuditSummary {
     let aggregate = aggregate_usage_stats(usage);
-    let cache_creation_tokens: u64 = usage.iter().map(admin_usage_cache_creation_tokens).sum();
-    let cache_creation_ephemeral_5m_tokens: u64 = usage
-        .iter()
-        .map(|item| item.cache_creation_ephemeral_5m_input_tokens)
-        .sum();
-    let cache_creation_ephemeral_1h_tokens: u64 = usage
-        .iter()
-        .map(|item| item.cache_creation_ephemeral_1h_input_tokens)
-        .sum();
-    let cache_read_tokens: u64 = usage.iter().map(|item| item.cache_read_input_tokens).sum();
-    let cache_creation_cost: f64 = usage.iter().map(|item| item.cache_creation_cost_usd).sum();
-    let cache_read_cost: f64 = usage.iter().map(|item| item.cache_read_cost_usd).sum();
-    let total_tokens: u64 = usage.iter().map(admin_usage_total_tokens).sum();
-    let avg_response_time = round_to(aggregate.avg_response_time_ms() / 1000.0, 2);
-    let error_rate = if aggregate.total_requests == 0 {
+    StoredUsageAuditSummary {
+        total_requests: aggregate.total_requests,
+        input_tokens: usage.iter().map(|item| item.input_tokens).sum(),
+        output_tokens: usage.iter().map(|item| item.output_tokens).sum(),
+        recorded_total_tokens: aggregate.total_tokens,
+        cache_creation_tokens: usage.iter().map(admin_usage_cache_creation_tokens).sum(),
+        cache_creation_ephemeral_5m_tokens: usage
+            .iter()
+            .map(|item| item.cache_creation_ephemeral_5m_input_tokens)
+            .sum(),
+        cache_creation_ephemeral_1h_tokens: usage
+            .iter()
+            .map(|item| item.cache_creation_ephemeral_1h_input_tokens)
+            .sum(),
+        cache_read_tokens: usage.iter().map(|item| item.cache_read_input_tokens).sum(),
+        total_cost_usd: aggregate.total_cost,
+        actual_total_cost_usd: aggregate.actual_total_cost,
+        cache_creation_cost_usd: usage.iter().map(|item| item.cache_creation_cost_usd).sum(),
+        cache_read_cost_usd: usage.iter().map(|item| item.cache_read_cost_usd).sum(),
+        total_response_time_ms: aggregate.total_response_time_ms,
+        error_requests: aggregate.error_requests,
+    }
+}
+
+pub fn build_admin_usage_summary_stats_response_from_summary(
+    summary: &StoredUsageAuditSummary,
+) -> Response<Body> {
+    let total_tokens = summary
+        .input_tokens
+        .saturating_add(summary.output_tokens)
+        .saturating_add(summary.cache_creation_tokens)
+        .saturating_add(summary.cache_read_tokens);
+    let avg_response_time = if summary.total_requests == 0 {
         0.0
     } else {
         round_to(
-            (aggregate.error_requests as f64 / aggregate.total_requests as f64) * 100.0,
+            summary.total_response_time_ms / summary.total_requests as f64 / 1000.0,
+            2,
+        )
+    };
+    let error_rate = if summary.total_requests == 0 {
+        0.0
+    } else {
+        round_to(
+            (summary.error_requests as f64 / summary.total_requests as f64) * 100.0,
             2,
         )
     };
 
     Json(json!({
-        "total_requests": aggregate.total_requests,
+        "total_requests": summary.total_requests,
         "total_tokens": total_tokens,
-        "total_cost": round_to(aggregate.total_cost, 6),
-        "total_actual_cost": round_to(aggregate.actual_total_cost, 6),
+        "total_cost": round_to(summary.total_cost_usd, 6),
+        "total_actual_cost": round_to(summary.actual_total_cost_usd, 6),
         "avg_response_time": avg_response_time,
-        "error_count": aggregate.error_requests,
+        "error_count": summary.error_requests,
         "error_rate": error_rate,
         "cache_stats": {
-            "cache_creation_tokens": cache_creation_tokens,
-            "cache_creation_ephemeral_5m_tokens": cache_creation_ephemeral_5m_tokens,
-            "cache_creation_ephemeral_1h_tokens": cache_creation_ephemeral_1h_tokens,
-            "cache_read_tokens": cache_read_tokens,
-            "cache_creation_cost": round_to(cache_creation_cost, 6),
-            "cache_read_cost": round_to(cache_read_cost, 6),
+            "cache_creation_tokens": summary.cache_creation_tokens,
+            "cache_creation_ephemeral_5m_tokens": summary.cache_creation_ephemeral_5m_tokens,
+            "cache_creation_ephemeral_1h_tokens": summary.cache_creation_ephemeral_1h_tokens,
+            "cache_read_tokens": summary.cache_read_tokens,
+            "cache_creation_cost": round_to(summary.cache_creation_cost_usd, 6),
+            "cache_read_cost": round_to(summary.cache_read_cost_usd, 6),
         }
     }))
     .into_response()
+}
+
+pub fn build_admin_usage_summary_stats_response(
+    usage: &[StoredRequestUsageAudit],
+) -> Response<Body> {
+    build_admin_usage_summary_stats_response_from_summary(&summarize_admin_usage_stats(usage))
 }
 
 pub fn build_admin_usage_active_requests_response(

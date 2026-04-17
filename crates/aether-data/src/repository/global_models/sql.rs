@@ -649,11 +649,12 @@ INSERT INTO global_models (
   default_price_per_request,
   default_tiered_pricing,
   supported_capabilities,
+  usage_count,
   config,
   created_at,
   updated_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
 RETURNING id
             "#,
         )
@@ -664,6 +665,7 @@ RETURNING id
         .bind(record.default_price_per_request)
         .bind(record.default_tiered_pricing.clone())
         .bind(record.supported_capabilities.clone())
+        .bind(0_i32)
         .bind(record.config.clone())
         .fetch_optional(&self.pool)
         .await

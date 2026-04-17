@@ -1,3 +1,4 @@
+use crate::ai_pipeline::planner::candidate_metadata::build_request_trace_proxy_value;
 use crate::ai_pipeline::planner::payload_metadata::{
     build_local_execution_decision_response, LocalExecutionDecisionResponseParts,
 };
@@ -42,6 +43,10 @@ pub(super) async fn maybe_build_local_video_create_decision_payload_for_candidat
         .resolve_transport_proxy_snapshot_with_tunnel_affinity(&transport)
         .await;
     let tls_profile = resolve_transport_tls_profile(&transport);
+    let mut extra_fields = serde_json::Map::new();
+    if let Some(proxy_value) = build_request_trace_proxy_value(Some(&transport), proxy.as_ref()) {
+        extra_fields.insert("proxy".to_string(), proxy_value);
+    }
 
     Some(build_local_execution_decision_response(
         LocalExecutionDecisionResponseParts {
@@ -103,7 +108,7 @@ pub(super) async fn maybe_build_local_video_create_decision_payload_for_candidat
                     original_request_body: body_json,
                     has_envelope: false,
                     needs_conversion: false,
-                    extra_fields: serde_json::Map::new(),
+                    extra_fields,
                 },
             )),
             auth_context: input.auth_context.clone(),

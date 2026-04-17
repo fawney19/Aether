@@ -8,7 +8,7 @@ use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::state::{AppState, ServerContext};
 
@@ -34,7 +34,7 @@ pub async fn connect_and_run(
     drain: watch::Receiver<bool>,
 ) -> Result<TunnelOutcome, anyhow::Error> {
     let ws_url = build_tunnel_url(server);
-    info!(url = %ws_url, conn = conn_idx, "connecting tunnel");
+    debug!(url = %ws_url, conn = conn_idx, "connecting tunnel");
 
     // Build WebSocket request with auth headers
     let mut request = ws_url.clone().into_client_request()?;
@@ -124,7 +124,7 @@ pub async fn connect_and_run(
         .config
         .tunnel_ping_interval()
         .expect("validated config should resolve tunnel ping interval");
-    info!(
+    debug!(
         conn = conn_idx,
         tcp_keepalive_secs = state.config.tunnel_tcp_keepalive_secs,
         tcp_nodelay = state.config.tunnel_tcp_nodelay,
@@ -213,7 +213,7 @@ pub async fn connect_and_run(
         let _ = tokio::time::timeout(Duration::from_secs(35), writer_handle).await;
     }
 
-    info!("tunnel disconnected");
+    debug!("tunnel disconnected");
     Ok(outcome)
 }
 
