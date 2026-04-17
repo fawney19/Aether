@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use aether_contracts::ExecutionPlan;
 use aether_data_contracts::repository::candidates::{
@@ -71,6 +71,23 @@ impl LocalExecutionRequestOutcome {
 impl LocalExecutionRuntimeMissContext {
     pub(crate) fn persisted_candidate_count(&self) -> usize {
         self.candidate_contexts.len()
+    }
+
+    pub(crate) fn all_candidates_skipped_for_reason(&self, reason: &str) -> bool {
+        let reason = reason.trim();
+        if reason.is_empty() || self.candidate_contexts.is_empty() {
+            return false;
+        }
+
+        self.candidate_contexts.iter().all(|candidate| {
+            candidate.candidate.status == RequestCandidateStatus::Skipped
+                && candidate
+                    .candidate
+                    .skip_reason
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|value| value == reason)
+        })
     }
 
     pub(crate) fn candidate_summary(&self) -> Option<String> {
@@ -166,7 +183,8 @@ pub(crate) async fn build_local_execution_runtime_miss_context(
         auth_api_key_id: auth_context.map(|value| value.api_key_id.clone()),
         auth_username: auth_context.and_then(|value| value.username.clone()),
         auth_api_key_name: auth_context.and_then(|value| value.api_key_name.clone()),
-        candidate_contexts: load_runtime_miss_candidate_contexts(state, request_id, decision).await,
+        candidate_contexts: load_runtime_miss_candidate_contexts_with_retry(state, request_id, decision)
+            .await,
     }
 }
 
@@ -175,6 +193,7 @@ pub(crate) async fn record_failed_usage_for_exhausted_request(
     exhaustion: LocalExecutionExhaustion,
     started_at: &Instant,
     local_execution_runtime_miss_detail: &str,
+    execution_path: &str,
     diagnostic: Option<&LocalExecutionRuntimeMissDiagnostic>,
 ) {
     if !state.usage_runtime.is_enabled() {
@@ -244,6 +263,7 @@ pub(crate) async fn record_failed_usage_for_exhausted_request(
     apply_runtime_miss_usage_routing(
         &mut data,
         &mut request_metadata,
+        execution_path,
         candidate_id.as_deref(),
         candidate_index,
         None,
@@ -264,6 +284,7 @@ pub(crate) async fn record_failed_usage_for_runtime_miss_request(
     request_id: &str,
     started_at: &Instant,
     local_execution_runtime_miss_detail: &str,
+    execution_path: &str,
     decision: Option<&GatewayControlDecision>,
     diagnostic: Option<&LocalExecutionRuntimeMissDiagnostic>,
     context: &LocalExecutionRuntimeMissContext,
@@ -272,7 +293,8 @@ pub(crate) async fn record_failed_usage_for_runtime_miss_request(
         return;
     }
 
-    let selected_candidate = select_last_runtime_miss_candidate(&context.candidate_contexts);
+    let selected_candidate =
+        select_last_runtime_miss_executed_candidate(&context.candidate_contexts);
     let api_format = selected_candidate
         .and_then(|value| value.client_api_format.clone())
         .or_else(|| {
@@ -371,6 +393,7 @@ pub(crate) async fn record_failed_usage_for_runtime_miss_request(
     apply_runtime_miss_usage_routing(
         &mut data,
         &mut request_metadata,
+        execution_path,
         selected_candidate.map(|value| value.candidate.id.as_str()),
         selected_candidate.map(|value| value.candidate.candidate_index),
         selected_candidate.and_then(|value| value.key_name.as_deref()),
@@ -410,10 +433,13 @@ fn select_last_failed_request_candidate(
         })
 }
 
-fn select_last_runtime_miss_candidate(
+fn select_last_runtime_miss_executed_candidate(
     candidates: &[RuntimeMissCandidateContext],
 ) -> Option<&RuntimeMissCandidateContext> {
-    candidates.iter().max_by_key(|candidate| {
+    candidates
+        .iter()
+        .filter(|candidate| request_candidate_represents_provider_execution(&candidate.candidate))
+        .max_by_key(|candidate| {
         (
             candidate.candidate.retry_index,
             candidate.candidate.candidate_index,
@@ -424,6 +450,17 @@ fn select_last_runtime_miss_candidate(
                 .unwrap_or(candidate.candidate.created_at_unix_ms),
         )
     })
+}
+
+fn request_candidate_represents_provider_execution(candidate: &StoredRequestCandidate) -> bool {
+    matches!(
+        candidate.status,
+        RequestCandidateStatus::Pending
+            | RequestCandidateStatus::Streaming
+            | RequestCandidateStatus::Success
+            | RequestCandidateStatus::Failed
+            | RequestCandidateStatus::Cancelled
+    )
 }
 
 fn error_category_for_failed_status(status_code: u16) -> Option<String> {
@@ -580,6 +617,27 @@ async fn load_runtime_miss_candidate_contexts(
             }
         })
         .collect()
+}
+
+async fn load_runtime_miss_candidate_contexts_with_retry(
+    state: &AppState,
+    request_id: &str,
+    decision: Option<&GatewayControlDecision>,
+) -> Vec<RuntimeMissCandidateContext> {
+    let mut contexts = load_runtime_miss_candidate_contexts(state, request_id, decision).await;
+    if !contexts.is_empty() {
+        return contexts;
+    }
+
+    for _ in 0..4 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        contexts = load_runtime_miss_candidate_contexts(state, request_id, decision).await;
+        if !contexts.is_empty() {
+            break;
+        }
+    }
+
+    contexts
 }
 
 fn collect_present_ids<'a>(ids: impl Iterator<Item = &'a str>) -> Vec<String> {
@@ -740,6 +798,7 @@ fn infer_endpoint_kind(api_format: &str) -> Option<&str> {
 fn apply_runtime_miss_usage_routing(
     data: &mut UsageEventData,
     request_metadata: &mut Map<String, Value>,
+    execution_path: &str,
     candidate_id: Option<&str>,
     candidate_index: Option<u32>,
     key_name: Option<&str>,
@@ -761,7 +820,7 @@ fn apply_runtime_miss_usage_routing(
     data.execution_path = data
         .execution_path
         .clone()
-        .or_else(|| Some(EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS.to_string()));
+        .or_else(|| trimmed_non_empty(Some(execution_path)));
     data.local_execution_runtime_miss_reason = data
         .local_execution_runtime_miss_reason
         .clone()
@@ -796,9 +855,15 @@ fn trimmed_non_empty(value: Option<&str>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::apply_runtime_miss_usage_routing;
+    use super::{
+        apply_runtime_miss_usage_routing, request_candidate_represents_provider_execution,
+        select_last_runtime_miss_executed_candidate, RuntimeMissCandidateContext,
+    };
     use crate::constants::EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS;
     use crate::state::LocalExecutionRuntimeMissDiagnostic;
+    use aether_data_contracts::repository::candidates::{
+        RequestCandidateStatus, StoredRequestCandidate,
+    };
     use aether_usage_runtime::UsageEventData;
     use serde_json::{json, Map, Value};
 
@@ -811,6 +876,7 @@ mod tests {
         apply_runtime_miss_usage_routing(
             &mut data,
             &mut request_metadata,
+            EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS,
             Some("cand-1"),
             Some(2),
             Some("primary"),
@@ -845,5 +911,51 @@ mod tests {
                 "trace_id": "trace-1"
             })
         );
+    }
+
+    #[test]
+    fn runtime_miss_executed_candidate_selection_ignores_skipped_only_histories() {
+        let skipped_candidate = StoredRequestCandidate::new(
+            "cand-skipped".to_string(),
+            "req-1".to_string(),
+            Some("user-1".to_string()),
+            Some("api-key-1".to_string()),
+            Some("alice".to_string()),
+            Some("default".to_string()),
+            0,
+            0,
+            Some("provider-1".to_string()),
+            Some("endpoint-1".to_string()),
+            Some("provider-key-1".to_string()),
+            RequestCandidateStatus::Skipped,
+            Some("api_key_concurrency_limit_reached".to_string()),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            100,
+            None,
+            None,
+        )
+        .expect("candidate should build");
+
+        assert!(!request_candidate_represents_provider_execution(&skipped_candidate));
+
+        let contexts = vec![RuntimeMissCandidateContext {
+            candidate: skipped_candidate,
+            provider_name: Some("openai".to_string()),
+            key_name: Some("prod".to_string()),
+            client_api_format: Some("openai:cli".to_string()),
+            provider_api_format: Some("openai:cli".to_string()),
+            global_model_name: Some("gpt-5".to_string()),
+            selected_provider_model_name: Some("gpt-5-upstream".to_string()),
+            endpoint_url: Some("https://api.openai.example/v1/responses".to_string()),
+        }];
+
+        assert!(select_last_runtime_miss_executed_candidate(&contexts).is_none());
     }
 }
