@@ -101,6 +101,16 @@ pub(crate) fn apply_local_candidate_terminal_plan_reason(
     let skipped_candidate_count = diagnostic.skipped_candidate_count.unwrap_or(0);
     diagnostic.reason = if candidate_count == 0 {
         "candidate_list_empty".to_string()
+    } else if skipped_candidate_count >= candidate_count
+        && diagnostic.skip_reasons.len() == 1
+        && diagnostic
+            .skip_reasons
+            .get("api_key_concurrency_limit_reached")
+            .copied()
+            .unwrap_or(0)
+            > 0
+    {
+        "api_key_concurrency_limit_reached".to_string()
     } else if skipped_candidate_count >= candidate_count {
         "all_candidates_skipped".to_string()
     } else {
@@ -222,7 +232,15 @@ mod tests {
         apply_local_candidate_terminal_plan_reason(&mut diagnostic, "no_local_sync_plans");
         assert_eq!(diagnostic.reason, "all_candidates_skipped");
 
+        diagnostic.skip_reasons = std::collections::BTreeMap::from([(
+            "api_key_concurrency_limit_reached".to_string(),
+            2,
+        )]);
+        apply_local_candidate_terminal_plan_reason(&mut diagnostic, "no_local_sync_plans");
+        assert_eq!(diagnostic.reason, "api_key_concurrency_limit_reached");
+
         diagnostic.skipped_candidate_count = Some(1);
+        diagnostic.skip_reasons.clear();
         apply_local_candidate_terminal_plan_reason(&mut diagnostic, "no_local_sync_plans");
         assert_eq!(diagnostic.reason, "no_local_sync_plans");
     }

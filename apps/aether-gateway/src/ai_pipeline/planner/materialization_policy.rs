@@ -47,7 +47,7 @@ pub(crate) fn build_local_candidate_persistence_policy<'a>(
             LocalCandidatePersistencePolicyKind::OpenAiCliDecision => (
                 "gateway local openai cli decision request candidate upsert failed",
                 "gateway local openai cli decision failed to persist skipped candidate",
-                false,
+                true,
             ),
             LocalCandidatePersistencePolicyKind::GeminiFilesDecision => (
                 "gateway local gemini files request candidate upsert failed",

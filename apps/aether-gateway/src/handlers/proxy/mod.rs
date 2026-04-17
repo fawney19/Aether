@@ -14,7 +14,8 @@ use crate::constants::{
     DEPENDENCY_REASON_HEADER, EXECUTION_PATH_CONTROL_EXECUTE_STREAM,
     EXECUTION_PATH_CONTROL_EXECUTE_SYNC, EXECUTION_PATH_DISTRIBUTED_OVERLOADED,
     EXECUTION_PATH_EXECUTION_RUNTIME_STREAM, EXECUTION_PATH_EXECUTION_RUNTIME_SYNC,
-    EXECUTION_PATH_LOCAL_AI_PUBLIC, EXECUTION_PATH_LOCAL_AUTH_DENIED,
+    EXECUTION_PATH_LOCAL_AI_PUBLIC, EXECUTION_PATH_LOCAL_API_KEY_CONCURRENCY_LIMITED,
+    EXECUTION_PATH_LOCAL_AUTH_DENIED,
     EXECUTION_PATH_LOCAL_EXECUTION_LOOP_DETECTED, EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS,
     EXECUTION_PATH_LOCAL_OVERLOADED, EXECUTION_PATH_LOCAL_PROXY_PASSTHROUGH_REMOVED,
     EXECUTION_PATH_LOCAL_RATE_LIMITED, EXECUTION_PATH_LOCAL_ROUTE_NOT_FOUND,
@@ -75,6 +76,8 @@ const LOCAL_PROXY_PASSTHROUGH_REMOVED_DETAIL: &str =
     "Route matched a removed compatibility passthrough; implement it in Rust or retire the route";
 const LOCAL_EXECUTION_LOOP_DETECTED_DETAIL: &str =
     "Gateway detected an execution runtime request loop back into the local frontdoor";
+const AUTH_API_KEY_CONCURRENCY_LIMIT_REACHED_DETAIL: &str =
+    "当前 API Key 并发请求数已达上限，请稍后重试";
 const EXECUTION_PATH_TUNNEL_AFFINITY_FORWARD: &str = "tunnel_affinity_forward";
 
 fn local_execution_outcome_label(outcome: &LocalExecutionRequestOutcome) -> &'static str {
@@ -1018,23 +1021,38 @@ pub(crate) async fn proxy_request(
         }
         let local_execution_runtime_miss_diagnostic =
             state.take_local_execution_runtime_miss_diagnostic(&trace_id);
+        let local_execution_runtime_miss_context =
+            build_local_execution_runtime_miss_context(&state, &trace_id, control_decision).await;
+        let auth_api_key_concurrency_limited = diagnostic_is_auth_api_key_concurrency_limited(
+            local_execution_runtime_miss_diagnostic.as_ref(),
+        ) || local_execution_runtime_miss_context
+            .all_candidates_skipped_for_reason("api_key_concurrency_limit_reached");
         let local_execution_runtime_miss_detail = local_execution_runtime_miss_detail(
             control_decision,
             local_execution_runtime_miss_diagnostic.as_ref(),
+            auth_api_key_concurrency_limited,
             stream_request,
         )
         .unwrap_or_else(|| {
             "AI public execution runtime miss did not match a Rust execution path".to_string()
         });
+        let local_execution_failure_path = if auth_api_key_concurrency_limited {
+            EXECUTION_PATH_LOCAL_API_KEY_CONCURRENCY_LIMITED
+        } else {
+            EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS
+        };
+        let local_execution_failure_log = if auth_api_key_concurrency_limited {
+            "gateway local execution blocked by api key concurrency limit"
+        } else {
+            "gateway local execution runtime miss"
+        };
         state.record_fallback_metric(
             GatewayFallbackMetricKind::LocalExecutionRuntimeMiss,
             control_decision,
             None,
-            Some(EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS),
+            Some(local_execution_failure_path),
             GatewayFallbackReason::LocalExecutionPathRequired,
         );
-        let local_execution_runtime_miss_context =
-            build_local_execution_runtime_miss_context(&state, &trace_id, control_decision).await;
         warn!(
             trace_id = %trace_id,
             local_execution_runtime_miss_reason = local_execution_runtime_miss_diagnostic
@@ -1094,7 +1112,7 @@ pub(crate) async fn proxy_request(
             request_candidates = local_execution_runtime_miss_context
                 .candidate_summary()
                 .unwrap_or_default(),
-            "gateway local execution runtime miss"
+            local_execution_failure_log
         );
         if let Some(exhaustion) = local_execution_exhaustion {
             record_failed_usage_for_exhausted_request(
@@ -1102,6 +1120,7 @@ pub(crate) async fn proxy_request(
                 exhaustion,
                 &started_at,
                 local_execution_runtime_miss_detail.as_str(),
+                local_execution_failure_path,
                 local_execution_runtime_miss_diagnostic.as_ref(),
             )
             .await;
@@ -1111,6 +1130,7 @@ pub(crate) async fn proxy_request(
                 &trace_id,
                 &started_at,
                 local_execution_runtime_miss_detail.as_str(),
+                local_execution_failure_path,
                 control_decision,
                 local_execution_runtime_miss_diagnostic.as_ref(),
                 &local_execution_runtime_miss_context,
@@ -1123,21 +1143,28 @@ pub(crate) async fn proxy_request(
             http::StatusCode::SERVICE_UNAVAILABLE,
             local_execution_runtime_miss_detail.as_str(),
         )?;
-        if let Some(diagnostic) = local_execution_runtime_miss_diagnostic {
-            if !diagnostic.reason.trim().is_empty() {
-                response.headers_mut().insert(
-                    HeaderName::from_static(LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER),
-                    HeaderValue::from_str(diagnostic.reason.as_str())
-                        .map_err(|err| GatewayError::Internal(err.to_string()))?,
-                );
-            }
+        let local_execution_runtime_miss_reason = local_execution_runtime_miss_diagnostic
+            .as_ref()
+            .map(|diagnostic| diagnostic.reason.trim())
+            .filter(|reason| !reason.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                auth_api_key_concurrency_limited
+                    .then_some("api_key_concurrency_limit_reached".to_string())
+            });
+        if let Some(reason) = local_execution_runtime_miss_reason {
+            response.headers_mut().insert(
+                HeaderName::from_static(LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER),
+                HeaderValue::from_str(reason.as_str())
+                    .map_err(|err| GatewayError::Internal(err.to_string()))?,
+            );
         }
         return Ok(finalize_gateway_response_with_context(
             &state,
             response,
             &remote_addr,
             &request_context,
-            EXECUTION_PATH_LOCAL_EXECUTION_RUNTIME_MISS,
+            local_execution_failure_path,
             &started_at,
             request_permit.take(),
         ));
@@ -1163,8 +1190,13 @@ pub(crate) async fn proxy_request(
 fn local_execution_runtime_miss_detail(
     decision: Option<&GatewayControlDecision>,
     diagnostic: Option<&LocalExecutionRuntimeMissDiagnostic>,
+    auth_api_key_concurrency_limited: bool,
     stream_request: bool,
 ) -> Option<String> {
+    if auth_api_key_concurrency_limited || diagnostic_is_auth_api_key_concurrency_limited(diagnostic) {
+        return Some(AUTH_API_KEY_CONCURRENCY_LIMIT_REACHED_DETAIL.to_string());
+    }
+
     if let Some(detail) = local_execution_runtime_miss_model_detail(diagnostic, stream_request) {
         return Some(detail);
     }
@@ -1193,6 +1225,23 @@ fn local_execution_runtime_miss_model_detail(
     Some(format!(
         "没有可用的提供商支持模型 {requested_model} 的{request_mode}请求"
     ))
+}
+
+fn diagnostic_is_auth_api_key_concurrency_limited(
+    diagnostic: Option<&LocalExecutionRuntimeMissDiagnostic>,
+) -> bool {
+    let Some(diagnostic) = diagnostic else {
+        return false;
+    };
+    diagnostic.reason == "api_key_concurrency_limit_reached"
+        || (diagnostic.reason == "all_candidates_skipped"
+            && diagnostic.skip_reasons.len() == 1
+            && diagnostic
+                .skip_reasons
+                .get("api_key_concurrency_limit_reached")
+                .copied()
+                .unwrap_or(0)
+                > 0)
 }
 
 fn local_execution_runtime_miss_route_detail(
@@ -1226,7 +1275,8 @@ fn local_execution_runtime_miss_route_detail(
 #[cfg(test)]
 mod tests {
     use super::{
-        local_execution_runtime_miss_detail, GatewayControlDecision,
+        diagnostic_is_auth_api_key_concurrency_limited, local_execution_runtime_miss_detail,
+        GatewayControlDecision,
         LocalExecutionRuntimeMissDiagnostic,
     };
 
@@ -1245,7 +1295,12 @@ mod tests {
             ..LocalExecutionRuntimeMissDiagnostic::default()
         };
 
-        let detail = local_execution_runtime_miss_detail(Some(&decision), Some(&diagnostic), true);
+        let detail = local_execution_runtime_miss_detail(
+            Some(&decision),
+            Some(&diagnostic),
+            false,
+            true,
+        );
 
         assert_eq!(
             detail.as_deref(),
@@ -1268,11 +1323,81 @@ mod tests {
             ..LocalExecutionRuntimeMissDiagnostic::default()
         };
 
-        let detail = local_execution_runtime_miss_detail(Some(&decision), Some(&diagnostic), false);
+        let detail = local_execution_runtime_miss_detail(
+            Some(&decision),
+            Some(&diagnostic),
+            false,
+            false,
+        );
 
         assert_eq!(
             detail.as_deref(),
             Some("Claude messages execution runtime miss did not match a Rust execution path")
+        );
+    }
+
+    #[test]
+    fn runtime_miss_detail_returns_api_key_concurrency_message_for_exact_all_skipped_limit_case() {
+        let decision = GatewayControlDecision::synthetic(
+            "/v1/responses",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("cli".to_string()),
+            Some("openai:cli".to_string()),
+        );
+        let diagnostic = LocalExecutionRuntimeMissDiagnostic {
+            reason: "all_candidates_skipped".to_string(),
+            skip_reasons: std::collections::BTreeMap::from([(
+                "api_key_concurrency_limit_reached".to_string(),
+                1,
+            )]),
+            requested_model: Some("gpt-5.4".to_string()),
+            ..LocalExecutionRuntimeMissDiagnostic::default()
+        };
+
+        let detail = local_execution_runtime_miss_detail(
+            Some(&decision),
+            Some(&diagnostic),
+            false,
+            false,
+        );
+
+        assert_eq!(
+            detail.as_deref(),
+            Some("当前 API Key 并发请求数已达上限，请稍后重试")
+        );
+        assert!(diagnostic_is_auth_api_key_concurrency_limited(Some(&diagnostic)));
+    }
+
+    #[test]
+    fn runtime_miss_detail_prefers_api_key_concurrency_message_when_classified_from_context() {
+        let decision = GatewayControlDecision::synthetic(
+            "/v1/responses",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("cli".to_string()),
+            Some("openai:cli".to_string()),
+        );
+        let diagnostic = LocalExecutionRuntimeMissDiagnostic {
+            reason: "all_candidates_skipped".to_string(),
+            skip_reasons: std::collections::BTreeMap::from([(
+                "format_conversion_disabled".to_string(),
+                1,
+            )]),
+            requested_model: Some("gpt-5.4".to_string()),
+            ..LocalExecutionRuntimeMissDiagnostic::default()
+        };
+
+        let detail = local_execution_runtime_miss_detail(
+            Some(&decision),
+            Some(&diagnostic),
+            true,
+            false,
+        );
+
+        assert_eq!(
+            detail.as_deref(),
+            Some("当前 API Key 并发请求数已达上限，请稍后重试")
         );
     }
 }
