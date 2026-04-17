@@ -203,6 +203,39 @@
             </div>
           </div>
 
+          <div class="space-y-2">
+            <Label
+              for="form-concurrent-limit"
+              class="text-sm font-medium"
+            >并发限制</Label>
+            <div class="flex items-center gap-3">
+              <div class="flex-1 min-w-0">
+                <Input
+                  v-if="!form.concurrent_limit_inherited"
+                  id="form-concurrent-limit"
+                  :model-value="form.concurrent_limit ?? ''"
+                  type="number"
+                  min="0"
+                  max="10000"
+                  placeholder="0 = 不限制"
+                  class="h-10"
+                  @update:model-value="(v) => form.concurrent_limit = parseNumberInput(v, { min: 0, max: 10000 })"
+                />
+                <span
+                  v-else
+                  class="flex h-10 w-full items-center rounded-lg border bg-background px-3 text-sm text-muted-foreground opacity-60"
+                >默认值 5</span>
+              </div>
+              <Switch
+                v-model="form.concurrent_limit_inherited"
+                class="shrink-0"
+              />
+            </div>
+            <p class="text-xs text-muted-foreground">
+              默认值为 5，填 0 表示不限制并发
+            </p>
+          </div>
+
           <!-- 额度 -->
           <div class="space-y-2">
             <Label class="text-sm font-medium">额度</Label>
@@ -288,6 +321,7 @@ export interface StandaloneKeyFormData {
   unlimited_balance?: boolean
   expires_at?: string  // ISO 日期字符串，如 "2025-12-31"，undefined = 永不过期
   rate_limit?: number | null
+  concurrent_limit?: number | null
   auto_delete_on_expiry: boolean
   allowed_providers?: string[] | null
   allowed_api_formats?: string[] | null
@@ -303,6 +337,8 @@ interface StandaloneKeyFormState {
   expires_at?: string
   rate_limit_inherited: boolean
   rate_limit?: number
+  concurrent_limit_inherited: boolean
+  concurrent_limit?: number
   auto_delete_on_expiry: boolean
   provider_unrestricted: boolean
   api_format_unrestricted: boolean
@@ -358,6 +394,8 @@ const form = ref<StandaloneKeyFormState>({
   expires_at: undefined,
   rate_limit_inherited: true,
   rate_limit: undefined,
+  concurrent_limit_inherited: true,
+  concurrent_limit: 5,
   auto_delete_on_expiry: false,
   provider_unrestricted: true,
   api_format_unrestricted: true,
@@ -402,6 +440,8 @@ function resetForm() {
     expires_at: undefined,
     rate_limit_inherited: true,
     rate_limit: undefined,
+    concurrent_limit_inherited: true,
+    concurrent_limit: 5,
     auto_delete_on_expiry: false,
     provider_unrestricted: true,
     api_format_unrestricted: true,
@@ -423,6 +463,8 @@ function loadKeyData() {
     expires_at: props.apiKey.expires_at,
     rate_limit_inherited: props.apiKey.rate_limit == null,
     rate_limit: props.apiKey.rate_limit ?? undefined,
+    concurrent_limit_inherited: props.apiKey.concurrent_limit == null || props.apiKey.concurrent_limit === 5,
+    concurrent_limit: props.apiKey.concurrent_limit ?? 5,
     auto_delete_on_expiry: props.apiKey.auto_delete_on_expiry,
     provider_unrestricted: props.apiKey.allowed_providers == null,
     api_format_unrestricted: props.apiKey.allowed_api_formats == null,
@@ -473,6 +515,7 @@ function handleSubmit() {
     unlimited_balance: form.value.unlimited_balance,
     expires_at: form.value.expires_at,
     rate_limit: form.value.rate_limit_inherited ? null : (form.value.rate_limit ?? 0),
+    concurrent_limit: form.value.concurrent_limit_inherited ? 5 : (form.value.concurrent_limit ?? 5),
     auto_delete_on_expiry: form.value.auto_delete_on_expiry,
     allowed_providers: form.value.provider_unrestricted ? null : [...form.value.allowed_providers],
     allowed_api_formats: form.value.api_format_unrestricted ? null : [...form.value.allowed_api_formats],
@@ -499,6 +542,15 @@ watch(
       form.value.initial_balance_usd = undefined
     } else if (form.value.initial_balance_usd == null) {
       form.value.initial_balance_usd = 10
+    }
+  }
+)
+
+watch(
+  () => form.value.concurrent_limit_inherited,
+  (inherited) => {
+    if (!inherited && form.value.concurrent_limit == null) {
+      form.value.concurrent_limit = 5
     }
   }
 )
