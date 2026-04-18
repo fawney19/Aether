@@ -1,11 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
-use aether_data::repository::{
-    provider_catalog::InMemoryProviderCatalogReadRepository, usage::InMemoryUsageReadRepository,
-};
+use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
-use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
 use axum::body::{to_bytes, Body, Bytes};
 use axum::routing::{any, get, post};
 use axum::{extract::Request, Router};
@@ -471,7 +468,7 @@ async fn gateway_pool_list_includes_usage_totals_and_nullable_lru_score() {
 }
 
 #[tokio::test]
-async fn gateway_pool_list_uses_usage_aggregates_for_stats_and_last_used() {
+async fn gateway_pool_list_ignores_usage_rows_and_uses_persisted_key_stats() {
     let provider = sample_provider("provider-openai", "openai", 10).with_transport_fields(
         true,
         false,
@@ -488,110 +485,27 @@ async fn gateway_pool_list_uses_usage_aggregates_for_stats_and_last_used() {
         })),
     );
     let mut key = sample_key(
-        "key-openai-usage-live",
+        "key-openai-persisted",
         "provider-openai",
         "openai:chat",
-        "sk-usage-live",
+        "sk-persisted",
     );
-    key.name = "live usage key".to_string();
-    key.request_count = Some(0);
-    key.total_tokens = 0;
-    key.total_cost_usd = 0.0;
-    key.last_used_at_unix_secs = None;
+    key.name = "persisted usage key".to_string();
+    key.request_count = Some(7);
+    key.total_tokens = 1_024;
+    key.total_cost_usd = 3.5;
+    key.last_used_at_unix_secs = Some(1_711_000_999);
 
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],
         Vec::new(),
         vec![key],
     ));
-    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
-        StoredRequestUsageAudit::new(
-            "usage-1".to_string(),
-            "request-1".to_string(),
-            None,
-            None,
-            None,
-            None,
-            "OpenAI".to_string(),
-            "gpt-5.4".to_string(),
-            None,
-            Some("provider-openai".to_string()),
-            None,
-            Some("key-openai-usage-live".to_string()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            false,
-            100,
-            50,
-            150,
-            0.5,
-            0.5,
-            Some(200),
-            None,
-            None,
-            None,
-            None,
-            "completed".to_string(),
-            "settled".to_string(),
-            1_711_000_000,
-            1_711_000_001,
-            Some(1_711_000_002),
-        )
-        .expect("usage row should build"),
-        StoredRequestUsageAudit::new(
-            "usage-2".to_string(),
-            "request-2".to_string(),
-            None,
-            None,
-            None,
-            None,
-            "OpenAI".to_string(),
-            "gpt-5.4".to_string(),
-            None,
-            Some("provider-openai".to_string()),
-            None,
-            Some("key-openai-usage-live".to_string()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            false,
-            200,
-            100,
-            300,
-            0.75,
-            0.75,
-            Some(200),
-            None,
-            None,
-            None,
-            None,
-            "completed".to_string(),
-            "settled".to_string(),
-            1_711_000_250,
-            1_711_000_251,
-            Some(1_711_000_252),
-        )
-        .expect("usage row should build"),
-    ]));
     let state = AppState::new()
         .expect("gateway should build")
-        .with_data_state_for_tests(
-            GatewayDataState::with_provider_catalog_and_usage_reader_for_tests(
-                provider_catalog_repository,
-                usage_repository,
-            ),
-        );
+        .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+            provider_catalog_repository,
+        ));
 
     let response = local_admin_pool_response(
         &state,
@@ -610,12 +524,12 @@ async fn gateway_pool_list_uses_usage_aggregates_for_stats_and_last_used() {
     .expect("json body should parse");
     let keys = payload["keys"].as_array().expect("keys should be array");
     assert_eq!(keys.len(), 1);
-    assert_eq!(keys[0]["request_count"], json!(2));
-    assert_eq!(keys[0]["total_tokens"], json!(450u64));
-    assert_eq!(keys[0]["total_cost_usd"], json!("1.25000000"));
+    assert_eq!(keys[0]["request_count"], json!(7));
+    assert_eq!(keys[0]["total_tokens"], json!(1_024u64));
+    assert_eq!(keys[0]["total_cost_usd"], json!("3.50000000"));
     assert_eq!(
         keys[0]["last_used_at"],
-        json!(crate::handlers::shared::unix_secs_to_rfc3339(1_711_000_250))
+        json!(crate::handlers::shared::unix_secs_to_rfc3339(1_711_000_999))
     );
 }
 

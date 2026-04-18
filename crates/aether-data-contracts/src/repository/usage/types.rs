@@ -1539,6 +1539,8 @@ pub trait UsageWriteRepository: Send + Sync {
         &self,
         usage: UpsertUsageRecord,
     ) -> Result<StoredRequestUsageAudit, crate::DataLayerError>;
+
+    async fn rebuild_provider_api_key_usage_stats(&self) -> Result<u64, crate::DataLayerError>;
 }
 
 pub trait UsageRepository: UsageReadRepository + UsageWriteRepository + Send + Sync {}

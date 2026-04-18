@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::RwLock;
 
 use aether_data_contracts::repository::usage::{
@@ -23,11 +24,13 @@ use chrono::Utc;
 use serde_json::Value;
 
 use super::{
-    strip_deprecated_usage_display_fields, usage_can_recover_terminal_failure,
+    provider_api_key_usage_contribution, strip_deprecated_usage_display_fields,
+    usage_can_recover_terminal_failure, ProviderApiKeyUsageContribution, ProviderApiKeyUsageDelta,
     StoredProviderApiKeyUsageSummary, StoredProviderUsageSummary, StoredProviderUsageWindow,
     StoredRequestUsageAudit, StoredUsageDailySummary, UpsertUsageRecord, UsageAuditListQuery,
     UsageDailyHeatmapQuery, UsageReadRepository, UsageWriteRepository,
 };
+use crate::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use crate::DataLayerError;
 
 #[derive(Debug, Default)]
@@ -35,6 +38,7 @@ pub struct InMemoryUsageReadRepository {
     by_request_id: RwLock<BTreeMap<String, StoredRequestUsageAudit>>,
     detached_bodies: RwLock<BTreeMap<String, Value>>,
     provider_usage_windows: RwLock<Vec<StoredProviderUsageWindow>>,
+    provider_catalog: Option<Arc<InMemoryProviderCatalogReadRepository>>,
 }
 
 impl InMemoryUsageReadRepository {
@@ -51,6 +55,7 @@ impl InMemoryUsageReadRepository {
             by_request_id: RwLock::new(by_request_id),
             detached_bodies: RwLock::new(BTreeMap::new()),
             provider_usage_windows: RwLock::new(Vec::new()),
+            provider_catalog: None,
         }
     }
 
@@ -101,6 +106,7 @@ impl InMemoryUsageReadRepository {
             by_request_id: RwLock::new(by_request_id),
             detached_bodies: RwLock::new(detached_bodies),
             provider_usage_windows: RwLock::new(Vec::new()),
+            provider_catalog: None,
         }
     }
 
@@ -112,7 +118,16 @@ impl InMemoryUsageReadRepository {
             by_request_id: self.by_request_id,
             detached_bodies: self.detached_bodies,
             provider_usage_windows: RwLock::new(items.into_iter().collect()),
+            provider_catalog: self.provider_catalog,
         }
+    }
+
+    pub fn with_provider_catalog_repository(
+        mut self,
+        repository: Arc<InMemoryProviderCatalogReadRepository>,
+    ) -> Self {
+        self.provider_catalog = Some(repository);
+        self
     }
 }
 
@@ -122,6 +137,38 @@ fn usage_status_is_finalized(status: &str) -> bool {
 
 fn usage_status_is_lifecycle(status: &str) -> bool {
     matches!(status, "pending" | "streaming")
+}
+
+fn accumulate_provider_api_key_usage_contribution(
+    aggregates: &mut BTreeMap<String, ProviderApiKeyUsageContribution>,
+    contribution: ProviderApiKeyUsageContribution,
+) {
+    let entry = aggregates
+        .entry(contribution.key_id.clone())
+        .or_insert_with(|| ProviderApiKeyUsageContribution {
+            key_id: contribution.key_id.clone(),
+            ..ProviderApiKeyUsageContribution::default()
+        });
+    entry.request_count = entry
+        .request_count
+        .saturating_add(contribution.request_count);
+    entry.success_count = entry
+        .success_count
+        .saturating_add(contribution.success_count);
+    entry.error_count = entry.error_count.saturating_add(contribution.error_count);
+    entry.total_tokens = entry.total_tokens.saturating_add(contribution.total_tokens);
+    entry.total_cost_usd += contribution.total_cost_usd;
+    entry.total_response_time_ms = entry
+        .total_response_time_ms
+        .saturating_add(contribution.total_response_time_ms);
+    entry.last_used_at_unix_secs = match (
+        entry.last_used_at_unix_secs,
+        contribution.last_used_at_unix_secs,
+    ) {
+        (Some(existing), Some(candidate)) => Some(existing.max(candidate)),
+        (None, Some(candidate)) => Some(candidate),
+        (existing, None) => existing,
+    };
 }
 
 fn usage_matches_list_query(item: &StoredRequestUsageAudit, query: &UsageAuditListQuery) -> bool {
@@ -2039,6 +2086,7 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
         usage.validate()?;
         let usage = strip_deprecated_usage_display_fields(usage);
         let mut by_request_id = self.by_request_id.write().expect("usage repository lock");
+        let existing = by_request_id.get(&usage.request_id).cloned();
 
         let created_at_unix_ms = by_request_id
             .get(&usage.request_id)
@@ -2055,8 +2103,7 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
                 )
             })
             .unwrap_or_default();
-        let existing = by_request_id.get(&usage.request_id);
-        if existing.is_some_and(|existing| {
+        if existing.as_ref().is_some_and(|existing| {
             usage_status_is_finalized(existing.status.as_str())
                 && usage_status_is_lifecycle(usage.status.as_str())
                 && !usage_can_recover_terminal_failure(
@@ -2068,7 +2115,7 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
         }) {
             return Ok(existing.expect("existing usage should be present").clone());
         }
-        if existing.is_some_and(|existing| {
+        if existing.as_ref().is_some_and(|existing| {
             existing.billing_status == "pending"
                 && existing.status == "streaming"
                 && usage.status == "pending"
@@ -2076,47 +2123,53 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
             return Ok(existing.expect("existing usage should be present").clone());
         }
 
-        let request_metadata = usage
-            .request_metadata
-            .clone()
-            .or_else(|| existing.and_then(|existing| existing.request_metadata.clone()));
+        let request_metadata = usage.request_metadata.clone().or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|existing| existing.request_metadata.clone())
+        });
         let request_body_ref = persisted_usage_body_ref(
             usage.request_body_ref.as_deref(),
             usage.request_body.as_ref(),
             request_metadata.as_ref(),
-            existing,
+            existing.as_ref(),
             UsageBodyField::RequestBody,
         );
         let provider_request_body_ref = persisted_usage_body_ref(
             usage.provider_request_body_ref.as_deref(),
             usage.provider_request_body.as_ref(),
             request_metadata.as_ref(),
-            existing,
+            existing.as_ref(),
             UsageBodyField::ProviderRequestBody,
         );
         let response_body_ref = persisted_usage_body_ref(
             usage.response_body_ref.as_deref(),
             usage.response_body.as_ref(),
             request_metadata.as_ref(),
-            existing,
+            existing.as_ref(),
             UsageBodyField::ResponseBody,
         );
         let client_response_body_ref = persisted_usage_body_ref(
             usage.client_response_body_ref.as_deref(),
             usage.client_response_body.as_ref(),
             request_metadata.as_ref(),
-            existing,
+            existing.as_ref(),
             UsageBodyField::ClientResponseBody,
         );
         let stored = StoredRequestUsageAudit {
             id: existing
+                .as_ref()
                 .map(|existing| existing.id.clone())
                 .unwrap_or_else(|| format!("usage-{}", usage.request_id)),
             request_id: usage.request_id.clone(),
             user_id: usage.user_id,
             api_key_id: usage.api_key_id,
-            username: existing.and_then(|existing| existing.username.clone()),
-            api_key_name: existing.and_then(|existing| existing.api_key_name.clone()),
+            username: existing
+                .as_ref()
+                .and_then(|existing| existing.username.clone()),
+            api_key_name: existing
+                .as_ref()
+                .and_then(|existing| existing.api_key_name.clone()),
             provider_name: usage.provider_name,
             model: usage.model,
             target_model: usage.target_model,
@@ -2137,6 +2190,7 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
             total_tokens,
             cache_creation_input_tokens: usage.cache_creation_input_tokens.unwrap_or_else(|| {
                 existing
+                    .as_ref()
                     .map(|existing| existing.cache_creation_input_tokens)
                     .unwrap_or_default()
             }),
@@ -2144,6 +2198,7 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
                 .cache_creation_ephemeral_5m_input_tokens
                 .unwrap_or_else(|| {
                     existing
+                        .as_ref()
                         .map(|existing| existing.cache_creation_ephemeral_5m_input_tokens)
                         .unwrap_or_default()
                 }),
@@ -2151,32 +2206,40 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
                 .cache_creation_ephemeral_1h_input_tokens
                 .unwrap_or_else(|| {
                     existing
+                        .as_ref()
                         .map(|existing| existing.cache_creation_ephemeral_1h_input_tokens)
                         .unwrap_or_default()
                 }),
             cache_read_input_tokens: usage.cache_read_input_tokens.unwrap_or_else(|| {
                 existing
+                    .as_ref()
                     .map(|existing| existing.cache_read_input_tokens)
                     .unwrap_or_default()
             }),
             cache_creation_cost_usd: usage.cache_creation_cost_usd.unwrap_or_else(|| {
                 existing
+                    .as_ref()
                     .map(|existing| existing.cache_creation_cost_usd)
                     .unwrap_or_default()
             }),
             cache_read_cost_usd: usage.cache_read_cost_usd.unwrap_or_else(|| {
                 existing
+                    .as_ref()
                     .map(|existing| existing.cache_read_cost_usd)
                     .unwrap_or_default()
             }),
-            output_price_per_1m: existing.and_then(|existing| existing.output_price_per_1m),
+            output_price_per_1m: existing
+                .as_ref()
+                .and_then(|existing| existing.output_price_per_1m),
             total_cost_usd: usage.total_cost_usd.unwrap_or_else(|| {
                 existing
+                    .as_ref()
                     .map(|existing| existing.total_cost_usd)
                     .unwrap_or_default()
             }),
             actual_total_cost_usd: usage.actual_total_cost_usd.unwrap_or_else(|| {
                 existing
+                    .as_ref()
                     .map(|existing| existing.actual_total_cost_usd)
                     .unwrap_or_default()
             }),
@@ -2187,71 +2250,108 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
             first_byte_time_ms: usage.first_byte_time_ms,
             status: usage.status,
             billing_status: usage.billing_status,
-            request_headers: usage
-                .request_headers
-                .or_else(|| existing.and_then(|existing| existing.request_headers.clone())),
-            request_body: usage
-                .request_body
-                .or_else(|| existing.and_then(|existing| existing.request_body.clone())),
+            request_headers: usage.request_headers.or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.request_headers.clone())
+            }),
+            request_body: usage.request_body.or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.request_body.clone())
+            }),
             request_body_ref,
-            request_body_state: usage
-                .request_body_state
-                .or_else(|| existing.and_then(|existing| existing.request_body_state)),
+            request_body_state: usage.request_body_state.or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.request_body_state)
+            }),
             provider_request_headers: usage.provider_request_headers.or_else(|| {
-                existing.and_then(|existing| existing.provider_request_headers.clone())
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.provider_request_headers.clone())
             }),
-            provider_request_body: usage
-                .provider_request_body
-                .or_else(|| existing.and_then(|existing| existing.provider_request_body.clone())),
+            provider_request_body: usage.provider_request_body.or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.provider_request_body.clone())
+            }),
             provider_request_body_ref,
-            provider_request_body_state: usage
-                .provider_request_body_state
-                .or_else(|| existing.and_then(|existing| existing.provider_request_body_state)),
-            response_headers: usage
-                .response_headers
-                .or_else(|| existing.and_then(|existing| existing.response_headers.clone())),
-            response_body: usage
-                .response_body
-                .or_else(|| existing.and_then(|existing| existing.response_body.clone())),
-            response_body_ref,
-            response_body_state: usage
-                .response_body_state
-                .or_else(|| existing.and_then(|existing| existing.response_body_state)),
-            client_response_headers: usage
-                .client_response_headers
-                .or_else(|| existing.and_then(|existing| existing.client_response_headers.clone())),
-            client_response_body: usage
-                .client_response_body
-                .or_else(|| existing.and_then(|existing| existing.client_response_body.clone())),
-            client_response_body_ref,
-            client_response_body_state: usage
-                .client_response_body_state
-                .or_else(|| existing.and_then(|existing| existing.client_response_body_state)),
-            candidate_id: usage.candidate_id.or_else(|| {
-                existing.and_then(|existing| existing.routing_candidate_id().map(ToOwned::to_owned))
+            provider_request_body_state: usage.provider_request_body_state.or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.provider_request_body_state)
             }),
-            candidate_index: usage
-                .candidate_index
-                .or_else(|| existing.and_then(|existing| existing.routing_candidate_index())),
+            response_headers: usage.response_headers.or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.response_headers.clone())
+            }),
+            response_body: usage.response_body.or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.response_body.clone())
+            }),
+            response_body_ref,
+            response_body_state: usage.response_body_state.or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.response_body_state)
+            }),
+            client_response_headers: usage.client_response_headers.or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.client_response_headers.clone())
+            }),
+            client_response_body: usage.client_response_body.or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.client_response_body.clone())
+            }),
+            client_response_body_ref,
+            client_response_body_state: usage.client_response_body_state.or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.client_response_body_state)
+            }),
+            candidate_id: usage.candidate_id.or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.routing_candidate_id().map(ToOwned::to_owned))
+            }),
+            candidate_index: usage.candidate_index.or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.routing_candidate_index())
+            }),
             key_name: usage.key_name.or_else(|| {
-                existing.and_then(|existing| existing.routing_key_name().map(ToOwned::to_owned))
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.routing_key_name().map(ToOwned::to_owned))
             }),
             planner_kind: usage.planner_kind.or_else(|| {
-                existing.and_then(|existing| existing.routing_planner_kind().map(ToOwned::to_owned))
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.routing_planner_kind().map(ToOwned::to_owned))
             }),
             route_family: usage.route_family.or_else(|| {
-                existing.and_then(|existing| existing.routing_route_family().map(ToOwned::to_owned))
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.routing_route_family().map(ToOwned::to_owned))
             }),
             route_kind: usage.route_kind.or_else(|| {
-                existing.and_then(|existing| existing.routing_route_kind().map(ToOwned::to_owned))
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.routing_route_kind().map(ToOwned::to_owned))
             }),
             execution_path: usage.execution_path.or_else(|| {
                 existing
+                    .as_ref()
                     .and_then(|existing| existing.routing_execution_path().map(ToOwned::to_owned))
             }),
             local_execution_runtime_miss_reason: usage.local_execution_runtime_miss_reason.or_else(
                 || {
-                    existing.and_then(|existing| {
+                    existing.as_ref().and_then(|existing| {
                         existing
                             .routing_local_execution_runtime_miss_reason()
                             .map(ToOwned::to_owned)
@@ -2265,13 +2365,76 @@ impl UsageWriteRepository for InMemoryUsageReadRepository {
         };
 
         by_request_id.insert(stored.request_id.clone(), stored.clone());
+        if let Some(provider_catalog) = self.provider_catalog.as_ref() {
+            let before_contribution = existing
+                .as_ref()
+                .and_then(provider_api_key_usage_contribution);
+            let after_contribution = provider_api_key_usage_contribution(&stored);
+
+            match (before_contribution.as_ref(), after_contribution.as_ref()) {
+                (Some(before), Some(after)) if before.key_id == after.key_id => {
+                    let delta = ProviderApiKeyUsageDelta::between(before, after);
+                    provider_catalog.apply_usage_stats_delta(before.key_id.as_str(), &delta, None);
+                }
+                _ => {
+                    if let Some(before) = before_contribution.as_ref() {
+                        let delta = ProviderApiKeyUsageDelta::removal(before);
+                        let recomputed_last_used_at_unix_secs = by_request_id
+                            .values()
+                            .filter_map(|item| {
+                                item.provider_api_key_id
+                                    .as_deref()
+                                    .filter(|key_id| *key_id == before.key_id.as_str())
+                                    .map(|_| item.created_at_unix_ms)
+                            })
+                            .max();
+                        provider_catalog.apply_usage_stats_delta(
+                            before.key_id.as_str(),
+                            &delta,
+                            recomputed_last_used_at_unix_secs,
+                        );
+                    }
+                    if let Some(after) = after_contribution.as_ref() {
+                        let delta = ProviderApiKeyUsageDelta::addition(after);
+                        provider_catalog.apply_usage_stats_delta(
+                            after.key_id.as_str(),
+                            &delta,
+                            None,
+                        );
+                    }
+                }
+            }
+        }
         Ok(stored)
+    }
+
+    async fn rebuild_provider_api_key_usage_stats(&self) -> Result<u64, DataLayerError> {
+        let Some(provider_catalog) = self.provider_catalog.as_ref() else {
+            return Ok(0);
+        };
+
+        let by_request_id = self.by_request_id.read().expect("usage repository lock");
+        let mut aggregates = BTreeMap::new();
+        for usage in by_request_id.values() {
+            let Some(contribution) = provider_api_key_usage_contribution(usage) else {
+                continue;
+            };
+            accumulate_provider_api_key_usage_contribution(&mut aggregates, contribution);
+        }
+        provider_catalog.rebuild_usage_stats(&aggregates);
+        Ok(aggregates.len() as u64)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::InMemoryUsageReadRepository;
+    use crate::repository::provider_catalog::{
+        InMemoryProviderCatalogReadRepository, ProviderCatalogReadRepository,
+        ProviderCatalogWriteRepository, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+    };
     use crate::repository::usage::{
         StoredProviderUsageWindow, StoredRequestUsageAudit, UpsertUsageRecord, UsageReadRepository,
         UsageWriteRepository,
@@ -2319,6 +2482,78 @@ mod tests {
             Some(created_at_unix_ms + 2),
         )
         .expect("usage should build")
+    }
+
+    fn sample_upsert_usage_record(request_id: &str) -> UpsertUsageRecord {
+        UpsertUsageRecord {
+            request_id: request_id.to_string(),
+            user_id: None,
+            api_key_id: None,
+            username: None,
+            api_key_name: None,
+            provider_name: "OpenAI".to_string(),
+            model: "gpt-5".to_string(),
+            target_model: None,
+            provider_id: Some("provider-1".to_string()),
+            provider_endpoint_id: None,
+            provider_api_key_id: None,
+            request_type: None,
+            api_format: None,
+            api_family: None,
+            endpoint_kind: None,
+            endpoint_api_format: None,
+            provider_api_family: None,
+            provider_endpoint_kind: None,
+            has_format_conversion: Some(false),
+            is_stream: Some(false),
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_creation_ephemeral_5m_input_tokens: None,
+            cache_creation_ephemeral_1h_input_tokens: None,
+            cache_read_input_tokens: None,
+            cache_creation_cost_usd: None,
+            cache_read_cost_usd: None,
+            output_price_per_1m: None,
+            total_cost_usd: None,
+            actual_total_cost_usd: None,
+            status_code: None,
+            error_message: None,
+            error_category: None,
+            response_time_ms: None,
+            first_byte_time_ms: None,
+            status: "pending".to_string(),
+            billing_status: "pending".to_string(),
+            request_headers: None,
+            request_body: None,
+            request_body_ref: None,
+            request_body_state: None,
+            provider_request_headers: None,
+            provider_request_body: None,
+            provider_request_body_ref: None,
+            provider_request_body_state: None,
+            response_headers: None,
+            response_body: None,
+            response_body_ref: None,
+            response_body_state: None,
+            client_response_headers: None,
+            client_response_body: None,
+            client_response_body_ref: None,
+            client_response_body_state: None,
+            candidate_id: None,
+            candidate_index: None,
+            key_name: None,
+            planner_kind: None,
+            route_family: None,
+            route_kind: None,
+            execution_path: None,
+            local_execution_runtime_miss_reason: None,
+            request_metadata: None,
+            finalized_at_unix_secs: None,
+            created_at_unix_ms: Some(1_700_000_000),
+            updated_at_unix_secs: 1_700_000_000,
+        }
     }
 
     #[tokio::test]
@@ -3718,5 +3953,204 @@ mod tests {
             .expect("provider key summary should exist");
         assert_eq!(usage.request_count, 2);
         assert_eq!(usage.last_used_at_unix_secs, Some(2_500));
+    }
+
+    fn sample_provider_catalog_key(key_id: &str) -> StoredProviderCatalogKey {
+        StoredProviderCatalogKey::new(
+            key_id.to_string(),
+            "provider-1".to_string(),
+            "provider key".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("provider key should build")
+    }
+
+    fn sample_provider_catalog_repository(
+        key_ids: &[&str],
+    ) -> Arc<InMemoryProviderCatalogReadRepository> {
+        Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![StoredProviderCatalogProvider::new(
+                "provider-1".to_string(),
+                "OpenAI".to_string(),
+                None,
+                "openai".to_string(),
+            )
+            .expect("provider should build")],
+            Vec::new(),
+            key_ids
+                .iter()
+                .map(|key_id| sample_provider_catalog_key(key_id))
+                .collect(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn upsert_syncs_linked_provider_key_stats_without_double_counting_request_count() {
+        let provider_catalog = sample_provider_catalog_repository(&["provider-key-1"]);
+        let repository = InMemoryUsageReadRepository::default()
+            .with_provider_catalog_repository(Arc::clone(&provider_catalog));
+
+        repository
+            .upsert(UpsertUsageRecord {
+                provider_api_key_id: Some("provider-key-1".to_string()),
+                total_tokens: Some(100),
+                total_cost_usd: Some(0.5),
+                created_at_unix_ms: Some(1_711_100_000),
+                updated_at_unix_secs: 1_711_100_000,
+                ..sample_upsert_usage_record("req-linked-1")
+            })
+            .await
+            .expect("pending upsert should succeed");
+        repository
+            .upsert(UpsertUsageRecord {
+                provider_api_key_id: Some("provider-key-1".to_string()),
+                status: "completed".to_string(),
+                billing_status: "settled".to_string(),
+                status_code: Some(200),
+                response_time_ms: Some(240),
+                total_tokens: Some(180),
+                total_cost_usd: Some(0.75),
+                created_at_unix_ms: Some(1_711_100_000),
+                updated_at_unix_secs: 1_711_100_010,
+                finalized_at_unix_secs: Some(1_711_100_011),
+                ..sample_upsert_usage_record("req-linked-1")
+            })
+            .await
+            .expect("completed upsert should succeed");
+
+        let key = provider_catalog
+            .list_keys_by_ids(&["provider-key-1".to_string()])
+            .await
+            .expect("key list should succeed")
+            .into_iter()
+            .next()
+            .expect("provider key should exist");
+        assert_eq!(key.request_count, Some(1));
+        assert_eq!(key.success_count, Some(1));
+        assert_eq!(key.error_count, Some(0));
+        assert_eq!(key.total_tokens, 180);
+        assert_eq!(key.total_cost_usd, 0.75);
+        assert_eq!(key.total_response_time_ms, Some(240));
+        assert_eq!(key.last_used_at_unix_secs, Some(1_711_100_000));
+    }
+
+    #[tokio::test]
+    async fn upsert_moves_linked_provider_key_stats_when_key_assignment_changes() {
+        let provider_catalog =
+            sample_provider_catalog_repository(&["provider-key-a", "provider-key-b"]);
+        let repository = InMemoryUsageReadRepository::default()
+            .with_provider_catalog_repository(Arc::clone(&provider_catalog));
+
+        repository
+            .upsert(UpsertUsageRecord {
+                provider_api_key_id: Some("provider-key-a".to_string()),
+                status: "completed".to_string(),
+                billing_status: "settled".to_string(),
+                status_code: Some(200),
+                response_time_ms: Some(100),
+                total_tokens: Some(120),
+                total_cost_usd: Some(0.4),
+                created_at_unix_ms: Some(1_711_200_000),
+                updated_at_unix_secs: 1_711_200_000,
+                finalized_at_unix_secs: Some(1_711_200_001),
+                ..sample_upsert_usage_record("req-move-1")
+            })
+            .await
+            .expect("first upsert should succeed");
+        repository
+            .upsert(UpsertUsageRecord {
+                provider_api_key_id: Some("provider-key-b".to_string()),
+                status: "completed".to_string(),
+                billing_status: "settled".to_string(),
+                status_code: Some(200),
+                response_time_ms: Some(150),
+                total_tokens: Some(140),
+                total_cost_usd: Some(0.6),
+                created_at_unix_ms: Some(1_711_200_000),
+                updated_at_unix_secs: 1_711_200_010,
+                finalized_at_unix_secs: Some(1_711_200_011),
+                ..sample_upsert_usage_record("req-move-1")
+            })
+            .await
+            .expect("moved upsert should succeed");
+
+        let keys = provider_catalog
+            .list_keys_by_ids(&["provider-key-a".to_string(), "provider-key-b".to_string()])
+            .await
+            .expect("key list should succeed");
+        let key_a = keys
+            .iter()
+            .find(|key| key.id == "provider-key-a")
+            .expect("key a should exist");
+        let key_b = keys
+            .iter()
+            .find(|key| key.id == "provider-key-b")
+            .expect("key b should exist");
+
+        assert_eq!(key_a.request_count, Some(0));
+        assert_eq!(key_a.success_count, Some(0));
+        assert_eq!(key_a.total_tokens, 0);
+        assert_eq!(key_a.total_cost_usd, 0.0);
+        assert_eq!(key_a.total_response_time_ms, Some(0));
+        assert_eq!(key_a.last_used_at_unix_secs, None);
+
+        assert_eq!(key_b.request_count, Some(1));
+        assert_eq!(key_b.success_count, Some(1));
+        assert_eq!(key_b.total_tokens, 140);
+        assert_eq!(key_b.total_cost_usd, 0.6);
+        assert_eq!(key_b.total_response_time_ms, Some(150));
+        assert_eq!(key_b.last_used_at_unix_secs, Some(1_711_200_000));
+    }
+
+    #[tokio::test]
+    async fn rebuild_provider_key_usage_stats_resets_linked_catalog_to_current_usage() {
+        let provider_catalog = sample_provider_catalog_repository(&["provider-key-1"]);
+        let mut stale_key = provider_catalog
+            .list_keys_by_ids(&["provider-key-1".to_string()])
+            .await
+            .expect("key list should succeed")
+            .into_iter()
+            .next()
+            .expect("provider key should exist");
+        stale_key.request_count = Some(99);
+        stale_key.success_count = Some(88);
+        stale_key.error_count = Some(11);
+        stale_key.total_tokens = 9_999;
+        stale_key.total_cost_usd = 42.0;
+        stale_key.total_response_time_ms = Some(9_999);
+        stale_key.last_used_at_unix_secs = Some(9_999);
+        provider_catalog
+            .update_key(&stale_key)
+            .await
+            .expect("stale key should update");
+
+        let repository = InMemoryUsageReadRepository::seed(vec![
+            sample_usage("req-1", 1_711_300_000),
+            sample_usage("req-2", 1_711_300_250),
+        ])
+        .with_provider_catalog_repository(Arc::clone(&provider_catalog));
+
+        let rebuilt = repository
+            .rebuild_provider_api_key_usage_stats()
+            .await
+            .expect("rebuild should succeed");
+        assert_eq!(rebuilt, 1);
+
+        let key = provider_catalog
+            .list_keys_by_ids(&["provider-key-1".to_string()])
+            .await
+            .expect("key list should succeed")
+            .into_iter()
+            .next()
+            .expect("provider key should exist");
+        assert_eq!(key.request_count, Some(2));
+        assert_eq!(key.success_count, Some(2));
+        assert_eq!(key.error_count, Some(0));
+        assert_eq!(key.total_tokens, 300);
+        assert_eq!(key.total_cost_usd, 0.24);
+        assert_eq!(key.total_response_time_ms, Some(840));
+        assert_eq!(key.last_used_at_unix_secs, Some(1_711_300_250));
     }
 }

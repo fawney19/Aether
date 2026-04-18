@@ -26,6 +26,85 @@ pub(crate) use aether_data_contracts::repository::usage::{
 pub use memory::InMemoryUsageReadRepository;
 pub use sql::SqlxUsageReadRepository;
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct ProviderApiKeyUsageContribution {
+    pub key_id: String,
+    pub request_count: i64,
+    pub success_count: i64,
+    pub error_count: i64,
+    pub total_tokens: i64,
+    pub total_cost_usd: f64,
+    pub total_response_time_ms: i64,
+    pub last_used_at_unix_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct ProviderApiKeyUsageDelta {
+    pub request_count: i64,
+    pub success_count: i64,
+    pub error_count: i64,
+    pub total_tokens: i64,
+    pub total_cost_usd: f64,
+    pub total_response_time_ms: i64,
+    pub candidate_last_used_at_unix_secs: Option<u64>,
+    pub removed_last_used_at_unix_secs: Option<u64>,
+}
+
+impl ProviderApiKeyUsageDelta {
+    pub(crate) fn between(
+        before: &ProviderApiKeyUsageContribution,
+        after: &ProviderApiKeyUsageContribution,
+    ) -> Self {
+        Self {
+            request_count: after.request_count - before.request_count,
+            success_count: after.success_count - before.success_count,
+            error_count: after.error_count - before.error_count,
+            total_tokens: after.total_tokens - before.total_tokens,
+            total_cost_usd: after.total_cost_usd - before.total_cost_usd,
+            total_response_time_ms: after.total_response_time_ms - before.total_response_time_ms,
+            candidate_last_used_at_unix_secs: after.last_used_at_unix_secs,
+            removed_last_used_at_unix_secs: None,
+        }
+    }
+
+    pub(crate) fn addition(after: &ProviderApiKeyUsageContribution) -> Self {
+        Self {
+            request_count: after.request_count,
+            success_count: after.success_count,
+            error_count: after.error_count,
+            total_tokens: after.total_tokens,
+            total_cost_usd: after.total_cost_usd,
+            total_response_time_ms: after.total_response_time_ms,
+            candidate_last_used_at_unix_secs: after.last_used_at_unix_secs,
+            removed_last_used_at_unix_secs: None,
+        }
+    }
+
+    pub(crate) fn removal(before: &ProviderApiKeyUsageContribution) -> Self {
+        Self {
+            request_count: -before.request_count,
+            success_count: -before.success_count,
+            error_count: -before.error_count,
+            total_tokens: -before.total_tokens,
+            total_cost_usd: -before.total_cost_usd,
+            total_response_time_ms: -before.total_response_time_ms,
+            candidate_last_used_at_unix_secs: None,
+            removed_last_used_at_unix_secs: before.last_used_at_unix_secs,
+        }
+    }
+
+    pub(crate) fn is_noop(&self) -> bool {
+        self.request_count == 0
+            && self.success_count == 0
+            && self.error_count == 0
+            && self.total_tokens == 0
+            && self.total_cost_usd == 0.0
+            && self.total_response_time_ms == 0
+            && self.candidate_last_used_at_unix_secs.is_none()
+            && self.removed_last_used_at_unix_secs.is_none()
+    }
+}
+
 pub(crate) fn incoming_usage_can_recover_terminal_failure(
     incoming_status: &str,
     incoming_billing_status: &str,
@@ -57,11 +136,77 @@ pub(crate) fn strip_deprecated_usage_display_fields(
     usage
 }
 
+pub(crate) fn provider_api_key_usage_is_success(
+    status: &str,
+    status_code: Option<u16>,
+    error_message: Option<&str>,
+) -> bool {
+    matches!(
+        status,
+        "completed" | "success" | "ok" | "billed" | "settled"
+    ) && status_code.is_none_or(|code| code < 400)
+        && error_message.is_none_or(|value| value.trim().is_empty())
+}
+
+pub(crate) fn provider_api_key_usage_is_error(
+    status: &str,
+    status_code: Option<u16>,
+    error_message: Option<&str>,
+) -> bool {
+    !matches!(status, "pending" | "streaming")
+        && !provider_api_key_usage_is_success(status, status_code, error_message)
+}
+
+pub(crate) fn provider_api_key_usage_contribution(
+    usage: &StoredRequestUsageAudit,
+) -> Option<ProviderApiKeyUsageContribution> {
+    let key_id = usage
+        .provider_api_key_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let is_success = provider_api_key_usage_is_success(
+        usage.status.as_str(),
+        usage.status_code,
+        usage.error_message.as_deref(),
+    );
+    let is_error = provider_api_key_usage_is_error(
+        usage.status.as_str(),
+        usage.status_code,
+        usage.error_message.as_deref(),
+    );
+
+    Some(ProviderApiKeyUsageContribution {
+        key_id,
+        request_count: 1,
+        success_count: i64::from(is_success),
+        error_count: i64::from(is_error),
+        total_tokens: i64::try_from(usage.total_tokens).unwrap_or(i64::MAX),
+        total_cost_usd: if usage.total_cost_usd.is_finite() {
+            usage.total_cost_usd.max(0.0)
+        } else {
+            0.0
+        },
+        total_response_time_ms: if is_success {
+            usage
+                .response_time_ms
+                .and_then(|value| i64::try_from(value).ok())
+                .unwrap_or_default()
+        } else {
+            0
+        },
+        last_used_at_unix_secs: Some(usage.created_at_unix_ms),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        incoming_usage_can_recover_terminal_failure, strip_deprecated_usage_display_fields,
-        usage_can_recover_terminal_failure, UpsertUsageRecord,
+        incoming_usage_can_recover_terminal_failure, provider_api_key_usage_contribution,
+        provider_api_key_usage_is_error, provider_api_key_usage_is_success,
+        strip_deprecated_usage_display_fields, usage_can_recover_terminal_failure,
+        StoredRequestUsageAudit, UpsertUsageRecord,
     };
 
     #[test]
@@ -186,5 +331,99 @@ mod tests {
         assert!(!usage_can_recover_terminal_failure(
             "failed", "void", "failed", "void"
         ));
+    }
+
+    #[test]
+    fn provider_key_usage_success_requires_clean_terminal_success() {
+        assert!(provider_api_key_usage_is_success(
+            "completed",
+            Some(200),
+            None
+        ));
+        assert!(!provider_api_key_usage_is_success(
+            "completed",
+            Some(500),
+            None
+        ));
+        assert!(!provider_api_key_usage_is_success(
+            "completed",
+            Some(200),
+            Some("boom")
+        ));
+        assert!(!provider_api_key_usage_is_success(
+            "streaming",
+            Some(200),
+            None
+        ));
+    }
+
+    #[test]
+    fn provider_key_usage_error_ignores_pending_states() {
+        assert!(provider_api_key_usage_is_error(
+            "failed",
+            Some(500),
+            Some("boom")
+        ));
+        assert!(provider_api_key_usage_is_error(
+            "completed",
+            Some(200),
+            Some("boom")
+        ));
+        assert!(!provider_api_key_usage_is_error("pending", None, None));
+        assert!(!provider_api_key_usage_is_error("streaming", None, None));
+    }
+
+    #[test]
+    fn provider_key_usage_contribution_tracks_success_response_time() {
+        let usage = StoredRequestUsageAudit::new(
+            "usage-1".to_string(),
+            "request-1".to_string(),
+            None,
+            None,
+            None,
+            None,
+            "OpenAI".to_string(),
+            "gpt-5".to_string(),
+            None,
+            Some("provider-1".to_string()),
+            None,
+            Some("provider-key-1".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            12,
+            8,
+            20,
+            0.25,
+            0.25,
+            Some(200),
+            None,
+            None,
+            Some(120),
+            None,
+            "completed".to_string(),
+            "settled".to_string(),
+            123,
+            124,
+            Some(125),
+        )
+        .expect("usage should build");
+
+        let contribution =
+            provider_api_key_usage_contribution(&usage).expect("contribution should exist");
+        assert_eq!(contribution.key_id, "provider-key-1");
+        assert_eq!(contribution.request_count, 1);
+        assert_eq!(contribution.success_count, 1);
+        assert_eq!(contribution.error_count, 0);
+        assert_eq!(contribution.total_tokens, 20);
+        assert_eq!(contribution.total_cost_usd, 0.25);
+        assert_eq!(contribution.total_response_time_ms, 120);
+        assert_eq!(contribution.last_used_at_unix_secs, Some(123));
     }
 }

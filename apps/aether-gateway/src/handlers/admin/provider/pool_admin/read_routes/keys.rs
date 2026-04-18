@@ -7,7 +7,6 @@ use super::{
     ADMIN_POOL_PROVIDER_CATALOG_READER_UNAVAILABLE_DETAIL,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
-use crate::handlers::admin::shared::unix_secs_to_rfc3339;
 use crate::GatewayError;
 use axum::{
     body::Body,
@@ -138,38 +137,16 @@ pub(super) async fn build_admin_pool_list_keys_response(
         }
         _ => AdminProviderPoolRuntimeState::default(),
     };
-    let usage_summary_by_key_id = state
-        .app()
-        .summarize_usage_by_provider_api_key_ids(&key_ids)
-        .await?;
-
     let items = keys
         .into_iter()
         .map(|key| {
-            let mut payload = pool_payloads::build_admin_pool_key_payload(
+            pool_payloads::build_admin_pool_key_payload(
                 state,
                 &provider.provider_type,
                 &key,
                 &runtime,
                 pool_config.clone(),
-            );
-            if let Some(summary) = usage_summary_by_key_id.get(&key.id) {
-                if let Some(object) = payload.as_object_mut() {
-                    object.insert("request_count".to_string(), json!(summary.request_count));
-                    object.insert("total_tokens".to_string(), json!(summary.total_tokens));
-                    object.insert(
-                        "total_cost_usd".to_string(),
-                        json!(format!("{:.8}", summary.total_cost_usd)),
-                    );
-                    object.insert(
-                        "last_used_at".to_string(),
-                        json!(summary
-                            .last_used_at_unix_secs
-                            .and_then(unix_secs_to_rfc3339)),
-                    );
-                }
-            }
-            payload
+            )
         })
         .collect::<Vec<_>>();
 

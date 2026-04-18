@@ -8,6 +8,7 @@ use super::{
     ProviderCatalogWriteRepository, StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
     StoredProviderCatalogKeyPage, StoredProviderCatalogKeyStats, StoredProviderCatalogProvider,
 };
+use crate::repository::usage::{ProviderApiKeyUsageContribution, ProviderApiKeyUsageDelta};
 use crate::DataLayerError;
 
 #[derive(Debug, Default)]
@@ -41,6 +42,117 @@ impl InMemoryProviderCatalogReadRepository {
                 keys: keys.into_iter().map(|key| (key.id.clone(), key)).collect(),
             }),
         }
+    }
+
+    pub(crate) fn apply_usage_stats_delta(
+        &self,
+        key_id: &str,
+        delta: &ProviderApiKeyUsageDelta,
+        recomputed_last_used_at_unix_secs: Option<u64>,
+    ) {
+        let mut index = self
+            .index
+            .write()
+            .expect("provider catalog repository lock");
+        let Some(key) = index.keys.get_mut(key_id) else {
+            return;
+        };
+
+        key.request_count = Some(apply_i64_delta_to_u32(
+            key.request_count.unwrap_or_default(),
+            delta.request_count,
+        ));
+        key.success_count = Some(apply_i64_delta_to_u32(
+            key.success_count.unwrap_or_default(),
+            delta.success_count,
+        ));
+        key.error_count = Some(apply_i64_delta_to_u32(
+            key.error_count.unwrap_or_default(),
+            delta.error_count,
+        ));
+        key.total_tokens = apply_i64_delta_to_u64(key.total_tokens, delta.total_tokens);
+        key.total_cost_usd = apply_f64_delta(key.total_cost_usd, delta.total_cost_usd);
+        key.total_response_time_ms = Some(apply_i64_delta_to_u32(
+            key.total_response_time_ms.unwrap_or_default(),
+            delta.total_response_time_ms,
+        ));
+
+        if let Some(candidate) = delta.candidate_last_used_at_unix_secs {
+            key.last_used_at_unix_secs = Some(
+                key.last_used_at_unix_secs
+                    .map(|existing| existing.max(candidate))
+                    .unwrap_or(candidate),
+            );
+        } else if delta.removed_last_used_at_unix_secs.is_some()
+            && key.last_used_at_unix_secs == delta.removed_last_used_at_unix_secs
+        {
+            key.last_used_at_unix_secs = recomputed_last_used_at_unix_secs;
+        }
+    }
+
+    pub(crate) fn rebuild_usage_stats(
+        &self,
+        contributions: &BTreeMap<String, ProviderApiKeyUsageContribution>,
+    ) {
+        let mut index = self
+            .index
+            .write()
+            .expect("provider catalog repository lock");
+        for key in index.keys.values_mut() {
+            key.request_count = Some(0);
+            key.success_count = Some(0);
+            key.error_count = Some(0);
+            key.total_tokens = 0;
+            key.total_cost_usd = 0.0;
+            key.total_response_time_ms = Some(0);
+            key.last_used_at_unix_secs = None;
+        }
+
+        for (key_id, contribution) in contributions {
+            let Some(key) = index.keys.get_mut(key_id) else {
+                continue;
+            };
+            key.request_count = Some(clamp_i64_to_u32(contribution.request_count));
+            key.success_count = Some(clamp_i64_to_u32(contribution.success_count));
+            key.error_count = Some(clamp_i64_to_u32(contribution.error_count));
+            key.total_tokens = clamp_i64_to_u64(contribution.total_tokens);
+            key.total_cost_usd = contribution.total_cost_usd.max(0.0);
+            key.total_response_time_ms =
+                Some(clamp_i64_to_u32(contribution.total_response_time_ms));
+            key.last_used_at_unix_secs = contribution.last_used_at_unix_secs;
+        }
+    }
+}
+
+fn apply_i64_delta_to_u32(current: u32, delta: i64) -> u32 {
+    clamp_i64_to_u32(i64::from(current).saturating_add(delta))
+}
+
+fn apply_i64_delta_to_u64(current: u64, delta: i64) -> u64 {
+    if delta >= 0 {
+        current.saturating_add(delta as u64)
+    } else {
+        current.saturating_sub(delta.unsigned_abs())
+    }
+}
+
+fn clamp_i64_to_u32(value: i64) -> u32 {
+    value.clamp(0, i64::from(u32::MAX)) as u32
+}
+
+fn clamp_i64_to_u64(value: i64) -> u64 {
+    value.max(0) as u64
+}
+
+fn apply_f64_delta(current: f64, delta: f64) -> f64 {
+    if !current.is_finite() && !delta.is_finite() {
+        return 0.0;
+    }
+    let next = current.max(0.0) + delta;
+    if next.is_finite() {
+        next.max(0.0)
+    } else {
+        0.0
     }
 }
 

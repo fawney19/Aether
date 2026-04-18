@@ -722,6 +722,14 @@ impl GatewayDataState {
         }
     }
 
+    #[allow(dead_code)]
+    pub(crate) async fn rebuild_provider_api_key_usage_stats(&self) -> Result<u64, DataLayerError> {
+        match &self.usage_writer {
+            Some(repository) => repository.rebuild_provider_api_key_usage_stats().await,
+            None => Ok(0),
+        }
+    }
+
     pub(crate) async fn find_request_usage_by_request_id(
         &self,
         request_id: &str,

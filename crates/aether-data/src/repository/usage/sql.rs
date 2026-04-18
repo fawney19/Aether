@@ -26,7 +26,8 @@ use std::io::{Read, Write};
 use uuid::Uuid;
 
 use super::{
-    incoming_usage_can_recover_terminal_failure, strip_deprecated_usage_display_fields,
+    incoming_usage_can_recover_terminal_failure, provider_api_key_usage_contribution,
+    strip_deprecated_usage_display_fields, ProviderApiKeyUsageDelta,
     StoredProviderApiKeyUsageSummary, StoredProviderUsageSummary, StoredRequestUsageAudit,
     StoredUsageDailySummary, UpsertUsageRecord, UsageAuditListQuery, UsageDailyHeatmapQuery,
     UsageReadRepository, UsageWriteRepository,
@@ -561,6 +562,103 @@ FROM "usage"
 WHERE provider_api_key_id = ANY($1::TEXT[])
 GROUP BY provider_api_key_id
 ORDER BY provider_api_key_id ASC
+"#;
+
+const APPLY_PROVIDER_API_KEY_USAGE_DELTA_SQL: &str = r#"
+UPDATE provider_api_keys
+SET
+  request_count = GREATEST(COALESCE(request_count, 0) + $2, 0),
+  success_count = GREATEST(COALESCE(success_count, 0) + $3, 0),
+  error_count = GREATEST(COALESCE(error_count, 0) + $4, 0),
+  total_tokens = GREATEST(total_tokens + $5, 0),
+  total_cost_usd = CAST(
+    GREATEST(CAST(total_cost_usd AS DOUBLE PRECISION) + $6, 0) AS NUMERIC(20,8)
+  ),
+  total_response_time_ms = GREATEST(COALESCE(total_response_time_ms, 0) + $7, 0),
+  last_used_at = CASE
+    WHEN $8::double precision IS NOT NULL THEN CASE
+      WHEN last_used_at IS NULL THEN TO_TIMESTAMP($8::double precision)
+      ELSE GREATEST(last_used_at, TO_TIMESTAMP($8::double precision))
+    END
+    WHEN $9::double precision IS NOT NULL
+      AND last_used_at IS NOT NULL
+      AND EXTRACT(EPOCH FROM last_used_at)::BIGINT = $9::BIGINT
+    THEN (
+      SELECT MAX(created_at)
+      FROM "usage"
+      WHERE provider_api_key_id = $1
+    )
+    ELSE last_used_at
+  END
+WHERE id = $1
+"#;
+
+const RESET_PROVIDER_API_KEY_USAGE_STATS_SQL: &str = r#"
+UPDATE provider_api_keys
+SET
+  request_count = 0,
+  success_count = 0,
+  error_count = 0,
+  total_tokens = 0,
+  total_cost_usd = 0,
+  total_response_time_ms = 0,
+  last_used_at = NULL
+"#;
+
+const REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL: &str = r#"
+WITH aggregated AS (
+  SELECT
+    provider_api_key_id,
+    COUNT(*)::INTEGER AS request_count,
+    COALESCE(SUM(
+      CASE
+        WHEN status IN ('completed', 'success', 'ok', 'billed', 'settled')
+             AND (status_code IS NULL OR status_code < 400)
+             AND error_message IS NULL
+        THEN 1
+        ELSE 0
+      END
+    ), 0)::INTEGER AS success_count,
+    COALESCE(SUM(
+      CASE
+        WHEN status NOT IN ('pending', 'streaming')
+             AND NOT (
+               status IN ('completed', 'success', 'ok', 'billed', 'settled')
+               AND (status_code IS NULL OR status_code < 400)
+               AND error_message IS NULL
+             )
+        THEN 1
+        ELSE 0
+      END
+    ), 0)::INTEGER AS error_count,
+    COALESCE(SUM(GREATEST(COALESCE(total_tokens, 0), 0)::BIGINT), 0)::BIGINT AS total_tokens,
+    COALESCE(SUM(COALESCE(total_cost_usd, 0)), 0)::NUMERIC(20,8) AS total_cost_usd,
+    COALESCE(SUM(
+      CASE
+        WHEN status IN ('completed', 'success', 'ok', 'billed', 'settled')
+             AND (status_code IS NULL OR status_code < 400)
+             AND error_message IS NULL
+             AND response_time_ms IS NOT NULL
+        THEN GREATEST(response_time_ms, 0)
+        ELSE 0
+      END
+    ), 0)::INTEGER AS total_response_time_ms,
+    MAX(created_at) AS last_used_at
+  FROM "usage"
+  WHERE provider_api_key_id IS NOT NULL
+  GROUP BY provider_api_key_id
+)
+UPDATE provider_api_keys
+SET
+  request_count = aggregated.request_count,
+  success_count = aggregated.success_count,
+  error_count = aggregated.error_count,
+  total_tokens = aggregated.total_tokens,
+  total_cost_usd = aggregated.total_cost_usd,
+  total_response_time_ms = aggregated.total_response_time_ms,
+  last_used_at = aggregated.last_used_at
+FROM aggregated
+WHERE provider_api_keys.id = aggregated.provider_api_key_id
 "#;
 
 const LIST_USAGE_AUDITS_PREFIX: &str = r#"
@@ -3987,6 +4085,9 @@ WHERE "usage".created_at >= TO_TIMESTAMP($1::double precision)"#,
                             .map_postgres_err()?;
                     }
 
+                    let previous_usage =
+                        find_usage_by_request_id_in_tx(tx, &usage.request_id).await?;
+
                     let request_headers_json = json_bind_text(usage.request_headers.as_ref())?;
                     let request_body_storage =
                         prepare_usage_body_storage(usage.request_body.as_ref())?;
@@ -4292,8 +4393,63 @@ WHERE "usage".created_at >= TO_TIMESTAMP($1::double precision)"#,
                         routing_snapshot.local_execution_runtime_miss_reason.clone();
                     stored.output_price_per_1m = settlement_pricing_snapshot.output_price_per_1m;
                     stored.request_metadata = request_metadata_value;
+
+                    let before_contribution = previous_usage
+                        .as_ref()
+                        .and_then(provider_api_key_usage_contribution);
+                    let after_contribution = provider_api_key_usage_contribution(&stored);
+                    match (before_contribution.as_ref(), after_contribution.as_ref()) {
+                        (Some(before), Some(after)) if before.key_id == after.key_id => {
+                            let delta = ProviderApiKeyUsageDelta::between(before, after);
+                            apply_provider_api_key_usage_delta_in_tx(
+                                tx,
+                                before.key_id.as_str(),
+                                &delta,
+                            )
+                            .await?;
+                        }
+                        _ => {
+                            if let Some(before) = before_contribution.as_ref() {
+                                let delta = ProviderApiKeyUsageDelta::removal(before);
+                                apply_provider_api_key_usage_delta_in_tx(
+                                    tx,
+                                    before.key_id.as_str(),
+                                    &delta,
+                                )
+                                .await?;
+                            }
+                            if let Some(after) = after_contribution.as_ref() {
+                                let delta = ProviderApiKeyUsageDelta::addition(after);
+                                apply_provider_api_key_usage_delta_in_tx(
+                                    tx,
+                                    after.key_id.as_str(),
+                                    &delta,
+                                )
+                                .await?;
+                            }
+                        }
+                    }
                     Ok(stored)
                 }) as BoxFuture<'_, Result<StoredRequestUsageAudit, DataLayerError>>
+            })
+            .await
+    }
+
+    pub async fn rebuild_provider_api_key_usage_stats(&self) -> Result<u64, DataLayerError> {
+        self.tx_runner
+            .run_read_write(|tx| {
+                Box::pin(async move {
+                    sqlx::query(RESET_PROVIDER_API_KEY_USAGE_STATS_SQL)
+                        .execute(&mut **tx)
+                        .await
+                        .map_postgres_err()?;
+                    let rows_affected = sqlx::query(REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL)
+                        .execute(&mut **tx)
+                        .await
+                        .map_postgres_err()?
+                        .rows_affected();
+                    Ok(rows_affected)
+                }) as BoxFuture<'_, Result<u64, DataLayerError>>
             })
             .await
     }
@@ -4517,6 +4673,85 @@ impl UsageWriteRepository for SqlxUsageReadRepository {
     ) -> Result<StoredRequestUsageAudit, DataLayerError> {
         Self::upsert(self, usage).await
     }
+
+    async fn rebuild_provider_api_key_usage_stats(&self) -> Result<u64, DataLayerError> {
+        Self::rebuild_provider_api_key_usage_stats(self).await
+    }
+}
+
+async fn find_usage_by_request_id_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    request_id: &str,
+) -> Result<Option<StoredRequestUsageAudit>, DataLayerError> {
+    sqlx::query(FIND_BY_REQUEST_ID_SQL)
+        .bind(request_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_postgres_err()?
+        .map(|row| map_usage_row(&row, false))
+        .transpose()
+}
+
+async fn apply_provider_api_key_usage_delta_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    key_id: &str,
+    delta: &ProviderApiKeyUsageDelta,
+) -> Result<(), DataLayerError> {
+    if key_id.trim().is_empty() {
+        return Ok(());
+    }
+    if delta.is_noop() {
+        return Ok(());
+    }
+
+    let total_cost_usd_delta = if delta.total_cost_usd.is_finite() {
+        delta.total_cost_usd
+    } else {
+        0.0
+    };
+
+    sqlx::query(APPLY_PROVIDER_API_KEY_USAGE_DELTA_SQL)
+        .bind(key_id)
+        .bind(i32::try_from(delta.request_count).map_err(|_| {
+            DataLayerError::UnexpectedValue(format!(
+                "provider_api_keys.request_count delta exceeds i32: {}",
+                delta.request_count
+            ))
+        })?)
+        .bind(i32::try_from(delta.success_count).map_err(|_| {
+            DataLayerError::UnexpectedValue(format!(
+                "provider_api_keys.success_count delta exceeds i32: {}",
+                delta.success_count
+            ))
+        })?)
+        .bind(i32::try_from(delta.error_count).map_err(|_| {
+            DataLayerError::UnexpectedValue(format!(
+                "provider_api_keys.error_count delta exceeds i32: {}",
+                delta.error_count
+            ))
+        })?)
+        .bind(delta.total_tokens)
+        .bind(total_cost_usd_delta)
+        .bind(i32::try_from(delta.total_response_time_ms).map_err(|_| {
+            DataLayerError::UnexpectedValue(format!(
+                "provider_api_keys.total_response_time_ms delta exceeds i32: {}",
+                delta.total_response_time_ms
+            ))
+        })?)
+        .bind(
+            delta
+                .candidate_last_used_at_unix_secs
+                .map(|value| value as f64),
+        )
+        .bind(
+            delta
+                .removed_last_used_at_unix_secs
+                .map(|value| value as f64),
+        )
+        .execute(&mut **tx)
+        .await
+        .map_postgres_err()?;
+    Ok(())
 }
 
 // Build the usage read model from the split storage layout.
