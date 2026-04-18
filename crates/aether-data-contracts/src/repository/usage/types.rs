@@ -710,6 +710,13 @@ pub struct StoredUsageAuditSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct StoredUsageUserTotals {
+    pub user_id: String,
+    pub request_count: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct UsageCacheHitSummaryQuery {
     pub created_from_unix_secs: u64,
     pub created_until_unix_secs: u64,
@@ -1278,6 +1285,11 @@ pub trait UsageReadRepository: Send + Sync {
         &self,
         query: &UsageAuditSummaryQuery,
     ) -> Result<StoredUsageAuditSummary, crate::DataLayerError>;
+
+    async fn summarize_usage_totals_by_user_ids(
+        &self,
+        user_ids: &[String],
+    ) -> Result<Vec<StoredUsageUserTotals>, crate::DataLayerError>;
 
     async fn summarize_usage_cache_hit_summary(
         &self,

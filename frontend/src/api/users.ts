@@ -15,6 +15,8 @@ export interface User {
   created_at: string
   updated_at?: string
   last_login_at?: string | null
+  request_count?: number
+  total_tokens?: number
 }
 
 export interface CreateUserRequest {

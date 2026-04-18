@@ -4,11 +4,13 @@ use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY}
 use aether_data::repository::auth::{
     InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeyExportRecord, StoredAuthApiKeySnapshot,
 };
+use aether_data::repository::usage::InMemoryUsageReadRepository;
 use aether_data::repository::users::{
     InMemoryUserReadRepository, StoredUserAuthRecord, StoredUserExportRow,
 };
 use aether_data::repository::wallet::InMemoryWalletRepository;
 use aether_data::repository::wallet::StoredWalletSnapshot;
+use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
 use axum::body::Body;
 use axum::routing::{any, delete, get, patch, post, put};
 use axum::{extract::Request, Router};
@@ -127,6 +129,55 @@ fn sample_admin_wallet(user_id: &str, limit_mode: &str) -> StoredWalletSnapshot 
     .expect("wallet should build")
 }
 
+fn sample_usage_row(
+    id: &str,
+    request_id: &str,
+    user_id: Option<&str>,
+    provider_name: &str,
+    status: &str,
+    total_tokens: i32,
+) -> StoredRequestUsageAudit {
+    StoredRequestUsageAudit::new(
+        id.to_string(),
+        request_id.to_string(),
+        user_id.map(str::to_string),
+        Some(format!("key-{id}")),
+        user_id.map(|value| format!("user-{value}")),
+        Some(format!("key-name-{id}")),
+        provider_name.to_string(),
+        "gpt-4.1".to_string(),
+        Some("gpt-4.1".to_string()),
+        Some("provider-1".to_string()),
+        Some("endpoint-1".to_string()),
+        Some("provider-key-1".to_string()),
+        Some("chat".to_string()),
+        Some("openai:chat".to_string()),
+        Some("openai".to_string()),
+        Some("chat".to_string()),
+        Some("openai:chat".to_string()),
+        Some("openai".to_string()),
+        Some("chat".to_string()),
+        false,
+        status == "streaming",
+        total_tokens,
+        0,
+        total_tokens,
+        0.1,
+        0.1,
+        Some(if status == "failed" { 500 } else { 200 }),
+        (status == "failed").then(|| "request failed".to_string()),
+        None,
+        Some(320),
+        Some(120),
+        status.to_string(),
+        "settled".to_string(),
+        1_711_000_000_000,
+        1_711_000_001,
+        Some(1_711_000_002),
+    )
+    .expect("usage row should build")
+}
+
 fn sample_admin_api_key_snapshot(user_id: &str, api_key_id: &str) -> StoredAuthApiKeySnapshot {
     StoredAuthApiKeySnapshot::new(
         user_id.to_string(),
@@ -186,14 +237,50 @@ async fn gateway_handles_admin_users_root_locally_with_trusted_admin_principal()
         sample_admin_wallet("user-2", "monthly"),
         sample_admin_wallet("user-3", "monthly"),
     ]));
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        sample_usage_row(
+            "usage-1",
+            "req-1",
+            Some("user-1"),
+            "OpenAI",
+            "completed",
+            80,
+        ),
+        sample_usage_row("usage-2", "req-2", Some("user-1"), "OpenAI", "failed", 20),
+        sample_usage_row(
+            "usage-3",
+            "req-3",
+            Some("user-1"),
+            "OpenAI",
+            "streaming",
+            999,
+        ),
+        sample_usage_row(
+            "usage-4",
+            "req-4",
+            Some("user-1"),
+            "pending",
+            "completed",
+            999,
+        ),
+        sample_usage_row(
+            "usage-5",
+            "req-5",
+            Some("user-3"),
+            "OpenAI",
+            "completed",
+            777,
+        ),
+    ]));
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
     let gateway = build_router_with_state(
         AppState::new()
             .expect("gateway should build")
-            .with_data_state_for_tests(GatewayDataState::with_user_and_wallet_for_tests(
+            .with_data_state_for_tests(GatewayDataState::with_user_wallet_and_usage_for_tests(
                 user_repository,
                 wallet_repository,
+                usage_repository,
             )),
     );
     let (gateway_url, gateway_handle) = start_server(gateway).await;
@@ -224,6 +311,8 @@ async fn gateway_handles_admin_users_root_locally_with_trusted_admin_principal()
     assert_eq!(items[0]["rate_limit"], 60);
     assert_eq!(items[0]["unlimited"], true);
     assert_eq!(items[0]["is_active"], true);
+    assert_eq!(items[0]["request_count"], 2);
+    assert_eq!(items[0]["total_tokens"], 100);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

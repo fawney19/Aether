@@ -9,15 +9,16 @@ use aether_data_contracts::repository::usage::{
     StoredUsageDashboardDailyBreakdownRow, StoredUsageDashboardProviderCount,
     StoredUsageDashboardSummary, StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
     StoredUsagePerformancePercentilesRow, StoredUsageSettledCostSummary,
-    StoredUsageTimeSeriesBucket, UsageAuditAggregationGroupBy, UsageAuditAggregationQuery,
-    UsageAuditKeywordSearchQuery, UsageAuditSummaryQuery, UsageBodyField, UsageBreakdownGroupBy,
-    UsageBreakdownSummaryQuery, UsageCacheAffinityHitSummaryQuery,
-    UsageCacheAffinityIntervalGroupBy, UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery,
-    UsageCostSavingsSummaryQuery, UsageDashboardDailyBreakdownQuery,
-    UsageDashboardProviderCountsQuery, UsageDashboardSummaryQuery, UsageErrorDistributionQuery,
-    UsageLeaderboardGroupBy, UsageLeaderboardQuery, UsageMonitoringErrorCountQuery,
-    UsageMonitoringErrorListQuery, UsagePerformancePercentilesQuery, UsageSettledCostSummaryQuery,
-    UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
+    StoredUsageTimeSeriesBucket, StoredUsageUserTotals, UsageAuditAggregationGroupBy,
+    UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery, UsageAuditSummaryQuery,
+    UsageBodyField, UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
+    UsageCacheAffinityHitSummaryQuery, UsageCacheAffinityIntervalGroupBy,
+    UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery, UsageCostSavingsSummaryQuery,
+    UsageDashboardDailyBreakdownQuery, UsageDashboardProviderCountsQuery,
+    UsageDashboardSummaryQuery, UsageErrorDistributionQuery, UsageLeaderboardGroupBy,
+    UsageLeaderboardQuery, UsageMonitoringErrorCountQuery, UsageMonitoringErrorListQuery,
+    UsagePerformancePercentilesQuery, UsageSettledCostSummaryQuery, UsageTimeSeriesGranularity,
+    UsageTimeSeriesQuery,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -1851,6 +1852,46 @@ impl UsageReadRepository for InMemoryUsageReadRepository {
             *entry = (*entry).saturating_add(item.total_tokens);
         }
         Ok(totals)
+    }
+
+    async fn summarize_usage_totals_by_user_ids(
+        &self,
+        user_ids: &[String],
+    ) -> Result<Vec<StoredUsageUserTotals>, DataLayerError> {
+        let user_id_set = user_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut totals = BTreeMap::<String, StoredUsageUserTotals>::new();
+        for item in self
+            .by_request_id
+            .read()
+            .expect("usage repository lock")
+            .values()
+        {
+            if matches!(item.status.as_str(), "pending" | "streaming")
+                || matches!(item.provider_name.as_str(), "unknown" | "pending")
+            {
+                continue;
+            }
+            let Some(user_id) = item.user_id.as_deref() else {
+                continue;
+            };
+            if !user_id_set.contains(user_id) {
+                continue;
+            }
+
+            let entry =
+                totals
+                    .entry(user_id.to_string())
+                    .or_insert_with(|| StoredUsageUserTotals {
+                        user_id: user_id.to_string(),
+                        ..Default::default()
+                    });
+            entry.request_count = entry.request_count.saturating_add(1);
+            entry.total_tokens = entry.total_tokens.saturating_add(item.total_tokens);
+        }
+        Ok(totals.into_values().collect())
     }
 
     async fn summarize_usage_by_provider_api_key_ids(

@@ -26,7 +26,7 @@
               </Button>
               <!-- 刷新按钮 -->
               <RefreshButton
-                :loading="usersStore.loading || loadingStats"
+                :loading="usersStore.loading"
                 @click="refreshUsers"
               />
             </div>
@@ -161,7 +161,7 @@
 
             <!-- 刷新按钮 -->
             <RefreshButton
-              :loading="usersStore.loading || loadingStats"
+              :loading="usersStore.loading"
               @click="refreshUsers"
             />
           </div>
@@ -259,23 +259,13 @@
               </TableCell>
               <TableCell class="py-4">
                 <div class="space-y-1 text-xs">
-                  <template v-if="userStats[user.id]">
-                    <div class="flex items-center text-muted-foreground">
-                      <span class="w-14">请求:</span>
-                      <span class="font-medium text-foreground">{{ formatNumber(userStats[user.id]?.request_count) }}</span>
-                    </div>
-                    <div class="flex items-center text-muted-foreground">
-                      <span class="w-14">Tokens:</span>
-                      <span class="font-medium text-foreground">{{ formatTokens(userStats[user.id]?.total_tokens ?? 0) }}</span>
-                    </div>
-                  </template>
-                  <div
-                    v-else
-                    class="flex items-center text-muted-foreground"
-                  >
-                    <span class="w-14">统计:</span>
-                    <span v-if="loadingStats">加载中...</span>
-                    <span v-else>无数据</span>
+                  <div class="flex items-center text-muted-foreground">
+                    <span class="w-14">请求:</span>
+                    <span class="font-medium text-foreground">{{ formatNumber(user.request_count) }}</span>
+                  </div>
+                  <div class="flex items-center text-muted-foreground">
+                    <span class="w-14">Tokens:</span>
+                    <span class="font-medium text-foreground">{{ formatTokens(user.total_tokens ?? 0) }}</span>
                   </div>
                   <div class="flex items-center text-muted-foreground">
                     <span class="w-14">限速:</span>
@@ -507,7 +497,7 @@
                     请求次数
                   </div>
                   <div class="font-semibold text-foreground">
-                    {{ formatNumber(userStats[user.id]?.request_count) }}
+                    {{ formatNumber(user.request_count) }}
                   </div>
                 </div>
                 <div class="rounded-lg border border-border/50 bg-background/70 p-2.5">
@@ -515,7 +505,7 @@
                     Tokens
                   </div>
                   <div class="font-semibold text-foreground">
-                    {{ formatTokens(userStats[user.id]?.total_tokens ?? 0) }}
+                    {{ formatTokens(user.total_tokens ?? 0) }}
                   </div>
                 </div>
               </div>
@@ -1044,7 +1034,6 @@ import { adminWalletApi, type AdminWallet } from '@/api/admin-wallets'
 import { useToast } from '@/composables/useToast'
 import { useConfirm } from '@/composables/useConfirm'
 import { useClipboard } from '@/composables/useClipboard'
-import { usageApi, type UsageByUser } from '@/api/usage'
 import { adminApi } from '@/api/admin'
 import { walletStatusBadge, walletStatusLabel } from '@/utils/walletDisplay'
 
@@ -1128,9 +1117,6 @@ const userApiKeyForm = ref({
 })
 
 // 用户统计
-const userStats = ref<Record<string, UsageByUser>>({})
-const loadingStats = ref(false)
-let userStatsRequestId = 0
 const userWalletMap = ref<Record<string, AdminWallet>>({})
 
 const showWalletActionDialogState = ref(false)
@@ -1194,32 +1180,12 @@ onMounted(async () => {
 async function refreshUsers() {
   await Promise.all([
     usersStore.fetchUsers(),
-    loadUserStats(),
     loadUserWallets()
   ])
 }
 
 function formatDate(dateString: string) {
   return new Date(dateString).toLocaleDateString('zh-CN')
-}
-
-async function loadUserStats() {
-  const requestId = ++userStatsRequestId
-  loadingStats.value = true
-  try {
-    const data = await usageApi.getUsageByUser()
-    if (requestId !== userStatsRequestId) return
-    userStats.value = data.reduce((acc: Record<string, UsageByUser>, stat: UsageByUser) => {
-      acc[stat.user_id] = stat
-      return acc
-    }, {})
-  } catch (err) {
-    log.error('加载用户统计失败:', err)
-  } finally {
-    if (requestId === userStatsRequestId) {
-      loadingStats.value = false
-    }
-  }
 }
 
 async function loadUserWallets() {

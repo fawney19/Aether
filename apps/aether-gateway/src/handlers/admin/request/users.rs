@@ -568,6 +568,14 @@ impl<'a> AdminAppState<'a> {
             .await
     }
 
+    pub(crate) async fn summarize_usage_totals_by_user_ids(
+        &self,
+        user_ids: &[String],
+    ) -> Result<Vec<aether_data_contracts::repository::usage::StoredUsageUserTotals>, GatewayError>
+    {
+        self.app.summarize_usage_totals_by_user_ids(user_ids).await
+    }
+
     pub(crate) async fn list_non_admin_export_users(
         &self,
     ) -> Result<Vec<aether_data::repository::users::StoredUserExportRow>, GatewayError> {

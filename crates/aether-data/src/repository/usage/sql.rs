@@ -5,15 +5,16 @@ use aether_data_contracts::repository::usage::{
     StoredUsageDashboardDailyBreakdownRow, StoredUsageDashboardProviderCount,
     StoredUsageDashboardSummary, StoredUsageErrorDistributionRow, StoredUsageLeaderboardSummary,
     StoredUsagePerformancePercentilesRow, StoredUsageSettledCostSummary,
-    StoredUsageTimeSeriesBucket, UsageAuditAggregationGroupBy, UsageAuditAggregationQuery,
-    UsageAuditKeywordSearchQuery, UsageAuditSummaryQuery, UsageBodyCaptureState, UsageBodyField,
-    UsageBreakdownGroupBy, UsageBreakdownSummaryQuery, UsageCacheAffinityHitSummaryQuery,
-    UsageCacheAffinityIntervalGroupBy, UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery,
-    UsageCostSavingsSummaryQuery, UsageDashboardDailyBreakdownQuery,
-    UsageDashboardProviderCountsQuery, UsageDashboardSummaryQuery, UsageErrorDistributionQuery,
-    UsageLeaderboardGroupBy, UsageLeaderboardQuery, UsageMonitoringErrorCountQuery,
-    UsageMonitoringErrorListQuery, UsagePerformancePercentilesQuery, UsageSettledCostSummaryQuery,
-    UsageTimeSeriesGranularity, UsageTimeSeriesQuery,
+    StoredUsageTimeSeriesBucket, StoredUsageUserTotals, UsageAuditAggregationGroupBy,
+    UsageAuditAggregationQuery, UsageAuditKeywordSearchQuery, UsageAuditSummaryQuery,
+    UsageBodyCaptureState, UsageBodyField, UsageBreakdownGroupBy, UsageBreakdownSummaryQuery,
+    UsageCacheAffinityHitSummaryQuery, UsageCacheAffinityIntervalGroupBy,
+    UsageCacheAffinityIntervalQuery, UsageCacheHitSummaryQuery, UsageCostSavingsSummaryQuery,
+    UsageDashboardDailyBreakdownQuery, UsageDashboardProviderCountsQuery,
+    UsageDashboardSummaryQuery, UsageErrorDistributionQuery, UsageLeaderboardGroupBy,
+    UsageLeaderboardQuery, UsageMonitoringErrorCountQuery, UsageMonitoringErrorListQuery,
+    UsagePerformancePercentilesQuery, UsageSettledCostSummaryQuery, UsageTimeSeriesGranularity,
+    UsageTimeSeriesQuery,
 };
 use async_trait::async_trait;
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
@@ -544,6 +545,19 @@ FROM "usage"
 WHERE api_key_id = ANY($1::TEXT[])
 GROUP BY api_key_id
 ORDER BY api_key_id ASC
+"#;
+
+const SUMMARIZE_USAGE_TOTALS_BY_USER_IDS_SQL: &str = r#"
+SELECT
+  "usage".user_id,
+  COUNT(*)::BIGINT AS request_count,
+  COALESCE(SUM(GREATEST(COALESCE("usage".total_tokens, 0), 0)), 0)::BIGINT AS total_tokens
+FROM "usage"
+WHERE "usage".user_id = ANY($1::TEXT[])
+  AND "usage".status NOT IN ('pending', 'streaming')
+  AND "usage".provider_name NOT IN ('unknown', 'pending')
+GROUP BY "usage".user_id
+ORDER BY "usage".user_id ASC
 "#;
 
 const SUMMARIZE_USAGE_BY_PROVIDER_API_KEY_IDS_SQL: &str = r#"
@@ -4004,6 +4018,35 @@ WHERE "usage".created_at >= TO_TIMESTAMP($1::double precision)"#,
         Ok(totals)
     }
 
+    pub async fn summarize_usage_totals_by_user_ids(
+        &self,
+        user_ids: &[String],
+    ) -> Result<Vec<StoredUsageUserTotals>, DataLayerError> {
+        if user_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut rows = sqlx::query(SUMMARIZE_USAGE_TOTALS_BY_USER_IDS_SQL)
+            .bind(user_ids)
+            .fetch(&self.pool);
+
+        let mut items = Vec::new();
+        while let Some(row) = rows.try_next().await.map_postgres_err()? {
+            items.push(StoredUsageUserTotals {
+                user_id: row.try_get::<String, _>("user_id").map_postgres_err()?,
+                request_count: row
+                    .try_get::<i64, _>("request_count")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+                total_tokens: row
+                    .try_get::<i64, _>("total_tokens")
+                    .map_postgres_err()?
+                    .max(0) as u64,
+            });
+        }
+        Ok(items)
+    }
+
     pub async fn summarize_usage_by_provider_api_key_ids(
         &self,
         provider_api_key_ids: &[String],
@@ -4653,6 +4696,13 @@ impl UsageReadRepository for SqlxUsageReadRepository {
         api_key_ids: &[String],
     ) -> Result<std::collections::BTreeMap<String, u64>, DataLayerError> {
         Self::summarize_total_tokens_by_api_key_ids(self, api_key_ids).await
+    }
+
+    async fn summarize_usage_totals_by_user_ids(
+        &self,
+        user_ids: &[String],
+    ) -> Result<Vec<StoredUsageUserTotals>, DataLayerError> {
+        Self::summarize_usage_totals_by_user_ids(self, user_ids).await
     }
 
     async fn summarize_usage_by_provider_api_key_ids(

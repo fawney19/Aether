@@ -54,6 +54,12 @@ pub(in super::super) async fn build_admin_list_users_response(
         .into_iter()
         .filter_map(|wallet| wallet.user_id.clone().map(|user_id| (user_id, wallet)))
         .collect::<BTreeMap<_, _>>();
+    let usage_totals_by_user_id = state
+        .summarize_usage_totals_by_user_ids(&user_ids)
+        .await?
+        .into_iter()
+        .map(|item| (item.user_id.clone(), item))
+        .collect::<BTreeMap<_, _>>();
 
     let mut payload = Vec::with_capacity(paged_rows.len());
     for row in paged_rows {
@@ -61,6 +67,7 @@ pub(in super::super) async fn build_admin_list_users_response(
         let unlimited = wallet_by_user_id
             .get(&row.id)
             .is_some_and(|wallet| wallet.limit_mode.eq_ignore_ascii_case("unlimited"));
+        let usage_totals = usage_totals_by_user_id.get(&row.id);
         payload.push(json!({
             "id": row.id,
             "email": row.email,
@@ -77,6 +84,8 @@ pub(in super::super) async fn build_admin_list_users_response(
             "last_login_at": format_optional_datetime_iso8601(
                 auth.as_ref().and_then(|user| user.last_login_at),
             ),
+            "request_count": usage_totals.map(|item| item.request_count).unwrap_or_default(),
+            "total_tokens": usage_totals.map(|item| item.total_tokens).unwrap_or_default(),
         }));
     }
 
