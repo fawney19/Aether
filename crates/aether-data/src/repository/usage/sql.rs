@@ -79,6 +79,9 @@ SET
 WHERE request_id = $1
   AND billing_status = 'void'
 "#;
+const LOCK_USAGE_REQUEST_ID_SQL: &str = r#"
+SELECT pg_advisory_xact_lock(hashtext($1)::BIGINT)
+"#;
 const UPSERT_USAGE_HTTP_AUDIT_SQL: &str = r#"
 INSERT INTO usage_http_audits (
   request_id,
@@ -614,7 +617,7 @@ WITH aggregated AS (
       CASE
         WHEN status IN ('completed', 'success', 'ok', 'billed', 'settled')
              AND (status_code IS NULL OR status_code < 400)
-             AND error_message IS NULL
+             AND NULLIF(BTRIM(error_message), '') IS NULL
         THEN 1
         ELSE 0
       END
@@ -625,19 +628,27 @@ WITH aggregated AS (
              AND NOT (
                status IN ('completed', 'success', 'ok', 'billed', 'settled')
                AND (status_code IS NULL OR status_code < 400)
-               AND error_message IS NULL
+               AND NULLIF(BTRIM(error_message), '') IS NULL
              )
         THEN 1
         ELSE 0
       END
     ), 0)::INTEGER AS error_count,
-    COALESCE(SUM(GREATEST(COALESCE(total_tokens, 0), 0)::BIGINT), 0)::BIGINT AS total_tokens,
+    COALESCE(SUM(
+      GREATEST(
+        COALESCE(
+          total_tokens,
+          COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)
+        ),
+        0
+      )::BIGINT
+    ), 0)::BIGINT AS total_tokens,
     COALESCE(SUM(COALESCE(total_cost_usd, 0)), 0)::NUMERIC(20,8) AS total_cost_usd,
     COALESCE(SUM(
       CASE
         WHEN status IN ('completed', 'success', 'ok', 'billed', 'settled')
              AND (status_code IS NULL OR status_code < 400)
-             AND error_message IS NULL
+             AND NULLIF(BTRIM(error_message), '') IS NULL
              AND response_time_ms IS NOT NULL
         THEN GREATEST(response_time_ms, 0)
         ELSE 0
@@ -646,6 +657,7 @@ WITH aggregated AS (
     MAX(created_at) AS last_used_at
   FROM "usage"
   WHERE provider_api_key_id IS NOT NULL
+    AND BTRIM(provider_api_key_id) <> ''
   GROUP BY provider_api_key_id
 )
 UPDATE provider_api_keys
@@ -4069,6 +4081,8 @@ WHERE "usage".created_at >= TO_TIMESTAMP($1::double precision)"#,
         self.tx_runner
             .run_read_write(|tx| {
                 Box::pin(async move {
+                    lock_usage_request_id_in_tx(tx, &usage.request_id).await?;
+
                     if incoming_usage_can_recover_terminal_failure(
                         usage.status.as_str(),
                         usage.billing_status.as_str(),
@@ -4690,6 +4704,18 @@ async fn find_usage_by_request_id_in_tx(
         .map_postgres_err()?
         .map(|row| map_usage_row(&row, false))
         .transpose()
+}
+
+async fn lock_usage_request_id_in_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    request_id: &str,
+) -> Result<(), DataLayerError> {
+    sqlx::query(LOCK_USAGE_REQUEST_ID_SQL)
+        .bind(request_id)
+        .execute(&mut **tx)
+        .await
+        .map_postgres_err()?;
+    Ok(())
 }
 
 async fn apply_provider_api_key_usage_delta_in_tx(
@@ -6081,6 +6107,26 @@ mod tests {
             .contains("GROUP BY provider_api_key_id"));
         assert!(super::SUMMARIZE_USAGE_BY_PROVIDER_API_KEY_IDS_SQL.contains("MAX(created_at)"));
         assert!(super::SUMMARIZE_USAGE_BY_PROVIDER_API_KEY_IDS_SQL.contains("ANY($1::TEXT[])"));
+    }
+
+    #[test]
+    fn usage_sql_serializes_request_id_upserts_before_reading_previous_usage() {
+        assert!(super::LOCK_USAGE_REQUEST_ID_SQL.contains("pg_advisory_xact_lock"));
+        assert!(super::LOCK_USAGE_REQUEST_ID_SQL.contains("hashtext($1)::BIGINT"));
+        assert!(include_str!("sql.rs")
+            .contains("lock_usage_request_id_in_tx(tx, &usage.request_id).await?;"));
+    }
+
+    #[test]
+    fn usage_sql_rebuild_matches_online_provider_key_usage_semantics() {
+        assert!(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL
+            .contains("NULLIF(BTRIM(error_message), '') IS NULL"));
+        assert!(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL.contains("COALESCE("));
+        assert!(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL.contains("total_tokens,"));
+        assert!(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL
+            .contains("COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)"));
+        assert!(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL
+            .contains("AND BTRIM(provider_api_key_id) <> ''"));
     }
 
     #[test]
