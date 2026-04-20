@@ -120,6 +120,9 @@ fn remote_ip_allowed(allowed_ips: Option<&serde_json::Value>, remote_ip: std::ne
     let Some(allowed_ips) = allowed_ips else {
         return true;
     };
+    if allowed_ips.is_null() {
+        return true;
+    }
     let Some(items) = allowed_ips.as_array() else {
         return false;
     };

@@ -764,6 +764,71 @@ async fn gateway_registers_and_unregisters_proxy_nodes_locally_with_management_t
 }
 
 #[tokio::test]
+async fn gateway_registers_proxy_node_with_management_token_when_allowed_ips_is_json_null() {
+    let raw_token = "ae_proxy_register_json_null";
+    let proxy_node_repository = Arc::new(InMemoryProxyNodeRepository::default());
+    let state = AppState::new().expect("gateway should build");
+    let admin_user = state
+        .create_local_auth_user_with_settings(
+            Some("proxy-admin@example.com".to_string()),
+            true,
+            "admin".to_string(),
+            "hash".to_string(),
+            "admin".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("admin user should be created")
+        .expect("admin user should exist");
+    let mut management_token =
+        sample_management_token("token-proxy-register-json-null", &admin_user.id, "proxy-admin", true);
+    management_token.token.allowed_ips = Some(serde_json::Value::Null);
+    let management_token_repository =
+        Arc::new(InMemoryManagementTokenRepository::seed_with_hashes(
+            vec![management_token],
+            vec![(
+                hash_management_token(raw_token),
+                "token-proxy-register-json-null".to_string(),
+            )],
+        ));
+
+    let state = state.with_data_state_for_tests(
+        GatewayDataState::with_management_token_repository_for_tests(management_token_repository)
+            .attach_proxy_node_repository_for_tests(proxy_node_repository),
+    );
+    let gateway = build_router_with_state(state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let register_response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/admin/proxy-nodes/register"))
+        .header(GATEWAY_HEADER, "rust-phase3b")
+        .bearer_auth(raw_token)
+        .json(&json!({
+            "name": "proxy-json-null",
+            "ip": "1.1.1.1",
+            "port": 0,
+            "heartbeat_interval": 30,
+            "tunnel_mode": true
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(register_response.status(), StatusCode::OK);
+    let register_payload: serde_json::Value = register_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(register_payload["node"]["name"], "proxy-json-null");
+    assert_eq!(register_payload["node"]["registered_by"], json!(admin_user.id));
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_creates_updates_and_tests_manual_proxy_nodes_locally() {
     let proxy_auths = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
     let proxy_auths_clone = Arc::clone(&proxy_auths);
