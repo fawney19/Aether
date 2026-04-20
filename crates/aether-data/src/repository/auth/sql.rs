@@ -656,6 +656,14 @@ SET api_key_id = NULL
 WHERE api_key_id = $1
 "#;
 
+const DISABLE_WALLET_BY_API_KEY_ID_SQL: &str = r#"
+UPDATE wallets
+SET status = 'disabled',
+    updated_at = NOW()
+WHERE api_key_id = $1
+  AND status <> 'disabled'
+"#;
+
 const DELETE_USER_API_KEY_SQL: &str = r#"
 DELETE FROM api_keys
 WHERE user_id = $1
@@ -1268,6 +1276,11 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .execute(&mut *tx)
             .await
             .map_postgres_err()?;
+        sqlx::query(DISABLE_WALLET_BY_API_KEY_ID_SQL)
+            .bind(api_key_id)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
         let result = sqlx::query(DELETE_USER_API_KEY_SQL)
             .bind(user_id)
             .bind(api_key_id)
@@ -1286,6 +1299,11 @@ impl AuthApiKeyWriteRepository for SqlxAuthApiKeySnapshotReadRepository {
             .await
             .map_postgres_err()?;
         sqlx::query(NULL_REQUEST_CANDIDATE_API_KEY_FK_SQL)
+            .bind(api_key_id)
+            .execute(&mut *tx)
+            .await
+            .map_postgres_err()?;
+        sqlx::query(DISABLE_WALLET_BY_API_KEY_ID_SQL)
             .bind(api_key_id)
             .execute(&mut *tx)
             .await

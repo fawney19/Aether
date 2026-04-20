@@ -570,6 +570,13 @@ const DELETE_EXPIRED_API_KEY_SQL: &str = r#"
 DELETE FROM api_keys
 WHERE id = $1
 "#;
+const DISABLE_EXPIRED_API_KEY_WALLET_SQL: &str = r#"
+UPDATE wallets
+SET status = 'disabled',
+    updated_at = NOW()
+WHERE api_key_id = $1
+  AND status <> 'disabled'
+"#;
 const DISABLE_EXPIRED_API_KEY_SQL: &str = r#"
 UPDATE api_keys
 SET is_active = FALSE,
