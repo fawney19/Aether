@@ -783,8 +783,12 @@ async fn gateway_registers_proxy_node_with_management_token_when_allowed_ips_is_
         .await
         .expect("admin user should be created")
         .expect("admin user should exist");
-    let mut management_token =
-        sample_management_token("token-proxy-register-json-null", &admin_user.id, "proxy-admin", true);
+    let mut management_token = sample_management_token(
+        "token-proxy-register-json-null",
+        &admin_user.id,
+        "proxy-admin",
+        true,
+    );
     management_token.token.allowed_ips = Some(serde_json::Value::Null);
     let management_token_repository =
         Arc::new(InMemoryManagementTokenRepository::seed_with_hashes(
@@ -823,7 +827,10 @@ async fn gateway_registers_proxy_node_with_management_token_when_allowed_ips_is_
         .await
         .expect("json body should parse");
     assert_eq!(register_payload["node"]["name"], "proxy-json-null");
-    assert_eq!(register_payload["node"]["registered_by"], json!(admin_user.id));
+    assert_eq!(
+        register_payload["node"]["registered_by"],
+        json!(admin_user.id)
+    );
 
     gateway_handle.abort();
 }
