@@ -11,6 +11,30 @@ use crate::GatewayError;
 use super::super::AwsEventFrame;
 use super::super::KiroClaudeStreamState;
 
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let mut boundary = index.min(text.len());
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    boundary
+}
+
+fn split_preserving_trailing_bytes(
+    buffer: &str,
+    trailing_bytes: usize,
+) -> Option<(String, String)> {
+    if buffer.len() <= trailing_bytes {
+        return None;
+    }
+
+    let split = floor_char_boundary(buffer, buffer.len() - trailing_bytes);
+    if split == 0 {
+        return None;
+    }
+
+    Some((buffer[..split].to_string(), buffer[split..].to_string()))
+}
+
 impl KiroClaudeStreamState {
     pub(super) fn process_frame(&mut self, frame: AwsEventFrame) -> Result<Vec<u8>, GatewayError> {
         let message_type = frame.headers.message_type().unwrap_or("event");
@@ -150,12 +174,12 @@ impl KiroClaudeStreamState {
                 }
 
                 let keep = "<thinking>".len();
-                if self.thinking_buffer.len() > keep {
-                    let split = self.thinking_buffer.len() - keep;
-                    let safe = self.thinking_buffer[..split].to_string();
+                if let Some((safe, remaining)) =
+                    split_preserving_trailing_bytes(&self.thinking_buffer, keep)
+                {
                     if !safe.trim().is_empty() {
                         events.extend(self.emit_text_delta(&safe));
-                        self.thinking_buffer = self.thinking_buffer[split..].to_string();
+                        self.thinking_buffer = remaining;
                     }
                 }
                 break;
@@ -185,12 +209,12 @@ impl KiroClaudeStreamState {
                 }
 
                 let keep = "</thinking>".len();
-                if self.thinking_buffer.len() > keep {
-                    let split = self.thinking_buffer.len() - keep;
-                    let safe = self.thinking_buffer[..split].to_string();
+                if let Some((safe, remaining)) =
+                    split_preserving_trailing_bytes(&self.thinking_buffer, keep)
+                {
                     if !safe.is_empty() {
                         events.extend(self.emit_thinking_delta(&safe));
-                        self.thinking_buffer = self.thinking_buffer[split..].to_string();
+                        self.thinking_buffer = remaining;
                     }
                 }
                 break;

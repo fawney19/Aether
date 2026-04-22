@@ -37,14 +37,26 @@ fn encode_frame(headers: Vec<u8>, payload: Vec<u8>) -> Vec<u8> {
     out
 }
 
-#[test]
-fn kiro_stream_rewriter_converts_text_events_to_claude_sse() {
-    let report_context = json!({
+fn kiro_report_context(thinking_enabled: bool) -> Value {
+    let mut context = json!({
         "provider_api_format": "claude:cli",
         "client_api_format": "claude:cli",
         "envelope_name": "kiro:generateAssistantResponse",
         "mapped_model": "claude-sonnet-4.5"
     });
+    if thinking_enabled {
+        context["original_request_body"] = json!({
+            "thinking": {
+                "type": "enabled"
+            }
+        });
+    }
+    context
+}
+
+#[test]
+fn kiro_stream_rewriter_converts_text_events_to_claude_sse() {
+    let report_context = kiro_report_context(false);
     let mut rewriter = KiroToClaudeCliStreamState::new(&report_context);
     let chunk = [
         encode_event_frame(
@@ -76,12 +88,7 @@ fn kiro_stream_rewriter_converts_text_events_to_claude_sse() {
 
 #[test]
 fn kiro_stream_rewriter_converts_tool_use_to_claude_events() {
-    let report_context = json!({
-        "provider_api_format": "claude:cli",
-        "client_api_format": "claude:cli",
-        "envelope_name": "kiro:generateAssistantResponse",
-        "mapped_model": "claude-sonnet-4.5"
-    });
+    let report_context = kiro_report_context(false);
     let mut rewriter = KiroToClaudeCliStreamState::new(&report_context);
     let chunk = [
         encode_event_frame(
@@ -114,4 +121,46 @@ fn kiro_stream_rewriter_converts_tool_use_to_claude_events() {
     assert!(text.contains("\"name\":\"get_weather\""));
     assert!(text.contains("\"partial_json\":\"{\\\"city\\\":\\\"SF\\\"}\""));
     assert!(text.contains("\"stop_reason\":\"tool_use\""));
+}
+
+#[test]
+fn kiro_stream_rewriter_handles_multibyte_text_without_thinking_tag() {
+    let report_context = kiro_report_context(true);
+    let mut rewriter = KiroToClaudeCliStreamState::new(&report_context);
+    let chunk = encode_event_frame(
+        "event",
+        Some("assistantResponseEvent"),
+        &json!({"content": "\n\n你好！有"}),
+    );
+
+    let first = rewriter
+        .push_chunk(&report_context, &chunk)
+        .expect("rewrite should succeed");
+    let rest = rewriter
+        .finish(&report_context)
+        .expect("finish should succeed");
+    let text = String::from_utf8([first, rest].concat()).expect("utf8 should decode");
+    assert!(text.contains("\"type\":\"text_delta\""));
+    assert!(text.contains("你好！有"));
+}
+
+#[test]
+fn kiro_stream_rewriter_handles_multibyte_text_inside_thinking_block() {
+    let report_context = kiro_report_context(true);
+    let mut rewriter = KiroToClaudeCliStreamState::new(&report_context);
+    let chunk = encode_event_frame(
+        "event",
+        Some("assistantResponseEvent"),
+        &json!({"content": "<thinking>\n\n你好！有"}),
+    );
+
+    let first = rewriter
+        .push_chunk(&report_context, &chunk)
+        .expect("rewrite should succeed");
+    let rest = rewriter
+        .finish(&report_context)
+        .expect("finish should succeed");
+    let text = String::from_utf8([first, rest].concat()).expect("utf8 should decode");
+    assert!(text.contains("\"type\":\"thinking_delta\""));
+    assert!(text.contains("你好！有"));
 }
