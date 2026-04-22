@@ -92,7 +92,6 @@ pub(crate) async fn maybe_build_local_admin_provider_writes_response(
                 };
             }
         }
-
         return Ok(Some(attach_admin_audit_response(
             Json(json!({
                 "id": created_provider.id,

@@ -9,13 +9,17 @@ use axum::body::{Body, Bytes};
 use axum::http::{self, Response};
 use axum::response::IntoResponse;
 use axum::Json;
-use serde_json::json;
+use serde_json::{json, Value};
 
 const CLAUDE_COUNT_TOKENS_INVALID_PAYLOAD_DETAIL: &str = "Invalid token count payload";
 const CLAUDE_COUNT_TOKENS_MISSING_BODY_DETAIL: &str = "请求体不能为空";
 const GEMINI_VIDEO_TASK_NOT_FOUND_DETAIL: &str = "Video task not found";
 const AI_PUBLIC_METHOD_NOT_ALLOWED_DETAIL: &str = "Method not allowed";
 const AI_PUBLIC_UNAUTHORIZED_DETAIL: &str = "Unauthorized";
+const OPENAI_CHAT_IMAGE_MODEL_DETAIL: &str =
+    "gpt-image-2 仅支持通过 /v1/images/generations 或 /v1/images/edits 调用";
+const OPENAI_IMAGE_MODEL_DETAIL: &str = "图片接口当前仅支持模型 gpt-image-2";
+const OPENAI_IMAGE_N_DETAIL: &str = "图片接口当前仅支持 n=1";
 
 pub(crate) fn ai_public_local_requires_buffered_body(
     request_context: &GatewayPublicRequestContext,
@@ -46,12 +50,95 @@ pub(crate) async fn maybe_build_local_ai_public_response(
     }
 
     if let Some(response) =
+        maybe_build_local_openai_request_validation_response(request_context, request_body)
+    {
+        return Some(response);
+    }
+
+    if let Some(response) =
         maybe_build_local_claude_count_tokens_response(request_context, request_body)
     {
         return Some(response);
     }
 
     maybe_build_local_gemini_video_operations_response(state, request_context, decision).await
+}
+
+fn maybe_build_local_openai_request_validation_response(
+    request_context: &GatewayPublicRequestContext,
+    request_body: Option<&Bytes>,
+) -> Option<Response<Body>> {
+    let decision = request_context.control_decision.as_ref()?;
+    if decision.route_family.as_deref() != Some("openai")
+        || request_context.request_method != http::Method::POST
+    {
+        return None;
+    }
+
+    let request_body = request_body?;
+    let payload = serde_json::from_slice::<Value>(request_body).ok()?;
+
+    if decision.route_kind.as_deref() == Some("chat")
+        && request_context.request_path == "/v1/chat/completions"
+    {
+        let model = payload
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        if model.eq_ignore_ascii_case("gpt-image-2") {
+            return Some(build_ai_public_error_response(
+                http::StatusCode::BAD_REQUEST,
+                OPENAI_CHAT_IMAGE_MODEL_DETAIL,
+            ));
+        }
+        return None;
+    }
+
+    if decision.route_kind.as_deref() != Some("image")
+        || !matches!(
+            request_context.request_path.as_str(),
+            "/v1/images/generations" | "/v1/images/edits"
+        )
+    {
+        return None;
+    }
+
+    if let Some(model) = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !model.eq_ignore_ascii_case("gpt-image-2") {
+            return Some(build_ai_public_error_response(
+                http::StatusCode::BAD_REQUEST,
+                OPENAI_IMAGE_MODEL_DETAIL,
+            ));
+        }
+    }
+
+    if let Some(n) = payload.get("n").and_then(image_request_count) {
+        if n != 1 {
+            return Some(build_ai_public_error_response(
+                http::StatusCode::BAD_REQUEST,
+                OPENAI_IMAGE_N_DETAIL,
+            ));
+        }
+    }
+
+    None
+}
+
+fn image_request_count(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))
+        .or_else(|| {
+            value
+                .as_str()
+                .and_then(|text| text.trim().parse::<u64>().ok())
+        })
 }
 
 fn maybe_build_local_ai_public_route_guard_response(

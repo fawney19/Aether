@@ -6,8 +6,8 @@ use crate::ai_pipeline::planner::plan_builders::{
 };
 use crate::ai_pipeline::{
     GatewayControlSyncDecisionResponse, LocalGeminiFilesSpec, LocalOpenAiCliSpec,
-    LocalSameFormatProviderFamily, LocalSameFormatProviderSpec, LocalStandardSourceFamily,
-    LocalStandardSpec, LocalVideoCreateFamily, LocalVideoCreateSpec,
+    LocalOpenAiImageSpec, LocalSameFormatProviderFamily, LocalSameFormatProviderSpec,
+    LocalStandardSourceFamily, LocalStandardSpec, LocalVideoCreateFamily, LocalVideoCreateSpec,
 };
 use crate::GatewayError;
 
@@ -74,6 +74,18 @@ pub(crate) fn local_gemini_files_spec_metadata(
         report_kind: spec.report_kind,
         require_streaming: spec.require_streaming,
         requested_model_family: None,
+    }
+}
+
+pub(crate) fn local_openai_image_spec_metadata(
+    spec: LocalOpenAiImageSpec,
+) -> LocalExecutionSurfaceSpecMetadata {
+    LocalExecutionSurfaceSpecMetadata {
+        api_format: spec.api_format,
+        decision_kind: spec.decision_kind,
+        report_kind: Some(spec.report_kind),
+        require_streaming: false,
+        requested_model_family: Some(RequestedModelFamily::Standard),
     }
 }
 

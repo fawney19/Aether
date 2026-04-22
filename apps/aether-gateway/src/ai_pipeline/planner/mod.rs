@@ -39,6 +39,7 @@ pub(crate) use self::plan_builders::{
 pub(crate) use self::specialized::{
     build_local_gemini_files_stream_plan_and_reports_for_kind,
     build_local_gemini_files_sync_plan_and_reports_for_kind,
+    build_local_image_sync_plan_and_reports_for_kind,
     build_local_video_sync_plan_and_reports_for_kind,
 };
 pub(crate) use self::standard::{

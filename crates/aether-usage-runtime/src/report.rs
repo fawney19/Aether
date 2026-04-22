@@ -87,6 +87,9 @@ pub fn infer_internal_finalize_signature(payload: &GatewaySyncReportRequest) -> 
     if report_kind.starts_with("openai_compact_") {
         return Some("openai:compact".to_string());
     }
+    if report_kind.starts_with("openai_image_") {
+        return Some("openai:image".to_string());
+    }
     if report_kind.starts_with("openai_cli_") {
         return Some("openai:cli".to_string());
     }
@@ -127,6 +130,11 @@ pub fn resolve_internal_finalize_route(signature: &str) -> Option<InternalFinali
             public_path: "/v1/responses/compact",
             route_family: "openai",
             route_kind: "compact",
+        }),
+        "openai:image" => Some(InternalFinalizeRoute {
+            public_path: "/v1/images/generations",
+            route_family: "openai",
+            route_kind: "image",
         }),
         "openai:video" => Some(InternalFinalizeRoute {
             public_path: "/v1/videos",
@@ -224,6 +232,7 @@ pub fn is_local_ai_sync_report_kind(report_kind: &str) -> bool {
             | "claude_chat_sync_error"
             | "gemini_chat_sync_error"
             | "openai_cli_sync_success"
+            | "openai_image_sync_success"
             | "claude_cli_sync_success"
             | "gemini_cli_sync_success"
             | "openai_cli_sync_error"
@@ -406,6 +415,7 @@ mod tests {
         assert!(is_local_ai_sync_report_kind(
             "openai_video_create_sync_success"
         ));
+        assert!(is_local_ai_sync_report_kind("openai_image_sync_success"));
         assert!(is_local_ai_sync_report_kind("gemini_files_delete_mapping"));
         assert!(!is_local_ai_sync_report_kind("unknown_sync_kind"));
     }
@@ -466,6 +476,13 @@ mod tests {
             Some("openai:video".to_string())
         );
 
+        let from_image_report_kind =
+            sample_sync_report_with_context("openai_image_sync_finalize", json!({}));
+        assert_eq!(
+            infer_internal_finalize_signature(&from_image_report_kind),
+            Some("openai:image".to_string())
+        );
+
         let unknown = sample_sync_report("unknown_sync_finalize", 200);
         assert_eq!(infer_internal_finalize_signature(&unknown), None);
     }
@@ -486,6 +503,14 @@ mod tests {
                 public_path: "/v1beta/models",
                 route_family: "gemini",
                 route_kind: "video",
+            })
+        );
+        assert_eq!(
+            resolve_internal_finalize_route("openai:image"),
+            Some(InternalFinalizeRoute {
+                public_path: "/v1/images/generations",
+                route_family: "openai",
+                route_kind: "image",
             })
         );
         assert_eq!(resolve_internal_finalize_route("unknown:kind"), None);
@@ -614,6 +639,15 @@ mod tests {
                 "key_id": "key-123"
             })),
             "openai_chat_sync_success"
+        ));
+        assert!(should_handle_local_sync_report(
+            Some(&json!({
+                "request_id": "req-123",
+                "provider_id": "provider-123",
+                "endpoint_id": "endpoint-123",
+                "key_id": "key-123"
+            })),
+            "openai_image_sync_success"
         ));
         assert!(!should_handle_local_sync_report(
             Some(&json!({"request_id": "req-123"})),

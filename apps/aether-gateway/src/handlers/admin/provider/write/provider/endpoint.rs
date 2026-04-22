@@ -20,12 +20,13 @@ pub(crate) fn build_admin_fixed_provider_endpoint_record(
         Some(provider.provider_type.as_str()),
     )
     .and_then(|(_, rules)| (!rules.is_empty()).then_some(serde_json::Value::Array(rules)));
-    let endpoint_config =
-        if provider.provider_type == "codex" && normalized_api_format == "openai:cli" {
-            Some(json!({ "upstream_stream_policy": "force_stream" }))
-        } else {
-            None
-        };
+    let endpoint_config = if provider.provider_type == "codex"
+        && matches!(normalized_api_format, "openai:cli" | "openai:image")
+    {
+        Some(json!({ "upstream_stream_policy": "force_stream" }))
+    } else {
+        None
+    };
     let now_unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()

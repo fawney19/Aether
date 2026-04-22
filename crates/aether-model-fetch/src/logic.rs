@@ -251,6 +251,7 @@ pub fn preset_models_for_provider(provider_type: &str) -> Option<Vec<Value>> {
         ],
         "codex" => vec![
             preset_model("gpt-5", "openai", "GPT-5", "openai:cli"),
+            preset_model("gpt-image-2", "openai", "GPT Image 2", "openai:image"),
             preset_model("gpt-5-codex", "openai", "GPT-5 Codex", "openai:cli"),
             preset_model("gpt-5-codex-mini", "openai", "GPT-5 Codex Mini", "openai:cli"),
             preset_model("gpt-5.1", "openai", "GPT-5.1", "openai:cli"),

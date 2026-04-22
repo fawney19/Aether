@@ -45,6 +45,20 @@ pub(crate) async fn maybe_build_sync_decision_payload(
         return Ok(Some(payload));
     }
 
+    if let Some(payload) = super::maybe_build_sync_local_image_decision_payload(
+        state,
+        parts,
+        body_json,
+        body_base64,
+        trace_id,
+        decision,
+        plan_kind,
+    )
+    .await?
+    {
+        return Ok(Some(payload));
+    }
+
     if let Some(payload) = super::maybe_build_sync_local_decision_payload(
         state, parts, trace_id, decision, body_json, plan_kind,
     )

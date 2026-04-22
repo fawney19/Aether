@@ -14,7 +14,7 @@ pub(crate) use super::passthrough::{
 pub(crate) use super::specialized::{
     maybe_build_stream_local_gemini_files_decision_payload,
     maybe_build_sync_local_gemini_files_decision_payload,
-    maybe_build_sync_local_video_decision_payload,
+    maybe_build_sync_local_image_decision_payload, maybe_build_sync_local_video_decision_payload,
 };
 pub(crate) use super::standard::{
     maybe_build_stream_local_decision_payload,

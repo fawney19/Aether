@@ -40,6 +40,9 @@ const CLIENT_ERROR_PATTERNS: &[&str] = &[
     "validationexception",
 ];
 
+const STRICT_CLIENT_ERROR_PATTERNS: &[&str] =
+    &["unknown parameter", "invalid model for this endpoint"];
+
 const COMPATIBILITY_ERROR_PATTERNS: &[&str] = &[
     "unsupported parameter",
     "unsupported model",
@@ -152,6 +155,10 @@ pub(crate) fn classify_local_failover(
 
     if is_semantic_thinking_error(input.status_code, &parsed_error) {
         return LocalFailoverClassification::RetrySemanticThinkingError;
+    }
+
+    if is_strict_semantic_client_error(input.status_code, &parsed_error) {
+        return LocalFailoverClassification::StopSemanticClientError;
     }
 
     if is_semantic_compatibility_error(input.status_code, &parsed_error) {
@@ -324,6 +331,18 @@ fn is_semantic_client_error(status_code: u16, parsed: &ParsedLocalErrorResponse)
             .any(|pattern| search_text.contains(&pattern.to_ascii_lowercase()))
 }
 
+fn is_strict_semantic_client_error(status_code: u16, parsed: &ParsedLocalErrorResponse) -> bool {
+    if status_code < 400 {
+        return false;
+    }
+
+    let search_text = semantic_search_text(parsed);
+    !search_text.is_empty()
+        && STRICT_CLIENT_ERROR_PATTERNS
+            .iter()
+            .any(|pattern| search_text.contains(&pattern.to_ascii_lowercase()))
+}
+
 fn is_semantic_compatibility_error(status_code: u16, parsed: &ParsedLocalErrorResponse) -> bool {
     if status_code < 400 {
         return false;
@@ -459,6 +478,34 @@ mod tests {
                 )
             ),
             LocalFailoverClassification::RetrySemanticCompatibilityError
+        );
+    }
+
+    #[test]
+    fn classifier_stops_unknown_parameter_errors_before_compatibility_retry() {
+        assert_eq!(
+            classify_local_failover(
+                &LocalFailoverPolicy::default(),
+                LocalFailoverInput::new(
+                    400,
+                    Some("{\"error\":{\"message\":\"Unknown parameter: 'tools[0].n'.\"}}")
+                )
+            ),
+            LocalFailoverClassification::StopSemanticClientError
+        );
+    }
+
+    #[test]
+    fn classifier_stops_invalid_model_for_endpoint_errors_before_compatibility_retry() {
+        assert_eq!(
+            classify_local_failover(
+                &LocalFailoverPolicy::default(),
+                LocalFailoverInput::new(
+                    400,
+                    Some("{\"error\":{\"message\":\"invalid model for this endpoint\"}}")
+                )
+            ),
+            LocalFailoverClassification::StopSemanticClientError
         );
     }
 

@@ -243,6 +243,8 @@ pub(crate) struct AdminProviderModelCreateRequest {
     #[serde(default)]
     pub(crate) supports_extended_thinking: Option<bool>,
     #[serde(default)]
+    pub(crate) supports_image_generation: Option<bool>,
+    #[serde(default)]
     pub(crate) is_active: Option<bool>,
     #[serde(default)]
     pub(crate) config: Option<serde_json::Value>,
@@ -271,6 +273,8 @@ pub(crate) struct AdminProviderModelUpdateRequest {
     pub(crate) supports_streaming: Option<bool>,
     #[serde(default)]
     pub(crate) supports_extended_thinking: Option<bool>,
+    #[serde(default)]
+    pub(crate) supports_image_generation: Option<bool>,
     #[serde(default)]
     pub(crate) is_active: Option<bool>,
     #[serde(default)]

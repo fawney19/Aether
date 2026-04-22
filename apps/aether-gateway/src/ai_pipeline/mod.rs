@@ -26,6 +26,7 @@ pub(crate) use self::planner::{
     build_gemini_stream_plan_from_decision, build_gemini_sync_plan_from_decision,
     build_local_gemini_files_stream_plan_and_reports_for_kind,
     build_local_gemini_files_sync_plan_and_reports_for_kind,
+    build_local_image_sync_plan_and_reports_for_kind,
     build_local_openai_chat_stream_plan_and_reports_for_kind,
     build_local_openai_chat_sync_plan_and_reports_for_kind,
     build_local_openai_cli_stream_plan_and_reports_for_kind,

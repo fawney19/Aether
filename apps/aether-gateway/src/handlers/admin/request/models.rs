@@ -120,6 +120,7 @@ impl<'a> AdminAppState<'a> {
             payload.supports_function_calling,
             payload.supports_streaming,
             payload.supports_extended_thinking,
+            payload.supports_image_generation,
             payload.is_active,
             config,
         )
@@ -225,6 +226,11 @@ impl<'a> AdminAppState<'a> {
                 payload.supports_extended_thinking
             } else {
                 existing.supports_extended_thinking
+            },
+            if fields.contains("supports_image_generation") {
+                payload.supports_image_generation
+            } else {
+                existing.supports_image_generation
             },
             payload.is_active.unwrap_or(existing.is_active),
             payload.is_available.unwrap_or(existing.is_available),

@@ -8,6 +8,10 @@ use sha2::Sha256;
 use uuid::Uuid;
 
 const CODEX_PROMPT_CACHE_NAMESPACE_VERSION: &str = "v3";
+const CODEX_DEFAULT_USER_AGENT: &str =
+    "codex-tui/0.122.0 (Aether; x86_64) vscode/3.0.12 (codex-tui; 0.122.0)";
+const CODEX_DEFAULT_VERSION: &str = "0.122.0";
+const CODEX_DEFAULT_ORIGINATOR: &str = "codex_cli_rs";
 const UUID_NAMESPACE_OID_BYTES: [u8; 16] = [
     0x6b, 0xa7, 0xb8, 0x12, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
 ];
@@ -16,7 +20,7 @@ fn is_codex_openai_cli_request(provider_type: &str, provider_api_format: &str) -
     provider_type.trim().eq_ignore_ascii_case("codex")
         && matches!(
             provider_api_format.trim().to_ascii_lowercase().as_str(),
-            "openai:cli" | "openai:compact"
+            "openai:cli" | "openai:compact" | "openai:image"
         )
 }
 
@@ -237,6 +241,30 @@ pub fn apply_codex_openai_cli_special_headers(
             provider_request_headers
                 .insert("x-client-request-id".to_string(), request_id.to_string());
         }
+    }
+
+    if !header_map_has_non_empty_value(original_headers, "user-agent")
+        && !btree_map_has_non_empty_value(provider_request_headers, "user-agent")
+    {
+        provider_request_headers.insert(
+            "user-agent".to_string(),
+            CODEX_DEFAULT_USER_AGENT.to_string(),
+        );
+    }
+
+    if !header_map_has_non_empty_value(original_headers, "version")
+        && !btree_map_has_non_empty_value(provider_request_headers, "version")
+    {
+        provider_request_headers.insert("version".to_string(), CODEX_DEFAULT_VERSION.to_string());
+    }
+
+    if !header_map_has_non_empty_value(original_headers, "originator")
+        && !btree_map_has_non_empty_value(provider_request_headers, "originator")
+    {
+        provider_request_headers.insert(
+            "originator".to_string(),
+            CODEX_DEFAULT_ORIGINATOR.to_string(),
+        );
     }
 
     let short_session_id = prompt_cache_key.and_then(build_short_codex_header_id);

@@ -1,6 +1,7 @@
 use crate::ai_pipeline::GatewayControlDecision;
 use crate::ai_pipeline::{build_generated_tool_call_id, canonicalize_tool_arguments};
 use crate::{usage::GatewaySyncReportRequest, GatewayError};
+use base64::Engine as _;
 
 pub(crate) use crate::ai_pipeline::finalize::common::{
     build_local_success_outcome, build_local_success_outcome_with_conversion_report,
@@ -25,6 +26,12 @@ pub(crate) fn maybe_build_local_core_sync_finalize_response(
     decision: &GatewayControlDecision,
     payload: &GatewaySyncReportRequest,
 ) -> Result<Option<LocalCoreSyncFinalizeOutcome>, GatewayError> {
+    if let Some(outcome) =
+        maybe_build_local_openai_image_sync_finalize_response(trace_id, decision, payload)?
+    {
+        return Ok(Some(outcome));
+    }
+
     let Some(normalized_payload) =
         crate::ai_pipeline::adaptation::private_envelope::maybe_normalize_provider_private_sync_report_payload(payload)?
     else {
@@ -74,6 +81,133 @@ pub(crate) fn maybe_build_local_core_sync_finalize_response(
             )?))
         }
     }
+}
+
+fn maybe_build_local_openai_image_sync_finalize_response(
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+    payload: &GatewaySyncReportRequest,
+) -> Result<Option<LocalCoreSyncFinalizeOutcome>, GatewayError> {
+    if payload.report_kind != "openai_image_sync_finalize" || payload.status_code >= 400 {
+        return Ok(None);
+    }
+    let Some(report_context) = payload.report_context.as_ref() else {
+        return Ok(None);
+    };
+    if report_context
+        .get("client_api_format")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        != Some("openai:image")
+    {
+        return Ok(None);
+    }
+    let Some(body_base64) = payload.body_base64.as_deref() else {
+        return Ok(None);
+    };
+    let body_bytes = base64::engine::general_purpose::STANDARD
+        .decode(body_base64)
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let text =
+        std::str::from_utf8(&body_bytes).map_err(|err| GatewayError::Internal(err.to_string()))?;
+
+    let mut created = None;
+    let mut completed_response = None;
+    let mut images = Vec::new();
+
+    for raw_block in text.split("\n\n") {
+        let block = raw_block.trim();
+        if block.is_empty() {
+            continue;
+        }
+        let data_line = block
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("data:").map(str::trim));
+        let Some(data_line) = data_line else {
+            continue;
+        };
+        if data_line.is_empty() || data_line == "[DONE]" {
+            continue;
+        }
+        let event: serde_json::Value = serde_json::from_str(data_line)
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        match event
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+        {
+            "response.created" => {
+                created = event
+                    .get("response")
+                    .and_then(|value| value.get("created_at"))
+                    .and_then(serde_json::Value::as_i64)
+                    .or(created);
+            }
+            "response.output_item.done" => {
+                let Some(item) = event.get("item").and_then(serde_json::Value::as_object) else {
+                    continue;
+                };
+                if item.get("type").and_then(serde_json::Value::as_str)
+                    != Some("image_generation_call")
+                {
+                    continue;
+                }
+                let Some(result) = item.get("result").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                images.push(serde_json::json!({
+                    "b64_json": result,
+                    "revised_prompt": item.get("revised_prompt").cloned().unwrap_or(serde_json::Value::Null),
+                }));
+            }
+            "response.completed" => {
+                completed_response = event
+                    .get("response")
+                    .and_then(serde_json::Value::as_object)
+                    .cloned();
+            }
+            _ => {}
+        }
+    }
+
+    if images.is_empty() {
+        return Ok(None);
+    }
+
+    let completed_response = completed_response.unwrap_or_default();
+    let provider_usage = completed_response
+        .get("tool_usage")
+        .and_then(|value| value.get("image_gen"))
+        .cloned()
+        .or_else(|| completed_response.get("usage").cloned());
+    let provider_body_json = serde_json::json!({
+        "id": completed_response.get("id").cloned().unwrap_or(serde_json::Value::Null),
+        "object": "response",
+        "model": completed_response.get("model").cloned().unwrap_or(serde_json::Value::Null),
+        "status": completed_response.get("status").cloned().unwrap_or(serde_json::Value::String("completed".to_string())),
+        "usage": provider_usage,
+        "tool_usage": completed_response.get("tool_usage").cloned().unwrap_or(serde_json::Value::Null),
+        "output": images
+            .iter()
+            .map(|image| serde_json::json!({
+                "type": "image_generation_call",
+                "revised_prompt": image.get("revised_prompt").cloned().unwrap_or(serde_json::Value::Null),
+            }))
+            .collect::<Vec<_>>(),
+    });
+    let client_body_json = serde_json::json!({
+        "created": created.unwrap_or_default(),
+        "data": images,
+        "usage": provider_body_json.get("usage").cloned().unwrap_or(serde_json::Value::Null),
+    });
+
+    Ok(Some(build_local_success_outcome_with_conversion_report(
+        trace_id,
+        decision,
+        payload,
+        client_body_json,
+        provider_body_json,
+    )?))
 }
 
 #[cfg(test)]

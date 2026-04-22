@@ -7,7 +7,7 @@ use crate::ai_pipeline::planner::common::{
     GEMINI_FILES_GET_PLAN_KIND, GEMINI_FILES_LIST_PLAN_KIND, GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND,
     GEMINI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_CHAT_SYNC_PLAN_KIND,
     OPENAI_CLI_STREAM_PLAN_KIND, OPENAI_CLI_SYNC_PLAN_KIND, OPENAI_COMPACT_STREAM_PLAN_KIND,
-    OPENAI_COMPACT_SYNC_PLAN_KIND, OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND,
+    OPENAI_COMPACT_SYNC_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND, OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND,
     OPENAI_VIDEO_CONTENT_PLAN_KIND, OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND,
     OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND, OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
 };
@@ -91,6 +91,7 @@ fn build_sync_plan_payload_from_decision(
         OPENAI_CLI_SYNC_PLAN_KIND => {
             build_openai_cli_sync_plan_from_decision(parts, body_json, payload, false)?
         }
+        OPENAI_IMAGE_SYNC_PLAN_KIND => build_passthrough_sync_plan_from_decision(parts, payload)?,
         OPENAI_COMPACT_SYNC_PLAN_KIND => {
             build_openai_cli_sync_plan_from_decision(parts, body_json, payload, true)?
         }

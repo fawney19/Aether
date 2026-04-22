@@ -30,6 +30,19 @@ pub(super) fn classify_ai_public_route(
         } else {
             Some(classified("ai_public", "openai", "cli", "openai:cli", true))
         }
+    } else if method == http::Method::POST
+        && matches!(
+            normalized_path,
+            "/v1/images/generations" | "/v1/images/edits"
+        )
+    {
+        Some(classified(
+            "ai_public",
+            "openai",
+            "image",
+            "openai:image",
+            true,
+        ))
     } else if method == http::Method::POST && normalized_path == "/v1/messages/count_tokens" {
         Some(classified(
             "ai_public",

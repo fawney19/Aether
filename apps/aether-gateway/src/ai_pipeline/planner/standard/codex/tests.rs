@@ -124,6 +124,12 @@ fn injects_chatgpt_account_id_and_session_headers_for_codex_requests() {
         Some(&"trace-codex-123".to_string())
     );
     assert_eq!(
+        headers.get("user-agent"),
+        Some(&"codex-tui/0.122.0 (Aether; x86_64) vscode/3.0.12 (codex-tui; 0.122.0)".to_string())
+    );
+    assert_eq!(headers.get("version"), Some(&"0.122.0".to_string()));
+    assert_eq!(headers.get("originator"), Some(&"codex_cli_rs".to_string()));
+    assert_eq!(
         headers.get("session_id"),
         Some(&"ab5ecce4f0d110fe".to_string())
     );
@@ -158,6 +164,18 @@ fn respects_existing_codex_request_and_session_headers() {
         "conversation_id",
         HeaderValue::from_static("user-specified-conversation"),
     );
+    original_headers.insert(
+        "user-agent",
+        HeaderValue::from_static("user-specified-agent"),
+    );
+    original_headers.insert(
+        "version",
+        HeaderValue::from_static("user-specified-version"),
+    );
+    original_headers.insert(
+        "originator",
+        HeaderValue::from_static("user-specified-originator"),
+    );
 
     apply_codex_openai_cli_special_headers(
         &mut headers,
@@ -173,6 +191,9 @@ fn respects_existing_codex_request_and_session_headers() {
         headers.get("x-client-request-id"),
         Some(&"kept-by-rule-request".to_string())
     );
+    assert!(!headers.contains_key("user-agent"));
+    assert!(!headers.contains_key("version"));
+    assert!(!headers.contains_key("originator"));
     assert_eq!(headers.get("session_id"), Some(&"kept-by-rule".to_string()));
     assert!(!headers.contains_key("conversation_id"));
 }
@@ -203,6 +224,12 @@ fn skips_conversation_id_for_compact_codex_requests() {
         headers.get("x-client-request-id"),
         Some(&"trace-codex-compact-123".to_string())
     );
+    assert_eq!(
+        headers.get("user-agent"),
+        Some(&"codex-tui/0.122.0 (Aether; x86_64) vscode/3.0.12 (codex-tui; 0.122.0)".to_string())
+    );
+    assert_eq!(headers.get("version"), Some(&"0.122.0".to_string()));
+    assert_eq!(headers.get("originator"), Some(&"codex_cli_rs".to_string()));
     assert_eq!(
         headers.get("session_id"),
         Some(&"ab5ecce4f0d110fe".to_string())
