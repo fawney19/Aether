@@ -85,7 +85,7 @@ fn sample_standalone_export_record(
     plaintext_key: &str,
     is_active: bool,
 ) -> StoredAuthApiKeyExportRecord {
-    StoredAuthApiKeyExportRecord::new(
+    let mut record = StoredAuthApiKeyExportRecord::new(
         user_id.to_string(),
         api_key_id.to_string(),
         format!("hash-{api_key_id}"),
@@ -108,7 +108,11 @@ fn sample_standalone_export_record(
         1.25,
         true,
     )
-    .expect("export record should build")
+    .expect("export record should build");
+    record.created_at_unix_secs = Some(1_711_000_100);
+    record.updated_at_unix_secs = Some(1_711_000_101);
+    record.last_used_at_unix_secs = Some(1_711_000_102);
+    record
 }
 
 fn sample_standalone_wallet(api_key_id: &str) -> StoredWalletSnapshot {
@@ -236,9 +240,14 @@ async fn gateway_handles_admin_api_keys_list_locally_with_trusted_admin_principa
         json!("sk-key-1-p...text")
     );
     assert_eq!(payload["api_keys"][0]["total_requests"], json!(7));
+    assert_eq!(payload["api_keys"][0]["total_tokens"], json!(0));
     assert_eq!(
-        payload["api_keys"][0]["total_tokens"],
-        serde_json::Value::Null
+        payload["api_keys"][0]["created_at"],
+        json!("2024-03-21T05:48:20+00:00")
+    );
+    assert_eq!(
+        payload["api_keys"][0]["last_used_at"],
+        json!("2024-03-21T05:48:22+00:00")
     );
     assert_eq!(
         payload["api_keys"][0]["wallet"]["id"],
@@ -255,17 +264,14 @@ async fn gateway_handles_admin_api_keys_list_locally_with_trusted_admin_principa
 async fn gateway_handles_admin_api_keys_detail_locally_with_trusted_admin_principal() {
     let (upstream_url, upstream_hits, upstream_handle) =
         start_api_keys_upstream("/api/admin/api-keys/key-1").await;
+    let mut export = sample_standalone_export_record("key-1", "user-1", "sk-key-1-plaintext", true);
+    export.total_tokens = 77;
     let auth_repository = Arc::new(
         InMemoryAuthApiKeySnapshotRepository::seed(vec![(
             None,
             sample_standalone_api_key_snapshot("key-1", "user-1", true),
         )])
-        .with_export_records([sample_standalone_export_record(
-            "key-1",
-            "user-1",
-            "sk-key-1-plaintext",
-            true,
-        )]),
+        .with_export_records([export]),
     );
     let wallet_repository = Arc::new(InMemoryWalletRepository::seed(vec![
         sample_standalone_wallet("key-1"),
@@ -302,7 +308,9 @@ async fn gateway_handles_admin_api_keys_detail_locally_with_trusted_admin_princi
     assert_eq!(payload["wallet"]["unlimited"], json!(true));
     assert_eq!(payload["wallet"]["balance"], json!(20.0));
     assert_eq!(payload["key_display"], json!("sk-key-1-p...text"));
-    assert_eq!(payload["total_tokens"], json!(150));
+    assert_eq!(payload["total_tokens"], json!(77));
+    assert_eq!(payload["created_at"], json!("2024-03-21T05:48:20+00:00"));
+    assert_eq!(payload["last_used_at"], json!("2024-03-21T05:48:22+00:00"));
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -313,17 +321,14 @@ async fn gateway_handles_admin_api_keys_detail_locally_with_trusted_admin_princi
 async fn gateway_includes_usage_summary_when_admin_api_keys_list_requests_it() {
     let (_upstream_url, _upstream_hits, upstream_handle) =
         start_api_keys_upstream("/api/admin/api-keys").await;
+    let mut export = sample_standalone_export_record("key-1", "user-1", "sk-key-1-plaintext", true);
+    export.total_tokens = 42;
     let auth_repository = Arc::new(
         InMemoryAuthApiKeySnapshotRepository::seed(vec![(
             None,
             sample_standalone_api_key_snapshot("key-1", "user-1", true),
         )])
-        .with_export_records([sample_standalone_export_record(
-            "key-1",
-            "user-1",
-            "sk-key-1-plaintext",
-            true,
-        )]),
+        .with_export_records([export]),
     );
     let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![sample_usage_row(
         "usage-1", "req-1", "key-1", 90,
@@ -353,7 +358,7 @@ async fn gateway_includes_usage_summary_when_admin_api_keys_list_requests_it() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["api_keys"][0]["total_tokens"], json!(90));
+    assert_eq!(payload["api_keys"][0]["total_tokens"], json!(42));
 
     gateway_handle.abort();
     upstream_handle.abort();

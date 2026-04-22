@@ -1,9 +1,8 @@
 use super::shared::{
-    admin_api_key_total_tokens_by_ids, admin_api_keys_id_from_path, admin_api_keys_operator_id,
-    build_admin_api_key_detail_payload, build_admin_api_keys_bad_request_response,
-    build_admin_api_keys_data_unavailable_response, build_admin_api_keys_not_found_response,
-    AdminStandaloneApiKeyCreateRequest, AdminStandaloneApiKeyToggleRequest,
-    AdminStandaloneApiKeyUpdatePatch,
+    admin_api_keys_id_from_path, admin_api_keys_operator_id, build_admin_api_key_detail_payload,
+    build_admin_api_keys_bad_request_response, build_admin_api_keys_data_unavailable_response,
+    build_admin_api_keys_not_found_response, AdminStandaloneApiKeyCreateRequest,
+    AdminStandaloneApiKeyToggleRequest, AdminStandaloneApiKeyUpdatePatch,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
@@ -396,14 +395,7 @@ pub(super) async fn build_admin_update_api_key_response(
             ))
             .await?;
     }
-    let total_tokens_by_api_key_id =
-        admin_api_key_total_tokens_by_ids(state, std::slice::from_ref(&api_key_id)).await?;
-    let total_tokens = total_tokens_by_api_key_id
-        .get(&api_key_id)
-        .copied()
-        .unwrap_or(0);
-    let mut payload =
-        build_admin_api_key_detail_payload(state, &updated, total_tokens, wallet.as_ref());
+    let mut payload = build_admin_api_key_detail_payload(state, &updated, wallet.as_ref());
     payload["message"] = json!("API密钥已更新");
     Ok(attach_admin_audit_response(
         Json(payload).into_response(),

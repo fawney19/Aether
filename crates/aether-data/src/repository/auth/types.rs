@@ -268,6 +268,9 @@ pub struct StoredAuthApiKeyExportRecord {
     pub total_requests: u64,
     pub total_tokens: u64,
     pub total_cost_usd: f64,
+    pub last_used_at_unix_secs: Option<u64>,
+    pub created_at_unix_secs: Option<u64>,
+    pub updated_at_unix_secs: Option<u64>,
     pub is_standalone: bool,
 }
 
@@ -337,8 +340,29 @@ impl StoredAuthApiKeyExportRecord {
             total_requests: parse_u64_i64(total_requests, "api_keys.total_requests")?,
             total_tokens: parse_u64_i64(total_tokens, "api_keys.total_tokens")?,
             total_cost_usd,
+            last_used_at_unix_secs: None,
+            created_at_unix_secs: None,
+            updated_at_unix_secs: None,
             is_standalone,
         })
+    }
+
+    pub fn with_activity_timestamps(
+        mut self,
+        last_used_at_unix_secs: Option<i64>,
+        created_at_unix_secs: Option<i64>,
+        updated_at_unix_secs: Option<i64>,
+    ) -> Result<Self, crate::DataLayerError> {
+        self.last_used_at_unix_secs = last_used_at_unix_secs
+            .map(|value| parse_u64_i64(value, "api_keys.last_used_at_unix_secs"))
+            .transpose()?;
+        self.created_at_unix_secs = created_at_unix_secs
+            .map(|value| parse_u64_i64(value, "api_keys.created_at_unix_secs"))
+            .transpose()?;
+        self.updated_at_unix_secs = updated_at_unix_secs
+            .map(|value| parse_u64_i64(value, "api_keys.updated_at_unix_secs"))
+            .transpose()?;
+        Ok(self)
     }
 }
 

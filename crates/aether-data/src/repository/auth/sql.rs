@@ -152,6 +152,9 @@ SELECT
   api_keys.total_requests,
   COALESCE(api_keys.total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(api_keys.total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  CAST(EXTRACT(EPOCH FROM api_keys.last_used_at) AS BIGINT) AS last_used_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM api_keys.created_at) AS BIGINT) AS created_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM api_keys.updated_at) AS BIGINT) AS updated_at_unix_secs,
   api_keys.is_standalone
 FROM api_keys
 WHERE api_keys.user_id = ANY($1::TEXT[])
@@ -178,6 +181,9 @@ SELECT
   api_keys.total_requests,
   COALESCE(api_keys.total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(api_keys.total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  CAST(EXTRACT(EPOCH FROM api_keys.last_used_at) AS BIGINT) AS last_used_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM api_keys.created_at) AS BIGINT) AS created_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM api_keys.updated_at) AS BIGINT) AS updated_at_unix_secs,
   api_keys.is_standalone
 FROM api_keys
 WHERE api_keys.id = ANY($1::TEXT[])
@@ -203,6 +209,9 @@ SELECT
   api_keys.total_requests,
   COALESCE(api_keys.total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(api_keys.total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  CAST(EXTRACT(EPOCH FROM api_keys.last_used_at) AS BIGINT) AS last_used_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM api_keys.created_at) AS BIGINT) AS created_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM api_keys.updated_at) AS BIGINT) AS updated_at_unix_secs,
   api_keys.is_standalone
 FROM api_keys
 WHERE LOWER(COALESCE(api_keys.name, '')) LIKE $1
@@ -228,6 +237,9 @@ SELECT
   api_keys.total_requests,
   COALESCE(api_keys.total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(api_keys.total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  CAST(EXTRACT(EPOCH FROM api_keys.last_used_at) AS BIGINT) AS last_used_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM api_keys.created_at) AS BIGINT) AS created_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM api_keys.updated_at) AS BIGINT) AS updated_at_unix_secs,
   api_keys.is_standalone
 FROM api_keys
 WHERE api_keys.is_standalone = TRUE
@@ -253,6 +265,9 @@ SELECT
   api_keys.total_requests,
   COALESCE(api_keys.total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(api_keys.total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  CAST(EXTRACT(EPOCH FROM api_keys.last_used_at) AS BIGINT) AS last_used_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM api_keys.created_at) AS BIGINT) AS created_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM api_keys.updated_at) AS BIGINT) AS updated_at_unix_secs,
   api_keys.is_standalone
 FROM api_keys
 WHERE api_keys.is_standalone = TRUE
@@ -322,6 +337,9 @@ SELECT
   api_keys.total_requests,
   COALESCE(api_keys.total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(api_keys.total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  CAST(EXTRACT(EPOCH FROM api_keys.last_used_at) AS BIGINT) AS last_used_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM api_keys.created_at) AS BIGINT) AS created_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM api_keys.updated_at) AS BIGINT) AS updated_at_unix_secs,
   api_keys.is_standalone
 FROM api_keys
 WHERE api_keys.is_standalone = TRUE
@@ -400,6 +418,9 @@ RETURNING
   total_requests,
   COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
   is_standalone
 "#;
 
@@ -468,6 +489,9 @@ RETURNING
   total_requests,
   COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
   is_standalone
 "#;
 
@@ -499,6 +523,9 @@ RETURNING
   total_requests,
   COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
   is_standalone
 "#;
 
@@ -534,6 +561,9 @@ RETURNING
   total_requests,
   COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
   is_standalone
 "#;
 
@@ -563,6 +593,9 @@ RETURNING
   total_requests,
   COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
   is_standalone
 "#;
 
@@ -591,6 +624,9 @@ RETURNING
   total_requests,
   COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
   is_standalone
 "#;
 
@@ -630,6 +666,9 @@ RETURNING
   total_requests,
   COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
   is_standalone
 "#;
 
@@ -659,6 +698,9 @@ RETURNING
   total_requests,
   COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
   COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
+  CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_secs,
+  CAST(EXTRACT(EPOCH FROM updated_at) AS BIGINT) AS updated_at_unix_secs,
   is_standalone
 "#;
 
@@ -1397,6 +1439,13 @@ fn map_auth_api_key_export_row(
         row_get(row, "total_cost_usd")?,
         row_get(row, "is_standalone")?,
     )
+    .and_then(|record| {
+        record.with_activity_timestamps(
+            row_get(row, "last_used_at_unix_secs")?,
+            row_get(row, "created_at_unix_secs")?,
+            row_get(row, "updated_at_unix_secs")?,
+        )
+    })
 }
 
 #[cfg(test)]
