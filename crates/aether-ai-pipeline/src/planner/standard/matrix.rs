@@ -1,10 +1,9 @@
 use std::borrow::Cow;
 
-use aether_provider_transport::url::{
-    build_claude_messages_url, build_gemini_content_url, build_openai_chat_url,
-    build_openai_cli_url, build_passthrough_path_url,
+use aether_provider_transport::{
+    apply_local_body_rules, build_transport_request_url, GatewayProviderTransportSnapshot,
+    TransportRequestUrlParams,
 };
-use aether_provider_transport::{apply_local_body_rules, GatewayProviderTransportSnapshot};
 use serde_json::Value;
 
 use crate::conversion::request::{
@@ -136,45 +135,16 @@ pub fn build_standard_upstream_url(
     provider_api_format: &str,
     upstream_is_stream: bool,
 ) -> Option<String> {
-    let custom_path = transport
-        .endpoint
-        .custom_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-
-    match custom_path {
-        Some(path) => {
-            build_passthrough_path_url(&transport.endpoint.base_url, path, parts.uri.query(), &[])
-        }
-        None => match provider_api_format.trim().to_ascii_lowercase().as_str() {
-            "openai:chat" => Some(build_openai_chat_url(
-                &transport.endpoint.base_url,
-                parts.uri.query(),
-            )),
-            "openai:cli" => Some(build_openai_cli_url(
-                &transport.endpoint.base_url,
-                parts.uri.query(),
-                false,
-            )),
-            "openai:compact" => Some(build_openai_cli_url(
-                &transport.endpoint.base_url,
-                parts.uri.query(),
-                true,
-            )),
-            "claude:chat" | "claude:cli" => Some(build_claude_messages_url(
-                &transport.endpoint.base_url,
-                parts.uri.query(),
-            )),
-            "gemini:chat" | "gemini:cli" => build_gemini_content_url(
-                &transport.endpoint.base_url,
-                mapped_model,
-                upstream_is_stream,
-                parts.uri.query(),
-            ),
-            _ => None,
+    build_transport_request_url(
+        transport,
+        TransportRequestUrlParams {
+            provider_api_format,
+            mapped_model: Some(mapped_model),
+            upstream_is_stream,
+            request_query: parts.uri.query(),
+            kiro_api_region: None,
         },
-    }
+    )
 }
 
 #[cfg(test)]

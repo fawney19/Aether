@@ -17,6 +17,9 @@ pub struct SchedulerRequestCandidateReportContext {
     pub key_id: Option<String>,
     pub client_api_format: Option<String>,
     pub provider_api_format: Option<String>,
+    pub upstream_url: Option<String>,
+    pub mapped_model: Option<String>,
+    pub key_name: Option<String>,
     pub proxy: Option<Value>,
 }
 
@@ -103,6 +106,9 @@ pub fn parse_request_candidate_report_context(
         key_id: string_field(report_context, "key_id"),
         client_api_format: string_field(report_context, "client_api_format"),
         provider_api_format: string_field(report_context, "provider_api_format"),
+        upstream_url: string_field(report_context, "upstream_url"),
+        mapped_model: string_field(report_context, "mapped_model"),
+        key_name: string_field(report_context, "key_name"),
         proxy: report_context
             .get("proxy")
             .cloned()
@@ -129,11 +135,20 @@ pub fn resolve_report_request_candidate_slot(
         key_id,
         client_api_format,
         provider_api_format,
+        upstream_url,
+        mapped_model,
+        key_name,
         proxy,
     } = metadata;
     let request_id = request_id?;
-    let synthesized_extra_data =
-        build_report_candidate_extra_data(client_api_format, provider_api_format, proxy);
+    let synthesized_extra_data = build_report_candidate_extra_data(
+        client_api_format,
+        provider_api_format,
+        upstream_url,
+        mapped_model,
+        key_name,
+        proxy,
+    );
     let created_at_unix_ms = matched_candidate
         .as_ref()
         .map(|candidate| candidate.created_at_unix_ms)
@@ -489,9 +504,12 @@ fn next_candidate_index(candidates: &[StoredRequestCandidate]) -> u32 {
 fn build_report_candidate_extra_data(
     client_api_format: Option<String>,
     provider_api_format: Option<String>,
+    upstream_url: Option<String>,
+    mapped_model: Option<String>,
+    key_name: Option<String>,
     proxy: Option<Value>,
 ) -> Option<Value> {
-    let mut extra_data = Map::with_capacity(5);
+    let mut extra_data = Map::with_capacity(8);
     extra_data.insert("gateway_execution_runtime".to_string(), Value::Bool(true));
     extra_data.insert("phase".to_string(), Value::String("3c_trial".to_string()));
     if let Some(client_api_format) = client_api_format {
@@ -505,6 +523,15 @@ fn build_report_candidate_extra_data(
             "provider_api_format".to_string(),
             Value::String(provider_api_format),
         );
+    }
+    if let Some(upstream_url) = upstream_url {
+        extra_data.insert("upstream_url".to_string(), Value::String(upstream_url));
+    }
+    if let Some(mapped_model) = mapped_model {
+        extra_data.insert("mapped_model".to_string(), Value::String(mapped_model));
+    }
+    if let Some(key_name) = key_name {
+        extra_data.insert("key_name".to_string(), Value::String(key_name));
     }
     if let Some(proxy) = proxy {
         extra_data.insert("proxy".to_string(), proxy);

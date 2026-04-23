@@ -10,6 +10,7 @@ mod network;
 pub mod oauth_refresh;
 pub mod policy;
 pub mod provider_types;
+mod request_url;
 pub mod rules;
 pub mod snapshot;
 pub mod url;
@@ -40,6 +41,7 @@ pub use policy::{
     local_standard_transport_unsupported_reason_with_network, supports_local_gemini_transport,
     supports_local_gemini_transport_with_network, supports_local_standard_transport,
 };
+pub use request_url::{build_transport_request_url, TransportRequestUrlParams};
 pub use rules::{
     apply_local_body_rules, apply_local_header_rules, body_rules_are_locally_supported,
     body_rules_handle_path, header_rules_are_locally_supported,
@@ -48,6 +50,7 @@ pub use snapshot::{
     read_provider_transport_snapshot, GatewayProviderTransportSnapshot,
     ProviderTransportSnapshotSource,
 };
+pub use vertex::{is_vertex_api_key_transport_context, uses_vertex_api_key_query_auth};
 pub use video::{
     reconstruct_local_video_task_snapshot, resolve_local_video_task_transport,
     VideoTaskTransportSnapshotLookup,

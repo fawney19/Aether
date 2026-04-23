@@ -28,6 +28,7 @@ use crate::ai_pipeline::transport::auth::{
     resolve_local_openai_bearer_auth, resolve_local_standard_auth,
 };
 use crate::ai_pipeline::transport::local_standard_transport_unsupported_reason_with_network;
+use crate::ai_pipeline::transport::vertex::uses_vertex_api_key_query_auth;
 use crate::ai_pipeline::{ConversionMode, ExecutionStrategy};
 use crate::ai_pipeline::{GatewayProviderTransportSnapshot, PlannerAppState};
 use crate::AppState;
@@ -267,6 +268,7 @@ pub(crate) async fn resolve_local_openai_cli_candidate_payload_parts(
         .await;
         return None;
     };
+    let uses_vertex_query_auth = uses_vertex_api_key_query_auth(transport, provider_api_format);
 
     let extra_headers = antigravity_auth
         .as_ref()
@@ -297,10 +299,15 @@ pub(crate) async fn resolve_local_openai_cli_candidate_payload_parts(
             Some("application/json"),
         )
     };
+    let protected_headers = if uses_vertex_query_auth {
+        &["content-type"][..]
+    } else {
+        &[auth_header.as_str(), "content-type"][..]
+    };
     if !apply_local_header_rules(
         &mut provider_request_headers,
         transport.endpoint.header_rules.as_ref(),
-        &[&auth_header, "content-type"],
+        protected_headers,
         &provider_request_body,
         Some(body_json),
     ) {
@@ -325,7 +332,13 @@ pub(crate) async fn resolve_local_openai_cli_candidate_payload_parts(
         Some(trace_id),
         transport.key.decrypted_auth_config.as_deref(),
     );
-    ensure_upstream_auth_header(&mut provider_request_headers, &auth_header, &auth_value);
+    let (auth_header, auth_value) = if uses_vertex_query_auth {
+        provider_request_headers.remove("x-goog-api-key");
+        (String::new(), String::new())
+    } else {
+        ensure_upstream_auth_header(&mut provider_request_headers, &auth_header, &auth_value);
+        (auth_header, auth_value)
+    };
     if upstream_is_stream {
         provider_request_headers
             .entry("accept".to_string())

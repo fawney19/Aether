@@ -13,6 +13,7 @@ use crate::ai_pipeline::transport::apply_local_header_rules;
 use crate::ai_pipeline::transport::auth::{
     build_claude_passthrough_headers, build_openai_passthrough_headers, ensure_upstream_auth_header,
 };
+use crate::ai_pipeline::transport::vertex::uses_vertex_api_key_query_auth;
 use crate::ai_pipeline::GatewayProviderTransportSnapshot;
 use crate::AppState;
 
@@ -155,6 +156,7 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
             return None;
         }
     };
+    let uses_vertex_query_auth = uses_vertex_api_key_query_auth(transport, provider_api_format);
 
     let mut provider_request_headers = if provider_api_format.starts_with("claude:") {
         build_claude_passthrough_headers(
@@ -173,10 +175,15 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
             Some("application/json"),
         )
     };
+    let protected_headers = if uses_vertex_query_auth {
+        &["content-type"][..]
+    } else {
+        &[prepared_candidate.auth_header.as_str(), "content-type"][..]
+    };
     if !apply_local_header_rules(
         &mut provider_request_headers,
         transport.endpoint.header_rules.as_ref(),
-        &[&prepared_candidate.auth_header, "content-type"],
+        protected_headers,
         &provider_request_body,
         Some(body_json),
     ) {
@@ -201,11 +208,20 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
         Some(trace_id),
         transport.key.decrypted_auth_config.as_deref(),
     );
-    ensure_upstream_auth_header(
-        &mut provider_request_headers,
-        &prepared_candidate.auth_header,
-        &prepared_candidate.auth_value,
-    );
+    let (auth_header, auth_value) = if uses_vertex_query_auth {
+        provider_request_headers.remove("x-goog-api-key");
+        (String::new(), String::new())
+    } else {
+        ensure_upstream_auth_header(
+            &mut provider_request_headers,
+            &prepared_candidate.auth_header,
+            &prepared_candidate.auth_value,
+        );
+        (
+            prepared_candidate.auth_header.clone(),
+            prepared_candidate.auth_value.clone(),
+        )
+    };
     if upstream_is_stream {
         provider_request_headers
             .entry("accept".to_string())
@@ -213,8 +229,8 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
     }
 
     Some(LocalStandardCandidatePayloadParts {
-        auth_header: prepared_candidate.auth_header,
-        auth_value: prepared_candidate.auth_value,
+        auth_header,
+        auth_value,
         mapped_model: prepared_candidate.mapped_model,
         provider_api_format: provider_api_format.to_string(),
         provider_request_body,

@@ -11,12 +11,7 @@ pub struct VertexApiKeyQueryAuth {
 pub fn resolve_local_vertex_api_key_query_auth(
     transport: &GatewayProviderTransportSnapshot,
 ) -> Option<VertexApiKeyQueryAuth> {
-    if !transport
-        .provider
-        .provider_type
-        .trim()
-        .eq_ignore_ascii_case(super::PROVIDER_TYPE)
-    {
+    if !super::is_vertex_api_key_transport_context(transport) {
         return None;
     }
 
@@ -126,5 +121,16 @@ mod tests {
         let mut transport = sample_transport();
         transport.key.decrypted_auth_config = Some("{\"project_id\":\"demo-project\"}".to_string());
         assert!(resolve_local_vertex_api_key_query_auth(&transport).is_none());
+    }
+
+    #[test]
+    fn resolves_query_auth_for_custom_aiplatform_transport() {
+        let mut transport = sample_transport();
+        transport.provider.provider_type = "custom".to_string();
+        transport.endpoint.api_format = "gemini:cli".to_string();
+
+        let auth = resolve_local_vertex_api_key_query_auth(&transport)
+            .expect("custom aiplatform transport should resolve");
+        assert_eq!(auth.value, "vertex-secret");
     }
 }

@@ -1,9 +1,13 @@
 mod auth;
+mod context;
 mod policy;
 mod url;
 
 pub use auth::{
     resolve_local_vertex_api_key_query_auth, VertexApiKeyQueryAuth, VERTEX_API_KEY_QUERY_PARAM,
+};
+pub use context::{
+    is_vertex_api_key_transport_context, looks_like_vertex_ai_host, uses_vertex_api_key_query_auth,
 };
 pub use policy::{
     local_vertex_api_key_gemini_transport_unsupported_reason_with_network,

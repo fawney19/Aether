@@ -13,7 +13,7 @@ use crate::planner::openai::{
 pub fn convert_openai_chat_request_to_gemini_request(
     body_json: &Value,
     mapped_model: &str,
-    upstream_is_stream: bool,
+    _upstream_is_stream: bool,
 ) -> Option<Value> {
     let request = body_json.as_object()?;
     let mut system_segments = Vec::new();
@@ -76,7 +76,7 @@ pub fn convert_openai_chat_request_to_gemini_request(
                                 parse_openai_tool_arguments(function.get("arguments"))?;
                             tool_name_by_id.insert(tool_call_id.clone(), tool_name.clone());
                             parts.push(json!({
-                                "functionCall": {
+                                "function_call": {
                                     "name": tool_name,
                                     "args": tool_input,
                                     "id": tool_call_id,
@@ -107,7 +107,7 @@ pub fn convert_openai_chat_request_to_gemini_request(
                     contents.push(json!({
                         "role": "user",
                         "parts": [{
-                            "functionResponse": {
+                            "function_response": {
                                 "name": tool_name,
                                 "id": tool_use_id,
                                 "response": {
@@ -123,14 +123,16 @@ pub fn convert_openai_chat_request_to_gemini_request(
     }
 
     let mut output = Map::new();
-    output.insert("model".to_string(), Value::String(mapped_model.to_string()));
+    if !mapped_model.trim().is_empty() {
+        output.insert(
+            "model".to_string(),
+            Value::String(mapped_model.trim().to_string()),
+        );
+    }
     output.insert(
         "contents".to_string(),
         Value::Array(compact_gemini_contents(contents)),
     );
-    if upstream_is_stream {
-        output.insert("stream".to_string(), Value::Bool(true));
-    }
     let system_text = system_segments
         .into_iter()
         .filter(|value| !value.trim().is_empty())
@@ -138,7 +140,7 @@ pub fn convert_openai_chat_request_to_gemini_request(
         .join("\n\n");
     if !system_text.is_empty() {
         output.insert(
-            "systemInstruction".to_string(),
+            "system_instruction".to_string(),
             json!({ "parts": [{ "text": system_text }] }),
         );
     }
@@ -149,7 +151,7 @@ pub fn convert_openai_chat_request_to_gemini_request(
         .and_then(value_as_u64)
         .or_else(|| request.get("max_tokens").and_then(value_as_u64))
     {
-        generation_config.insert("maxOutputTokens".to_string(), Value::from(max_tokens));
+        generation_config.insert("max_output_tokens".to_string(), Value::from(max_tokens));
     }
     copy_request_number_field_as(
         request,
@@ -157,8 +159,8 @@ pub fn convert_openai_chat_request_to_gemini_request(
         "temperature",
         "temperature",
     );
-    copy_request_number_field_as(request, &mut generation_config, "top_p", "topP");
-    copy_request_number_field_as(request, &mut generation_config, "top_k", "topK");
+    copy_request_number_field_as(request, &mut generation_config, "top_p", "top_p");
+    copy_request_number_field_as(request, &mut generation_config, "top_k", "top_k");
     if let Some(candidate_count) = request
         .get("n")
         .and_then(value_as_u64)
@@ -174,7 +176,7 @@ pub fn convert_openai_chat_request_to_gemini_request(
         generation_config.insert("seed".to_string(), Value::from(seed));
     }
     if let Some(stop_sequences) = parse_openai_stop_sequences(request.get("stop")) {
-        generation_config.insert("stopSequences".to_string(), Value::Array(stop_sequences));
+        generation_config.insert("stop_sequences".to_string(), Value::Array(stop_sequences));
     }
     if let Some(reasoning_effort) = extract_openai_reasoning_effort(request) {
         if let Some(thinking_budget) =
@@ -203,6 +205,8 @@ pub fn convert_openai_chat_request_to_gemini_request(
                         .and_then(|json_schema| json_schema.get("schema"))
                         .cloned()
                     {
+                        let mut schema = schema;
+                        clean_gemini_schema(&mut schema);
                         generation_config.insert("responseSchema".to_string(), schema);
                     }
                 }
@@ -218,7 +222,7 @@ pub fn convert_openai_chat_request_to_gemini_request(
     }
     if !generation_config.is_empty() {
         output.insert(
-            "generationConfig".to_string(),
+            "generation_config".to_string(),
             Value::Object(generation_config),
         );
     }
@@ -228,22 +232,21 @@ pub fn convert_openai_chat_request_to_gemini_request(
         output.insert("tools".to_string(), tools);
     }
     if let Some(tool_config) = convert_openai_tool_choice_to_gemini(request.get("tool_choice")) {
-        output.insert("toolConfig".to_string(), tool_config);
+        output.insert("tool_config".to_string(), tool_config);
     }
     if let Some(extra_body) = request.get("extra_body").and_then(Value::as_object) {
         if let Some(google) = extra_body.get("google").and_then(Value::as_object) {
-            if let Some(existing) = output
-                .get_mut("generationConfig")
-                .and_then(Value::as_object_mut)
-            {
-                if let Some(response_modalities) = google.get("response_modalities").cloned() {
-                    existing.insert("responseModalities".to_string(), response_modalities);
-                }
-                if let Some(thinking_config) = google.get("thinking_config").cloned() {
-                    existing
-                        .entry("thinkingConfig".to_string())
-                        .or_insert(thinking_config);
-                }
+            let existing = output
+                .entry("generation_config".to_string())
+                .or_insert_with(|| Value::Object(Map::new()))
+                .as_object_mut()?;
+            if let Some(response_modalities) = google.get("response_modalities").cloned() {
+                existing.insert("responseModalities".to_string(), response_modalities);
+            }
+            if let Some(thinking_config) = google.get("thinking_config").cloned() {
+                existing
+                    .entry("thinkingConfig".to_string())
+                    .or_insert(thinking_config);
             }
         }
     }
@@ -301,8 +304,8 @@ fn convert_openai_content_to_gemini_parts(
                             })?;
                         if let Some((mime_type, data)) = parse_data_url(image.as_str()) {
                             converted.push(json!({
-                                "inlineData": {
-                                    "mimeType": mime_type,
+                                "inline_data": {
+                                    "mime_type": mime_type,
                                     "data": data,
                                 }
                             }));
@@ -325,8 +328,8 @@ fn convert_openai_content_to_gemini_parts(
                         {
                             if let Some((mime_type, data)) = parse_data_url(file_data) {
                                 converted.push(json!({
-                                    "inlineData": {
-                                        "mimeType": mime_type,
+                                    "inline_data": {
+                                        "mime_type": mime_type,
                                         "data": data,
                                     }
                                 }));
@@ -394,6 +397,10 @@ fn convert_openai_tools_to_gemini(
                 function
                     .get("parameters")
                     .cloned()
+                    .map(|mut schema| {
+                        clean_gemini_schema(&mut schema);
+                        schema
+                    })
                     .unwrap_or_else(|| json!({})),
             );
             declarations.push(Value::Object(declaration));
@@ -409,7 +416,7 @@ fn convert_openai_tools_to_gemini(
         result_tools.push(json!({ "urlContext": {} }));
     }
     if !declarations.is_empty() {
-        result_tools.push(json!({ "functionDeclarations": declarations }));
+        result_tools.push(json!({ "function_declarations": declarations }));
     }
     (!result_tools.is_empty()).then_some(Value::Array(result_tools))
 }
@@ -425,7 +432,7 @@ fn convert_openai_tool_choice_to_gemini(tool_choice: Option<&Value>) -> Option<V
                 _ => return None,
             };
             Some(json!({
-                "functionCallingConfig": {
+                "function_calling_config": {
                     "mode": mode,
                 }
             }))
@@ -439,9 +446,9 @@ fn convert_openai_tool_choice_to_gemini(tool_choice: Option<&Value>) -> Option<V
                 .map(str::trim)
                 .filter(|value| !value.is_empty())?;
             Some(json!({
-                "functionCallingConfig": {
+                "function_calling_config": {
                     "mode": "ANY",
-                    "allowedFunctionNames": [function_name],
+                    "allowed_function_names": [function_name],
                 }
             }))
         }
@@ -481,6 +488,517 @@ fn compact_gemini_contents(contents: Vec<Value>) -> Vec<Value> {
         compact.push(content);
     }
     compact
+}
+
+const ALLOWED_SCHEMA_FIELDS: &[&str] = &[
+    "type",
+    "description",
+    "properties",
+    "required",
+    "items",
+    "enum",
+    "title",
+];
+
+const CONSTRAINT_FIELDS: &[(&str, &str)] = &[
+    ("minLength", "minLen"),
+    ("maxLength", "maxLen"),
+    ("pattern", "pattern"),
+    ("minimum", "min"),
+    ("maximum", "max"),
+    ("multipleOf", "multipleOf"),
+    ("exclusiveMinimum", "exclMin"),
+    ("exclusiveMaximum", "exclMax"),
+    ("minItems", "minItems"),
+    ("maxItems", "maxItems"),
+    ("format", "format"),
+];
+
+fn clean_gemini_schema(value: &mut Value) {
+    if !value.is_object() {
+        return;
+    }
+
+    let mut defs = Map::new();
+    collect_all_defs(value, &mut defs);
+    if let Some(object) = value.as_object_mut() {
+        object.remove("$defs");
+        object.remove("definitions");
+    }
+    let mut seen = Vec::new();
+    flatten_refs(value, &defs, &mut seen);
+    clean_schema_recursive(value, true);
+}
+
+fn collect_all_defs(value: &Value, defs: &mut Map<String, Value>) {
+    match value {
+        Value::Object(object) => {
+            for defs_key in ["$defs", "definitions"] {
+                if let Some(Value::Object(inner_defs)) = object.get(defs_key) {
+                    for (key, inner) in inner_defs {
+                        defs.entry(key.clone()).or_insert_with(|| inner.clone());
+                    }
+                }
+            }
+            for (key, inner) in object {
+                if key != "$defs" && key != "definitions" {
+                    collect_all_defs(inner, defs);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_all_defs(item, defs);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn flatten_refs(value: &mut Value, defs: &Map<String, Value>, seen: &mut Vec<String>) {
+    match value {
+        Value::Object(object) => {
+            let ref_path = object
+                .remove("$ref")
+                .and_then(|value| value.as_str().map(ToOwned::to_owned));
+            if let Some(ref_path) = ref_path {
+                let ref_name = ref_path.rsplit('/').next().unwrap_or_default().to_string();
+                if seen.iter().any(|value| value == &ref_name) {
+                    object
+                        .entry("type".to_string())
+                        .or_insert_with(|| Value::String("string".to_string()));
+                    append_schema_hint(object, &format!("(Circular $ref: {ref_path})"));
+                    return;
+                }
+                seen.push(ref_name.clone());
+                if let Some(Value::Object(def_schema)) = defs.get(&ref_name) {
+                    for (key, inner) in def_schema {
+                        if !object.contains_key(key) {
+                            object.insert(key.clone(), inner.clone());
+                        }
+                    }
+                    flatten_refs(value, defs, seen);
+                } else {
+                    object
+                        .entry("type".to_string())
+                        .or_insert_with(|| Value::String("string".to_string()));
+                    append_schema_hint(object, &format!("(Unresolved $ref: {ref_path})"));
+                }
+                seen.pop();
+                return;
+            }
+            for inner in object.values_mut() {
+                flatten_refs(inner, defs, seen);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                flatten_refs(item, defs, seen);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn clean_schema_recursive(value: &mut Value, is_schema_node: bool) -> bool {
+    let Some(object) = value.as_object_mut() else {
+        if let Some(items) = value.as_array_mut() {
+            for item in items {
+                clean_schema_recursive(item, is_schema_node);
+            }
+        }
+        return false;
+    };
+
+    let mut is_nullable = false;
+    merge_all_of(object);
+
+    if (object.get("type").and_then(Value::as_str) == Some("object")
+        || object.contains_key("properties"))
+        && object.contains_key("items")
+    {
+        let items = object.remove("items");
+        if let Some(Value::Object(items)) = items {
+            let props = object
+                .entry("properties".to_string())
+                .or_insert_with(|| Value::Object(Map::new()))
+                .as_object_mut();
+            if let Some(props) = props {
+                for (key, inner) in items {
+                    props.entry(key).or_insert(inner);
+                }
+            }
+        }
+    }
+
+    let mut nullable_keys = Vec::new();
+    if let Some(Value::Object(props)) = object.get_mut("properties") {
+        for (key, inner) in props.iter_mut() {
+            if clean_schema_recursive(inner, true) {
+                nullable_keys.push(key.clone());
+            }
+        }
+        if !object.contains_key("type") {
+            object.insert("type".to_string(), Value::String("object".to_string()));
+        }
+    }
+    if !nullable_keys.is_empty() {
+        if let Some(Value::Array(required)) = object.get_mut("required") {
+            required.retain(|item| {
+                item.as_str()
+                    .is_some_and(|value| !nullable_keys.iter().any(|candidate| candidate == value))
+            });
+            if required.is_empty() {
+                object.remove("required");
+            }
+        }
+    }
+
+    if let Some(items) = object.get_mut("items") {
+        if items.is_object() {
+            clean_schema_recursive(items, true);
+            if !object.contains_key("type") {
+                object.insert("type".to_string(), Value::String("array".to_string()));
+            }
+        }
+    }
+
+    if !object.contains_key("properties") && !object.contains_key("items") {
+        for (key, inner) in object.iter_mut() {
+            if !matches!(key.as_str(), "anyOf" | "oneOf" | "allOf" | "enum" | "type")
+                && (inner.is_object() || inner.is_array())
+            {
+                clean_schema_recursive(inner, false);
+            }
+        }
+    }
+
+    for combo_key in ["anyOf", "oneOf"] {
+        if let Some(Value::Array(combo)) = object.get_mut(combo_key) {
+            for branch in combo {
+                if branch.is_object() {
+                    clean_schema_recursive(branch, true);
+                }
+            }
+        }
+    }
+
+    let should_merge_union = object.get("type").is_none()
+        || object.get("type").and_then(Value::as_str) == Some("object");
+    if should_merge_union {
+        let union = object
+            .get("anyOf")
+            .and_then(Value::as_array)
+            .or_else(|| object.get("oneOf").and_then(Value::as_array))
+            .cloned();
+        if let Some(union) = union {
+            let (best, all_types) = extract_best_schema_branch(&union);
+            if let Some(Value::Object(best_object)) = best {
+                for (key, inner) in best_object {
+                    if key == "properties" {
+                        let target = object
+                            .entry("properties".to_string())
+                            .or_insert_with(|| Value::Object(Map::new()))
+                            .as_object_mut();
+                        if let (Some(target), Value::Object(props)) = (target, inner) {
+                            for (prop_key, prop_value) in props {
+                                target.entry(prop_key).or_insert(prop_value);
+                            }
+                        }
+                    } else if key == "required" {
+                        let target = object
+                            .entry("required".to_string())
+                            .or_insert_with(|| Value::Array(Vec::new()))
+                            .as_array_mut();
+                        if let (Some(target), Value::Array(required)) = (target, inner) {
+                            for required_value in required {
+                                if !target.iter().any(|value| value == &required_value) {
+                                    target.push(required_value);
+                                }
+                            }
+                        }
+                    } else if !object.contains_key(&key) {
+                        object.insert(key, inner);
+                    }
+                }
+                if all_types.len() > 1 {
+                    append_schema_hint(object, &format!("Accepts: {}", all_types.join(" | ")));
+                }
+            }
+        }
+    }
+    object.remove("anyOf");
+    object.remove("oneOf");
+
+    let is_not_schema_payload = object.contains_key("functionCall")
+        || object.contains_key("functionResponse")
+        || object.contains_key("function_call")
+        || object.contains_key("function_response");
+    let has_standard = object
+        .keys()
+        .any(|key| ALLOWED_SCHEMA_FIELDS.iter().any(|allowed| key == allowed));
+
+    if is_schema_node && !has_standard && !object.is_empty() && !is_not_schema_payload {
+        let keys = object.keys().cloned().collect::<Vec<_>>();
+        let mut new_props = Map::new();
+        for key in keys {
+            if let Some(inner) = object.remove(&key) {
+                new_props.insert(key, inner);
+            }
+        }
+        for inner in new_props.values_mut() {
+            if inner.is_object() {
+                clean_schema_recursive(inner, true);
+            }
+        }
+        object.insert("type".to_string(), Value::String("object".to_string()));
+        object.insert("properties".to_string(), Value::Object(new_props));
+    }
+
+    let looks_like_schema = (is_schema_node || has_standard || object.contains_key("properties"))
+        && !is_not_schema_payload;
+    if looks_like_schema {
+        move_constraints_to_description(object);
+        let keys_to_remove = object
+            .keys()
+            .filter(|key| !ALLOWED_SCHEMA_FIELDS.iter().any(|allowed| *key == allowed))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys_to_remove {
+            object.remove(&key);
+        }
+
+        if object.get("type").and_then(Value::as_str) == Some("object")
+            && !object.contains_key("properties")
+        {
+            object.insert("properties".to_string(), Value::Object(Map::new()));
+        }
+
+        let valid_keys = object
+            .get("properties")
+            .and_then(Value::as_object)
+            .map(|props| props.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if let Some(Value::Array(required)) = object.get_mut("required") {
+            required.retain(|item| {
+                item.as_str()
+                    .is_some_and(|value| valid_keys.iter().any(|candidate| candidate == value))
+            });
+            if required.is_empty() {
+                object.remove("required");
+            }
+        }
+
+        if !object.contains_key("type") {
+            let inferred_type = if object.contains_key("enum") {
+                "string"
+            } else if object.contains_key("properties") {
+                "object"
+            } else if object.contains_key("items") {
+                "array"
+            } else {
+                "string"
+            };
+            object.insert("type".to_string(), Value::String(inferred_type.to_string()));
+        }
+
+        let fallback_type = if object.contains_key("properties") {
+            "object"
+        } else if object.contains_key("items") {
+            "array"
+        } else {
+            "string"
+        };
+        let selected_type = match object.get("type") {
+            Some(Value::String(type_name)) => {
+                let lower = type_name.to_ascii_lowercase();
+                if lower == "null" {
+                    is_nullable = true;
+                    None
+                } else {
+                    Some(lower)
+                }
+            }
+            Some(Value::Array(types)) => {
+                let mut selected = None;
+                for item in types {
+                    if let Some(type_name) = item.as_str() {
+                        let lower = type_name.to_ascii_lowercase();
+                        if lower == "null" {
+                            is_nullable = true;
+                        } else if selected.is_none() {
+                            selected = Some(lower);
+                        }
+                    }
+                }
+                selected
+            }
+            _ => None,
+        };
+        object.insert(
+            "type".to_string(),
+            Value::String(selected_type.unwrap_or_else(|| fallback_type.to_string())),
+        );
+
+        if is_nullable {
+            append_schema_hint(object, "(nullable)");
+        }
+
+        if let Some(Value::Array(items)) = object.get_mut("enum") {
+            for item in items.iter_mut() {
+                if !item.is_string() {
+                    *item = Value::String(match item {
+                        Value::Null => "null".to_string(),
+                        _ => item.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    is_nullable
+}
+
+fn merge_all_of(object: &mut Map<String, Value>) {
+    let all_of = object.remove("allOf");
+    let Some(Value::Array(all_of)) = all_of else {
+        return;
+    };
+
+    let mut merged_props = Map::new();
+    let mut merged_required = Vec::new();
+    let mut other_fields = Map::new();
+
+    for item in all_of {
+        let Value::Object(item) = item else {
+            continue;
+        };
+        if let Some(Value::Object(props)) = item.get("properties") {
+            for (key, value) in props {
+                merged_props.insert(key.clone(), value.clone());
+            }
+        }
+        if let Some(Value::Array(required)) = item.get("required") {
+            for value in required {
+                if !merged_required.iter().any(|existing| existing == value) {
+                    merged_required.push(value.clone());
+                }
+            }
+        }
+        for (key, value) in item {
+            if !matches!(key.as_str(), "properties" | "required" | "allOf")
+                && !other_fields.contains_key(&key)
+            {
+                other_fields.insert(key, value);
+            }
+        }
+    }
+
+    for (key, value) in other_fields {
+        object.entry(key).or_insert(value);
+    }
+    if !merged_props.is_empty() {
+        let target = object
+            .entry("properties".to_string())
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut();
+        if let Some(target) = target {
+            for (key, value) in merged_props {
+                target.entry(key).or_insert(value);
+            }
+        }
+    }
+    if !merged_required.is_empty() {
+        let target = object
+            .entry("required".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut();
+        if let Some(target) = target {
+            for value in merged_required {
+                if !target.iter().any(|existing| existing == &value) {
+                    target.push(value);
+                }
+            }
+        }
+    }
+}
+
+fn extract_best_schema_branch(union: &[Value]) -> (Option<Value>, Vec<String>) {
+    let mut best = None;
+    let mut best_score = -1;
+    let mut all_types = Vec::new();
+
+    for item in union {
+        let score = score_schema_branch(item);
+        if let Some(type_name) = schema_type_name(item) {
+            if !all_types.iter().any(|existing| existing == type_name) {
+                all_types.push(type_name.to_string());
+            }
+        }
+        if score > best_score {
+            best_score = score;
+            best = Some(item.clone());
+        }
+    }
+
+    (best, all_types)
+}
+
+fn score_schema_branch(value: &Value) -> i32 {
+    let Some(object) = value.as_object() else {
+        return 0;
+    };
+    if object.contains_key("properties")
+        || object.get("type").and_then(Value::as_str) == Some("object")
+    {
+        return 3;
+    }
+    if object.contains_key("items") || object.get("type").and_then(Value::as_str) == Some("array") {
+        return 2;
+    }
+    if object
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value != "null")
+    {
+        return 1;
+    }
+    0
+}
+
+fn schema_type_name(value: &Value) -> Option<&str> {
+    let object = value.as_object()?;
+    object
+        .get("type")
+        .and_then(Value::as_str)
+        .or_else(|| object.contains_key("properties").then_some("object"))
+        .or_else(|| object.contains_key("items").then_some("array"))
+}
+
+fn move_constraints_to_description(object: &mut Map<String, Value>) {
+    let hints = CONSTRAINT_FIELDS
+        .iter()
+        .filter_map(|(field, label)| object.get(*field).map(|value| format!("{label}: {value}")))
+        .collect::<Vec<_>>();
+    if !hints.is_empty() {
+        append_schema_hint(object, &format!("[Constraint: {}]", hints.join(", ")));
+    }
+}
+
+fn append_schema_hint(object: &mut Map<String, Value>, hint: &str) {
+    let existing = object
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if existing.contains(hint) {
+        return;
+    }
+    let next = if existing.trim().is_empty() {
+        hint.to_string()
+    } else {
+        format!("{existing} {hint}")
+    };
+    object.insert("description".to_string(), Value::String(next));
 }
 
 fn parse_data_url(value: &str) -> Option<(String, String)> {
@@ -572,14 +1090,15 @@ mod tests {
             convert_openai_chat_request_to_gemini_request(&request, "gemini-2.5-pro", false)
                 .expect("request should convert");
 
-        assert_eq!(converted["generationConfig"]["seed"], 7);
+        assert_eq!(converted["model"], "gemini-2.5-pro");
+        assert_eq!(converted["generation_config"]["seed"], 7);
         assert_eq!(converted["tools"][0], json!({ "codeExecution": {} }));
         assert_eq!(converted["tools"][1], json!({ "googleSearch": {} }));
         assert_eq!(converted["tools"][2], json!({ "urlContext": {} }));
         assert_eq!(
             converted["tools"][3],
             json!({
-                "functionDeclarations": [
+                "function_declarations": [
                     {
                         "name": "lookupWeather",
                         "parameters": { "type": "object", "properties": { "city": { "type": "string" } } }

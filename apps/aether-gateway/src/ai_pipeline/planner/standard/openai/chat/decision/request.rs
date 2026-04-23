@@ -21,6 +21,7 @@ use crate::ai_pipeline::transport::auth::{
     resolve_local_openai_bearer_auth,
 };
 use crate::ai_pipeline::transport::local_openai_chat_transport_unsupported_reason;
+use crate::ai_pipeline::transport::vertex::uses_vertex_api_key_query_auth;
 use crate::ai_pipeline::{ConversionMode, ExecutionStrategy, GatewayProviderTransportSnapshot};
 use crate::AppState;
 
@@ -301,6 +302,8 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         .await;
         return None;
     };
+    let uses_vertex_query_auth =
+        uses_vertex_api_key_query_auth(transport, provider_api_format.as_str());
 
     let mut provider_request_headers = if provider_api_format.starts_with("claude:") {
         build_claude_passthrough_headers(
@@ -319,10 +322,15 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             Some("application/json"),
         )
     };
+    let protected_headers = if uses_vertex_query_auth {
+        &["content-type"][..]
+    } else {
+        &[prepared_candidate.auth_header.as_str(), "content-type"][..]
+    };
     if !apply_local_header_rules(
         &mut provider_request_headers,
         transport.endpoint.header_rules.as_ref(),
-        &[&prepared_candidate.auth_header, "content-type"],
+        protected_headers,
         &provider_request_body,
         Some(body_json),
     ) {
@@ -347,11 +355,20 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         Some(trace_id),
         transport.key.decrypted_auth_config.as_deref(),
     );
-    ensure_upstream_auth_header(
-        &mut provider_request_headers,
-        &prepared_candidate.auth_header,
-        &prepared_candidate.auth_value,
-    );
+    let (auth_header, auth_value) = if uses_vertex_query_auth {
+        provider_request_headers.remove("x-goog-api-key");
+        (String::new(), String::new())
+    } else {
+        ensure_upstream_auth_header(
+            &mut provider_request_headers,
+            &prepared_candidate.auth_header,
+            &prepared_candidate.auth_value,
+        );
+        (
+            prepared_candidate.auth_header.clone(),
+            prepared_candidate.auth_value.clone(),
+        )
+    };
     if upstream_is_stream {
         provider_request_headers
             .entry("accept".to_string())
@@ -365,8 +382,8 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
     };
 
     Some(LocalOpenAiChatCandidatePayloadParts {
-        auth_header: prepared_candidate.auth_header,
-        auth_value: prepared_candidate.auth_value,
+        auth_header,
+        auth_value,
         mapped_model: prepared_candidate.mapped_model,
         provider_api_format,
         provider_request_body,

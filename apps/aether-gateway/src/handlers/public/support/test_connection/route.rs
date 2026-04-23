@@ -219,50 +219,21 @@ pub(super) async fn maybe_build_local_test_connection_route_response(
     let Some((auth_header, auth_value)) = auth else {
         return None;
     };
+    let uses_vertex_query_auth = crate::provider_transport::uses_vertex_api_key_query_auth(
+        &transport,
+        format_value.as_str(),
+    );
 
-    let upstream_url = {
-        let custom_path = transport
-            .endpoint
-            .custom_path
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        match (format_value.as_str(), custom_path) {
-            ("openai:chat", Some(path)) | ("claude:chat", Some(path)) => {
-                crate::provider_transport::url::build_passthrough_path_url(
-                    &transport.endpoint.base_url,
-                    path,
-                    None,
-                    &[],
-                )
-            }
-            ("gemini:chat", Some(path)) => {
-                crate::provider_transport::url::build_passthrough_path_url(
-                    &transport.endpoint.base_url,
-                    path,
-                    None,
-                    &["key"],
-                )
-            }
-            ("openai:chat", None) => Some(crate::provider_transport::url::build_openai_chat_url(
-                &transport.endpoint.base_url,
-                None,
-            )),
-            ("claude:chat", None) => {
-                Some(crate::provider_transport::url::build_claude_messages_url(
-                    &transport.endpoint.base_url,
-                    None,
-                ))
-            }
-            ("gemini:chat", None) => crate::provider_transport::url::build_gemini_content_url(
-                &transport.endpoint.base_url,
-                &model,
-                false,
-                None,
-            ),
-            _ => None,
-        }
-    };
+    let upstream_url = crate::provider_transport::build_transport_request_url(
+        &transport,
+        crate::provider_transport::TransportRequestUrlParams {
+            provider_api_format: format_value.as_str(),
+            mapped_model: Some(model.as_str()),
+            upstream_is_stream: false,
+            request_query: None,
+            kiro_api_region: None,
+        },
+    );
     let Some(upstream_url) = upstream_url else {
         return None;
     };
@@ -271,20 +242,30 @@ pub(super) async fn maybe_build_local_test_connection_route_response(
         ("content-type".to_string(), "application/json".to_string()),
         (auth_header.clone(), auth_value.clone()),
     ]);
+    if uses_vertex_query_auth {
+        provider_request_headers.remove("x-goog-api-key");
+    }
+    let protected_headers = if uses_vertex_query_auth {
+        &["content-type"][..]
+    } else {
+        &[auth_header.as_str(), "content-type"][..]
+    };
     if !crate::provider_transport::apply_local_header_rules(
         &mut provider_request_headers,
         transport.endpoint.header_rules.as_ref(),
-        &[auth_header.as_str(), "content-type"],
+        protected_headers,
         &provider_request_body,
         None,
     ) {
         return None;
     }
-    crate::provider_transport::ensure_upstream_auth_header(
-        &mut provider_request_headers,
-        &auth_header,
-        &auth_value,
-    );
+    if !uses_vertex_query_auth {
+        crate::provider_transport::ensure_upstream_auth_header(
+            &mut provider_request_headers,
+            &auth_header,
+            &auth_value,
+        );
+    }
 
     let mut upstream_request = state.client.post(&upstream_url);
     for (name, value) in &provider_request_headers {
