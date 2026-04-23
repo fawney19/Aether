@@ -76,7 +76,7 @@ pub fn convert_openai_chat_request_to_gemini_request(
                                 parse_openai_tool_arguments(function.get("arguments"))?;
                             tool_name_by_id.insert(tool_call_id.clone(), tool_name.clone());
                             parts.push(json!({
-                                "function_call": {
+                                "functionCall": {
                                     "name": tool_name,
                                     "args": tool_input,
                                     "id": tool_call_id,
@@ -107,7 +107,7 @@ pub fn convert_openai_chat_request_to_gemini_request(
                     contents.push(json!({
                         "role": "user",
                         "parts": [{
-                            "function_response": {
+                            "functionResponse": {
                                 "name": tool_name,
                                 "id": tool_use_id,
                                 "response": {
@@ -140,7 +140,7 @@ pub fn convert_openai_chat_request_to_gemini_request(
         .join("\n\n");
     if !system_text.is_empty() {
         output.insert(
-            "system_instruction".to_string(),
+            "systemInstruction".to_string(),
             json!({ "parts": [{ "text": system_text }] }),
         );
     }
@@ -151,7 +151,7 @@ pub fn convert_openai_chat_request_to_gemini_request(
         .and_then(value_as_u64)
         .or_else(|| request.get("max_tokens").and_then(value_as_u64))
     {
-        generation_config.insert("max_output_tokens".to_string(), Value::from(max_tokens));
+        generation_config.insert("maxOutputTokens".to_string(), Value::from(max_tokens));
     }
     copy_request_number_field_as(
         request,
@@ -159,8 +159,8 @@ pub fn convert_openai_chat_request_to_gemini_request(
         "temperature",
         "temperature",
     );
-    copy_request_number_field_as(request, &mut generation_config, "top_p", "top_p");
-    copy_request_number_field_as(request, &mut generation_config, "top_k", "top_k");
+    copy_request_number_field_as(request, &mut generation_config, "top_p", "topP");
+    copy_request_number_field_as(request, &mut generation_config, "top_k", "topK");
     if let Some(candidate_count) = request
         .get("n")
         .and_then(value_as_u64)
@@ -176,7 +176,7 @@ pub fn convert_openai_chat_request_to_gemini_request(
         generation_config.insert("seed".to_string(), Value::from(seed));
     }
     if let Some(stop_sequences) = parse_openai_stop_sequences(request.get("stop")) {
-        generation_config.insert("stop_sequences".to_string(), Value::Array(stop_sequences));
+        generation_config.insert("stopSequences".to_string(), Value::Array(stop_sequences));
     }
     if let Some(reasoning_effort) = extract_openai_reasoning_effort(request) {
         if let Some(thinking_budget) =
@@ -222,7 +222,7 @@ pub fn convert_openai_chat_request_to_gemini_request(
     }
     if !generation_config.is_empty() {
         output.insert(
-            "generation_config".to_string(),
+            "generationConfig".to_string(),
             Value::Object(generation_config),
         );
     }
@@ -232,12 +232,12 @@ pub fn convert_openai_chat_request_to_gemini_request(
         output.insert("tools".to_string(), tools);
     }
     if let Some(tool_config) = convert_openai_tool_choice_to_gemini(request.get("tool_choice")) {
-        output.insert("tool_config".to_string(), tool_config);
+        output.insert("toolConfig".to_string(), tool_config);
     }
     if let Some(extra_body) = request.get("extra_body").and_then(Value::as_object) {
         if let Some(google) = extra_body.get("google").and_then(Value::as_object) {
             let existing = output
-                .entry("generation_config".to_string())
+                .entry("generationConfig".to_string())
                 .or_insert_with(|| Value::Object(Map::new()))
                 .as_object_mut()?;
             if let Some(response_modalities) = google.get("response_modalities").cloned() {
@@ -304,8 +304,8 @@ fn convert_openai_content_to_gemini_parts(
                             })?;
                         if let Some((mime_type, data)) = parse_data_url(image.as_str()) {
                             converted.push(json!({
-                                "inline_data": {
-                                    "mime_type": mime_type,
+                                "inlineData": {
+                                    "mimeType": mime_type,
                                     "data": data,
                                 }
                             }));
@@ -328,8 +328,8 @@ fn convert_openai_content_to_gemini_parts(
                         {
                             if let Some((mime_type, data)) = parse_data_url(file_data) {
                                 converted.push(json!({
-                                    "inline_data": {
-                                        "mime_type": mime_type,
+                                    "inlineData": {
+                                        "mimeType": mime_type,
                                         "data": data,
                                     }
                                 }));
@@ -416,7 +416,7 @@ fn convert_openai_tools_to_gemini(
         result_tools.push(json!({ "urlContext": {} }));
     }
     if !declarations.is_empty() {
-        result_tools.push(json!({ "function_declarations": declarations }));
+        result_tools.push(json!({ "functionDeclarations": declarations }));
     }
     (!result_tools.is_empty()).then_some(Value::Array(result_tools))
 }
@@ -432,7 +432,7 @@ fn convert_openai_tool_choice_to_gemini(tool_choice: Option<&Value>) -> Option<V
                 _ => return None,
             };
             Some(json!({
-                "function_calling_config": {
+                "functionCallingConfig": {
                     "mode": mode,
                 }
             }))
@@ -446,9 +446,9 @@ fn convert_openai_tool_choice_to_gemini(tool_choice: Option<&Value>) -> Option<V
                 .map(str::trim)
                 .filter(|value| !value.is_empty())?;
             Some(json!({
-                "function_calling_config": {
+                "functionCallingConfig": {
                     "mode": "ANY",
-                    "allowed_function_names": [function_name],
+                    "allowedFunctionNames": [function_name],
                 }
             }))
         }
@@ -1091,14 +1091,14 @@ mod tests {
                 .expect("request should convert");
 
         assert_eq!(converted["model"], "gemini-2.5-pro");
-        assert_eq!(converted["generation_config"]["seed"], 7);
+        assert_eq!(converted["generationConfig"]["seed"], 7);
         assert_eq!(converted["tools"][0], json!({ "codeExecution": {} }));
         assert_eq!(converted["tools"][1], json!({ "googleSearch": {} }));
         assert_eq!(converted["tools"][2], json!({ "urlContext": {} }));
         assert_eq!(
             converted["tools"][3],
             json!({
-                "function_declarations": [
+                "functionDeclarations": [
                     {
                         "name": "lookupWeather",
                         "parameters": { "type": "object", "properties": { "city": { "type": "string" } } }

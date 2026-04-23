@@ -5,6 +5,15 @@ use super::super::{
 };
 use super::auth::resolve_local_vertex_api_key_query_auth;
 
+fn is_vertex_transport_family(transport: &GatewayProviderTransportSnapshot) -> bool {
+    transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case(super::PROVIDER_TYPE)
+        || super::looks_like_vertex_ai_host(&transport.endpoint.base_url)
+}
+
 pub fn local_vertex_api_key_gemini_transport_unsupported_reason_with_network(
     transport: &GatewayProviderTransportSnapshot,
 ) -> Option<&'static str> {
@@ -30,7 +39,7 @@ pub fn local_vertex_api_key_gemini_transport_unsupported_reason_with_network(
     {
         return Some("transport_api_format_mismatch");
     }
-    if !super::is_vertex_api_key_transport_context(transport) {
+    if !is_vertex_transport_family(transport) {
         return Some("transport_provider_type_unsupported");
     }
     if !header_rules_are_locally_supported(transport.endpoint.header_rules.as_ref()) {

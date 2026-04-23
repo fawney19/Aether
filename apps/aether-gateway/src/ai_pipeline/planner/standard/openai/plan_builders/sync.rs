@@ -85,7 +85,9 @@ pub(crate) fn build_openai_chat_sync_plan_from_decision(
     let existing_provider_request_headers = std::mem::take(&mut payload.provider_request_headers);
     let extra_headers = std::mem::take(&mut payload.extra_headers);
     let mut provider_request_headers = if existing_provider_request_headers.is_empty() {
-        if let (Some(auth_header), Some(auth_value)) = (auth_header.as_deref(), auth_value.as_deref()) {
+        if let (Some(auth_header), Some(auth_value)) =
+            (auth_header.as_deref(), auth_value.as_deref())
+        {
             if provider_api_format == client_api_format {
                 build_complete_passthrough_headers_with_auth(
                     &parts.headers,

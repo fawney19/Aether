@@ -394,6 +394,6 @@ mod tests {
         )
         .expect("fallback custom path url");
 
-        assert_eq!(url, "https://api.example.com/v1/messages/%7Bmodel%7D");
+        assert_eq!(url, "https://api.example.com/v1/messages/{model}");
     }
 }

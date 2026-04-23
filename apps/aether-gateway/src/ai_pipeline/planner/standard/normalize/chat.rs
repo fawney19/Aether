@@ -102,16 +102,16 @@ pub(crate) fn build_cross_format_openai_chat_upstream_url(
                 &transport.endpoint.base_url,
                 parts.uri.query(),
             )),
-            RequestConversionKind::ToGeminiStandard => crate::provider_transport::build_transport_request_url(
-                transport,
-                crate::provider_transport::TransportRequestUrlParams {
+            RequestConversionKind::ToGeminiStandard => {
+                crate::ai_pipeline::build_provider_transport_request_url(
+                    transport,
                     provider_api_format,
-                    mapped_model: Some(mapped_model),
+                    Some(mapped_model),
                     upstream_is_stream,
-                    request_query: parts.uri.query(),
-                    kiro_api_region: None,
-                },
-            ),
+                    parts.uri.query(),
+                    None,
+                )
+            }
             RequestConversionKind::ToOpenAIFamilyCli => Some(build_openai_cli_url(
                 &transport.endpoint.base_url,
                 parts.uri.query(),

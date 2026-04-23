@@ -9,9 +9,9 @@ use aether_provider_transport::policy::{
     local_standard_transport_unsupported_reason_with_network,
 };
 use aether_provider_transport::vertex::{
-    is_vertex_api_key_transport_context, resolve_local_vertex_api_key_query_auth,
+    is_vertex_api_key_transport_context,
     local_vertex_api_key_gemini_transport_unsupported_reason_with_network,
-    VERTEX_API_KEY_QUERY_PARAM,
+    resolve_local_vertex_api_key_query_auth, VERTEX_API_KEY_QUERY_PARAM,
 };
 use aether_provider_transport::GatewayProviderTransportSnapshot;
 
@@ -289,12 +289,8 @@ pub fn request_conversion_direct_auth(
         }
         "gemini:chat" | "gemini:cli" => {
             if is_vertex_api_key_transport_context(transport) {
-                resolve_local_vertex_api_key_query_auth(transport).map(|auth| {
-                    (
-                        VERTEX_API_KEY_QUERY_PARAM.to_string(),
-                        auth.value,
-                    )
-                })
+                resolve_local_vertex_api_key_query_auth(transport)
+                    .map(|auth| (VERTEX_API_KEY_QUERY_PARAM.to_string(), auth.value))
             } else {
                 resolve_local_gemini_auth(transport)
             }

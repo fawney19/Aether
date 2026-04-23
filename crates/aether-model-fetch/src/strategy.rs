@@ -1184,7 +1184,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn custom_aiplatform_transport_uses_vertex_models_fetch_path_and_preserves_cli_format() {
+    async fn custom_aiplatform_transport_uses_vertex_models_fetch_path_and_normalizes_chat_format()
+    {
         let executed_urls = Arc::new(Mutex::new(Vec::new()));
         let runtime = TestRuntime {
             executed_urls: Arc::clone(&executed_urls),
@@ -1197,13 +1198,13 @@ mod tests {
         let urls = executed_urls.lock().expect("executed_urls lock");
         assert_eq!(
             urls.as_slice(),
-            &["https://aiplatform.googleapis.com/v1/publishers/google/models?key=vertex-secret"]
+            &["https://aiplatform.googleapis.com/v1/publishers/google/models?key=vertex-secret&pageSize=100"]
         );
         assert_eq!(outcome.fetched_model_ids, vec!["gemini-3.1-pro-preview"]);
         assert_eq!(outcome.cached_models.len(), 1);
         assert_eq!(
             outcome.cached_models[0]["api_formats"][0].as_str(),
-            Some("gemini:cli")
+            Some("gemini:chat")
         );
     }
 }

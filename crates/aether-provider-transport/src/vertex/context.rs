@@ -20,7 +20,9 @@ pub fn looks_like_vertex_ai_host(base_url: &str) -> bool {
         return false;
     };
 
-    host == VERTEX_AI_HOST || host.ends_with(&format!(".{VERTEX_AI_HOST}"))
+    host == VERTEX_AI_HOST
+        || host.ends_with(&format!(".{VERTEX_AI_HOST}"))
+        || host.ends_with(&format!("-{VERTEX_AI_HOST}"))
 }
 
 pub fn is_vertex_api_key_transport_context(transport: &GatewayProviderTransportSnapshot) -> bool {

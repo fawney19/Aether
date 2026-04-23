@@ -47,6 +47,26 @@ pub(crate) use self::pure::*;
 pub(crate) use crate::control::GatewayControlDecision;
 pub(crate) use crate::execution_runtime::{ConversionMode, ExecutionStrategy};
 
+pub(crate) fn build_provider_transport_request_url(
+    transport: &GatewayProviderTransportSnapshot,
+    provider_api_format: &str,
+    mapped_model: Option<&str>,
+    upstream_is_stream: bool,
+    request_query: Option<&str>,
+    kiro_api_region: Option<&str>,
+) -> Option<String> {
+    crate::provider_transport::build_transport_request_url(
+        transport,
+        crate::provider_transport::TransportRequestUrlParams {
+            provider_api_format,
+            mapped_model,
+            upstream_is_stream,
+            request_query,
+            kiro_api_region,
+        },
+    )
+}
+
 pub(crate) async fn resolve_execution_runtime_auth_context(
     state: &AppState,
     decision: &GatewayControlDecision,

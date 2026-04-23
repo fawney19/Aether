@@ -1162,7 +1162,8 @@ async fn provider_query_execute_standard_test_candidate(
         );
     }
     if !uses_vertex_query_auth {
-        if let (Some(auth_header), Some(auth_value)) = (auth_header.as_deref(), auth_value.as_deref())
+        if let (Some(auth_header), Some(auth_value)) =
+            (auth_header.as_deref(), auth_value.as_deref())
         {
             crate::provider_transport::ensure_upstream_auth_header(
                 &mut request_headers,
