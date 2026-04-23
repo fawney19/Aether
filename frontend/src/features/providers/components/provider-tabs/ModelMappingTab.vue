@@ -732,6 +732,7 @@ async function handleStartMappingTest() {
     displayLabel: `[${endpoint.api_format}] 映射 "${testingModelName.value}"`,
     apiFormat: endpoint.api_format,
     endpointId: endpoint.id,
+    endpointBaseUrl: endpoint.base_url,
     requestHeaders,
     requestBody,
     concurrency: isPoolManagedProvider.value ? POOL_TEST_CONCURRENCY : SINGLE_TEST_CONCURRENCY,

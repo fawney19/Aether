@@ -517,6 +517,7 @@ async function handleStartPendingTest() {
     displayLabel: `${endpointPrefix}${modelName}`,
     apiFormat: endpoint.api_format,
     endpointId: endpoint.id,
+    endpointBaseUrl: endpoint.base_url,
     requestHeaders,
     requestBody,
     concurrency: isPoolManagedProvider.value ? POOL_TEST_CONCURRENCY : SINGLE_TEST_CONCURRENCY,

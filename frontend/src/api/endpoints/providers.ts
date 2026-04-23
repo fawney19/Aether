@@ -190,6 +190,10 @@ export interface TestModelRequest {
   endpoint_id?: string
   message?: string
   api_format?: string
+  request_headers?: Record<string, unknown>
+  request_body?: Record<string, unknown>
+  request_id?: string
+  concurrency?: number
 }
 
 export interface TestModelResponse {
@@ -210,9 +214,13 @@ export interface TestModelResponse {
   model?: string
 }
 
-export async function testModel(data: TestModelRequest): Promise<TestModelResponse> {
+export async function testModel(
+  data: TestModelRequest,
+  options: { signal?: AbortSignal } = {},
+): Promise<TestModelResponse> {
   const response = await client.post('/api/admin/provider-query/test-model', data, {
     timeout: 10 * 60 * 1000,
+    signal: options.signal,
   })
   return response.data
 }

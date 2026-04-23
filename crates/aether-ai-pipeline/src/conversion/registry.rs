@@ -8,6 +8,11 @@ use aether_provider_transport::policy::{
     local_openai_chat_transport_unsupported_reason,
     local_standard_transport_unsupported_reason_with_network,
 };
+use aether_provider_transport::vertex::{
+    is_vertex_api_key_transport_context, resolve_local_vertex_api_key_query_auth,
+    local_vertex_api_key_gemini_transport_unsupported_reason_with_network,
+    VERTEX_API_KEY_QUERY_PARAM,
+};
 use aether_provider_transport::GatewayProviderTransportSnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,6 +260,9 @@ pub fn request_conversion_transport_unsupported_reason(
         "claude:cli" => {
             local_standard_transport_unsupported_reason_with_network(transport, "claude:cli")
         }
+        "gemini:chat" | "gemini:cli" if is_vertex_api_key_transport_context(transport) => {
+            local_vertex_api_key_gemini_transport_unsupported_reason_with_network(transport)
+        }
         "gemini:chat" => {
             local_gemini_transport_unsupported_reason_with_network(transport, "gemini:chat")
         }
@@ -279,7 +287,18 @@ pub fn request_conversion_direct_auth(
         "openai:chat" | "openai:cli" | "openai:compact" => {
             resolve_local_openai_bearer_auth(transport)
         }
-        "gemini:chat" | "gemini:cli" => resolve_local_gemini_auth(transport),
+        "gemini:chat" | "gemini:cli" => {
+            if is_vertex_api_key_transport_context(transport) {
+                resolve_local_vertex_api_key_query_auth(transport).map(|auth| {
+                    (
+                        VERTEX_API_KEY_QUERY_PARAM.to_string(),
+                        auth.value,
+                    )
+                })
+            } else {
+                resolve_local_gemini_auth(transport)
+            }
+        }
         "claude:chat" | "claude:cli" => resolve_local_standard_auth(transport),
         _ => None,
     }
@@ -728,5 +747,68 @@ mod tests {
             "claude:cli",
             "openai:cli"
         ));
+    }
+
+    #[test]
+    fn vertex_gemini_transport_supports_cross_format_conversion_with_query_auth() {
+        let transport = GatewayProviderTransportSnapshot {
+            provider: GatewayProviderTransportProvider {
+                id: "provider-vertex".to_string(),
+                name: "vertex".to_string(),
+                provider_type: "vertex_ai".to_string(),
+                website: None,
+                is_active: true,
+                keep_priority_on_conversion: false,
+                enable_format_conversion: true,
+                concurrent_limit: None,
+                max_retries: None,
+                proxy: None,
+                request_timeout_secs: None,
+                stream_first_byte_timeout_secs: None,
+                config: None,
+            },
+            endpoint: GatewayProviderTransportEndpoint {
+                id: "endpoint-vertex".to_string(),
+                provider_id: "provider-vertex".to_string(),
+                api_format: "gemini:chat".to_string(),
+                api_family: Some("gemini".to_string()),
+                endpoint_kind: Some("chat".to_string()),
+                is_active: true,
+                base_url: "https://aiplatform.googleapis.com".to_string(),
+                header_rules: None,
+                body_rules: None,
+                max_retries: None,
+                custom_path: None,
+                config: None,
+                format_acceptance_config: None,
+                proxy: None,
+            },
+            key: GatewayProviderTransportKey {
+                id: "key-vertex".to_string(),
+                provider_id: "provider-vertex".to_string(),
+                name: "key".to_string(),
+                auth_type: "api_key".to_string(),
+                is_active: true,
+                api_formats: Some(vec!["gemini:chat".to_string()]),
+                allowed_models: None,
+                capabilities: None,
+                rate_multipliers: None,
+                global_priority_by_format: None,
+                expires_at_unix_secs: None,
+                proxy: None,
+                fingerprint: None,
+                decrypted_api_key: "vertex-secret".to_string(),
+                decrypted_auth_config: None,
+            },
+        };
+
+        assert!(request_conversion_transport_supported(
+            &transport,
+            RequestConversionKind::ToGeminiStandard
+        ));
+        assert_eq!(
+            request_conversion_direct_auth(&transport, RequestConversionKind::ToGeminiStandard),
+            Some(("key".to_string(), "vertex-secret".to_string()))
+        );
     }
 }
