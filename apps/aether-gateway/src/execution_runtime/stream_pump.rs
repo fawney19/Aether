@@ -60,7 +60,7 @@ pub(crate) fn build_direct_execution_frame_stream(
         let mut stream_terminal_observer = StreamingStandardTerminalObserver::default();
         let mut observer_buffered = Vec::new();
 
-        if !response_headers_indicate_sse(&headers) {
+        if !should_treat_upstream_response_as_stream(&headers, &observer_context) {
             let original_headers = headers.clone();
             match buffer_non_sse_upstream_body(response, started_at).await {
                 Ok(buffered) => {
@@ -388,6 +388,20 @@ fn response_headers_indicate_sse(headers: &BTreeMap<String, String>) -> bool {
         .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"))
 }
 
+fn should_treat_upstream_response_as_stream(
+    headers: &BTreeMap<String, String>,
+    report_context: &Value,
+) -> bool {
+    if response_headers_indicate_sse(headers) {
+        return true;
+    }
+
+    report_context
+        .get("envelope_name")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case(crate::ai_pipeline::KIRO_ENVELOPE_NAME))
+}
+
 async fn buffer_non_sse_upstream_body(
     response: DirectUpstreamResponse,
     started_at: Instant,
@@ -648,7 +662,7 @@ mod tests {
     use serde_json::Value;
     use tokio::sync::watch;
 
-    use super::build_direct_execution_frame_stream;
+    use super::{build_direct_execution_frame_stream, should_treat_upstream_response_as_stream};
     use crate::execution_runtime::transport::{
         execute_stream_plan_via_local_tunnel, DirectSyncExecutionRuntime, DirectUpstreamResponse,
     };
@@ -664,6 +678,19 @@ mod tests {
             url: None,
             extra: Some(serde_json::json!({"tunnel_base_url": base_url})),
         }
+    }
+
+    #[test]
+    fn treats_kiro_eventstream_envelope_as_stream_even_when_content_type_is_json() {
+        let headers = BTreeMap::from([("content-type".into(), "application/json".into())]);
+        let report_context = serde_json::json!({
+            "envelope_name": "kiro:generateAssistantResponse",
+        });
+
+        assert!(should_treat_upstream_response_as_stream(
+            &headers,
+            &report_context
+        ));
     }
 
     #[tokio::test]
