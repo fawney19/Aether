@@ -2180,11 +2180,22 @@ async function handleRefreshOAuth(key: PoolKeyDetail) {
   refreshingOAuthKeyId.value = key.key_id
   try {
     const result = await refreshProviderOAuth(key.key_id)
+    const refreshedExpiresAt = typeof result.expires_at === 'number' ? result.expires_at : null
     const target = keyPage.value.keys.find(k => k.key_id === key.key_id)
     if (target) {
-      target.oauth_expires_at = result.expires_at ?? null
+      target.oauth_expires_at = refreshedExpiresAt
     }
     await loadKeys()
+    if (refreshedExpiresAt != null) {
+      const reloadedTarget = keyPage.value.keys.find(k => k.key_id === key.key_id)
+      if (
+        reloadedTarget
+        && (typeof reloadedTarget.oauth_expires_at !== 'number'
+          || reloadedTarget.oauth_expires_at < refreshedExpiresAt)
+      ) {
+        reloadedTarget.oauth_expires_at = refreshedExpiresAt
+      }
+    }
     const refreshedKey = keyPage.value.keys.find(k => k.key_id === key.key_id) ?? null
     const feedback = getOAuthRefreshFeedback({
       accountStateRecheckAttempted: result.account_state_recheck_attempted,

@@ -24,8 +24,8 @@ pub(super) async fn execute_admin_provider_oauth_refresh(
         transport,
     } = request;
 
-    match state.force_local_oauth_refresh_entry(&transport).await {
-        Ok(Some(_)) => {}
+    let refreshed_entry = match state.force_local_oauth_refresh_entry(&transport).await {
+        Ok(Some(entry)) => Some(entry),
         Ok(None) => {
             return Ok(RefreshDispatch::Respond(response::control_error_response(
                 http::StatusCode::BAD_REQUEST,
@@ -75,7 +75,7 @@ pub(super) async fn execute_admin_provider_oauth_refresh(
                 response::oauth_refresh_failed_bad_request_response(&message),
             ));
         }
-    }
+    };
 
     if !helpers::key_is_account_blocked(&key, OAUTH_ACCOUNT_BLOCK_PREFIX) {
         let _ = state
@@ -89,10 +89,25 @@ pub(super) async fn execute_admin_provider_oauth_refresh(
         .into_iter()
         .next()
         .unwrap_or(key);
-    let refreshed_auth_config = helpers::refreshed_auth_config_object(
-        state,
-        refreshed_key.encrypted_auth_config.as_deref(),
-    );
+    let refreshed_auth_config = refreshed_entry
+        .as_ref()
+        .and_then(|entry| entry.metadata.as_ref())
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_else(|| {
+            helpers::refreshed_auth_config_object(
+                state,
+                refreshed_key.encrypted_auth_config.as_deref(),
+            )
+        });
+    let refreshed_expires_at_unix_secs = refreshed_entry
+        .as_ref()
+        .and_then(|entry| entry.expires_at_unix_secs)
+        .or_else(|| {
+            refreshed_auth_config
+                .get("expires_at")
+                .and_then(serde_json::Value::as_u64)
+        });
     let (account_state_recheck_attempted, account_state_recheck_error) = state
         .refresh_provider_oauth_account_state_after_update(&provider, &key_id, None)
         .await?;
@@ -100,6 +115,7 @@ pub(super) async fn execute_admin_provider_oauth_refresh(
     Ok(RefreshDispatch::Continue(RefreshSuccessContext {
         provider_type,
         refreshed_auth_config,
+        refreshed_expires_at_unix_secs,
         account_state_recheck_attempted,
         account_state_recheck_error,
     }))

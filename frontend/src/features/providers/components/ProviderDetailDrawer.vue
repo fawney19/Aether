@@ -1703,19 +1703,28 @@ async function handleRefreshOAuth(key: EndpointAPIKey) {
   refreshingOAuthKeyId.value = key.id
   try {
     const result = await refreshProviderOAuth(key.id)
+    const refreshedExpiresAt = typeof result.expires_at === 'number' ? result.expires_at : null
     let refreshedKey: EndpointAPIKey | null = null
     // 更新本地数据
     const keyInList = providerKeys.value.find(k => k.id === key.id)
     if (keyInList) {
-      keyInList.oauth_expires_at = result.expires_at
+      keyInList.oauth_expires_at = refreshedExpiresAt
     }
     // 只重新加载 keys 数据，避免整个表格刷新
     if (props.providerId) {
       const freshKeys = await getProviderKeys(props.providerId).catch(() => null)
       if (freshKeys) {
-        providerKeys.value = freshKeys
-        syncCurrentSelections(endpoints.value, freshKeys)
-        refreshedKey = freshKeys.find(item => item.id === key.id) ?? null
+        const mergedKeys = freshKeys.map((item) => {
+          if (item.id !== key.id) return item
+          if (refreshedExpiresAt == null) return item
+          if (typeof item.oauth_expires_at === 'number' && item.oauth_expires_at >= refreshedExpiresAt) {
+            return item
+          }
+          return { ...item, oauth_expires_at: refreshedExpiresAt }
+        })
+        providerKeys.value = mergedKeys
+        syncCurrentSelections(endpoints.value, mergedKeys)
+        refreshedKey = mergedKeys.find(item => item.id === key.id) ?? null
       }
     }
     const feedback = getOAuthRefreshFeedback({

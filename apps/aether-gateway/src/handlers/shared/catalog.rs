@@ -1024,6 +1024,10 @@ pub(crate) fn provider_key_status_snapshot_payload(
         .or_else(|| default_provider_key_status_snapshot().as_object().cloned())
         .unwrap_or_default();
     snapshot.insert(
+        "oauth".to_string(),
+        build_provider_key_oauth_status_snapshot(key),
+    );
+    snapshot.insert(
         "account".to_string(),
         build_provider_key_account_status_snapshot(key, provider_type),
     );

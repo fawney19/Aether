@@ -121,6 +121,10 @@ fn admin_pool_derive_oauth_expires_at(
         return None;
     }
 
+    if key.expires_at_unix_secs.is_some() {
+        return key.expires_at_unix_secs;
+    }
+
     for field in ["expires_at", "expiresAt", "expiry", "exp"] {
         let expires_at = admin_pool_json_to_u64(auth_config.and_then(|config| config.get(field)));
         if expires_at.is_some() {
@@ -128,7 +132,7 @@ fn admin_pool_derive_oauth_expires_at(
         }
     }
 
-    key.expires_at_unix_secs
+    None
 }
 
 fn admin_pool_derive_oauth_plan_type(

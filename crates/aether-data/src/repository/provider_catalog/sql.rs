@@ -1366,6 +1366,7 @@ INSERT INTO provider_api_keys (
         .bind(key.is_active)
         .bind(key.created_at_unix_ms.map(|value| value as f64))
         .bind(key.updated_at_unix_secs.map(|value| value as f64))
+        .bind(key.expires_at_unix_secs.map(|value| value as f64))
         .execute(&self.pool)
         .await
         .map_postgres_err()?;
@@ -1735,6 +1736,10 @@ SET
   proxy = $22,
   fingerprint = $23,
   upstream_metadata = $24,
+  expires_at = CASE
+    WHEN $38::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($38::double precision)
+  END,
   oauth_invalid_at = CASE
     WHEN $25::double precision IS NULL THEN NULL
     ELSE TO_TIMESTAMP($25::double precision)
@@ -1803,6 +1808,7 @@ WHERE id = $1
         .bind(key.last_rpm_peak.map(|value| value as i32))
         .bind(key.is_active)
         .bind(key.updated_at_unix_secs.map(|value| value as f64))
+        .bind(key.expires_at_unix_secs.map(|value| value as f64))
         .execute(&self.pool)
         .await
         .map_postgres_err()?
