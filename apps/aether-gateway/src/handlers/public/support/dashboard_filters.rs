@@ -213,6 +213,14 @@ fn dashboard_format_today_token_subvalue(totals: &DashboardUsageTotals) -> Strin
     )
 }
 
+fn dashboard_today_token_value_from_subvalue(totals: &DashboardUsageTotals) -> u64 {
+    totals
+        .effective_input_tokens
+        .saturating_add(totals.output_tokens)
+        .saturating_add(totals.cache_creation_tokens)
+        .saturating_add(totals.cache_read_tokens)
+}
+
 fn dashboard_parse_tz_offset_minutes(query: Option<&str>) -> Result<i32, String> {
     query_param_value(query, "tz_offset_minutes")
         .map(|value| {
@@ -1591,9 +1599,10 @@ pub(super) async fn handle_dashboard_stats_get(
         "cache_creation": period_totals.cache_creation_tokens,
         "cache_read": period_totals.cache_read_tokens,
     });
+    let today_token_value = dashboard_today_token_value_from_subvalue(&today_totals);
     let today_payload = json!({
         "requests": today_totals.requests,
-        "tokens": today_totals.total_tokens,
+        "tokens": today_token_value,
         "cost": dashboard_round_f64(today_totals.total_cost_usd, 4),
         "actual_cost": dashboard_round_f64(today_totals.actual_total_cost_usd, 4),
         "cache_creation_tokens": today_totals.cache_creation_tokens,
@@ -1634,7 +1643,7 @@ pub(super) async fn handle_dashboard_stats_get(
             },
             {
                 "name": "今日 Token",
-                "value": dashboard_format_token_compact(today_totals.total_tokens),
+                "value": dashboard_format_token_compact(today_token_value),
                 "subValue": dashboard_format_today_token_subvalue(&today_totals),
                 "icon": "Zap",
             },
