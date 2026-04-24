@@ -1013,7 +1013,7 @@
 
         <!-- Empty keys -->
         <div
-          v-if="keyPage.keys.length === 0 && !keysLoading"
+          v-if="keyPage.keys.length === 0 && !keysLoading && keysLoadedOnce"
           class="flex flex-col items-center justify-center py-16 text-center"
         >
           <div class="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-muted">
@@ -1232,23 +1232,28 @@ async function loadOverview() {
     const enabledProviders = allProviders.filter(item => item.pool_enabled)
     poolProviders.value = enabledProviders
 
-    // Keep selected provider aligned with dropdown options.
-    const selectedId = selectedProviderId.value
+    const queryProviderId = getQueryValue('providerId')
+    const queryProviderExists = Boolean(
+      queryProviderId && enabledProviders.some(item => item.provider_id === queryProviderId),
+    )
+    const selectedId = selectedProviderId.value || (queryProviderExists ? queryProviderId : null)
     const selectedStillExists = Boolean(
       selectedId && enabledProviders.some(item => item.provider_id === selectedId),
     )
 
     if (!selectedStillExists) {
       if (enabledProviders.length > 0) {
-        // Do not block overview loading on key list fetch; keys area has its own loader.
-        void selectProvider(enabledProviders[0].provider_id)
+        await selectProvider(enabledProviders[0].provider_id)
       } else {
         selectedProviderId.value = null
         selectedProviderData.value = null
+        keysLoadedOnce.value = false
         showAccountBatchDialog.value = false
         closeProviderProxyPopovers()
         resetKeyPage()
       }
+    } else if (selectedId && selectedId !== selectedProviderId.value) {
+      await selectProvider(selectedId, { preserveSearch: true })
     }
   } catch (err) {
     if (requestId !== overviewRequestId) return
@@ -1455,6 +1460,7 @@ async function selectProvider(id: string, options: { preserveSearch?: boolean } 
     clearTimeout(keysSearchDebounceTimer)
     keysSearchDebounceTimer = null
   }
+  keysLoadedOnce.value = false
   resetKeyPage(1, pageSize.value)
   const keysTask = loadKeys()
   // Provider summary is non-blocking for key list rendering.
@@ -1486,6 +1492,7 @@ function createEmptyKeyPage(page = 1, pageSizeValue = 50): PoolKeysPageResponse 
 
 const keyPage = ref<PoolKeysPageResponse>(createEmptyKeyPage())
 const keysLoading = ref(false)
+const keysLoadedOnce = ref(false)
 const refreshingCurrentPageQuota = ref(false)
 const searchQuery = ref('')
 const statusFilter = ref('all')
@@ -1524,10 +1531,11 @@ watch(searchQuery, (value) => {
 watch(
   () => getQueryValue('providerId'),
   (value) => {
+    if (overviewLoading.value) return
     if (!value || value === selectedProviderId.value) return
+    if (!poolProviders.value.some(item => item.provider_id === value)) return
     void selectProvider(value, { preserveSearch: true })
   },
-  { immediate: true },
 )
 
 watch(selectedProviderId, (value) => {
@@ -1700,9 +1708,11 @@ async function loadKeys() {
     })
     if (requestId !== keysRequestId || selectedProviderId.value !== providerId) return
     keyPage.value = nextPage
+    keysLoadedOnce.value = true
   } catch (err) {
     if (requestId !== keysRequestId || selectedProviderId.value !== providerId) return
     resetKeyPage(page, pageSizeValue)
+    keysLoadedOnce.value = true
     showError(parseApiError(err))
   } finally {
     if (requestId === keysRequestId) {
