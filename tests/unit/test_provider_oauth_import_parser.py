@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+
+import jwt
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -261,3 +263,63 @@ async def test_refresh_account_state_after_oauth_update_returns_error_when_refre
     assert attempted is True
     assert "quota refresh failed" in error
     fake_db.close.assert_called_once()
+
+
+def test_parse_standard_oauth_import_entries_accepts_codex_access_token_only() -> None:
+    entries = module._parse_standard_oauth_import_entries(
+        '[{"access_token":"at_1","accountId":"acc-1","email":"u@example.com"}]'
+    )
+
+    assert entries == [
+        {
+            "access_token": "at_1",
+            "account_id": "acc-1",
+            "email": "u@example.com",
+        }
+    ]
+
+
+def test_parse_standard_oauth_import_entries_keeps_refresh_and_access_token() -> None:
+    entries = module._parse_standard_oauth_import_entries(
+        '{"refreshToken":"rt_1","accessToken":"at_1","planType":"PLUS"}'
+    )
+
+    assert entries == [
+        {
+            "refresh_token": "rt_1",
+            "access_token": "at_1",
+            "plan_type": "plus",
+        }
+    ]
+
+
+def test_decode_access_token_expires_at_reads_jwt_exp() -> None:
+    token = jwt.encode({"exp": 2_000_000_000}, key="", algorithm="none")
+    if isinstance(token, bytes):
+        token = token.decode("utf-8")
+
+    assert module._decode_access_token_expires_at(token) == 2_000_000_000
+
+
+def test_normalize_single_import_tokens_treats_plain_jwt_as_access_token() -> None:
+    token = jwt.encode(
+        {
+            "iss": "https://auth.openai.com",
+            "aud": ["https://api.openai.com/v1"],
+            "exp": 2_000_000_000,
+            "scp": ["openid", "offline_access"],
+        },
+        key="",
+        algorithm="none",
+    )
+    if isinstance(token, bytes):
+        token = token.decode("utf-8")
+    token = f"{token}signature"
+
+    refresh_token, access_token = module._normalize_single_import_tokens(
+        refresh_token=token,
+        access_token=None,
+    )
+
+    assert refresh_token == ""
+    assert access_token == token

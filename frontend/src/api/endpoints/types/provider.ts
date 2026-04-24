@@ -292,6 +292,7 @@ export interface EndpointAPIKey {
   oauth_account_user_id?: string | null  // Codex ChatGPT account-user 联合 ID
   oauth_account_name?: string | null
   oauth_organizations?: OAuthOrganizationInfo[] | null  // OAuth 关联组织/工作区摘要
+  oauth_temporary?: boolean | null  // 是否为仅 Access Token 导入的临时 OAuth 账号
   oauth_invalid_at?: number | null  // 兼容字段；优先使用 status_snapshot.oauth
   oauth_invalid_reason?: string | null  // 兼容字段；优先使用 status_snapshot.oauth
   status_snapshot?: ProviderKeyStatusSnapshot | null

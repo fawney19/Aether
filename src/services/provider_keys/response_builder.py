@@ -64,6 +64,7 @@ def build_key_response(
     oauth_account_user_id = None
     auth_config: dict[str, Any] | None = None
     oauth_organizations: list[dict[str, object]] = []
+    oauth_temporary = False
     encrypted_auth_config = key_dict.pop("auth_config", None)  # 移除敏感字段，避免泄露
     if auth_type == "oauth" and isinstance(encrypted_auth_config, str) and encrypted_auth_config:
         try:
@@ -81,6 +82,7 @@ def build_key_response(
             oauth_account_name = auth_config.get("account_name")
             oauth_account_user_id = auth_config.get("account_user_id")
             oauth_organizations = normalize_oauth_organizations(auth_config.get("organizations"))
+            oauth_temporary = bool(auth_config.get("access_token_import_temporary"))
         except Exception as e:
             logger.error("Failed to decrypt auth_config for key {}: {}", key.id, e)
 
@@ -154,6 +156,7 @@ def build_key_response(
             "oauth_account_name": oauth_account_name,
             "oauth_account_user_id": oauth_account_user_id,
             "oauth_organizations": oauth_organizations,
+            "oauth_temporary": oauth_temporary,
             "oauth_invalid_at": status_snapshot.oauth.invalid_at,
             "oauth_invalid_reason": getattr(key, "oauth_invalid_reason", None),
             "status_snapshot": asdict(status_snapshot),

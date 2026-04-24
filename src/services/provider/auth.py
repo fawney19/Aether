@@ -516,7 +516,13 @@ async def get_provider_auth(
 
         # Refresh 失败（非锁竞争）且 access token 已过期 → 升级标记为 [OAUTH_EXPIRED]
         # 注意：未获取到锁说明其他实例正在刷新，不应在此标记为过期
-        if should_refresh and not _refreshed and not _lost_lock and expires_at is not None:
+        if (
+            should_refresh
+            and refresh_token
+            and not _refreshed
+            and not _lost_lock
+            and expires_at is not None
+        ):
             try:
                 token_truly_expired = int(time.time()) >= int(expires_at)
             except Exception:

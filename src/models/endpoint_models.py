@@ -863,6 +863,10 @@ class EndpointAPIKeyResponse(BaseModel):
         default_factory=list,
         description="OAuth 关联的组织/工作区摘要列表",
     )
+    oauth_temporary: bool = Field(
+        default=False,
+        description="是否为仅 Access Token 导入、不可自动刷新的临时 OAuth 账号",
+    )
     oauth_invalid_at: int | None = Field(
         default=None,
         description="OAuth Token 失效时间（Unix 时间戳，兼容字段；优先使用 status_snapshot.oauth）",

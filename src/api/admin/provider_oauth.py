@@ -36,7 +36,7 @@ from src.clients.redis_client import get_redis_client
 from src.core.crypto import crypto_service
 from src.core.exceptions import InvalidRequestException, NotFoundException
 from src.core.logger import logger
-from src.core.provider_oauth_utils import enrich_auth_config, post_oauth_token
+from src.core.provider_oauth_utils import enrich_auth_config, parse_codex_id_token, post_oauth_token
 from src.core.provider_templates.fixed_providers import FIXED_PROVIDERS
 from src.core.provider_templates.types import ProviderType
 from src.database import get_db_context
@@ -150,6 +150,10 @@ def _mark_refresh_failed_sync(key_id: str, reason: str) -> None:
         if not key:
             raise NotFoundException("Key 不存在", "key")
         current_reason = str(getattr(key, "oauth_invalid_reason", None) or "").strip()
+        from src.services.provider.oauth_token import is_account_level_block
+
+        if is_account_level_block(current_reason):
+            return
         merged_reason = _merge_refresh_failure_reason(current_reason, reason)
         if merged_reason is None:
             return
@@ -1577,11 +1581,62 @@ def _coerce_import_str(value: Any) -> str | None:
     return normalized or None
 
 
+def _decode_unverified_jwt_json_part(part: str) -> dict[str, Any] | None:
+    try:
+        padding = "=" * (-len(part) % 4)
+        decoded = base64.urlsafe_b64decode(f"{part}{padding}")
+        payload = json.loads(decoded.decode("utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _looks_like_access_token(token: str) -> bool:
+    """识别手工粘贴的 JWT Access Token，避免误当 Refresh Token 去刷新验证。"""
+    parts = token.strip().split(".")
+    if len(parts) != 3 or not all(parts):
+        return False
+
+    header = _decode_unverified_jwt_json_part(parts[0])
+    payload = _decode_unverified_jwt_json_part(parts[1])
+    if not header or not payload:
+        return False
+
+    token_type = str(header.get("typ") or "").lower()
+    if token_type and token_type not in {"jwt", "at+jwt"}:
+        return False
+
+    return any(key in payload for key in ("exp", "aud", "iss", "scope", "scp"))
+
+
+def _build_standard_oauth_import_entry_from_token(token: str) -> dict[str, Any]:
+    if _looks_like_access_token(token):
+        return {"access_token": token}
+    return {"refresh_token": token}
+
+
+def _normalize_single_import_tokens(
+    *,
+    refresh_token: str | None,
+    access_token: str | None,
+) -> tuple[str, str]:
+    refresh_token_value = (refresh_token or "").strip()
+    access_token_value = (access_token or "").strip()
+    if (
+        refresh_token_value
+        and not access_token_value
+        and _looks_like_access_token(refresh_token_value)
+    ):
+        access_token_value = refresh_token_value
+        refresh_token_value = ""
+    return refresh_token_value, access_token_value
+
+
 def _extract_standard_oauth_import_entry(item: Any) -> dict[str, Any] | None:
     if isinstance(item, str):
         token = _coerce_import_str(item)
         if token:
-            return {"refresh_token": token}
+            return _build_standard_oauth_import_entry_from_token(token)
         return None
     if not isinstance(item, dict):
         return None
@@ -1589,10 +1644,17 @@ def _extract_standard_oauth_import_entry(item: Any) -> dict[str, Any] | None:
     refresh_token = _coerce_import_str(item.get("refresh_token")) or _coerce_import_str(
         item.get("refreshToken")
     )
-    if not refresh_token:
+    access_token = _coerce_import_str(item.get("access_token")) or _coerce_import_str(
+        item.get("accessToken")
+    )
+    if not refresh_token and not access_token:
         return None
 
-    entry: dict[str, Any] = {"refresh_token": refresh_token}
+    entry: dict[str, Any] = {}
+    if refresh_token:
+        entry["refresh_token"] = refresh_token
+    if access_token:
+        entry["access_token"] = access_token
 
     account_id = (
         _coerce_import_str(item.get("account_id"))
@@ -1678,14 +1740,18 @@ def _parse_standard_oauth_import_entries(raw_input: str) -> list[dict[str, Any]]
     for line in raw.splitlines():
         token = line.strip()
         if token and not token.startswith("#"):
-            result.append({"refresh_token": token})
+            result.append(_build_standard_oauth_import_entry_from_token(token))
 
     return result
 
 
 def _parse_tokens_input(raw_input: str) -> list[str]:
     """兼容旧逻辑：仅返回 refresh_token 列表。"""
-    return [entry["refresh_token"] for entry in _parse_standard_oauth_import_entries(raw_input)]
+    return [
+        str(entry["refresh_token"])
+        for entry in _parse_standard_oauth_import_entries(raw_input)
+        if entry.get("refresh_token")
+    ]
 
 
 def _parse_kiro_import_input(raw_input: str) -> list[dict[str, Any]]:
@@ -1788,7 +1854,8 @@ def _parse_kiro_import_input(raw_input: str) -> list[dict[str, Any]]:
 
 
 class ImportRefreshTokenRequest(BaseModel):
-    refresh_token: str = Field(..., min_length=1, description="Refresh Token")
+    refresh_token: str | None = Field(None, min_length=1, description="Refresh Token")
+    access_token: str | None = Field(None, min_length=1, description="Access Token（Codex 可选）")
     name: str | None = Field(None, max_length=100, description="账号名称（可选）")
     proxy_node_id: str | None = Field(
         None,
@@ -1944,6 +2011,243 @@ def _apply_codex_import_hints(auth_config: dict[str, Any], import_entry: dict[st
             auth_config[field] = value
 
 
+def _decode_access_token_expires_at(access_token: str) -> int | None:
+    """从 access token JWT payload 中解析 exp。"""
+    try:
+        import jwt
+
+        claims = jwt.decode(
+            access_token,
+            options={
+                "verify_signature": False,
+                "verify_aud": False,
+            },
+        )
+    except Exception:
+        return None
+    if not isinstance(claims, dict):
+        return None
+    try:
+        exp = int(claims.get("exp"))
+    except Exception:
+        return None
+    return exp if exp > 0 else None
+
+
+def _build_access_token_import_payload(
+    *,
+    provider_type: str,
+    access_token: str,
+    refresh_token: str | None = None,
+    refresh_error: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    expires_at = _decode_access_token_expires_at(access_token)
+    token_data: dict[str, Any] = {
+        "access_token": access_token,
+        "token_type": "Bearer",
+    }
+    if expires_at is not None:
+        token_data["expires_at"] = expires_at
+
+    auth_config: dict[str, Any] = {
+        "provider_type": provider_type,
+        "token_type": "Bearer",
+        "refresh_token": refresh_token or None,
+        "expires_at": expires_at,
+        "scope": None,
+        "updated_at": int(time.time()),
+        "imported_from_access_token": True,
+        "access_token_import_temporary": not bool(refresh_token),
+    }
+    if refresh_error:
+        auth_config["refresh_token_import_error"] = refresh_error[:300]
+    return token_data, auth_config
+
+
+async def _build_codex_access_token_import_auth_config(
+    *,
+    provider_type: str,
+    access_token: str,
+    refresh_token: str | None,
+    proxy_config: dict[str, Any] | None,
+    import_entry: dict[str, Any] | None = None,
+    refresh_error: str | None = None,
+) -> tuple[str, dict[str, Any], int | None]:
+    if provider_type != ProviderType.CODEX.value:
+        raise InvalidRequestException("仅 Codex 支持 Access Token 导入")
+    access_token = access_token.strip()
+    if len(access_token) < 10:
+        raise InvalidRequestException("Access Token 无效或过短")
+
+    token_data, auth_config = _build_access_token_import_payload(
+        provider_type=provider_type,
+        access_token=access_token,
+        refresh_token=refresh_token,
+        refresh_error=refresh_error,
+    )
+    try:
+        auth_config = await enrich_auth_config(
+            provider_type=provider_type,
+            auth_config=auth_config,
+            token_response=token_data,
+            access_token=access_token,
+            proxy_config=proxy_config,
+        )
+    except Exception as exc:
+        logger.warning("Codex Access Token 导入: enrich_auth_config 失败: {}", exc)
+        parsed = parse_codex_id_token(access_token)
+        for key, value in parsed.items():
+            if value and not auth_config.get(key):
+                auth_config[key] = value
+
+    if import_entry:
+        _apply_codex_import_hints(auth_config, import_entry)
+    return access_token, auth_config, auth_config.get("expires_at")
+
+
+async def _exchange_refresh_token_for_import(
+    *,
+    provider_type: str,
+    template: Any,
+    refresh_token: str,
+    proxy_config: dict[str, Any] | None,
+    timeout_seconds: float,
+) -> tuple[str, dict[str, Any], int | None]:
+    token_url = template.oauth.token_url
+    is_json = "anthropic.com" in token_url
+    scope_str = " ".join(template.oauth.scopes) if template.oauth.scopes else ""
+
+    if is_json:
+        body: dict[str, Any] = {
+            "grant_type": "refresh_token",
+            "client_id": template.oauth.client_id,
+            "refresh_token": refresh_token,
+        }
+        if scope_str:
+            body["scope"] = scope_str
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        data = None
+        json_body = body
+    else:
+        form: dict[str, str] = {
+            "grant_type": "refresh_token",
+            "client_id": template.oauth.client_id,
+            "refresh_token": refresh_token,
+        }
+        if scope_str:
+            form["scope"] = scope_str
+        if template.oauth.client_secret:
+            form["client_secret"] = template.oauth.client_secret
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        }
+        data = form
+        json_body = None
+
+    resp = await post_oauth_token(
+        provider_type=provider_type,
+        token_url=token_url,
+        headers=headers,
+        data=data,
+        json_body=json_body,
+        proxy_config=proxy_config,
+        timeout_seconds=timeout_seconds,
+    )
+
+    if resp.status_code < 200 or resp.status_code >= 300:
+        error_reason = f"HTTP {resp.status_code}"
+        try:
+            error_body = resp.json()
+            if "error" in error_body:
+                error_reason = str(error_body.get("error_description") or error_body.get("error"))
+        except Exception:
+            error_reason = resp.text[:100] if resp.text else f"HTTP {resp.status_code}"
+        raise InvalidRequestException(f"Refresh Token 验证失败: {error_reason}")
+
+    token_data = resp.json()
+    access_token = str(token_data.get("access_token") or "")
+    new_refresh_token = str(token_data.get("refresh_token") or "") or refresh_token
+
+    if not access_token:
+        raise InvalidRequestException("token refresh 返回缺少 access_token")
+
+    expires_in = token_data.get("expires_in")
+    expires_at: int | None = None
+    try:
+        if expires_in is not None:
+            expires_at = int(time.time()) + int(expires_in)
+    except Exception:
+        expires_at = None
+
+    auth_config: dict[str, Any] = {
+        "provider_type": provider_type,
+        "token_type": token_data.get("token_type"),
+        "refresh_token": new_refresh_token or None,
+        "expires_at": expires_at,
+        "scope": token_data.get("scope"),
+        "updated_at": int(time.time()),
+    }
+
+    auth_config = await enrich_auth_config(
+        provider_type=provider_type,
+        auth_config=auth_config,
+        token_response=token_data,
+        access_token=access_token,
+        proxy_config=proxy_config,
+    )
+    return access_token, auth_config, expires_at
+
+
+async def _build_standard_oauth_import_credentials(
+    *,
+    provider_type: str,
+    template: Any,
+    import_entry: dict[str, Any],
+    proxy_config: dict[str, Any] | None,
+    timeout_seconds: float,
+) -> tuple[str, dict[str, Any], int | None]:
+    refresh_token = str(import_entry.get("refresh_token") or "").strip()
+    access_token_input = str(import_entry.get("access_token") or "").strip()
+
+    if refresh_token:
+        try:
+            access_token, auth_config, expires_at = await _exchange_refresh_token_for_import(
+                provider_type=provider_type,
+                template=template,
+                refresh_token=refresh_token,
+                proxy_config=proxy_config,
+                timeout_seconds=timeout_seconds,
+            )
+            if provider_type == ProviderType.CODEX.value:
+                _apply_codex_import_hints(auth_config, import_entry)
+            return access_token, auth_config, expires_at
+        except Exception as exc:
+            if access_token_input and provider_type == ProviderType.CODEX.value:
+                return await _build_codex_access_token_import_auth_config(
+                    provider_type=provider_type,
+                    access_token=access_token_input,
+                    refresh_token=refresh_token,
+                    proxy_config=proxy_config,
+                    import_entry=import_entry,
+                    refresh_error=str(exc),
+                )
+            raise
+
+    if access_token_input:
+        if provider_type != ProviderType.CODEX.value:
+            raise InvalidRequestException("仅 Codex 支持 Access Token 导入")
+        return await _build_codex_access_token_import_auth_config(
+            provider_type=provider_type,
+            access_token=access_token_input,
+            refresh_token=None,
+            proxy_config=proxy_config,
+            import_entry=import_entry,
+        )
+
+    raise InvalidRequestException("Token 无效或过短")
+
+
 @router.post(
     "/providers/{provider_id}/import-refresh-token",
     response_model=ProviderCompleteOAuthResponse,
@@ -1969,9 +2273,9 @@ async def import_refresh_token(
     )
 
     if provider_type == ProviderType.KIRO.value:
-        raw_import = payload.refresh_token.strip()
+        raw_import = (payload.refresh_token or "").strip()
         if not raw_import:
-            raise InvalidRequestException("Refresh Token 不能为空")
+            raise InvalidRequestException("Kiro 导入需要 Refresh Token 或完整凭据 JSON")
 
         # 使用统一的解析函数
         credentials = _parse_kiro_import_input(raw_import)
@@ -2045,93 +2349,43 @@ async def import_refresh_token(
 
     template = _require_oauth_template(provider_type)
 
-    # 用 refresh_token 换取 access_token
-    refresh_token = payload.refresh_token.strip()
-    token_url = template.oauth.token_url
-    is_json = "anthropic.com" in token_url
-    scope_str = " ".join(template.oauth.scopes) if template.oauth.scopes else ""
-
-    if is_json:
-        body: dict[str, Any] = {
-            "grant_type": "refresh_token",
-            "client_id": template.oauth.client_id,
-            "refresh_token": refresh_token,
-        }
-        if scope_str:
-            body["scope"] = scope_str
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
-        data = None
-        json_body = body
-    else:
-        form: dict[str, str] = {
-            "grant_type": "refresh_token",
-            "client_id": template.oauth.client_id,
-            "refresh_token": refresh_token,
-        }
-        if scope_str:
-            form["scope"] = scope_str
-        if template.oauth.client_secret:
-            form["client_secret"] = template.oauth.client_secret
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json",
-        }
-        data = form
-        json_body = None
-
-    # proxy_config 和 key_proxy 已在上方 Kiro 分支之前统一解析
-
-    resp = await post_oauth_token(
-        provider_type=provider_type,
-        token_url=token_url,
-        headers=headers,
-        data=data,
-        json_body=json_body,
-        proxy_config=proxy_config,
-        timeout_seconds=30.0,
+    refresh_token, access_token_input = _normalize_single_import_tokens(
+        refresh_token=payload.refresh_token,
+        access_token=payload.access_token,
     )
+    if not refresh_token and not access_token_input:
+        raise InvalidRequestException("缺少 refresh_token 或 access_token")
+    if access_token_input and provider_type != ProviderType.CODEX.value:
+        raise InvalidRequestException("仅 Codex 支持 Access Token 导入")
 
-    if resp.status_code < 200 or resp.status_code >= 300:
-        error_reason = f"HTTP {resp.status_code}"
+    refresh_error: str | None = None
+    if refresh_token:
         try:
-            error_body = resp.json()
-            if "error" in error_body:
-                error_reason = str(error_body.get("error_description") or error_body.get("error"))
-        except Exception:
-            error_reason = resp.text[:100] if resp.text else f"HTTP {resp.status_code}"
-        raise InvalidRequestException(f"Refresh Token 验证失败: {error_reason}")
-
-    token = resp.json()
-    access_token = str(token.get("access_token") or "")
-    new_refresh_token = str(token.get("refresh_token") or "") or refresh_token
-    expires_in = token.get("expires_in")
-    expires_at: int | None = None
-    try:
-        if expires_in is not None:
-            expires_at = int(time.time()) + int(expires_in)
-    except Exception:
-        expires_at = None
-
-    if not access_token:
-        raise InvalidRequestException("token refresh 返回缺少 access_token")
-
-    # 构建 auth_config
-    auth_config: dict[str, Any] = {
-        "provider_type": provider_type,
-        "token_type": token.get("token_type"),
-        "refresh_token": new_refresh_token or None,
-        "expires_at": expires_at,
-        "scope": token.get("scope"),
-        "updated_at": int(time.time()),
-    }
-
-    auth_config = await enrich_auth_config(
-        provider_type=provider_type,
-        auth_config=auth_config,
-        token_response=token,
-        access_token=access_token,
-        proxy_config=proxy_config,
-    )
+            access_token, auth_config, expires_at = await _exchange_refresh_token_for_import(
+                provider_type=provider_type,
+                template=template,
+                refresh_token=refresh_token,
+                proxy_config=proxy_config,
+                timeout_seconds=30.0,
+            )
+        except Exception as exc:
+            if not access_token_input or provider_type != ProviderType.CODEX.value:
+                raise
+            refresh_error = str(exc)
+            access_token, auth_config, expires_at = await _build_codex_access_token_import_auth_config(
+                provider_type=provider_type,
+                access_token=access_token_input,
+                refresh_token=refresh_token,
+                proxy_config=proxy_config,
+                refresh_error=refresh_error,
+            )
+    else:
+        access_token, auth_config, expires_at = await _build_codex_access_token_import_auth_config(
+            provider_type=provider_type,
+            access_token=access_token_input,
+            refresh_token=None,
+            proxy_config=proxy_config,
+        )
 
     # 检查是否存在重复的 OAuth 账号（失效账号允许覆盖）
     existing_key = _check_duplicate_oauth_account(db, provider_id, auth_config)
@@ -2162,7 +2416,7 @@ async def import_refresh_token(
         key_id=str(new_key.id),
         provider_type=provider_type,
         expires_at=expires_at,
-        has_refresh_token=bool(new_refresh_token),
+        has_refresh_token=bool(auth_config.get("refresh_token")),
         email=auth_config.get("email"),
         replaced=replaced,
     )
@@ -2284,10 +2538,6 @@ async def _batch_import_standard_oauth_internal(
         raise InvalidRequestException("未找到有效的 Token 数据")
 
     api_formats = _get_provider_api_formats(provider)
-    token_url = template.oauth.token_url
-    is_json = "anthropic.com" in token_url
-    scope_str = " ".join(template.oauth.scopes) if template.oauth.scopes else ""
-
     total = len(import_entries)
     results: list[BatchImportResultItem] = [None] * total  # type: ignore[list-item]
     success_count = 0
@@ -2305,214 +2555,94 @@ async def _batch_import_standard_oauth_internal(
 
         async with sem:
             try:
-                refresh_token = import_entry.get("refresh_token", "")
-                if not refresh_token or len(refresh_token) < 10:
-                    result_item = BatchImportResultItem(
-                        index=idx,
-                        status="error",
-                        error="Token 无效或过短",
-                    )
-                    failed_count += 1
-                else:
-                    if is_json:
-                        body: dict[str, Any] = {
-                            "grant_type": "refresh_token",
-                            "client_id": template.oauth.client_id,
-                            "refresh_token": refresh_token,
-                        }
-                        if scope_str:
-                            body["scope"] = scope_str
-                        headers = {
-                            "Content-Type": "application/json",
-                            "Accept": "application/json",
-                        }
-                        data = None
-                        json_body = body
-                    else:
-                        form: dict[str, str] = {
-                            "grant_type": "refresh_token",
-                            "client_id": template.oauth.client_id,
-                            "refresh_token": refresh_token,
-                        }
-                        if scope_str:
-                            form["scope"] = scope_str
-                        if template.oauth.client_secret:
-                            form["client_secret"] = template.oauth.client_secret
-                        headers = {
-                            "Content-Type": "application/x-www-form-urlencoded",
-                            "Accept": "application/json",
-                        }
-                        data = form
-                        json_body = None
-
-                    try:
-                        _release_batch_import_db_connection_before_await(db)
-                        resp = await post_oauth_token(
+                try:
+                    _release_batch_import_db_connection_before_await(db)
+                    access_token, auth_config, _expires_at = (
+                        await _build_standard_oauth_import_credentials(
                             provider_type=provider_type,
-                            token_url=token_url,
-                            headers=headers,
-                            data=data,
-                            json_body=json_body,
+                            template=template,
+                            import_entry=import_entry,
                             proxy_config=proxy_config,
                             timeout_seconds=timeout_seconds,
                         )
-                    except Exception as exc:
-                        result_item = BatchImportResultItem(
-                            index=idx,
-                            status="error",
-                            error=f"Token 刷新请求失败: {exc}",
-                        )
-                        failed_count += 1
-                        processed_count += 1
-                        results[idx] = result_item
-                        if progress_hook is not None:
-                            _release_batch_import_db_connection_before_await(db)
-                            await progress_hook(
-                                total, processed_count, success_count, failed_count, result_item
-                            )
-                        return
-
-                    if resp.status_code < 200 or resp.status_code >= 300:
-                        error_reason = f"HTTP {resp.status_code}"
-                        try:
-                            error_body = resp.json()
-                            if "error" in error_body:
-                                error_reason = str(
-                                    error_body.get("error_description") or error_body.get("error")
-                                )
-                        except Exception:
-                            error_reason = (
-                                resp.text[:100] if resp.text else f"HTTP {resp.status_code}"
-                            )
-
-                        result_item = BatchImportResultItem(
-                            index=idx,
-                            status="error",
-                            error=f"Token 验证失败: {error_reason}",
-                        )
-                        failed_count += 1
-                        processed_count += 1
-                        results[idx] = result_item
-                        if progress_hook is not None:
-                            _release_batch_import_db_connection_before_await(db)
-                            await progress_hook(
-                                total, processed_count, success_count, failed_count, result_item
-                            )
-                        return
-
-                    token_data = resp.json()
-                    access_token = str(token_data.get("access_token") or "")
-                    new_refresh_token = str(token_data.get("refresh_token") or "") or refresh_token
-
-                    if not access_token:
-                        result_item = BatchImportResultItem(
-                            index=idx,
-                            status="error",
-                            error="Token 刷新返回缺少 access_token",
-                        )
-                        failed_count += 1
-                        processed_count += 1
-                        results[idx] = result_item
-                        if progress_hook is not None:
-                            _release_batch_import_db_connection_before_await(db)
-                            await progress_hook(
-                                total, processed_count, success_count, failed_count, result_item
-                            )
-                        return
-
-                    expires_in = token_data.get("expires_in")
-                    expires_at: int | None = None
-                    try:
-                        if expires_in is not None:
-                            expires_at = int(time.time()) + int(expires_in)
-                    except Exception:
-                        expires_at = None
-
-                    auth_config: dict[str, Any] = {
-                        "provider_type": provider_type,
-                        "token_type": token_data.get("token_type"),
-                        "refresh_token": new_refresh_token or None,
-                        "expires_at": expires_at,
-                        "scope": token_data.get("scope"),
-                        "updated_at": int(time.time()),
-                    }
-
-                    try:
+                    )
+                except Exception as exc:
+                    result_item = BatchImportResultItem(
+                        index=idx,
+                        status="error",
+                        error=f"Token 验证失败: {exc}",
+                    )
+                    failed_count += 1
+                    processed_count += 1
+                    results[idx] = result_item
+                    if progress_hook is not None:
                         _release_batch_import_db_connection_before_await(db)
-                        auth_config = await enrich_auth_config(
-                            provider_type=provider_type,
-                            auth_config=auth_config,
-                            token_response=token_data,
-                            access_token=access_token,
-                            proxy_config=proxy_config,
+                        await progress_hook(
+                            total, processed_count, success_count, failed_count, result_item
                         )
-                    except Exception as exc:
-                        logger.warning("批量导入: enrich_auth_config 失败 (index={}): {}", idx, exc)
+                    return
 
-                    if provider_type == ProviderType.CODEX.value:
-                        _apply_codex_import_hints(auth_config, import_entry)
+                async with db_lock:
+                    try:
+                        existing_key = _check_duplicate_oauth_account(
+                            db, provider_id, auth_config
+                        )
+                    except InvalidRequestException as exc:
+                        result_item = BatchImportResultItem(
+                            index=idx,
+                            status="error",
+                            error=str(exc),
+                        )
+                        failed_count += 1
+                        processed_count += 1
+                        results[idx] = result_item
+                        if progress_hook is not None:
+                            _release_batch_import_db_connection_before_await(db)
+                            await progress_hook(
+                                total,
+                                processed_count,
+                                success_count,
+                                failed_count,
+                                result_item,
+                            )
+                        return
 
-                    async with db_lock:
-                        try:
-                            existing_key = _check_duplicate_oauth_account(
-                                db, provider_id, auth_config
-                            )
-                        except InvalidRequestException as exc:
-                            result_item = BatchImportResultItem(
-                                index=idx,
-                                status="error",
-                                error=str(exc),
-                            )
-                            failed_count += 1
-                            processed_count += 1
-                            results[idx] = result_item
-                            if progress_hook is not None:
-                                _release_batch_import_db_connection_before_await(db)
-                                await progress_hook(
-                                    total,
-                                    processed_count,
-                                    success_count,
-                                    failed_count,
-                                    result_item,
-                                )
-                            return
-
-                        replaced = False
-                        if existing_key:
-                            new_key = _update_existing_oauth_key(
-                                db,
-                                existing_key,
-                                access_token,
-                                auth_config,
-                                flush_only=True,
-                                proxy=key_proxy,
-                            )
-                            name = existing_key.name
-                            replaced = True
+                    replaced = False
+                    if existing_key:
+                        new_key = _update_existing_oauth_key(
+                            db,
+                            existing_key,
+                            access_token,
+                            auth_config,
+                            flush_only=True,
+                            proxy=key_proxy,
+                        )
+                        name = existing_key.name
+                        replaced = True
+                    else:
+                        email = auth_config.get("email")
+                        if email:
+                            name = f"{provider_type}_{email}"
                         else:
-                            email = auth_config.get("email")
-                            if email:
-                                name = f"{provider_type}_{email}"
-                            else:
-                                name = f"{provider_type}_{int(time.time())}_{idx}"
-                            if len(name) > 100:
-                                name = name[:100]
+                            name = f"{provider_type}_{int(time.time())}_{idx}"
+                        if len(name) > 100:
+                            name = name[:100]
 
-                            new_key = _create_oauth_key(
-                                db,
-                                provider_id=provider_id,
-                                name=name,
-                                access_token=access_token,
-                                auth_config=auth_config,
-                                api_formats=api_formats,
-                                flush_only=True,
-                                proxy=key_proxy,
-                            )
-
-                        pending_success_writes += 1
-                        pending_success_writes = _commit_batch_import_writes_if_needed(
-                            db, pending_success_writes
+                        new_key = _create_oauth_key(
+                            db,
+                            provider_id=provider_id,
+                            name=name,
+                            access_token=access_token,
+                            auth_config=auth_config,
+                            api_formats=api_formats,
+                            flush_only=True,
+                            proxy=key_proxy,
                         )
+
+                    pending_success_writes += 1
+                    pending_success_writes = _commit_batch_import_writes_if_needed(
+                        db, pending_success_writes
+                    )
 
                     result_item = BatchImportResultItem(
                         index=idx,

@@ -311,6 +311,8 @@ def _decode_unverified_jwt_payload(token: str) -> dict[str, Any] | None:
 def _extract_codex_fields_from_claims(claims: dict[str, Any]) -> dict[str, Any]:
     auth_info = claims.get("https://api.openai.com/auth")
     auth = auth_info if isinstance(auth_info, dict) else {}
+    profile_info = claims.get("https://api.openai.com/profile")
+    profile = profile_info if isinstance(profile_info, dict) else {}
 
     result: dict[str, Any] = {}
 
@@ -318,6 +320,7 @@ def _extract_codex_fields_from_claims(claims: dict[str, Any]) -> dict[str, Any]:
         [
             claims.get("email"),
             auth.get("email"),
+            profile.get("email"),
         ]
     )
     if email:

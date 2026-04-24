@@ -370,7 +370,16 @@
                                 >
                                   {{ getKeyOAuthExpires(key)?.text }}
                                 </span>
+                                <Badge
+                                  v-if="key.oauth_temporary"
+                                  variant="outline"
+                                  class="text-[10px] px-1.5 py-0 shrink-0"
+                                  title="仅通过 Access Token 导入，无法自动刷新，到期后需要重新导入"
+                                >
+                                  临时
+                                </Badge>
                                 <Button
+                                  v-else
                                   variant="ghost"
                                   size="icon"
                                   class="h-4 w-4 shrink-0"

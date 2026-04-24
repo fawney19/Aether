@@ -45,6 +45,25 @@ def test_parse_codex_id_token_extracts_auth_claim_fields() -> None:
     }
 
 
+def test_parse_codex_id_token_extracts_profile_email() -> None:
+    token = _encode_unsigned_jwt(
+        {
+            "https://api.openai.com/profile": {
+                "email": "r7q94c0ljw@ed7z.botnum.lol",
+                "email_verified": True,
+            },
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acc-1",
+            },
+        }
+    )
+
+    parsed = parse_codex_id_token(token)
+
+    assert parsed["email"] == "r7q94c0ljw@ed7z.botnum.lol"
+    assert parsed["account_id"] == "acc-1"
+
+
 def test_parse_codex_id_token_accepts_json_payload_string() -> None:
     payload = {
         "email": "u@example.com",
