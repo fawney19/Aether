@@ -16,6 +16,7 @@ use crate::handlers::admin::system::shared::settings::{
     build_admin_system_check_update_payload, build_admin_system_settings_payload,
     build_admin_system_stats_payload, current_aether_version,
 };
+use crate::handlers::admin::system::shared::smtp::build_admin_smtp_test_payload;
 use crate::GatewayError;
 use axum::{
     body::{Body, Bytes},
@@ -173,11 +174,19 @@ pub(super) async fn maybe_build_local_admin_core_system_response(
         ));
     }
 
+    if decision.route_kind.as_deref() == Some("smtp_test")
+        && request_method == http::Method::POST
+        && request_path == "/api/admin/system/smtp/test"
+    {
+        return Ok(Some(
+            Json(build_admin_smtp_test_payload(state, request_body).await?).into_response(),
+        ));
+    }
+
     if matches!(
         decision.route_kind.as_deref(),
         Some(
-            "smtp_test"
-                | "cleanup"
+            "cleanup"
                 | "purge_config"
                 | "purge_users"
                 | "purge_usage"
