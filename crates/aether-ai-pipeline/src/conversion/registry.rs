@@ -3,6 +3,7 @@
 use aether_provider_transport::auth::{
     resolve_local_gemini_auth, resolve_local_openai_bearer_auth, resolve_local_standard_auth,
 };
+use aether_provider_transport::kiro::local_kiro_request_transport_unsupported_reason_with_network;
 use aether_provider_transport::policy::{
     local_gemini_transport_unsupported_reason_with_network,
     local_openai_chat_transport_unsupported_reason,
@@ -222,6 +223,20 @@ pub fn request_pair_allowed_for_transport(
     if request_conversion_kind(client_api_format.as_str(), provider_api_format.as_str()).is_none() {
         return false;
     }
+    if transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("kiro")
+        && provider_api_format.eq_ignore_ascii_case("claude:cli")
+    {
+        return request_conversion_enabled_for_transport(
+            transport,
+            client_api_format.as_str(),
+            provider_api_format.as_str(),
+        ) && local_kiro_request_transport_unsupported_reason_with_network(transport)
+            .is_none();
+    }
     request_conversion_enabled_for_transport(
         transport,
         client_api_format.as_str(),
@@ -240,6 +255,20 @@ pub fn request_conversion_transport_unsupported_reason(
     transport: &GatewayProviderTransportSnapshot,
     _kind: RequestConversionKind,
 ) -> Option<&'static str> {
+    if transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("kiro")
+        && transport
+            .endpoint
+            .api_format
+            .trim()
+            .eq_ignore_ascii_case("claude:cli")
+    {
+        return local_kiro_request_transport_unsupported_reason_with_network(transport);
+    }
+
     match transport
         .endpoint
         .api_format
@@ -806,5 +835,69 @@ mod tests {
             request_conversion_direct_auth(&transport, RequestConversionKind::ToGeminiStandard),
             Some(("key".to_string(), "vertex-secret".to_string()))
         );
+    }
+
+    #[test]
+    fn kiro_claude_cli_transport_supports_cross_format_conversion_via_envelope() {
+        let transport = GatewayProviderTransportSnapshot {
+            provider: GatewayProviderTransportProvider {
+                id: "provider-kiro".to_string(),
+                name: "kiro".to_string(),
+                provider_type: "kiro".to_string(),
+                website: None,
+                is_active: true,
+                keep_priority_on_conversion: false,
+                enable_format_conversion: true,
+                concurrent_limit: None,
+                max_retries: None,
+                proxy: None,
+                request_timeout_secs: None,
+                stream_first_byte_timeout_secs: None,
+                config: None,
+            },
+            endpoint: GatewayProviderTransportEndpoint {
+                id: "endpoint-kiro".to_string(),
+                provider_id: "provider-kiro".to_string(),
+                api_format: "claude:cli".to_string(),
+                api_family: Some("claude".to_string()),
+                endpoint_kind: Some("cli".to_string()),
+                is_active: true,
+                base_url: "https://q.{region}.amazonaws.com".to_string(),
+                header_rules: None,
+                body_rules: None,
+                max_retries: None,
+                custom_path: None,
+                config: None,
+                format_acceptance_config: None,
+                proxy: None,
+            },
+            key: GatewayProviderTransportKey {
+                id: "key-kiro".to_string(),
+                provider_id: "provider-kiro".to_string(),
+                name: "key".to_string(),
+                auth_type: "bearer".to_string(),
+                is_active: true,
+                api_formats: Some(vec!["claude:cli".to_string()]),
+                allowed_models: None,
+                capabilities: None,
+                rate_multipliers: None,
+                global_priority_by_format: None,
+                expires_at_unix_secs: None,
+                proxy: None,
+                fingerprint: None,
+                decrypted_api_key: "kiro-secret".to_string(),
+                decrypted_auth_config: None,
+            },
+        };
+
+        assert!(request_pair_allowed_for_transport(
+            &transport,
+            "openai:chat",
+            "claude:cli"
+        ));
+        assert!(request_conversion_transport_supported(
+            &transport,
+            RequestConversionKind::ToClaudeStandard
+        ));
     }
 }

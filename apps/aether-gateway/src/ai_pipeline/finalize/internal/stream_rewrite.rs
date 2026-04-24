@@ -12,6 +12,10 @@ enum RewriteMode {
     OpenAiImage(OpenAiImageStreamState),
     Standard(StreamingStandardConversionState),
     KiroToClaudeCli(KiroToClaudeCliStreamState),
+    KiroToClaudeCliThenStandard {
+        kiro: KiroToClaudeCliStreamState,
+        standard: StreamingStandardConversionState,
+    },
 }
 
 pub(crate) struct LocalStreamRewriter<'a> {
@@ -35,6 +39,12 @@ pub(crate) fn maybe_build_local_stream_rewriter<'a>(
         FinalizeStreamRewriteMode::KiroToClaudeCli => {
             RewriteMode::KiroToClaudeCli(KiroToClaudeCliStreamState::new(report_context))
         }
+        FinalizeStreamRewriteMode::KiroToClaudeCliThenStandard => {
+            RewriteMode::KiroToClaudeCliThenStandard {
+                kiro: KiroToClaudeCliStreamState::new(report_context),
+                standard: StreamingStandardConversionState::default(),
+            }
+        }
     };
 
     Some(LocalStreamRewriter {
@@ -52,6 +62,10 @@ impl LocalStreamRewriter<'_> {
         if let RewriteMode::KiroToClaudeCli(state) = &mut self.mode {
             return state.push_chunk(self.report_context, chunk);
         }
+        if let RewriteMode::KiroToClaudeCliThenStandard { kiro, standard } = &mut self.mode {
+            let claude_bytes = kiro.push_chunk(self.report_context, chunk)?;
+            return transform_standard_bytes(standard, self.report_context, claude_bytes);
+        }
         self.buffered.extend_from_slice(chunk);
         let mut output = Vec::new();
         while let Some(line_end) = self.buffered.iter().position(|byte| *byte == b'\n') {
@@ -68,11 +82,21 @@ impl LocalStreamRewriter<'_> {
         if let RewriteMode::KiroToClaudeCli(state) = &mut self.mode {
             return state.finish(self.report_context);
         }
+        if let RewriteMode::KiroToClaudeCliThenStandard { kiro, standard } = &mut self.mode {
+            let mut output = transform_standard_bytes(
+                standard,
+                self.report_context,
+                kiro.finish(self.report_context)?,
+            )?;
+            output.extend(standard.finish(self.report_context)?);
+            return Ok(output);
+        }
         if self.buffered.is_empty() {
             match &mut self.mode {
                 RewriteMode::Standard(state) => return state.finish(self.report_context),
                 RewriteMode::OpenAiImage(_) => {}
                 RewriteMode::KiroToClaudeCli(_) => {}
+                RewriteMode::KiroToClaudeCliThenStandard { .. } => {}
                 RewriteMode::EnvelopeUnwrap => {}
             }
             return Ok(Vec::new());
@@ -85,6 +109,7 @@ impl LocalStreamRewriter<'_> {
             }
             RewriteMode::OpenAiImage(_) => {}
             RewriteMode::KiroToClaudeCli(_) => {}
+            RewriteMode::KiroToClaudeCliThenStandard { .. } => {}
             RewriteMode::EnvelopeUnwrap => {}
         }
         Ok(output)
@@ -97,8 +122,24 @@ impl LocalStreamRewriter<'_> {
             RewriteMode::OpenAiImage(_) => Ok(Vec::new()),
             RewriteMode::Standard(state) => state.transform_line(self.report_context, line),
             RewriteMode::KiroToClaudeCli(_) => Ok(Vec::new()),
+            RewriteMode::KiroToClaudeCliThenStandard { .. } => Ok(Vec::new()),
         }
     }
+}
+
+fn transform_standard_bytes(
+    standard: &mut StreamingStandardConversionState,
+    report_context: &Value,
+    bytes: Vec<u8>,
+) -> Result<Vec<u8>, GatewayError> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut output = Vec::new();
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        output.extend(standard.transform_line(report_context, line.to_vec())?);
+    }
+    Ok(output)
 }
 
 #[derive(Default)]

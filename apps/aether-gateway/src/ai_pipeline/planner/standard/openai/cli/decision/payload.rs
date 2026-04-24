@@ -70,8 +70,8 @@ pub(crate) async fn maybe_build_local_openai_cli_decision_payload_for_candidate(
     {
         extra_fields.insert("proxy".to_string(), proxy_value);
     }
-    if resolved.is_antigravity {
-        extra_fields.insert("envelope_name".to_string(), json!("antigravity:v1internal"));
+    if let Some(envelope_name) = resolved.envelope_name {
+        extra_fields.insert("envelope_name".to_string(), json!(envelope_name));
     }
     let report_context = append_local_failover_policy_to_value(
         append_execution_contract_fields_to_value(
@@ -101,7 +101,7 @@ pub(crate) async fn maybe_build_local_openai_cli_decision_payload_for_candidate(
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false),
                 upstream_is_stream: resolved.upstream_is_stream,
-                has_envelope: resolved.is_antigravity,
+                has_envelope: resolved.envelope_name.is_some(),
                 needs_conversion: matches!(
                     resolved.conversion_mode,
                     crate::ai_pipeline::ConversionMode::Bidirectional
@@ -136,7 +136,7 @@ pub(crate) async fn maybe_build_local_openai_cli_decision_payload_for_candidate(
         upstream_base_url = %resolved.transport.endpoint.base_url,
         upstream_url = %resolved.upstream_url,
         upstream_is_stream = resolved.upstream_is_stream,
-        has_envelope = resolved.is_antigravity,
+        has_envelope = resolved.envelope_name.is_some(),
         "gateway built local openai cli decision payload"
     );
     let super::request::LocalOpenAiCliCandidatePayloadParts {
@@ -150,6 +150,7 @@ pub(crate) async fn maybe_build_local_openai_cli_decision_payload_for_candidate(
         execution_strategy,
         conversion_mode,
         is_antigravity: _,
+        envelope_name: _,
         upstream_is_stream,
         transport,
     } = resolved;

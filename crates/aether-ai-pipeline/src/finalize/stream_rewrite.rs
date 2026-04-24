@@ -10,6 +10,7 @@ pub enum FinalizeStreamRewriteMode {
     OpenAiImage,
     Standard,
     KiroToClaudeCli,
+    KiroToClaudeCliThenStandard,
 }
 
 pub fn resolve_finalize_stream_rewrite_mode(
@@ -37,6 +38,17 @@ pub fn resolve_finalize_stream_rewrite_mode(
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase();
+
+    if needs_conversion
+        && envelope_name.eq_ignore_ascii_case(KIRO_ENVELOPE_NAME)
+        && provider_api_format == "claude:cli"
+    {
+        return supports_standard_stream_rewrite(
+            provider_api_format.as_str(),
+            client_api_format.as_str(),
+        )
+        .then_some(FinalizeStreamRewriteMode::KiroToClaudeCliThenStandard);
+    }
 
     if needs_conversion {
         return supports_standard_stream_rewrite(

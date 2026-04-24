@@ -20,9 +20,16 @@ use crate::ai_pipeline::transport::auth::{
     build_openai_passthrough_headers, ensure_upstream_auth_header,
     resolve_local_openai_bearer_auth,
 };
+use crate::ai_pipeline::transport::kiro::{
+    build_kiro_provider_headers, build_kiro_provider_request_body, KiroProviderHeadersInput,
+    KiroRequestAuth, KIRO_ENVELOPE_NAME,
+};
 use crate::ai_pipeline::transport::local_openai_chat_transport_unsupported_reason;
 use crate::ai_pipeline::transport::vertex::uses_vertex_api_key_query_auth;
-use crate::ai_pipeline::{ConversionMode, ExecutionStrategy, GatewayProviderTransportSnapshot};
+use crate::ai_pipeline::{
+    ConversionMode, ExecutionStrategy, GatewayProviderTransportSnapshot,
+    LocalResolvedOAuthRequestAuth,
+};
 use crate::AppState;
 
 use super::support::{mark_skipped_local_openai_chat_candidate, LocalOpenAiChatDecisionInput};
@@ -38,6 +45,7 @@ pub(crate) struct LocalOpenAiChatCandidatePayloadParts {
     pub(super) execution_strategy: ExecutionStrategy,
     pub(super) conversion_mode: ConversionMode,
     pub(super) report_kind: String,
+    pub(super) envelope_name: Option<&'static str>,
     pub(super) transport: Arc<GatewayProviderTransportSnapshot>,
 }
 
@@ -194,6 +202,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             execution_strategy: ExecutionStrategy::LocalSameFormat,
             conversion_mode: ConversionMode::None,
             report_kind: report_kind.to_string(),
+            envelope_name: None,
             transport: Arc::clone(transport),
         });
     }
@@ -232,32 +241,92 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         .await;
         return None;
     }
-    let prepared_candidate = match prepare_header_authenticated_candidate(
-        planner_state,
-        transport,
-        candidate,
-        request_conversion_direct_auth(transport, conversion_kind),
-        OauthPreparationContext {
-            trace_id,
-            api_format: provider_api_format.as_str(),
-            operation: "openai_chat_cross_format",
-        },
-    )
-    .await
-    {
-        Ok(prepared) => prepared,
-        Err(skip_reason) => {
-            mark_skipped_local_openai_chat_candidate(
-                state,
-                input,
-                trace_id,
+    let is_kiro_claude_cli = transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case("kiro")
+        && provider_api_format.eq_ignore_ascii_case("claude:cli");
+    let oauth_context = OauthPreparationContext {
+        trace_id,
+        api_format: provider_api_format.as_str(),
+        operation: "openai_chat_cross_format",
+    };
+    let kiro_auth = if is_kiro_claude_cli {
+        match crate::ai_pipeline::planner::candidate_preparation::resolve_candidate_oauth_auth(
+            planner_state,
+            transport,
+            oauth_context,
+        )
+        .await
+        {
+            Some(LocalResolvedOAuthRequestAuth::Kiro(auth)) => Some(auth),
+            _ => {
+                mark_skipped_local_openai_chat_candidate(
+                    state,
+                    input,
+                    trace_id,
+                    candidate,
+                    candidate_index,
+                    candidate_id,
+                    "transport_auth_unavailable",
+                )
+                .await;
+                return None;
+            }
+        }
+    } else {
+        None
+    };
+    let prepared_candidate = if let Some(kiro_auth) = kiro_auth.as_ref() {
+        let mapped_model =
+            match crate::ai_pipeline::planner::candidate_preparation::resolve_candidate_mapped_model(
                 candidate,
-                candidate_index,
-                candidate_id,
-                skip_reason,
-            )
-            .await;
-            return None;
+            ) {
+                Ok(mapped_model) => mapped_model,
+                Err(skip_reason) => {
+                    mark_skipped_local_openai_chat_candidate(
+                        state,
+                        input,
+                        trace_id,
+                        candidate,
+                        candidate_index,
+                        candidate_id,
+                        skip_reason,
+                    )
+                    .await;
+                    return None;
+                }
+            };
+        crate::ai_pipeline::planner::candidate_preparation::PreparedHeaderAuthenticatedCandidate {
+            auth_header: kiro_auth.name.to_string(),
+            auth_value: kiro_auth.value.clone(),
+            mapped_model,
+        }
+    } else {
+        match prepare_header_authenticated_candidate(
+            planner_state,
+            transport,
+            candidate,
+            request_conversion_direct_auth(transport, conversion_kind),
+            oauth_context,
+        )
+        .await
+        {
+            Ok(prepared) => prepared,
+            Err(skip_reason) => {
+                mark_skipped_local_openai_chat_candidate(
+                    state,
+                    input,
+                    trace_id,
+                    candidate,
+                    candidate_index,
+                    candidate_id,
+                    skip_reason,
+                )
+                .await;
+                return None;
+            }
         }
     };
 
@@ -267,7 +336,11 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         transport.provider.provider_type.as_str(),
         provider_api_format.as_str(),
         upstream_is_stream,
-        transport.endpoint.body_rules.as_ref(),
+        if is_kiro_claude_cli {
+            None
+        } else {
+            transport.endpoint.body_rules.as_ref()
+        },
         Some(input.auth_context.api_key_id.as_str()),
     ) else {
         mark_skipped_local_openai_chat_candidate(
@@ -282,6 +355,29 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         .await;
         return None;
     };
+
+    if let Some(kiro_auth) = kiro_auth.as_ref() {
+        return build_kiro_openai_chat_cross_format_payload_parts(
+            state,
+            parts,
+            trace_id,
+            body_json,
+            input,
+            eligible,
+            candidate_index,
+            candidate_id,
+            decision_kind,
+            transport,
+            provider_api_format.as_str(),
+            prepared_candidate.mapped_model,
+            prepared_candidate.auth_header,
+            prepared_candidate.auth_value,
+            provider_request_body,
+            upstream_is_stream,
+            kiro_auth,
+        )
+        .await;
+    }
 
     let Some(upstream_url) = build_cross_format_openai_chat_upstream_url(
         parts,
@@ -392,6 +488,119 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         execution_strategy: ExecutionStrategy::LocalCrossFormat,
         conversion_mode: ConversionMode::Bidirectional,
         report_kind: resolved_report_kind,
+        envelope_name: None,
+        transport: Arc::clone(transport),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_kiro_openai_chat_cross_format_payload_parts(
+    state: &AppState,
+    parts: &http::request::Parts,
+    trace_id: &str,
+    original_body_json: &serde_json::Value,
+    input: &LocalOpenAiChatDecisionInput,
+    eligible: &EligibleLocalExecutionCandidate,
+    candidate_index: u32,
+    candidate_id: &str,
+    decision_kind: &str,
+    transport: &Arc<GatewayProviderTransportSnapshot>,
+    provider_api_format: &str,
+    mapped_model: String,
+    auth_header: String,
+    auth_value: String,
+    claude_request_body: Value,
+    upstream_is_stream: bool,
+    kiro_auth: &KiroRequestAuth,
+) -> Option<LocalOpenAiChatCandidatePayloadParts> {
+    let candidate = &eligible.candidate;
+    let provider_request_body = match build_kiro_provider_request_body(
+        &claude_request_body,
+        &mapped_model,
+        &kiro_auth.auth_config,
+        transport.endpoint.body_rules.as_ref(),
+    ) {
+        Some(body) => body,
+        None => {
+            mark_skipped_local_openai_chat_candidate(
+                state,
+                input,
+                trace_id,
+                candidate,
+                candidate_index,
+                candidate_id,
+                "provider_request_body_missing",
+            )
+            .await;
+            return None;
+        }
+    };
+    let upstream_url = match crate::ai_pipeline::build_provider_transport_request_url(
+        transport,
+        provider_api_format,
+        Some(&mapped_model),
+        upstream_is_stream,
+        parts.uri.query(),
+        Some(kiro_auth.auth_config.effective_api_region()),
+    ) {
+        Some(url) => url,
+        None => {
+            mark_skipped_local_openai_chat_candidate(
+                state,
+                input,
+                trace_id,
+                candidate,
+                candidate_index,
+                candidate_id,
+                "upstream_url_missing",
+            )
+            .await;
+            return None;
+        }
+    };
+    let provider_request_headers = match build_kiro_provider_headers(KiroProviderHeadersInput {
+        headers: &parts.headers,
+        provider_request_body: &provider_request_body,
+        original_request_body: original_body_json,
+        header_rules: transport.endpoint.header_rules.as_ref(),
+        auth_header: &auth_header,
+        auth_value: &auth_value,
+        auth_config: &kiro_auth.auth_config,
+        machine_id: kiro_auth.machine_id.as_str(),
+    }) {
+        Some(headers) => headers,
+        None => {
+            mark_skipped_local_openai_chat_candidate(
+                state,
+                input,
+                trace_id,
+                candidate,
+                candidate_index,
+                candidate_id,
+                "transport_header_rules_apply_failed",
+            )
+            .await;
+            return None;
+        }
+    };
+    let resolved_report_kind = if decision_kind == OPENAI_CHAT_STREAM_PLAN_KIND {
+        "openai_chat_stream_success".to_string()
+    } else {
+        "openai_chat_sync_finalize".to_string()
+    };
+
+    Some(LocalOpenAiChatCandidatePayloadParts {
+        auth_header,
+        auth_value,
+        mapped_model,
+        provider_api_format: provider_api_format.to_string(),
+        provider_request_body,
+        provider_request_headers,
+        upstream_url,
+        execution_strategy: ExecutionStrategy::LocalCrossFormat,
+        conversion_mode: ConversionMode::Bidirectional,
+        report_kind: resolved_report_kind,
+        envelope_name: Some(KIRO_ENVELOPE_NAME),
         transport: Arc::clone(transport),
     })
 }

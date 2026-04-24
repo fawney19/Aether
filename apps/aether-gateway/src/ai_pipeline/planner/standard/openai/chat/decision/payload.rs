@@ -69,6 +69,12 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
     {
         extra_fields.insert("proxy".to_string(), proxy_value);
     }
+    if let Some(envelope_name) = resolved.envelope_name {
+        extra_fields.insert(
+            "envelope_name".to_string(),
+            serde_json::Value::String(envelope_name.to_string()),
+        );
+    }
     let report_context = append_local_failover_policy_to_value(
         append_execution_contract_fields_to_value(
             build_local_execution_report_context(LocalExecutionReportContextParts {
@@ -97,7 +103,7 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false),
                 upstream_is_stream,
-                has_envelope: false,
+                has_envelope: resolved.envelope_name.is_some(),
                 needs_conversion: matches!(
                     resolved.conversion_mode,
                     crate::ai_pipeline::ConversionMode::Bidirectional
@@ -122,6 +128,7 @@ pub(crate) async fn maybe_build_local_openai_chat_decision_payload_for_candidate
         execution_strategy,
         conversion_mode,
         report_kind,
+        envelope_name: _,
         transport,
     } = resolved;
 

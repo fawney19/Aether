@@ -946,6 +946,8 @@ struct OpenAICliClientToolState {
 pub struct OpenAICliClientEmitter {
     response_id: Option<String>,
     model: Option<String>,
+    message_item_id: Option<String>,
+    reasoning_item_id: Option<String>,
     started: bool,
     finished: bool,
     sequence_number: u64,
@@ -1166,11 +1168,29 @@ impl OpenAICliClientEmitter {
     }
 
     fn message_item_id(&self) -> String {
-        format!("{}_msg", self.response_id())
+        self.message_item_id
+            .clone()
+            .unwrap_or_else(|| format!("{}_msg", self.response_id()))
     }
 
     fn reasoning_item_id(&self) -> String {
-        format!("{}_rs_0", self.response_id())
+        self.reasoning_item_id
+            .clone()
+            .unwrap_or_else(|| format!("{}_rs_0", self.response_id()))
+    }
+
+    fn ensure_message_item_id(&mut self) -> String {
+        if self.message_item_id.is_none() {
+            self.message_item_id = Some(format!("{}_msg", self.response_id()));
+        }
+        self.message_item_id()
+    }
+
+    fn ensure_reasoning_item_id(&mut self) -> String {
+        if self.reasoning_item_id.is_none() {
+            self.reasoning_item_id = Some(format!("{}_rs_0", self.response_id()));
+        }
+        self.reasoning_item_id()
     }
 
     fn in_progress_response(&self) -> Value {
@@ -1269,6 +1289,7 @@ impl OpenAICliClientEmitter {
     fn ensure_reasoning_item_started(&mut self) -> Result<Vec<u8>, PipelineFinalizeError> {
         let mut out = self.ensure_started()?;
         let output_index = self.ensure_reasoning_output_index();
+        let item_id = self.ensure_reasoning_item_id();
         if !self.reasoning_item_started {
             out.extend(self.encode_response_event(
                 "response.output_item.added",
@@ -1278,7 +1299,7 @@ impl OpenAICliClientEmitter {
                     "output_index": output_index,
                     "item": {
                         "type": "reasoning",
-                        "id": self.reasoning_item_id(),
+                        "id": item_id.clone(),
                         "summary": [],
                     }
                 }),
@@ -1291,7 +1312,7 @@ impl OpenAICliClientEmitter {
                 json!({
                     "type": "response.reasoning_summary_part.added",
                     "response_id": self.response_id(),
-                    "item_id": self.reasoning_item_id(),
+                    "item_id": item_id,
                     "output_index": output_index,
                     "summary_index": 0,
                     "part": {
@@ -1308,8 +1329,8 @@ impl OpenAICliClientEmitter {
     fn ensure_text_item_started(&mut self) -> Result<Vec<u8>, PipelineFinalizeError> {
         let mut out = self.ensure_started()?;
         let output_index = self.ensure_message_output_index();
+        let item_id = self.ensure_message_item_id();
         if !self.text_item_started {
-            let item_id = self.message_item_id();
             out.extend(self.encode_response_event(
                 "response.output_item.added",
                 json!({
@@ -1318,7 +1339,7 @@ impl OpenAICliClientEmitter {
                     "output_index": output_index,
                     "item": {
                         "type": "message",
-                        "id": item_id,
+                        "id": item_id.clone(),
                         "status": "in_progress",
                         "role": "assistant",
                         "content": [],
@@ -1328,7 +1349,6 @@ impl OpenAICliClientEmitter {
             self.text_item_started = true;
         }
         if !self.text_part_started {
-            let item_id = self.message_item_id();
             out.extend(self.encode_response_event(
                 "response.content_part.added",
                 json!({
@@ -1847,6 +1867,31 @@ mod tests {
         assert!(sse.contains("\"item_id\":\"resp_stream_123_msg\""));
         assert!(sse.contains("\"text\":\"Hello\""));
         assert_eq!(response_sequence_numbers(&sse), (1..=9).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn openai_cli_client_emitter_keeps_text_item_id_stable_after_text_started() {
+        let mut emitter = OpenAICliClientEmitter::default();
+        let mut bytes = emitter
+            .emit(CanonicalStreamFrame {
+                id: "msg_first".to_string(),
+                model: "claude-haiku-4-5-20251001".to_string(),
+                event: CanonicalStreamEvent::TextDelta("Hel".to_string()),
+            })
+            .expect("first text should encode");
+        bytes.extend(
+            emitter
+                .emit(CanonicalStreamFrame {
+                    id: "msg_second".to_string(),
+                    model: "claude-haiku-4-5-20251001".to_string(),
+                    event: CanonicalStreamEvent::TextDelta("lo".to_string()),
+                })
+                .expect("second text should encode"),
+        );
+
+        let sse = String::from_utf8(bytes).expect("sse should be utf8");
+        assert!(sse.contains("\"item_id\":\"msg_first_msg\""));
+        assert!(!sse.contains("\"item_id\":\"msg_second_msg\""));
     }
 
     #[test]
