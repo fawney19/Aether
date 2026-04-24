@@ -318,9 +318,12 @@ fn parse_openai_image_validation_input(
         });
     }
 
-    let content_type = content_type.unwrap_or_default().to_ascii_lowercase();
-    if content_type.contains("multipart/form-data") {
-        parse_openai_image_validation_input_from_multipart(request_body, &content_type)
+    let content_type = content_type.unwrap_or_default();
+    if content_type
+        .to_ascii_lowercase()
+        .contains("multipart/form-data")
+    {
+        parse_openai_image_validation_input_from_multipart(request_body, content_type)
     } else {
         parse_openai_image_validation_input_from_json(request_body)
     }
@@ -403,11 +406,7 @@ fn parse_openai_image_validation_input_from_multipart(
     request_body: &Bytes,
     content_type: &str,
 ) -> Result<OpenAiImageValidationInput, &'static str> {
-    let boundary = content_type
-        .split(';')
-        .find_map(|segment| segment.trim().strip_prefix("boundary="))
-        .map(|value| value.trim_matches('"').to_string())
-        .ok_or(OPENAI_IMAGE_INVALID_MULTIPART_DETAIL)?;
+    let boundary = multipart_boundary(content_type).ok_or(OPENAI_IMAGE_INVALID_MULTIPART_DETAIL)?;
     let fields = parse_multipart_fields(request_body, &boundary);
     if fields.is_empty() {
         return Err(OPENAI_IMAGE_INVALID_MULTIPART_DETAIL);
@@ -534,6 +533,17 @@ fn parse_multipart_fields(body: &[u8], boundary: &str) -> Vec<MultipartField> {
     }
 
     parts
+}
+
+fn multipart_boundary(content_type: &str) -> Option<String> {
+    content_type.split(';').find_map(|segment| {
+        let (key, value) = segment.trim().split_once('=')?;
+        if !key.trim().eq_ignore_ascii_case("boundary") {
+            return None;
+        }
+        let boundary = value.trim().trim_matches('"').trim();
+        (!boundary.is_empty()).then(|| boundary.to_string())
+    })
 }
 
 fn parse_multipart_field(raw: &[u8]) -> Option<MultipartField> {
@@ -1080,5 +1090,37 @@ mod tests {
         .expect("custom image model should validate");
 
         assert_eq!(validation.model.as_deref(), Some("Custom/Image-Model:V1"));
+    }
+
+    #[test]
+    fn image_validation_accepts_multipart_with_mixed_case_boundary() {
+        let boundary = "------------------------OYNWsMZCt0ILTwn8naP4Gb";
+        let body = Bytes::from(format!(
+            concat!(
+                "--{boundary}\r\n",
+                "Content-Disposition: form-data; name=\"model\"\r\n\r\n",
+                "gpt-image-2\r\n",
+                "--{boundary}\r\n",
+                "Content-Disposition: form-data; name=\"prompt\"\r\n\r\n",
+                "edit this image\r\n",
+                "--{boundary}\r\n",
+                "Content-Disposition: form-data; name=\"image\"; filename=\"image.jpg\"\r\n",
+                "Content-Type: image/jpeg\r\n\r\n",
+                "image-bytes\r\n",
+                "--{boundary}--\r\n"
+            ),
+            boundary = boundary,
+        ));
+
+        let validation = parse_openai_image_validation_input(
+            OpenAiImageOperation::Edit,
+            Some(&format!("multipart/form-data; boundary={boundary}")),
+            &body,
+        )
+        .expect("multipart image edit should validate");
+
+        assert_eq!(validation.model.as_deref(), Some("gpt-image-2"));
+        assert_eq!(validation.prompt.as_deref(), Some("edit this image"));
+        assert_eq!(validation.image_count, 1);
     }
 }

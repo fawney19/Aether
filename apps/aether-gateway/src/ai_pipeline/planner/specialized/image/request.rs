@@ -866,11 +866,7 @@ fn parse_multipart_fields_from_base64(
         .headers
         .get(http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())?;
-    let boundary = content_type
-        .split(';')
-        .find_map(|segment| segment.trim().strip_prefix("boundary="))?
-        .trim_matches('"')
-        .to_string();
+    let boundary = multipart_boundary(content_type)?;
     let body_bytes = base64::engine::general_purpose::STANDARD
         .decode(body_base64)
         .ok()?;
@@ -903,6 +899,17 @@ fn parse_multipart_fields(body: &[u8], boundary: &str) -> Vec<MultipartField> {
     }
 
     parts
+}
+
+fn multipart_boundary(content_type: &str) -> Option<String> {
+    content_type.split(';').find_map(|segment| {
+        let (key, value) = segment.trim().split_once('=')?;
+        if !key.trim().eq_ignore_ascii_case("boundary") {
+            return None;
+        }
+        let boundary = value.trim().trim_matches('"').trim();
+        (!boundary.is_empty()).then(|| boundary.to_string())
+    })
 }
 
 fn parse_multipart_field(raw: &[u8]) -> Option<MultipartField> {
@@ -1032,6 +1039,44 @@ mod tests {
         assert_eq!(
             provider_request_body["tools"][0]["output_format"],
             json!("png")
+        );
+    }
+
+    #[test]
+    fn normalize_edit_multipart_request_accepts_mixed_case_boundary() {
+        let boundary = "------------------------OYNWsMZCt0ILTwn8naP4Gb";
+        let body = format!(
+            concat!(
+                "--{boundary}\r\n",
+                "Content-Disposition: form-data; name=\"model\"\r\n\r\n",
+                "gpt-image-2\r\n",
+                "--{boundary}\r\n",
+                "Content-Disposition: form-data; name=\"prompt\"\r\n\r\n",
+                "edit this image\r\n",
+                "--{boundary}\r\n",
+                "Content-Disposition: form-data; name=\"image\"; filename=\"image.jpg\"\r\n",
+                "Content-Type: image/jpeg\r\n\r\n",
+                "image-bytes\r\n",
+                "--{boundary}--\r\n"
+            ),
+            boundary = boundary,
+        );
+        let body_base64 = base64::engine::general_purpose::STANDARD.encode(body.as_bytes());
+        let parts = request_parts(
+            "/v1/images/edits",
+            Some(&format!("multipart/form-data; boundary={boundary}")),
+        );
+
+        let request = normalize_openai_image_request(&parts, &json!({}), Some(&body_base64))
+            .expect("edit request should normalize");
+
+        assert_eq!(request.operation, OpenAiImageOperation::Edit);
+        assert_eq!(request.requested_model.as_deref(), Some("gpt-image-2"));
+        assert_eq!(request.prompt.as_deref(), Some("edit this image"));
+        assert_eq!(request.images.len(), 1);
+        assert_eq!(
+            request.tool.get("action").and_then(|value| value.as_str()),
+            Some("edit")
         );
     }
 
