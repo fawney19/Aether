@@ -60,6 +60,18 @@ pub(crate) fn parse_admin_pool_search(query: Option<&str>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+pub(crate) fn parse_admin_pool_quick_selectors(query: Option<&str>) -> Vec<String> {
+    query_param_value(query, "quick_selectors")
+        .map(|value| {
+            value
+                .split(',')
+                .map(|item| item.trim().to_string())
+                .filter(|item| !item.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
 pub(crate) fn parse_admin_pool_status_filter(query: Option<&str>) -> Result<String, String> {
     let value = query_param_value(query, "status")
         .unwrap_or_else(|| "all".to_string())
