@@ -72,6 +72,17 @@ pub struct ReportRequestCandidateStatusRecordInput {
     pub now_unix_ms: u64,
 }
 
+struct ReportCandidateExtraDataInput {
+    client_api_format: Option<String>,
+    provider_api_format: Option<String>,
+    upstream_url: Option<String>,
+    mapped_model: Option<String>,
+    key_name: Option<String>,
+    header_rules: Option<Value>,
+    body_rules: Option<Value>,
+    proxy: Option<Value>,
+}
+
 pub fn execution_error_details(
     error: Option<&ExecutionError>,
     body_json: Option<&Value>,
@@ -153,7 +164,7 @@ pub fn resolve_report_request_candidate_slot(
         proxy,
     } = metadata;
     let request_id = request_id?;
-    let synthesized_extra_data = build_report_candidate_extra_data(
+    let synthesized_extra_data = build_report_candidate_extra_data(ReportCandidateExtraDataInput {
         client_api_format,
         provider_api_format,
         upstream_url,
@@ -162,7 +173,7 @@ pub fn resolve_report_request_candidate_slot(
         header_rules,
         body_rules,
         proxy,
-    );
+    });
     let created_at_unix_ms = matched_candidate
         .as_ref()
         .map(|candidate| candidate.created_at_unix_ms)
@@ -316,16 +327,16 @@ pub fn build_local_request_candidate_status_record(
         .filter(|value| !value.is_empty())?;
     let metadata = parse_request_candidate_report_context(report_context)?;
     let candidate_index = metadata.candidate_index?;
-    let extra_data = build_report_candidate_extra_data(
-        metadata.client_api_format.clone(),
-        metadata.provider_api_format.clone(),
-        metadata.upstream_url.clone(),
-        metadata.mapped_model.clone(),
-        metadata.key_name.clone(),
-        metadata.header_rules.clone(),
-        metadata.body_rules.clone(),
-        metadata.proxy.clone(),
-    );
+    let extra_data = build_report_candidate_extra_data(ReportCandidateExtraDataInput {
+        client_api_format: metadata.client_api_format.clone(),
+        provider_api_format: metadata.provider_api_format.clone(),
+        upstream_url: metadata.upstream_url.clone(),
+        mapped_model: metadata.mapped_model.clone(),
+        key_name: metadata.key_name.clone(),
+        header_rules: metadata.header_rules.clone(),
+        body_rules: metadata.body_rules.clone(),
+        proxy: metadata.proxy.clone(),
+    });
     let created_at_unix_ms = started_at_unix_ms.or(finished_at_unix_ms);
 
     Some(UpsertRequestCandidateRecord {
@@ -526,17 +537,18 @@ fn next_candidate_index(candidates: &[StoredRequestCandidate]) -> u32 {
         .unwrap_or_default()
 }
 
-fn build_report_candidate_extra_data(
-    client_api_format: Option<String>,
-    provider_api_format: Option<String>,
-    upstream_url: Option<String>,
-    mapped_model: Option<String>,
-    key_name: Option<String>,
-    header_rules: Option<Value>,
-    body_rules: Option<Value>,
-    proxy: Option<Value>,
-) -> Option<Value> {
-    let mut extra_data = Map::with_capacity(8);
+fn build_report_candidate_extra_data(input: ReportCandidateExtraDataInput) -> Option<Value> {
+    let ReportCandidateExtraDataInput {
+        client_api_format,
+        provider_api_format,
+        upstream_url,
+        mapped_model,
+        key_name,
+        header_rules,
+        body_rules,
+        proxy,
+    } = input;
+    let mut extra_data = Map::with_capacity(10);
     extra_data.insert("gateway_execution_runtime".to_string(), Value::Bool(true));
     extra_data.insert("phase".to_string(), Value::String("3c_trial".to_string()));
     if let Some(client_api_format) = client_api_format {
