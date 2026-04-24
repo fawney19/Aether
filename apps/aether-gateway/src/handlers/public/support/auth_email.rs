@@ -176,6 +176,7 @@ fn auth_build_verification_text_body(
 }
 
 fn auth_build_tls_config() -> std::sync::Arc<rustls::ClientConfig> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let root_store =
         rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let config = rustls::ClientConfig::builder()
