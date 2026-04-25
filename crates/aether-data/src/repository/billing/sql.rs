@@ -23,8 +23,7 @@ SELECT
   m.tiered_pricing AS model_tiered_pricing
 FROM providers p
 INNER JOIN global_models gm
-  ON gm.name = $2
- AND gm.is_active = TRUE
+  ON gm.is_active = TRUE
 LEFT JOIN models m
   ON m.global_model_id = gm.id
  AND m.provider_id = p.id
@@ -33,7 +32,71 @@ LEFT JOIN provider_api_keys pak
   ON pak.id = $3
  AND pak.provider_id = p.id
 WHERE p.id = $1
-ORDER BY COALESCE(m.is_available, FALSE) DESC, m.created_at ASC
+  AND (
+    gm.name = $2
+    OR m.provider_model_name = $2
+    OR (
+      m.provider_model_mappings IS NOT NULL
+      AND (
+        m.provider_model_mappings @> jsonb_build_array(jsonb_build_object('name', $2::TEXT))
+        OR m.provider_model_mappings @> jsonb_build_array(to_jsonb($2::TEXT))
+        OR m.provider_model_mappings @> jsonb_build_object('name', $2::TEXT)
+        OR m.provider_model_mappings = to_jsonb($2::TEXT)
+      )
+    )
+  )
+ORDER BY
+  CASE
+    WHEN m.provider_model_name = $2 THEN 0
+    WHEN m.provider_model_mappings IS NOT NULL
+      AND (
+        m.provider_model_mappings @> jsonb_build_array(jsonb_build_object('name', $2::TEXT))
+        OR m.provider_model_mappings @> jsonb_build_array(to_jsonb($2::TEXT))
+        OR m.provider_model_mappings @> jsonb_build_object('name', $2::TEXT)
+        OR m.provider_model_mappings = to_jsonb($2::TEXT)
+      ) THEN 1
+    WHEN gm.name = $2 THEN 2
+    ELSE 3
+  END ASC,
+  COALESCE(m.is_available, FALSE) DESC,
+  CASE
+    WHEN m.tiered_pricing IS NOT NULL OR m.price_per_request IS NOT NULL THEN 0
+    WHEN gm.default_tiered_pricing IS NOT NULL OR gm.default_price_per_request IS NOT NULL THEN 1
+    ELSE 2
+  END ASC,
+  m.created_at ASC
+LIMIT 1
+"#;
+
+const FIND_MODEL_CONTEXT_BY_MODEL_ID_SQL: &str = r#"
+SELECT
+  p.id AS provider_id,
+  CAST(p.billing_type AS TEXT) AS provider_billing_type,
+  pak.id AS provider_api_key_id,
+  pak.rate_multipliers AS provider_api_key_rate_multipliers,
+  pak.cache_ttl_minutes AS provider_api_key_cache_ttl_minutes,
+  gm.id AS global_model_id,
+  gm.name AS global_model_name,
+  gm.config AS global_model_config,
+  CAST(gm.default_price_per_request AS DOUBLE PRECISION) AS default_price_per_request,
+  gm.default_tiered_pricing AS default_tiered_pricing,
+  m.id AS model_id,
+  m.provider_model_name AS model_provider_model_name,
+  m.config AS model_config,
+  CAST(m.price_per_request AS DOUBLE PRECISION) AS model_price_per_request,
+  m.tiered_pricing AS model_tiered_pricing
+FROM providers p
+INNER JOIN models m
+  ON m.id = $2
+ AND m.provider_id = p.id
+ AND m.is_active = TRUE
+INNER JOIN global_models gm
+  ON gm.id = m.global_model_id
+ AND gm.is_active = TRUE
+LEFT JOIN provider_api_keys pak
+  ON pak.id = $3
+ AND pak.provider_id = p.id
+WHERE p.id = $1
 LIMIT 1
 "#;
 
@@ -62,6 +125,22 @@ impl SqlxBillingReadRepository {
             .map_postgres_err()?;
         row.as_ref().map(map_row).transpose()
     }
+
+    pub async fn find_model_context_by_model_id(
+        &self,
+        provider_id: &str,
+        provider_api_key_id: Option<&str>,
+        model_id: &str,
+    ) -> Result<Option<StoredBillingModelContext>, DataLayerError> {
+        let row = sqlx::query(FIND_MODEL_CONTEXT_BY_MODEL_ID_SQL)
+            .bind(provider_id)
+            .bind(model_id)
+            .bind(provider_api_key_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_postgres_err()?;
+        row.as_ref().map(map_row).transpose()
+    }
 }
 
 #[async_trait]
@@ -73,6 +152,15 @@ impl BillingReadRepository for SqlxBillingReadRepository {
         global_model_name: &str,
     ) -> Result<Option<StoredBillingModelContext>, DataLayerError> {
         Self::find_model_context(self, provider_id, provider_api_key_id, global_model_name).await
+    }
+
+    async fn find_model_context_by_model_id(
+        &self,
+        provider_id: &str,
+        provider_api_key_id: Option<&str>,
+        model_id: &str,
+    ) -> Result<Option<StoredBillingModelContext>, DataLayerError> {
+        Self::find_model_context_by_model_id(self, provider_id, provider_api_key_id, model_id).await
     }
 }
 

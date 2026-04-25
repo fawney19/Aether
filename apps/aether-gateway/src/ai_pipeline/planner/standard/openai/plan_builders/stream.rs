@@ -31,12 +31,11 @@ pub(crate) fn build_openai_chat_stream_plan_from_decision(
     let Some(key_id) = take_non_empty_string(&mut payload.key_id) else {
         return Ok(None);
     };
-    let Some(auth_header) = take_non_empty_string(&mut payload.auth_header) else {
+    let auth_header = take_non_empty_string(&mut payload.auth_header);
+    let auth_value = take_non_empty_string(&mut payload.auth_value);
+    if auth_header.is_some() != auth_value.is_some() {
         return Ok(None);
-    };
-    let Some(auth_value) = take_non_empty_string(&mut payload.auth_value) else {
-        return Ok(None);
-    };
+    }
     let Some(provider_api_format) = take_non_empty_string(&mut payload.provider_api_format) else {
         return Ok(None);
     };
@@ -86,27 +85,37 @@ pub(crate) fn build_openai_chat_stream_plan_from_decision(
     let existing_provider_request_headers = std::mem::take(&mut payload.provider_request_headers);
     let extra_headers = std::mem::take(&mut payload.extra_headers);
     let mut provider_request_headers = if existing_provider_request_headers.is_empty() {
-        if provider_api_format == client_api_format {
-            build_complete_passthrough_headers_with_auth(
-                &parts.headers,
-                &auth_header,
-                &auth_value,
-                &extra_headers,
-                payload.content_type.as_deref(),
-            )
-        } else if provider_api_format.starts_with("claude:") {
-            build_claude_passthrough_headers(
-                &parts.headers,
-                &auth_header,
-                &auth_value,
-                &extra_headers,
-                payload.content_type.as_deref(),
-            )
+        if let (Some(auth_header), Some(auth_value)) =
+            (auth_header.as_deref(), auth_value.as_deref())
+        {
+            if provider_api_format == client_api_format {
+                build_complete_passthrough_headers_with_auth(
+                    &parts.headers,
+                    auth_header,
+                    auth_value,
+                    &extra_headers,
+                    payload.content_type.as_deref(),
+                )
+            } else if provider_api_format.starts_with("claude:") {
+                build_claude_passthrough_headers(
+                    &parts.headers,
+                    auth_header,
+                    auth_value,
+                    &extra_headers,
+                    payload.content_type.as_deref(),
+                )
+            } else {
+                build_openai_passthrough_headers(
+                    &parts.headers,
+                    auth_header,
+                    auth_value,
+                    &extra_headers,
+                    payload.content_type.as_deref(),
+                )
+            }
         } else {
-            build_openai_passthrough_headers(
+            crate::ai_pipeline::transport::auth::build_passthrough_headers(
                 &parts.headers,
-                &auth_header,
-                &auth_value,
                 &extra_headers,
                 payload.content_type.as_deref(),
             )
@@ -114,7 +123,9 @@ pub(crate) fn build_openai_chat_stream_plan_from_decision(
     } else {
         existing_provider_request_headers
     };
-    ensure_upstream_auth_header(&mut provider_request_headers, &auth_header, &auth_value);
+    if let (Some(auth_header), Some(auth_value)) = (auth_header.as_deref(), auth_value.as_deref()) {
+        ensure_upstream_auth_header(&mut provider_request_headers, auth_header, auth_value);
+    }
     provider_request_headers.insert("accept".to_string(), "text/event-stream".to_string());
     let content_type = payload
         .content_type

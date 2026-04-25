@@ -48,10 +48,12 @@ pub use crate::contracts::{
     OPENAI_CLI_SYNC_FINALIZE_REPORT_KIND, OPENAI_CLI_SYNC_PLAN_KIND,
     OPENAI_CLI_SYNC_SUCCESS_REPORT_KIND, OPENAI_COMPACT_STREAM_PLAN_KIND,
     OPENAI_COMPACT_SYNC_ERROR_REPORT_KIND, OPENAI_COMPACT_SYNC_FINALIZE_REPORT_KIND,
-    OPENAI_COMPACT_SYNC_PLAN_KIND, OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND,
-    OPENAI_VIDEO_CONTENT_PLAN_KIND, OPENAI_VIDEO_CREATE_SYNC_FINALIZE_REPORT_KIND,
-    OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND,
-    OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
+    OPENAI_COMPACT_SYNC_PLAN_KIND, OPENAI_IMAGE_STREAM_PLAN_KIND,
+    OPENAI_IMAGE_STREAM_SUCCESS_REPORT_KIND, OPENAI_IMAGE_SYNC_FINALIZE_REPORT_KIND,
+    OPENAI_IMAGE_SYNC_PLAN_KIND, OPENAI_IMAGE_SYNC_SUCCESS_REPORT_KIND,
+    OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND, OPENAI_VIDEO_CONTENT_PLAN_KIND,
+    OPENAI_VIDEO_CREATE_SYNC_FINALIZE_REPORT_KIND, OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND,
+    OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND, OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
 };
 pub use crate::conversion::request::{
     convert_openai_chat_request_to_claude_request, convert_openai_chat_request_to_gemini_request,
@@ -134,6 +136,10 @@ pub use crate::planner::specialized::{
         resolve_stream_spec as resolve_gemini_files_stream_spec,
         resolve_sync_spec as resolve_gemini_files_sync_spec, LocalGeminiFilesSpec,
     },
+    image::{
+        resolve_stream_spec as resolve_local_image_stream_spec,
+        resolve_sync_spec as resolve_local_image_sync_spec, LocalOpenAiImageSpec,
+    },
     video::{
         resolve_sync_spec as resolve_local_video_sync_spec, LocalVideoCreateFamily,
         LocalVideoCreateSpec,
@@ -158,4 +164,7 @@ pub use crate::planner::standard::{
         resolve_sync_spec as resolve_openai_cli_sync_spec, LocalOpenAiCliSpec,
     },
     LocalStandardSourceFamily, LocalStandardSourceMode, LocalStandardSpec,
+    CODEX_OPENAI_IMAGE_DEFAULT_MODEL, CODEX_OPENAI_IMAGE_DEFAULT_OUTPUT_FORMAT,
+    CODEX_OPENAI_IMAGE_DEFAULT_VARIATION_MODEL, CODEX_OPENAI_IMAGE_DEFAULT_VARIATION_PROMPT,
+    CODEX_OPENAI_IMAGE_INTERNAL_MODEL,
 };

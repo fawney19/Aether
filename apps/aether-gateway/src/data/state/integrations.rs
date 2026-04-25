@@ -157,6 +157,21 @@ impl MinimalCandidateSelectionRowSource for GatewayDataState {
 
 #[async_trait]
 impl BillingModelContextLookup for GatewayDataState {
+    async fn find_billing_model_context_by_model_id(
+        &self,
+        provider_id: &str,
+        provider_api_key_id: Option<&str>,
+        model_id: &str,
+    ) -> Result<Option<StoredBillingModelContext>, DataLayerError> {
+        GatewayDataState::find_billing_model_context_by_model_id(
+            self,
+            provider_id,
+            provider_api_key_id,
+            model_id,
+        )
+        .await
+    }
+
     async fn find_billing_model_context(
         &self,
         provider_id: &str,

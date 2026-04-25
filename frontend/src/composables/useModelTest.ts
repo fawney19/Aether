@@ -2,7 +2,10 @@ import { ref, onBeforeUnmount } from 'vue'
 import { isAxiosError } from 'axios'
 import { useToast } from './useToast'
 import {
+  testModel,
   testModelFailover,
+  type TestAttemptDetail,
+  type TestModelResponse,
   type TestModelFailoverResponse,
 } from '@/api/endpoints/providers'
 import { requestTraceApi, type RequestTrace } from '@/api/requestTrace'
@@ -14,6 +17,7 @@ export interface StartTestParams {
   displayLabel: string
   apiFormat?: string
   endpointId?: string
+  endpointBaseUrl?: string
   message?: string
   requestHeaders?: Record<string, unknown>
   requestBody?: Record<string, unknown>
@@ -33,6 +37,7 @@ export interface UseModelTestOptions {
 export function useModelTest(options: UseModelTestOptions) {
   const { providerId, pollInterval = 800 } = options
   const { success: showSuccess, error: showError } = useToast()
+  const LOCAL_FAILOVER_UNCONFIGURED_MESSAGE = 'Rust local provider-query failover simulation is not configured'
 
   const testing = ref(false)
   const testMode = ref<'global' | 'direct'>('global')
@@ -59,6 +64,78 @@ export function useModelTest(options: UseModelTestOptions) {
     if (typeof result.total_attempts === 'number' && result.total_attempts > 0) return true
     if (typeof result.total_candidates === 'number' && result.total_candidates > 0) return true
     return false
+  }
+
+  function normalizeDirectTestResult(
+    params: StartTestParams,
+    result: TestModelResponse,
+  ): TestModelFailoverResponse {
+    const responsePayload = result.data?.response
+    const failureMessage = typeof result.error === 'string' && result.error.trim()
+      ? result.error.trim()
+      : (
+          typeof responsePayload?.error === 'string'
+            ? responsePayload.error
+            : responsePayload?.error?.message
+        ) || null
+    const syntheticAttempt: TestAttemptDetail = {
+      candidate_index: 1,
+      endpoint_api_format: params.apiFormat || '-',
+      endpoint_base_url: params.endpointBaseUrl || '',
+      key_name: null,
+      key_id: '',
+      auth_type: '',
+      effective_model: result.model || params.modelName,
+      status: result.success ? 'success' : 'failed',
+      skip_reason: null,
+      error_message: result.success ? null : failureMessage,
+      status_code: responsePayload?.status_code ?? null,
+      latency_ms: null,
+      request_url: null,
+      request_headers: (params.requestHeaders as Record<string, unknown> | undefined) ?? null,
+      request_body: params.requestBody ?? null,
+      response_headers: null,
+      response_body: (responsePayload as Record<string, unknown> | undefined)
+        ?? (result.data as Record<string, unknown> | undefined)
+        ?? null,
+    }
+
+    return {
+      success: result.success,
+      model: result.model || params.modelName,
+      provider: result.provider || { id: providerId(), name: providerId() },
+      attempts: [syntheticAttempt],
+      total_candidates: 1,
+      total_attempts: 1,
+      data: (result.data as Record<string, unknown> | undefined) ?? null,
+      error: failureMessage,
+    }
+  }
+
+  async function runDirectTest(
+    params: StartTestParams,
+    reqId: string,
+    signal?: AbortSignal,
+  ): Promise<TestModelFailoverResponse> {
+    return normalizeDirectTestResult(params, await testModel({
+      provider_id: providerId(),
+      model_name: params.modelName,
+      api_format: params.apiFormat,
+      endpoint_id: params.endpointId,
+      ...(normalizedMessage(params.message) ? { message: normalizedMessage(params.message) } : {}),
+      ...(params.requestHeaders ? { request_headers: params.requestHeaders } : {}),
+      ...(params.requestBody ? { request_body: params.requestBody } : {}),
+      request_id: reqId,
+      concurrency: params.concurrency,
+    }, {
+      signal,
+    }))
+  }
+
+  function normalizedMessage(message?: string): string | undefined {
+    return typeof message === 'string' && message.trim()
+      ? message.trim()
+      : undefined
   }
 
   async function pollTestTrace(reqId: string, token: number) {
@@ -136,25 +213,33 @@ export function useModelTest(options: UseModelTestOptions) {
     startPolling(reqId)
 
     try {
-      const normalizedMessage = typeof params.message === 'string' && params.message.trim()
-        ? params.message.trim()
-        : undefined
+      const message = normalizedMessage(params.message)
 
-      const result = await testModelFailover({
-        provider_id: providerId(),
-        mode: params.mode,
-        model_name: params.modelName,
-        failover_models: [params.modelName],
-        api_format: params.apiFormat,
-        endpoint_id: params.endpointId,
-        ...(normalizedMessage ? { message: normalizedMessage } : {}),
-        ...(params.requestHeaders ? { request_headers: params.requestHeaders } : {}),
-        ...(params.requestBody ? { request_body: params.requestBody } : {}),
-        request_id: reqId,
-        concurrency: params.concurrency,
-      }, {
-        signal: abortController.signal,
-      })
+      let result = params.mode === 'direct'
+        ? await runDirectTest(params, reqId, abortController.signal)
+        : await testModelFailover({
+          provider_id: providerId(),
+          mode: params.mode,
+          model_name: params.modelName,
+          failover_models: [params.modelName],
+          api_format: params.apiFormat,
+          endpoint_id: params.endpointId,
+          ...(message ? { message } : {}),
+          ...(params.requestHeaders ? { request_headers: params.requestHeaders } : {}),
+          ...(params.requestBody ? { request_body: params.requestBody } : {}),
+          request_id: reqId,
+          concurrency: params.concurrency,
+        }, {
+          signal: abortController.signal,
+        })
+
+      if (
+        params.mode === 'global'
+        && !result.success
+        && result.error === LOCAL_FAILOVER_UNCONFIGURED_MESSAGE
+      ) {
+        result = await runDirectTest(params, reqId, abortController.signal)
+      }
 
       const keepTraceContext = resultHasTraceContext(result)
       if (result.success) {

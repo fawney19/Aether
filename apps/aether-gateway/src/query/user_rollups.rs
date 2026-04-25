@@ -110,7 +110,7 @@ SELECT
   "usage".user_id,
   COUNT(*)::BIGINT AS request_count,
   COALESCE(SUM(GREATEST(COALESCE("usage".total_tokens, 0), 0)), 0)::BIGINT AS total_tokens
-FROM "usage"
+FROM usage_billing_facts AS "usage"
 WHERE "usage".user_id = ANY($1::TEXT[])
   AND "usage".created_at >= $2
   AND "usage".status NOT IN ('pending', 'streaming')

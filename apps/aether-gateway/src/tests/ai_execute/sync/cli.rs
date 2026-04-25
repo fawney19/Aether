@@ -23,6 +23,7 @@ use aether_data_contracts::repository::candidates::{
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
+use base64::Engine as _;
 use sha2::{Digest, Sha256};
 
 #[tokio::test]
@@ -3380,21 +3381,19 @@ async fn gateway_executes_codex_cli_sync_via_local_decision_gate_after_oauth_ref
                     "request_id": "trace-codex-cli-local-123",
                     "status_code": 200,
                     "headers": {
-                        "content-type": "application/json"
+                        "content-type": "text/event-stream"
                     },
                     "body": {
-                        "json_body": {
-                            "id": "resp-codex-local-123",
-                            "object": "response",
-                            "model": "gpt-5.4",
-                            "status": "completed",
-                            "output": [],
-                            "usage": {
-                                "input_tokens": 1,
-                                "output_tokens": 2,
-                                "total_tokens": 3
-                            }
-                        }
+                        "body_bytes_b64": base64::engine::general_purpose::STANDARD.encode(
+                            concat!(
+                                "event: response.created\n",
+                                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-codex-local-123\",\"object\":\"response\",\"model\":\"gpt-5.4\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+                                "event: response.output_text.delta\n",
+                                "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hello from Codex\"}\n\n",
+                                "event: response.completed\n",
+                                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-codex-local-123\",\"object\":\"response\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n"
+                            )
+                        )
                     },
                     "telemetry": {
                         "elapsed_ms": 37
@@ -3459,6 +3458,10 @@ async fn gateway_executes_codex_cli_sync_via_local_decision_gate_after_oauth_ref
     assert_eq!(response.status(), StatusCode::OK);
     let response_json: serde_json::Value = response.json().await.expect("body should parse");
     assert_eq!(response_json["id"], "resp-codex-local-123");
+    assert_eq!(
+        response_json["output"][0]["content"][0]["text"],
+        "Hello from Codex"
+    );
 
     let seen_refresh_request = seen_refresh
         .lock()

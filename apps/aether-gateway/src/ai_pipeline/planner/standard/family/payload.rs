@@ -52,6 +52,12 @@ pub(super) async fn maybe_build_local_standard_decision_payload_for_candidate(
     {
         extra_fields.insert("proxy".to_string(), proxy_value);
     }
+    if let Some(envelope_name) = resolved.envelope_name {
+        extra_fields.insert(
+            "envelope_name".to_string(),
+            serde_json::Value::String(envelope_name.to_string()),
+        );
+    }
     let report_context = append_local_failover_policy_to_value(
         append_execution_contract_fields_to_value(
             build_local_execution_report_context(LocalExecutionReportContextParts {
@@ -65,17 +71,27 @@ pub(super) async fn maybe_build_local_standard_decision_payload_for_candidate(
                 endpoint_id: &candidate.endpoint_id,
                 key_id: &candidate.key_id,
                 key_name: Some(&candidate.key_name),
+                model_id: Some(&candidate.model_id),
+                global_model_id: Some(&candidate.global_model_id),
+                global_model_name: Some(&candidate.global_model_name),
                 provider_api_format: &resolved.provider_api_format,
                 client_api_format: spec_metadata.api_format,
                 mapped_model: Some(&resolved.mapped_model),
                 candidate_group_id: eligible.orchestration.candidate_group_id.as_deref(),
                 upstream_url: Some(&resolved.upstream_url),
+                header_rules: resolved.transport.endpoint.header_rules.as_ref(),
+                body_rules: resolved.transport.endpoint.body_rules.as_ref(),
                 provider_request_method: Some(serde_json::Value::Null),
                 provider_request_headers: Some(&resolved.provider_request_headers),
                 original_headers: &parts.headers,
                 original_request_body_json: Some(body_json),
                 original_request_body_base64: None,
-                has_envelope: false,
+                client_requested_stream: body_json
+                    .get("stream")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                upstream_is_stream: resolved.upstream_is_stream,
+                has_envelope: resolved.envelope_name.is_some(),
                 needs_conversion: true,
                 extra_fields,
             }),
@@ -97,6 +113,7 @@ pub(super) async fn maybe_build_local_standard_decision_payload_for_candidate(
         provider_request_headers,
         upstream_url,
         upstream_is_stream,
+        envelope_name: _,
         transport,
     } = resolved;
 

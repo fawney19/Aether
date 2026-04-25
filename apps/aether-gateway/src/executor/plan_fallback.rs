@@ -74,8 +74,15 @@ pub(crate) async fn maybe_execute_stream_via_plan_fallback(
     _bypass_cache_key: String,
     _fallback_reason: GatewayFallbackReason,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
-    let Some(payload) =
-        maybe_build_stream_plan_payload(state, parts, trace_id, decision, body_json).await?
+    let Some(payload) = maybe_build_stream_plan_payload(
+        state,
+        parts,
+        trace_id,
+        decision,
+        body_json,
+        body_base64.as_deref(),
+    )
+    .await?
     else {
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };

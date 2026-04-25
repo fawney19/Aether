@@ -249,19 +249,22 @@ SELECT
   provider_id,
   COALESCE(NULLIF(name, ''), id) AS name,
   COALESCE(NULLIF(auth_type, ''), 'summary') AS auth_type,
-  capabilities,
+  NULL::jsonb AS capabilities,
   is_active,
   api_formats,
   'summary' AS api_key,
-  NULL::text AS auth_config,
+  CASE
+    WHEN auth_config IS NULL THEN NULL
+    ELSE '{}'::text
+  END AS auth_config,
   NULL::text AS note,
-  internal_priority,
-  rate_multipliers,
-  global_priority_by_format,
+  NULL::integer AS internal_priority,
+  NULL::jsonb AS rate_multipliers,
+  NULL::jsonb AS global_priority_by_format,
   NULL::jsonb AS allowed_models,
   NULL::bigint AS expires_at_unix_secs,
-  cache_ttl_minutes,
-  max_probe_interval_minutes,
+  NULL::integer AS cache_ttl_minutes,
+  NULL::integer AS max_probe_interval_minutes,
   NULL::jsonb AS proxy,
   NULL::jsonb AS fingerprint,
   NULL::integer AS rpm_limit,
@@ -274,27 +277,27 @@ SELECT
   NULL::jsonb AS utilization_samples,
   NULL::bigint AS last_probe_increase_at_unix_secs,
   NULL::integer AS last_rpm_peak,
-  request_count,
+  NULL::integer AS request_count,
   0::bigint AS total_tokens,
   0::double precision AS total_cost_usd,
-  success_count,
+  NULL::integer AS success_count,
   NULL::integer AS error_count,
-  total_response_time_ms,
-  EXTRACT(EPOCH FROM last_used_at)::bigint AS last_used_at_unix_secs,
-  auto_fetch_models,
+  NULL::integer AS total_response_time_ms,
+  NULL::bigint AS last_used_at_unix_secs,
+  FALSE AS auto_fetch_models,
   NULL::bigint AS last_models_fetch_at_unix_secs,
   NULL::text AS last_models_fetch_error,
   NULL::jsonb AS locked_models,
   NULL::jsonb AS model_include_patterns,
   NULL::jsonb AS model_exclude_patterns,
   NULL::jsonb AS upstream_metadata,
-  EXTRACT(EPOCH FROM oauth_invalid_at)::bigint AS oauth_invalid_at_unix_secs,
-  oauth_invalid_reason,
+  NULL::bigint AS oauth_invalid_at_unix_secs,
+  NULL::text AS oauth_invalid_reason,
   NULL::jsonb AS status_snapshot,
-  EXTRACT(EPOCH FROM created_at)::bigint AS created_at_unix_ms,
-  EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_unix_secs,
+  NULL::bigint AS created_at_unix_ms,
+  NULL::bigint AS updated_at_unix_secs,
   health_by_format,
-  circuit_breaker_by_format
+  NULL::jsonb AS circuit_breaker_by_format
 FROM provider_api_keys
 WHERE provider_id IN (
 "#;
@@ -1363,6 +1366,7 @@ INSERT INTO provider_api_keys (
         .bind(key.is_active)
         .bind(key.created_at_unix_ms.map(|value| value as f64))
         .bind(key.updated_at_unix_secs.map(|value| value as f64))
+        .bind(key.expires_at_unix_secs.map(|value| value as f64))
         .execute(&self.pool)
         .await
         .map_postgres_err()?;
@@ -1732,6 +1736,10 @@ SET
   proxy = $22,
   fingerprint = $23,
   upstream_metadata = $24,
+  expires_at = CASE
+    WHEN $38::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($38::double precision)
+  END,
   oauth_invalid_at = CASE
     WHEN $25::double precision IS NULL THEN NULL
     ELSE TO_TIMESTAMP($25::double precision)
@@ -1800,6 +1808,7 @@ WHERE id = $1
         .bind(key.last_rpm_peak.map(|value| value as i32))
         .bind(key.is_active)
         .bind(key.updated_at_unix_secs.map(|value| value as f64))
+        .bind(key.expires_at_unix_secs.map(|value| value as f64))
         .execute(&self.pool)
         .await
         .map_postgres_err()?

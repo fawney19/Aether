@@ -518,7 +518,7 @@ const mockHandlers: Record<string, (config: AxiosRequestConfig) => Promise<Axios
   // ========== 用户信息 ==========
   'GET /api/users/me': async () => {
     await delay()
-    return createMockResponse(getCurrentUser())
+    return createMockResponse(getCurrentProfile())
   },
 
   'PUT /api/users/me': async () => {

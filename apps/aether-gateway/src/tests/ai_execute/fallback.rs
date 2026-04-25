@@ -122,7 +122,7 @@ async fn gateway_locally_denies_openai_chat_after_repeated_execution_runtime_mis
         assert_eq!(payload["error"]["type"], "http_error");
         assert_eq!(
             payload["error"]["message"],
-            "OpenAI chat execution runtime miss did not match a Rust execution path"
+            "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商（OpenAI Chat Completions，原因代码: missing_auth_context）"
         );
     }
 
@@ -248,7 +248,7 @@ async fn gateway_locally_denies_openai_chat_when_control_api_is_configured_witho
     assert_eq!(payload["error"]["type"], "http_error");
     assert_eq!(
         payload["error"]["message"],
-        "OpenAI chat execution runtime miss did not match a Rust execution path"
+        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商（OpenAI Chat Completions，原因代码: missing_auth_context）"
     );
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
@@ -359,7 +359,7 @@ async fn gateway_locally_denies_openai_chat_stream_after_execution_runtime_miss_
     assert_eq!(payload["error"]["type"], "http_error");
     assert_eq!(
         payload["error"]["message"],
-        "OpenAI chat execution runtime miss did not match a Rust execution path"
+        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商（OpenAI Chat Completions，原因代码: missing_auth_context）"
     );
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
@@ -537,7 +537,7 @@ async fn gateway_locally_denies_openai_responses_after_execution_runtime_miss_wi
         "cli",
         "openai:cli",
         "{\"model\":\"gpt-5\",\"input\":\"hello\"}",
-        "OpenAI responses execution runtime miss did not match a Rust execution path",
+        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商（OpenAI Responses，原因代码: missing_auth_context）",
     )
     .await;
 }
@@ -551,7 +551,7 @@ async fn gateway_locally_denies_claude_messages_after_execution_runtime_miss_wit
         "chat",
         "claude:chat",
         "{\"model\":\"claude-sonnet-4-5\",\"messages\":[]}",
-        "Claude messages execution runtime miss did not match a Rust execution path",
+        "请求缺少本地执行所需的认证、模型或配置上下文，无法选择上游提供商（Claude Messages，原因代码: decision_input_unavailable）",
     )
     .await;
 }
@@ -565,7 +565,7 @@ async fn gateway_locally_denies_openai_responses_stream_after_execution_runtime_
         "cli",
         "openai:cli",
         "{\"model\":\"gpt-5\",\"input\":\"hello\",\"stream\":true}",
-        "OpenAI responses execution runtime miss did not match a Rust execution path",
+        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商（OpenAI Responses，原因代码: missing_auth_context）",
     )
     .await;
 }
@@ -579,7 +579,7 @@ async fn gateway_locally_denies_claude_messages_stream_after_execution_runtime_m
         "chat",
         "claude:chat",
         "{\"model\":\"claude-sonnet-4-5\",\"messages\":[],\"stream\":true}",
-        "Claude messages execution runtime miss did not match a Rust execution path",
+        "请求缺少本地执行所需的认证、模型或配置上下文，无法选择上游提供商（Claude Messages，原因代码: decision_input_unavailable）",
     )
     .await;
 }
@@ -593,7 +593,7 @@ async fn gateway_locally_denies_openai_compact_after_execution_runtime_miss_with
         "compact",
         "openai:compact",
         "{\"model\":\"gpt-5\",\"input\":\"hello\"}",
-        "OpenAI compact execution runtime miss did not match a Rust execution path",
+        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商（OpenAI Responses Compact，原因代码: missing_auth_context）",
     )
     .await;
 }
@@ -607,7 +607,7 @@ async fn gateway_locally_denies_openai_compact_stream_after_execution_runtime_mi
         "compact",
         "openai:compact",
         "{\"model\":\"gpt-5\",\"input\":\"hello\",\"stream\":true}",
-        "OpenAI compact execution runtime miss did not match a Rust execution path",
+        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商（OpenAI Responses Compact，原因代码: missing_auth_context）",
     )
     .await;
 }
@@ -621,7 +621,7 @@ async fn gateway_locally_denies_gemini_generate_after_execution_runtime_miss_wit
         "chat",
         "gemini:chat",
         "{\"contents\":[]}",
-        "Gemini public execution runtime miss did not match a Rust execution path",
+        "请求缺少本地执行所需的认证、模型或配置上下文，无法选择上游提供商（Gemini Public，原因代码: decision_input_unavailable）",
     )
     .await;
 }
@@ -635,7 +635,7 @@ async fn gateway_locally_denies_gemini_v1_generate_after_execution_runtime_miss_
         "chat",
         "gemini:chat",
         "{\"contents\":[]}",
-        "Gemini public execution runtime miss did not match a Rust execution path",
+        "请求缺少本地执行所需的认证、模型或配置上下文，无法选择上游提供商（Gemini Public，原因代码: decision_input_unavailable）",
     )
     .await;
 }
@@ -649,7 +649,7 @@ async fn gateway_locally_denies_gemini_stream_after_execution_runtime_miss_witho
         "chat",
         "gemini:chat",
         "{\"contents\":[]}",
-        "Gemini public execution runtime miss did not match a Rust execution path",
+        "请求缺少本地执行所需的认证、模型或配置上下文，无法选择上游提供商（Gemini Public，原因代码: decision_input_unavailable）",
     )
     .await;
 }
@@ -663,7 +663,7 @@ async fn gateway_locally_denies_openai_video_after_execution_runtime_miss_withou
         "video",
         "openai:video",
         "{\"model\":\"sora-2\"}",
-        "OpenAI video execution runtime miss did not match a Rust execution path",
+        "当前 OpenAI Video 请求无法在本地执行：没有匹配到可用的执行路径",
     )
     .await;
 }
@@ -677,7 +677,7 @@ async fn gateway_locally_denies_gemini_video_after_execution_runtime_miss_withou
         "video",
         "gemini:video",
         "{\"instances\":[]}",
-        "Gemini public execution runtime miss did not match a Rust execution path",
+        "当前 Gemini Public 请求无法在本地执行：没有匹配到可用的执行路径",
     )
     .await;
 }
@@ -693,7 +693,7 @@ async fn gateway_locally_denies_gemini_files_root_after_execution_runtime_miss_w
         "files",
         "gemini:chat",
         None,
-        "Gemini files execution runtime miss did not match a Rust execution path",
+        "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径",
     )
     .await;
 }
@@ -709,7 +709,7 @@ async fn gateway_locally_denies_gemini_files_download_after_execution_runtime_mi
         "files",
         "gemini:chat",
         None,
-        "Gemini files execution runtime miss did not match a Rust execution path",
+        "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径",
     )
     .await;
 }
@@ -725,7 +725,7 @@ async fn gateway_locally_denies_gemini_files_upload_after_execution_runtime_miss
         "files",
         "gemini:chat",
         Some("{\"file\":{}}"),
-        "Gemini files execution runtime miss did not match a Rust execution path",
+        "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径",
     )
     .await;
 }

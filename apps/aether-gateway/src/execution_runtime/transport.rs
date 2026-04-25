@@ -327,6 +327,7 @@ pub(crate) async fn execute_stream_plan_via_local_tunnel(
 fn build_stream_summary_report_context(plan: &ExecutionPlan) -> Value {
     json!({
         "provider_api_format": plan.provider_api_format,
+        "client_api_format": plan.client_api_format,
         "model": plan.model_name,
     })
 }

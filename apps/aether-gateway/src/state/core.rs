@@ -24,6 +24,7 @@ use super::super::async_task::{
 use super::super::cache::{
     AuthApiKeyLastUsedCache, AuthContextCache, DashboardResponseCache, DirectPlanBypassCache,
     SchedulerAffinityCache, SchedulerAffinitySnapshotEntry, SchedulerAffinityTarget,
+    SystemConfigCache,
 };
 use super::super::data::{GatewayDataConfig, GatewayDataState};
 use super::super::fallback_metrics;
@@ -47,6 +48,8 @@ use crate::maintenance::spawn_stats_aggregation_worker;
 use crate::maintenance::spawn_stats_hourly_aggregation_worker;
 use crate::maintenance::spawn_usage_cleanup_worker;
 use crate::maintenance::spawn_wallet_daily_usage_aggregation_worker;
+
+const SYSTEM_CONFIG_CACHE_TTL: Duration = Duration::from_secs(3);
 
 impl AppState {
     fn spawn_scheduler_affinity_redis_write(
@@ -90,6 +93,7 @@ impl AppState {
 
     pub(crate) fn replace_data_state(&mut self, data: Arc<GatewayDataState>) {
         self.clear_provider_transport_snapshot_cache();
+        self.system_config_cache.clear();
         self.tunnel = crate::tunnel::EmbeddedTunnelState::with_data(Arc::clone(&data));
         self.data = data;
     }
@@ -147,6 +151,7 @@ impl AppState {
             direct_plan_bypass_cache: Arc::new(DirectPlanBypassCache::default()),
             scheduler_affinity_cache: Arc::new(SchedulerAffinityCache::default()),
             dashboard_response_cache: Arc::new(DashboardResponseCache::default()),
+            system_config_cache: Arc::new(SystemConfigCache::default()),
             fallback_metrics: Arc::new(fallback_metrics::GatewayFallbackMetrics::default()),
             frontdoor_cors: None,
             frontdoor_user_rpm: Arc::new(FrontdoorUserRpmLimiter::new(
@@ -396,10 +401,18 @@ impl AppState {
         &self,
         key: &str,
     ) -> Result<Option<serde_json::Value>, GatewayError> {
-        self.data
+        if let Some(value) = self.system_config_cache.get(key, SYSTEM_CONFIG_CACHE_TTL) {
+            return Ok(value);
+        }
+
+        let value = self
+            .data
             .find_system_config_value(key)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        self.system_config_cache
+            .insert(key.to_string(), value.clone(), SYSTEM_CONFIG_CACHE_TTL);
+        Ok(value)
     }
 
     pub(crate) async fn upsert_system_config_json_value(
@@ -408,10 +421,17 @@ impl AppState {
         value: &serde_json::Value,
         description: Option<&str>,
     ) -> Result<serde_json::Value, GatewayError> {
-        self.data
+        let value = self
+            .data
             .upsert_system_config_value(key, value, description)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        self.system_config_cache.insert(
+            key.to_string(),
+            Some(value.clone()),
+            SYSTEM_CONFIG_CACHE_TTL,
+        );
+        Ok(value)
     }
 
     pub(crate) async fn list_system_config_entries(
@@ -436,10 +456,14 @@ impl AppState {
     }
 
     pub(crate) async fn delete_system_config_value(&self, key: &str) -> Result<bool, GatewayError> {
-        self.data
+        let deleted = self
+            .data
             .delete_system_config_value(key)
             .await
-            .map_err(|err| GatewayError::Internal(err.to_string()))
+            .map_err(|err| GatewayError::Internal(err.to_string()))?;
+        self.system_config_cache
+            .insert(key.to_string(), None, SYSTEM_CONFIG_CACHE_TTL);
+        Ok(deleted)
     }
 
     pub(crate) async fn read_admin_system_stats(
@@ -841,4 +865,90 @@ fn runtime_miss_diagnostic_has_candidate_signal(
     diagnostic.candidate_count.unwrap_or(0) > 0
         || diagnostic.skipped_candidate_count.unwrap_or(0) > 0
         || !diagnostic.skip_reasons.is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
+
+    use super::AppState;
+    use crate::data::GatewayDataState;
+
+    #[tokio::test]
+    async fn system_config_reads_use_short_lived_cache_until_app_invalidation() {
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled()
+                    .with_system_config_values_for_tests([("site_name".to_string(), json!("old"))]),
+            );
+
+        assert_eq!(
+            state
+                .read_system_config_json_value("site_name")
+                .await
+                .expect("system config read should succeed"),
+            Some(json!("old"))
+        );
+
+        state
+            .data
+            .upsert_system_config_value("site_name", &json!("bypassed"), None)
+            .await
+            .expect("direct data write should succeed");
+
+        assert_eq!(
+            state
+                .read_system_config_json_value("site_name")
+                .await
+                .expect("cached system config read should succeed"),
+            Some(json!("old"))
+        );
+
+        state
+            .upsert_system_config_json_value("site_name", &json!("fresh"), None)
+            .await
+            .expect("app system config write should succeed");
+
+        assert_eq!(
+            state
+                .read_system_config_json_value("site_name")
+                .await
+                .expect("refreshed system config read should succeed"),
+            Some(json!("fresh"))
+        );
+    }
+
+    #[tokio::test]
+    async fn replacing_data_state_clears_system_config_cache() {
+        let mut state = AppState::new()
+            .expect("app state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::disabled()
+                    .with_system_config_values_for_tests([("site_name".to_string(), json!("old"))]),
+            );
+
+        assert_eq!(
+            state
+                .read_system_config_json_value("site_name")
+                .await
+                .expect("system config read should succeed"),
+            Some(json!("old"))
+        );
+
+        state.replace_data_state(Arc::new(
+            GatewayDataState::disabled()
+                .with_system_config_values_for_tests([("site_name".to_string(), json!("new"))]),
+        ));
+
+        assert_eq!(
+            state
+                .read_system_config_json_value("site_name")
+                .await
+                .expect("system config read should reflect replaced data"),
+            Some(json!("new"))
+        );
+    }
 }

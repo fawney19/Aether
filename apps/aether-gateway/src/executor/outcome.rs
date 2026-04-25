@@ -619,8 +619,9 @@ async fn load_runtime_miss_candidate_contexts(
                     &candidate,
                     "selected_provider_model_name",
                 ),
-                endpoint_url: endpoint
-                    .and_then(|value| build_runtime_miss_candidate_endpoint_url(value, decision)),
+                endpoint_url: endpoint.and_then(|value| {
+                    build_runtime_miss_candidate_endpoint_url(&candidate, value, decision)
+                }),
                 candidate,
             }
         })
@@ -671,9 +672,14 @@ fn candidate_extra_data_string(candidate: &StoredRequestCandidate, key: &str) ->
 }
 
 fn build_runtime_miss_candidate_endpoint_url(
+    candidate: &StoredRequestCandidate,
     endpoint: &StoredProviderCatalogEndpoint,
     decision: Option<&GatewayControlDecision>,
 ) -> Option<String> {
+    if let Some(upstream_url) = candidate_extra_data_string(candidate, "upstream_url") {
+        return Some(upstream_url);
+    }
+
     let path = endpoint
         .custom_path
         .as_deref()

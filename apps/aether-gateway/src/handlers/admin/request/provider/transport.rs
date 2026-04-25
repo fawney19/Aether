@@ -94,7 +94,7 @@ impl<'a> AdminAppState<'a> {
     pub(crate) fn fixed_provider_template(
         &self,
         provider_type: &str,
-    ) -> Option<(&'static str, &'static [&'static str])> {
+    ) -> Option<&'static crate::provider_transport::provider_types::FixedProviderTemplate> {
         crate::provider_transport::provider_types::fixed_provider_template(provider_type)
     }
 

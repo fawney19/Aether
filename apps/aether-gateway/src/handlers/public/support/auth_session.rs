@@ -176,6 +176,10 @@ fn build_auth_me_payload(
     wallet: Option<&aether_data::repository::wallet::StoredWalletSnapshot>,
 ) -> serde_json::Value {
     let billing = build_auth_wallet_summary_payload(wallet);
+    let has_password = user
+        .password_hash
+        .as_deref()
+        .is_some_and(|value| !value.is_empty());
     json!({
         "id": user.id,
         "email": user.email,
@@ -189,6 +193,7 @@ fn build_auth_me_payload(
         "created_at": user.created_at.map(|value| value.to_rfc3339()),
         "last_login_at": user.last_login_at.map(|value| value.to_rfc3339()),
         "auth_source": user.auth_source,
+        "has_password": has_password,
     })
 }
 

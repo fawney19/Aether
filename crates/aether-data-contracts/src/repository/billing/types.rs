@@ -150,4 +150,14 @@ pub trait BillingReadRepository: Send + Sync {
         provider_api_key_id: Option<&str>,
         global_model_name: &str,
     ) -> Result<Option<StoredBillingModelContext>, crate::DataLayerError>;
+
+    async fn find_model_context_by_model_id(
+        &self,
+        provider_id: &str,
+        provider_api_key_id: Option<&str>,
+        model_id: &str,
+    ) -> Result<Option<StoredBillingModelContext>, crate::DataLayerError> {
+        let _ = (provider_id, provider_api_key_id, model_id);
+        Ok(None)
+    }
 }

@@ -8,14 +8,82 @@ use super::shared::{
     persist_provider_quota_refresh_state, quota_refresh_success_invalid_state,
     ProviderQuotaExecutionOutcome,
 };
-use crate::handlers::admin::request::AdminAppState;
+use crate::handlers::admin::request::{AdminAppState, AdminLocalOAuthRefreshError};
 use crate::GatewayError;
 use aether_contracts::ProxySnapshot;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
+use aether_provider_transport::kiro::build_kiro_request_auth_from_config;
+use aether_provider_transport::{CachedOAuthEntry, LocalResolvedOAuthRequestAuth};
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+fn kiro_quota_error_is_token_invalid(detail: Option<&str>) -> bool {
+    let Some(detail) = detail else {
+        return false;
+    };
+    let normalized = detail.to_ascii_lowercase();
+    normalized.contains("bearer token invalid")
+        || normalized.contains("bearer token invild")
+        || normalized.contains("bearer token is invalid")
+        || normalized.contains("invalid bearer token")
+        || normalized.contains("token expired")
+        || normalized.contains("token has expired")
+        || normalized.contains("expired token")
+}
+
+fn kiro_quota_error_is_account_banned(detail: Option<&str>) -> bool {
+    let Some(detail) = detail else {
+        return false;
+    };
+    let normalized = detail.to_ascii_lowercase();
+    [
+        "account suspended",
+        "account is suspended",
+        "account banned",
+        "account is banned",
+        "terms of service",
+        "封禁",
+        "封号",
+        "被封",
+        "账户已封禁",
+    ]
+    .iter()
+    .any(|keyword| normalized.contains(keyword))
+}
+
+fn kiro_auth_from_refreshed_entry(
+    entry: &CachedOAuthEntry,
+) -> Option<LocalResolvedOAuthRequestAuth> {
+    if !entry.provider_type.trim().eq_ignore_ascii_case("kiro") {
+        return None;
+    }
+    let auth_config = entry
+        .metadata
+        .as_ref()
+        .and_then(aether_provider_transport::kiro::KiroAuthConfig::from_json_value)?;
+    let auth = build_kiro_request_auth_from_config(auth_config, None)?;
+    Some(LocalResolvedOAuthRequestAuth::Kiro(auth))
+}
+
+fn kiro_quota_refresh_failure_status(err: &AdminLocalOAuthRefreshError) -> Option<u16> {
+    match err {
+        AdminLocalOAuthRefreshError::HttpStatus { status_code, .. } => Some(*status_code),
+        _ => None,
+    }
+}
+
+fn kiro_quota_refresh_failure_message(err: &AdminLocalOAuthRefreshError) -> String {
+    match err {
+        AdminLocalOAuthRefreshError::HttpStatus {
+            status_code,
+            body_excerpt,
+            ..
+        } => format!("Kiro Token 刷新失败 ({status_code}): {body_excerpt}"),
+        _ => format!("Kiro Token 刷新失败: {err}"),
+    }
+}
 
 pub(crate) async fn refresh_kiro_provider_quota_locally(
     state: &AdminAppState<'_>,
@@ -46,18 +114,52 @@ pub(crate) async fn refresh_kiro_provider_quota_locally(
             }
         };
 
-        let Some(auth) = state
-            .resolve_local_oauth_kiro_request_auth(&transport)
-            .await?
-        else {
-            failed_count += 1;
-            results.push(json!({
-                "key_id": key.id,
-                "key_name": key.name,
-                "status": "error",
-                "message": "缺少 Kiro 认证配置 (auth_config)",
-            }));
-            continue;
+        let auth = match state.force_local_oauth_refresh_entry(&transport).await {
+            Ok(Some(entry)) => match kiro_auth_from_refreshed_entry(&entry) {
+                Some(LocalResolvedOAuthRequestAuth::Kiro(auth)) => auth,
+                _ => {
+                    failed_count += 1;
+                    results.push(json!({
+                        "key_id": key.id,
+                        "key_name": key.name,
+                        "status": "error",
+                        "message": "Kiro Token 刷新成功但认证信息解析失败",
+                    }));
+                    continue;
+                }
+            },
+            Ok(None) => match state
+                .resolve_local_oauth_kiro_request_auth(&transport)
+                .await?
+            {
+                Some(auth) => auth,
+                None => {
+                    failed_count += 1;
+                    results.push(json!({
+                        "key_id": key.id,
+                        "key_name": key.name,
+                        "status": "error",
+                        "message": "缺少 Kiro 认证配置 (auth_config)",
+                    }));
+                    continue;
+                }
+            },
+            Err(err) => {
+                failed_count += 1;
+                let mut payload = serde_json::Map::new();
+                payload.insert("key_id".to_string(), json!(key.id));
+                payload.insert("key_name".to_string(), json!(key.name));
+                payload.insert("status".to_string(), json!("error"));
+                payload.insert(
+                    "message".to_string(),
+                    json!(kiro_quota_refresh_failure_message(&err)),
+                );
+                if let Some(status_code) = kiro_quota_refresh_failure_status(&err) {
+                    payload.insert("status_code".to_string(), json!(status_code));
+                }
+                results.push(serde_json::Value::Object(payload));
+                continue;
+            }
         };
 
         let result =
@@ -152,17 +254,22 @@ pub(crate) async fn refresh_kiro_provider_quota_locally(
                         .clone()
                         .filter(|value| !value.trim().is_empty())
                         .unwrap_or_else(|| format!("HTTP {}", result.status_code));
-                    oauth_invalid_at_unix_secs = Some(now_unix_secs);
-                    oauth_invalid_reason = Some(format!("账户已封禁: {reason}"));
-                    metadata_update = Some(json!({
-                        "kiro": {
-                            "is_banned": true,
-                            "ban_reason": reason,
-                            "banned_at": now_unix_secs,
-                            "updated_at": now_unix_secs,
-                        }
-                    }));
-                    status = "banned".to_string();
+                    if kiro_quota_error_is_token_invalid(err_msg.as_deref()) {
+                        oauth_invalid_at_unix_secs = Some(now_unix_secs);
+                        oauth_invalid_reason = Some("Kiro Token 无效或已过期".to_string());
+                    } else if kiro_quota_error_is_account_banned(err_msg.as_deref()) {
+                        oauth_invalid_at_unix_secs = Some(now_unix_secs);
+                        oauth_invalid_reason = Some(format!("账户已封禁: {reason}"));
+                        metadata_update = Some(json!({
+                            "kiro": {
+                                "is_banned": true,
+                                "ban_reason": reason,
+                                "banned_at": now_unix_secs,
+                                "updated_at": now_unix_secs,
+                            }
+                        }));
+                        status = "banned".to_string();
+                    }
                 }
                 _ => {}
             }
@@ -226,4 +333,33 @@ pub(crate) async fn refresh_kiro_provider_quota_locally(
         "message": format!("已处理 {} 个 Key", success_count + failed_count),
         "auto_removed": 0,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{kiro_quota_error_is_account_banned, kiro_quota_error_is_token_invalid};
+
+    #[test]
+    fn bearer_token_invalid_is_not_classified_as_banned() {
+        let detail = Some("Bearer token invalid");
+
+        assert!(kiro_quota_error_is_token_invalid(detail));
+        assert!(!kiro_quota_error_is_account_banned(detail));
+    }
+
+    #[test]
+    fn bearer_token_invild_typo_is_not_classified_as_banned() {
+        let detail = Some("bearer token invild");
+
+        assert!(kiro_quota_error_is_token_invalid(detail));
+        assert!(!kiro_quota_error_is_account_banned(detail));
+    }
+
+    #[test]
+    fn explicit_kiro_account_suspension_is_classified_as_banned() {
+        let detail = Some("account suspended due to Terms of Service violation");
+
+        assert!(!kiro_quota_error_is_token_invalid(detail));
+        assert!(kiro_quota_error_is_account_banned(detail));
+    }
 }

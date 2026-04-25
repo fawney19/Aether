@@ -19,8 +19,8 @@ export interface Profile {
   created_at: string
   updated_at?: string
   last_login_at?: string
-  auth_source?: 'local' | 'ldap' | 'oauth'
-  has_password?: boolean
+  auth_source: 'local' | 'ldap' | 'oauth'
+  has_password: boolean
   preferences?: UserPreferences
 }
 
@@ -61,6 +61,9 @@ export interface UsageRecordDetail {
   rate_multiplier?: number  // 成本倍率（仅管理员可见）
   response_time_ms?: number
   is_stream: boolean
+  upstream_is_stream?: boolean
+  client_requested_stream?: boolean
+  client_is_stream?: boolean
   created_at: string
   cache_creation_input_tokens?: number
   cache_creation_ephemeral_5m_input_tokens?: number
@@ -299,8 +302,14 @@ export const meApi = {
       rate_multiplier?: number | null
       response_time_ms: number | null
       first_byte_time_ms: number | null
+      status_code?: number | null
+      error_message?: string | null
       api_format?: string | null
       endpoint_api_format?: string | null
+      is_stream?: boolean | null
+      upstream_is_stream?: boolean | null
+      client_requested_stream?: boolean | null
+      client_is_stream?: boolean | null
       has_format_conversion?: boolean | null
       has_fallback?: boolean | null
       target_model?: string | null

@@ -80,6 +80,13 @@ where
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    pub fn clear(&self) {
+        let Ok(mut entries) = self.entries.lock() else {
+            return;
+        };
+        entries.clear();
+    }
 }
 
 impl<K, V> ExpiringMap<K, V>

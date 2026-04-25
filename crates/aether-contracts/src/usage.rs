@@ -83,6 +83,41 @@ impl StandardizedUsage {
         }
         self
     }
+
+    pub fn signal_score(&self) -> usize {
+        [
+            self.input_tokens,
+            self.output_tokens,
+            self.cache_creation_tokens,
+            self.cache_creation_ephemeral_5m_tokens,
+            self.cache_creation_ephemeral_1h_tokens,
+            self.cache_read_tokens,
+            self.reasoning_tokens,
+        ]
+        .into_iter()
+        .filter(|value| *value > 0)
+        .count()
+            + self.dimensions.len()
+    }
+
+    pub fn has_token_signal(&self) -> bool {
+        self.signal_score() > 0
+    }
+
+    pub fn is_more_complete_than(&self, other: &Self) -> bool {
+        self.signal_score() > other.signal_score()
+    }
+
+    pub fn choose_more_complete(primary: Option<Self>, candidate: Option<Self>) -> Option<Self> {
+        match (primary, candidate) {
+            (Some(primary), Some(candidate)) if candidate.is_more_complete_than(&primary) => {
+                Some(candidate)
+            }
+            (Some(primary), _) => Some(primary),
+            (None, Some(candidate)) => Some(candidate),
+            (None, None) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -115,6 +150,36 @@ fn as_f64(value: &serde_json::Value, default: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::StandardizedUsage;
+
+    #[test]
+    fn standardized_usage_prefers_more_complete_candidate() {
+        let mut output_only = StandardizedUsage::new();
+        output_only.output_tokens = 131;
+        let mut complete = StandardizedUsage::new();
+        complete.input_tokens = 26;
+        complete.output_tokens = 131;
+
+        let selected = StandardizedUsage::choose_more_complete(Some(output_only), Some(complete))
+            .expect("usage should be selected");
+
+        assert_eq!(selected.input_tokens, 26);
+        assert_eq!(selected.output_tokens, 131);
+    }
+
+    #[test]
+    fn standardized_usage_keeps_primary_when_candidate_is_not_more_complete() {
+        let mut primary = StandardizedUsage::new();
+        primary.input_tokens = 26;
+        primary.output_tokens = 131;
+        let mut output_only = StandardizedUsage::new();
+        output_only.output_tokens = 131;
+
+        let selected = StandardizedUsage::choose_more_complete(Some(primary), Some(output_only))
+            .expect("usage should be selected");
+
+        assert_eq!(selected.input_tokens, 26);
+        assert_eq!(selected.output_tokens, 131);
+    }
 
     #[test]
     fn standardized_usage_reads_and_writes_known_and_extra_fields() {

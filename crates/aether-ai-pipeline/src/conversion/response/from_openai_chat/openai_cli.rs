@@ -97,6 +97,14 @@ pub fn convert_openai_chat_response_to_openai_cli(
                         }
                         message_content.push(image_part);
                     }
+                } else if matches!(part_type.as_str(), "file" | "input_file") {
+                    if let Some(file_part) = build_openai_cli_file_part(part) {
+                        message_content.push(file_part);
+                    }
+                } else if part_type == "input_audio" {
+                    if let Some(audio_part) = build_openai_cli_input_audio_part(part) {
+                        message_content.push(audio_part);
+                    }
                 }
             }
         }
@@ -238,6 +246,49 @@ pub fn convert_openai_chat_response_to_openai_cli(
     Some(response)
 }
 
+fn build_openai_cli_file_part(part: &serde_json::Map<String, Value>) -> Option<Value> {
+    let file_object = part.get("file").and_then(Value::as_object).unwrap_or(part);
+    let mut file = serde_json::Map::new();
+    for key in ["file_data", "file_id", "filename"] {
+        if let Some(value) = file_object
+            .get(key)
+            .cloned()
+            .filter(|value| !value.is_null())
+        {
+            file.insert(key.to_string(), value);
+        }
+    }
+    if file.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "type": "file",
+        "file": Value::Object(file),
+    }))
+}
+
+fn build_openai_cli_input_audio_part(part: &serde_json::Map<String, Value>) -> Option<Value> {
+    let audio_object = part
+        .get("input_audio")
+        .and_then(Value::as_object)
+        .unwrap_or(part);
+    let data = audio_object
+        .get("data")
+        .cloned()
+        .filter(|value| value.as_str().is_some_and(|value| !value.trim().is_empty()))?;
+    let format = audio_object
+        .get("format")
+        .cloned()
+        .filter(|value| value.as_str().is_some_and(|value| !value.trim().is_empty()))?;
+    Some(json!({
+        "type": "input_audio",
+        "input_audio": {
+            "data": data,
+            "format": format,
+        }
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::convert_openai_chat_response_to_openai_cli;
@@ -319,6 +370,72 @@ mod tests {
         assert_eq!(
             converted["usage"]["output_tokens_details"],
             json!({"reasoning_tokens": 0})
+        );
+    }
+
+    #[test]
+    fn preserves_file_and_audio_parts_when_converting_to_responses() {
+        let response = json!({
+            "id": "chatcmpl_mm_123",
+            "object": "chat.completion",
+            "model": "gpt-5",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        { "type": "text", "text": "Attached." },
+                        {
+                            "type": "file",
+                            "file": {
+                                "file_data": "data:application/pdf;base64,JVBERi0x",
+                                "filename": "report.pdf"
+                            }
+                        },
+                        {
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": "SUQz",
+                                "format": "mp3"
+                            }
+                        }
+                    ]
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 4,
+                "completion_tokens": 2,
+                "total_tokens": 6
+            }
+        });
+
+        let converted = convert_openai_chat_response_to_openai_cli(&response, &json!({}), false)
+            .expect("chat response should convert to responses");
+
+        assert_eq!(
+            converted["output"][0]["content"],
+            json!([
+                {
+                    "type": "output_text",
+                    "text": "Attached.",
+                    "annotations": []
+                },
+                {
+                    "type": "file",
+                    "file": {
+                        "file_data": "data:application/pdf;base64,JVBERi0x",
+                        "filename": "report.pdf"
+                    }
+                },
+                {
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": "SUQz",
+                        "format": "mp3"
+                    }
+                }
+            ])
         );
     }
 }

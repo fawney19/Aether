@@ -42,6 +42,17 @@ impl ProviderQuotaReadRepository for InMemoryProviderQuotaRepository {
             .get(provider_id)
             .cloned())
     }
+
+    async fn find_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderQuotaSnapshot>, DataLayerError> {
+        let quotas = self.by_provider_id.read().expect("quota repository lock");
+        Ok(provider_ids
+            .iter()
+            .filter_map(|provider_id| quotas.get(provider_id).cloned())
+            .collect())
+    }
 }
 
 #[async_trait]
@@ -105,5 +116,36 @@ mod tests {
             .expect("lookup should succeed")
             .expect("quota should exist");
         assert_eq!(stored.monthly_used_usd, 0.0);
+    }
+
+    #[tokio::test]
+    async fn finds_quotas_by_provider_ids() {
+        let repository = InMemoryProviderQuotaRepository::seed(vec![
+            sample_quota(),
+            StoredProviderQuotaSnapshot::new(
+                "provider-2".to_string(),
+                "payg".to_string(),
+                None,
+                1.5,
+                None,
+                None,
+                None,
+                true,
+            )
+            .expect("quota should build"),
+        ]);
+
+        let stored = repository
+            .find_by_provider_ids(&[
+                "provider-2".to_string(),
+                "missing".to_string(),
+                "provider-1".to_string(),
+            ])
+            .await
+            .expect("lookup should succeed");
+
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].provider_id, "provider-2");
+        assert_eq!(stored[1].provider_id, "provider-1");
     }
 }

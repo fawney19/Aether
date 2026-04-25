@@ -1328,7 +1328,10 @@ const DEFAULT_ENABLED_PRESETS = new Set(['cache_affinity', 'recent_refresh'])
 
 const DEFAULT_PRESET_LABELS: Record<string, string> = {
   lru: 'LRU',
-  free_team_first: 'Free/Team',
+  free_first: 'Free',
+  team_first: 'Team',
+  plus_first: 'Plus',
+  pro_first: 'Pro',
   recent_refresh: '刷新优先',
   quota_balanced: '额度均衡',
   single_account: '单号优先',
@@ -1400,12 +1403,15 @@ const poolSchedulingLabel = computed(() => {
     return '多维评分'
   }
 
-  const lruEnabled = cfg.lru_enabled !== false
+  const lruEnabled = cfg.scheduling_mode === 'lru' || cfg.lru_enabled === true
   const stickyTtl = Number(cfg.sticky_session_ttl_seconds ?? 3600)
   const stickyEnabled = Number.isFinite(stickyTtl) && stickyTtl > 0
 
   if (lruEnabled && stickyEnabled) return 'LRU + 粘性'
   if (lruEnabled) return 'LRU'
+  if (!cfg.scheduling_mode && (cfg.lru_enabled === null || cfg.lru_enabled === undefined)) {
+    return `${DEFAULT_ENABLED_PRESETS.size} 维度`
+  }
   if (stickyEnabled) return '粘性'
   return '随机'
 })
@@ -2180,11 +2186,22 @@ async function handleRefreshOAuth(key: PoolKeyDetail) {
   refreshingOAuthKeyId.value = key.key_id
   try {
     const result = await refreshProviderOAuth(key.key_id)
+    const refreshedExpiresAt = typeof result.expires_at === 'number' ? result.expires_at : null
     const target = keyPage.value.keys.find(k => k.key_id === key.key_id)
     if (target) {
-      target.oauth_expires_at = result.expires_at ?? null
+      target.oauth_expires_at = refreshedExpiresAt
     }
     await loadKeys()
+    if (refreshedExpiresAt != null) {
+      const reloadedTarget = keyPage.value.keys.find(k => k.key_id === key.key_id)
+      if (
+        reloadedTarget
+        && (typeof reloadedTarget.oauth_expires_at !== 'number'
+          || reloadedTarget.oauth_expires_at < refreshedExpiresAt)
+      ) {
+        reloadedTarget.oauth_expires_at = refreshedExpiresAt
+      }
+    }
     const refreshedKey = keyPage.value.keys.find(k => k.key_id === key.key_id) ?? null
     const feedback = getOAuthRefreshFeedback({
       accountStateRecheckAttempted: result.account_state_recheck_attempted,

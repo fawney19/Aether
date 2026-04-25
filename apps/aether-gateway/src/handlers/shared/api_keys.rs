@@ -1,4 +1,7 @@
 const DEFAULT_API_KEY_PREFIX: &str = "sk";
+const API_KEY_RANDOM_ALPHABET: &[u8] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+const API_KEY_RANDOM_LEN: usize = 32;
 
 fn configured_api_key_prefix_from_lookup<F>(lookup: F) -> String
 where
@@ -24,9 +27,17 @@ fn api_key_placeholder_display_with_prefix(prefix: &str) -> String {
 }
 
 fn generate_gateway_api_key_plaintext_with_prefix(prefix: &str) -> String {
-    let first = uuid::Uuid::new_v4().simple().to_string();
-    let second = uuid::Uuid::new_v4().simple().to_string();
-    format!("{prefix}-{}{}", first, &second[..16])
+    let mut random = String::with_capacity(API_KEY_RANDOM_LEN);
+    while random.len() < API_KEY_RANDOM_LEN {
+        for byte in uuid::Uuid::new_v4().as_bytes() {
+            let index = usize::from(*byte) % API_KEY_RANDOM_ALPHABET.len();
+            random.push(char::from(API_KEY_RANDOM_ALPHABET[index]));
+            if random.len() == API_KEY_RANDOM_LEN {
+                break;
+            }
+        }
+    }
+    format!("{prefix}-{random}")
 }
 
 pub(crate) fn configured_api_key_prefix() -> String {
@@ -96,7 +107,11 @@ mod tests {
     fn generates_plaintext_api_key_with_configured_prefix() {
         let value = generate_gateway_api_key_plaintext_with_prefix("ak");
         assert!(value.starts_with("ak-"));
-        assert_eq!(value.len(), 3 + 32 + 16);
+        assert_eq!(value.len(), 3 + 32);
+        assert!(value
+            .trim_start_matches("ak-")
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric()));
     }
 
     #[test]

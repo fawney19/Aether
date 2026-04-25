@@ -9,9 +9,14 @@ use crate::{usage::GatewaySyncReportRequest, GatewayError};
 pub(crate) mod stream;
 #[path = "sync_finalize.rs"]
 pub(crate) mod sync;
+#[path = "sync_to_stream.rs"]
+pub(crate) mod sync_to_stream;
 
 pub(crate) use stream::LocalStreamRewriter;
 pub(crate) use sync::LocalCoreSyncFinalizeOutcome;
+pub(crate) use sync_to_stream::{
+    maybe_bridge_standard_sync_json_to_stream, SyncToStreamBridgeOutcome,
+};
 
 pub(crate) fn maybe_build_sync_finalize_outcome(
     trace_id: &str,

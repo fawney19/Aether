@@ -251,6 +251,13 @@ pub fn preset_models_for_provider(provider_type: &str) -> Option<Vec<Value>> {
         ],
         "codex" => vec![
             preset_model("gpt-5", "openai", "GPT-5", "openai:cli"),
+            preset_model("gpt-image-1", "openai", "GPT Image 1", "openai:image"),
+            preset_model("gpt-image-1.5", "openai", "GPT Image 1.5", "openai:image"),
+            preset_model("gpt-image-1-mini", "openai", "GPT Image 1 Mini", "openai:image"),
+            preset_model("gpt-image-2", "openai", "GPT Image 2", "openai:image"),
+            preset_model("chatgpt-image-latest", "openai", "ChatGPT Image Latest", "openai:image"),
+            preset_model("dall-e-2", "openai", "DALL-E 2", "openai:image"),
+            preset_model("dall-e-3", "openai", "DALL-E 3", "openai:image"),
             preset_model("gpt-5-codex", "openai", "GPT-5 Codex", "openai:cli"),
             preset_model("gpt-5-codex-mini", "openai", "GPT-5 Codex Mini", "openai:cli"),
             preset_model("gpt-5.1", "openai", "GPT-5.1", "openai:cli"),

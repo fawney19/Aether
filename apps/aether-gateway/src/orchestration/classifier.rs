@@ -40,6 +40,9 @@ const CLIENT_ERROR_PATTERNS: &[&str] = &[
     "validationexception",
 ];
 
+const STRICT_CLIENT_ERROR_PATTERNS: &[&str] =
+    &["unknown parameter", "invalid model for this endpoint"];
+
 const COMPATIBILITY_ERROR_PATTERNS: &[&str] = &[
     "unsupported parameter",
     "unsupported model",
@@ -77,6 +80,30 @@ const RETRYABLE_RATE_LIMIT_PATTERNS: &[&str] = &[
     "quota reached",
     "quota exceeded",
     "quota hit",
+];
+
+const RETRYABLE_ACCOUNT_OR_BILLING_PATTERNS: &[&str] = &[
+    "organization has been disabled",
+    "organization_disabled",
+    "account has been disabled",
+    "account_disabled",
+    "account has been deactivated",
+    "account_deactivated",
+    "account deactivated",
+    "account suspended",
+    "account banned",
+    "subscription inactive",
+    "payment_required",
+    "payment required",
+    "insufficient_quota",
+    "insufficient quota",
+    "quota exhausted",
+    "credits exhausted",
+    "credit balance",
+    "credit limit",
+    "verify your account",
+    "account verification",
+    "verification required",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -154,12 +181,20 @@ pub(crate) fn classify_local_failover(
         return LocalFailoverClassification::RetrySemanticThinkingError;
     }
 
+    if is_strict_semantic_client_error(input.status_code, &parsed_error) {
+        return LocalFailoverClassification::StopSemanticClientError;
+    }
+
     if is_semantic_compatibility_error(input.status_code, &parsed_error) {
         return LocalFailoverClassification::RetrySemanticCompatibilityError;
     }
 
     if is_semantic_rate_limit_error(input.status_code, &parsed_error) {
         return LocalFailoverClassification::RetrySemanticRateLimit;
+    }
+
+    if is_semantic_account_or_billing_error(input.status_code, &parsed_error) {
+        return LocalFailoverClassification::RetryUpstreamFailure;
     }
 
     if is_semantic_client_error(input.status_code, &parsed_error) {
@@ -324,6 +359,18 @@ fn is_semantic_client_error(status_code: u16, parsed: &ParsedLocalErrorResponse)
             .any(|pattern| search_text.contains(&pattern.to_ascii_lowercase()))
 }
 
+fn is_strict_semantic_client_error(status_code: u16, parsed: &ParsedLocalErrorResponse) -> bool {
+    if status_code < 400 {
+        return false;
+    }
+
+    let search_text = semantic_search_text(parsed);
+    !search_text.is_empty()
+        && STRICT_CLIENT_ERROR_PATTERNS
+            .iter()
+            .any(|pattern| search_text.contains(&pattern.to_ascii_lowercase()))
+}
+
 fn is_semantic_compatibility_error(status_code: u16, parsed: &ParsedLocalErrorResponse) -> bool {
     if status_code < 400 {
         return false;
@@ -356,6 +403,21 @@ fn is_semantic_rate_limit_error(status_code: u16, parsed: &ParsedLocalErrorRespo
     let search_text = semantic_search_text(parsed);
     !search_text.is_empty()
         && RETRYABLE_RATE_LIMIT_PATTERNS
+            .iter()
+            .any(|pattern| search_text.contains(&pattern.to_ascii_lowercase()))
+}
+
+fn is_semantic_account_or_billing_error(
+    status_code: u16,
+    parsed: &ParsedLocalErrorResponse,
+) -> bool {
+    if status_code < 400 {
+        return false;
+    }
+
+    let search_text = semantic_search_text(parsed);
+    !search_text.is_empty()
+        && RETRYABLE_ACCOUNT_OR_BILLING_PATTERNS
             .iter()
             .any(|pattern| search_text.contains(&pattern.to_ascii_lowercase()))
 }
@@ -463,6 +525,34 @@ mod tests {
     }
 
     #[test]
+    fn classifier_stops_unknown_parameter_errors_before_compatibility_retry() {
+        assert_eq!(
+            classify_local_failover(
+                &LocalFailoverPolicy::default(),
+                LocalFailoverInput::new(
+                    400,
+                    Some("{\"error\":{\"message\":\"Unknown parameter: 'tools[0].n'.\"}}")
+                )
+            ),
+            LocalFailoverClassification::StopSemanticClientError
+        );
+    }
+
+    #[test]
+    fn classifier_stops_invalid_model_for_endpoint_errors_before_compatibility_retry() {
+        assert_eq!(
+            classify_local_failover(
+                &LocalFailoverPolicy::default(),
+                LocalFailoverInput::new(
+                    400,
+                    Some("{\"error\":{\"message\":\"invalid model for this endpoint\"}}")
+                )
+            ),
+            LocalFailoverClassification::StopSemanticClientError
+        );
+    }
+
+    #[test]
     fn classifier_retries_semantic_thinking_errors() {
         assert_eq!(
             classify_local_failover(
@@ -489,6 +579,35 @@ mod tests {
                 )
             ),
             LocalFailoverClassification::RetrySemanticRateLimit
+        );
+    }
+
+    #[test]
+    fn classifier_retries_account_and_billing_errors_before_client_error_stop() {
+        assert_eq!(
+            classify_local_failover(
+                &LocalFailoverPolicy::default(),
+                LocalFailoverInput::new(
+                    403,
+                    Some(
+                        "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"verify your account before continuing\"}}"
+                    )
+                )
+            ),
+            LocalFailoverClassification::RetryUpstreamFailure
+        );
+
+        assert_eq!(
+            classify_local_failover(
+                &LocalFailoverPolicy::default(),
+                LocalFailoverInput::new(
+                    402,
+                    Some(
+                        "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"payment required: credit balance exhausted\"}}"
+                    )
+                )
+            ),
+            LocalFailoverClassification::RetryUpstreamFailure
         );
     }
 

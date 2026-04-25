@@ -122,7 +122,13 @@ pub(crate) async fn build_admin_global_model_routing_payload(
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|key| provider_catalog_key_supports_format(key, &endpoint.api_format))
+                .filter(|key| {
+                    provider_catalog_key_supports_format(
+                        key,
+                        provider.provider_type.as_str(),
+                        &endpoint.api_format,
+                    )
+                })
                 .filter(|key| {
                     key_allowed_models_match_global_model_for_routing(
                         key.allowed_models.as_ref(),

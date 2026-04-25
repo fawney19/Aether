@@ -47,6 +47,7 @@ struct PoolCatalogKeyContext {
     quota_exhausted: bool,
     health_score: Option<f64>,
     latency_avg_ms: Option<f64>,
+    catalog_lru_score: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +220,7 @@ fn build_pool_catalog_key_context(
             .unwrap_or(false),
         health_score,
         latency_avg_ms,
+        catalog_lru_score: Some(key.last_used_at_unix_secs.unwrap_or(0) as f64),
     }
 }
 
@@ -482,6 +484,9 @@ fn schedule_pool_group(
             continue;
         }
 
+        let lru_score =
+            runtime_lru_score(runtime, key_id.as_str()).or(key_context.catalog_lru_score);
+
         available.push(PoolGroupCandidateOrdering {
             eligible: EligibleLocalExecutionCandidate {
                 candidate,
@@ -491,7 +496,7 @@ fn schedule_pool_group(
             },
             key_context,
             original_index,
-            lru_score: runtime_lru_score(runtime, key_id.as_str()),
+            lru_score,
             cost_usage: runtime_cost_usage(runtime, key_id.as_str()),
         });
     }
@@ -594,6 +599,7 @@ fn build_pool_sort_vectors(
             "priority_first" => priority_first_ranks(items, &lru_ranks),
             "single_account" => single_account_ranks(items),
             "plus_first" => plan_ranks(items, &lru_ranks, Some("plus_only")),
+            "pro_first" => plan_ranks(items, &lru_ranks, Some("pro_only")),
             "free_first" => plan_ranks(items, &lru_ranks, Some("free_only")),
             "team_first" => plan_ranks(items, &lru_ranks, Some("team_only")),
             "health_first" => health_first_ranks(items, &lru_ranks),
@@ -905,8 +911,17 @@ fn plan_priority_score(plan_type: Option<&str>, mode: Option<&str>) -> f64 {
             None => 0.8,
         },
         "plus_only" => match plan_type {
-            Some("plus" | "pro") => 0.0,
-            Some("enterprise" | "business") => 0.3,
+            Some("plus") => 0.0,
+            Some("pro") => 0.3,
+            Some("enterprise" | "business") => 0.4,
+            Some("free" | "team") => 0.7,
+            Some(_) => 0.7,
+            None => 0.8,
+        },
+        "pro_only" => match plan_type {
+            Some("pro") => 0.0,
+            Some("plus") => 0.3,
+            Some("enterprise" | "business") => 0.4,
             Some("free" | "team") => 0.7,
             Some(_) => 0.7,
             None => 0.8,
@@ -991,7 +1006,7 @@ fn normalize_enabled_pool_presets(
 
 fn pool_preset_supported_for_provider(preset: &str, provider_type: &str) -> bool {
     match preset {
-        "free_first" | "plus_first" | "recent_refresh" | "team_first" => {
+        "free_first" | "plus_first" | "pro_first" | "recent_refresh" | "team_first" => {
             matches!(provider_type, "codex" | "kiro")
         }
         _ => true,
@@ -1086,6 +1101,56 @@ mod tests {
                 .map(|item| item.candidate.key_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["key-pool-b", "key-pool-a", "key-other"]
+        );
+    }
+
+    #[test]
+    fn pool_scheduler_uses_catalog_last_used_when_runtime_lru_is_missing() {
+        let recent_key = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "key-recent",
+            10,
+            Some(json!({ "pool_advanced": { "lru_enabled": true } })),
+        );
+        let older_key = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "key-older",
+            10,
+            Some(json!({ "pool_advanced": { "lru_enabled": true } })),
+        );
+
+        let key_context_by_id = BTreeMap::from([
+            (
+                "key-recent".to_string(),
+                PoolCatalogKeyContext {
+                    catalog_lru_score: Some(200.0),
+                    ..PoolCatalogKeyContext::default()
+                },
+            ),
+            (
+                "key-older".to_string(),
+                PoolCatalogKeyContext {
+                    catalog_lru_score: Some(100.0),
+                    ..PoolCatalogKeyContext::default()
+                },
+            ),
+        ]);
+
+        let (reordered, skipped) = apply_local_execution_pool_scheduler_with_runtime_map(
+            vec![recent_key, older_key],
+            &BTreeMap::new(),
+            &key_context_by_id,
+        );
+
+        assert!(skipped.is_empty());
+        assert_eq!(
+            reordered
+                .iter()
+                .map(|item| item.candidate.key_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["key-older", "key-recent"]
         );
     }
 
@@ -1393,6 +1458,126 @@ mod tests {
     }
 
     #[test]
+    fn pool_scheduler_supports_pro_first_plan_preset() {
+        let key_plus = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "key-plus",
+            10,
+            Some(json!({
+                "pool_advanced": {
+                    "scheduling_presets": [{"preset": "pro_first", "enabled": true}]
+                }
+            })),
+        );
+        let key_pro = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "key-pro",
+            10,
+            Some(json!({
+                "pool_advanced": {
+                    "scheduling_presets": [{"preset": "pro_first", "enabled": true}]
+                }
+            })),
+        );
+        let key_team = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "key-team",
+            10,
+            Some(json!({
+                "pool_advanced": {
+                    "scheduling_presets": [{"preset": "pro_first", "enabled": true}]
+                }
+            })),
+        );
+
+        let key_context_by_id = BTreeMap::from([
+            (
+                "key-plus".to_string(),
+                PoolCatalogKeyContext {
+                    oauth_plan_type: Some("plus".to_string()),
+                    ..PoolCatalogKeyContext::default()
+                },
+            ),
+            (
+                "key-pro".to_string(),
+                PoolCatalogKeyContext {
+                    oauth_plan_type: Some("pro".to_string()),
+                    ..PoolCatalogKeyContext::default()
+                },
+            ),
+            (
+                "key-team".to_string(),
+                PoolCatalogKeyContext {
+                    oauth_plan_type: Some("team".to_string()),
+                    ..PoolCatalogKeyContext::default()
+                },
+            ),
+        ]);
+
+        let (reordered, skipped) = apply_local_execution_pool_scheduler_with_runtime_map(
+            vec![key_plus, key_team, key_pro],
+            &BTreeMap::new(),
+            &key_context_by_id,
+        );
+
+        assert!(skipped.is_empty());
+        assert_eq!(
+            reordered
+                .iter()
+                .map(|item| item.candidate.key_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["key-pro", "key-plus", "key-team"]
+        );
+    }
+
+    #[test]
+    fn pool_scheduler_defaults_empty_pool_advanced_to_cache_affinity() {
+        let key_a = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "key-a",
+            10,
+            Some(json!({ "pool_advanced": {} })),
+        );
+        let key_b = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "key-b",
+            10,
+            Some(json!({ "pool_advanced": {} })),
+        );
+
+        let runtime_by_provider = BTreeMap::from([(
+            "provider-pool".to_string(),
+            AdminProviderPoolRuntimeState {
+                lru_score_by_key: BTreeMap::from([
+                    ("key-a".to_string(), 10.0),
+                    ("key-b".to_string(), 200.0),
+                ]),
+                ..AdminProviderPoolRuntimeState::default()
+            },
+        )]);
+
+        let (reordered, skipped) = apply_local_execution_pool_scheduler_with_runtime_map(
+            vec![key_a, key_b],
+            &runtime_by_provider,
+            &BTreeMap::new(),
+        );
+
+        assert!(skipped.is_empty());
+        assert_eq!(
+            reordered
+                .iter()
+                .map(|item| item.candidate.key_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["key-b", "key-a"]
+        );
+    }
+
+    #[test]
     fn normalizes_distribution_mutex_group_to_first_enabled_member() {
         let presets = normalize_enabled_pool_presets(
             &[
@@ -1463,6 +1648,7 @@ mod tests {
         }));
         key.success_count = Some(4);
         key.total_response_time_ms = Some(200);
+        key.last_used_at_unix_secs = Some(1_711_000_123);
 
         let app = AppState::new()
             .expect("state should build")
@@ -1480,6 +1666,7 @@ mod tests {
         assert_eq!(context.quota_usage_ratio, Some(0.25));
         assert_eq!(context.quota_reset_seconds, Some(3600.0));
         assert_eq!(context.latency_avg_ms, Some(50.0));
+        assert_eq!(context.catalog_lru_score, Some(1_711_000_123.0));
     }
 
     fn sample_eligible_candidate(

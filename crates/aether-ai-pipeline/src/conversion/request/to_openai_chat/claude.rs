@@ -32,82 +32,16 @@ pub fn normalize_claude_request_to_openai_chat_request(body_json: &Value) -> Opt
                 .to_ascii_lowercase();
             match role.as_str() {
                 "user" => {
-                    let mut text_segments = Vec::new();
-                    if let Some(content) = message_object.get("content") {
-                        for block in normalize_claude_content_blocks(content)? {
-                            match block {
-                                ClaudeNormalizedBlock::Text(text) => {
-                                    if !text.trim().is_empty() {
-                                        text_segments.push(text);
-                                    }
-                                }
-                                ClaudeNormalizedBlock::ToolResult {
-                                    tool_use_id,
-                                    content,
-                                } => {
-                                    messages.push(json!({
-                                        "role": "tool",
-                                        "tool_call_id": tool_use_id,
-                                        "content": content,
-                                    }));
-                                }
-                                ClaudeNormalizedBlock::ToolUse { .. } => {}
-                            }
-                        }
-                    }
-                    let text = text_segments.join("\n\n");
-                    if !text.trim().is_empty() {
-                        messages.push(json!({
-                            "role": "user",
-                            "content": text,
-                        }));
-                    }
+                    append_claude_user_message_to_openai_messages(
+                        message_object.get("content"),
+                        &mut messages,
+                    )?;
                 }
                 "assistant" => {
-                    let mut text_segments = Vec::new();
-                    let mut tool_calls = Vec::new();
-                    if let Some(content) = message_object.get("content") {
-                        for block in normalize_claude_content_blocks(content)? {
-                            match block {
-                                ClaudeNormalizedBlock::Text(text) => {
-                                    if !text.trim().is_empty() {
-                                        text_segments.push(text);
-                                    }
-                                }
-                                ClaudeNormalizedBlock::ToolUse { id, name, input } => {
-                                    let tool_use_id = id.unwrap_or_else(|| {
-                                        let generated =
-                                            format!("toolu_auto_{next_generated_tool_use_index}");
-                                        next_generated_tool_use_index += 1;
-                                        generated
-                                    });
-                                    tool_calls.push(json!({
-                                        "id": tool_use_id,
-                                        "type": "function",
-                                        "function": {
-                                            "name": name,
-                                            "arguments": canonical_json_string(input.unwrap_or(Value::Object(Map::new()))),
-                                        }
-                                    }));
-                                }
-                                ClaudeNormalizedBlock::ToolResult { .. } => {}
-                            }
-                        }
-                    }
-                    let mut assistant = Map::new();
-                    assistant.insert("role".to_string(), Value::String("assistant".to_string()));
-                    assistant.insert(
-                        "content".to_string(),
-                        if text_segments.is_empty() && !tool_calls.is_empty() {
-                            Value::Null
-                        } else {
-                            Value::String(text_segments.join("\n\n"))
-                        },
-                    );
-                    if !tool_calls.is_empty() {
-                        assistant.insert("tool_calls".to_string(), Value::Array(tool_calls));
-                    }
-                    messages.push(Value::Object(assistant));
+                    messages.push(normalize_claude_assistant_message_to_openai_message(
+                        message_object.get("content"),
+                        &mut next_generated_tool_use_index,
+                    )?);
                 }
                 _ => {}
             }
@@ -123,8 +57,22 @@ pub fn normalize_claude_request_to_openai_chat_request(body_json: &Value) -> Opt
             output.insert(passthrough_key.to_string(), value.clone());
         }
     }
+    if output.get("stop").is_none() {
+        if let Some(stop_sequences) = request
+            .get("stop_sequences")
+            .cloned()
+            .filter(|value| !value.is_null())
+        {
+            output.insert("stop".to_string(), stop_sequences);
+        }
+    }
     if output.get("reasoning_effort").is_none() {
-        if let Some(thinking_budget) = request
+        if let Some(reasoning_effort) = extract_claude_output_reasoning_effort(request) {
+            output.insert(
+                "reasoning_effort".to_string(),
+                Value::String(reasoning_effort.to_string()),
+            );
+        } else if let Some(thinking_budget) = request
             .get("thinking")
             .and_then(Value::as_object)
             .and_then(|thinking| thinking.get("budget_tokens"))
@@ -162,6 +110,16 @@ pub fn normalize_claude_request_to_openai_chat_request(body_json: &Value) -> Opt
 #[derive(Debug)]
 enum ClaudeNormalizedBlock {
     Text(String),
+    Thinking {
+        text: String,
+        signature: Option<String>,
+    },
+    RedactedThinking {
+        data: String,
+    },
+    ImageUrl(String),
+    FileData(String),
+    FileUrl(String),
     ToolUse {
         id: Option<String>,
         name: String,
@@ -181,12 +139,96 @@ fn normalize_claude_content_blocks(content: &Value) -> Option<Vec<ClaudeNormaliz
             for block in blocks {
                 let block = block.as_object()?;
                 match block.get("type")?.as_str()? {
-                    "text" | "thinking" => {
+                    "text" => {
                         let text = block
                             .get("text")
                             .and_then(Value::as_str)
                             .unwrap_or_default();
                         normalized.push(ClaudeNormalizedBlock::Text(text.to_string()));
+                    }
+                    "thinking" => {
+                        let thinking = block
+                            .get("thinking")
+                            .and_then(Value::as_str)
+                            .or_else(|| block.get("text").and_then(Value::as_str))
+                            .unwrap_or_default();
+                        normalized.push(ClaudeNormalizedBlock::Thinking {
+                            text: thinking.to_string(),
+                            signature: block
+                                .get("signature")
+                                .and_then(Value::as_str)
+                                .filter(|value| !value.is_empty())
+                                .map(ToOwned::to_owned),
+                        });
+                    }
+                    "redacted_thinking" => {
+                        let data = block
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        normalized.push(ClaudeNormalizedBlock::RedactedThinking {
+                            data: data.to_string(),
+                        });
+                    }
+                    "image" => {
+                        let source = block.get("source")?.as_object()?;
+                        match source.get("type")?.as_str()? {
+                            "base64" => {
+                                let media_type = source
+                                    .get("media_type")
+                                    .and_then(Value::as_str)
+                                    .map(str::trim)
+                                    .filter(|value| !value.is_empty())?;
+                                let data = source
+                                    .get("data")
+                                    .and_then(Value::as_str)
+                                    .map(str::trim)
+                                    .filter(|value| !value.is_empty())?;
+                                normalized.push(ClaudeNormalizedBlock::ImageUrl(build_data_url(
+                                    media_type, data,
+                                )));
+                            }
+                            "url" => {
+                                let url = source
+                                    .get("url")
+                                    .and_then(Value::as_str)
+                                    .map(str::trim)
+                                    .filter(|value| !value.is_empty())?
+                                    .to_string();
+                                normalized.push(ClaudeNormalizedBlock::ImageUrl(url));
+                            }
+                            _ => {}
+                        }
+                    }
+                    "document" => {
+                        let source = block.get("source")?.as_object()?;
+                        match source.get("type")?.as_str()? {
+                            "base64" => {
+                                let media_type = source
+                                    .get("media_type")
+                                    .and_then(Value::as_str)
+                                    .map(str::trim)
+                                    .filter(|value| !value.is_empty())?;
+                                let data = source
+                                    .get("data")
+                                    .and_then(Value::as_str)
+                                    .map(str::trim)
+                                    .filter(|value| !value.is_empty())?;
+                                normalized.push(ClaudeNormalizedBlock::FileData(build_data_url(
+                                    media_type, data,
+                                )));
+                            }
+                            "url" => {
+                                let url = source
+                                    .get("url")
+                                    .and_then(Value::as_str)
+                                    .map(str::trim)
+                                    .filter(|value| !value.is_empty())?
+                                    .to_string();
+                                normalized.push(ClaudeNormalizedBlock::FileUrl(url));
+                            }
+                            _ => {}
+                        }
                     }
                     "tool_use" => {
                         let name = block
@@ -223,6 +265,216 @@ fn normalize_claude_content_blocks(content: &Value) -> Option<Vec<ClaudeNormaliz
             }
             Some(normalized)
         }
+        _ => None,
+    }
+}
+
+fn append_claude_user_message_to_openai_messages(
+    content: Option<&Value>,
+    messages: &mut Vec<Value>,
+) -> Option<()> {
+    let Some(content) = content else {
+        return Some(());
+    };
+    let mut pending_parts = Vec::new();
+    for block in normalize_claude_content_blocks(content)? {
+        match block {
+            ClaudeNormalizedBlock::Text(text) | ClaudeNormalizedBlock::Thinking { text, .. } => {
+                push_openai_text_part(&mut pending_parts, text);
+            }
+            ClaudeNormalizedBlock::RedactedThinking { .. } => {}
+            ClaudeNormalizedBlock::ImageUrl(url) => {
+                pending_parts.push(build_openai_image_part(url));
+            }
+            ClaudeNormalizedBlock::FileData(file_data) => {
+                pending_parts.push(build_openai_file_part(file_data));
+            }
+            ClaudeNormalizedBlock::FileUrl(url) => {
+                push_openai_text_part(&mut pending_parts, format!("[File: {url}]"));
+            }
+            ClaudeNormalizedBlock::ToolResult {
+                tool_use_id,
+                content,
+            } => {
+                flush_openai_user_content_parts(&mut pending_parts, messages);
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": tool_use_id,
+                    "content": content,
+                }));
+            }
+            ClaudeNormalizedBlock::ToolUse { .. } => {}
+        }
+    }
+    flush_openai_user_content_parts(&mut pending_parts, messages);
+    Some(())
+}
+
+fn normalize_claude_assistant_message_to_openai_message(
+    content: Option<&Value>,
+    next_generated_tool_use_index: &mut usize,
+) -> Option<Value> {
+    let mut reasoning_segments = Vec::new();
+    let mut reasoning_parts = Vec::new();
+    let mut content_parts = Vec::new();
+    let mut tool_calls = Vec::new();
+    if let Some(content) = content {
+        for block in normalize_claude_content_blocks(content)? {
+            match block {
+                ClaudeNormalizedBlock::Text(text) => {
+                    push_openai_text_part(&mut content_parts, text);
+                }
+                ClaudeNormalizedBlock::Thinking { text, signature } => {
+                    if !text.trim().is_empty() {
+                        reasoning_segments.push(text.clone());
+                    }
+                    let mut reasoning_part = Map::new();
+                    reasoning_part
+                        .insert("type".to_string(), Value::String("thinking".to_string()));
+                    reasoning_part.insert("thinking".to_string(), Value::String(text));
+                    if let Some(signature) = signature {
+                        reasoning_part.insert("signature".to_string(), Value::String(signature));
+                    }
+                    reasoning_parts.push(Value::Object(reasoning_part));
+                }
+                ClaudeNormalizedBlock::RedactedThinking { data } => {
+                    if data.trim().is_empty() {
+                        continue;
+                    }
+                    reasoning_parts.push(json!({
+                        "type": "redacted_thinking",
+                        "data": data,
+                    }));
+                }
+                ClaudeNormalizedBlock::ImageUrl(url) => {
+                    content_parts.push(build_openai_image_part(url));
+                }
+                ClaudeNormalizedBlock::FileData(file_data) => {
+                    content_parts.push(build_openai_file_part(file_data));
+                }
+                ClaudeNormalizedBlock::FileUrl(url) => {
+                    push_openai_text_part(&mut content_parts, format!("[File: {url}]"));
+                }
+                ClaudeNormalizedBlock::ToolUse { id, name, input } => {
+                    let tool_use_id = id.unwrap_or_else(|| {
+                        let generated = format!("toolu_auto_{next_generated_tool_use_index}");
+                        *next_generated_tool_use_index += 1;
+                        generated
+                    });
+                    tool_calls.push(json!({
+                        "id": tool_use_id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": canonical_json_string(input.unwrap_or(Value::Object(Map::new()))),
+                        }
+                    }));
+                }
+                ClaudeNormalizedBlock::ToolResult { .. } => {}
+            }
+        }
+    }
+    let mut assistant = Map::new();
+    assistant.insert("role".to_string(), Value::String("assistant".to_string()));
+    assistant.insert(
+        "content".to_string(),
+        match build_openai_content_value(content_parts) {
+            Some(content) => content,
+            None if !tool_calls.is_empty() => Value::Null,
+            None => Value::String(String::new()),
+        },
+    );
+    if !reasoning_segments.is_empty() {
+        assistant.insert(
+            "reasoning_content".to_string(),
+            Value::String(reasoning_segments.join("")),
+        );
+    }
+    if !reasoning_parts.is_empty() {
+        assistant.insert("reasoning_parts".to_string(), Value::Array(reasoning_parts));
+    }
+    if !tool_calls.is_empty() {
+        assistant.insert("tool_calls".to_string(), Value::Array(tool_calls));
+    }
+    Some(Value::Object(assistant))
+}
+
+fn flush_openai_user_content_parts(pending_parts: &mut Vec<Value>, messages: &mut Vec<Value>) {
+    let parts = std::mem::take(pending_parts);
+    let Some(content) = build_openai_content_value(parts) else {
+        return;
+    };
+    messages.push(json!({
+        "role": "user",
+        "content": content,
+    }));
+}
+
+fn build_openai_content_value(parts: Vec<Value>) -> Option<Value> {
+    if parts.is_empty() {
+        return None;
+    }
+    if parts
+        .iter()
+        .all(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+    {
+        let text = parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        return Some(Value::String(text));
+    }
+    Some(Value::Array(parts))
+}
+
+fn push_openai_text_part(parts: &mut Vec<Value>, text: String) {
+    if text.trim().is_empty() {
+        return;
+    }
+    parts.push(json!({
+        "type": "text",
+        "text": text,
+    }));
+}
+
+fn build_openai_image_part(url: String) -> Value {
+    json!({
+        "type": "image_url",
+        "image_url": {
+            "url": url,
+        }
+    })
+}
+
+fn build_openai_file_part(file_data: String) -> Value {
+    json!({
+        "type": "file",
+        "file": {
+            "file_data": file_data,
+        }
+    })
+}
+
+fn build_data_url(media_type: &str, data: &str) -> String {
+    format!("data:{media_type};base64,{data}")
+}
+
+fn extract_claude_output_reasoning_effort(request: &Map<String, Value>) -> Option<&'static str> {
+    match request
+        .get("output_config")
+        .and_then(Value::as_object)
+        .and_then(|config| config.get("effort"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "max" | "xhigh" => Some("xhigh"),
         _ => None,
     }
 }
@@ -326,6 +578,7 @@ fn extract_claude_web_search_options(tools: Option<&Value>) -> Option<Value> {
         if !tool_type.starts_with("web_search") {
             continue;
         }
+        let found = true;
         let mut options = Map::new();
         if let Some(max_uses) = tool.get("max_uses").and_then(Value::as_u64) {
             let search_context_size = if max_uses <= 1 {
@@ -357,7 +610,7 @@ fn extract_claude_web_search_options(tools: Option<&Value>) -> Option<Value> {
                 );
             }
         }
-        if !options.is_empty() {
+        if found {
             return Some(Value::Object(options));
         }
     }
@@ -538,6 +791,116 @@ mod tests {
             })
         );
         assert_eq!(normalized["parallel_tool_calls"], false);
+        assert!(normalized.get("tools").is_none());
+    }
+
+    #[test]
+    fn normalizes_claude_media_thinking_and_stop_sequences() {
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "See attachment" },
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "url",
+                                "url": "https://example.com/cat.png"
+                            }
+                        },
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": "JVBERi0x"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "need context first",
+                            "signature": "sig_123"
+                        },
+                        { "type": "redacted_thinking", "data": "redacted_blob" },
+                        { "type": "text", "text": "Working on it" }
+                    ]
+                }
+            ],
+            "stop_sequences": ["END"],
+            "output_config": { "effort": "max" }
+        });
+
+        let normalized = normalize_claude_request_to_openai_chat_request(&request)
+            .expect("request should convert");
+
+        assert_eq!(normalized["stop"], json!(["END"]));
+        assert_eq!(normalized["reasoning_effort"], "xhigh");
+        assert_eq!(
+            normalized["messages"][0]["content"],
+            json!([
+                { "type": "text", "text": "See attachment" },
+                {
+                    "type": "image_url",
+                    "image_url": { "url": "https://example.com/cat.png" }
+                },
+                {
+                    "type": "file",
+                    "file": {
+                        "file_data": "data:application/pdf;base64,JVBERi0x"
+                    }
+                }
+            ])
+        );
+        assert_eq!(
+            normalized["messages"][1]["reasoning_content"],
+            "need context first"
+        );
+        assert_eq!(
+            normalized["messages"][1]["reasoning_parts"],
+            json!([
+                {
+                    "type": "thinking",
+                    "thinking": "need context first",
+                    "signature": "sig_123"
+                },
+                {
+                    "type": "redacted_thinking",
+                    "data": "redacted_blob"
+                }
+            ])
+        );
+        assert_eq!(normalized["messages"][1]["content"], "Working on it");
+    }
+
+    #[test]
+    fn preserves_default_claude_web_search_tool_as_empty_openai_options() {
+        let request = json!({
+            "model": "claude-sonnet-4-5",
+            "tools": [
+                {
+                    "type": "web_search_20250305",
+                    "name": "web_search"
+                }
+            ],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "find something"
+                }
+            ]
+        });
+
+        let normalized = normalize_claude_request_to_openai_chat_request(&request)
+            .expect("request should convert");
+
+        assert_eq!(normalized["web_search_options"], json!({}));
         assert!(normalized.get("tools").is_none());
     }
 }

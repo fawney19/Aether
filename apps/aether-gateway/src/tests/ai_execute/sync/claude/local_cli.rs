@@ -958,7 +958,7 @@ async fn gateway_marks_claude_cli_cross_format_runtime_miss_when_format_conversi
     assert_eq!(response_json["error"]["type"], "http_error");
     assert_eq!(
         response_json["error"]["message"],
-        "没有可用的提供商支持模型 gpt-5.4 的同步请求"
+        "没有可用提供商支持模型 gpt-5.4 的同步请求。请检查模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）"
     );
 
     let stored_candidates = request_candidate_repository

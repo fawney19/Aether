@@ -3,7 +3,6 @@ use crate::handlers::admin::shared::{query_param_value, AdminTypedObjectPatch};
 use crate::handlers::admin::users::{
     format_optional_unix_secs_iso8601, masked_user_api_key_display,
 };
-use crate::GatewayError;
 use aether_admin::system::serialize_admin_system_users_export_wallet;
 use axum::{
     body::Body,
@@ -132,7 +131,6 @@ fn masked_admin_api_key_display(state: &AdminAppState<'_>, ciphertext: Option<&s
 pub(super) fn build_admin_api_key_list_item_payload(
     state: &AdminAppState<'_>,
     record: &aether_data::repository::auth::StoredAuthApiKeyExportRecord,
-    total_tokens: Option<u64>,
     wallet: Option<&aether_data::repository::wallet::StoredWalletSnapshot>,
 ) -> serde_json::Value {
     json!({
@@ -143,17 +141,17 @@ pub(super) fn build_admin_api_key_list_item_payload(
         "is_active": record.is_active,
         "is_standalone": true,
         "total_requests": record.total_requests,
-        "total_tokens": total_tokens,
+        "total_tokens": record.total_tokens,
         "total_cost_usd": record.total_cost_usd,
         "rate_limit": record.rate_limit,
         "concurrent_limit": record.concurrent_limit,
         "allowed_providers": record.allowed_providers,
         "allowed_api_formats": record.allowed_api_formats,
         "allowed_models": record.allowed_models,
-        "last_used_at": serde_json::Value::Null,
+        "last_used_at": format_optional_unix_secs_iso8601(record.last_used_at_unix_secs),
         "expires_at": format_optional_unix_secs_iso8601(record.expires_at_unix_secs),
-        "created_at": serde_json::Value::Null,
-        "updated_at": serde_json::Value::Null,
+        "created_at": format_optional_unix_secs_iso8601(record.created_at_unix_secs),
+        "updated_at": format_optional_unix_secs_iso8601(record.updated_at_unix_secs),
         "auto_delete_on_expiry": record.auto_delete_on_expiry,
         "wallet": serialize_admin_system_users_export_wallet(wallet),
     })
@@ -162,7 +160,6 @@ pub(super) fn build_admin_api_key_list_item_payload(
 pub(super) fn build_admin_api_key_detail_payload(
     state: &AdminAppState<'_>,
     record: &aether_data::repository::auth::StoredAuthApiKeyExportRecord,
-    total_tokens: u64,
     wallet: Option<&aether_data::repository::wallet::StoredWalletSnapshot>,
 ) -> serde_json::Value {
     json!({
@@ -173,31 +170,18 @@ pub(super) fn build_admin_api_key_detail_payload(
         "is_active": record.is_active,
         "is_standalone": true,
         "total_requests": record.total_requests,
-        "total_tokens": total_tokens,
+        "total_tokens": record.total_tokens,
         "total_cost_usd": record.total_cost_usd,
         "rate_limit": record.rate_limit,
         "concurrent_limit": record.concurrent_limit,
         "allowed_providers": record.allowed_providers,
         "allowed_api_formats": record.allowed_api_formats,
         "allowed_models": record.allowed_models,
-        "last_used_at": serde_json::Value::Null,
+        "last_used_at": format_optional_unix_secs_iso8601(record.last_used_at_unix_secs),
         "expires_at": format_optional_unix_secs_iso8601(record.expires_at_unix_secs),
-        "created_at": serde_json::Value::Null,
-        "updated_at": serde_json::Value::Null,
+        "created_at": format_optional_unix_secs_iso8601(record.created_at_unix_secs),
+        "updated_at": format_optional_unix_secs_iso8601(record.updated_at_unix_secs),
         "auto_delete_on_expiry": record.auto_delete_on_expiry,
         "wallet": serialize_admin_system_users_export_wallet(wallet),
     })
-}
-
-pub(super) async fn admin_api_key_total_tokens_by_ids(
-    state: &AdminAppState<'_>,
-    api_key_ids: &[String],
-) -> Result<std::collections::BTreeMap<String, u64>, GatewayError> {
-    if api_key_ids.is_empty() || !state.has_usage_data_reader() {
-        return Ok(std::collections::BTreeMap::new());
-    }
-
-    state
-        .summarize_usage_total_tokens_by_api_key_ids(api_key_ids)
-        .await
 }

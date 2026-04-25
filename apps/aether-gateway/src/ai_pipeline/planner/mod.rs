@@ -36,9 +36,12 @@ pub(crate) use self::plan_builders::{
     build_passthrough_sync_plan_from_decision, build_standard_stream_plan_from_decision,
     build_standard_sync_plan_from_decision, LocalStreamPlanAndReport, LocalSyncPlanAndReport,
 };
+pub(crate) use self::route::is_matching_stream_request as planner_is_matching_stream_request;
 pub(crate) use self::specialized::{
     build_local_gemini_files_stream_plan_and_reports_for_kind,
     build_local_gemini_files_sync_plan_and_reports_for_kind,
+    build_local_image_stream_plan_and_reports_for_kind,
+    build_local_image_sync_plan_and_reports_for_kind,
     build_local_video_sync_plan_and_reports_for_kind,
 };
 pub(crate) use self::standard::{
@@ -82,8 +85,17 @@ pub(crate) async fn maybe_build_stream_decision_payload(
     trace_id: &str,
     decision: &GatewayControlDecision,
     body_json: &serde_json::Value,
+    body_base64: Option<&str>,
 ) -> Result<Option<GatewayControlSyncDecisionResponse>, GatewayError> {
-    decision::maybe_build_stream_decision_payload(state, parts, trace_id, decision, body_json).await
+    decision::maybe_build_stream_decision_payload(
+        state,
+        parts,
+        trace_id,
+        decision,
+        body_json,
+        body_base64,
+    )
+    .await
 }
 
 pub(crate) async fn maybe_build_sync_plan_payload(
@@ -113,7 +125,15 @@ pub(crate) async fn maybe_build_stream_plan_payload(
     trace_id: &str,
     decision: &GatewayControlDecision,
     body_json: &serde_json::Value,
+    body_base64: Option<&str>,
 ) -> Result<Option<GatewayControlPlanResponse>, GatewayError> {
-    decision::maybe_build_stream_plan_payload_impl(state, parts, trace_id, decision, body_json)
-        .await
+    decision::maybe_build_stream_plan_payload_impl(
+        state,
+        parts,
+        trace_id,
+        decision,
+        body_json,
+        body_base64,
+    )
+    .await
 }

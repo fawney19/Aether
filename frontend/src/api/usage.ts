@@ -307,11 +307,17 @@ export const usageApi = {
       rate_multiplier?: number | null
       response_time_ms: number | null
       first_byte_time_ms: number | null
+      status_code?: number | null
+      error_message?: string | null
       provider?: string | null
       api_key_name?: string | null
       provider_key_name?: string | null
       api_format?: string | null
       endpoint_api_format?: string | null
+      is_stream?: boolean | null
+      upstream_is_stream?: boolean | null
+      client_requested_stream?: boolean | null
+      client_is_stream?: boolean | null
       has_format_conversion?: boolean | null
       has_fallback?: boolean | null
       target_model?: string | null

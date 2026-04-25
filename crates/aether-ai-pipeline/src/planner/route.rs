@@ -8,9 +8,10 @@ use crate::contracts::{
     GEMINI_FILES_UPLOAD_PLAN_KIND, GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND,
     GEMINI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_CHAT_SYNC_PLAN_KIND,
     OPENAI_CLI_STREAM_PLAN_KIND, OPENAI_CLI_SYNC_PLAN_KIND, OPENAI_COMPACT_STREAM_PLAN_KIND,
-    OPENAI_COMPACT_SYNC_PLAN_KIND, OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND,
-    OPENAI_VIDEO_CONTENT_PLAN_KIND, OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND,
-    OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND, OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
+    OPENAI_COMPACT_SYNC_PLAN_KIND, OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND,
+    OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND, OPENAI_VIDEO_CONTENT_PLAN_KIND,
+    OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND,
+    OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
 };
 
 pub fn resolve_execution_runtime_stream_plan_kind(
@@ -86,6 +87,14 @@ pub fn resolve_execution_runtime_stream_plan_kind(
         && path == "/v1/responses/compact"
     {
         return Some(OPENAI_COMPACT_STREAM_PLAN_KIND);
+    }
+
+    if route_family == Some("openai")
+        && route_kind == Some("image")
+        && *method == Method::POST
+        && matches!(path, "/v1/images/generations" | "/v1/images/edits")
+    {
+        return Some(OPENAI_IMAGE_STREAM_PLAN_KIND);
     }
 
     if route_family == Some("openai")
@@ -166,6 +175,17 @@ pub fn resolve_execution_runtime_sync_plan_kind(
         && path == "/v1/chat/completions"
     {
         return Some(OPENAI_CHAT_SYNC_PLAN_KIND);
+    }
+
+    if route_family == Some("openai")
+        && route_kind == Some("image")
+        && *method == Method::POST
+        && matches!(
+            path,
+            "/v1/images/generations" | "/v1/images/edits" | "/v1/images/variations"
+        )
+    {
+        return Some(OPENAI_IMAGE_SYNC_PLAN_KIND);
     }
 
     if route_family == Some("openai")
@@ -250,7 +270,8 @@ pub fn is_matching_stream_request(
         | CLAUDE_CHAT_STREAM_PLAN_KIND
         | OPENAI_CLI_STREAM_PLAN_KIND
         | OPENAI_COMPACT_STREAM_PLAN_KIND
-        | CLAUDE_CLI_STREAM_PLAN_KIND => body_json
+        | CLAUDE_CLI_STREAM_PLAN_KIND
+        | OPENAI_IMAGE_STREAM_PLAN_KIND => body_json
             .get("stream")
             .and_then(|value| value.as_bool())
             .unwrap_or(false),
@@ -265,6 +286,7 @@ pub fn supports_sync_scheduler_decision_kind(plan_kind: &str) -> bool {
     matches!(
         plan_kind,
         OPENAI_CHAT_SYNC_PLAN_KIND
+            | OPENAI_IMAGE_SYNC_PLAN_KIND
             | OPENAI_CLI_SYNC_PLAN_KIND
             | OPENAI_COMPACT_SYNC_PLAN_KIND
             | CLAUDE_CHAT_SYNC_PLAN_KIND
@@ -291,6 +313,7 @@ pub fn supports_stream_scheduler_decision_kind(plan_kind: &str) -> bool {
             | CLAUDE_CHAT_STREAM_PLAN_KIND
             | GEMINI_CHAT_STREAM_PLAN_KIND
             | OPENAI_CLI_STREAM_PLAN_KIND
+            | OPENAI_IMAGE_STREAM_PLAN_KIND
             | OPENAI_COMPACT_STREAM_PLAN_KIND
             | CLAUDE_CLI_STREAM_PLAN_KIND
             | GEMINI_CLI_STREAM_PLAN_KIND
@@ -308,7 +331,10 @@ mod tests {
         resolve_execution_runtime_sync_plan_kind, supports_stream_scheduler_decision_kind,
         supports_sync_scheduler_decision_kind,
     };
-    use crate::contracts::{OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_CHAT_SYNC_PLAN_KIND};
+    use crate::contracts::{
+        OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_CHAT_SYNC_PLAN_KIND, OPENAI_IMAGE_STREAM_PLAN_KIND,
+        OPENAI_IMAGE_SYNC_PLAN_KIND,
+    };
 
     #[test]
     fn resolves_openai_chat_plan_kinds() {
@@ -351,6 +377,84 @@ mod tests {
         ));
         assert!(supports_stream_scheduler_decision_kind(
             OPENAI_CHAT_STREAM_PLAN_KIND
+        ));
+    }
+
+    #[test]
+    fn resolves_openai_image_sync_plan_kind() {
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(
+                Some("ai_public"),
+                Some("openai"),
+                Some("image"),
+                &Method::POST,
+                "/v1/images/generations",
+            ),
+            Some(OPENAI_IMAGE_SYNC_PLAN_KIND)
+        );
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(
+                Some("ai_public"),
+                Some("openai"),
+                Some("image"),
+                &Method::POST,
+                "/v1/images/edits",
+            ),
+            Some(OPENAI_IMAGE_SYNC_PLAN_KIND)
+        );
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(
+                Some("ai_public"),
+                Some("openai"),
+                Some("image"),
+                &Method::POST,
+                "/v1/images/variations",
+            ),
+            Some(OPENAI_IMAGE_SYNC_PLAN_KIND)
+        );
+        assert!(supports_sync_scheduler_decision_kind(
+            OPENAI_IMAGE_SYNC_PLAN_KIND
+        ));
+    }
+
+    #[test]
+    fn resolves_openai_image_stream_plan_kind() {
+        assert_eq!(
+            resolve_execution_runtime_stream_plan_kind(
+                Some("ai_public"),
+                Some("openai"),
+                Some("image"),
+                &Method::POST,
+                "/v1/images/generations",
+            ),
+            Some(OPENAI_IMAGE_STREAM_PLAN_KIND)
+        );
+        assert_eq!(
+            resolve_execution_runtime_stream_plan_kind(
+                Some("ai_public"),
+                Some("openai"),
+                Some("image"),
+                &Method::POST,
+                "/v1/images/edits",
+            ),
+            Some(OPENAI_IMAGE_STREAM_PLAN_KIND)
+        );
+        assert!(supports_stream_scheduler_decision_kind(
+            OPENAI_IMAGE_STREAM_PLAN_KIND
+        ));
+    }
+
+    #[test]
+    fn stream_matching_requires_openai_image_stream_flag() {
+        assert!(!is_matching_stream_request(
+            OPENAI_IMAGE_STREAM_PLAN_KIND,
+            "/v1/images/generations",
+            &serde_json::json!({"stream": false}),
+        ));
+        assert!(is_matching_stream_request(
+            OPENAI_IMAGE_STREAM_PLAN_KIND,
+            "/v1/images/generations",
+            &serde_json::json!({"stream": true}),
         ));
     }
 }

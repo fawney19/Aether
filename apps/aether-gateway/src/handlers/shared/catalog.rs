@@ -1,5 +1,8 @@
 use crate::handlers::shared::{json_string_list, unix_secs_to_rfc3339};
-use crate::provider_key_auth::provider_key_auth_semantics;
+use crate::provider_key_auth::{
+    provider_key_auth_semantics, provider_key_configured_api_formats,
+    provider_key_inherits_provider_api_formats,
+};
 use crate::AppState;
 use aether_admin::provider::quota as admin_provider_quota_pure;
 use aether_admin::provider::status as admin_provider_status_pure;
@@ -18,17 +21,18 @@ const OAUTH_REQUEST_FAILED_PREFIX: &str = "[REQUEST_FAILED] ";
 
 pub(crate) fn provider_catalog_key_supports_format(
     key: &StoredProviderCatalogKey,
+    provider_type: &str,
     api_format: &str,
 ) -> bool {
-    let Some(value) = key.api_formats.as_ref() else {
+    if provider_key_inherits_provider_api_formats(key, provider_type) {
         return true;
-    };
-    let Some(values) = value.as_array() else {
+    }
+    let formats = provider_key_configured_api_formats(key);
+    if formats.is_empty() {
         return true;
-    };
-    values
+    }
+    formats
         .iter()
-        .filter_map(serde_json::Value::as_str)
         .any(|candidate| candidate.trim().eq_ignore_ascii_case(api_format))
 }
 
@@ -1020,6 +1024,10 @@ pub(crate) fn provider_key_status_snapshot_payload(
         .or_else(|| default_provider_key_status_snapshot().as_object().cloned())
         .unwrap_or_default();
     snapshot.insert(
+        "oauth".to_string(),
+        build_provider_key_oauth_status_snapshot(key),
+    );
+    snapshot.insert(
         "account".to_string(),
         build_provider_key_account_status_snapshot(key, provider_type),
     );
@@ -1188,6 +1196,7 @@ pub(crate) fn build_admin_provider_key_response(
     state: &AppState,
     key: &StoredProviderCatalogKey,
     provider_type: &str,
+    api_formats: &[String],
     now_unix_secs: u64,
 ) -> serde_json::Value {
     let request_count = u64::from(key.request_count.unwrap_or(0));
@@ -1245,8 +1254,9 @@ pub(crate) fn build_admin_provider_key_response(
     payload.insert(
         "api_formats".to_string(),
         serde_json::Value::Array(
-            json_string_list(key.api_formats.as_ref())
-                .into_iter()
+            api_formats
+                .iter()
+                .cloned()
                 .map(serde_json::Value::String)
                 .collect(),
         ),

@@ -6,7 +6,10 @@ use crate::ai_pipeline::transport::policy::{
     local_gemini_transport_unsupported_reason_with_network,
     local_standard_transport_unsupported_reason_with_network,
 };
-use crate::ai_pipeline::transport::vertex::local_vertex_api_key_gemini_transport_unsupported_reason_with_network;
+use crate::ai_pipeline::transport::vertex::{
+    is_vertex_api_key_transport_context,
+    local_vertex_api_key_gemini_transport_unsupported_reason_with_network,
+};
 use crate::ai_pipeline::GatewayProviderTransportSnapshot;
 
 use super::super::LocalSameFormatProviderFamily;
@@ -34,11 +37,7 @@ pub(super) fn classify_same_format_provider_request_behavior(
         .provider_type
         .trim()
         .eq_ignore_ascii_case("claude_code");
-    let is_vertex = transport
-        .provider
-        .provider_type
-        .trim()
-        .eq_ignore_ascii_case("vertex_ai");
+    let is_vertex = is_vertex_api_key_transport_context(transport);
     let is_kiro = transport
         .provider
         .provider_type

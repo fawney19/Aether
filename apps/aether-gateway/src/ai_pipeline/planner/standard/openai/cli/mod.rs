@@ -60,12 +60,13 @@ pub(crate) async fn maybe_build_sync_local_openai_cli_decision_payload(
     };
 
     let Some(input) =
-        resolve_local_openai_cli_decision_input(state, trace_id, decision, body_json).await
+        resolve_local_openai_cli_decision_input(state, trace_id, decision, body_json, plan_kind)
+            .await
     else {
         return Ok(None);
     };
 
-    let attempts =
+    let (attempts, _) =
         materialize_local_openai_cli_candidate_attempts(state, trace_id, &input, body_json, spec)
             .await?;
 
@@ -95,12 +96,13 @@ pub(crate) async fn maybe_build_stream_local_openai_cli_decision_payload(
     };
 
     let Some(input) =
-        resolve_local_openai_cli_decision_input(state, trace_id, decision, body_json).await
+        resolve_local_openai_cli_decision_input(state, trace_id, decision, body_json, plan_kind)
+            .await
     else {
         return Ok(None);
     };
 
-    let attempts =
+    let (attempts, _) =
         materialize_local_openai_cli_candidate_attempts(state, trace_id, &input, body_json, spec)
             .await?;
 

@@ -11,11 +11,28 @@ pub struct CanonicalUsage {
     pub cache_read_tokens: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CanonicalContentPart {
+    ImageUrl(String),
+    File {
+        file_data: Option<String>,
+        reference: Option<String>,
+        mime_type: Option<String>,
+        filename: Option<String>,
+    },
+    Audio {
+        data: String,
+        format: String,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub enum CanonicalStreamEvent {
     Start,
     TextDelta(String),
     ReasoningDelta(String),
+    ReasoningSignature(String),
+    ContentPart(CanonicalContentPart),
     ToolCallStart {
         index: usize,
         call_id: String,
@@ -72,7 +89,7 @@ pub fn resolve_identity(
 
 pub fn canonical_usage_from_openai_usage(value: Option<&Value>) -> Option<CanonicalUsage> {
     let usage = value?.as_object()?;
-    let input_tokens = usage
+    let mut input_tokens = usage
         .get("input_tokens")
         .or_else(|| usage.get("prompt_tokens"))
         .and_then(Value::as_u64)
@@ -112,6 +129,9 @@ pub fn canonical_usage_from_openai_usage(value: Option<&Value>) -> Option<Canoni
             .saturating_add(cache_creation_tokens)
             .saturating_add(cache_read_tokens),
     );
+    if input_tokens == 0 && total_tokens > output_tokens {
+        input_tokens = total_tokens.saturating_sub(output_tokens);
+    }
     Some(CanonicalUsage {
         input_tokens,
         output_tokens,

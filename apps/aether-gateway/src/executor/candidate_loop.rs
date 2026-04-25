@@ -13,6 +13,7 @@ use crate::control::GatewayControlDecision;
 use crate::execution_runtime::{execute_execution_runtime_stream, execute_execution_runtime_sync};
 use crate::executor::{build_local_execution_exhaustion, LocalExecutionRequestOutcome};
 use crate::log_ids::short_request_id;
+use crate::orchestration::local_execution_candidate_metadata_from_report_context;
 use crate::request_candidate_runtime::{
     record_local_request_candidate_status, RequestCandidateRuntimeWriter,
 };
@@ -246,10 +247,14 @@ where
     T: LocalPlanAndReport,
 {
     for plan_and_report in remaining {
+        let report_context = plan_and_report.report_context();
+        if should_skip_unused_persistence(report_context.as_ref()) {
+            continue;
+        }
         record_local_request_candidate_status(
             state,
             plan_and_report.plan(),
-            plan_and_report.report_context().as_ref(),
+            report_context.as_ref(),
             SchedulerRequestCandidateStatusUpdate {
                 status: RequestCandidateStatus::Unused,
                 status_code: None,
@@ -262,6 +267,11 @@ where
         )
         .await;
     }
+}
+
+fn should_skip_unused_persistence(report_context: Option<&serde_json::Value>) -> bool {
+    let metadata = local_execution_candidate_metadata_from_report_context(report_context);
+    metadata.candidate_group_id.is_some() && metadata.pool_key_index.is_some()
 }
 
 fn resolve_stream_candidate_watchdog_timeout(plan: &aether_contracts::ExecutionPlan) -> Duration {
@@ -352,10 +362,14 @@ pub(crate) async fn mark_unused_local_candidate_items<T, FPlan, FContext>(
     FContext: Fn(&T) -> Option<&serde_json::Value>,
 {
     for item in remaining {
+        let report_context = report_context(&item);
+        if should_skip_unused_persistence(report_context) {
+            continue;
+        }
         record_local_request_candidate_status(
             state,
             plan(&item),
-            report_context(&item),
+            report_context,
             SchedulerRequestCandidateStatusUpdate {
                 status: RequestCandidateStatus::Unused,
                 status_code: None,
@@ -462,6 +476,20 @@ mod tests {
             timeout,
             Duration::from_millis(DEFAULT_STREAM_CANDIDATE_WATCHDOG_TIMEOUT_MS)
         );
+    }
+
+    #[test]
+    fn unused_persistence_skips_pool_internal_candidates() {
+        assert!(should_skip_unused_persistence(Some(&json!({
+            "candidate_group_id": "pool-group",
+            "pool_key_index": 1,
+        }))));
+        assert!(!should_skip_unused_persistence(Some(&json!({
+            "candidate_group_id": "pool-group",
+        }))));
+        assert!(!should_skip_unused_persistence(Some(&json!({
+            "candidate_index": 1,
+        }))));
     }
 
     #[tokio::test]

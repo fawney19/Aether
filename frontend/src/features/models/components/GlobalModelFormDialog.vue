@@ -764,13 +764,13 @@ async function handleSubmit() {
     return
   }
 
-  if (!tieredPricing.value?.tiers?.length) {
+  const finalTiers = tieredPricingEditorRef.value?.getFinalTiers()
+  const finalTieredPricing = finalTiers ? { tiers: finalTiers } : tieredPricing.value
+
+  if (!finalTieredPricing?.tiers?.length) {
     showError('请配置至少一个价格阶梯')
     return
   }
-
-  const finalTiers = tieredPricingEditorRef.value?.getFinalTiers()
-  const finalTieredPricing = finalTiers ? { tiers: finalTiers } : tieredPricing.value
 
   // Apply billing (video) pricing into config before cleaning/submitting.
   applyVideoPricingToConfig()

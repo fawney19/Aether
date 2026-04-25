@@ -1,4 +1,8 @@
-use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
+use aether_data_contracts::repository::provider_catalog::{
+    StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+};
+use aether_provider_transport::provider_types::provider_type_is_fixed;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProviderKeyCredentialKind {
@@ -146,12 +150,68 @@ pub(crate) fn provider_key_is_oauth_managed(
     provider_key_auth_semantics(key, provider_type).oauth_managed()
 }
 
+pub(crate) fn provider_key_configured_api_formats(key: &StoredProviderCatalogKey) -> Vec<String> {
+    key.api_formats
+        .as_ref()
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn provider_active_api_formats(
+    endpoints: &[StoredProviderCatalogEndpoint],
+) -> Vec<String> {
+    let mut formats = Vec::new();
+    let mut seen = BTreeSet::new();
+    for endpoint in endpoints.iter().filter(|endpoint| endpoint.is_active) {
+        let api_format = endpoint.api_format.trim();
+        if api_format.is_empty() || !seen.insert(api_format.to_string()) {
+            continue;
+        }
+        formats.push(api_format.to_string());
+    }
+    formats
+}
+
+pub(crate) fn provider_key_inherits_provider_api_formats(
+    key: &StoredProviderCatalogKey,
+    provider_type: &str,
+) -> bool {
+    provider_type_is_fixed(provider_type) && provider_key_is_oauth_managed(key, provider_type)
+}
+
+pub(crate) fn provider_key_effective_api_formats(
+    key: &StoredProviderCatalogKey,
+    provider_type: &str,
+    endpoints: &[StoredProviderCatalogEndpoint],
+) -> Vec<String> {
+    if provider_key_inherits_provider_api_formats(key, provider_type) {
+        provider_active_api_formats(endpoints)
+    } else {
+        provider_key_configured_api_formats(key)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        provider_key_auth_semantics, ProviderKeyCredentialKind, ProviderKeyRuntimeAuthKind,
+        provider_active_api_formats, provider_key_auth_semantics,
+        provider_key_configured_api_formats, provider_key_effective_api_formats,
+        provider_key_inherits_provider_api_formats, ProviderKeyCredentialKind,
+        ProviderKeyRuntimeAuthKind,
     };
-    use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
+    use aether_data_contracts::repository::provider_catalog::{
+        StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+    };
+    use serde_json::json;
 
     fn sample_key(auth_type: &str) -> StoredProviderCatalogKey {
         StoredProviderCatalogKey::new(
@@ -163,6 +223,21 @@ mod tests {
             true,
         )
         .expect("key should build")
+    }
+
+    fn sample_endpoint(api_format: &str, is_active: bool) -> StoredProviderCatalogEndpoint {
+        let mut endpoint = StoredProviderCatalogEndpoint::new(
+            format!("endpoint-{api_format}"),
+            "provider-1".to_string(),
+            api_format.to_string(),
+            None,
+            None,
+            true,
+        )
+        .expect("endpoint should build");
+        endpoint.is_active = is_active;
+        endpoint.base_url = "https://example.invalid".to_string();
+        endpoint
     }
 
     #[test]
@@ -225,6 +300,72 @@ mod tests {
         assert_eq!(
             semantics.runtime_auth_kind(),
             ProviderKeyRuntimeAuthKind::ServiceAccount
+        );
+    }
+
+    #[test]
+    fn deduplicates_active_provider_api_formats() {
+        let endpoints = vec![
+            sample_endpoint("openai:cli", true),
+            sample_endpoint("openai:image", true),
+            sample_endpoint("openai:cli", true),
+            sample_endpoint("openai:compact", false),
+        ];
+
+        assert_eq!(
+            provider_active_api_formats(&endpoints),
+            vec!["openai:cli".to_string(), "openai:image".to_string()]
+        );
+    }
+
+    #[test]
+    fn fixed_oauth_key_with_null_formats_inherits_provider_formats() {
+        let key = sample_key("oauth");
+        let endpoints = vec![
+            sample_endpoint("openai:cli", true),
+            sample_endpoint("openai:image", true),
+        ];
+
+        assert!(provider_key_inherits_provider_api_formats(&key, "codex"));
+        assert_eq!(
+            provider_key_effective_api_formats(&key, "codex", &endpoints),
+            vec!["openai:cli".to_string(), "openai:image".to_string()]
+        );
+    }
+
+    #[test]
+    fn fixed_oauth_key_with_legacy_explicit_formats_still_inherits_provider_formats() {
+        let mut key = sample_key("oauth");
+        key.api_formats = Some(json!(["openai:compact"]));
+        let endpoints = vec![
+            sample_endpoint("openai:cli", true),
+            sample_endpoint("openai:image", true),
+        ];
+
+        assert!(provider_key_inherits_provider_api_formats(&key, "codex"));
+        assert_eq!(
+            provider_key_effective_api_formats(&key, "codex", &endpoints),
+            vec!["openai:cli".to_string(), "openai:image".to_string()]
+        );
+    }
+
+    #[test]
+    fn explicit_formats_do_not_inherit_for_non_fixed_key() {
+        let mut key = sample_key("oauth");
+        key.api_formats = Some(json!(["openai:compact"]));
+        let endpoints = vec![
+            sample_endpoint("openai:cli", true),
+            sample_endpoint("openai:image", true),
+        ];
+
+        assert!(!provider_key_inherits_provider_api_formats(&key, "openai"));
+        assert_eq!(
+            provider_key_configured_api_formats(&key),
+            vec!["openai:compact".to_string()]
+        );
+        assert_eq!(
+            provider_key_effective_api_formats(&key, "openai", &endpoints),
+            vec!["openai:compact".to_string()]
         );
     }
 }

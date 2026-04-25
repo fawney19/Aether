@@ -27,3 +27,4 @@ mod chat;
 mod claude;
 mod cli;
 mod gemini;
+mod image;

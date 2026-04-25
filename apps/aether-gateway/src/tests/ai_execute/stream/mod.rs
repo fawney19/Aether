@@ -24,3 +24,4 @@ use super::{
 };
 
 mod decision;
+mod image;

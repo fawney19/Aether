@@ -2,12 +2,13 @@ use super::state::{
     enrich_admin_provider_oauth_auth_config, json_non_empty_string, json_u64_value,
 };
 use crate::handlers::admin::request::AdminAppState;
+use crate::provider_key_auth::provider_active_api_formats;
 use crate::GatewayError;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
 };
+use aether_provider_transport::provider_types::provider_type_is_fixed;
 use serde_json::json;
-use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -23,16 +24,7 @@ pub(crate) fn provider_oauth_key_proxy_value(
 pub(crate) fn provider_oauth_active_api_formats(
     endpoints: &[StoredProviderCatalogEndpoint],
 ) -> Vec<String> {
-    let mut formats = Vec::new();
-    let mut seen = BTreeSet::new();
-    for endpoint in endpoints.iter().filter(|endpoint| endpoint.is_active) {
-        let api_format = endpoint.api_format.trim();
-        if api_format.is_empty() || !seen.insert(api_format.to_string()) {
-            continue;
-        }
-        formats.push(api_format.to_string());
-    }
-    formats
+    provider_active_api_formats(endpoints)
 }
 
 pub(crate) fn build_provider_oauth_auth_config_from_token_payload(
@@ -76,6 +68,7 @@ pub(crate) fn build_provider_oauth_auth_config_from_token_payload(
 pub(crate) async fn create_provider_oauth_catalog_key(
     state: &AdminAppState<'_>,
     provider_id: &str,
+    provider_type: &str,
     name: &str,
     access_token: &str,
     auth_config: &serde_json::Map<String, serde_json::Value>,
@@ -108,7 +101,7 @@ pub(crate) async fn create_provider_oauth_catalog_key(
     )
     .map_err(|err| GatewayError::Internal(err.to_string()))?
     .with_transport_fields(
-        Some(json!(api_formats)),
+        provider_oauth_catalog_key_api_formats(provider_type, api_formats),
         encrypted_api_key,
         Some(encrypted_auth_config),
         None,
@@ -136,8 +129,10 @@ pub(crate) async fn create_provider_oauth_catalog_key(
 pub(crate) async fn update_existing_provider_oauth_catalog_key(
     state: &AdminAppState<'_>,
     existing_key: &StoredProviderCatalogKey,
+    provider_type: &str,
     access_token: &str,
     auth_config: &serde_json::Map<String, serde_json::Value>,
+    api_formats: &[String],
     proxy: Option<serde_json::Value>,
     expires_at_unix_secs: Option<u64>,
 ) -> Result<Option<StoredProviderCatalogKey>, GatewayError> {
@@ -159,6 +154,7 @@ pub(crate) async fn update_existing_provider_oauth_catalog_key(
     let mut updated = existing_key.clone();
     updated.encrypted_api_key = encrypted_api_key;
     updated.encrypted_auth_config = Some(encrypted_auth_config);
+    updated.api_formats = provider_oauth_catalog_key_api_formats(provider_type, api_formats);
     updated.is_active = true;
     updated.expires_at_unix_secs = expires_at_unix_secs;
     updated.oauth_invalid_at_unix_secs = None;
@@ -171,4 +167,15 @@ pub(crate) async fn update_existing_provider_oauth_catalog_key(
     }
     updated.updated_at_unix_secs = Some(now_unix_secs);
     state.update_provider_catalog_key(&updated).await
+}
+
+fn provider_oauth_catalog_key_api_formats(
+    provider_type: &str,
+    api_formats: &[String],
+) -> Option<serde_json::Value> {
+    if provider_type_is_fixed(provider_type) {
+        None
+    } else {
+        Some(json!(api_formats))
+    }
 }

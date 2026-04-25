@@ -392,28 +392,40 @@ function filterAvailableApiFormats(formats: string[]): string[] {
   return formats.filter(format => availableFormatSet.has(normalizeApiFormat(format)))
 }
 
+function getSelectableApiFormats(authType = form.value.auth_type): string[] {
+  const sorted = sortApiFormats(props.availableApiFormats)
+  if (props.providerType !== 'vertex_ai') {
+    return sorted
+  }
+
+  const allowed = getVertexAllowedFormatsByAuth(authType)
+  return sorted.filter(fmt => allowed.has(normalizeApiFormat(fmt)))
+}
+
+function sanitizeApiFormats(formats: string[], authType = form.value.auth_type): string[] {
+  const selectable = new Set(getSelectableApiFormats(authType).map(normalizeApiFormat))
+  if (selectable.size === 0) {
+    return []
+  }
+
+  return formats.filter(format => selectable.has(normalizeApiFormat(format)))
+}
+
 function getDefaultApiFormats(): string[] {
   const endpointFormat = props.endpoint?.api_format
   if (endpointFormat) {
-    const endpointFormats = filterAvailableApiFormats([endpointFormat])
+    const endpointFormats = sanitizeApiFormats([endpointFormat])
     if (endpointFormats.length > 0) {
       return endpointFormats
     }
   }
 
-  const firstAvailableFormat = sortApiFormats(props.availableApiFormats)[0]
+  const firstAvailableFormat = getSelectableApiFormats()[0]
   return firstAvailableFormat ? [firstAvailableFormat] : []
 }
 
 // 按 provider/auth_type 过滤后的可用 API 格式列表
-const visibleApiFormats = computed(() => {
-  const sorted = sortApiFormats(props.availableApiFormats)
-  if (props.providerType !== 'vertex_ai') {
-    return sorted
-  }
-  const allowed = getVertexAllowedFormatsByAuth(form.value.auth_type)
-  return sorted.filter(fmt => allowed.has(normalizeApiFormat(fmt)))
-})
+const visibleApiFormats = computed(() => getSelectableApiFormats())
 
 const showAuthTypeSelector = computed(() => props.providerType === 'vertex_ai')
 
@@ -517,11 +529,7 @@ const form = ref({
 watch(
   [() => form.value.auth_type, () => props.providerType, () => props.availableApiFormats],
   () => {
-    if (props.providerType !== 'vertex_ai') {
-      return
-    }
-    const allowed = getVertexAllowedFormatsByAuth(form.value.auth_type)
-    const filtered = form.value.api_formats.filter(fmt => allowed.has(normalizeApiFormat(fmt)))
+    const filtered = sanitizeApiFormats(form.value.api_formats)
     if (filtered.length !== form.value.api_formats.length) {
       form.value.api_formats = [...filtered]
     }
@@ -536,7 +544,7 @@ watch(
       return
     }
 
-    const filtered = filterAvailableApiFormats(form.value.api_formats)
+    const filtered = sanitizeApiFormats(form.value.api_formats)
     if (filtered.length !== form.value.api_formats.length) {
       form.value.api_formats = [...filtered]
       return
@@ -639,7 +647,10 @@ function loadKeyData() {
     auth_type: props.editingKey.auth_type === 'service_account' ? 'service_account' : 'api_key',
     auth_config_text: '',  // auth_config 不返回给前端，编辑时需要重新输入
     api_formats: props.editingKey.api_formats?.length > 0
-      ? filterAvailableApiFormats(props.editingKey.api_formats)
+      ? sanitizeApiFormats(
+        props.editingKey.api_formats,
+        props.editingKey.auth_type === 'service_account' ? 'service_account' : 'api_key'
+      )
       : [],  // 编辑模式下保持原有选择，不默认全选
     rate_multipliers: { ...(props.editingKey.rate_multipliers || {}) },
     internal_priority: props.editingKey.internal_priority ?? 10,
@@ -730,6 +741,8 @@ async function handleSave() {
       }
     }
   }
+
+  form.value.api_formats = sanitizeApiFormats(form.value.api_formats)
 
   // 验证至少选择一个 API 格式
   if (form.value.api_formats.length === 0) {

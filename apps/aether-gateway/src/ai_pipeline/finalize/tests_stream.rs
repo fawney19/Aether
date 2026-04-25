@@ -1,9 +1,110 @@
 use serde_json::json;
 
+use crate::ai_pipeline::maybe_bridge_standard_sync_json_to_stream;
+
 use super::maybe_build_local_stream_rewriter;
 
 fn utf8(bytes: Vec<u8>) -> String {
     String::from_utf8(bytes).expect("utf8 should decode")
+}
+
+#[test]
+fn standard_sync_bridge_converts_openai_chat_sync_json_to_openai_chat_sse() {
+    let outcome = maybe_bridge_standard_sync_json_to_stream(
+        &json!({
+            "id": "chatcmpl_sync_123",
+            "object": "chat.completion",
+            "model": "gpt-5.4",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello from sync bridge"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 2,
+                "total_tokens": 3
+            }
+        }),
+        "openai:chat",
+        "openai:chat",
+        None,
+    )
+    .expect("bridge should succeed")
+    .expect("bridge should produce sse");
+
+    let output_text = utf8(outcome.sse_body);
+    assert!(output_text.contains("\"object\":\"chat.completion.chunk\""));
+    assert!(output_text.contains("\"role\":\"assistant\""));
+    assert!(output_text.contains("\"content\":\"Hello from sync bridge\""));
+    assert!(output_text.contains("\"finish_reason\":\"stop\""));
+    assert!(output_text.contains("data: [DONE]"));
+    let summary = outcome
+        .terminal_summary
+        .expect("terminal summary should exist");
+    assert_eq!(summary.response_id.as_deref(), Some("resp_sync_123"));
+    assert_eq!(summary.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(summary.finish_reason.as_deref(), Some("stop"));
+    assert_eq!(
+        summary
+            .standardized_usage
+            .as_ref()
+            .and_then(|usage| usage.dimensions.get("total_tokens"))
+            .cloned(),
+        Some(json!(3))
+    );
+}
+
+#[test]
+fn standard_sync_bridge_converts_claude_sync_json_to_openai_cli_sse() {
+    let report_context = json!({
+        "mapped_model": "claude-sonnet-4-5",
+    });
+    let outcome = maybe_bridge_standard_sync_json_to_stream(
+        &json!({
+            "id": "msg_sync_123",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5",
+            "content": [{
+                "type": "text",
+                "text": "Hello from Claude sync"
+            }],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 2,
+                "output_tokens": 3
+            }
+        }),
+        "claude:chat",
+        "openai:cli",
+        Some(&report_context),
+    )
+    .expect("bridge should succeed")
+    .expect("bridge should produce sse");
+
+    let output_text = utf8(outcome.sse_body);
+    assert!(output_text.contains("event: response.created"));
+    assert!(output_text.contains("event: response.output_text.delta"));
+    assert!(output_text.contains("event: response.completed"));
+    assert!(output_text.contains("\"text\":\"Hello from Claude sync\""));
+    let summary = outcome
+        .terminal_summary
+        .expect("terminal summary should exist");
+    assert_eq!(summary.response_id.as_deref(), Some("msg_sync_123"));
+    assert_eq!(summary.model.as_deref(), Some("claude-sonnet-4-5"));
+    assert_eq!(summary.finish_reason.as_deref(), Some("stop"));
+    assert_eq!(
+        summary
+            .standardized_usage
+            .as_ref()
+            .and_then(|usage| usage.dimensions.get("total_tokens"))
+            .cloned(),
+        Some(json!(5))
+    );
 }
 
 #[test]
@@ -27,6 +128,179 @@ fn antigravity_stream_rewriter_unwraps_and_injects_tool_ids() {
     assert!(output_text.contains("\"_v1internal_response_id\":\"resp_123\""));
     assert!(output_text.contains("\"id\":\"call_get_weather_0\""));
     assert!(output_text.contains("\"modelVersion\":\"claude-sonnet-4-5\""));
+}
+
+#[test]
+fn openai_image_stream_rewriter_emits_completed_event_for_generate() {
+    let report_context = json!({
+        "provider_api_format": "openai:image",
+        "client_api_format": "openai:image",
+        "needs_conversion": false,
+        "image_request": {
+            "operation": "generate"
+        }
+    });
+    let mut rewriter =
+        maybe_build_local_stream_rewriter(Some(&report_context)).expect("rewriter should exist");
+
+    let first = rewriter
+        .push_chunk(
+            concat!(
+                "event: response.output_item.done\n",
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"ig_123\",\"type\":\"image_generation_call\",\"result\":\"aGVsbG8=\"}}\n\n"
+            )
+            .as_bytes(),
+        )
+        .expect("rewrite should succeed");
+    assert!(first.is_empty());
+
+    let second = rewriter
+        .push_chunk(
+            concat!(
+                "event: response.completed\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"tool_usage\":{\"image_gen\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}}\n\n"
+            )
+            .as_bytes(),
+        )
+        .expect("rewrite should succeed");
+    let output_text = utf8(second);
+    assert!(output_text.contains("event: image_generation.completed"));
+    assert!(output_text.contains("\"type\":\"image_generation.completed\""));
+    assert!(output_text.contains("\"b64_json\":\"aGVsbG8=\""));
+    assert!(output_text.contains("\"input_tokens\":1"));
+    assert!(!output_text.contains("data: [DONE]"));
+    assert!(rewriter.finish().expect("finish should succeed").is_empty());
+}
+
+#[test]
+fn openai_image_stream_rewriter_maps_responses_partial_image_events() {
+    let report_context = json!({
+        "provider_api_format": "openai:image",
+        "client_api_format": "openai:image",
+        "needs_conversion": false,
+        "image_request": {
+            "operation": "generate",
+            "partial_images": 1
+        }
+    });
+    let mut rewriter =
+        maybe_build_local_stream_rewriter(Some(&report_context)).expect("rewriter should exist");
+
+    let partial = rewriter
+        .push_chunk(
+            concat!(
+                "event: response.image_generation_call.partial_image\n",
+                "data: {\"type\":\"response.image_generation_call.partial_image\",\"partial_image_index\":0,\"partial_image_b64\":\"cGFydGlhbA==\"}\n\n"
+            )
+            .as_bytes(),
+        )
+        .expect("rewrite should succeed");
+    let partial_text = utf8(partial);
+    assert!(partial_text.contains("event: image_generation.partial_image"));
+    assert!(partial_text.contains("\"type\":\"image_generation.partial_image\""));
+    assert!(partial_text.contains("\"b64_json\":\"cGFydGlhbA==\""));
+    assert!(partial_text.contains("\"partial_image_index\":0"));
+    assert!(!partial_text.contains("response.image_generation_call.partial_image"));
+
+    let done = rewriter
+        .push_chunk(
+            concat!(
+                "event: response.output_item.done\n",
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"ig_123\",\"type\":\"image_generation_call\",\"result\":\"ZmluYWw=\"}}\n\n"
+            )
+            .as_bytes(),
+        )
+        .expect("rewrite should succeed");
+    assert!(done.is_empty());
+
+    let completed = rewriter
+        .push_chunk(
+            concat!(
+                "event: response.completed\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":4,\"output_tokens\":5,\"total_tokens\":9}}}\n\n"
+            )
+            .as_bytes(),
+        )
+        .expect("rewrite should succeed");
+    let completed_text = utf8(completed);
+    assert!(completed_text.contains("event: image_generation.completed"));
+    assert!(completed_text.contains("\"type\":\"image_generation.completed\""));
+    assert!(completed_text.contains("\"b64_json\":\"ZmluYWw=\""));
+    assert!(completed_text.contains("\"total_tokens\":9"));
+}
+
+#[test]
+fn openai_image_stream_rewriter_reads_final_image_from_completed_response_output() {
+    let report_context = json!({
+        "provider_api_format": "openai:image",
+        "client_api_format": "openai:image",
+        "needs_conversion": false,
+        "image_request": {
+            "operation": "generate"
+        }
+    });
+    let mut rewriter =
+        maybe_build_local_stream_rewriter(Some(&report_context)).expect("rewriter should exist");
+
+    let completed = rewriter
+        .push_chunk(
+            concat!(
+                "event: response.completed\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\"},{\"type\":\"image_generation_call\",\"result\":\"ZnJvbV9vdXRwdXQ=\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n"
+            )
+            .as_bytes(),
+        )
+        .expect("rewrite should succeed");
+    let completed_text = utf8(completed);
+    assert!(completed_text.contains("event: image_generation.completed"));
+    assert!(completed_text.contains("\"b64_json\":\"ZnJvbV9vdXRwdXQ=\""));
+    assert!(completed_text.contains("\"total_tokens\":3"));
+}
+
+#[test]
+fn openai_image_stream_rewriter_emits_partial_and_completed_events_for_edit() {
+    let report_context = json!({
+        "provider_api_format": "openai:image",
+        "client_api_format": "openai:image",
+        "needs_conversion": false,
+        "image_request": {
+            "operation": "edit",
+            "partial_images": 2
+        }
+    });
+    let mut rewriter =
+        maybe_build_local_stream_rewriter(Some(&report_context)).expect("rewriter should exist");
+
+    let partial = rewriter
+        .push_chunk(
+            concat!(
+                "event: response.output_item.done\n",
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"ig_edit_123\",\"type\":\"image_generation_call\",\"result\":\"d29ybGQ=\"}}\n\n"
+            )
+            .as_bytes(),
+        )
+        .expect("rewrite should succeed");
+    let partial_text = utf8(partial);
+    assert!(partial_text.contains("event: image_edit.partial_image"));
+    assert!(partial_text.contains("\"type\":\"image_edit.partial_image\""));
+    assert!(partial_text.contains("\"b64_json\":\"d29ybGQ=\""));
+    assert!(partial_text.contains("\"partial_image_index\":1"));
+
+    let completed = rewriter
+        .push_chunk(
+            concat!(
+                "event: response.completed\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":4,\"output_tokens\":5,\"total_tokens\":9}}}\n\n"
+            )
+            .as_bytes(),
+        )
+        .expect("rewrite should succeed");
+    let completed_text = utf8(completed);
+    assert!(completed_text.contains("event: image_edit.completed"));
+    assert!(completed_text.contains("\"type\":\"image_edit.completed\""));
+    assert!(completed_text.contains("\"b64_json\":\"d29ybGQ=\""));
+    assert!(completed_text.contains("\"total_tokens\":9"));
+    assert!(rewriter.finish().expect("finish should succeed").is_empty());
 }
 
 #[test]

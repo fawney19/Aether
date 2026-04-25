@@ -269,6 +269,20 @@ pub fn derive_request_candidate_final_status(
         return RequestCandidateFinalStatus::Success;
     }
 
+    let has_failed = candidates
+        .iter()
+        .any(|candidate| candidate.status == RequestCandidateStatus::Failed);
+    if has_failed {
+        return RequestCandidateFinalStatus::Failed;
+    }
+
+    let has_cancelled = candidates
+        .iter()
+        .any(|candidate| candidate.status == RequestCandidateStatus::Cancelled);
+    if has_cancelled {
+        return RequestCandidateFinalStatus::Cancelled;
+    }
+
     if candidates
         .iter()
         .any(|candidate| candidate.status == RequestCandidateStatus::Streaming)
@@ -281,16 +295,6 @@ pub fn derive_request_candidate_final_status(
         .any(|candidate| candidate.status == RequestCandidateStatus::Pending)
     {
         return RequestCandidateFinalStatus::Pending;
-    }
-
-    let has_cancelled = candidates
-        .iter()
-        .any(|candidate| candidate.status == RequestCandidateStatus::Cancelled);
-    let has_failed = candidates
-        .iter()
-        .any(|candidate| candidate.status == RequestCandidateStatus::Failed);
-    if has_cancelled && !has_failed {
-        return RequestCandidateFinalStatus::Cancelled;
     }
 
     RequestCandidateFinalStatus::Failed

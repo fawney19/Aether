@@ -7,7 +7,7 @@ use aether_runtime::{ConcurrencyGate, DistributedConcurrencyGate};
 use super::super::async_task::{VideoTaskPollerConfig, VideoTaskService};
 use super::super::cache::{
     AuthApiKeyLastUsedCache, AuthContextCache, DashboardResponseCache, DirectPlanBypassCache,
-    SchedulerAffinityCache,
+    SchedulerAffinityCache, SystemConfigCache,
 };
 use super::super::data::GatewayDataState;
 use super::super::fallback_metrics;
@@ -59,6 +59,7 @@ pub struct AppState {
     pub(crate) direct_plan_bypass_cache: Arc<DirectPlanBypassCache>,
     pub(crate) scheduler_affinity_cache: Arc<SchedulerAffinityCache>,
     pub(crate) dashboard_response_cache: Arc<DashboardResponseCache>,
+    pub(crate) system_config_cache: Arc<SystemConfigCache>,
     pub(crate) fallback_metrics: Arc<fallback_metrics::GatewayFallbackMetrics>,
     pub(crate) frontdoor_cors: Option<Arc<FrontdoorCorsConfig>>,
     pub(crate) frontdoor_user_rpm: Arc<FrontdoorUserRpmLimiter>,

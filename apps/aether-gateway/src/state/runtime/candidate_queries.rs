@@ -33,6 +33,16 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    pub(crate) async fn read_provider_quota_snapshots(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<quota::StoredProviderQuotaSnapshot>, GatewayError> {
+        self.data
+            .find_provider_quotas_by_provider_ids(provider_ids)
+            .await
+            .map_err(|err| GatewayError::Internal(err.to_string()))
+    }
+
     pub(crate) async fn read_recent_request_candidates(
         &self,
         limit: usize,

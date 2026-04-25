@@ -18,17 +18,32 @@ pub(crate) async fn maybe_build_stream_decision_payload(
     trace_id: &str,
     decision: &GatewayControlDecision,
     body_json: &serde_json::Value,
+    body_base64: Option<&str>,
 ) -> Result<Option<GatewayControlSyncDecisionResponse>, GatewayError> {
     let Some(plan_kind) = resolve_execution_runtime_stream_plan_kind(parts, decision) else {
         return Ok(None);
     };
 
-    if !is_matching_stream_request(plan_kind, parts, body_json) {
+    if !is_matching_stream_request(plan_kind, parts, body_json, body_base64) {
         return Ok(None);
     }
 
     if let Some(payload) = maybe_build_local_video_task_content_stream_decision_payload(
         state, parts, trace_id, decision, plan_kind,
+    )
+    .await?
+    {
+        return Ok(Some(payload));
+    }
+
+    if let Some(payload) = super::maybe_build_stream_local_image_decision_payload(
+        state,
+        parts,
+        body_json,
+        body_base64,
+        trace_id,
+        decision,
+        plan_kind,
     )
     .await?
     {

@@ -5,6 +5,15 @@ use super::super::{
 };
 use super::auth::resolve_local_vertex_api_key_query_auth;
 
+fn is_vertex_transport_family(transport: &GatewayProviderTransportSnapshot) -> bool {
+    transport
+        .provider
+        .provider_type
+        .trim()
+        .eq_ignore_ascii_case(super::PROVIDER_TYPE)
+        || super::looks_like_vertex_ai_host(&transport.endpoint.base_url)
+}
+
 pub fn local_vertex_api_key_gemini_transport_unsupported_reason_with_network(
     transport: &GatewayProviderTransportSnapshot,
 ) -> Option<&'static str> {
@@ -18,18 +27,20 @@ pub fn local_vertex_api_key_gemini_transport_unsupported_reason_with_network(
         };
     }
     if !transport
-        .provider
-        .provider_type
+        .endpoint
+        .api_format
         .trim()
-        .eq_ignore_ascii_case(super::PROVIDER_TYPE)
-    {
-        return Some("transport_provider_type_unsupported");
-    }
-    let endpoint_api_format = transport.endpoint.api_format.trim();
-    if !endpoint_api_format.eq_ignore_ascii_case("gemini:chat")
-        && !endpoint_api_format.eq_ignore_ascii_case("gemini:cli")
+        .eq_ignore_ascii_case("gemini:chat")
+        && !transport
+            .endpoint
+            .api_format
+            .trim()
+            .eq_ignore_ascii_case("gemini:cli")
     {
         return Some("transport_api_format_mismatch");
+    }
+    if !is_vertex_transport_family(transport) {
+        return Some("transport_provider_type_unsupported");
     }
     if !header_rules_are_locally_supported(transport.endpoint.header_rules.as_ref()) {
         return Some("transport_header_rules_unsupported");
@@ -87,18 +98,21 @@ fn supports_local_vertex_api_key_same_format_transport(
         return false;
     }
     if !transport
-        .provider
-        .provider_type
+        .endpoint
+        .api_format
         .trim()
-        .eq_ignore_ascii_case(super::PROVIDER_TYPE)
+        .eq_ignore_ascii_case(api_formats[0])
+        && !api_formats.iter().any(|api_format| {
+            transport
+                .endpoint
+                .api_format
+                .trim()
+                .eq_ignore_ascii_case(api_format)
+        })
     {
         return false;
     }
-    let endpoint_api_format = transport.endpoint.api_format.trim();
-    if !api_formats
-        .iter()
-        .any(|api_format| endpoint_api_format.eq_ignore_ascii_case(api_format))
-    {
+    if !super::is_vertex_api_key_transport_context(transport) {
         return false;
     }
     if !header_rules_are_locally_supported(transport.endpoint.header_rules.as_ref())
@@ -219,6 +233,14 @@ mod tests {
     #[test]
     fn supports_vertex_api_key_gemini_cli_subset() {
         let mut transport = sample_transport();
+        transport.endpoint.api_format = "gemini:cli".to_string();
+        assert!(supports_local_vertex_api_key_gemini_transport(&transport));
+    }
+
+    #[test]
+    fn supports_custom_aiplatform_gemini_cli_subset() {
+        let mut transport = sample_transport();
+        transport.provider.provider_type = "custom".to_string();
         transport.endpoint.api_format = "gemini:cli".to_string();
         assert!(supports_local_vertex_api_key_gemini_transport(&transport));
     }

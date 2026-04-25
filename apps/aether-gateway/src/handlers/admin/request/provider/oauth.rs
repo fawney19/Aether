@@ -465,6 +465,7 @@ impl<'a> AdminAppState<'a> {
     pub(crate) async fn create_provider_oauth_catalog_key(
         &self,
         provider_id: &str,
+        provider_type: &str,
         name: &str,
         access_token: &str,
         auth_config: &serde_json::Map<String, serde_json::Value>,
@@ -478,6 +479,7 @@ impl<'a> AdminAppState<'a> {
         crate::handlers::admin::provider::oauth::provisioning::create_provider_oauth_catalog_key(
             self,
             provider_id,
+            provider_type,
             name,
             access_token,
             auth_config,
@@ -491,8 +493,10 @@ impl<'a> AdminAppState<'a> {
     pub(crate) async fn update_existing_provider_oauth_catalog_key(
         &self,
         existing_key: &aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey,
+        provider_type: &str,
         access_token: &str,
         auth_config: &serde_json::Map<String, serde_json::Value>,
+        api_formats: &[String],
         proxy: Option<serde_json::Value>,
         expires_at_unix_secs: Option<u64>,
     ) -> Result<
@@ -502,8 +506,10 @@ impl<'a> AdminAppState<'a> {
         crate::handlers::admin::provider::oauth::provisioning::update_existing_provider_oauth_catalog_key(
             self,
             existing_key,
+            provider_type,
             access_token,
             auth_config,
+            api_formats,
             proxy,
             expires_at_unix_secs,
         )

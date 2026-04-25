@@ -494,7 +494,7 @@ CREATE TABLE IF NOT EXISTS public.provider_api_keys (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     provider_id character varying(36) NOT NULL,
-    api_formats json DEFAULT '[]'::json NOT NULL,
+    api_formats json,
     rate_multipliers json,
     health_by_format jsonb,
     circuit_breaker_by_format jsonb,

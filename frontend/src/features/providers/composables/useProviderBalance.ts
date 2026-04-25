@@ -5,7 +5,9 @@ import { formatBalanceExtraFromSchema, type CredentialsSchema } from '@/features
 import type { BalanceExtraItem } from '@/features/providers/auth-templates'
 import { log } from '@/utils/logger'
 
-const MAX_BALANCE_RETRIES = 3
+const MAX_BALANCE_RETRIES = 2
+const PENDING_BALANCE_RETRY_BASE_DELAY_MS = 12_000
+const PENDING_BALANCE_RETRY_MAX_DELAY_MS = 60_000
 
 export function useProviderBalance() {
   // 余额数据缓存 {providerId: ActionResultResponse}
@@ -86,7 +88,7 @@ export function useProviderBalance() {
         }
       }
 
-      // 如果有 pending 状态的 provider，3秒后自动重试
+      // 如果有 pending 状态的 provider，延后重试，避免把后台刷新队列打成高频轮询
       if (pendingProviderIds.length > 0) {
         const timerId = setTimeout(() => {
           pendingTimers.delete(timerId)
@@ -94,7 +96,7 @@ export function useProviderBalance() {
           if (currentVersion === balanceLoadVersion) {
             retryPendingBalances(pendingProviderIds, currentVersion, 0)
           }
-        }, 3000)
+        }, PENDING_BALANCE_RETRY_BASE_DELAY_MS)
         pendingTimers.add(timerId)
       }
     } catch (e) {
@@ -118,7 +120,10 @@ export function useProviderBalance() {
 
       // 如果还有 pending 且未达到最大重试次数，继续重试（指数退避）
       if (stillPending.length > 0 && retryCount < MAX_BALANCE_RETRIES) {
-        const delay = 3000 * Math.pow(1.5, retryCount) // 3s, 4.5s, 6.75s
+        const delay = Math.min(
+          PENDING_BALANCE_RETRY_BASE_DELAY_MS * Math.pow(2, retryCount),
+          PENDING_BALANCE_RETRY_MAX_DELAY_MS,
+        )
         const timerId = setTimeout(() => {
           pendingTimers.delete(timerId)
           // 检查版本号，确保没有新的加载请求

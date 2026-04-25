@@ -3,25 +3,13 @@ use crate::handlers::admin::provider::shared::support::{
 };
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{provider_key_status_snapshot_payload, unix_secs_to_rfc3339};
-use crate::provider_key_auth::provider_key_auth_semantics;
+use crate::provider_key_auth::{provider_key_auth_semantics, provider_key_effective_api_formats};
 use aether_admin::provider::pool as admin_provider_pool_pure;
 use aether_admin::provider::quota as admin_provider_quota_pure;
-use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
+use aether_data_contracts::repository::provider_catalog::{
+    StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
+};
 use serde_json::json;
-
-pub(super) fn admin_pool_api_formats(key: &StoredProviderCatalogKey) -> Vec<String> {
-    key.api_formats
-        .as_ref()
-        .and_then(serde_json::Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-}
 
 fn admin_pool_string_list(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
     let values = value
@@ -133,6 +121,10 @@ fn admin_pool_derive_oauth_expires_at(
         return None;
     }
 
+    if key.expires_at_unix_secs.is_some() {
+        return key.expires_at_unix_secs;
+    }
+
     for field in ["expires_at", "expiresAt", "expiry", "exp"] {
         let expires_at = admin_pool_json_to_u64(auth_config.and_then(|config| config.get(field)));
         if expires_at.is_some() {
@@ -140,7 +132,7 @@ fn admin_pool_derive_oauth_expires_at(
         }
     }
 
-    key.expires_at_unix_secs
+    None
 }
 
 fn admin_pool_derive_oauth_plan_type(
@@ -749,6 +741,7 @@ fn admin_pool_scheduling_payload(
 pub(super) fn build_admin_pool_key_payload(
     state: &AdminAppState<'_>,
     provider_type: &str,
+    endpoints: &[StoredProviderCatalogEndpoint],
     key: &StoredProviderCatalogKey,
     runtime: &AdminProviderPoolRuntimeState,
     pool_config: Option<AdminProviderPoolConfig>,
@@ -915,7 +908,11 @@ pub(super) fn build_admin_pool_key_payload(
     );
     payload.insert(
         "api_formats".to_string(),
-        json!(admin_pool_api_formats(key)),
+        json!(provider_key_effective_api_formats(
+            key,
+            provider_type,
+            endpoints,
+        )),
     );
     payload.insert(
         "rate_multipliers".to_string(),

@@ -764,6 +764,26 @@ async fn gateway_handles_admin_usage_active_locally_with_trusted_admin_principal
             row.candidate_index = Some(1);
             row
         },
+        {
+            let mut row = sample_usage_row(
+                "usage-failed-pending",
+                "req-failed-pending",
+                Some("user-1"),
+                Some("key-1"),
+                Some("primary"),
+                "OpenAI",
+                "gpt-5",
+                "pending",
+                10,
+                0,
+                0.0,
+                0.0,
+                DAY_2_UNIX_SECS + 1,
+            );
+            row.status_code = Some(503);
+            row.error_message = Some("upstream failed".to_string());
+            row
+        },
         sample_usage_row(
             "usage-done",
             "req-done",

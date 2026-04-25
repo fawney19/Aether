@@ -1,6 +1,8 @@
 use crate::ai_pipeline_api::{
     build_local_gemini_files_stream_plan_and_reports_for_kind,
     build_local_gemini_files_sync_plan_and_reports_for_kind,
+    build_local_image_stream_plan_and_reports_for_kind,
+    build_local_image_sync_plan_and_reports_for_kind,
     build_local_openai_chat_stream_plan_and_reports_for_kind,
     build_local_openai_chat_sync_plan_and_reports_for_kind,
     build_local_openai_cli_stream_plan_and_reports_for_kind,
@@ -409,6 +411,41 @@ pub(crate) async fn maybe_execute_sync_via_local_gemini_files_decision(
     .await
 }
 
+pub(crate) async fn maybe_execute_sync_via_local_image_decision(
+    state: &AppState,
+    parts: &http::request::Parts,
+    body_json: &serde_json::Value,
+    body_base64: Option<&str>,
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+    plan_kind: &str,
+) -> Result<LocalExecutionRequestOutcome, GatewayError> {
+    let plan_and_reports: Vec<LocalSyncPlanAndReport> =
+        build_local_image_sync_plan_and_reports_for_kind(
+            state,
+            parts,
+            body_json,
+            body_base64,
+            trace_id,
+            decision,
+            plan_kind,
+        )
+        .await?;
+    if plan_and_reports.is_empty() {
+        return Ok(LocalExecutionRequestOutcome::NoPath);
+    }
+
+    execute_sync_plan_and_reports(
+        state,
+        parts,
+        trace_id,
+        decision,
+        plan_kind,
+        plan_and_reports,
+    )
+    .await
+}
+
 pub(crate) async fn maybe_execute_stream_via_local_gemini_files_decision(
     state: &AppState,
     parts: &http::request::Parts,
@@ -419,6 +456,33 @@ pub(crate) async fn maybe_execute_stream_via_local_gemini_files_decision(
     let plan_and_reports: Vec<LocalStreamPlanAndReport> =
         build_local_gemini_files_stream_plan_and_reports_for_kind(
             state, parts, trace_id, decision, plan_kind,
+        )
+        .await?;
+    if plan_and_reports.is_empty() {
+        return Ok(LocalExecutionRequestOutcome::NoPath);
+    }
+
+    execute_stream_plan_and_reports(state, trace_id, decision, plan_kind, plan_and_reports).await
+}
+
+pub(crate) async fn maybe_execute_stream_via_local_image_decision(
+    state: &AppState,
+    parts: &http::request::Parts,
+    body_json: &serde_json::Value,
+    body_base64: Option<&str>,
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+    plan_kind: &str,
+) -> Result<LocalExecutionRequestOutcome, GatewayError> {
+    let plan_and_reports: Vec<LocalStreamPlanAndReport> =
+        build_local_image_stream_plan_and_reports_for_kind(
+            state,
+            parts,
+            body_json,
+            body_base64,
+            trace_id,
+            decision,
+            plan_kind,
         )
         .await?;
     if plan_and_reports.is_empty() {

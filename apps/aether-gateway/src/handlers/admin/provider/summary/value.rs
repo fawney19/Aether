@@ -1,7 +1,6 @@
 use crate::handlers::admin::shared::unix_secs_to_rfc3339;
-use crate::handlers::public::{
-    provider_key_api_formats, request_candidate_event_unix_ms, request_candidate_status_label,
-};
+use crate::handlers::public::{request_candidate_event_unix_ms, request_candidate_status_label};
+use crate::provider_key_auth::provider_key_effective_api_formats;
 use aether_data_contracts::repository::candidates::{
     RequestCandidateStatus, StoredRequestCandidate,
 };
@@ -66,7 +65,9 @@ pub(crate) fn build_admin_provider_summary_value(
         keys_by_endpoint.entry(endpoint.id.clone()).or_default();
     }
     for key in keys {
-        for api_format in provider_key_api_formats(key) {
+        for api_format in
+            provider_key_effective_api_formats(key, &provider.provider_type, endpoints)
+        {
             if let Some(endpoint_id) = format_to_endpoint_id.get(&api_format) {
                 keys_by_endpoint
                     .entry(endpoint_id.clone())
@@ -131,6 +132,26 @@ pub(crate) fn build_admin_provider_summary_value(
         .and_then(|cfg| cfg.get("architecture_id"))
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned);
+    let billing_type = quota_snapshot
+        .map(|quota| quota.billing_type.clone())
+        .or_else(|| provider.billing_type.clone());
+    let monthly_quota_usd = quota_snapshot
+        .and_then(|quota| quota.monthly_quota_usd)
+        .or(provider.monthly_quota_usd);
+    let monthly_used_usd = quota_snapshot
+        .map(|quota| quota.monthly_used_usd)
+        .or(provider.monthly_used_usd);
+    let quota_reset_day = quota_snapshot
+        .and_then(|quota| quota.quota_reset_day)
+        .or(provider.quota_reset_day);
+    let quota_last_reset_at = quota_snapshot
+        .and_then(|quota| quota.quota_last_reset_at_unix_secs)
+        .or(provider.quota_last_reset_at_unix_secs)
+        .and_then(unix_secs_to_rfc3339);
+    let quota_expires_at = quota_snapshot
+        .and_then(|quota| quota.quota_expires_at_unix_secs)
+        .or(provider.quota_expires_at_unix_secs)
+        .and_then(unix_secs_to_rfc3339);
 
     json!({
         "id": provider.id.clone(),
@@ -142,16 +163,12 @@ pub(crate) fn build_admin_provider_summary_value(
         "keep_priority_on_conversion": provider.keep_priority_on_conversion,
         "enable_format_conversion": provider.enable_format_conversion,
         "is_active": provider.is_active,
-        "billing_type": quota_snapshot.map(|quota| quota.billing_type.clone()),
-        "monthly_quota_usd": quota_snapshot.and_then(|quota| quota.monthly_quota_usd),
-        "monthly_used_usd": quota_snapshot.map(|quota| quota.monthly_used_usd),
-        "quota_reset_day": quota_snapshot.and_then(|quota| quota.quota_reset_day),
-        "quota_last_reset_at": quota_snapshot
-            .and_then(|quota| quota.quota_last_reset_at_unix_secs)
-            .and_then(unix_secs_to_rfc3339),
-        "quota_expires_at": quota_snapshot
-            .and_then(|quota| quota.quota_expires_at_unix_secs)
-            .and_then(unix_secs_to_rfc3339),
+        "billing_type": billing_type,
+        "monthly_quota_usd": monthly_quota_usd,
+        "monthly_used_usd": monthly_used_usd,
+        "quota_reset_day": quota_reset_day,
+        "quota_last_reset_at": quota_last_reset_at,
+        "quota_expires_at": quota_expires_at,
         "max_retries": provider.max_retries,
         "proxy": provider.proxy.clone(),
         "stream_first_byte_timeout": provider.stream_first_byte_timeout_secs,

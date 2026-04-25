@@ -395,7 +395,17 @@ async fn gateway_executes_openai_compact_openai_family_upstream_stream_via_local
             "object": "response",
             "model": "gpt-5",
             "status": "completed",
-            "output": [],
+            "output": [{
+                "type": "message",
+                "id": "resp_compact_openai_family_123_msg",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{
+                    "type": "output_text",
+                    "text": "Hello Compact",
+                    "annotations": []
+                }]
+            }],
             "usage": {
                 "input_tokens": 2,
                 "output_tokens": 3,

@@ -710,6 +710,16 @@ impl GatewayDataState {
         }
     }
 
+    pub(crate) async fn find_provider_quotas_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderQuotaSnapshot>, DataLayerError> {
+        match &self.provider_quota_reader {
+            Some(repository) => repository.find_by_provider_ids(provider_ids).await,
+            None => Ok(Vec::new()),
+        }
+    }
+
     #[allow(dead_code)]
 
     pub(crate) async fn upsert_usage(
@@ -1225,6 +1235,22 @@ impl GatewayDataState {
             Some(repository) => {
                 repository
                     .find_model_context(provider_id, provider_api_key_id, global_model_name)
+                    .await
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) async fn find_billing_model_context_by_model_id(
+        &self,
+        provider_id: &str,
+        provider_api_key_id: Option<&str>,
+        model_id: &str,
+    ) -> Result<Option<StoredBillingModelContext>, DataLayerError> {
+        match &self.billing_reader {
+            Some(repository) => {
+                repository
+                    .find_model_context_by_model_id(provider_id, provider_api_key_id, model_id)
                     .await
             }
             None => Ok(None),

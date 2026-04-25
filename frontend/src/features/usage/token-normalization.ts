@@ -30,6 +30,10 @@ export function getCacheCreationTokens(usage: UsageTokenLike): number {
   return explicit
 }
 
+export function getCacheReadTokens(usage: UsageTokenLike): number {
+  return toNonNegativeNumber(usage.cache_read_input_tokens)
+}
+
 export function getEffectiveInputTokens(usage: UsageTokenLike): number {
   const explicit = toNonNegativeNumber(usage.effective_input_tokens)
   if (explicit > 0) {

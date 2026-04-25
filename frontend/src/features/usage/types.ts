@@ -107,6 +107,9 @@ export interface UsageRecord {
   response_time_ms?: number
   first_byte_time_ms?: number  // 首字时间 (TTFB)
   is_stream: boolean
+  upstream_is_stream?: boolean
+  client_requested_stream?: boolean
+  client_is_stream?: boolean
   status_code?: number
   error_message?: string
   status?: RequestStatus  // 请求状态: pending, streaming, completed, failed

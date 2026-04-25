@@ -33,6 +33,10 @@ pub struct UsageEventData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_endpoint_id: Option<String>,

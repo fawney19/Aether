@@ -309,6 +309,7 @@ import {
 } from '@/api/endpoints'
 import { parseApiError } from '@/utils/errorParser'
 import { parseNumberInput } from '@/utils/form'
+import { dateTimeLocalToRfc3339, formatDateTimeLocalInput } from '@/utils/date'
 
 const props = defineProps<{
   modelValue: boolean
@@ -403,10 +404,8 @@ function loadProviderData() {
     billing_type: (props.provider.billing_type as 'monthly_quota' | 'pay_as_you_go' | 'free_tier') || 'pay_as_you_go',
     monthly_quota_usd: props.provider.monthly_quota_usd || undefined,
     quota_reset_day: props.provider.quota_reset_day || 30,
-    quota_last_reset_at: props.provider.quota_last_reset_at ?
-      new Date(props.provider.quota_last_reset_at).toISOString().slice(0, 16) : '',
-    quota_expires_at: props.provider.quota_expires_at ?
-      new Date(props.provider.quota_expires_at).toISOString().slice(0, 16) : '',
+    quota_last_reset_at: formatDateTimeLocalInput(props.provider.quota_last_reset_at),
+    quota_expires_at: formatDateTimeLocalInput(props.provider.quota_expires_at),
     provider_priority: props.provider.provider_priority || 999,
     keep_priority_on_conversion: props.provider.keep_priority_on_conversion ?? false,
     is_active: props.provider.is_active,
@@ -452,6 +451,17 @@ const handleSubmit = async () => {
     return
   }
 
+  const quotaLastResetAt = dateTimeLocalToRfc3339(form.value.quota_last_reset_at)
+  if (form.value.billing_type === 'monthly_quota' && !quotaLastResetAt) {
+    showError('周期开始时间必须是合法时间', '验证失败')
+    return
+  }
+  const quotaExpiresAt = dateTimeLocalToRfc3339(form.value.quota_expires_at)
+  if (form.value.quota_expires_at && !quotaExpiresAt) {
+    showError('过期时间必须是合法时间', '验证失败')
+    return
+  }
+
   loading.value = true
   try {
     const currentPoolAdvanced = normalizePoolAdvancedConfig(props.provider?.pool_advanced)
@@ -463,8 +473,8 @@ const handleSubmit = async () => {
       billing_type: form.value.billing_type,
       monthly_quota_usd: form.value.monthly_quota_usd,
       quota_reset_day: form.value.quota_reset_day,
-      quota_last_reset_at: form.value.quota_last_reset_at || undefined,
-      quota_expires_at: form.value.quota_expires_at || undefined,
+      quota_last_reset_at: quotaLastResetAt,
+      quota_expires_at: quotaExpiresAt,
       keep_priority_on_conversion: form.value.keep_priority_on_conversion,
       is_active: form.value.is_active,
       // 请求配置

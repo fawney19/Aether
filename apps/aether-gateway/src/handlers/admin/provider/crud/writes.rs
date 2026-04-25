@@ -5,7 +5,9 @@ use crate::handlers::admin::provider::shared::paths::{
 use crate::handlers::admin::provider::shared::payloads::{
     AdminProviderCreateRequest, AdminProviderUpdatePatch,
 };
-use crate::handlers::admin::provider::write::provider::build_admin_fixed_provider_endpoint_record;
+use crate::handlers::admin::provider::write::provider::{
+    reconcile_admin_fixed_provider_template_endpoints, reconcile_admin_fixed_provider_template_keys,
+};
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::handlers::admin::shared::attach_admin_audit_response;
 use crate::GatewayError;
@@ -73,26 +75,13 @@ pub(crate) async fn maybe_build_local_admin_provider_writes_response(
             return Ok(Some(build_admin_providers_data_unavailable_response()));
         };
 
-        if let Some((base_url, endpoint_signatures)) =
-            state.fixed_provider_template(&created_provider.provider_type)
+        if state
+            .fixed_provider_template(&created_provider.provider_type)
+            .is_some()
         {
-            for endpoint_signature in endpoint_signatures {
-                let endpoint = match build_admin_fixed_provider_endpoint_record(
-                    &created_provider,
-                    endpoint_signature,
-                    base_url,
-                ) {
-                    Ok(endpoint) => endpoint,
-                    Err(message) => {
-                        return Ok(Some(build_admin_provider_bad_request_response(message)));
-                    }
-                };
-                let Some(_) = state.create_provider_catalog_endpoint(&endpoint).await? else {
-                    return Ok(Some(build_admin_providers_data_unavailable_response()));
-                };
-            }
+            reconcile_admin_fixed_provider_template_endpoints(state, &created_provider).await?;
+            reconcile_admin_fixed_provider_template_keys(state, &created_provider).await?;
         }
-
         return Ok(Some(attach_admin_audit_response(
             Json(json!({
                 "id": created_provider.id,
@@ -168,6 +157,13 @@ pub(crate) async fn maybe_build_local_admin_provider_writes_response(
         else {
             return Ok(Some(build_admin_providers_data_unavailable_response()));
         };
+        if state
+            .fixed_provider_template(&updated_record.provider_type)
+            .is_some()
+        {
+            reconcile_admin_fixed_provider_template_endpoints(state, &updated_record).await?;
+            reconcile_admin_fixed_provider_template_keys(state, &updated_record).await?;
+        }
         return Ok(Some(
             match state
                 .build_admin_provider_summary_payload(&provider_id)

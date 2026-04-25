@@ -1,8 +1,8 @@
 use super::shared::{
-    admin_api_key_total_tokens_by_ids, admin_api_keys_id_from_path, admin_api_keys_parse_limit,
-    admin_api_keys_parse_skip, build_admin_api_key_detail_payload,
-    build_admin_api_key_list_item_payload, build_admin_api_keys_bad_request_response,
-    build_admin_api_keys_data_unavailable_response, build_admin_api_keys_not_found_response,
+    admin_api_keys_id_from_path, admin_api_keys_parse_limit, admin_api_keys_parse_skip,
+    build_admin_api_key_detail_payload, build_admin_api_key_list_item_payload,
+    build_admin_api_keys_bad_request_response, build_admin_api_keys_data_unavailable_response,
+    build_admin_api_keys_not_found_response,
 };
 use super::{decrypt_catalog_secret_with_fallbacks, query_param_bool, query_param_optional_bool};
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
@@ -33,7 +33,6 @@ pub(super) async fn build_admin_list_api_keys_response(
         Err(detail) => return Ok(build_admin_api_keys_bad_request_response(detail)),
     };
     let is_active = query_param_optional_bool(query, "is_active");
-    let include_usage_summary = query_param_bool(query, "include_usage_summary", false);
 
     let list_query = aether_data::repository::auth::StandaloneApiKeyExportListQuery {
         skip,
@@ -63,13 +62,6 @@ pub(super) async fn build_admin_list_api_keys_response(
         })
         .collect::<std::collections::BTreeMap<_, _>>();
     let wallet_lookup_ms = wallet_lookup_started_at.elapsed().as_millis() as u64;
-    let usage_summary_started_at = Instant::now();
-    let total_tokens_by_api_key_id = if include_usage_summary {
-        Some(admin_api_key_total_tokens_by_ids(state, &api_key_ids).await?)
-    } else {
-        None
-    };
-    let usage_summary_ms = usage_summary_started_at.elapsed().as_millis() as u64;
 
     let api_keys = paged_records
         .iter()
@@ -77,9 +69,6 @@ pub(super) async fn build_admin_list_api_keys_response(
             build_admin_api_key_list_item_payload(
                 state,
                 record,
-                total_tokens_by_api_key_id
-                    .as_ref()
-                    .and_then(|totals| totals.get(&record.api_key_id).copied()),
                 wallets_by_api_key_id.get(&record.api_key_id),
             )
         })
@@ -91,10 +80,8 @@ pub(super) async fn build_admin_list_api_keys_response(
         trace_id = request_context.trace_id.as_str(),
         returned_items = api_keys.len(),
         total,
-        include_usage_summary,
         count_and_page_ms,
         wallet_lookup_ms,
-        usage_summary_ms,
         handler_ms = handler_started_at.elapsed().as_millis() as u64,
         "measured admin api keys list handler timing"
     );
@@ -167,17 +154,10 @@ pub(super) async fn build_admin_api_key_detail_response(
         .await?
         .into_iter()
         .find(|wallet| wallet.api_key_id.as_deref() == Some(api_key_id.as_str()));
-    let total_tokens_by_api_key_id =
-        admin_api_key_total_tokens_by_ids(state, std::slice::from_ref(&api_key_id)).await?;
-    let total_tokens = total_tokens_by_api_key_id
-        .get(&api_key_id)
-        .copied()
-        .unwrap_or(0);
 
     Ok(Json(build_admin_api_key_detail_payload(
         state,
         &record,
-        total_tokens,
         wallet.as_ref(),
     ))
     .into_response())

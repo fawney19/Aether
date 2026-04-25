@@ -1,4 +1,5 @@
 use crate::handlers::admin::request::AdminAppState;
+use crate::provider_key_auth::provider_key_effective_api_formats;
 use aether_data_contracts::repository::provider_catalog::{
     ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
 };
@@ -29,6 +30,11 @@ pub(crate) async fn build_admin_provider_keys_payload(
         })
         .await
         .ok()?;
+    let endpoints = state
+        .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider.id))
+        .await
+        .ok()
+        .unwrap_or_default();
     let now_unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
@@ -39,9 +45,12 @@ pub(crate) async fn build_admin_provider_keys_payload(
             .items
             .into_iter()
             .map(|key| {
+                let api_formats =
+                    provider_key_effective_api_formats(&key, &provider.provider_type, &endpoints);
                 state.build_admin_provider_key_response(
                     &key,
                     &provider.provider_type,
+                    &api_formats,
                     now_unix_secs,
                 )
             })

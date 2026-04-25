@@ -8,7 +8,9 @@ pub mod openai_cli;
 
 pub use codex::{
     apply_codex_openai_cli_special_body_edits, apply_codex_openai_cli_special_headers,
-    apply_openai_compact_special_body_edits,
+    apply_openai_compact_special_body_edits, CODEX_OPENAI_IMAGE_DEFAULT_MODEL,
+    CODEX_OPENAI_IMAGE_DEFAULT_OUTPUT_FORMAT, CODEX_OPENAI_IMAGE_DEFAULT_VARIATION_MODEL,
+    CODEX_OPENAI_IMAGE_DEFAULT_VARIATION_PROMPT, CODEX_OPENAI_IMAGE_INTERNAL_MODEL,
 };
 pub use family::{LocalStandardSourceFamily, LocalStandardSourceMode, LocalStandardSpec};
 pub use matrix::{

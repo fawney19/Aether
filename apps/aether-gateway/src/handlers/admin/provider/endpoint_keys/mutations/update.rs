@@ -1,6 +1,7 @@
 use crate::handlers::admin::provider::shared::paths::admin_update_key_id;
 use crate::handlers::admin::provider::shared::payloads::AdminProviderKeyUpdatePatch;
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::provider_key_auth::provider_key_effective_api_formats;
 use crate::{model_fetch::perform_model_fetch_for_key, GatewayError};
 use axum::{
     body::{Body, Bytes},
@@ -117,11 +118,17 @@ pub(super) async fn maybe_handle(
         .ok()
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
+    let endpoints = state
+        .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider.id))
+        .await?;
+    let api_formats =
+        provider_key_effective_api_formats(&updated, &provider.provider_type, &endpoints);
 
     Ok(Some(
         Json(state.build_admin_provider_key_response(
             &updated,
             &provider.provider_type,
+            &api_formats,
             now_unix_secs,
         ))
         .into_response(),

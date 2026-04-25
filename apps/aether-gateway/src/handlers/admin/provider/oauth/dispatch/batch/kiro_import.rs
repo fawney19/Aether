@@ -57,6 +57,7 @@ pub(super) async fn execute_admin_provider_oauth_kiro_batch_import(
     let endpoints = state
         .list_provider_catalog_endpoints_by_provider_ids(&[provider_id.to_string()])
         .await?;
+    let api_formats = provider_oauth_active_api_formats(&endpoints);
     let runtime_endpoint = provider_oauth_runtime_endpoint_for_provider("kiro", &endpoints);
     let request_proxy = state
         .resolve_admin_provider_oauth_operation_proxy_snapshot(
@@ -191,8 +192,10 @@ pub(super) async fn execute_admin_provider_oauth_kiro_batch_import(
             match update_existing_provider_oauth_catalog_key(
                 state,
                 &existing_key,
+                provider.provider_type.as_str(),
                 &access_token,
                 &auth_config,
+                &api_formats,
                 None,
                 refreshed_auth_config.expires_at,
             )
@@ -223,10 +226,11 @@ pub(super) async fn execute_admin_provider_oauth_kiro_batch_import(
             match create_provider_oauth_catalog_key(
                 state,
                 provider_id,
+                provider.provider_type.as_str(),
                 &key_name,
                 &access_token,
                 &auth_config,
-                &provider_oauth_active_api_formats(&endpoints),
+                &api_formats,
                 None,
                 refreshed_auth_config.expires_at,
             )

@@ -654,7 +654,7 @@ async fn gateway_surfaces_local_execution_runtime_miss_reason_when_all_openai_ch
     assert_eq!(payload["error"]["type"], "http_error");
     assert_eq!(
         payload["error"]["message"],
-        "没有可用的提供商支持模型 gpt-5 的同步请求"
+        "找到 1 个支持模型 gpt-5 的候选提供商，但本次同步请求全部不可用：提供商类型不支持本地执行 2 次（原因代码: all_candidates_skipped）"
     );
 
     let stored_candidates = request_candidate_repository

@@ -942,7 +942,7 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
         .list_endpoints_by_provider_ids(std::slice::from_ref(&created.id))
         .await
         .expect("endpoints should list");
-    assert_eq!(endpoints.len(), 2);
+    assert_eq!(endpoints.len(), 3);
     let cli_endpoint = endpoints
         .iter()
         .find(|endpoint| endpoint.api_format == "openai:cli")
@@ -951,6 +951,10 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
         .iter()
         .find(|endpoint| endpoint.api_format == "openai:compact")
         .expect("compact endpoint should exist");
+    let image_endpoint = endpoints
+        .iter()
+        .find(|endpoint| endpoint.api_format == "openai:image")
+        .expect("image endpoint should exist");
     assert_eq!(
         cli_endpoint.base_url,
         "https://chatgpt.com/backend-api/codex"
@@ -959,8 +963,13 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
         compact_endpoint.base_url,
         "https://chatgpt.com/backend-api/codex"
     );
+    assert_eq!(
+        image_endpoint.base_url,
+        "https://chatgpt.com/backend-api/codex"
+    );
     assert_eq!(cli_endpoint.max_retries, Some(7));
     assert_eq!(compact_endpoint.max_retries, Some(7));
+    assert_eq!(image_endpoint.max_retries, Some(7));
     assert_eq!(
         cli_endpoint
             .config
@@ -969,12 +978,218 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
             .and_then(serde_json::Value::as_str),
         Some("force_stream")
     );
+    assert_eq!(
+        image_endpoint
+            .config
+            .as_ref()
+            .and_then(|value| value.get("upstream_stream_policy"))
+            .and_then(serde_json::Value::as_str),
+        Some("force_stream")
+    );
     assert!(cli_endpoint.body_rules.is_none());
     assert!(compact_endpoint.body_rules.is_none());
+    assert!(image_endpoint.body_rules.is_none());
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_updates_fixed_provider_and_reconciles_template_managed_endpoints() {
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/api/admin/providers/provider-codex",
+        any(move |_request: Request| {
+            let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+            async move {
+                *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("unexpected upstream hit"))
+            }
+        }),
+    );
+
+    let mut provider = sample_provider("provider-codex", "codex", 10).with_transport_fields(
+        true,
+        false,
+        true,
+        None,
+        Some(2),
+        None,
+        None,
+        None,
+        None,
+    );
+    provider.provider_type = "codex".to_string();
+    let mut cli_endpoint = sample_endpoint(
+        "endpoint-codex-cli",
+        "provider-codex",
+        "openai:cli",
+        "https://chatgpt.com/backend-api/codex",
+    );
+    cli_endpoint.max_retries = Some(2);
+    cli_endpoint.config = Some(json!({"upstream_stream_policy": "force_stream"}));
+    let mut key = sample_key(
+        "key-codex-oauth",
+        "provider-codex",
+        "openai:cli",
+        "oauth-placeholder",
+    );
+    key.auth_type = "oauth".to_string();
+    key.api_formats = Some(json!(["openai:cli"]));
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![cli_endpoint],
+        vec![key],
+    ));
+
+    let (_upstream_url, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                ),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .patch(format!("{gateway_url}/api/admin/providers/provider-codex"))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "max_retries": 9
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    let status = response.status();
+    let body = response.text().await.expect("body should read");
+    assert_eq!(status, StatusCode::OK, "body={body}");
+
+    let endpoints = provider_catalog_repository
+        .list_endpoints_by_provider_ids(&["provider-codex".to_string()])
+        .await
+        .expect("endpoints should list");
+    assert_eq!(endpoints.len(), 3);
+    let cli_endpoint = endpoints
+        .iter()
+        .find(|endpoint| endpoint.api_format == "openai:cli")
+        .expect("cli endpoint should exist");
+    let compact_endpoint = endpoints
+        .iter()
+        .find(|endpoint| endpoint.api_format == "openai:compact")
+        .expect("compact endpoint should exist");
+    let image_endpoint = endpoints
+        .iter()
+        .find(|endpoint| endpoint.api_format == "openai:image")
+        .expect("image endpoint should exist");
+
+    assert_eq!(cli_endpoint.max_retries, Some(9));
+    assert_eq!(compact_endpoint.max_retries, Some(9));
+    assert_eq!(image_endpoint.max_retries, Some(9));
+    assert_eq!(
+        cli_endpoint
+            .config
+            .as_ref()
+            .and_then(|value| value.get("_aether_fixed_provider_template"))
+            .and_then(|value| value.get("managed"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        image_endpoint
+            .config
+            .as_ref()
+            .and_then(|value| value.get("upstream_stream_policy"))
+            .and_then(serde_json::Value::as_str),
+        Some("force_stream")
+    );
+    let keys = provider_catalog_repository
+        .list_keys_by_provider_ids(&["provider-codex".to_string()])
+        .await
+        .expect("keys should list");
+    assert_eq!(keys.len(), 1);
+    assert!(keys[0].api_formats.is_none());
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_lists_effective_api_formats_for_fixed_oauth_provider_keys() {
+    let mut provider = sample_provider("provider-codex", "codex", 10)
+        .with_transport_fields(true, false, true, None, None, None, None, None, None);
+    provider.provider_type = "codex".to_string();
+
+    let mut key = sample_key(
+        "key-codex-legacy",
+        "provider-codex",
+        "openai:cli",
+        "oauth-placeholder",
+    );
+    key.name = "codex legacy".to_string();
+    key.auth_type = "oauth".to_string();
+    key.api_formats = Some(json!(["openai:cli", "openai:compact"]));
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![
+            sample_endpoint(
+                "endpoint-codex-cli",
+                "provider-codex",
+                "openai:cli",
+                "https://chatgpt.com/backend-api/codex",
+            ),
+            sample_endpoint(
+                "endpoint-codex-image",
+                "provider-codex",
+                "openai:image",
+                "https://chatgpt.com/backend-api/codex",
+            ),
+        ],
+        vec![key],
+    ));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+                provider_catalog_repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{gateway_url}/api/admin/endpoints/providers/provider-codex/keys?skip=0&limit=100"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    let keys = payload.as_array().expect("keys payload should be array");
+
+    assert_eq!(keys.len(), 1);
+    assert_eq!(
+        keys[0]["api_formats"],
+        json!(["openai:cli", "openai:image"])
+    );
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]

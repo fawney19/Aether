@@ -10,6 +10,23 @@ use super::{
 };
 use crate::DataLayerError;
 
+fn merge_extra_data(
+    existing: Option<serde_json::Value>,
+    overlay: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    match (existing, overlay) {
+        (
+            Some(serde_json::Value::Object(mut existing_object)),
+            Some(serde_json::Value::Object(overlay_object)),
+        ) => {
+            existing_object.extend(overlay_object);
+            Some(serde_json::Value::Object(existing_object))
+        }
+        (_existing, Some(overlay)) => Some(overlay),
+        (existing, None) => existing,
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct InMemoryRequestCandidateRepository {
     by_id: RwLock<BTreeMap<String, StoredRequestCandidate>>,
@@ -353,9 +370,10 @@ impl RequestCandidateWriteRepository for InMemoryRequestCandidateRepository {
             concurrent_requests: candidate
                 .concurrent_requests
                 .or_else(|| existing.as_ref().and_then(|row| row.concurrent_requests)),
-            extra_data: candidate
-                .extra_data
-                .or_else(|| existing.as_ref().and_then(|row| row.extra_data.clone())),
+            extra_data: merge_extra_data(
+                existing.as_ref().and_then(|row| row.extra_data.clone()),
+                candidate.extra_data,
+            ),
             required_capabilities: candidate.required_capabilities.or_else(|| {
                 existing
                     .as_ref()
@@ -411,6 +429,7 @@ mod tests {
         RequestCandidateReadRepository, RequestCandidateStatus, RequestCandidateWriteRepository,
         StoredRequestCandidate, UpsertRequestCandidateRecord,
     };
+    use serde_json::json;
 
     fn sample_candidate(
         id: &str,
@@ -540,7 +559,10 @@ mod tests {
                 error_message: None,
                 latency_ms: None,
                 concurrent_requests: None,
-                extra_data: None,
+                extra_data: Some(json!({
+                    "execution_strategy": "local_cross_format",
+                    "provider_name": "primary",
+                })),
                 required_capabilities: None,
                 created_at_unix_ms: Some(100),
                 started_at_unix_ms: None,
@@ -572,7 +594,10 @@ mod tests {
                 error_message: None,
                 latency_ms: Some(25),
                 concurrent_requests: Some(2),
-                extra_data: None,
+                extra_data: Some(json!({
+                    "provider_api_format": "openai:cli",
+                    "provider_name": "updated",
+                })),
                 required_capabilities: None,
                 created_at_unix_ms: None,
                 started_at_unix_ms: Some(101),
@@ -584,6 +609,27 @@ mod tests {
         assert_eq!(updated.status, RequestCandidateStatus::Success);
         assert_eq!(updated.status_code, Some(200));
         assert_eq!(updated.latency_ms, Some(25));
+        assert_eq!(
+            updated
+                .extra_data
+                .as_ref()
+                .and_then(|value| value.get("execution_strategy")),
+            Some(&json!("local_cross_format"))
+        );
+        assert_eq!(
+            updated
+                .extra_data
+                .as_ref()
+                .and_then(|value| value.get("provider_api_format")),
+            Some(&json!("openai:cli"))
+        );
+        assert_eq!(
+            updated
+                .extra_data
+                .as_ref()
+                .and_then(|value| value.get("provider_name")),
+            Some(&json!("updated"))
+        );
         assert_eq!(updated.started_at_unix_ms, Some(101));
     }
 

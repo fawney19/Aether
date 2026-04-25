@@ -309,6 +309,7 @@ pub(crate) fn resolve_core_stream_error_finalize_report_kind(
 pub(crate) fn resolve_core_stream_direct_finalize_report_kind(plan_kind: &str) -> Option<String> {
     let report_kind = match plan_kind {
         "openai_chat_stream" => "openai_chat_sync_finalize",
+        "openai_image_stream" => "openai_image_sync_finalize",
         "claude_chat_stream" => "claude_chat_sync_finalize",
         "gemini_chat_stream" => "gemini_chat_sync_finalize",
         "openai_cli_stream" => "openai_cli_sync_finalize",

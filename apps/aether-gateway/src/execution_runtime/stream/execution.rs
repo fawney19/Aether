@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::io::Error as IoError;
+use std::time::Instant;
 
 use aether_contracts::{
     ExecutionPlan, ExecutionStreamTerminalSummary, ExecutionTelemetry, StreamFrame,
@@ -39,8 +40,9 @@ use self::execution_failures::{
     handle_prefetch_stream_failure, submit_midstream_stream_failure, StreamFailureReport,
 };
 use crate::ai_pipeline_api::{
-    maybe_build_provider_private_stream_normalizer, maybe_build_stream_response_rewriter,
-    normalize_provider_private_report_context,
+    maybe_bridge_standard_sync_json_to_stream, maybe_build_provider_private_stream_normalizer,
+    maybe_build_stream_response_rewriter, normalize_provider_private_report_context,
+    StreamingStandardTerminalObserver,
 };
 use crate::api::response::{
     attach_control_metadata_headers, build_client_response, build_client_response_from_parts,
@@ -52,7 +54,8 @@ use crate::execution_runtime::build_direct_execution_frame_stream;
 #[cfg(test)]
 use crate::execution_runtime::remote_compat::post_stream_plan_to_remote_execution_runtime;
 use crate::execution_runtime::submission::{
-    resolve_core_error_background_report_kind, submit_local_core_error_or_sync_finalize,
+    resolve_core_error_background_report_kind, strip_utf8_bom_and_ws,
+    submit_local_core_error_or_sync_finalize,
 };
 use crate::execution_runtime::transport::{
     execute_stream_plan_via_local_tunnel, DirectSyncExecutionRuntime,
@@ -203,6 +206,101 @@ fn append_stream_capture_bytes(
     }
 }
 
+fn observe_stream_usage_bytes(
+    observer: &mut StreamingStandardTerminalObserver,
+    report_context: &Value,
+    buffered: &mut Vec<u8>,
+    chunk: &[u8],
+) {
+    if chunk.is_empty() {
+        return;
+    }
+
+    buffered.extend_from_slice(chunk);
+    while let Some(line_end) = buffered.iter().position(|byte| *byte == b'\n') {
+        let line = buffered.drain(..=line_end).collect::<Vec<_>>();
+        if let Err(err) = observer.push_line(report_context, line) {
+            observer.disable_with_error(err.to_string());
+            buffered.clear();
+            break;
+        }
+    }
+}
+
+fn finalize_stream_usage_observer(
+    observer: &mut Option<StreamingStandardTerminalObserver>,
+    report_context: Option<&Value>,
+    buffered: &mut Vec<u8>,
+) -> Option<ExecutionStreamTerminalSummary> {
+    let (Some(observer), Some(report_context)) = (observer.as_mut(), report_context) else {
+        return None;
+    };
+
+    if !buffered.is_empty() {
+        let line = std::mem::take(buffered);
+        if let Err(err) = observer.push_line(report_context, line) {
+            observer.disable_with_error(err.to_string());
+        }
+    }
+
+    match observer.finish(report_context) {
+        Ok(summary) => summary,
+        Err(err) => {
+            observer.disable_with_error(err.to_string());
+            observer.latest_summary().cloned()
+        }
+    }
+}
+
+fn merge_stream_terminal_summary(
+    mut current: Option<ExecutionStreamTerminalSummary>,
+    observed: Option<ExecutionStreamTerminalSummary>,
+) -> Option<ExecutionStreamTerminalSummary> {
+    let Some(observed) = observed else {
+        return current;
+    };
+
+    let Some(current_summary) = current.as_mut() else {
+        return Some(observed);
+    };
+
+    if should_replace_stream_usage(
+        current_summary.standardized_usage.as_ref(),
+        observed.standardized_usage.as_ref(),
+    ) {
+        current_summary.standardized_usage = observed.standardized_usage;
+    }
+    if current_summary.finish_reason.is_none() {
+        current_summary.finish_reason = observed.finish_reason;
+    }
+    if current_summary.response_id.is_none() {
+        current_summary.response_id = observed.response_id;
+    }
+    if current_summary.model.is_none() {
+        current_summary.model = observed.model;
+    }
+    current_summary.observed_finish |= observed.observed_finish;
+    if current_summary.parser_error.is_none() {
+        current_summary.parser_error = observed.parser_error;
+    }
+
+    current
+}
+
+fn should_replace_stream_usage(
+    current: Option<&aether_contracts::StandardizedUsage>,
+    observed: Option<&aether_contracts::StandardizedUsage>,
+) -> bool {
+    let Some(observed) = observed else {
+        return false;
+    };
+    let Some(current) = current else {
+        return true;
+    };
+
+    observed.is_more_complete_than(current)
+}
+
 async fn execute_in_process_stream(
     state: &AppState,
     plan: &ExecutionPlan,
@@ -224,6 +322,7 @@ pub(crate) async fn execute_execution_runtime_stream(
     report_kind: Option<String>,
     mut report_context: Option<serde_json::Value>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
+    let stream_started_at = Instant::now();
     ensure_execution_request_candidate_slot(state, &mut plan, &mut report_context).await;
     let lifecycle_seed = build_lifecycle_usage_seed(&plan, report_context.as_ref());
     let request_candidate_status_snapshot =
@@ -311,6 +410,7 @@ pub(crate) async fn execute_execution_runtime_stream(
             report_kind,
             report_context,
             candidate_started_unix_secs,
+            stream_started_at,
             frame_stream,
         )
         .await;
@@ -370,6 +470,7 @@ pub(crate) async fn execute_execution_runtime_stream(
                 report_kind,
                 report_context,
                 candidate_started_unix_secs,
+                stream_started_at,
                 frame_stream,
             )
             .await;
@@ -454,6 +555,7 @@ pub(crate) async fn execute_execution_runtime_stream(
             report_kind,
             report_context,
             candidate_started_unix_secs,
+            stream_started_at,
             frame_stream,
         )
         .await;
@@ -479,6 +581,11 @@ fn response_headers_indicate_sse(headers: &BTreeMap<String, String>) -> bool {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"))
+}
+
+fn parse_prefetched_sync_json_body(body: &[u8]) -> Option<Value> {
+    let stripped = strip_utf8_bom_and_ws(body);
+    serde_json::from_slice::<Value>(stripped).ok()
 }
 
 fn encode_terminal_sse_error_event(failure: &StreamFailureReport) -> Result<Bytes, std::io::Error> {
@@ -529,14 +636,7 @@ fn should_skip_direct_finalize_prefetch(
     has_private_stream_normalizer: bool,
     has_local_stream_rewriter: bool,
 ) -> bool {
-    if direct_stream_finalize_kind.is_none()
-        || has_private_stream_normalizer
-        || has_local_stream_rewriter
-    {
-        return false;
-    }
-
-    if !provider_api_format.eq_ignore_ascii_case(client_api_format) {
+    if direct_stream_finalize_kind.is_none() {
         return false;
     }
 
@@ -545,11 +645,35 @@ fn should_skip_direct_finalize_prefetch(
         .filter(|value| !value.is_empty())
         .unwrap_or_default()
         .to_ascii_lowercase();
+    if content_type.contains("text/event-stream") {
+        return true;
+    }
+
+    if has_private_stream_normalizer || has_local_stream_rewriter {
+        return false;
+    }
+
+    if !provider_api_format.eq_ignore_ascii_case(client_api_format) {
+        return false;
+    }
+
     if content_type.is_empty() {
         return true;
     }
 
     !(content_type.contains("json") || content_type.ends_with("+json"))
+}
+
+fn should_probe_success_failover_before_stream(headers: &BTreeMap<String, String>) -> bool {
+    let content_type = headers
+        .get("content-type")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    content_type.contains("json") || content_type.ends_with("+json")
 }
 
 async fn probe_local_stream_success_failover_text<R>(
@@ -590,6 +714,7 @@ async fn execute_stream_from_frame_stream(
     report_kind: Option<String>,
     report_context: Option<serde_json::Value>,
     candidate_started_unix_secs: u64,
+    stream_started_at: Instant,
     frame_stream: BoxStream<'static, Result<Bytes, IoError>>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     let request_id = plan.request_id.as_str();
@@ -621,7 +746,7 @@ async fn execute_stream_from_frame_stream(
     };
     let mut buffered_frames = VecDeque::new();
     let mut stream_terminal_summary: Option<ExecutionStreamTerminalSummary> = None;
-    if status_code == 200 {
+    if status_code == 200 && should_probe_success_failover_before_stream(&headers) {
         let success_probe_text =
             probe_local_stream_success_failover_text(&mut buffered_frames, &mut lines).await?;
         if should_retry_next_local_candidate_stream(
@@ -889,6 +1014,7 @@ async fn execute_stream_from_frame_stream(
     let direct_stream_finalize_kind = resolve_core_stream_direct_finalize_report_kind(plan_kind);
     let normalized_stream_report_context =
         normalize_provider_private_report_context(report_context.as_ref());
+    let upstream_headers = headers.clone();
     let mut private_stream_normalizer =
         maybe_build_provider_private_stream_normalizer(report_context.as_ref());
     let mut local_stream_rewriter =
@@ -898,10 +1024,10 @@ async fn execute_stream_from_frame_stream(
         headers.remove("content-length");
         headers.insert("content-type".to_string(), "text/event-stream".to_string());
     }
-    let content_type = headers.get("content-type").map(String::as_str);
+    let upstream_content_type = upstream_headers.get("content-type").map(String::as_str);
     let skip_direct_finalize_prefetch = should_skip_direct_finalize_prefetch(
         direct_stream_finalize_kind.as_deref(),
-        content_type,
+        upstream_content_type,
         plan.provider_api_format.as_str(),
         plan.client_api_format.as_str(),
         private_stream_normalizer.is_some(),
@@ -913,6 +1039,7 @@ async fn execute_stream_from_frame_stream(
     let mut prefetched_inspection_body = Vec::new();
     let mut prefetched_telemetry: Option<ExecutionTelemetry> = None;
     let mut reached_eof = false;
+    let mut sync_json_stream_bridge_active = false;
     if skip_direct_finalize_prefetch {
         debug!(
             event_name = "execution_runtime_stream_prefetch_skipped",
@@ -926,7 +1053,7 @@ async fn execute_stream_from_frame_stream(
             key_id = %plan.key_id,
             model_name,
             candidate_index = candidate_index.as_str(),
-            content_type = content_type.unwrap_or("-"),
+            content_type = upstream_content_type.unwrap_or("-"),
             provider_api_format = plan.provider_api_format.as_str(),
             client_api_format = plan.client_api_format.as_str(),
             "gateway skipped direct finalize prefetch for same-format passthrough stream"
@@ -1005,8 +1132,10 @@ async fn execute_stream_from_frame_stream(
                     provider_prefetched_body.extend_from_slice(&chunk);
                     prefetched_inspection_body.extend_from_slice(&chunk);
 
-                    let inspection =
-                        inspect_prefetched_stream_body(&headers, &prefetched_inspection_body);
+                    let inspection = inspect_prefetched_stream_body(
+                        &upstream_headers,
+                        &prefetched_inspection_body,
+                    );
                     match inspection {
                         StreamPrefetchInspection::EmbeddedError(body_json) => {
                             debug!(
@@ -1053,6 +1182,60 @@ async fn execute_stream_from_frame_stream(
                         }
                         StreamPrefetchInspection::NeedMore => {}
                         StreamPrefetchInspection::NonError => {}
+                    }
+
+                    if !response_headers_indicate_sse(&upstream_headers)
+                        && (200..300).contains(&status_code)
+                    {
+                        if let Some(body_json) =
+                            parse_prefetched_sync_json_body(&prefetched_inspection_body)
+                        {
+                            match maybe_bridge_standard_sync_json_to_stream(
+                                &body_json,
+                                plan.provider_api_format.as_str(),
+                                plan.client_api_format.as_str(),
+                                report_context.as_ref(),
+                            ) {
+                                Ok(Some(outcome)) => {
+                                    headers.remove("content-encoding");
+                                    headers.remove("content-length");
+                                    headers.insert(
+                                        "content-type".to_string(),
+                                        "text/event-stream".to_string(),
+                                    );
+                                    stream_terminal_summary = outcome.terminal_summary;
+                                    prefetched_body.extend_from_slice(&outcome.sse_body);
+                                    prefetched_chunks.push(Bytes::from(outcome.sse_body));
+                                    sync_json_stream_bridge_active = true;
+                                    break;
+                                }
+                                Ok(None) => {}
+                                Err(err) => {
+                                    let failure = build_stream_failure_report(
+                                        "execution_runtime_sync_json_stream_bridge_error",
+                                        format!(
+                                            "failed to bridge execution runtime sync json to stream: {err:?}"
+                                        ),
+                                        502,
+                                    );
+                                    return handle_prefetch_stream_failure(
+                                        state,
+                                        trace_id,
+                                        decision,
+                                        &plan,
+                                        report_context,
+                                        request_id,
+                                        candidate_id,
+                                        report_kind,
+                                        headers,
+                                        prefetched_telemetry,
+                                        &provider_prefetched_body,
+                                        failure,
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
                     }
 
                     let normalized_chunk = if let Some(normalizer) =
@@ -1134,7 +1317,9 @@ async fn execute_stream_from_frame_stream(
                     prefetched_telemetry = Some(frame_telemetry);
                 }
                 StreamFramePayload::Eof { summary } => {
-                    stream_terminal_summary = summary;
+                    if summary.is_some() {
+                        stream_terminal_summary = summary;
+                    }
                     reached_eof = true;
                     break;
                 }
@@ -1214,6 +1399,7 @@ async fn execute_stream_from_frame_stream(
     let provider_prefetched_body_for_report = provider_prefetched_body;
     let prefetched_body_for_report = prefetched_body;
     let prefetched_chunks_for_body = prefetched_chunks;
+    let sync_json_stream_bridge_active_for_report = sync_json_stream_bridge_active;
     let initial_telemetry = prefetched_telemetry;
     let initial_reached_eof = reached_eof;
     let direct_stream_finalize_kind_owned = direct_stream_finalize_kind;
@@ -1222,7 +1408,7 @@ async fn execute_stream_from_frame_stream(
     let request_id_for_report_log = short_request_id(&request_id);
     let candidate_id_for_report = candidate_id.clone();
     let emit_passthrough_sse_terminal_error =
-        skip_direct_finalize_prefetch && response_headers_indicate_sse(&headers);
+        skip_direct_finalize_prefetch && response_headers_indicate_sse(&upstream_headers);
     let body_capture_policy = match UsageRuntimeAccess::body_capture_policy(state.data.as_ref())
         .await
     {
@@ -1256,10 +1442,28 @@ async fn execute_stream_from_frame_stream(
         let mut buffered_body = Vec::new();
         let mut provider_body_truncated = false;
         let mut client_body_truncated = false;
-        let mut private_stream_normalizer =
-            maybe_build_provider_private_stream_normalizer(report_context_owned.as_ref());
-        let mut local_stream_rewriter =
-            maybe_build_stream_response_rewriter(normalized_stream_report_context_owned.as_ref());
+        let mut private_stream_normalizer = if sync_json_stream_bridge_active_for_report {
+            None
+        } else {
+            maybe_build_provider_private_stream_normalizer(report_context_owned.as_ref())
+        };
+        let mut local_stream_rewriter = if sync_json_stream_bridge_active_for_report {
+            None
+        } else {
+            maybe_build_stream_response_rewriter(normalized_stream_report_context_owned.as_ref())
+        };
+        let stream_usage_report_context =
+            normalized_stream_report_context_owned.clone().or_else(|| {
+                Some(serde_json::json!({
+                    "provider_api_format": plan_for_report.provider_api_format.as_str(),
+                    "client_api_format": plan_for_report.client_api_format.as_str(),
+                }))
+            });
+        let mut stream_usage_observer = stream_usage_report_context
+            .as_ref()
+            .filter(|_| !sync_json_stream_bridge_active_for_report)
+            .map(|_| StreamingStandardTerminalObserver::default());
+        let mut stream_usage_observer_buffered = Vec::new();
         append_stream_capture_bytes(
             &mut provider_buffered_body,
             &provider_prefetched_body_for_report,
@@ -1309,6 +1513,17 @@ async fn execute_stream_from_frame_stream(
             let replay_chunk = normalized_prefetched_chunk
                 .as_deref()
                 .unwrap_or(provider_prefetched_body_for_report.as_slice());
+            if let (Some(observer), Some(report_context)) = (
+                stream_usage_observer.as_mut(),
+                stream_usage_report_context.as_ref(),
+            ) {
+                observe_stream_usage_bytes(
+                    observer,
+                    report_context,
+                    &mut stream_usage_observer_buffered,
+                    replay_chunk,
+                );
+            }
             if terminal_failure.is_none() {
                 if let Some(rewriter) = local_stream_rewriter.as_mut() {
                     if let Err(err) = rewriter.push_chunk(replay_chunk) {
@@ -1360,6 +1575,9 @@ async fn execute_stream_from_frame_stream(
                 };
                 match frame.payload {
                     StreamFramePayload::Data { chunk_b64, text } => {
+                        if sync_json_stream_bridge_active_for_report {
+                            continue;
+                        }
                         let chunk =
                             match decode_stream_data_chunk(chunk_b64.as_deref(), text.as_deref()) {
                                 Ok(chunk) => chunk,
@@ -1420,6 +1638,17 @@ async fn execute_stream_from_frame_stream(
                         } else {
                             chunk
                         };
+                        if let (Some(observer), Some(report_context)) = (
+                            stream_usage_observer.as_mut(),
+                            stream_usage_report_context.as_ref(),
+                        ) {
+                            observe_stream_usage_bytes(
+                                observer,
+                                report_context,
+                                &mut stream_usage_observer_buffered,
+                                &normalized_chunk,
+                            );
+                        }
                         let rewritten_chunk = if let Some(rewriter) = local_stream_rewriter.as_mut()
                         {
                             match rewriter.push_chunk(&normalized_chunk) {
@@ -1448,6 +1677,32 @@ async fn execute_stream_from_frame_stream(
 
                         if rewritten_chunk.is_empty() {
                             continue;
+                        }
+
+                        if usage_stream_telemetry
+                            .as_ref()
+                            .and_then(|telemetry| telemetry.ttfb_ms)
+                            .is_none()
+                        {
+                            let first_data_elapsed_ms = stream_started_at
+                                .elapsed()
+                                .as_millis()
+                                .min(u128::from(u64::MAX))
+                                as u64;
+                            let first_data_telemetry = ExecutionTelemetry {
+                                ttfb_ms: Some(first_data_elapsed_ms),
+                                elapsed_ms: Some(first_data_elapsed_ms),
+                                upstream_bytes: telemetry
+                                    .as_ref()
+                                    .and_then(|telemetry| telemetry.upstream_bytes),
+                            };
+                            state_for_report.usage_runtime.record_stream_started(
+                                state_for_report.data.as_ref(),
+                                &lifecycle_seed_for_report,
+                                status_code,
+                                Some(&first_data_telemetry),
+                            );
+                            usage_stream_telemetry = Some(first_data_telemetry);
                         }
 
                         append_stream_capture_bytes(
@@ -1488,7 +1743,9 @@ async fn execute_stream_from_frame_stream(
                         telemetry = Some(frame_telemetry);
                     }
                     StreamFramePayload::Eof { summary } => {
-                        stream_terminal_summary = summary;
+                        if summary.is_some() {
+                            stream_terminal_summary = summary;
+                        }
                         break;
                     }
                     StreamFramePayload::Error { error } => {
@@ -1522,6 +1779,17 @@ async fn execute_stream_from_frame_stream(
             if let Some(normalizer) = private_stream_normalizer.as_mut() {
                 match normalizer.finish() {
                     Ok(normalized_chunk) if !normalized_chunk.is_empty() => {
+                        if let (Some(observer), Some(report_context)) = (
+                            stream_usage_observer.as_mut(),
+                            stream_usage_report_context.as_ref(),
+                        ) {
+                            observe_stream_usage_bytes(
+                                observer,
+                                report_context,
+                                &mut stream_usage_observer_buffered,
+                                &normalized_chunk,
+                            );
+                        }
                         let rewritten_chunk = if let Some(rewriter) = local_stream_rewriter.as_mut()
                         {
                             match rewriter.push_chunk(&normalized_chunk) {
@@ -1674,6 +1942,15 @@ async fn execute_stream_from_frame_stream(
         }
 
         drop(tx);
+
+        stream_terminal_summary = merge_stream_terminal_summary(
+            stream_terminal_summary,
+            finalize_stream_usage_observer(
+                &mut stream_usage_observer,
+                stream_usage_report_context.as_ref(),
+                &mut stream_usage_observer_buffered,
+            ),
+        );
 
         if downstream_dropped {
             debug!(
@@ -1871,15 +2148,30 @@ fn apply_stream_summary_report_context(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::convert::Infallible;
     use std::sync::Arc;
+    use std::time::Duration;
 
-    use aether_contracts::{ExecutionPlan, ExecutionTimeouts, RequestBody};
-    use axum::body::to_bytes;
+    use aether_contracts::{
+        ExecutionPlan, ExecutionStreamTerminalSummary, ExecutionTimeouts, RequestBody,
+        StandardizedUsage,
+    };
+    use aether_data::repository::usage::InMemoryUsageReadRepository;
+    use aether_data_contracts::repository::usage::UsageReadRepository;
+    use aether_usage_runtime::UsageRuntimeConfig;
+    use async_stream::stream;
+    use axum::body::{to_bytes, Body, Bytes};
     use axum::extract::ws::Message;
+    use axum::extract::Request;
+    use axum::routing::any;
+    use axum::{http::header, http::HeaderValue, Router};
     use serde_json::{json, Value};
-    use tokio::sync::watch;
+    use tokio::sync::{watch, Notify};
 
-    use super::{execute_execution_runtime_stream, should_skip_direct_finalize_prefetch};
+    use super::{
+        execute_execution_runtime_stream, merge_stream_terminal_summary,
+        should_probe_success_failover_before_stream, should_skip_direct_finalize_prefetch,
+    };
     use crate::control::GatewayControlDecision;
     use crate::tunnel::{tunnel_protocol, TunnelProxyConn};
     use crate::AppState;
@@ -1904,6 +2196,39 @@ mod tests {
             url: None,
             extra: Some(json!({"tunnel_base_url": base_url})),
         }
+    }
+
+    #[test]
+    fn merge_stream_terminal_summary_prefers_more_complete_observed_usage() {
+        let mut runtime_usage = StandardizedUsage::new();
+        runtime_usage.output_tokens = 137;
+        let mut observed_usage = StandardizedUsage::new();
+        observed_usage.input_tokens = 26;
+        observed_usage.output_tokens = 137;
+
+        let merged = merge_stream_terminal_summary(
+            Some(ExecutionStreamTerminalSummary {
+                standardized_usage: Some(runtime_usage),
+                model: Some("gpt-5.5".to_string()),
+                ..ExecutionStreamTerminalSummary::default()
+            }),
+            Some(ExecutionStreamTerminalSummary {
+                standardized_usage: Some(observed_usage),
+                response_id: Some("resp_123".to_string()),
+                observed_finish: true,
+                ..ExecutionStreamTerminalSummary::default()
+            }),
+        )
+        .expect("summary should merge");
+        let usage = merged
+            .standardized_usage
+            .expect("merged usage should exist");
+
+        assert_eq!(usage.input_tokens, 26);
+        assert_eq!(usage.output_tokens, 137);
+        assert_eq!(merged.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(merged.response_id.as_deref(), Some("resp_123"));
+        assert!(merged.observed_finish);
     }
 
     #[test]
@@ -1943,8 +2268,8 @@ mod tests {
     }
 
     #[test]
-    fn keeps_prefetch_for_cross_format_or_rewritten_streams() {
-        assert!(!should_skip_direct_finalize_prefetch(
+    fn skips_prefetch_for_event_streams_even_when_cross_format_or_rewritten() {
+        assert!(should_skip_direct_finalize_prefetch(
             Some("claude_cli_sync_finalize"),
             Some("text/event-stream"),
             "openai:chat",
@@ -1952,6 +2277,386 @@ mod tests {
             false,
             true,
         ));
+    }
+
+    #[test]
+    fn skips_success_failover_probe_for_event_streams() {
+        assert!(!should_probe_success_failover_before_stream(
+            &BTreeMap::from([(
+                "content-type".to_string(),
+                "text/event-stream; charset=utf-8".to_string(),
+            )])
+        ));
+        assert!(should_probe_success_failover_before_stream(
+            &BTreeMap::from([("content-type".to_string(), "application/json".to_string(),)])
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_execution_runtime_stream_records_first_data_as_streaming_before_terminal_telemetry(
+    ) {
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let first_data_seen = Arc::new(Notify::new());
+        let release_terminal = Arc::new(Notify::new());
+        let first_data_seen_for_route = Arc::clone(&first_data_seen);
+        let release_terminal_for_route = Arc::clone(&release_terminal);
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/v1/execute/stream",
+                any(move |_request: Request| {
+                    let first_data_seen = Arc::clone(&first_data_seen_for_route);
+                    let release_terminal = Arc::clone(&release_terminal_for_route);
+                    async move {
+                        let frames = stream! {
+                            yield Ok::<Bytes, Infallible>(Bytes::from_static(
+                                b"{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n",
+                            ));
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                            yield Ok::<Bytes, Infallible>(Bytes::from_static(
+                                b"{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"event: response.output_text.delta\\ndata: {\\\"type\\\":\\\"response.output_text.delta\\\",\\\"delta\\\":\\\"hi\\\"}\\n\\n\"}}\n",
+                            ));
+                            first_data_seen.notify_one();
+                            release_terminal.notified().await;
+                            yield Ok::<Bytes, Infallible>(Bytes::from_static(
+                                b"{\"type\":\"telemetry\",\"payload\":{\"kind\":\"telemetry\",\"telemetry\":{\"ttfb_ms\":123,\"elapsed_ms\":456}}}\n",
+                            ));
+                            yield Ok::<Bytes, Infallible>(Bytes::from_static(
+                                b"{\"type\":\"eof\",\"payload\":{\"kind\":\"eof\"}}\n",
+                            ));
+                        };
+                        let mut response = axum::http::Response::new(Body::from_stream(frames));
+                        response.headers_mut().insert(
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static("application/x-ndjson"),
+                        );
+                        response
+                    }
+                }),
+            );
+            axum::serve(listener, app)
+                .await
+                .expect("server should start");
+        });
+
+        let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_usage_data_repository_for_tests(Arc::clone(&usage_repository))
+            .with_usage_runtime_for_tests(UsageRuntimeConfig {
+                enabled: true,
+                ..UsageRuntimeConfig::default()
+            })
+            .with_execution_runtime_override_base_url(format!("http://{addr}"));
+        let plan = ExecutionPlan {
+            request_id: "req-live-stream-first-data".into(),
+            candidate_id: Some("cand-live-stream-first-data".into()),
+            provider_name: Some("openai".into()),
+            provider_id: "prov-1".into(),
+            endpoint_id: "ep-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "https://chatgpt.com/backend-api/codex/responses".into(),
+            headers: BTreeMap::from([
+                ("content-type".into(), "application/json".into()),
+                ("accept".into(), "text/event-stream".into()),
+            ]),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "gpt-5.4",
+                "input": "hello",
+                "stream": true
+            })),
+            stream: true,
+            client_api_format: "openai:cli".into(),
+            provider_api_format: "openai:cli".into(),
+            model_name: Some("gpt-5.4".into()),
+            proxy: None,
+            tls_profile: None,
+            timeouts: Some(ExecutionTimeouts {
+                connect_ms: Some(5_000),
+                total_ms: Some(5_000),
+                ..ExecutionTimeouts::default()
+            }),
+        };
+        let decision = GatewayControlDecision::synthetic(
+            "/v1/responses",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("cli".to_string()),
+            Some("openai:cli".to_string()),
+        )
+        .with_execution_runtime_candidate(true);
+
+        let response = execute_execution_runtime_stream(
+            &state,
+            plan,
+            "trace-live-stream-first-data",
+            &decision,
+            "openai_cli_stream",
+            None,
+            Some(json!({
+                "provider_api_format": "openai:cli",
+                "client_api_format": "openai:cli",
+            })),
+        )
+        .await
+        .expect("execution should succeed")
+        .expect("execution should return a client response");
+
+        first_data_seen.notified().await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let live_usage = loop {
+            let usage = usage_repository
+                .find_by_request_id("req-live-stream-first-data")
+                .await
+                .expect("usage should read");
+            if usage.as_ref().is_some_and(|usage| {
+                usage.status == "streaming" && usage.first_byte_time_ms.is_some()
+            }) {
+                break usage.expect("live usage should exist");
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "usage should record streaming status with first byte before terminal telemetry"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+
+        assert_eq!(live_usage.status, "streaming");
+        assert!(live_usage.first_byte_time_ms.is_some());
+
+        release_terminal.notify_one();
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let text = String::from_utf8(body.to_vec()).expect("response body should be utf8");
+        assert!(text.contains("response.output_text.delta"));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn execute_execution_runtime_stream_bridges_sync_json_body_from_remote_runtime_to_sse() {
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/v1/execute/stream",
+                any(|_request: Request| async move {
+                    let frames = concat!(
+                        "{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"application/json\"}}}\n",
+                        "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"{\\\"id\\\":\\\"resp-remote-runtime-sync-json-123\\\",\\\"object\\\":\\\"response\\\",\\\"model\\\":\\\"gpt-5.4\\\",\\\"status\\\":\\\"completed\\\",\\\"output\\\":[{\\\"type\\\":\\\"message\\\",\\\"id\\\":\\\"msg-remote-runtime-sync-json-123\\\",\\\"role\\\":\\\"assistant\\\",\\\"content\\\":[{\\\"type\\\":\\\"output_text\\\",\\\"text\\\":\\\"Hello from remote runtime sync json\\\",\\\"annotations\\\":[]}]}],\\\"usage\\\":{\\\"input_tokens\\\":1,\\\"output_tokens\\\":2,\\\"total_tokens\\\":3}}\"}}\n",
+                        "{\"type\":\"telemetry\",\"payload\":{\"kind\":\"telemetry\",\"telemetry\":{\"elapsed_ms\":41}}}\n",
+                        "{\"type\":\"eof\",\"payload\":{\"kind\":\"eof\"}}\n"
+                    );
+                    let mut response = axum::http::Response::new(Body::from(frames));
+                    response.headers_mut().insert(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/x-ndjson"),
+                    );
+                    response
+                }),
+            );
+            axum::serve(listener, app)
+                .await
+                .expect("server should start");
+        });
+
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_execution_runtime_override_base_url(format!("http://{addr}"));
+        let plan = ExecutionPlan {
+            request_id: "req-remote-runtime-sync-json-stream".into(),
+            candidate_id: Some("cand-remote-runtime-sync-json-stream".into()),
+            provider_name: Some("openai".into()),
+            provider_id: "prov-1".into(),
+            endpoint_id: "ep-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "https://chatgpt.com/backend-api/codex/responses".into(),
+            headers: BTreeMap::from([
+                ("content-type".into(), "application/json".into()),
+                ("accept".into(), "text/event-stream".into()),
+            ]),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "gpt-5.4",
+                "input": "hello",
+                "stream": true
+            })),
+            stream: true,
+            client_api_format: "openai:cli".into(),
+            provider_api_format: "openai:cli".into(),
+            model_name: Some("gpt-5.4".into()),
+            proxy: None,
+            tls_profile: None,
+            timeouts: Some(ExecutionTimeouts {
+                connect_ms: Some(5_000),
+                total_ms: Some(5_000),
+                ..ExecutionTimeouts::default()
+            }),
+        };
+        let decision = GatewayControlDecision::synthetic(
+            "/v1/responses",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("cli".to_string()),
+            Some("openai:cli".to_string()),
+        )
+        .with_execution_runtime_candidate(true);
+
+        let response = execute_execution_runtime_stream(
+            &state,
+            plan,
+            "trace-remote-runtime-sync-json-stream",
+            &decision,
+            "openai_cli_stream",
+            None,
+            Some(json!({
+                "provider_api_format": "openai:cli",
+                "client_api_format": "openai:cli",
+            })),
+        )
+        .await
+        .expect("execution should succeed")
+        .expect("execution should return a client response");
+
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/event-stream")
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let text = String::from_utf8(body.to_vec()).expect("response body should be utf8");
+        assert!(text.contains("event: response.output_text.delta"));
+        assert!(text.contains("Hello from remote runtime sync json"));
+        assert!(text.contains("event: response.completed"));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn execute_execution_runtime_stream_bridges_openai_image_sync_json_from_remote_runtime_to_image_sse(
+    ) {
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/v1/execute/stream",
+                any(|_request: Request| async move {
+                    let frames = concat!(
+                        "{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"application/json\"}}}\n",
+                        "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"{\\\"created\\\":1776972364,\\\"data\\\":[{\\\"b64_json\\\":\\\"aGVsbG8=\\\"}],\\\"usage\\\":{\\\"total_tokens\\\":100,\\\"input_tokens\\\":50,\\\"output_tokens\\\":50,\\\"input_tokens_details\\\":{\\\"text_tokens\\\":10,\\\"image_tokens\\\":40}}}\"}}\n",
+                        "{\"type\":\"telemetry\",\"payload\":{\"kind\":\"telemetry\",\"telemetry\":{\"elapsed_ms\":41}}}\n",
+                        "{\"type\":\"eof\",\"payload\":{\"kind\":\"eof\"}}\n"
+                    );
+                    let mut response = axum::http::Response::new(Body::from(frames));
+                    response.headers_mut().insert(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/x-ndjson"),
+                    );
+                    response
+                }),
+            );
+            axum::serve(listener, app)
+                .await
+                .expect("server should start");
+        });
+
+        let state = AppState::new()
+            .expect("app state should build")
+            .with_execution_runtime_override_base_url(format!("http://{addr}"));
+        let plan = ExecutionPlan {
+            request_id: "req-remote-runtime-image-sync-json-stream".into(),
+            candidate_id: Some("cand-remote-runtime-image-sync-json-stream".into()),
+            provider_name: Some("openai".into()),
+            provider_id: "prov-1".into(),
+            endpoint_id: "ep-1".into(),
+            key_id: "key-1".into(),
+            method: "POST".into(),
+            url: "https://chatgpt.com/backend-api/codex/responses".into(),
+            headers: BTreeMap::from([
+                ("content-type".into(), "application/json".into()),
+                ("accept".into(), "text/event-stream".into()),
+            ]),
+            content_type: Some("application/json".into()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({
+                "model": "gpt-image-1",
+                "prompt": "hello",
+                "stream": true
+            })),
+            stream: true,
+            client_api_format: "openai:image".into(),
+            provider_api_format: "openai:image".into(),
+            model_name: Some("gpt-image-1".into()),
+            proxy: None,
+            tls_profile: None,
+            timeouts: Some(ExecutionTimeouts {
+                connect_ms: Some(5_000),
+                total_ms: Some(5_000),
+                ..ExecutionTimeouts::default()
+            }),
+        };
+        let decision = GatewayControlDecision::synthetic(
+            "/v1/images/generations",
+            Some("ai_public".to_string()),
+            Some("openai".to_string()),
+            Some("image".to_string()),
+            Some("openai:image".to_string()),
+        )
+        .with_execution_runtime_candidate(true);
+
+        let response = execute_execution_runtime_stream(
+            &state,
+            plan,
+            "trace-remote-runtime-image-sync-json-stream",
+            &decision,
+            "openai_image_stream",
+            None,
+            Some(json!({
+                "provider_api_format": "openai:image",
+                "client_api_format": "openai:image",
+                "mapped_model": "gpt-image-1",
+                "image_request": {
+                    "operation": "generate"
+                }
+            })),
+        )
+        .await
+        .expect("execution should succeed")
+        .expect("execution should return a client response");
+
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/event-stream")
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        let text = String::from_utf8(body.to_vec()).expect("response body should be utf8");
+        assert!(text.contains("event: image_generation.completed"));
+        assert!(text.contains("\"type\":\"image_generation.completed\""));
+        assert!(text.contains("\"b64_json\":\"aGVsbG8=\""));
+        assert!(text.contains("\"total_tokens\":100"));
+
+        server.abort();
     }
 
     #[tokio::test]

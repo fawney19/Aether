@@ -8,6 +8,19 @@ use sha2::Sha256;
 use uuid::Uuid;
 
 const CODEX_PROMPT_CACHE_NAMESPACE_VERSION: &str = "v3";
+const CODEX_DEFAULT_INSTRUCTIONS: &str = "You are ChatGPT.";
+const CODEX_DEFAULT_USER_AGENT: &str =
+    "codex-tui/0.122.0 (Mac OS 15.2.0; arm64) vscode/2.6.11 (codex-tui; 0.122.0)";
+const CODEX_DEFAULT_ORIGINATOR: &str = "codex-tui";
+pub const CODEX_OPENAI_IMAGE_INTERNAL_MODEL: &str = "gpt-5.4-mini";
+pub const CODEX_OPENAI_IMAGE_DEFAULT_MODEL: &str = "gpt-image-2";
+pub const CODEX_OPENAI_IMAGE_DEFAULT_VARIATION_MODEL: &str = "dall-e-2";
+pub const CODEX_OPENAI_IMAGE_DEFAULT_OUTPUT_FORMAT: &str = "png";
+pub const CODEX_OPENAI_IMAGE_DEFAULT_VARIATION_PROMPT: &str =
+    "Create a faithful variation of the provided image.";
+const CODEX_IMAGE_TOOL_DEFAULT_SIZE: &str = "1024x1024";
+const CODEX_IMAGE_TOOL_DEFAULT_QUALITY: &str = "high";
+const CODEX_IMAGE_TOOL_DEFAULT_BACKGROUND: &str = "auto";
 const UUID_NAMESPACE_OID_BYTES: [u8; 16] = [
     0x6b, 0xa7, 0xb8, 0x12, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
 ];
@@ -16,7 +29,7 @@ fn is_codex_openai_cli_request(provider_type: &str, provider_api_format: &str) -
     provider_type.trim().eq_ignore_ascii_case("codex")
         && matches!(
             provider_api_format.trim().to_ascii_lowercase().as_str(),
-            "openai:cli" | "openai:compact"
+            "openai:cli" | "openai:compact" | "openai:image"
         )
 }
 
@@ -24,6 +37,110 @@ fn is_openai_compact_request(provider_api_format: &str) -> bool {
     provider_api_format
         .trim()
         .eq_ignore_ascii_case("openai:compact")
+}
+
+fn is_openai_image_request(provider_api_format: &str) -> bool {
+    provider_api_format
+        .trim()
+        .eq_ignore_ascii_case("openai:image")
+}
+
+fn apply_codex_openai_image_tool_overrides(body_object: &mut serde_json::Map<String, Value>) {
+    let mut tool = body_object
+        .get("tools")
+        .and_then(Value::as_array)
+        .and_then(|tools| tools.first())
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    tool.insert("type".to_string(), json!("image_generation"));
+    tool.entry("output_format".to_string())
+        .or_insert_with(|| json!(CODEX_OPENAI_IMAGE_DEFAULT_OUTPUT_FORMAT));
+    let action = tool
+        .get("action")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("generate")
+        .to_string();
+    if !tool.contains_key("action") {
+        tool.insert("action".to_string(), json!("generate"));
+    }
+    if action == "generate" {
+        tool.entry("size".to_string())
+            .or_insert_with(|| json!(CODEX_IMAGE_TOOL_DEFAULT_SIZE));
+        tool.entry("quality".to_string())
+            .or_insert_with(|| json!(CODEX_IMAGE_TOOL_DEFAULT_QUALITY));
+        tool.entry("background".to_string())
+            .or_insert_with(|| json!(CODEX_IMAGE_TOOL_DEFAULT_BACKGROUND));
+    }
+
+    body_object.insert("tools".to_string(), json!([tool]));
+    body_object.insert(
+        "tool_choice".to_string(),
+        json!({
+            "type": "image_generation"
+        }),
+    );
+}
+
+fn codex_openai_image_has_prompt(body_object: &serde_json::Map<String, Value>) -> bool {
+    body_object
+        .get("input")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .filter_map(|item| item.get("content"))
+        .any(|content| match content {
+            Value::String(text) => !text.trim().is_empty(),
+            Value::Array(items) => items.iter().any(|item| {
+                item.as_object()
+                    .filter(|item| item.get("type").and_then(Value::as_str) == Some("input_text"))
+                    .and_then(|item| item.get("text").and_then(Value::as_str))
+                    .map(str::trim)
+                    .is_some_and(|text| !text.is_empty())
+            }),
+            _ => false,
+        })
+}
+
+fn inject_codex_default_variation_prompt(body_object: &mut serde_json::Map<String, Value>) {
+    let Some(action) = body_object
+        .get("tools")
+        .and_then(Value::as_array)
+        .and_then(|tools| tools.first())
+        .and_then(Value::as_object)
+        .and_then(|tool| tool.get("action"))
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    if action != "edit" || codex_openai_image_has_prompt(body_object) {
+        return;
+    }
+
+    let Some(input) = body_object.get_mut("input").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let Some(first_message) = input.first_mut().and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(content) = first_message
+        .get_mut("content")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+
+    content.insert(
+        0,
+        json!({
+            "type": "input_text",
+            "text": CODEX_OPENAI_IMAGE_DEFAULT_VARIATION_PROMPT,
+        }),
+    );
 }
 
 fn build_stable_codex_prompt_cache_key(user_api_key_id: &str) -> Option<String> {
@@ -105,6 +222,21 @@ fn extract_codex_account_id(decrypted_auth_config_raw: Option<&str>) -> Option<S
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
     })
+}
+
+fn maybe_insert_default_codex_header(
+    provider_request_headers: &mut BTreeMap<String, String>,
+    original_headers: &http::HeaderMap,
+    header_name: &str,
+    header_value: &str,
+) {
+    if header_map_has_non_empty_value(original_headers, header_name)
+        || btree_map_has_non_empty_value(provider_request_headers, header_name)
+    {
+        return;
+    }
+
+    provider_request_headers.insert(header_name.to_string(), header_value.to_string());
 }
 
 fn maybe_inject_codex_prompt_cache_key(
@@ -192,7 +324,19 @@ pub fn apply_codex_openai_cli_special_body_edits(
     if !body_rules_handle_path(body_rules, "instructions")
         && !body_object.contains_key("instructions")
     {
-        body_object.insert("instructions".to_string(), json!("You are GPT-5."));
+        body_object.insert(
+            "instructions".to_string(),
+            json!(CODEX_DEFAULT_INSTRUCTIONS),
+        );
+    }
+    if is_openai_image_request(provider_api_format) {
+        body_object.insert(
+            "model".to_string(),
+            json!(CODEX_OPENAI_IMAGE_INTERNAL_MODEL),
+        );
+        body_object.insert("stream".to_string(), json!(true));
+        apply_codex_openai_image_tool_overrides(body_object);
+        inject_codex_default_variation_prompt(body_object);
     }
 
     maybe_inject_codex_prompt_cache_key(
@@ -239,6 +383,21 @@ pub fn apply_codex_openai_cli_special_headers(
         }
     }
 
+    if !is_openai_image_request(provider_api_format) {
+        maybe_insert_default_codex_header(
+            provider_request_headers,
+            original_headers,
+            "user-agent",
+            CODEX_DEFAULT_USER_AGENT,
+        );
+        maybe_insert_default_codex_header(
+            provider_request_headers,
+            original_headers,
+            "originator",
+            CODEX_DEFAULT_ORIGINATOR,
+        );
+    }
+
     let short_session_id = prompt_cache_key.and_then(build_short_codex_header_id);
 
     if !header_map_has_non_empty_value(original_headers, "session_id")
@@ -259,5 +418,106 @@ pub fn apply_codex_openai_cli_special_headers(
             provider_request_headers
                 .insert("conversation_id".to_string(), short_session_id.to_string());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_codex_openai_cli_special_body_edits, CODEX_OPENAI_IMAGE_INTERNAL_MODEL};
+    use serde_json::json;
+
+    #[test]
+    fn codex_image_body_edits_force_tool_choice_and_default_generate_tool_fields() {
+        let mut provider_request_body = json!({
+            "input": [{
+                "role": "user",
+                "content": "generate image"
+            }],
+            "tools": [{
+                "type": "image_generation"
+            }],
+            "tool_choice": "auto"
+        });
+
+        apply_codex_openai_cli_special_body_edits(
+            &mut provider_request_body,
+            "codex",
+            "openai:image",
+            None,
+            None,
+        );
+
+        assert_eq!(
+            provider_request_body["tools"][0]["size"],
+            json!("1024x1024")
+        );
+        assert_eq!(provider_request_body["tools"][0]["quality"], json!("high"));
+        assert_eq!(
+            provider_request_body["tools"][0]["background"],
+            json!("auto")
+        );
+        assert_eq!(
+            provider_request_body["tools"][0]["output_format"],
+            json!("png")
+        );
+        assert_eq!(
+            provider_request_body["tools"][0]["action"],
+            json!("generate")
+        );
+        assert_eq!(
+            provider_request_body["model"],
+            json!(CODEX_OPENAI_IMAGE_INTERNAL_MODEL)
+        );
+        assert_eq!(provider_request_body["stream"], json!(true));
+        assert_eq!(
+            provider_request_body["tool_choice"]["type"],
+            json!("image_generation")
+        );
+    }
+
+    #[test]
+    fn codex_image_body_edits_preserve_edit_action_without_generate_defaults() {
+        let mut provider_request_body = json!({
+            "tools": [{
+                "type": "image_generation",
+                "action": "edit",
+                "input_image_mask": { "image_url": "data:image/png;base64,mask" }
+            }],
+            "input": [{
+                "role": "user",
+                "content": [{
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,image"
+                }]
+            }],
+            "tool_choice": "auto"
+        });
+
+        apply_codex_openai_cli_special_body_edits(
+            &mut provider_request_body,
+            "codex",
+            "openai:image",
+            None,
+            None,
+        );
+
+        assert_eq!(provider_request_body["tools"][0]["action"], json!("edit"));
+        assert!(provider_request_body["tools"][0].get("size").is_none());
+        assert!(provider_request_body["tools"][0].get("quality").is_none());
+        assert!(provider_request_body["tools"][0]
+            .get("background")
+            .is_none());
+        assert_eq!(
+            provider_request_body["tools"][0]["output_format"],
+            json!("png")
+        );
+        assert_eq!(
+            provider_request_body["input"][0]["content"][0]["text"],
+            json!("Create a faithful variation of the provided image.")
+        );
+        assert_eq!(
+            provider_request_body["tool_choice"]["type"],
+            json!("image_generation")
+        );
     }
 }

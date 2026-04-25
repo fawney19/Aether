@@ -36,7 +36,7 @@ where
     let mut stored = None;
     // Usage terminal events are written on a shared background runtime; under full-suite parallel
     // load they can lag noticeably behind the request/response assertion path.
-    let timeout = std::time::Duration::from_secs(30);
+    let timeout = std::time::Duration::from_secs(60);
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         stored = repository
@@ -955,7 +955,7 @@ async fn gateway_records_failed_usage_for_claude_runtime_miss_without_execution_
     assert_eq!(body_json["error"]["type"], "http_error");
     assert_eq!(
         body_json["error"]["message"],
-        "没有可用的提供商支持模型 claude-sonnet-4-5 的同步请求"
+        "没有可用提供商支持模型 claude-sonnet-4-5 的同步请求。请检查模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）"
     );
 
     let stored_usage = wait_for_usage_status(
@@ -1576,7 +1576,7 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
     assert_eq!(body_json["error"]["type"], "http_error");
     assert_eq!(
         body_json["error"]["message"],
-        "没有可用的提供商支持模型 gpt-5.4 的同步请求"
+        "没有可用提供商支持模型 gpt-5.4 的同步请求。请检查模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）"
     );
 
     let stored_usage = wait_for_usage_status(
@@ -1614,7 +1614,9 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
     );
     assert_eq!(
         stored_usage.error_message.as_deref(),
-        Some("没有可用的提供商支持模型 gpt-5.4 的同步请求")
+        Some(
+            "没有可用提供商支持模型 gpt-5.4 的同步请求。请检查模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）"
+        )
     );
     assert_eq!(
         stored_usage

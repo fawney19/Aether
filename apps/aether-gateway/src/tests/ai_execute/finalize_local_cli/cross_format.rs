@@ -860,6 +860,7 @@ async fn gateway_executes_openai_cli_cross_format_function_call_upstream_stream_
                 },
                 {
                     "type": "function_call",
+                    "id": "call_auto_1",
                     "call_id": "call_auto_1",
                     "name": "get_weather",
                     "arguments": "{\"location\":\"Tokyo\"}"
@@ -1410,13 +1411,13 @@ async fn gateway_executes_openai_cli_antigravity_cross_format_upstream_stream_vi
     assert_eq!(
         response_json,
         json!({
-            "id": "resp_antigravity_cli_xfmt_123",
+            "id": "resp-local-stream",
             "object": "response",
             "status": "completed",
             "model": "claude-sonnet-4-5",
             "output": [{
                 "type": "message",
-                "id": "resp_antigravity_cli_xfmt_123_msg",
+                "id": "resp-local-stream_msg",
                 "role": "assistant",
                 "status": "completed",
                 "content": [{

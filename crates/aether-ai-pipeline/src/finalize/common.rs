@@ -36,12 +36,34 @@ pub fn prepare_local_success_response_parts_owned(
     Ok((body_bytes, headers))
 }
 
+fn should_capture_client_sync_success_body(payload: &GatewaySyncReportRequest) -> bool {
+    payload
+        .report_context
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|context| context.get("upstream_is_stream"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 pub fn build_local_success_background_report(
     payload: &GatewaySyncReportRequest,
     body_json: Value,
     headers: BTreeMap<String, String>,
 ) -> Option<GatewaySyncReportRequest> {
     let report_kind = core_success_background_report_kind(payload.report_kind.as_str())?;
+    let upstream_is_stream = should_capture_client_sync_success_body(payload);
+    let client_body_json = upstream_is_stream.then(|| body_json.clone());
+    let provider_body_json = if upstream_is_stream {
+        payload.body_json.clone()
+    } else {
+        Some(body_json)
+    };
+    let provider_body_base64 = if upstream_is_stream {
+        payload.body_base64.clone()
+    } else {
+        None
+    };
 
     Some(GatewaySyncReportRequest {
         trace_id: payload.trace_id.clone(),
@@ -49,9 +71,9 @@ pub fn build_local_success_background_report(
         report_context: payload.report_context.clone(),
         status_code: payload.status_code,
         headers,
-        body_json: Some(body_json),
-        client_body_json: None,
-        body_base64: None,
+        body_json: provider_body_json,
+        client_body_json,
+        body_base64: provider_body_base64,
         telemetry: payload.telemetry.clone(),
     })
 }
@@ -78,6 +100,7 @@ pub fn build_local_success_conversion_background_report(
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine as _;
     use serde_json::Value;
 
     use super::{
@@ -188,6 +211,47 @@ mod tests {
         assert_eq!(report.report_kind, "openai_chat_sync_success");
         assert_eq!(report.body_json, Some(serde_json::json!({"id": "resp-1"})));
         assert_eq!(report.client_body_json, None);
+    }
+
+    #[test]
+    fn build_local_success_background_report_preserves_provider_stream_for_upstream_stream_sync() {
+        let payload = GatewaySyncReportRequest {
+            trace_id: "trace-1b".to_string(),
+            report_kind: "openai_chat_sync_finalize".to_string(),
+            report_context: Some(serde_json::json!({
+                "request_id": "req-1b",
+                "upstream_is_stream": true
+            })),
+            status_code: 200,
+            headers: BTreeMap::from([("content-type".to_string(), "text/event-stream".to_string())]),
+            body_json: None,
+            client_body_json: None,
+            body_base64: Some(base64::engine::general_purpose::STANDARD.encode(
+                concat!(
+                    "event: response.created\n",
+                    "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1b\",\"object\":\"response\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+                    "event: response.output_text.delta\n",
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+                    "event: response.completed\n",
+                    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1b\",\"object\":\"response\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+                )
+            )),
+            telemetry: None,
+        };
+
+        let report = build_local_success_background_report(
+            &payload,
+            serde_json::json!({"id": "resp-1b"}),
+            payload.headers.clone(),
+        )
+        .expect("success report should be built");
+
+        assert_eq!(report.body_json, None);
+        assert_eq!(
+            report.client_body_json,
+            Some(serde_json::json!({"id": "resp-1b"}))
+        );
+        assert_eq!(report.body_base64, payload.body_base64);
     }
 
     #[test]

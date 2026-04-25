@@ -265,7 +265,7 @@ mod tests {
 
         assert!(converted.get("metadata").is_none());
         assert_eq!(converted["store"], false);
-        assert_eq!(converted["instructions"], "You are GPT-5.");
+        assert_eq!(converted["instructions"], "You are ChatGPT.");
     }
 
     #[test]

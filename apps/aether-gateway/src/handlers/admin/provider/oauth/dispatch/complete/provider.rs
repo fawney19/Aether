@@ -174,8 +174,10 @@ pub(super) async fn handle_admin_provider_oauth_complete_provider(
         match state
             .update_existing_provider_oauth_catalog_key(
                 &existing_key,
+                &provider_type,
                 &access_token,
                 &auth_config,
+                &api_formats,
                 None,
                 expires_at,
             )
@@ -213,6 +215,7 @@ pub(super) async fn handle_admin_provider_oauth_complete_provider(
         match state
             .create_provider_oauth_catalog_key(
                 &provider_id,
+                &provider_type,
                 &name,
                 &access_token,
                 &auth_config,

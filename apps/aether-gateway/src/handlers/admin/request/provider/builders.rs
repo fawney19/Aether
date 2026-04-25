@@ -36,12 +36,14 @@ impl<'a> AdminAppState<'a> {
         &self,
         key: &aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey,
         provider_type: &str,
+        api_formats: &[String],
         now_unix_secs: u64,
     ) -> serde_json::Value {
         crate::handlers::admin::shared::build_admin_provider_key_response(
             self.app,
             key,
             provider_type,
+            api_formats,
             now_unix_secs,
         )
     }
@@ -274,6 +276,7 @@ impl<'a> AdminAppState<'a> {
         String,
     > {
         use crate::api::ai::admin_endpoint_signature_parts;
+        use crate::handlers::admin::provider::write::provider::apply_admin_fixed_provider_endpoint_template_overrides;
         use crate::handlers::public::{admin_requested_force_stream, normalize_admin_base_url};
         use aether_admin::provider::endpoints as admin_provider_endpoints_pure;
         let (fields, payload) = patch.into_parts();
@@ -346,6 +349,11 @@ impl<'a> AdminAppState<'a> {
             .ok_or_else(|| format!("无效的 api_format: {}", updated.api_format))?;
         updated.api_family = Some(api_family.to_string());
         updated.endpoint_kind = Some(endpoint_kind.to_string());
+        apply_admin_fixed_provider_endpoint_template_overrides(
+            provider,
+            existing_endpoint,
+            &mut updated,
+        )?;
         updated.updated_at_unix_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .ok()

@@ -886,7 +886,7 @@ mod tests {
         record_admin_provider_pool_stream_timeout(&runner, "provider-1", "key-4", &pool_config)
             .await;
 
-        let runtime = read_admin_provider_pool_runtime_state(
+        let mut runtime = read_admin_provider_pool_runtime_state(
             &runner,
             "provider-1",
             &key_ids,
@@ -894,6 +894,25 @@ mod tests {
             None,
         )
         .await;
+        for _ in 0..20 {
+            if runtime
+                .cooldown_reason_by_key
+                .get("key-4")
+                .map(String::as_str)
+                == Some("stream_timeout_x2")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            runtime = read_admin_provider_pool_runtime_state(
+                &runner,
+                "provider-1",
+                &key_ids,
+                &pool_config,
+                None,
+            )
+            .await;
+        }
 
         assert_eq!(
             runtime

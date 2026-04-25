@@ -4187,6 +4187,8 @@ async fn gateway_updates_users_me_detail_locally_without_proxying_upstream() {
     let get_payload: serde_json::Value = get_response.json().await.expect("json body should parse");
     assert_eq!(get_payload["email"], "alice+updated@example.com");
     assert_eq!(get_payload["username"], "alice-updated");
+    assert_eq!(get_payload["auth_source"], "local");
+    assert_eq!(get_payload["has_password"], true);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -7352,6 +7354,8 @@ async fn gateway_handles_users_me_detail_locally_without_proxying_upstream() {
     assert_eq!(payload["id"], "user-auth-1");
     assert_eq!(payload["email"], "alice@example.com");
     assert_eq!(payload["username"], "alice");
+    assert_eq!(payload["auth_source"], "local");
+    assert_eq!(payload["has_password"], true);
     assert_eq!(payload["billing"]["id"], "wallet-auth-1");
     assert_eq!(payload["billing"]["balance"], 15.5);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);

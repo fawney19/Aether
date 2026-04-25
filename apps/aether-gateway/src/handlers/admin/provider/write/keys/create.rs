@@ -10,6 +10,7 @@ use crate::handlers::admin::shared::{
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
+use aether_provider_transport::provider_types::provider_type_is_fixed;
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
@@ -129,6 +130,8 @@ pub(crate) async fn build_admin_create_provider_key_record(
         .ok()
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
+    let inherits_provider_api_formats =
+        auth_type == "oauth" && provider_type_is_fixed(&provider.provider_type);
     let mut key = StoredProviderCatalogKey::new(
         Uuid::new_v4().to_string(),
         provider.id.clone(),
@@ -139,7 +142,11 @@ pub(crate) async fn build_admin_create_provider_key_record(
     )
     .map_err(|err| err.to_string())?
     .with_transport_fields(
-        Some(json!(api_formats)),
+        if inherits_provider_api_formats {
+            None
+        } else {
+            Some(json!(api_formats))
+        },
         encrypted_api_key,
         encrypted_auth_config,
         normalize_json_object(payload.rate_multipliers, "rate_multipliers")?,

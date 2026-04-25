@@ -53,6 +53,11 @@ pub trait ProviderQuotaReadRepository: Send + Sync {
         &self,
         provider_id: &str,
     ) -> Result<Option<StoredProviderQuotaSnapshot>, crate::DataLayerError>;
+
+    async fn find_by_provider_ids(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<StoredProviderQuotaSnapshot>, crate::DataLayerError>;
 }
 
 #[async_trait]

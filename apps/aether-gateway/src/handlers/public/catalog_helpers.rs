@@ -2,6 +2,9 @@ use crate::api::ai::public_api_format_local_path;
 use crate::handlers::shared::{
     query_param_optional_bool, query_param_value, unix_ms_to_rfc3339, unix_secs_to_rfc3339,
 };
+use crate::provider_key_auth::{
+    provider_key_configured_api_formats, provider_key_effective_api_formats,
+};
 use crate::AppState;
 use aether_data_contracts::repository::candidates::{
     PublicHealthTimelineBucket, RequestCandidateStatus, StoredRequestCandidate,
@@ -67,19 +70,7 @@ pub(crate) struct ApiFormatHealthMonitorOptions {
 }
 
 pub(crate) fn provider_key_api_formats(key: &StoredProviderCatalogKey) -> Vec<String> {
-    key.api_formats
-        .as_ref()
-        .and_then(|value| value.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
+    provider_key_configured_api_formats(key)
 }
 
 pub(crate) async fn build_public_providers_payload(
@@ -336,16 +327,25 @@ pub(crate) async fn build_api_format_health_monitor_payload(
     let mut endpoint_ids_by_format = BTreeMap::<String, Vec<String>>::new();
     let mut endpoint_to_format = BTreeMap::<String, String>::new();
     let mut provider_ids_by_format = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut active_endpoints_by_provider = BTreeMap::<String, Vec<_>>::new();
+    let provider_type_by_id = providers
+        .iter()
+        .map(|provider| (provider.id.clone(), provider.provider_type.clone()))
+        .collect::<BTreeMap<_, _>>();
     for endpoint in active_endpoints {
         endpoint_to_format.insert(endpoint.id.clone(), endpoint.api_format.clone());
         endpoint_ids_by_format
             .entry(endpoint.api_format.clone())
             .or_default()
-            .push(endpoint.id);
+            .push(endpoint.id.clone());
         provider_ids_by_format
             .entry(endpoint.api_format.clone())
             .or_default()
             .insert(endpoint.provider_id.clone());
+        active_endpoints_by_provider
+            .entry(endpoint.provider_id.clone())
+            .or_default()
+            .push(endpoint);
     }
     let all_endpoint_ids = endpoint_to_format.keys().cloned().collect::<Vec<_>>();
 
@@ -357,7 +357,15 @@ pub(crate) async fn build_api_format_health_monitor_payload(
             .ok()
             .unwrap_or_default();
         for key in keys.into_iter().filter(|key| key.is_active) {
-            for api_format in provider_key_api_formats(&key) {
+            let provider_type = provider_type_by_id
+                .get(&key.provider_id)
+                .map(String::as_str)
+                .unwrap_or("");
+            let endpoints = active_endpoints_by_provider
+                .get(&key.provider_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            for api_format in provider_key_effective_api_formats(&key, provider_type, endpoints) {
                 if provider_ids_by_format
                     .get(&api_format)
                     .is_some_and(|provider_ids| provider_ids.contains(key.provider_id.as_str()))

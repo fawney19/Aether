@@ -121,7 +121,7 @@ WITH aggregated AS (
         COALESCE(SUM(usage.cache_read_input_tokens), 0) AS cache_read_tokens,
         MIN(COALESCE(usage_settlement_snapshots.finalized_at, usage.finalized_at)) AS first_finalized_at,
         MAX(COALESCE(usage_settlement_snapshots.finalized_at, usage.finalized_at)) AS last_finalized_at
-    FROM usage
+    FROM usage_billing_facts AS usage
     JOIN usage_settlement_snapshots
       ON usage_settlement_snapshots.request_id = usage.request_id
     WHERE usage_settlement_snapshots.wallet_id IS NOT NULL
@@ -184,7 +184,7 @@ WHERE ledgers.billing_date = $1
   AND ledgers.billing_timezone = $2
   AND NOT EXISTS (
       SELECT 1
-      FROM usage
+      FROM usage_billing_facts AS usage
       JOIN usage_settlement_snapshots
         ON usage_settlement_snapshots.request_id = usage.request_id
       WHERE usage_settlement_snapshots.wallet_id = ledgers.wallet_id
@@ -600,7 +600,7 @@ const SELECT_STATS_DAILY_AGGREGATE_SQL: &str = r#"
 SELECT
     (
         SELECT CAST(COUNT(cache_hit_usage.id) AS BIGINT)
-        FROM usage AS cache_hit_usage
+        FROM usage_billing_facts AS cache_hit_usage
         WHERE cache_hit_usage.created_at >= $1
           AND cache_hit_usage.created_at < $2
     ) AS cache_hit_total_requests,
@@ -610,13 +610,13 @@ SELECT
                 WHERE GREATEST(COALESCE(cache_hit_usage.cache_read_input_tokens, 0), 0) > 0
             ) AS BIGINT
         )
-        FROM usage AS cache_hit_usage
+        FROM usage_billing_facts AS cache_hit_usage
         WHERE cache_hit_usage.created_at >= $1
           AND cache_hit_usage.created_at < $2
     ) AS cache_hit_requests,
     (
         SELECT CAST(COUNT(completed_usage.id) AS BIGINT)
-        FROM usage AS completed_usage
+        FROM usage_billing_facts AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -627,7 +627,7 @@ SELECT
                 WHERE GREATEST(COALESCE(completed_usage.cache_read_input_tokens, 0), 0) > 0
             ) AS BIGINT
         )
-        FROM usage AS completed_usage
+        FROM usage_billing_facts AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -636,7 +636,7 @@ SELECT
         SELECT CAST(
             COALESCE(SUM(GREATEST(COALESCE(completed_usage.input_tokens, 0), 0)), 0) AS BIGINT
         )
-        FROM usage AS completed_usage
+        FROM usage_billing_facts AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -659,7 +659,7 @@ SELECT
                 0
             ) AS BIGINT
         )
-        FROM usage AS completed_usage
+        FROM usage_billing_facts AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -671,7 +671,7 @@ SELECT
                 0
             ) AS BIGINT
         )
-        FROM usage AS completed_usage
+        FROM usage_billing_facts AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -809,7 +809,7 @@ SELECT
                 0
             ) AS BIGINT
         )
-        FROM usage AS completed_usage
+        FROM usage_billing_facts AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -826,7 +826,7 @@ SELECT
                 0
             ) AS DOUBLE PRECISION
         )
-        FROM usage AS completed_usage
+        FROM usage_billing_facts AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -840,7 +840,7 @@ SELECT
                 0
             ) AS DOUBLE PRECISION
         )
-        FROM usage AS completed_usage
+        FROM usage_billing_facts AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -850,7 +850,7 @@ SELECT
             COALESCE(SUM(COALESCE(CAST(settled_usage.total_cost_usd AS DOUBLE PRECISION), 0)), 0)
                 AS DOUBLE PRECISION
         )
-        FROM usage AS settled_usage
+        FROM usage_billing_facts AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -858,7 +858,7 @@ SELECT
     ) AS settled_total_cost,
     (
         SELECT CAST(COUNT(settled_usage.id) AS BIGINT)
-        FROM usage AS settled_usage
+        FROM usage_billing_facts AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -868,7 +868,7 @@ SELECT
         SELECT CAST(
             COALESCE(SUM(GREATEST(COALESCE(settled_usage.input_tokens, 0), 0)), 0) AS BIGINT
         )
-        FROM usage AS settled_usage
+        FROM usage_billing_facts AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -878,7 +878,7 @@ SELECT
         SELECT CAST(
             COALESCE(SUM(GREATEST(COALESCE(settled_usage.output_tokens, 0), 0)), 0) AS BIGINT
         )
-        FROM usage AS settled_usage
+        FROM usage_billing_facts AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -891,7 +891,7 @@ SELECT
                 0
             ) AS BIGINT
         )
-        FROM usage AS settled_usage
+        FROM usage_billing_facts AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -904,7 +904,7 @@ SELECT
                 0
             ) AS BIGINT
         )
-        FROM usage AS settled_usage
+        FROM usage_billing_facts AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -912,7 +912,7 @@ SELECT
     ) AS settled_cache_read_tokens,
     (
         SELECT MIN(CAST(EXTRACT(EPOCH FROM settled_usage.finalized_at) AS BIGINT))
-        FROM usage AS settled_usage
+        FROM usage_billing_facts AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -920,7 +920,7 @@ SELECT
     ) AS settled_first_finalized_at_unix_secs,
     (
         SELECT MAX(CAST(EXTRACT(EPOCH FROM settled_usage.finalized_at) AS BIGINT))
-        FROM usage AS settled_usage
+        FROM usage_billing_facts AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -1081,7 +1081,7 @@ SELECT
     CAST(COALESCE(AVG(response_time_ms), 0) AS DOUBLE PRECISION) AS avg_response_time_ms,
     CAST(COUNT(DISTINCT model) AS BIGINT) AS unique_models,
     CAST(COUNT(DISTINCT provider_name) AS BIGINT) AS unique_providers
-FROM usage
+FROM usage_billing_facts AS usage
 WHERE created_at >= $1
   AND created_at < $2
   AND status NOT IN ('pending', 'streaming')
@@ -1105,7 +1105,7 @@ SELECT
     CAST(percentile_cont(0.5) WITHIN GROUP (ORDER BY response_time_ms) AS DOUBLE PRECISION) AS p50,
     CAST(percentile_cont(0.9) WITHIN GROUP (ORDER BY response_time_ms) AS DOUBLE PRECISION) AS p90,
     CAST(percentile_cont(0.99) WITHIN GROUP (ORDER BY response_time_ms) AS DOUBLE PRECISION) AS p99
-FROM usage
+FROM usage_billing_facts AS usage
 WHERE created_at >= $1
   AND created_at < $2
   AND status = 'completed'
@@ -1118,7 +1118,7 @@ SELECT
     CAST(percentile_cont(0.5) WITHIN GROUP (ORDER BY first_byte_time_ms) AS DOUBLE PRECISION) AS p50,
     CAST(percentile_cont(0.9) WITHIN GROUP (ORDER BY first_byte_time_ms) AS DOUBLE PRECISION) AS p90,
     CAST(percentile_cont(0.99) WITHIN GROUP (ORDER BY first_byte_time_ms) AS DOUBLE PRECISION) AS p99
-FROM usage
+FROM usage_billing_facts AS usage
 WHERE created_at >= $1
   AND created_at < $2
   AND status = 'completed'
@@ -1295,7 +1295,7 @@ WITH aggregated AS (
             ) AS BIGINT
         ) AS response_time_samples,
         CAST(COALESCE(AVG(response_time_ms), 0) AS DOUBLE PRECISION) AS avg_response_time_ms
-    FROM usage
+    FROM usage_billing_facts AS usage
     WHERE created_at >= $1
       AND created_at < $2
       AND model IS NOT NULL
@@ -1330,6 +1330,8 @@ SELECT
     aggregated.input_tokens,
     aggregated.output_tokens,
     aggregated.cache_creation_tokens,
+    aggregated.cache_creation_ephemeral_5m_tokens,
+    aggregated.cache_creation_ephemeral_1h_tokens,
     aggregated.cache_read_tokens,
     aggregated.total_cost,
     aggregated.response_time_sum_ms,
@@ -1344,6 +1346,8 @@ DO UPDATE SET
     input_tokens = EXCLUDED.input_tokens,
     output_tokens = EXCLUDED.output_tokens,
     cache_creation_tokens = EXCLUDED.cache_creation_tokens,
+    cache_creation_ephemeral_5m_tokens = EXCLUDED.cache_creation_ephemeral_5m_tokens,
+    cache_creation_ephemeral_1h_tokens = EXCLUDED.cache_creation_ephemeral_1h_tokens,
     cache_read_tokens = EXCLUDED.cache_read_tokens,
     total_cost = EXCLUDED.total_cost,
     response_time_sum_ms = EXCLUDED.response_time_sum_ms,
@@ -1361,7 +1365,7 @@ WITH aggregated AS (
         CAST(COALESCE(SUM(cache_creation_input_tokens), 0) AS BIGINT) AS cache_creation_tokens,
         CAST(COALESCE(SUM(cache_read_input_tokens), 0) AS BIGINT) AS cache_read_tokens,
         CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost
-    FROM usage
+    FROM usage_billing_facts AS usage
     WHERE created_at >= $1
       AND created_at < $2
       AND status NOT IN ('pending', 'streaming')
@@ -1433,7 +1437,7 @@ WITH aggregated AS (
                 0
             ) AS BIGINT
         ) AS response_time_samples
-    FROM usage
+    FROM usage_billing_facts AS usage
     WHERE created_at >= $1
       AND created_at < $2
       AND model IS NOT NULL
@@ -1519,7 +1523,7 @@ WITH aggregated AS (
                 0
             ) AS DOUBLE PRECISION
         ) AS estimated_full_cost
-    FROM usage
+    FROM usage_billing_facts AS usage
     LEFT JOIN usage_settlement_snapshots
       ON usage_settlement_snapshots.request_id = usage.request_id
     WHERE usage.created_at >= $1
@@ -1585,7 +1589,7 @@ WITH aggregated AS (
                 0
             ) AS DOUBLE PRECISION
         ) AS estimated_full_cost
-    FROM usage
+    FROM usage_billing_facts AS usage
     LEFT JOIN usage_settlement_snapshots
       ON usage_settlement_snapshots.request_id = usage.request_id
     WHERE usage.created_at >= $1
@@ -1661,7 +1665,7 @@ WITH aggregated AS (
                 0
             ) AS DOUBLE PRECISION
         ) AS estimated_full_cost
-    FROM usage
+    FROM usage_billing_facts AS usage
     LEFT JOIN usage_settlement_snapshots
       ON usage_settlement_snapshots.request_id = usage.request_id
     WHERE usage.created_at >= $1
@@ -1738,7 +1742,7 @@ WITH aggregated AS (
                 0
             ) AS DOUBLE PRECISION
         ) AS estimated_full_cost
-    FROM usage
+    FROM usage_billing_facts AS usage
     LEFT JOIN usage_settlement_snapshots
       ON usage_settlement_snapshots.request_id = usage.request_id
     WHERE usage.created_at >= $1
@@ -1828,7 +1832,7 @@ WITH aggregated AS (
         CAST(COALESCE(SUM(cache_creation_input_tokens), 0) AS BIGINT) AS cache_creation_tokens,
         CAST(COALESCE(SUM(cache_read_input_tokens), 0) AS BIGINT) AS cache_read_tokens,
         CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost
-    FROM usage
+    FROM usage_billing_facts AS usage
     WHERE created_at >= $1
       AND created_at < $2
       AND api_key_id IS NOT NULL
@@ -1890,7 +1894,7 @@ WITH aggregated AS (
         provider_name,
         model,
         CAST(COUNT(id) AS BIGINT) AS total_count
-    FROM usage
+    FROM usage_billing_facts AS usage
     WHERE created_at >= $1
       AND created_at < $2
       AND error_category IS NOT NULL
@@ -2179,7 +2183,7 @@ WITH aggregated AS (
                 0
             ) AS BIGINT
         ) AS response_time_samples
-    FROM usage
+    FROM usage_billing_facts AS usage
     WHERE created_at >= $1
       AND created_at < $2
       AND user_id IS NOT NULL
@@ -2468,7 +2472,7 @@ WITH aggregated AS (
                 0
             ) AS BIGINT
         ) AS successful_response_time_samples
-    FROM usage
+    FROM usage_billing_facts AS usage
     WHERE created_at >= $1
       AND created_at < $2
       AND user_id IS NOT NULL
@@ -2736,7 +2740,7 @@ WITH aggregated AS (
                 0
             ) AS BIGINT
         ) AS successful_response_time_samples
-    FROM usage
+    FROM usage_billing_facts AS usage
     WHERE created_at >= $1
       AND created_at < $2
       AND user_id IS NOT NULL
@@ -3004,7 +3008,7 @@ WITH aggregated AS (
                 0
             ) AS BIGINT
         ) AS successful_response_time_samples
-    FROM usage
+    FROM usage_billing_facts AS usage
     WHERE created_at >= $1
       AND created_at < $2
       AND user_id IS NOT NULL
@@ -3118,7 +3122,7 @@ WITH aggregated AS (
                 0
             ) AS BIGINT
         ) AS response_time_samples
-    FROM usage
+    FROM usage_billing_facts AS usage
     WHERE created_at >= $1
       AND created_at < $2
       AND user_id IS NOT NULL
@@ -3214,7 +3218,7 @@ WITH aggregated AS (
                 0
             ) AS DOUBLE PRECISION
         ) AS estimated_full_cost
-    FROM usage
+    FROM usage_billing_facts AS usage
     LEFT JOIN usage_settlement_snapshots
       ON usage_settlement_snapshots.request_id = usage.request_id
     WHERE usage.created_at >= $1
@@ -3296,7 +3300,7 @@ WITH aggregated AS (
                 0
             ) AS DOUBLE PRECISION
         ) AS estimated_full_cost
-    FROM usage
+    FROM usage_billing_facts AS usage
     LEFT JOIN usage_settlement_snapshots
       ON usage_settlement_snapshots.request_id = usage.request_id
     WHERE usage.created_at >= $1
@@ -3382,7 +3386,7 @@ WITH aggregated AS (
                 0
             ) AS DOUBLE PRECISION
         ) AS estimated_full_cost
-    FROM usage
+    FROM usage_billing_facts AS usage
     LEFT JOIN usage_settlement_snapshots
       ON usage_settlement_snapshots.request_id = usage.request_id
     WHERE usage.created_at >= $1
@@ -3469,7 +3473,7 @@ WITH aggregated AS (
                 0
             ) AS DOUBLE PRECISION
         ) AS estimated_full_cost
-    FROM usage
+    FROM usage_billing_facts AS usage
     LEFT JOIN usage_settlement_snapshots
       ON usage_settlement_snapshots.request_id = usage.request_id
     WHERE usage.created_at >= $1
@@ -3696,7 +3700,7 @@ WHERE is_complete IS TRUE
 "#;
 const SELECT_NEXT_STATS_DAILY_BUCKET_SQL: &str = r#"
 SELECT date_trunc('day', MIN(created_at)) AS next_bucket
-FROM usage
+FROM usage_billing_facts AS usage
 WHERE created_at >= $1
   AND created_at < $2
   AND status NOT IN ('pending', 'streaming')
@@ -3709,7 +3713,7 @@ WHERE is_complete IS TRUE
 "#;
 const SELECT_NEXT_STATS_HOURLY_BUCKET_SQL: &str = r#"
 SELECT date_trunc('hour', MIN(created_at)) AS next_bucket
-FROM usage
+FROM usage_billing_facts AS usage
 WHERE created_at >= $1
   AND created_at < $2
   AND status NOT IN ('pending', 'streaming')
@@ -3719,7 +3723,7 @@ const SELECT_STATS_HOURLY_AGGREGATE_SQL: &str = r#"
 SELECT
     (
         SELECT CAST(COUNT(cache_hit_usage.id) AS BIGINT)
-        FROM usage AS cache_hit_usage
+        FROM usage_billing_facts AS cache_hit_usage
         WHERE cache_hit_usage.created_at >= $1
           AND cache_hit_usage.created_at < $2
     ) AS cache_hit_total_requests,
@@ -3729,13 +3733,13 @@ SELECT
                 WHERE GREATEST(COALESCE(cache_hit_usage.cache_read_input_tokens, 0), 0) > 0
             ) AS BIGINT
         )
-        FROM usage AS cache_hit_usage
+        FROM usage_billing_facts AS cache_hit_usage
         WHERE cache_hit_usage.created_at >= $1
           AND cache_hit_usage.created_at < $2
     ) AS cache_hit_requests,
     (
         SELECT CAST(COUNT(completed_usage.id) AS BIGINT)
-        FROM usage AS completed_usage
+        FROM usage_billing_facts AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -3746,7 +3750,7 @@ SELECT
                 WHERE GREATEST(COALESCE(completed_usage.cache_read_input_tokens, 0), 0) > 0
             ) AS BIGINT
         )
-        FROM usage AS completed_usage
+        FROM usage_billing_facts AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -3755,7 +3759,7 @@ SELECT
         SELECT CAST(
             COALESCE(SUM(GREATEST(COALESCE(completed_usage.input_tokens, 0), 0)), 0) AS BIGINT
         )
-        FROM usage AS completed_usage
+        FROM usage_billing_facts AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -3778,7 +3782,7 @@ SELECT
                 0
             ) AS BIGINT
         )
-        FROM usage AS completed_usage
+        FROM usage_billing_facts AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -3790,7 +3794,7 @@ SELECT
                 0
             ) AS BIGINT
         )
-        FROM usage AS completed_usage
+        FROM usage_billing_facts AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -3928,7 +3932,7 @@ SELECT
                 0
             ) AS BIGINT
         )
-        FROM usage AS completed_usage
+        FROM usage_billing_facts AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -3945,7 +3949,7 @@ SELECT
                 0
             ) AS DOUBLE PRECISION
         )
-        FROM usage AS completed_usage
+        FROM usage_billing_facts AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -3959,7 +3963,7 @@ SELECT
                 0
             ) AS DOUBLE PRECISION
         )
-        FROM usage AS completed_usage
+        FROM usage_billing_facts AS completed_usage
         WHERE completed_usage.created_at >= $1
           AND completed_usage.created_at < $2
           AND completed_usage.status = 'completed'
@@ -3969,7 +3973,7 @@ SELECT
             COALESCE(SUM(COALESCE(CAST(settled_usage.total_cost_usd AS DOUBLE PRECISION), 0)), 0)
                 AS DOUBLE PRECISION
         )
-        FROM usage AS settled_usage
+        FROM usage_billing_facts AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -3977,7 +3981,7 @@ SELECT
     ) AS settled_total_cost,
     (
         SELECT CAST(COUNT(settled_usage.id) AS BIGINT)
-        FROM usage AS settled_usage
+        FROM usage_billing_facts AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -3987,7 +3991,7 @@ SELECT
         SELECT CAST(
             COALESCE(SUM(GREATEST(COALESCE(settled_usage.input_tokens, 0), 0)), 0) AS BIGINT
         )
-        FROM usage AS settled_usage
+        FROM usage_billing_facts AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -3997,7 +4001,7 @@ SELECT
         SELECT CAST(
             COALESCE(SUM(GREATEST(COALESCE(settled_usage.output_tokens, 0), 0)), 0) AS BIGINT
         )
-        FROM usage AS settled_usage
+        FROM usage_billing_facts AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -4010,7 +4014,7 @@ SELECT
                 0
             ) AS BIGINT
         )
-        FROM usage AS settled_usage
+        FROM usage_billing_facts AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -4023,7 +4027,7 @@ SELECT
                 0
             ) AS BIGINT
         )
-        FROM usage AS settled_usage
+        FROM usage_billing_facts AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -4031,7 +4035,7 @@ SELECT
     ) AS settled_cache_read_tokens,
     (
         SELECT MIN(CAST(EXTRACT(EPOCH FROM settled_usage.finalized_at) AS BIGINT))
-        FROM usage AS settled_usage
+        FROM usage_billing_facts AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
@@ -4039,14 +4043,14 @@ SELECT
     ) AS settled_first_finalized_at_unix_secs,
     (
         SELECT MAX(CAST(EXTRACT(EPOCH FROM settled_usage.finalized_at) AS BIGINT))
-        FROM usage AS settled_usage
+        FROM usage_billing_facts AS settled_usage
         WHERE settled_usage.created_at >= $1
           AND settled_usage.created_at < $2
           AND settled_usage.billing_status = 'settled'
           AND COALESCE(CAST(settled_usage.total_cost_usd AS DOUBLE PRECISION), 0) > 0
     ) AS settled_last_finalized_at_unix_secs,
-    COUNT(id) AS total_requests,
-    COALESCE(
+    CAST(COUNT(id) AS BIGINT) AS total_requests,
+    CAST(COALESCE(
         SUM(
             CASE
                 WHEN status_code >= 400
@@ -4056,10 +4060,10 @@ SELECT
             END
         ),
         0
-    ) AS error_requests,
-    COALESCE(SUM(input_tokens), 0) AS input_tokens,
-    COALESCE(SUM(output_tokens), 0) AS output_tokens,
-    COALESCE(
+    ) AS BIGINT) AS error_requests,
+    CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS input_tokens,
+    CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS output_tokens,
+    CAST(COALESCE(
         SUM(
             CASE
                 WHEN COALESCE(cache_creation_input_tokens, 0) = 0
@@ -4073,8 +4077,8 @@ SELECT
             END
         ),
         0
-    ) AS cache_creation_tokens,
-    COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_tokens,
+    ) AS BIGINT) AS cache_creation_tokens,
+    CAST(COALESCE(SUM(cache_read_input_tokens), 0) AS BIGINT) AS cache_read_tokens,
     CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost,
     CAST(COALESCE(SUM(actual_total_cost_usd), 0) AS DOUBLE PRECISION) AS actual_total_cost,
     COALESCE(
@@ -4087,7 +4091,7 @@ SELECT
         ),
         0
     ) AS response_time_sum_ms,
-    COALESCE(
+    CAST(COALESCE(
         SUM(
             CASE
                 WHEN response_time_ms IS NOT NULL THEN 1
@@ -4095,9 +4099,9 @@ SELECT
             END
         ),
         0
-    ) AS response_time_samples,
+    ) AS BIGINT) AS response_time_samples,
     CAST(COALESCE(AVG(response_time_ms), 0) AS DOUBLE PRECISION) AS avg_response_time_ms
-FROM usage
+FROM usage_billing_facts AS usage
 WHERE created_at >= $1
   AND created_at < $2
   AND status NOT IN ('pending', 'streaming')
@@ -4189,8 +4193,8 @@ const UPSERT_STATS_HOURLY_USER_SQL: &str = r#"
 WITH aggregated AS (
     SELECT
         user_id,
-        COUNT(id) AS total_requests,
-        COALESCE(
+        CAST(COUNT(id) AS BIGINT) AS total_requests,
+        CAST(COALESCE(
             SUM(
                 CASE
                     WHEN status_code >= 400
@@ -4200,10 +4204,10 @@ WITH aggregated AS (
                 END
             ),
             0
-        ) AS error_requests,
-        COALESCE(SUM(input_tokens), 0) AS input_tokens,
-        COALESCE(SUM(output_tokens), 0) AS output_tokens,
-        COALESCE(
+        ) AS BIGINT) AS error_requests,
+        CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS input_tokens,
+        CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS output_tokens,
+        CAST(COALESCE(
             SUM(
                 CASE
                     WHEN COALESCE(cache_creation_input_tokens, 0) = 0
@@ -4217,8 +4221,8 @@ WITH aggregated AS (
                 END
             ),
             0
-        ) AS cache_creation_tokens,
-        COALESCE(SUM(cache_read_input_tokens), 0) AS cache_read_tokens,
+        ) AS BIGINT) AS cache_creation_tokens,
+        CAST(COALESCE(SUM(cache_read_input_tokens), 0) AS BIGINT) AS cache_read_tokens,
         CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost,
         CAST(COALESCE(SUM(actual_total_cost_usd), 0) AS DOUBLE PRECISION) AS actual_total_cost,
         CAST(
@@ -4234,7 +4238,7 @@ WITH aggregated AS (
                 0
             ) AS DOUBLE PRECISION
         ) AS settled_total_cost,
-        COALESCE(
+        CAST(COALESCE(
             SUM(
                 CASE
                     WHEN billing_status = 'settled'
@@ -4244,8 +4248,8 @@ WITH aggregated AS (
                 END
             ),
             0
-        ) AS settled_total_requests,
-        COALESCE(
+        ) AS BIGINT) AS settled_total_requests,
+        CAST(COALESCE(
             SUM(
                 CASE
                     WHEN billing_status = 'settled'
@@ -4255,8 +4259,8 @@ WITH aggregated AS (
                 END
             ),
             0
-        ) AS settled_input_tokens,
-        COALESCE(
+        ) AS BIGINT) AS settled_input_tokens,
+        CAST(COALESCE(
             SUM(
                 CASE
                     WHEN billing_status = 'settled'
@@ -4266,8 +4270,8 @@ WITH aggregated AS (
                 END
             ),
             0
-        ) AS settled_output_tokens,
-        COALESCE(
+        ) AS BIGINT) AS settled_output_tokens,
+        CAST(COALESCE(
             SUM(
                 CASE
                     WHEN billing_status = 'settled'
@@ -4277,8 +4281,8 @@ WITH aggregated AS (
                 END
             ),
             0
-        ) AS settled_cache_creation_tokens,
-        COALESCE(
+        ) AS BIGINT) AS settled_cache_creation_tokens,
+        CAST(COALESCE(
             SUM(
                 CASE
                     WHEN billing_status = 'settled'
@@ -4288,7 +4292,7 @@ WITH aggregated AS (
                 END
             ),
             0
-        ) AS settled_cache_read_tokens,
+        ) AS BIGINT) AS settled_cache_read_tokens,
         MIN(
             CASE
                 WHEN billing_status = 'settled'
@@ -4317,7 +4321,7 @@ WITH aggregated AS (
             ),
             0
         ) AS response_time_sum_ms,
-        COALESCE(
+        CAST(COALESCE(
             SUM(
                 CASE
                     WHEN response_time_ms IS NOT NULL THEN 1
@@ -4325,8 +4329,8 @@ WITH aggregated AS (
                 END
             ),
             0
-        ) AS response_time_samples
-    FROM usage
+        ) AS BIGINT) AS response_time_samples
+    FROM usage_billing_facts AS usage
     WHERE created_at >= $1
       AND created_at < $2
       AND user_id IS NOT NULL
@@ -4413,9 +4417,9 @@ const UPSERT_STATS_HOURLY_MODEL_SQL: &str = r#"
 WITH aggregated AS (
     SELECT
         model,
-        COUNT(id) AS total_requests,
-        COALESCE(SUM(input_tokens), 0) AS input_tokens,
-        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        CAST(COUNT(id) AS BIGINT) AS total_requests,
+        CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS input_tokens,
+        CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS output_tokens,
         CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost,
         COALESCE(
             SUM(
@@ -4427,7 +4431,7 @@ WITH aggregated AS (
             ),
             0
         ) AS response_time_sum_ms,
-        COALESCE(
+        CAST(COALESCE(
             SUM(
                 CASE
                     WHEN response_time_ms IS NOT NULL THEN 1
@@ -4435,9 +4439,9 @@ WITH aggregated AS (
                 END
             ),
             0
-        ) AS response_time_samples,
+        ) AS BIGINT) AS response_time_samples,
         CAST(COALESCE(AVG(response_time_ms), 0) AS DOUBLE PRECISION) AS avg_response_time_ms
-    FROM usage
+    FROM usage_billing_facts AS usage
     WHERE created_at >= $1
       AND created_at < $2
       AND model IS NOT NULL
@@ -4490,9 +4494,9 @@ WITH aggregated AS (
     SELECT
         user_id,
         model,
-        COUNT(id) AS total_requests,
-        COALESCE(SUM(input_tokens), 0) AS input_tokens,
-        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        CAST(COUNT(id) AS BIGINT) AS total_requests,
+        CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS input_tokens,
+        CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS output_tokens,
         CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost,
         COALESCE(
             SUM(
@@ -4504,7 +4508,7 @@ WITH aggregated AS (
             ),
             0
         ) AS response_time_sum_ms,
-        COALESCE(
+        CAST(COALESCE(
             SUM(
                 CASE
                     WHEN response_time_ms IS NOT NULL THEN 1
@@ -4512,8 +4516,8 @@ WITH aggregated AS (
                 END
             ),
             0
-        ) AS response_time_samples
-    FROM usage
+        ) AS BIGINT) AS response_time_samples
+    FROM usage_billing_facts AS usage
     WHERE created_at >= $1
       AND created_at < $2
       AND user_id IS NOT NULL
@@ -4565,11 +4569,11 @@ const UPSERT_STATS_HOURLY_PROVIDER_SQL: &str = r#"
 WITH aggregated AS (
     SELECT
         provider_name,
-        COUNT(id) AS total_requests,
-        COALESCE(SUM(input_tokens), 0) AS input_tokens,
-        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        CAST(COUNT(id) AS BIGINT) AS total_requests,
+        CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT) AS input_tokens,
+        CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT) AS output_tokens,
         CAST(COALESCE(SUM(total_cost_usd), 0) AS DOUBLE PRECISION) AS total_cost
-    FROM usage
+    FROM usage_billing_facts AS usage
     WHERE created_at >= $1
       AND created_at < $2
       AND provider_name IS NOT NULL

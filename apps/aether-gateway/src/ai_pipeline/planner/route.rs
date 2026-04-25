@@ -1,3 +1,4 @@
+use super::specialized::is_openai_image_stream_request;
 use crate::ai_pipeline::GatewayControlDecision;
 use crate::ai_pipeline::{
     is_matching_stream_request as is_matching_stream_request_impl,
@@ -5,6 +6,7 @@ use crate::ai_pipeline::{
     resolve_execution_runtime_sync_plan_kind as resolve_execution_runtime_sync_plan_kind_impl,
     supports_stream_scheduler_decision_kind as supports_stream_scheduler_decision_kind_impl,
     supports_sync_scheduler_decision_kind as supports_sync_scheduler_decision_kind_impl,
+    OPENAI_IMAGE_STREAM_PLAN_KIND,
 };
 
 pub(crate) fn resolve_execution_runtime_stream_plan_kind(
@@ -37,7 +39,11 @@ pub(crate) fn is_matching_stream_request(
     plan_kind: &str,
     parts: &http::request::Parts,
     body_json: &serde_json::Value,
+    body_base64: Option<&str>,
 ) -> bool {
+    if plan_kind == OPENAI_IMAGE_STREAM_PLAN_KIND {
+        return is_openai_image_stream_request(parts, body_json, body_base64);
+    }
     is_matching_stream_request_impl(plan_kind, parts.uri.path(), body_json)
 }
 
@@ -52,6 +58,7 @@ pub(crate) fn supports_stream_scheduler_decision_kind(plan_kind: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use axum::http::{Method, Request};
+    use base64::Engine as _;
 
     use super::{
         is_matching_stream_request, resolve_execution_runtime_stream_plan_kind,
@@ -108,15 +115,45 @@ mod tests {
             "openai_chat_stream",
             &parts,
             &serde_json::json!({"stream": false}),
+            None,
         ));
         assert!(is_matching_stream_request(
             "openai_chat_stream",
             &parts,
             &serde_json::json!({"stream": true}),
+            None,
         ));
         assert!(supports_sync_scheduler_decision_kind("openai_chat_sync"));
         assert!(supports_stream_scheduler_decision_kind(
             "openai_chat_stream"
+        ));
+    }
+
+    #[test]
+    fn image_stream_matching_parses_multipart_stream_flag() {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/images/edits")
+            .header(
+                http::header::CONTENT_TYPE,
+                "multipart/form-data; boundary=image-stream-boundary",
+            )
+            .body(())
+            .expect("request should build");
+        let (parts, _) = request.into_parts();
+        let body = concat!(
+            "--image-stream-boundary\r\n",
+            "Content-Disposition: form-data; name=\"stream\"\r\n\r\n",
+            "true\r\n",
+            "--image-stream-boundary--\r\n"
+        );
+        let body_base64 = base64::engine::general_purpose::STANDARD.encode(body.as_bytes());
+
+        assert!(is_matching_stream_request(
+            "openai_image_stream",
+            &parts,
+            &serde_json::json!({}),
+            Some(body_base64.as_str()),
         ));
     }
 }

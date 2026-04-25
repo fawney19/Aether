@@ -64,6 +64,27 @@ WHERE p.is_active = TRUE
   AND LOWER(pe.api_format) = LOWER($1)
   AND (
     pak.api_formats IS NULL
+    OR (
+      LOWER(BTRIM(p.provider_type)) IN (
+        'claude_code',
+        'codex',
+        'gemini_cli',
+        'vertex_ai',
+        'antigravity'
+      )
+      AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+    )
+    OR (
+      LOWER(BTRIM(p.provider_type)) = 'kiro'
+      AND (
+        LOWER(BTRIM(pak.auth_type)) = 'oauth'
+        OR (
+          LOWER(BTRIM(pak.auth_type)) = 'bearer'
+          AND pak.auth_config IS NOT NULL
+          AND BTRIM(pak.auth_config) <> ''
+        )
+      )
+    )
     OR EXISTS (
       SELECT 1
       FROM json_array_elements_text(pak.api_formats) AS fmt(value)
@@ -137,6 +158,27 @@ WHERE p.is_active = TRUE
   AND gm.name = $2
   AND (
     pak.api_formats IS NULL
+    OR (
+      LOWER(BTRIM(p.provider_type)) IN (
+        'claude_code',
+        'codex',
+        'gemini_cli',
+        'vertex_ai',
+        'antigravity'
+      )
+      AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+    )
+    OR (
+      LOWER(BTRIM(p.provider_type)) = 'kiro'
+      AND (
+        LOWER(BTRIM(pak.auth_type)) = 'oauth'
+        OR (
+          LOWER(BTRIM(pak.auth_type)) = 'bearer'
+          AND pak.auth_config IS NOT NULL
+          AND BTRIM(pak.auth_config) <> ''
+        )
+      )
+    )
     OR EXISTS (
       SELECT 1
       FROM json_array_elements_text(pak.api_formats) AS fmt(value)

@@ -79,7 +79,17 @@ uuid = { version = "1", features = ["serde", "v4", "v5"] }
 webpki-roots = "0.26"
 url = "2"
 
+[profile.dev]
+# Keep file/line information for backtraces while avoiding full debug info
+# generation on very large crates during local development builds.
+debug = "line-tables-only"
+
+[profile.test]
+# The gateway test target pulls in a very large in-crate test tree, so use the
+# lighter debug format here as well to reduce rustc peak memory.
+debug = "line-tables-only"
+
 [profile.release]
-lto = true
+lto = "thin"
 strip = true
-codegen-units = 1
+codegen-units = 8

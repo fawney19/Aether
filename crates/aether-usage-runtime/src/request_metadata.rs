@@ -67,12 +67,20 @@ pub(crate) fn sanitize_usage_request_metadata_ref(value: Option<&Value>) -> Opti
 
 fn copy_allowed_metadata_fields(source: &Map<String, Value>, target: &mut Map<String, Value>) {
     copy_non_empty_string(source, target, "trace_id");
+    copy_bool(source, target, "client_requested_stream");
+    copy_bool(source, target, "upstream_is_stream");
     copy_number(source, target, "provider_request_body_base64_bytes");
     copy_number(source, target, "provider_response_body_base64_bytes");
     copy_number(source, target, "client_response_body_base64_bytes");
     copy_non_null_value(source, target, "billing_snapshot");
     copy_non_empty_string(source, target, "billing_snapshot_schema_version");
     copy_non_empty_string(source, target, "billing_snapshot_status");
+    copy_non_null_value(source, target, "settlement_snapshot");
+    copy_non_empty_string(source, target, "settlement_snapshot_schema_version");
+    copy_non_null_value(source, target, "billing_dimensions");
+    copy_non_empty_string(source, target, "model_id");
+    copy_non_empty_string(source, target, "global_model_id");
+    copy_non_empty_string(source, target, "global_model_name");
     copy_non_null_value(source, target, "dimensions");
     copy_non_null_value(source, target, "billing_rule_snapshot");
     copy_non_null_value(source, target, "scheduling_audit");
@@ -87,12 +95,20 @@ fn copy_allowed_metadata_fields(source: &Map<String, Value>, target: &mut Map<St
 
 fn move_allowed_metadata_fields(mut source: Map<String, Value>, target: &mut Map<String, Value>) {
     remove_non_empty_string(&mut source, target, "trace_id");
+    remove_bool(&mut source, target, "client_requested_stream");
+    remove_bool(&mut source, target, "upstream_is_stream");
     remove_number(&mut source, target, "provider_request_body_base64_bytes");
     remove_number(&mut source, target, "provider_response_body_base64_bytes");
     remove_number(&mut source, target, "client_response_body_base64_bytes");
     remove_non_null_value(&mut source, target, "billing_snapshot");
     remove_non_empty_string(&mut source, target, "billing_snapshot_schema_version");
     remove_non_empty_string(&mut source, target, "billing_snapshot_status");
+    remove_non_null_value(&mut source, target, "settlement_snapshot");
+    remove_non_empty_string(&mut source, target, "settlement_snapshot_schema_version");
+    remove_non_null_value(&mut source, target, "billing_dimensions");
+    remove_non_empty_string(&mut source, target, "model_id");
+    remove_non_empty_string(&mut source, target, "global_model_id");
+    remove_non_empty_string(&mut source, target, "global_model_name");
     remove_non_null_value(&mut source, target, "dimensions");
     remove_non_null_value(&mut source, target, "billing_rule_snapshot");
     remove_non_null_value(&mut source, target, "scheduling_audit");
@@ -366,12 +382,17 @@ mod tests {
             "model": "gpt-5",
             "candidate_index": 2,
             "trace_id": "trace-1",
+            "client_requested_stream": false,
+            "upstream_is_stream": true,
             "provider_request_body_base64_bytes": 512,
             "provider_response_body_base64_bytes": 1024,
             "client_response_body_base64_bytes": 2048,
             "billing_snapshot": {"status": "complete"},
             "billing_snapshot_schema_version": "2.0",
             "billing_snapshot_status": "complete",
+            "model_id": "model-1",
+            "global_model_id": "global-model-1",
+            "global_model_name": "gpt-5",
             "dimensions": {"total_input_context": 10},
             "rate_multiplier": 1.25,
             "is_free_tier": false,
@@ -391,12 +412,17 @@ mod tests {
             metadata,
             json!({
                 "trace_id": "trace-1",
+                "client_requested_stream": false,
+                "upstream_is_stream": true,
                 "provider_request_body_base64_bytes": 512,
                 "provider_response_body_base64_bytes": 1024,
                 "client_response_body_base64_bytes": 2048,
                 "billing_snapshot": {"status": "complete"},
                 "billing_snapshot_schema_version": "2.0",
                 "billing_snapshot_status": "complete",
+                "model_id": "model-1",
+                "global_model_id": "global-model-1",
+                "global_model_name": "gpt-5",
                 "dimensions": {"total_input_context": 10},
                 "rate_multiplier": 1.25,
                 "is_free_tier": false,
@@ -444,7 +470,12 @@ mod tests {
                 json!({
                     "request_id": "req-1",
                     "candidate_index": 0,
+                    "client_requested_stream": false,
+                    "upstream_is_stream": true,
                     "provider_id": "provider-1",
+                    "model_id": "model-1",
+                    "global_model_id": "global-model-1",
+                    "global_model_name": "gpt-5",
                     "billing_snapshot": {"status": "complete"}
                 })
                 .as_object()
@@ -456,6 +487,11 @@ mod tests {
         assert_eq!(
             metadata,
             json!({
+                "client_requested_stream": false,
+                "upstream_is_stream": true,
+                "model_id": "model-1",
+                "global_model_id": "global-model-1",
+                "global_model_name": "gpt-5",
                 "billing_snapshot": {"status": "complete"}
             })
         );

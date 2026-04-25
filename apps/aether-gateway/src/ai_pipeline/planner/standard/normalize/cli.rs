@@ -9,8 +9,8 @@ use crate::ai_pipeline::transport::antigravity::{
 };
 use crate::ai_pipeline::transport::apply_local_body_rules;
 use crate::ai_pipeline::transport::url::{
-    build_claude_messages_url, build_gemini_content_url, build_openai_chat_url,
-    build_openai_cli_url, build_passthrough_path_url,
+    build_claude_messages_url, build_openai_chat_url, build_openai_cli_url,
+    build_passthrough_path_url,
 };
 use crate::ai_pipeline::{
     apply_codex_openai_cli_special_body_edits, apply_openai_compact_special_body_edits,
@@ -155,12 +155,16 @@ pub(crate) fn build_cross_format_openai_cli_upstream_url(
                 &transport.endpoint.base_url,
                 parts.uri.query(),
             )),
-            RequestConversionKind::ToGeminiStandard => build_gemini_content_url(
-                &transport.endpoint.base_url,
-                mapped_model,
-                upstream_is_stream,
-                parts.uri.query(),
-            ),
+            RequestConversionKind::ToGeminiStandard => {
+                crate::ai_pipeline::build_provider_transport_request_url(
+                    transport,
+                    provider_api_format,
+                    Some(mapped_model),
+                    upstream_is_stream,
+                    parts.uri.query(),
+                    None,
+                )
+            }
         },
     }
 }

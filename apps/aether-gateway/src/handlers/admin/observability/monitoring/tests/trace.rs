@@ -77,6 +77,51 @@ async fn admin_monitoring_trace_request_returns_local_payload() {
 }
 
 #[tokio::test]
+async fn admin_monitoring_trace_final_status_prefers_failed_over_stale_pending() {
+    let request_candidates = Arc::new(InMemoryRequestCandidateRepository::seed(vec![
+        sample_candidate(
+            "cand-stale-pending",
+            "request-1",
+            0,
+            RequestCandidateStatus::Pending,
+            None,
+            None,
+            None,
+        ),
+        sample_candidate(
+            "cand-failed",
+            "request-1",
+            1,
+            RequestCandidateStatus::Failed,
+            Some(101),
+            Some(33),
+            Some(502),
+        ),
+    ]));
+    let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider()],
+        vec![sample_endpoint()],
+        vec![sample_key()],
+    ));
+    let state = AppState::new()
+        .expect("state should build")
+        .with_decision_trace_data_readers_for_tests(request_candidates, provider_catalog);
+    let context = request_context(http::Method::GET, "/api/admin/monitoring/trace/request-1");
+
+    let response = local_monitoring_response(&state, &context)
+        .await
+        .expect("handler should not error")
+        .expect("route should be handled locally");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
+    assert_eq!(payload["final_status"], json!("failed"));
+}
+
+#[tokio::test]
 async fn admin_monitoring_trace_request_keeps_format_conversion_disabled_candidates_visible() {
     let mut format_disabled_candidate = sample_candidate(
         "cand-format-disabled",

@@ -23,6 +23,8 @@ pub struct GeminiProviderState {
     finished: bool,
     text_parts: BTreeMap<usize, String>,
     reasoning_parts: BTreeMap<usize, String>,
+    reasoning_signatures: BTreeMap<usize, String>,
+    content_parts: BTreeMap<usize, CanonicalContentPart>,
     tool_calls: BTreeMap<usize, GeminiProviderToolState>,
 }
 
@@ -98,6 +100,13 @@ impl GeminiProviderState {
                 let Some(part_object) = part.as_object() else {
                     continue;
                 };
+                let reasoning_signature = part_object
+                    .get("thoughtSignature")
+                    .or_else(|| part_object.get("thought_signature"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned);
                 if let Some(text) = render_gemini_part_as_text(part_object) {
                     let is_reasoning = part_object
                         .get("thought")
@@ -127,11 +136,43 @@ impl GeminiProviderState {
                             },
                         });
                     }
+                    if is_reasoning {
+                        if let Some(signature) = reasoning_signature.as_ref() {
+                            let previous_signature =
+                                self.reasoning_signatures.entry(index).or_default();
+                            if previous_signature.as_str() != signature.as_str() {
+                                *previous_signature = signature.clone();
+                                out.push(CanonicalStreamFrame {
+                                    id: id.clone(),
+                                    model: model.clone(),
+                                    event: CanonicalStreamEvent::ReasoningSignature(
+                                        signature.clone(),
+                                    ),
+                                });
+                            }
+                        }
+                    }
                     continue;
                 }
                 let Some(function_call) =
                     part_object.get("functionCall").and_then(Value::as_object)
                 else {
+                    if let Some(content_part) = canonical_content_part_from_gemini_part(part_object)
+                    {
+                        let should_emit = self
+                            .content_parts
+                            .get(&index)
+                            .map(|existing| existing != &content_part)
+                            .unwrap_or(true);
+                        if should_emit {
+                            self.content_parts.insert(index, content_part.clone());
+                            out.push(CanonicalStreamFrame {
+                                id: id.clone(),
+                                model: model.clone(),
+                                event: CanonicalStreamEvent::ContentPart(content_part),
+                            });
+                        }
+                    }
                     continue;
                 };
                 let tool_state = self.tool_calls.entry(index).or_default();
@@ -349,6 +390,20 @@ impl GeminiClientEmitter {
             CanonicalStreamEvent::ReasoningDelta(text) => {
                 self.emit_candidate(vec![json!({ "text": text, "thought": true })], None, None)
             }
+            CanonicalStreamEvent::ReasoningSignature(signature) => self.emit_candidate(
+                vec![json!({
+                    "text": "",
+                    "thought": true,
+                    "thoughtSignature": signature,
+                })],
+                None,
+                None,
+            ),
+            CanonicalStreamEvent::ContentPart(part) => self.emit_candidate(
+                vec![gemini_part_from_canonical_content_part(part)],
+                None,
+                None,
+            ),
             CanonicalStreamEvent::ToolCallStart {
                 index,
                 call_id,
@@ -439,6 +494,197 @@ fn render_gemini_part_as_text(part: &Map<String, Value>) -> Option<String> {
     None
 }
 
+fn canonical_content_part_from_gemini_part(
+    part: &Map<String, Value>,
+) -> Option<CanonicalContentPart> {
+    if let Some(image_url) = extract_gemini_image_url(part) {
+        return Some(CanonicalContentPart::ImageUrl(image_url));
+    }
+    if let Some(inline_data) = part
+        .get("inlineData")
+        .or_else(|| part.get("inline_data"))
+        .and_then(Value::as_object)
+    {
+        let mime_type = inline_data
+            .get("mimeType")
+            .or_else(|| inline_data.get("mime_type"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        let data = inline_data
+            .get("data")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        if let Some(format) = mime_type.strip_prefix("audio/") {
+            return Some(CanonicalContentPart::Audio {
+                data: data.to_string(),
+                format: format.to_string(),
+            });
+        }
+        return Some(CanonicalContentPart::File {
+            file_data: Some(format!("data:{mime_type};base64,{data}")),
+            reference: None,
+            mime_type: Some(mime_type.to_string()),
+            filename: None,
+        });
+    }
+    let file_data = part
+        .get("fileData")
+        .or_else(|| part.get("file_data"))
+        .and_then(Value::as_object)?;
+    let reference = file_data
+        .get("fileUri")
+        .or_else(|| file_data.get("file_uri"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(CanonicalContentPart::File {
+        file_data: None,
+        reference: Some(reference.to_string()),
+        mime_type: file_data
+            .get("mimeType")
+            .or_else(|| file_data.get("mime_type"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        filename: None,
+    })
+}
+
+fn gemini_part_from_canonical_content_part(part: CanonicalContentPart) -> Value {
+    match part {
+        CanonicalContentPart::ImageUrl(url) => {
+            if let Some((mime_type, data)) = parse_data_url(url.as_str()) {
+                json!({
+                    "inlineData": {
+                        "mimeType": mime_type,
+                        "data": data,
+                    }
+                })
+            } else {
+                json!({
+                    "fileData": {
+                        "fileUri": url.clone(),
+                        "mimeType": guess_media_type_from_reference(url.as_str(), "image/jpeg"),
+                    }
+                })
+            }
+        }
+        CanonicalContentPart::File {
+            file_data,
+            reference,
+            mime_type,
+            ..
+        } => {
+            if let Some(file_data) = file_data {
+                if let Some((mime_type, data)) = parse_data_url(file_data.as_str()) {
+                    json!({
+                        "inlineData": {
+                            "mimeType": mime_type,
+                            "data": data,
+                        }
+                    })
+                } else {
+                    json!({ "text": "[File]" })
+                }
+            } else if let Some(reference) = reference {
+                json!({
+                    "fileData": {
+                        "fileUri": reference.clone(),
+                        "mimeType": mime_type.unwrap_or_else(|| {
+                            guess_media_type_from_reference(reference.as_str(), "application/octet-stream")
+                        }),
+                    }
+                })
+            } else {
+                json!({ "text": "[File]" })
+            }
+        }
+        CanonicalContentPart::Audio { data, format } => json!({
+            "inlineData": {
+                "mimeType": format!("audio/{format}"),
+                "data": data,
+            }
+        }),
+    }
+}
+
+fn extract_gemini_image_url(part: &Map<String, Value>) -> Option<String> {
+    let inline_data = part
+        .get("inlineData")
+        .or_else(|| part.get("inline_data"))
+        .and_then(Value::as_object)?;
+    if !inline_data
+        .get("mimeType")
+        .or_else(|| inline_data.get("mime_type"))
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.starts_with("image/"))
+    {
+        return None;
+    }
+    if let Some(data) = inline_data
+        .get("data")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let mime_type = inline_data
+            .get("mimeType")
+            .or_else(|| inline_data.get("mime_type"))
+            .and_then(Value::as_str)
+            .unwrap_or("image/jpeg");
+        return Some(format!("data:{mime_type};base64,{data}"));
+    }
+    let file_data = part
+        .get("fileData")
+        .or_else(|| part.get("file_data"))
+        .and_then(Value::as_object)?;
+    if !file_data
+        .get("mimeType")
+        .or_else(|| file_data.get("mime_type"))
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.starts_with("image/"))
+    {
+        return None;
+    }
+    file_data
+        .get("fileUri")
+        .or_else(|| file_data.get("file_uri"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn parse_data_url(value: &str) -> Option<(String, String)> {
+    let rest = value.strip_prefix("data:")?;
+    let (meta, data) = rest.split_once(',')?;
+    let mime_type = meta.strip_suffix(";base64")?;
+    if mime_type.trim().is_empty() || data.trim().is_empty() {
+        return None;
+    }
+    Some((mime_type.to_string(), data.to_string()))
+}
+
+fn guess_media_type_from_reference(reference: &str, default_mime: &str) -> String {
+    let normalized = reference
+        .split('?')
+        .next()
+        .unwrap_or(reference)
+        .to_ascii_lowercase();
+    if normalized.ends_with(".png") {
+        "image/png".to_string()
+    } else if normalized.ends_with(".gif") {
+        "image/gif".to_string()
+    } else if normalized.ends_with(".webp") {
+        "image/webp".to_string()
+    } else if normalized.ends_with(".jpg") || normalized.ends_with(".jpeg") {
+        "image/jpeg".to_string()
+    } else if normalized.ends_with(".pdf") {
+        "application/pdf".to_string()
+    } else {
+        default_mime.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,7 +709,7 @@ mod tests {
                         "finishReason": "RECITATION",
                         "content": {
                             "parts": [
-                                { "text": "reason", "thought": true },
+                                { "text": "reason", "thought": true, "thoughtSignature": "sig_123" },
                                 { "executableCode": { "language": "python", "code": "print(1)" } }
                             ]
                         }
@@ -481,6 +727,10 @@ mod tests {
         assert!(frames.iter().any(|frame| matches!(
             frame.event,
             CanonicalStreamEvent::ReasoningDelta(ref text) if text == "reason"
+        )));
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ReasoningSignature(ref signature) if signature == "sig_123"
         )));
         assert!(frames.iter().any(|frame| matches!(
             frame.event,
@@ -508,6 +758,15 @@ mod tests {
                 .emit(CanonicalStreamFrame {
                     id: "resp_123".to_string(),
                     model: "gemini-2.5-pro".to_string(),
+                    event: CanonicalStreamEvent::ReasoningSignature("sig_123".to_string()),
+                })
+                .expect("signature should encode"),
+        );
+        bytes.extend(
+            emitter
+                .emit(CanonicalStreamFrame {
+                    id: "resp_123".to_string(),
+                    model: "gemini-2.5-pro".to_string(),
                     event: CanonicalStreamEvent::Finish {
                         finish_reason: Some("stop".to_string()),
                         usage: Some(CanonicalUsage {
@@ -523,6 +782,55 @@ mod tests {
 
         let sse = String::from_utf8(bytes).expect("sse should be utf8");
         assert!(sse.contains("\"thought\":true"));
+        assert!(sse.contains("\"thoughtSignature\":\"sig_123\""));
         assert!(sse.contains("\"finishReason\":\"STOP\""));
+    }
+
+    #[test]
+    fn gemini_provider_state_parses_inline_image_parts() {
+        let mut state = GeminiProviderState::default();
+        let report_context = json!({});
+        let frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "responseId": "resp_media_123",
+                    "modelVersion": "gemini-2.5-pro",
+                    "candidates": [{
+                        "index": 0,
+                        "content": {
+                            "parts": [
+                                { "inlineData": { "mimeType": "image/png", "data": "iVBORw0KGgo=" } }
+                            ]
+                        }
+                    }]
+                })),
+            )
+            .expect("chunk should parse");
+
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ContentPart(CanonicalContentPart::ImageUrl(ref url))
+                if url == "data:image/png;base64,iVBORw0KGgo="
+        )));
+    }
+
+    #[test]
+    fn gemini_client_emitter_emits_inline_image_parts() {
+        let mut emitter = GeminiClientEmitter::default();
+        let bytes = emitter
+            .emit(CanonicalStreamFrame {
+                id: "resp_img_123".to_string(),
+                model: "gemini-2.5-pro".to_string(),
+                event: CanonicalStreamEvent::ContentPart(CanonicalContentPart::ImageUrl(
+                    "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                )),
+            })
+            .expect("image should encode");
+
+        let sse = String::from_utf8(bytes).expect("sse should be utf8");
+        assert!(
+            sse.contains("\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}")
+        );
     }
 }

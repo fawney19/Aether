@@ -80,6 +80,18 @@ pub fn convert_openai_cli_response_to_openai_chat(
                                     }));
                                     has_non_text_content = true;
                                 }
+                            } else if part_type == "file" {
+                                if let Some(file_part) = extract_openai_response_file(part_object) {
+                                    content_parts.push(file_part);
+                                    has_non_text_content = true;
+                                }
+                            } else if part_type == "input_audio" {
+                                if let Some(audio_part) =
+                                    extract_openai_response_input_audio(part_object)
+                                {
+                                    content_parts.push(audio_part);
+                                    has_non_text_content = true;
+                                }
                             }
                         }
                     }
@@ -298,6 +310,52 @@ fn extract_openai_response_image(
     Some((image_url, detail))
 }
 
+fn extract_openai_response_file(part_object: &Map<String, Value>) -> Option<Value> {
+    let file_object = part_object
+        .get("file")
+        .and_then(Value::as_object)
+        .unwrap_or(part_object);
+    let mut file = Map::new();
+    for key in ["file_data", "file_id", "filename"] {
+        if let Some(value) = file_object
+            .get(key)
+            .cloned()
+            .filter(|value| !value.is_null())
+        {
+            file.insert(key.to_string(), value);
+        }
+    }
+    if file.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "type": "file",
+        "file": Value::Object(file),
+    }))
+}
+
+fn extract_openai_response_input_audio(part_object: &Map<String, Value>) -> Option<Value> {
+    let audio_object = part_object
+        .get("input_audio")
+        .and_then(Value::as_object)
+        .unwrap_or(part_object);
+    let data = audio_object
+        .get("data")
+        .cloned()
+        .filter(|value| value.as_str().is_some_and(|value| !value.trim().is_empty()))?;
+    let format = audio_object
+        .get("format")
+        .cloned()
+        .filter(|value| value.as_str().is_some_and(|value| !value.trim().is_empty()))?;
+    Some(json!({
+        "type": "input_audio",
+        "input_audio": {
+            "data": data,
+            "format": format,
+        }
+    }))
+}
+
 fn offset_annotation_indices(annotation: &Value, offset: i64) -> Value {
     let Some(object) = annotation.as_object() else {
         return annotation.clone();
@@ -372,6 +430,65 @@ mod tests {
         assert_eq!(
             converted["usage"]["completion_tokens_details"],
             json!({"reasoning_tokens": 1})
+        );
+    }
+
+    #[test]
+    fn preserves_file_and_audio_parts_when_converting_to_chat() {
+        let response = json!({
+            "id": "resp_mm_123",
+            "object": "response",
+            "model": "gpt-5",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    { "type": "output_text", "text": "Attached." },
+                    {
+                        "type": "file",
+                        "file": {
+                            "file_data": "data:application/pdf;base64,JVBERi0x",
+                            "filename": "report.pdf"
+                        }
+                    },
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": "SUQz",
+                            "format": "mp3"
+                        }
+                    }
+                ]
+            }],
+            "usage": {
+                "input_tokens": 4,
+                "output_tokens": 2,
+                "total_tokens": 6
+            }
+        });
+
+        let converted = convert_openai_cli_response_to_openai_chat(&response, &json!({}))
+            .expect("responses response should convert to chat");
+
+        assert_eq!(
+            converted["choices"][0]["message"]["content"],
+            json!([
+                { "type": "text", "text": "Attached." },
+                {
+                    "type": "file",
+                    "file": {
+                        "file_data": "data:application/pdf;base64,JVBERi0x",
+                        "filename": "report.pdf"
+                    }
+                },
+                {
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": "SUQz",
+                        "format": "mp3"
+                    }
+                }
+            ])
         );
     }
 }

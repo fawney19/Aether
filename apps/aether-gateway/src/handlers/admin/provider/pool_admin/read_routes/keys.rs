@@ -1,13 +1,14 @@
 use super::{
     admin_pool_provider_id_from_path, admin_provider_pool_config, build_admin_pool_error_response,
-    parse_admin_pool_page, parse_admin_pool_page_size, parse_admin_pool_search,
-    parse_admin_pool_status_filter, pool_payloads, pool_selection,
+    parse_admin_pool_page, parse_admin_pool_page_size, parse_admin_pool_quick_selectors,
+    parse_admin_pool_search, parse_admin_pool_status_filter, pool_payloads, pool_selection,
     read_admin_provider_pool_cooldown_key_ids, read_admin_provider_pool_runtime_state,
     AdminProviderPoolRuntimeState, ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
     ADMIN_POOL_PROVIDER_CATALOG_READER_UNAVAILABLE_DETAIL,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::GatewayError;
+use aether_admin::provider::pool as admin_provider_pool_pure;
 use axum::{
     body::Body,
     http,
@@ -53,6 +54,9 @@ pub(super) async fn build_admin_pool_list_keys_response(
         }
     };
     let search = parse_admin_pool_search(query).map(|value| value.to_ascii_lowercase());
+    let quick_selectors = admin_provider_pool_pure::admin_pool_sanitize_quick_selectors(
+        parse_admin_pool_quick_selectors(query),
+    );
     let status = match parse_admin_pool_status_filter(query) {
         Ok(value) => value,
         Err(detail) => {
@@ -93,10 +97,63 @@ pub(super) async fn build_admin_pool_list_keys_response(
         };
         if let Some(keyword) = search.as_ref() {
             keys.retain(|key| {
-                key.name.to_ascii_lowercase().contains(keyword)
-                    || key.id.to_ascii_lowercase().contains(keyword)
+                pool_selection::admin_pool_matches_search(
+                    state,
+                    key,
+                    &provider.provider_type,
+                    Some(keyword),
+                )
             });
         }
+        if !quick_selectors.is_empty() {
+            keys.retain(|key| {
+                quick_selectors.iter().all(|selector| {
+                    pool_selection::admin_pool_matches_quick_selector(
+                        state,
+                        key,
+                        &provider.provider_type,
+                        selector,
+                    )
+                })
+            });
+        }
+        pool_selection::admin_pool_sort_keys(&mut keys);
+        let total = keys.len();
+        let keys = keys
+            .into_iter()
+            .skip(page_offset)
+            .take(page_size)
+            .collect::<Vec<_>>();
+        (keys, total)
+    } else if !quick_selectors.is_empty() {
+        let mut keys = state
+            .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
+            .await?
+            .into_iter()
+            .filter(|key| match status.as_str() {
+                "active" => key.is_active,
+                "inactive" => !key.is_active,
+                _ => true,
+            })
+            .filter(|key| {
+                pool_selection::admin_pool_matches_search(
+                    state,
+                    key,
+                    &provider.provider_type,
+                    search.as_deref(),
+                )
+            })
+            .filter(|key| {
+                quick_selectors.iter().all(|selector| {
+                    pool_selection::admin_pool_matches_quick_selector(
+                        state,
+                        key,
+                        &provider.provider_type,
+                        selector,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
         pool_selection::admin_pool_sort_keys(&mut keys);
         let total = keys.len();
         let keys = keys
@@ -124,6 +181,9 @@ pub(super) async fn build_admin_pool_list_keys_response(
     };
 
     let key_ids = keys.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
+    let endpoints = state
+        .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&provider.id))
+        .await?;
     let runtime = match (state.redis_kv_runner(), pool_config.as_ref()) {
         (Some(runner), Some(pool_config)) if !key_ids.is_empty() => {
             read_admin_provider_pool_runtime_state(
@@ -143,6 +203,7 @@ pub(super) async fn build_admin_pool_list_keys_response(
             pool_payloads::build_admin_pool_key_payload(
                 state,
                 &provider.provider_type,
+                &endpoints,
                 &key,
                 &runtime,
                 pool_config.clone(),

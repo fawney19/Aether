@@ -227,15 +227,21 @@ pub fn admin_usage_matches_api_format(
 }
 
 pub fn admin_usage_is_failed(item: &StoredRequestUsageAudit) -> bool {
-    let status = item.status.trim();
-    if !status.is_empty() {
-        return status.eq_ignore_ascii_case("failed");
-    }
-    item.status_code.is_some_and(|value| value >= 400)
+    let has_failure_signal = item.status_code.is_some_and(|value| value >= 400)
         || item
             .error_message
             .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
+            .is_some_and(|value| !value.trim().is_empty());
+    let status = item.status.trim().to_ascii_lowercase();
+    if !status.is_empty() {
+        return match status.as_str() {
+            "completed" | "cancelled" => false,
+            "pending" | "streaming" => has_failure_signal,
+            "failed" => true,
+            _ => false,
+        };
+    }
+    has_failure_signal
 }
 
 pub fn admin_usage_has_fallback(item: &StoredRequestUsageAudit) -> bool {
@@ -279,6 +285,9 @@ fn admin_usage_strip_routing_metadata(metadata: &mut serde_json::Map<String, Val
     metadata.remove("candidate_id");
     metadata.remove("candidate_index");
     metadata.remove("key_name");
+    metadata.remove("model_id");
+    metadata.remove("global_model_id");
+    metadata.remove("global_model_name");
     metadata.remove("planner_kind");
     metadata.remove("route_family");
     metadata.remove("route_kind");
@@ -290,6 +299,9 @@ fn admin_usage_strip_settlement_metadata(metadata: &mut serde_json::Map<String, 
     metadata.remove("billing_snapshot");
     metadata.remove("billing_snapshot_schema_version");
     metadata.remove("billing_snapshot_status");
+    metadata.remove("settlement_snapshot");
+    metadata.remove("settlement_snapshot_schema_version");
+    metadata.remove("billing_dimensions");
     metadata.remove("rate_multiplier");
     metadata.remove("is_free_tier");
     metadata.remove("input_price_per_1m");
@@ -344,6 +356,36 @@ fn admin_usage_body_capture_json(item: &StoredRequestUsageAudit) -> Value {
 
 fn admin_usage_settlement_json(item: &StoredRequestUsageAudit) -> Value {
     let mut settlement = serde_json::Map::new();
+    if let Some(snapshot) = item
+        .request_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("settlement_snapshot"))
+        .cloned()
+    {
+        settlement.insert("settlement_snapshot".to_string(), snapshot);
+    }
+    if let Some(schema_version) = item
+        .request_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("settlement_snapshot_schema_version"))
+        .and_then(Value::as_str)
+    {
+        settlement.insert(
+            "settlement_snapshot_schema_version".to_string(),
+            json!(schema_version),
+        );
+    }
+    if let Some(dimensions) = item
+        .request_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("billing_dimensions"))
+        .cloned()
+    {
+        settlement.insert("billing_dimensions".to_string(), dimensions);
+    }
     if let Some(snapshot) = item
         .request_metadata
         .as_ref()
@@ -444,6 +486,174 @@ pub fn admin_usage_provider_key_name(
         .or_else(|| item.routing_key_name().map(ToOwned::to_owned))
 }
 
+fn admin_usage_request_body_stream_flag(item: &StoredRequestUsageAudit) -> Option<bool> {
+    item.request_body
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|body| body.get("stream"))
+        .and_then(Value::as_bool)
+}
+
+fn admin_usage_api_format_defaults_to_non_stream(item: &StoredRequestUsageAudit) -> bool {
+    let api_format = item
+        .api_format
+        .as_deref()
+        .or(item.endpoint_api_format.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    matches!(
+        api_format,
+        Some(value)
+            if value.eq_ignore_ascii_case("openai:chat")
+                || value.eq_ignore_ascii_case("openai:cli")
+                || value.eq_ignore_ascii_case("openai:compact")
+                || value.eq_ignore_ascii_case("openai:image")
+                || value.eq_ignore_ascii_case("claude:chat")
+                || value.eq_ignore_ascii_case("claude:cli")
+    )
+}
+
+fn admin_usage_request_body_implies_default_non_stream(item: &StoredRequestUsageAudit) -> bool {
+    let Some(body) = item.request_body.as_ref().and_then(Value::as_object) else {
+        return false;
+    };
+    !body.contains_key("stream") && admin_usage_api_format_defaults_to_non_stream(item)
+}
+
+fn admin_usage_headers_stream_flag(headers: Option<&Value>) -> Option<bool> {
+    let object = headers.and_then(Value::as_object)?;
+    let raw = object
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("content-type"))
+        .and_then(|(_, value)| match value {
+            Value::String(text) => Some(text.as_str()),
+            Value::Array(values) => values.iter().find_map(Value::as_str),
+            _ => None,
+        })?
+        .trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let normalized = raw.to_ascii_lowercase();
+    Some(
+        normalized.contains("event-stream")
+            || normalized.contains("eventstream")
+            || normalized.contains("x-ndjson"),
+    )
+}
+
+fn admin_usage_body_is_sse_capture(value: Option<&Value>) -> bool {
+    let Some(object) = value.and_then(Value::as_object) else {
+        return false;
+    };
+    object.get("chunks").and_then(Value::as_array).is_some()
+        && object
+            .get("metadata")
+            .and_then(Value::as_object)
+            .and_then(|metadata| metadata.get("stream"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+fn admin_usage_infer_client_stream_from_captured_bodies(
+    item: &StoredRequestUsageAudit,
+) -> Option<bool> {
+    let provider_stream = admin_usage_body_is_sse_capture(item.response_body.as_ref());
+    let client_stream = admin_usage_body_is_sse_capture(item.client_response_body.as_ref());
+    if client_stream {
+        Some(true)
+    } else if provider_stream && item.client_response_body.is_some() {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn admin_usage_infer_upstream_stream_from_captured_bodies(
+    item: &StoredRequestUsageAudit,
+) -> Option<bool> {
+    let provider_stream = admin_usage_body_is_sse_capture(item.response_body.as_ref());
+    let client_stream = admin_usage_body_is_sse_capture(item.client_response_body.as_ref());
+    if provider_stream {
+        Some(true)
+    } else if client_stream && item.response_body.is_some() {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+pub fn admin_usage_client_is_stream(item: &StoredRequestUsageAudit) -> bool {
+    item.request_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("client_requested_stream"))
+        .and_then(Value::as_bool)
+        .or_else(|| admin_usage_request_body_stream_flag(item))
+        .or_else(|| admin_usage_headers_stream_flag(item.client_response_headers.as_ref()))
+        .or_else(|| admin_usage_request_body_implies_default_non_stream(item).then_some(false))
+        .or_else(|| admin_usage_infer_client_stream_from_captured_bodies(item))
+        .unwrap_or(item.is_stream)
+}
+
+fn admin_usage_upstream_is_stream(item: &StoredRequestUsageAudit) -> bool {
+    item.request_metadata
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("upstream_is_stream"))
+        .and_then(Value::as_bool)
+        .or_else(|| admin_usage_headers_stream_flag(item.response_headers.as_ref()))
+        .or_else(|| admin_usage_infer_upstream_stream_from_captured_bodies(item))
+        .unwrap_or(item.is_stream)
+}
+
+fn admin_usage_active_request_json(
+    item: &StoredRequestUsageAudit,
+    api_key_name: Option<String>,
+    provider_key_name: Option<String>,
+) -> Value {
+    let cache_creation_input_tokens = admin_usage_cache_creation_tokens(item);
+    let client_is_stream = admin_usage_client_is_stream(item);
+    let upstream_is_stream = admin_usage_upstream_is_stream(item);
+    let mut value = json!({
+        "id": item.id,
+        "status": item.status,
+        "input_tokens": item.input_tokens,
+        "effective_input_tokens": admin_usage_effective_input_tokens(item),
+        "output_tokens": item.output_tokens,
+        "cache_creation_input_tokens": cache_creation_input_tokens,
+        "cache_creation_ephemeral_5m_input_tokens": item.cache_creation_ephemeral_5m_input_tokens,
+        "cache_creation_ephemeral_1h_input_tokens": item.cache_creation_ephemeral_1h_input_tokens,
+        "cache_read_input_tokens": item.cache_read_input_tokens,
+        "cost": round_to(item.total_cost_usd, 6),
+        "actual_cost": round_to(item.actual_total_cost_usd, 6),
+        "response_time_ms": item.response_time_ms,
+        "first_byte_time_ms": item.first_byte_time_ms,
+        "status_code": item.status_code,
+        "error_message": item.error_message,
+        "provider": item.provider_name,
+        "api_key_name": api_key_name,
+        "provider_key_name": provider_key_name,
+        "is_stream": item.is_stream,
+        "upstream_is_stream": upstream_is_stream,
+        "client_requested_stream": client_is_stream,
+        "client_is_stream": client_is_stream,
+        "has_fallback": admin_usage_has_fallback(item),
+    });
+    if let Some(api_format) = item.api_format.as_ref() {
+        value["api_format"] = json!(api_format);
+    }
+    if let Some(endpoint_api_format) = item.endpoint_api_format.as_ref() {
+        value["endpoint_api_format"] = json!(endpoint_api_format);
+    }
+    value["has_format_conversion"] = json!(item.has_format_conversion);
+    if let Some(target_model) = item.target_model.as_ref() {
+        value["target_model"] = json!(target_model);
+    }
+    value
+}
+
 pub fn admin_usage_record_json(
     item: &StoredRequestUsageAudit,
     users_by_id: &BTreeMap<String, StoredUserSummary>,
@@ -469,8 +679,10 @@ pub fn admin_usage_record_json(
     let user_email = user
         .and_then(|value| value.email.clone())
         .unwrap_or_else(|| "已删除用户".to_string());
+    let client_is_stream = admin_usage_client_is_stream(item);
+    let upstream_is_stream = admin_usage_upstream_is_stream(item);
 
-    json!({
+    let mut payload = json!({
         "id": item.id,
         "user_id": item.user_id,
         "user_email": user_email,
@@ -497,7 +709,6 @@ pub fn admin_usage_record_json(
         "response_time_ms": item.response_time_ms,
         "first_byte_time_ms": item.first_byte_time_ms,
         "created_at": unix_secs_to_rfc3339(item.created_at_unix_ms),
-        "is_stream": item.is_stream,
         "input_price_per_1m": input_price_per_1m,
         "output_price_per_1m": output_price_per_1m,
         "cache_creation_price_per_1m": cache_creation_price_per_1m,
@@ -515,7 +726,18 @@ pub fn admin_usage_record_json(
         "api_key_name": api_key_name,
         "provider_key_name": provider_key_name,
         "model_version": Value::Null,
-    })
+    });
+    let object = payload
+        .as_object_mut()
+        .expect("admin usage record payload should be an object");
+    object.insert("is_stream".to_string(), json!(item.is_stream));
+    object.insert("upstream_is_stream".to_string(), json!(upstream_is_stream));
+    object.insert(
+        "client_requested_stream".to_string(),
+        json!(client_is_stream),
+    );
+    object.insert("client_is_stream".to_string(), json!(client_is_stream));
+    payload
 }
 
 pub fn admin_usage_total_tokens(item: &StoredRequestUsageAudit) -> u64 {
@@ -608,6 +830,17 @@ fn admin_usage_routing_json(
         &mut routing,
         "key_name",
         provider_key_name.or_else(|| item.routing_key_name()),
+    );
+    maybe_insert_string_field(&mut routing, "model_id", item.routing_model_id());
+    maybe_insert_string_field(
+        &mut routing,
+        "global_model_id",
+        item.routing_global_model_id(),
+    );
+    maybe_insert_string_field(
+        &mut routing,
+        "global_model_name",
+        item.routing_global_model_name(),
     );
     maybe_insert_string_field(&mut routing, "planner_kind", item.routing_planner_kind());
     maybe_insert_string_field(&mut routing, "route_family", item.routing_route_family());
@@ -1250,12 +1483,13 @@ pub fn admin_usage_resolve_request_capture_body(
     body_override: Option<Value>,
 ) -> Option<Value> {
     let resolved_model = item.model.clone();
+    let client_is_stream = admin_usage_client_is_stream(item);
     let mut request_body = body_override.or_else(|| item.request_body.clone())?;
     if let Some(body) = request_body.as_object_mut() {
         body.entry("model".to_string())
             .or_insert_with(|| json!(resolved_model));
         if !body.contains_key("stream") {
-            body.insert("stream".to_string(), json!(item.is_stream));
+            body.insert("stream".to_string(), json!(client_is_stream));
         }
         if let Some(target_model) = item
             .target_model
@@ -1419,37 +1653,7 @@ pub fn build_admin_usage_active_requests_response(
             let provider_key_name = admin_usage_provider_key_name(item, provider_key_names);
             let api_key_name =
                 admin_usage_api_key_name(item, api_key_names, auth_api_key_reader_available);
-            let cache_creation_input_tokens = admin_usage_cache_creation_tokens(item);
-            let mut value = json!({
-                "id": item.id,
-                "status": item.status,
-                "input_tokens": item.input_tokens,
-                "effective_input_tokens": admin_usage_effective_input_tokens(item),
-                "output_tokens": item.output_tokens,
-                "cache_creation_input_tokens": cache_creation_input_tokens,
-                "cache_creation_ephemeral_5m_input_tokens": item.cache_creation_ephemeral_5m_input_tokens,
-                "cache_creation_ephemeral_1h_input_tokens": item.cache_creation_ephemeral_1h_input_tokens,
-                "cache_read_input_tokens": item.cache_read_input_tokens,
-                "cost": round_to(item.total_cost_usd, 6),
-                "actual_cost": round_to(item.actual_total_cost_usd, 6),
-                "response_time_ms": item.response_time_ms,
-                "first_byte_time_ms": item.first_byte_time_ms,
-                "provider": item.provider_name,
-                "api_key_name": api_key_name,
-                "provider_key_name": provider_key_name,
-                "has_fallback": admin_usage_has_fallback(item),
-            });
-            if let Some(api_format) = item.api_format.as_ref() {
-                value["api_format"] = json!(api_format);
-            }
-            if let Some(endpoint_api_format) = item.endpoint_api_format.as_ref() {
-                value["endpoint_api_format"] = json!(endpoint_api_format);
-            }
-            value["has_format_conversion"] = json!(item.has_format_conversion);
-            if let Some(target_model) = item.target_model.as_ref() {
-                value["target_model"] = json!(target_model);
-            }
-            value
+            admin_usage_active_request_json(item, api_key_name, provider_key_name)
         })
         .collect();
 
@@ -1674,9 +1878,11 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        admin_usage_has_body_value, admin_usage_has_fallback, admin_usage_is_failed,
-        admin_usage_matches_search, admin_usage_matches_status, admin_usage_matches_username,
-        admin_usage_record_json, build_admin_usage_detail_payload,
+        admin_usage_active_request_json, admin_usage_client_is_stream, admin_usage_has_body_value,
+        admin_usage_has_fallback, admin_usage_is_failed, admin_usage_matches_search,
+        admin_usage_matches_status, admin_usage_matches_username, admin_usage_record_json,
+        admin_usage_resolve_request_capture_body, admin_usage_upstream_is_stream,
+        build_admin_usage_detail_payload,
     };
     use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UsageBodyField};
 
@@ -1739,11 +1945,213 @@ mod tests {
     }
 
     #[test]
+    fn client_requested_stream_prefers_request_metadata_flag() {
+        let item = StoredRequestUsageAudit {
+            is_stream: true,
+            request_metadata: Some(json!({
+                "client_requested_stream": false
+            })),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        assert!(!admin_usage_client_is_stream(&item));
+
+        let record = admin_usage_record_json(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+        );
+        assert_eq!(record["is_stream"], true);
+        assert_eq!(record["upstream_is_stream"], true);
+        assert_eq!(record["client_requested_stream"], false);
+        assert_eq!(record["client_is_stream"], false);
+    }
+
+    #[test]
+    fn client_requested_stream_falls_back_to_request_body_stream_flag() {
+        let item = StoredRequestUsageAudit {
+            is_stream: true,
+            request_body: Some(json!({
+                "model": "gpt-5.4",
+                "stream": false
+            })),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        assert!(!admin_usage_client_is_stream(&item));
+
+        let active = admin_usage_active_request_json(&item, None, None);
+        assert_eq!(active["is_stream"], true);
+        assert_eq!(active["upstream_is_stream"], true);
+        assert_eq!(active["client_requested_stream"], false);
+        assert_eq!(active["client_is_stream"], false);
+    }
+
+    #[test]
+    fn client_requested_stream_defaults_to_non_stream_for_openai_cli_request_body_without_flag() {
+        let item = StoredRequestUsageAudit {
+            is_stream: true,
+            api_format: Some("openai:cli".to_string()),
+            request_body: Some(json!({
+                "model": "gpt-5.4",
+                "input": [{"role": "user", "content": "hi"}],
+                "store": false
+            })),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        assert!(!admin_usage_client_is_stream(&item));
+
+        let record = admin_usage_record_json(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+        );
+        assert_eq!(record["is_stream"], true);
+        assert_eq!(record["upstream_is_stream"], true);
+        assert_eq!(record["client_requested_stream"], false);
+        assert_eq!(record["client_is_stream"], false);
+    }
+
+    #[test]
+    fn upstream_stream_prefers_request_metadata_flag() {
+        let item = StoredRequestUsageAudit {
+            is_stream: false,
+            request_metadata: Some(json!({
+                "client_requested_stream": false,
+                "upstream_is_stream": true
+            })),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        let record = admin_usage_record_json(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+        );
+        assert_eq!(record["is_stream"], false);
+        assert_eq!(record["upstream_is_stream"], true);
+        assert_eq!(record["client_requested_stream"], false);
+        assert_eq!(record["client_is_stream"], false);
+    }
+
+    #[test]
+    fn stream_modes_fall_back_to_captured_response_bodies_when_request_metadata_is_missing() {
+        let item = StoredRequestUsageAudit {
+            is_stream: true,
+            response_body: Some(json!({
+                "chunks": [
+                    {"type": "response.created"},
+                    {"type": "response.output_text.delta", "delta": "Hello"}
+                ],
+                "metadata": {
+                    "stream": true,
+                    "stored_chunks": 2,
+                    "total_chunks": 2
+                }
+            })),
+            client_response_body: Some(json!({
+                "id": "resp-1",
+                "object": "response",
+                "status": "completed",
+                "output": []
+            })),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        assert!(!admin_usage_client_is_stream(&item));
+        assert!(admin_usage_upstream_is_stream(&item));
+
+        let record = admin_usage_record_json(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+        );
+        assert_eq!(record["is_stream"], true);
+        assert_eq!(record["upstream_is_stream"], true);
+        assert_eq!(record["client_requested_stream"], false);
+        assert_eq!(record["client_is_stream"], false);
+    }
+
+    #[test]
+    fn stream_modes_fall_back_to_captured_response_headers_when_bodies_are_detached() {
+        let item = StoredRequestUsageAudit {
+            is_stream: true,
+            response_headers: Some(json!({
+                "content-type": "text/event-stream; charset=utf-8"
+            })),
+            client_response_headers: Some(json!({
+                "content-type": "application/json"
+            })),
+            response_body_ref: Some("usage://request/req-1/response_body".to_string()),
+            client_response_body_ref: Some(
+                "usage://request/req-1/client_response_body".to_string(),
+            ),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        assert!(!admin_usage_client_is_stream(&item));
+        assert!(admin_usage_upstream_is_stream(&item));
+
+        let record = admin_usage_record_json(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+        );
+        assert_eq!(record["is_stream"], true);
+        assert_eq!(record["upstream_is_stream"], true);
+        assert_eq!(record["client_requested_stream"], false);
+        assert_eq!(record["client_is_stream"], false);
+    }
+
+    #[test]
+    fn replay_body_defaults_stream_to_client_requested_mode() {
+        let item = StoredRequestUsageAudit {
+            is_stream: true,
+            request_body: Some(json!({
+                "model": "gpt-5.4",
+                "input": "hello"
+            })),
+            request_metadata: Some(json!({
+                "client_requested_stream": false
+            })),
+            ..sample_usage("completed", Some(200), None)
+        };
+
+        let body = admin_usage_resolve_request_capture_body(&item, None)
+            .expect("replay body should resolve");
+        assert_eq!(body["stream"], false);
+    }
+
+    #[test]
     fn legacy_failure_signals_still_work_when_status_is_missing() {
         let item = StoredRequestUsageAudit {
             status: String::new(),
             ..sample_usage("completed", Some(429), Some("rate limited"))
         };
+        assert!(admin_usage_is_failed(&item));
+        assert!(admin_usage_matches_status(&item, Some("failed")));
+    }
+
+    #[test]
+    fn active_status_with_failure_signal_counts_as_failed() {
+        let item = sample_usage("pending", Some(503), Some("upstream failed"));
+
         assert!(admin_usage_is_failed(&item));
         assert!(admin_usage_matches_status(&item, Some("failed")));
     }
@@ -1964,6 +2372,17 @@ mod tests {
                 "cache_creation_price_per_1m": 3.75,
                 "cache_read_price_per_1m": 0.30,
                 "price_per_request": 0.02,
+                "settlement_snapshot_schema_version": "3.0",
+                "billing_dimensions": {
+                    "input_tokens": 35,
+                    "total_input_context": 42
+                },
+                "settlement_snapshot": {
+                    "schema_version": "3.0",
+                    "pricing_snapshot": {
+                        "pricing_source": "provider_override"
+                    }
+                },
                 "billing_snapshot": {
                     "resolved_variables": {
                         "output_price_per_1m": 11.0
@@ -1994,6 +2413,18 @@ mod tests {
             payload["settlement"]["billing_snapshot"]["resolved_variables"]["output_price_per_1m"],
             11.0
         );
+        assert_eq!(
+            payload["settlement"]["settlement_snapshot_schema_version"],
+            "3.0"
+        );
+        assert_eq!(
+            payload["settlement"]["settlement_snapshot"]["pricing_snapshot"]["pricing_source"],
+            "provider_override"
+        );
+        assert_eq!(
+            payload["settlement"]["billing_dimensions"]["input_tokens"],
+            35
+        );
         assert_eq!(payload["settlement"]["billing_snapshot_status"], "resolved");
         assert_eq!(payload["settlement"]["rate_multiplier"], 0.5);
         assert_eq!(payload["settlement"]["is_free_tier"], false);
@@ -2006,6 +2437,9 @@ mod tests {
         assert!(payload["metadata"]["billing_snapshot"].is_null());
         assert!(payload["metadata"]["billing_snapshot_schema_version"].is_null());
         assert!(payload["metadata"]["billing_snapshot_status"].is_null());
+        assert!(payload["metadata"]["settlement_snapshot"].is_null());
+        assert!(payload["metadata"]["settlement_snapshot_schema_version"].is_null());
+        assert!(payload["metadata"]["billing_dimensions"].is_null());
         assert!(payload["metadata"]["rate_multiplier"].is_null());
         assert!(payload["metadata"]["is_free_tier"].is_null());
         assert!(payload["metadata"]["input_price_per_1m"].is_null());
@@ -2034,7 +2468,10 @@ mod tests {
     fn detail_payload_exposes_typed_routing_section() {
         let item = StoredRequestUsageAudit {
             request_metadata: Some(json!({
-                "trace_id": "trace-routing-detail"
+                "trace_id": "trace-routing-detail",
+                "model_id": "model-1",
+                "global_model_id": "global-model-1",
+                "global_model_name": "gpt-5"
             })),
             candidate_id: Some("cand-1".to_string()),
             candidate_index: Some(2),
@@ -2062,6 +2499,9 @@ mod tests {
         assert_eq!(payload["routing"]["candidate_id"], "cand-1");
         assert_eq!(payload["routing"]["candidate_index"], 2);
         assert_eq!(payload["routing"]["key_name"], "resolved-primary");
+        assert_eq!(payload["routing"]["model_id"], "model-1");
+        assert_eq!(payload["routing"]["global_model_id"], "global-model-1");
+        assert_eq!(payload["routing"]["global_model_name"], "gpt-5");
         assert_eq!(payload["routing"]["planner_kind"], "claude_cli_sync");
         assert_eq!(payload["routing"]["route_family"], "claude");
         assert_eq!(payload["routing"]["route_kind"], "cli");
@@ -2076,6 +2516,9 @@ mod tests {
         assert!(payload["metadata"]["candidate_id"].is_null());
         assert!(payload["metadata"]["candidate_index"].is_null());
         assert!(payload["metadata"]["key_name"].is_null());
+        assert!(payload["metadata"]["model_id"].is_null());
+        assert!(payload["metadata"]["global_model_id"].is_null());
+        assert!(payload["metadata"]["global_model_name"].is_null());
         assert!(payload["metadata"]["planner_kind"].is_null());
         assert!(payload["metadata"]["trace_id"].is_null());
         assert!(payload["metadata"]["route_family"].is_null());

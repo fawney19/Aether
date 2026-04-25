@@ -2115,6 +2115,7 @@ async fn gateway_executes_antigravity_gemini_cli_sync_via_local_decision_gate_af
     assert_eq!(
         response_json,
         json!({
+            "responseId": "resp-local-stream",
             "_v1internal_response_id": "resp_antigravity_cli_local_sync_123",
             "candidates": [{
                 "content": {

@@ -14,6 +14,7 @@ use crate::{AppState, GatewayError, GatewayFallbackReason};
 use super::{
     build_direct_plan_bypass_cache_key, execute_stream_plan_and_reports,
     maybe_execute_stream_via_local_decision, maybe_execute_stream_via_local_gemini_files_decision,
+    maybe_execute_stream_via_local_image_decision,
     maybe_execute_stream_via_local_openai_cli_decision,
     maybe_execute_stream_via_local_same_format_provider_decision,
     maybe_execute_stream_via_local_standard_decision, maybe_execute_stream_via_plan_fallback,
@@ -36,7 +37,7 @@ pub(crate) async fn maybe_execute_via_stream_decision_path(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    if !is_matching_stream_request(plan_kind, parts, &body_json) {
+    if !is_matching_stream_request(plan_kind, parts, &body_json, body_base64.as_deref()) {
         return Ok(LocalExecutionRequestOutcome::NoPath);
     }
 
@@ -59,6 +60,24 @@ pub(crate) async fn maybe_execute_via_stream_decision_path(
     }
 
     if supports_stream_scheduler_decision_kind(plan_kind) {
+        match maybe_execute_stream_via_local_image_decision(
+            state,
+            parts,
+            &body_json,
+            body_base64.as_deref(),
+            trace_id,
+            decision,
+            plan_kind,
+        )
+        .await?
+        {
+            LocalExecutionRequestOutcome::Responded(response) => {
+                return Ok(LocalExecutionRequestOutcome::Responded(response));
+            }
+            LocalExecutionRequestOutcome::Exhausted(outcome) => exhausted = Some(outcome),
+            LocalExecutionRequestOutcome::NoPath => {}
+        }
+
         match maybe_execute_stream_via_local_decision(
             state, parts, trace_id, decision, &body_json, plan_kind,
         )

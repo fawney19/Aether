@@ -542,6 +542,12 @@ const ADMIN_API_FORMAT_DEFINITIONS: &[AdminApiFormatDefinition] = &[
         aliases: &["openai_compact", "responses_compact"],
     },
     AdminApiFormatDefinition {
+        value: "openai:image",
+        label: "OpenAI Image",
+        default_path: "/v1/images/generations",
+        aliases: &["openai_image", "images"],
+    },
+    AdminApiFormatDefinition {
         value: "openai:video",
         label: "OpenAI Video",
         default_path: "/v1/videos",

@@ -240,7 +240,14 @@ DO UPDATE SET
   error_message = COALESCE(EXCLUDED.error_message, request_candidates.error_message),
   latency_ms = COALESCE(EXCLUDED.latency_ms, request_candidates.latency_ms),
   concurrent_requests = COALESCE(EXCLUDED.concurrent_requests, request_candidates.concurrent_requests),
-  extra_data = COALESCE(EXCLUDED.extra_data, request_candidates.extra_data),
+  extra_data = CASE
+    WHEN request_candidates.extra_data IS NULL THEN EXCLUDED.extra_data
+    WHEN EXCLUDED.extra_data IS NULL THEN request_candidates.extra_data
+    WHEN json_typeof(request_candidates.extra_data) = 'object'
+      AND json_typeof(EXCLUDED.extra_data) = 'object'
+      THEN (request_candidates.extra_data::jsonb || EXCLUDED.extra_data::jsonb)::json
+    ELSE EXCLUDED.extra_data
+  END,
   required_capabilities = COALESCE(EXCLUDED.required_capabilities, request_candidates.required_capabilities),
   started_at = COALESCE(EXCLUDED.started_at, request_candidates.started_at),
   finished_at = COALESCE(EXCLUDED.finished_at, request_candidates.finished_at)

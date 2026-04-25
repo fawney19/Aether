@@ -5,8 +5,8 @@ use super::super::to_openai_chat::{extract_openai_text_content, parse_openai_too
 use super::shared::parse_openai_tool_arguments;
 use crate::planner::openai::{
     copy_request_number_field, extract_openai_reasoning_effort,
-    map_openai_reasoning_effort_to_thinking_budget, parse_openai_stop_sequences,
-    resolve_openai_chat_max_tokens,
+    map_openai_reasoning_effort_to_claude_output, map_openai_reasoning_effort_to_thinking_budget,
+    parse_openai_stop_sequences, resolve_openai_chat_max_tokens,
 };
 
 pub fn convert_openai_chat_request_to_claude_request(
@@ -37,17 +37,18 @@ pub fn convert_openai_chat_request_to_claude_request(
                 "user" => {
                     let blocks = convert_openai_content_to_claude_blocks(
                         message_object.get("content"),
-                        true,
+                        ClaudeMessageRole::User,
                     )?;
                     if !blocks.is_empty() {
                         messages.push(build_claude_message("user", blocks));
                     }
                 }
                 "assistant" => {
-                    let mut blocks = convert_openai_content_to_claude_blocks(
+                    let mut blocks = extract_openai_reasoning_to_claude_blocks(message_object);
+                    blocks.extend(convert_openai_content_to_claude_blocks(
                         message_object.get("content"),
-                        false,
-                    )?;
+                        ClaudeMessageRole::Assistant,
+                    )?);
                     if let Some(tool_calls) =
                         message_object.get("tool_calls").and_then(Value::as_array)
                     {
@@ -159,14 +160,30 @@ pub fn convert_openai_chat_request_to_claude_request(
                 }),
             );
         }
+        if let Some(output_effort) =
+            map_openai_reasoning_effort_to_claude_output(reasoning_effort.as_str())
+        {
+            output.insert(
+                "output_config".to_string(),
+                json!({
+                    "effort": output_effort,
+                }),
+            );
+        }
     }
 
     Some(Value::Object(output))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeMessageRole {
+    User,
+    Assistant,
+}
+
 fn convert_openai_content_to_claude_blocks(
     content: Option<&Value>,
-    allow_images: bool,
+    role: ClaudeMessageRole,
 ) -> Option<Vec<Value>> {
     match content {
         None | Some(Value::Null) => Some(Vec::new()),
@@ -187,14 +204,14 @@ fn convert_openai_content_to_claude_blocks(
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 match part_type {
-                    "text" | "input_text" => {
+                    "text" | "input_text" | "output_text" => {
                         if let Some(text) = part_object.get("text").and_then(Value::as_str) {
                             if !text.trim().is_empty() {
                                 blocks.push(json!({ "type": "text", "text": text }));
                             }
                         }
                     }
-                    "image_url" | "input_image" if allow_images => {
+                    "image_url" | "input_image" | "output_image" => {
                         let url = part_object
                             .get("image_url")
                             .and_then(|value| {
@@ -206,23 +223,36 @@ fn convert_openai_content_to_claude_blocks(
                                         .map(ToOwned::to_owned)
                                 })
                             })
+                            .or_else(|| {
+                                part_object
+                                    .get("url")
+                                    .and_then(Value::as_str)
+                                    .map(ToOwned::to_owned)
+                            })
                             .filter(|value| !value.trim().is_empty())?;
-                        if let Some((media_type, data)) = parse_data_url(url.as_str()) {
-                            blocks.push(json!({
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": media_type,
-                                    "data": data,
-                                }
-                            }));
+                        if role == ClaudeMessageRole::User {
+                            if let Some((media_type, data)) = parse_data_url(url.as_str()) {
+                                blocks.push(json!({
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": media_type,
+                                        "data": data,
+                                    }
+                                }));
+                            } else {
+                                blocks.push(json!({
+                                    "type": "image",
+                                    "source": {
+                                        "type": "url",
+                                        "url": url,
+                                    }
+                                }));
+                            }
                         } else {
                             blocks.push(json!({
-                                "type": "image",
-                                "source": {
-                                    "type": "url",
-                                    "url": url,
-                                }
+                                "type": "text",
+                                "text": assistant_image_placeholder(url.as_str()),
                             }));
                         }
                     }
@@ -244,6 +274,42 @@ fn convert_openai_content_to_claude_blocks(
                                     }
                                 }));
                             }
+                        } else if let Some(file_id) = file_object
+                            .get("file_id")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                        {
+                            blocks.push(json!({
+                                "type": "text",
+                                "text": format!("[File: {file_id}]"),
+                            }));
+                        }
+                    }
+                    "input_audio" => {
+                        let audio_object = part_object
+                            .get("input_audio")
+                            .and_then(Value::as_object)
+                            .unwrap_or(part_object);
+                        let data = audio_object
+                            .get("data")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty());
+                        let format = audio_object
+                            .get("format")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty());
+                        if let (Some(data), Some(format)) = (data, format) {
+                            blocks.push(json!({
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": format!("audio/{format}"),
+                                    "data": data,
+                                }
+                            }));
                         }
                     }
                     _ => {}
@@ -253,6 +319,77 @@ fn convert_openai_content_to_claude_blocks(
         }
         _ => None,
     }
+}
+
+fn extract_openai_reasoning_to_claude_blocks(message: &Map<String, Value>) -> Vec<Value> {
+    let mut blocks = Vec::new();
+    if let Some(reasoning_parts) = message.get("reasoning_parts").and_then(Value::as_array) {
+        for reasoning_part in reasoning_parts {
+            let Some(reasoning_object) = reasoning_part.as_object() else {
+                continue;
+            };
+            match reasoning_object
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("thinking")
+            {
+                "thinking" => {
+                    let thinking = reasoning_object
+                        .get("thinking")
+                        .or_else(|| reasoning_object.get("text"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or_default();
+                    if thinking.is_empty() {
+                        continue;
+                    }
+                    let mut block = Map::new();
+                    block.insert("type".to_string(), Value::String("thinking".to_string()));
+                    block.insert("thinking".to_string(), Value::String(thinking.to_string()));
+                    if let Some(signature) = reasoning_object
+                        .get("signature")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                    {
+                        block.insert(
+                            "signature".to_string(),
+                            Value::String(signature.to_string()),
+                        );
+                    }
+                    blocks.push(Value::Object(block));
+                }
+                "redacted_thinking" => {
+                    let data = reasoning_object
+                        .get("data")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or_default();
+                    if !data.is_empty() {
+                        blocks.push(json!({
+                            "type": "redacted_thinking",
+                            "data": data,
+                        }));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if !blocks.is_empty() {
+        return blocks;
+    }
+    if let Some(reasoning_content) = message
+        .get("reasoning_content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        blocks.push(json!({
+            "type": "thinking",
+            "thinking": reasoning_content,
+        }));
+    }
+    blocks
 }
 
 fn convert_openai_tools_to_claude(
@@ -491,6 +628,14 @@ fn parse_data_url(value: &str) -> Option<(String, String)> {
     Some((media_type.to_string(), data.to_string()))
 }
 
+fn assistant_image_placeholder(url: &str) -> String {
+    if url.starts_with("data:") {
+        "[Image]".to_string()
+    } else {
+        format!("[Image: {url}]")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::convert_openai_chat_request_to_claude_request;
@@ -554,5 +699,116 @@ mod tests {
                 "disable_parallel_tool_use": false,
             })
         );
+    }
+
+    #[test]
+    fn converts_openai_multipart_reasoning_and_file_id_to_claude_request() {
+        let request = json!({
+            "model": "gpt-5.4",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "Read this" },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "data:image/png;base64,iVBORw0KGgo="
+                            }
+                        },
+                        {
+                            "type": "file",
+                            "file": {
+                                "file_data": "data:application/pdf;base64,JVBERi0x"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "reasoning_content": "step by step",
+                    "reasoning_parts": [
+                        {
+                            "type": "thinking",
+                            "thinking": "step by step",
+                            "signature": "sig_123"
+                        },
+                        {
+                            "type": "redacted_thinking",
+                            "data": "redacted_blob"
+                        }
+                    ],
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "https://example.com/diagram.png"
+                            }
+                        },
+                        { "type": "file", "file": { "file_id": "file_123" } },
+                        { "type": "text", "text": "done" }
+                    ],
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "arguments": "\"tokyo\""
+                        }
+                    }]
+                }
+            ],
+            "reasoning_effort": "xhigh"
+        });
+
+        let converted =
+            convert_openai_chat_request_to_claude_request(&request, "claude-sonnet-4-5", false)
+                .expect("request should convert");
+
+        assert_eq!(
+            converted["messages"][0]["content"],
+            json!([
+                { "type": "text", "text": "Read this" },
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "iVBORw0KGgo="
+                    }
+                },
+                {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": "JVBERi0x"
+                    }
+                }
+            ])
+        );
+        assert_eq!(converted["messages"][1]["content"][0]["type"], "thinking");
+        assert_eq!(
+            converted["messages"][1]["content"][0]["signature"],
+            "sig_123"
+        );
+        assert_eq!(
+            converted["messages"][1]["content"][1]["type"],
+            "redacted_thinking"
+        );
+        assert_eq!(
+            converted["messages"][1]["content"][2]["text"],
+            "[Image: https://example.com/diagram.png]"
+        );
+        assert_eq!(
+            converted["messages"][1]["content"][3]["text"],
+            "[File: file_123]"
+        );
+        assert_eq!(
+            converted["messages"][1]["content"][5]["input"],
+            json!({"raw": "tokyo"})
+        );
+        assert_eq!(converted["thinking"]["budget_tokens"], 8192);
+        assert_eq!(converted["output_config"]["effort"], "max");
     }
 }

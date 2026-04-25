@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  formatUsageStreamLabel,
   hasUsageFallback,
   isUsageRecordFailed,
   isUsageRecordSuccessful,
@@ -78,6 +79,17 @@ describe('usage status helpers', () => {
     }))).toBe('streaming')
   })
 
+  it('treats active lifecycle records with failure signals as failed for display', () => {
+    const record = buildUsageRecord({
+      status: 'pending',
+      status_code: 503,
+      error_message: 'upstream failed',
+    })
+
+    expect(resolveDisplayRequestStatus(record)).toBe('failed')
+    expect(isUsageRecordFailed(record)).toBe(true)
+  })
+
   it('treats explicit success status code as authoritative for the timeline', () => {
     expect(resolveTimelineFinalStatus({
       traceFinalStatus: 'success',
@@ -92,10 +104,71 @@ describe('usage status helpers', () => {
     })).toBe('failed')
   })
 
+  it('does not let stale pending candidates override terminal request status', () => {
+    expect(resolveTimelineFinalStatus({
+      hasPendingCandidates: true,
+      requestStatus: 'failed',
+    })).toBe('failed')
+  })
+
   it('uses explicit has_fallback flag for transfer filtering', () => {
     expect(hasUsageFallback(buildUsageRecord({ has_fallback: true }))).toBe(true)
     expect(hasUsageFallback(buildUsageRecord({ has_fallback: false }))).toBe(false)
     expect(hasUsageFallback(buildUsageRecord({ has_fallback: undefined }))).toBe(false)
+  })
+
+  it('prefers symmetric stream aliases when present', () => {
+    expect(formatUsageStreamLabel(buildUsageRecord({
+      is_stream: true,
+      upstream_is_stream: true,
+      client_requested_stream: false,
+      client_is_stream: false,
+    }))).toBe('标准->流式')
+  })
+
+  it('falls back to legacy stream fields when symmetric aliases are absent', () => {
+    expect(formatUsageStreamLabel(buildUsageRecord({
+      is_stream: true,
+      client_requested_stream: false,
+    }))).toBe('标准->流式')
+  })
+
+  it('defaults OpenAI and Claude requests to non-stream when client flags are absent', () => {
+    expect(formatUsageStreamLabel(buildUsageRecord({
+      api_format: 'openai:cli',
+      is_stream: true,
+      upstream_is_stream: true,
+      client_requested_stream: undefined,
+      client_is_stream: undefined,
+    }))).toBe('标准->流式')
+
+    expect(formatUsageStreamLabel(buildUsageRecord({
+      api_format: 'claude:chat',
+      is_stream: false,
+      upstream_is_stream: false,
+      client_requested_stream: undefined,
+      client_is_stream: undefined,
+    }))).toBe('标准')
+  })
+
+  it('keeps upstream fallback for formats without a default non-stream convention', () => {
+    expect(formatUsageStreamLabel(buildUsageRecord({
+      api_format: 'gemini:cli',
+      is_stream: true,
+      upstream_is_stream: true,
+      client_requested_stream: undefined,
+      client_is_stream: undefined,
+    }))).toBe('流式')
+  })
+
+  it('prefers client_requested_stream over stale client_is_stream when they disagree', () => {
+    expect(formatUsageStreamLabel(buildUsageRecord({
+      api_format: 'openai:cli',
+      is_stream: true,
+      upstream_is_stream: true,
+      client_requested_stream: false,
+      client_is_stream: true,
+    }))).toBe('标准->流式')
   })
 
   it('uses status code only as a last fallback for timeline status', () => {

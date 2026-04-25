@@ -170,21 +170,21 @@ struct GatewayDataArgs {
     #[arg(
         long,
         env = "AETHER_GATEWAY_DATA_POSTGRES_MAX_CONNECTIONS",
-        default_value_t = 30
+        default_value_t = 20
     )]
     postgres_max_connections: u32,
 
     #[arg(
         long,
         env = "AETHER_GATEWAY_DATA_POSTGRES_ACQUIRE_TIMEOUT_MS",
-        default_value_t = 3_000
+        default_value_t = 10_000
     )]
     postgres_acquire_timeout_ms: u64,
 
     #[arg(
         long,
         env = "AETHER_GATEWAY_DATA_POSTGRES_IDLE_TIMEOUT_MS",
-        default_value_t = 60_000
+        default_value_t = 30_000
     )]
     postgres_idle_timeout_ms: u64,
 
@@ -1243,9 +1243,9 @@ mod tests {
                 redis_url: None,
                 redis_key_prefix: None,
                 postgres_min_connections: 1,
-                postgres_max_connections: 30,
-                postgres_acquire_timeout_ms: 3_000,
-                postgres_idle_timeout_ms: 60_000,
+                postgres_max_connections: 20,
+                postgres_acquire_timeout_ms: 10_000,
+                postgres_idle_timeout_ms: 30_000,
                 postgres_max_lifetime_ms: 1_800_000,
                 postgres_statement_cache_capacity: 100,
                 postgres_require_ssl: false,

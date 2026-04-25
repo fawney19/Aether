@@ -10,13 +10,19 @@ pub(crate) fn models_api_format(request_context: &GatewayPublicRequestContext) -
         .control_decision
         .as_ref()
         .and_then(|decision| decision.auth_endpoint_signature.as_deref())
-        .filter(|signature| matches!(*signature, "openai:chat" | "claude:chat" | "gemini:chat"))
+        .filter(|signature| {
+            matches!(
+                *signature,
+                "openai:chat" | "openai:image" | "claude:chat" | "gemini:chat"
+            )
+        })
 }
 
 const MODELS_CROSS_FORMAT_QUERY_API_FORMATS: &[&str] = &[
     "openai:chat",
     "openai:cli",
     "openai:compact",
+    "openai:image",
     "claude:chat",
     "claude:cli",
     "gemini:chat",
@@ -26,6 +32,7 @@ const MODELS_CROSS_FORMAT_QUERY_API_FORMATS: &[&str] = &[
 pub(super) fn models_query_api_formats(api_format: &str) -> &'static [&'static str] {
     match api_format.trim().to_ascii_lowercase().as_str() {
         "openai:chat" | "claude:chat" | "gemini:chat" => MODELS_CROSS_FORMAT_QUERY_API_FORMATS,
+        "openai:image" => &["openai:image"],
         _ => &[],
     }
 }

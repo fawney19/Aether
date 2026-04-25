@@ -1,5 +1,6 @@
 use super::enabled_key_capability_short_names;
-use crate::handlers::shared::{json_string_list, unix_secs_to_rfc3339};
+use crate::handlers::shared::unix_secs_to_rfc3339;
+use crate::provider_key_auth::provider_key_effective_api_formats;
 use crate::AppState;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
@@ -34,7 +35,11 @@ pub(crate) async fn build_admin_keys_grouped_by_format_payload(
         .map(|provider| {
             (
                 provider.id.clone(),
-                (provider.name.clone(), provider.is_active),
+                (
+                    provider.name.clone(),
+                    provider.is_active,
+                    provider.provider_type.clone(),
+                ),
             )
         })
         .collect::<HashMap<_, _>>();
@@ -44,18 +49,28 @@ pub(crate) async fn build_admin_keys_grouped_by_format_payload(
         state.list_provider_catalog_key_summaries_by_provider_ids(&provider_ids),
     );
 
-    let endpoint_base_url_by_provider_and_format = endpoints_result
+    let active_endpoints = endpoints_result
         .ok()
         .unwrap_or_default()
         .into_iter()
         .filter(|endpoint| endpoint.is_active)
+        .collect::<Vec<_>>();
+    let endpoint_base_url_by_provider_and_format = active_endpoints
+        .iter()
         .map(|endpoint| {
             (
-                (endpoint.provider_id, endpoint.api_format),
-                endpoint.base_url,
+                (endpoint.provider_id.clone(), endpoint.api_format.clone()),
+                endpoint.base_url.clone(),
             )
         })
         .collect::<HashMap<_, _>>();
+    let mut endpoints_by_provider = HashMap::<String, Vec<_>>::new();
+    for endpoint in active_endpoints {
+        endpoints_by_provider
+            .entry(endpoint.provider_id.clone())
+            .or_default()
+            .push(endpoint);
+    }
 
     let mut keys = keys_result.ok().unwrap_or_default();
     keys.sort_by(|left, right| {
@@ -72,7 +87,7 @@ pub(crate) async fn build_admin_keys_grouped_by_format_payload(
 
     let mut grouped = BTreeMap::<String, Vec<serde_json::Value>>::new();
     for key in keys {
-        let Some((provider_name, provider_is_active)) =
+        let Some((provider_name, provider_is_active, provider_type)) =
             provider_metadata_by_id.get(&key.provider_id)
         else {
             continue;
@@ -108,7 +123,14 @@ pub(crate) async fn build_admin_keys_grouped_by_format_payload(
             .cloned()
             .unwrap_or_default();
         let capability_names = enabled_key_capability_short_names(key.capabilities.as_ref());
-        let api_formats = json_string_list(key.api_formats.as_ref());
+        let api_formats = provider_key_effective_api_formats(
+            &key,
+            provider_type,
+            endpoints_by_provider
+                .get(&key.provider_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        );
         if api_formats.is_empty() {
             continue;
         }

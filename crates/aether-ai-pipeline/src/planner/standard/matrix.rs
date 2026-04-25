@@ -1,10 +1,9 @@
 use std::borrow::Cow;
 
-use aether_provider_transport::url::{
-    build_claude_messages_url, build_gemini_content_url, build_openai_chat_url,
-    build_openai_cli_url, build_passthrough_path_url,
+use aether_provider_transport::{
+    apply_local_body_rules, build_transport_request_url, GatewayProviderTransportSnapshot,
+    TransportRequestUrlParams,
 };
-use aether_provider_transport::{apply_local_body_rules, GatewayProviderTransportSnapshot};
 use serde_json::Value;
 
 use crate::conversion::request::{
@@ -136,51 +135,139 @@ pub fn build_standard_upstream_url(
     provider_api_format: &str,
     upstream_is_stream: bool,
 ) -> Option<String> {
-    let custom_path = transport
-        .endpoint
-        .custom_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-
-    match custom_path {
-        Some(path) => {
-            build_passthrough_path_url(&transport.endpoint.base_url, path, parts.uri.query(), &[])
-        }
-        None => match provider_api_format.trim().to_ascii_lowercase().as_str() {
-            "openai:chat" => Some(build_openai_chat_url(
-                &transport.endpoint.base_url,
-                parts.uri.query(),
-            )),
-            "openai:cli" => Some(build_openai_cli_url(
-                &transport.endpoint.base_url,
-                parts.uri.query(),
-                false,
-            )),
-            "openai:compact" => Some(build_openai_cli_url(
-                &transport.endpoint.base_url,
-                parts.uri.query(),
-                true,
-            )),
-            "claude:chat" | "claude:cli" => Some(build_claude_messages_url(
-                &transport.endpoint.base_url,
-                parts.uri.query(),
-            )),
-            "gemini:chat" | "gemini:cli" => build_gemini_content_url(
-                &transport.endpoint.base_url,
-                mapped_model,
-                upstream_is_stream,
-                parts.uri.query(),
-            ),
-            _ => None,
+    build_transport_request_url(
+        transport,
+        TransportRequestUrlParams {
+            provider_api_format,
+            mapped_model: Some(mapped_model),
+            upstream_is_stream,
+            request_query: parts.uri.query(),
+            kiro_api_region: None,
         },
-    }
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::build_standard_request_body;
-    use serde_json::json;
+    use serde_json::{json, Value};
+
+    const STANDARD_SURFACES: &[&str] = &[
+        "openai:chat",
+        "openai:cli",
+        "claude:chat",
+        "claude:cli",
+        "gemini:chat",
+        "gemini:cli",
+    ];
+
+    fn sample_request_for(api_format: &str) -> (Value, &'static str) {
+        match api_format {
+            "openai:chat" => (
+                json!({
+                    "model": "source-model",
+                    "messages": [
+                        {"role": "system", "content": "Be concise."},
+                        {"role": "user", "content": "Hello matrix"}
+                    ],
+                    "max_tokens": 32
+                }),
+                "/v1/chat/completions",
+            ),
+            "openai:cli" => (
+                json!({
+                    "model": "source-model",
+                    "instructions": "Be concise.",
+                    "input": "Hello matrix",
+                    "max_output_tokens": 32
+                }),
+                "/v1/responses",
+            ),
+            "claude:chat" | "claude:cli" => (
+                json!({
+                    "model": "source-model",
+                    "system": "Be concise.",
+                    "messages": [{
+                        "role": "user",
+                        "content": [{"type": "text", "text": "Hello matrix"}]
+                    }],
+                    "max_tokens": 32
+                }),
+                "/v1/messages",
+            ),
+            "gemini:chat" | "gemini:cli" => (
+                json!({
+                    "systemInstruction": {
+                        "parts": [{"text": "Be concise."}]
+                    },
+                    "contents": [{
+                        "role": "user",
+                        "parts": [{"text": "Hello matrix"}]
+                    }],
+                    "generationConfig": {
+                        "maxOutputTokens": 32
+                    }
+                }),
+                "/v1beta/models/source-model:generateContent",
+            ),
+            other => panic!("unexpected api format: {other}"),
+        }
+    }
+
+    fn assert_stream_flag(provider_api_format: &str, upstream_is_stream: bool, converted: &Value) {
+        match provider_api_format {
+            "openai:chat" | "openai:cli" | "claude:chat" | "claude:cli" => {
+                assert_eq!(
+                    converted
+                        .get("stream")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    upstream_is_stream,
+                    "{provider_api_format} stream flag should follow upstream_is_stream"
+                );
+            }
+            "gemini:chat" | "gemini:cli" => {
+                assert!(
+                    converted.get("stream").is_none(),
+                    "gemini streaming is represented by endpoint URL, not request body"
+                );
+            }
+            other => panic!("unexpected provider api format: {other}"),
+        }
+    }
+
+    #[test]
+    fn builds_request_body_for_all_standard_surface_pairs_in_sync_and_stream_modes() {
+        for client_api_format in STANDARD_SURFACES {
+            let (request, request_path) = sample_request_for(client_api_format);
+            for provider_api_format in STANDARD_SURFACES {
+                for upstream_is_stream in [false, true] {
+                    let converted = build_standard_request_body(
+                        &request,
+                        client_api_format,
+                        "mapped-model",
+                        "custom",
+                        provider_api_format,
+                        request_path,
+                        upstream_is_stream,
+                        None,
+                        None,
+                    )
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{client_api_format} -> {provider_api_format} should build with upstream_is_stream={upstream_is_stream}"
+                        )
+                    });
+
+                    assert_stream_flag(provider_api_format, upstream_is_stream, &converted);
+                    assert!(
+                        converted.to_string().contains("Hello matrix"),
+                        "{client_api_format} -> {provider_api_format} should retain user content"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn builds_openai_chat_request_from_claude_chat_source() {

@@ -26,6 +26,7 @@ impl UsageMapper {
             }
         }
 
+        derive_missing_input_tokens(raw_usage, api_format, &mut usage);
         usage.normalize_cache_creation_breakdown()
     }
 
@@ -166,6 +167,36 @@ fn base_mapping(api_format: &str) -> BTreeMap<String, String> {
     mapping
 }
 
+fn derive_missing_input_tokens(
+    raw_usage: &serde_json::Value,
+    api_format: &str,
+    usage: &mut StandardizedUsage,
+) {
+    if usage.input_tokens > 0 || api_family(api_format).as_str() != "openai" {
+        return;
+    }
+
+    let Some(total_tokens) = numeric_i64(raw_usage.get("total_tokens")) else {
+        return;
+    };
+    let output_tokens = usage
+        .output_tokens
+        .max(numeric_i64(raw_usage.get("completion_tokens")).unwrap_or_default())
+        .max(numeric_i64(raw_usage.get("output_tokens")).unwrap_or_default());
+    let inferred_input_tokens = total_tokens.saturating_sub(output_tokens);
+    if inferred_input_tokens > 0 {
+        usage.input_tokens = inferred_input_tokens;
+    }
+}
+
+fn numeric_i64(value: Option<&serde_json::Value>) -> Option<i64> {
+    value.and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+    })
+}
+
 fn get_nested_value<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
     let mut current = value;
     for segment in path.split('.') {
@@ -198,9 +229,11 @@ fn resolve_usage_value<'a>(
         }
     }
 
-    if let Some(nested) = response.get("response") {
-        if let Some(usage) = resolve_usage_value(nested, family) {
-            return Some(usage);
+    for nested_key in ["response", "message", "item"] {
+        if let Some(nested) = response.get(nested_key) {
+            if let Some(usage) = resolve_usage_value(nested, family) {
+                return Some(usage);
+            }
         }
     }
 
@@ -266,6 +299,44 @@ mod tests {
         assert_eq!(usage.cache_creation_tokens, 2);
         assert_eq!(usage.cache_read_tokens, 3);
         assert_eq!(usage.reasoning_tokens, 1);
+    }
+
+    #[test]
+    fn maps_openai_responses_usage_with_missing_input_from_total() {
+        let usage = map_usage_from_response(
+            &serde_json::json!({
+                "usage": {
+                    "output_tokens": 899,
+                    "total_tokens": 53_499,
+                    "input_tokens_details": {
+                        "cached_tokens": 52_600
+                    }
+                }
+            }),
+            "openai:cli",
+        );
+
+        assert_eq!(usage.input_tokens, 52_600);
+        assert_eq!(usage.output_tokens, 899);
+        assert_eq!(usage.cache_read_tokens, 52_600);
+    }
+
+    #[test]
+    fn keeps_missing_input_derivation_scoped_to_openai() {
+        let usage = map_usage_from_response(
+            &serde_json::json!({
+                "usage": {
+                    "output_tokens": 7,
+                    "total_tokens": 17,
+                    "cache_read_input_tokens": 10
+                }
+            }),
+            "claude:chat",
+        );
+
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.cache_read_tokens, 10);
     }
 
     #[test]
@@ -350,6 +421,117 @@ mod tests {
     }
 
     #[test]
+    fn maps_claude_usage_from_stream_chunks() {
+        let usage = map_usage_from_response(
+            &serde_json::json!({
+                "chunks": [
+                    {
+                        "type": "message_start",
+                        "message": {
+                            "usage": {
+                                "input_tokens": 5,
+                                "cache_creation_input_tokens": 59_573,
+                                "cache_read_input_tokens": 0,
+                                "output_tokens": 0
+                            }
+                        }
+                    },
+                    {
+                        "type": "message_delta",
+                        "usage": {
+                            "input_tokens": 5,
+                            "cache_creation_input_tokens": 59_573,
+                            "cache_read_input_tokens": 0,
+                            "output_tokens": 162
+                        }
+                    }
+                ]
+            }),
+            "claude:chat",
+        );
+
+        assert_eq!(usage.input_tokens, 5);
+        assert_eq!(usage.output_tokens, 162);
+        assert_eq!(usage.cache_creation_tokens, 59_573);
+        assert_eq!(usage.cache_read_tokens, 0);
+    }
+
+    #[test]
+    fn maps_claude_usage_from_message_start_chunk() {
+        let usage = map_usage_from_response(
+            &serde_json::json!({
+                "chunks": [
+                    {
+                        "type": "message_start",
+                        "message": {
+                            "usage": {
+                                "input_tokens": 5,
+                                "cache_creation_input_tokens": 59_573,
+                                "cache_read_input_tokens": 0,
+                                "output_tokens": 0
+                            }
+                        }
+                    }
+                ]
+            }),
+            "claude:chat",
+        );
+
+        assert_eq!(usage.input_tokens, 5);
+        assert_eq!(usage.output_tokens, 0);
+        assert_eq!(usage.cache_creation_tokens, 59_573);
+        assert_eq!(usage.cache_read_tokens, 0);
+    }
+
+    #[test]
+    fn maps_claude_usage_with_large_cache_read_tokens_without_subtracting_input() {
+        let usage = map_usage(
+            &serde_json::json!({
+                "input_tokens": 4941,
+                "cache_creation_input_tokens": 687,
+                "cache_read_input_tokens": 52873,
+                "output_tokens": 973
+            }),
+            "claude:chat",
+        );
+
+        assert_eq!(usage.input_tokens, 4941);
+        assert_eq!(usage.cache_creation_tokens, 687);
+        assert_eq!(usage.cache_read_tokens, 52873);
+        assert_eq!(usage.output_tokens, 973);
+    }
+
+    #[test]
+    fn maps_claude_usage_with_cache_creation_total_and_zero_ttl_breakdown() {
+        let usage = map_usage(
+            &serde_json::json!({
+                "cache_creation": {
+                    "ephemeral_1h_input_tokens": 0,
+                    "ephemeral_5m_input_tokens": 0
+                },
+                "cache_creation_input_tokens": 2051,
+                "cache_read_input_tokens": 2051,
+                "inference_geo": "inference_geo",
+                "input_tokens": 2095,
+                "output_tokens": 503,
+                "server_tool_use": {
+                    "web_fetch_requests": 2,
+                    "web_search_requests": 0
+                },
+                "service_tier": "standard"
+            }),
+            "claude:chat",
+        );
+
+        assert_eq!(usage.input_tokens, 2095);
+        assert_eq!(usage.cache_creation_tokens, 2051);
+        assert_eq!(usage.cache_creation_ephemeral_5m_tokens, 0);
+        assert_eq!(usage.cache_creation_ephemeral_1h_tokens, 0);
+        assert_eq!(usage.cache_read_tokens, 2051);
+        assert_eq!(usage.output_tokens, 503);
+    }
+
+    #[test]
     fn maps_claude_usage_with_ephemeral_cache_breakdown() {
         let usage = map_usage(
             &serde_json::json!({
@@ -382,6 +564,37 @@ mod tests {
                     "candidatesTokenCount": 6,
                     "cachedContentTokenCount": 2
                 }
+            }),
+            "gemini:chat",
+        );
+
+        assert_eq!(usage.input_tokens, 14);
+        assert_eq!(usage.output_tokens, 6);
+        assert_eq!(usage.cache_read_tokens, 2);
+    }
+
+    #[test]
+    fn maps_gemini_usage_from_stream_chunks() {
+        let usage = map_usage_from_response(
+            &serde_json::json!({
+                "chunks": [
+                    {
+                        "candidates": [
+                            {
+                                "content": {
+                                    "parts": [{ "text": "hello" }]
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        "usageMetadata": {
+                            "promptTokenCount": 14,
+                            "candidatesTokenCount": 6,
+                            "cachedContentTokenCount": 2
+                        }
+                    }
+                ]
             }),
             "gemini:chat",
         );

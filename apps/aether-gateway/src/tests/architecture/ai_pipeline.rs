@@ -480,6 +480,7 @@ fn ai_pipeline_candidate_preparation_owns_shared_auth_and_mapped_model_resolutio
     for path in [
         "apps/aether-gateway/src/ai_pipeline/planner/standard/openai/chat/decision/request.rs",
         "apps/aether-gateway/src/ai_pipeline/planner/standard/openai/cli/decision/request.rs",
+        "apps/aether-gateway/src/ai_pipeline/planner/specialized/image/request.rs",
         "apps/aether-gateway/src/ai_pipeline/planner/standard/family/request.rs",
     ] {
         let source = read_workspace_file(path);

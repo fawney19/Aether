@@ -500,6 +500,18 @@ impl StoredRequestUsageAudit {
             .or_else(|| self.request_metadata_string("key_name"))
     }
 
+    pub fn routing_model_id(&self) -> Option<&str> {
+        self.request_metadata_string("model_id")
+    }
+
+    pub fn routing_global_model_id(&self) -> Option<&str> {
+        self.request_metadata_string("global_model_id")
+    }
+
+    pub fn routing_global_model_name(&self) -> Option<&str> {
+        self.request_metadata_string("global_model_name")
+    }
+
     pub fn routing_planner_kind(&self) -> Option<&str> {
         self.planner_kind
             .as_deref()

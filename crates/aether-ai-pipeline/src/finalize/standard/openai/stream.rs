@@ -110,6 +110,19 @@ impl OpenAIChatProviderState {
 
         let mut out = Vec::new();
         let Some(chunk_choices) = chunk_object.get("choices").and_then(Value::as_array) else {
+            if let Some(usage) = Self::finish_usage(chunk_object.get("usage")) {
+                self.ensure_started(report_context, &mut out);
+                let (id, model) = self.identity(report_context);
+                out.push(CanonicalStreamFrame {
+                    id,
+                    model,
+                    event: CanonicalStreamEvent::Finish {
+                        finish_reason: self.pending_finish_reason.take(),
+                        usage: Some(usage),
+                    },
+                });
+                self.finished = true;
+            }
             return Ok(out);
         };
         if chunk_choices.is_empty() {
@@ -568,7 +581,7 @@ impl OpenAICliProviderState {
             "response.created" | "response.in_progress" => {
                 self.ensure_started(report_context, &mut out);
             }
-            "response.output_text.delta" => {
+            "response.output_text.delta" | "response.outtext.delta" => {
                 let piece = match value.get("delta") {
                     Some(Value::String(text)) => text.clone(),
                     Some(Value::Object(delta)) => delta
@@ -946,6 +959,8 @@ struct OpenAICliClientToolState {
 pub struct OpenAICliClientEmitter {
     response_id: Option<String>,
     model: Option<String>,
+    message_item_id: Option<String>,
+    reasoning_item_id: Option<String>,
     started: bool,
     finished: bool,
     sequence_number: u64,
@@ -1021,6 +1036,24 @@ impl OpenAIChatClientEmitter {
                             "finish_reason": Value::Null
                         }]
                     }),
+                )?);
+                Ok(out)
+            }
+            CanonicalStreamEvent::ReasoningSignature(_) => Ok(Vec::new()),
+            CanonicalStreamEvent::ContentPart(part) => {
+                let placeholder = openai_stream_placeholder_for_content_part(&part);
+                let mut out = self.ensure_started()?;
+                out.extend(encode_json_sse(
+                    None,
+                    &build_openai_chat_chunk(
+                        self.response_id
+                            .as_deref()
+                            .unwrap_or("chatcmpl-local-stream"),
+                        self.model.as_deref().unwrap_or("unknown"),
+                        placeholder,
+                        None,
+                        None,
+                    ),
                 )?);
                 Ok(out)
             }
@@ -1148,11 +1181,29 @@ impl OpenAICliClientEmitter {
     }
 
     fn message_item_id(&self) -> String {
-        format!("{}_msg", self.response_id())
+        self.message_item_id
+            .clone()
+            .unwrap_or_else(|| format!("{}_msg", self.response_id()))
     }
 
     fn reasoning_item_id(&self) -> String {
-        format!("{}_rs_0", self.response_id())
+        self.reasoning_item_id
+            .clone()
+            .unwrap_or_else(|| format!("{}_rs_0", self.response_id()))
+    }
+
+    fn ensure_message_item_id(&mut self) -> String {
+        if self.message_item_id.is_none() {
+            self.message_item_id = Some(format!("{}_msg", self.response_id()));
+        }
+        self.message_item_id()
+    }
+
+    fn ensure_reasoning_item_id(&mut self) -> String {
+        if self.reasoning_item_id.is_none() {
+            self.reasoning_item_id = Some(format!("{}_rs_0", self.response_id()));
+        }
+        self.reasoning_item_id()
     }
 
     fn in_progress_response(&self) -> Value {
@@ -1251,6 +1302,7 @@ impl OpenAICliClientEmitter {
     fn ensure_reasoning_item_started(&mut self) -> Result<Vec<u8>, PipelineFinalizeError> {
         let mut out = self.ensure_started()?;
         let output_index = self.ensure_reasoning_output_index();
+        let item_id = self.ensure_reasoning_item_id();
         if !self.reasoning_item_started {
             out.extend(self.encode_response_event(
                 "response.output_item.added",
@@ -1260,7 +1312,7 @@ impl OpenAICliClientEmitter {
                     "output_index": output_index,
                     "item": {
                         "type": "reasoning",
-                        "id": self.reasoning_item_id(),
+                        "id": item_id.clone(),
                         "summary": [],
                     }
                 }),
@@ -1273,7 +1325,7 @@ impl OpenAICliClientEmitter {
                 json!({
                     "type": "response.reasoning_summary_part.added",
                     "response_id": self.response_id(),
-                    "item_id": self.reasoning_item_id(),
+                    "item_id": item_id,
                     "output_index": output_index,
                     "summary_index": 0,
                     "part": {
@@ -1290,8 +1342,8 @@ impl OpenAICliClientEmitter {
     fn ensure_text_item_started(&mut self) -> Result<Vec<u8>, PipelineFinalizeError> {
         let mut out = self.ensure_started()?;
         let output_index = self.ensure_message_output_index();
+        let item_id = self.ensure_message_item_id();
         if !self.text_item_started {
-            let item_id = self.message_item_id();
             out.extend(self.encode_response_event(
                 "response.output_item.added",
                 json!({
@@ -1300,7 +1352,7 @@ impl OpenAICliClientEmitter {
                     "output_index": output_index,
                     "item": {
                         "type": "message",
-                        "id": item_id,
+                        "id": item_id.clone(),
                         "status": "in_progress",
                         "role": "assistant",
                         "content": [],
@@ -1310,7 +1362,6 @@ impl OpenAICliClientEmitter {
             self.text_item_started = true;
         }
         if !self.text_part_started {
-            let item_id = self.message_item_id();
             out.extend(self.encode_response_event(
                 "response.content_part.added",
                 json!({
@@ -1602,6 +1653,24 @@ impl OpenAICliClientEmitter {
                 )?);
                 Ok(out)
             }
+            CanonicalStreamEvent::ReasoningSignature(_) => Ok(Vec::new()),
+            CanonicalStreamEvent::ContentPart(part) => {
+                let placeholder = openai_stream_placeholder_for_content_part(&part);
+                let mut out = self.ensure_text_item_started()?;
+                self.text.push_str(&placeholder);
+                out.extend(self.encode_response_event(
+                    "response.output_text.delta",
+                    json!({
+                        "type": "response.output_text.delta",
+                        "response_id": self.response_id(),
+                        "output_index": self.message_output_index.unwrap_or(0),
+                        "item_id": self.message_item_id(),
+                        "content_index": 0,
+                        "delta": placeholder,
+                    }),
+                )?);
+                Ok(out)
+            }
             CanonicalStreamEvent::ToolCallStart {
                 index,
                 call_id,
@@ -1715,6 +1784,30 @@ impl OpenAICliClientEmitter {
     }
 }
 
+fn openai_stream_placeholder_for_content_part(part: &CanonicalContentPart) -> String {
+    match part {
+        CanonicalContentPart::ImageUrl(url) => {
+            if url.starts_with("data:") {
+                "[Image]".to_string()
+            } else {
+                format!("[Image: {url}]")
+            }
+        }
+        CanonicalContentPart::File {
+            reference,
+            mime_type,
+            filename,
+            ..
+        } => reference
+            .as_ref()
+            .map(|value| format!("[File: {value}]"))
+            .or_else(|| filename.as_ref().map(|value| format!("[File: {value}]")))
+            .or_else(|| mime_type.as_ref().map(|value| format!("[File: {value}]")))
+            .unwrap_or_else(|| "[File]".to_string()),
+        CanonicalContentPart::Audio { format, .. } => format!("[Audio: {format}]"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1740,6 +1833,120 @@ mod tests {
             }
         }
         sequence_numbers
+    }
+
+    #[test]
+    fn openai_usage_derives_missing_input_tokens_from_total() {
+        let usage = canonical_usage_from_openai_usage(Some(&json!({
+            "output_tokens": 177,
+            "total_tokens": 20_612,
+            "input_tokens_details": {
+                "cached_tokens": 19_840,
+            },
+        })))
+        .expect("usage should parse");
+
+        assert_eq!(usage.input_tokens, 20_435);
+        assert_eq!(usage.output_tokens, 177);
+        assert_eq!(usage.cache_read_tokens, 19_840);
+    }
+
+    #[test]
+    fn openai_chat_provider_state_accepts_usage_only_terminal_chunk() {
+        let mut state = OpenAIChatProviderState::default();
+        let report_context = json!({});
+        let _ = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "id": "chatcmpl_123",
+                    "object": "chat.completion.chunk",
+                    "model": "gpt-5.4",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop",
+                    }],
+                })),
+            )
+            .expect("finish chunk should parse");
+        let frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "usage": {
+                        "input_tokens": 26,
+                        "input_tokens_details": {
+                            "cached_tokens": 0,
+                        },
+                        "output_tokens": 144,
+                        "output_tokens_details": {
+                            "reasoning_tokens": 10,
+                        },
+                        "total_tokens": 170,
+                    },
+                })),
+            )
+            .expect("usage-only chunk should parse");
+
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::Finish {
+                finish_reason: Some(ref reason),
+                usage: Some(CanonicalUsage {
+                    input_tokens: 26,
+                    output_tokens: 144,
+                    cache_read_tokens: 0,
+                    ..
+                }),
+            } if reason == "stop"
+        )));
+    }
+
+    #[test]
+    fn openai_cli_provider_state_extracts_response_completed_usage() {
+        let mut state = OpenAICliProviderState::default();
+        let report_context = json!({});
+        let frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_063494bbd780be940169eb8191c4ec8191916347b2080805ee",
+                        "object": "response",
+                        "model": "gpt-5.5",
+                        "status": "completed",
+                        "output": [],
+                        "usage": {
+                            "input_tokens": 26,
+                            "input_tokens_details": {
+                                "cached_tokens": 0,
+                            },
+                            "output_tokens": 137,
+                            "output_tokens_details": {
+                                "reasoning_tokens": 0,
+                            },
+                            "total_tokens": 163,
+                        },
+                    },
+                    "sequence_number": 139,
+                })),
+            )
+            .expect("completed event should parse");
+
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::Finish {
+                usage: Some(CanonicalUsage {
+                    input_tokens: 26,
+                    output_tokens: 137,
+                    cache_read_tokens: 0,
+                    ..
+                }),
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -1787,6 +1994,31 @@ mod tests {
         assert!(sse.contains("\"item_id\":\"resp_stream_123_msg\""));
         assert!(sse.contains("\"text\":\"Hello\""));
         assert_eq!(response_sequence_numbers(&sse), (1..=9).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn openai_cli_client_emitter_keeps_text_item_id_stable_after_text_started() {
+        let mut emitter = OpenAICliClientEmitter::default();
+        let mut bytes = emitter
+            .emit(CanonicalStreamFrame {
+                id: "msg_first".to_string(),
+                model: "claude-haiku-4-5-20251001".to_string(),
+                event: CanonicalStreamEvent::TextDelta("Hel".to_string()),
+            })
+            .expect("first text should encode");
+        bytes.extend(
+            emitter
+                .emit(CanonicalStreamFrame {
+                    id: "msg_second".to_string(),
+                    model: "claude-haiku-4-5-20251001".to_string(),
+                    event: CanonicalStreamEvent::TextDelta("lo".to_string()),
+                })
+                .expect("second text should encode"),
+        );
+
+        let sse = String::from_utf8(bytes).expect("sse should be utf8");
+        assert!(sse.contains("\"item_id\":\"msg_first_msg\""));
+        assert!(!sse.contains("\"item_id\":\"msg_second_msg\""));
     }
 
     #[test]
@@ -1910,6 +2142,48 @@ mod tests {
     }
 
     #[test]
+    fn openai_cli_provider_state_accepts_legacy_outtext_delta_alias() {
+        let mut state = OpenAICliProviderState::default();
+        let report_context = json!({});
+        let mut frames = Vec::new();
+
+        frames.extend(
+            state
+                .push_line(
+                    &report_context,
+                    data_line(json!({
+                        "type": "response.created",
+                        "response": {
+                            "id": "resp_legacy_123",
+                            "model": "gpt-5.4",
+                        }
+                    })),
+                )
+                .expect("created should parse"),
+        );
+        frames.extend(
+            state
+                .push_line(
+                    &report_context,
+                    data_line(json!({
+                        "type": "response.outtext.delta",
+                        "response_id": "resp_legacy_123",
+                        "output_index": 0,
+                        "item_id": "resp_legacy_123_msg",
+                        "content_index": 0,
+                        "delta": "Hello from legacy alias",
+                    })),
+                )
+                .expect("legacy text delta should parse"),
+        );
+
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::TextDelta(ref text) if text == "Hello from legacy alias"
+        )));
+    }
+
+    #[test]
     fn openai_chat_client_emitter_emits_reasoning_content_chunks() {
         let mut emitter = OpenAIChatClientEmitter::default();
         let mut bytes = emitter
@@ -1931,6 +2205,23 @@ mod tests {
 
         let sse = String::from_utf8(bytes).expect("sse should be utf8");
         assert!(sse.contains("\"reasoning_content\":\"because\""));
+    }
+
+    #[test]
+    fn openai_chat_client_emitter_renders_image_parts_as_placeholder() {
+        let mut emitter = OpenAIChatClientEmitter::default();
+        let bytes = emitter
+            .emit(CanonicalStreamFrame {
+                id: "chatcmpl_img_123".to_string(),
+                model: "gpt-5.4".to_string(),
+                event: CanonicalStreamEvent::ContentPart(CanonicalContentPart::ImageUrl(
+                    "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                )),
+            })
+            .expect("image should encode");
+
+        let sse = String::from_utf8(bytes).expect("sse should be utf8");
+        assert!(sse.contains("[Image]"));
     }
 
     #[test]

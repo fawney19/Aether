@@ -51,27 +51,8 @@ const MAX_INLINE_USAGE_BODY_BYTES: usize = 0;
 const MAX_SUPPORTED_UNIX_SECS: u64 = 253_402_300_799;
 const FIND_USAGE_BODY_BLOB_BY_REF_SQL: &str =
     r#"SELECT payload_gzip FROM usage_body_blobs WHERE body_ref = $1 LIMIT 1"#;
-const UPSERT_USAGE_BODY_BLOB_SQL: &str = r#"
-INSERT INTO usage_body_blobs (
-  body_ref,
-  request_id,
-  body_field,
-  payload_gzip
-) VALUES (
-  $1,
-  $2,
-  $3,
-  $4
-)
-ON CONFLICT (body_ref)
-DO UPDATE SET
-  payload_gzip = EXCLUDED.payload_gzip,
-  updated_at = NOW()
-"#;
-const DELETE_USAGE_BODY_BLOB_SQL: &str = r#"
-DELETE FROM usage_body_blobs
-WHERE body_ref = $1
-"#;
+const UPSERT_USAGE_BODY_BLOB_SQL: &str = include_str!("queries/upsert_usage_body_blob_sql.sql");
+const DELETE_USAGE_BODY_BLOB_SQL: &str = include_str!("queries/delete_usage_body_blob_sql.sql");
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct AggregateRangeSplit {
@@ -943,821 +924,51 @@ async fn fetch_usage_leaderboard_query<'q>(
     }
     Ok(items)
 }
-const RESET_STALE_VOID_USAGE_SQL: &str = r#"
-UPDATE "usage"
-SET
-  billing_status = 'pending',
-  finalized_at = NULL
-WHERE request_id = $1
-  AND billing_status = 'void'
-  AND status IN ('failed', 'cancelled')
-"#;
-const RESET_STALE_VOID_USAGE_SETTLEMENT_SNAPSHOT_SQL: &str = r#"
-UPDATE usage_settlement_snapshots
-SET
-  billing_status = 'pending',
-  finalized_at = NULL,
-  updated_at = NOW()
-WHERE request_id = $1
-  AND billing_status = 'void'
-"#;
-const LOCK_USAGE_REQUEST_ID_SQL: &str = r#"
-SELECT pg_advisory_xact_lock(hashtext($1)::BIGINT)
-"#;
-const UPSERT_USAGE_HTTP_AUDIT_SQL: &str = r#"
-INSERT INTO usage_http_audits (
-  request_id,
-  request_headers,
-  provider_request_headers,
-  response_headers,
-  client_response_headers,
-  request_body_ref,
-  provider_request_body_ref,
-  response_body_ref,
-  client_response_body_ref,
-  request_body_state,
-  provider_request_body_state,
-  response_body_state,
-  client_response_body_state,
-  body_capture_mode
-) VALUES (
-  $1,
-  $2::json,
-  $3::json,
-  $4::json,
-  $5::json,
-  $6,
-  $7,
-  $8,
-  $9,
-  $10,
-  $11,
-  $12,
-  $13,
-  $14
-)
-ON CONFLICT (request_id)
-DO UPDATE SET
-  request_headers = COALESCE(EXCLUDED.request_headers, usage_http_audits.request_headers),
-  provider_request_headers = COALESCE(
-    EXCLUDED.provider_request_headers,
-    usage_http_audits.provider_request_headers
-  ),
-  response_headers = COALESCE(EXCLUDED.response_headers, usage_http_audits.response_headers),
-  client_response_headers = COALESCE(
-    EXCLUDED.client_response_headers,
-    usage_http_audits.client_response_headers
-  ),
-  request_body_ref = COALESCE(EXCLUDED.request_body_ref, usage_http_audits.request_body_ref),
-  provider_request_body_ref = COALESCE(
-    EXCLUDED.provider_request_body_ref,
-    usage_http_audits.provider_request_body_ref
-  ),
-  response_body_ref = COALESCE(EXCLUDED.response_body_ref, usage_http_audits.response_body_ref),
-  client_response_body_ref = COALESCE(
-    EXCLUDED.client_response_body_ref,
-    usage_http_audits.client_response_body_ref
-  ),
-  request_body_state = COALESCE(
-    EXCLUDED.request_body_state,
-    usage_http_audits.request_body_state
-  ),
-  provider_request_body_state = COALESCE(
-    EXCLUDED.provider_request_body_state,
-    usage_http_audits.provider_request_body_state
-  ),
-  response_body_state = COALESCE(
-    EXCLUDED.response_body_state,
-    usage_http_audits.response_body_state
-  ),
-  client_response_body_state = COALESCE(
-    EXCLUDED.client_response_body_state,
-    usage_http_audits.client_response_body_state
-  ),
-  body_capture_mode = COALESCE(
-    NULLIF(EXCLUDED.body_capture_mode, 'none'),
-    usage_http_audits.body_capture_mode,
-    'none'
-  ),
-  updated_at = NOW()
-"#;
-const UPSERT_USAGE_ROUTING_SNAPSHOT_SQL: &str = r#"
-INSERT INTO usage_routing_snapshots (
-  request_id,
-  candidate_id,
-  candidate_index,
-  key_name,
-  planner_kind,
-  route_family,
-  route_kind,
-  execution_path,
-  local_execution_runtime_miss_reason,
-  selected_provider_id,
-  selected_endpoint_id,
-  selected_provider_api_key_id,
-  has_format_conversion
-) VALUES (
-  $1,
-  $2,
-  $3,
-  $4,
-  $5,
-  $6,
-  $7,
-  $8,
-  $9,
-  $10,
-  $11,
-  $12,
-  $13
-)
-ON CONFLICT (request_id)
-DO UPDATE SET
-  candidate_id = COALESCE(EXCLUDED.candidate_id, usage_routing_snapshots.candidate_id),
-  candidate_index = COALESCE(
-    EXCLUDED.candidate_index,
-    usage_routing_snapshots.candidate_index
-  ),
-  key_name = COALESCE(EXCLUDED.key_name, usage_routing_snapshots.key_name),
-  planner_kind = COALESCE(EXCLUDED.planner_kind, usage_routing_snapshots.planner_kind),
-  route_family = COALESCE(EXCLUDED.route_family, usage_routing_snapshots.route_family),
-  route_kind = COALESCE(EXCLUDED.route_kind, usage_routing_snapshots.route_kind),
-  execution_path = COALESCE(EXCLUDED.execution_path, usage_routing_snapshots.execution_path),
-  local_execution_runtime_miss_reason = COALESCE(
-    EXCLUDED.local_execution_runtime_miss_reason,
-    usage_routing_snapshots.local_execution_runtime_miss_reason
-  ),
-  selected_provider_id = COALESCE(
-    EXCLUDED.selected_provider_id,
-    usage_routing_snapshots.selected_provider_id
-  ),
-  selected_endpoint_id = COALESCE(
-    EXCLUDED.selected_endpoint_id,
-    usage_routing_snapshots.selected_endpoint_id
-  ),
-  selected_provider_api_key_id = COALESCE(
-    EXCLUDED.selected_provider_api_key_id,
-    usage_routing_snapshots.selected_provider_api_key_id
-  ),
-  has_format_conversion = COALESCE(
-    EXCLUDED.has_format_conversion,
-    usage_routing_snapshots.has_format_conversion
-  ),
-  updated_at = NOW()
-"#;
-const UPSERT_USAGE_SETTLEMENT_PRICING_SNAPSHOT_SQL: &str = r#"
-INSERT INTO usage_settlement_snapshots (
-  request_id,
-  billing_status,
-  billing_snapshot_schema_version,
-  billing_snapshot_status,
-  rate_multiplier,
-  is_free_tier,
-  input_price_per_1m,
-  output_price_per_1m,
-  cache_creation_price_per_1m,
-  cache_read_price_per_1m,
-  price_per_request
-) VALUES (
-  $1,
-  $2,
-  $3,
-  $4,
-  $5,
-  $6,
-  $7,
-  $8,
-  $9,
-  $10,
-  $11
-)
-ON CONFLICT (request_id)
-DO UPDATE SET
-  billing_snapshot_schema_version = COALESCE(
-    EXCLUDED.billing_snapshot_schema_version,
-    usage_settlement_snapshots.billing_snapshot_schema_version
-  ),
-  billing_snapshot_status = COALESCE(
-    EXCLUDED.billing_snapshot_status,
-    usage_settlement_snapshots.billing_snapshot_status
-  ),
-  rate_multiplier = COALESCE(
-    EXCLUDED.rate_multiplier,
-    usage_settlement_snapshots.rate_multiplier
-  ),
-  is_free_tier = COALESCE(
-    EXCLUDED.is_free_tier,
-    usage_settlement_snapshots.is_free_tier
-  ),
-  input_price_per_1m = COALESCE(
-    EXCLUDED.input_price_per_1m,
-    usage_settlement_snapshots.input_price_per_1m
-  ),
-  output_price_per_1m = COALESCE(
-    EXCLUDED.output_price_per_1m,
-    usage_settlement_snapshots.output_price_per_1m
-  ),
-  cache_creation_price_per_1m = COALESCE(
-    EXCLUDED.cache_creation_price_per_1m,
-    usage_settlement_snapshots.cache_creation_price_per_1m
-  ),
-  cache_read_price_per_1m = COALESCE(
-    EXCLUDED.cache_read_price_per_1m,
-    usage_settlement_snapshots.cache_read_price_per_1m
-  ),
-  price_per_request = COALESCE(
-    EXCLUDED.price_per_request,
-    usage_settlement_snapshots.price_per_request
-  ),
-  updated_at = NOW()
-"#;
+const RESET_STALE_VOID_USAGE_SQL: &str = include_str!("queries/reset_stale_void_usage_sql.sql");
+const RESET_STALE_VOID_USAGE_SETTLEMENT_SNAPSHOT_SQL: &str =
+    include_str!("queries/reset_stale_void_usage_settlement_snapshot_sql.sql");
+const LOCK_USAGE_REQUEST_ID_SQL: &str = include_str!("queries/lock_usage_request_id_sql.sql");
+const UPSERT_USAGE_HTTP_AUDIT_SQL: &str = include_str!("queries/upsert_usage_http_audit_sql.sql");
+const UPSERT_USAGE_ROUTING_SNAPSHOT_SQL: &str =
+    include_str!("queries/upsert_usage_routing_snapshot_sql.sql");
+const UPSERT_USAGE_SETTLEMENT_PRICING_SNAPSHOT_SQL: &str =
+    include_str!("queries/upsert_usage_settlement_pricing_snapshot_sql.sql");
 
-const FIND_BY_REQUEST_ID_SQL: &str = r#"
-SELECT
-  "usage".id,
-  "usage".request_id,
-  "usage".user_id,
-  "usage".api_key_id,
-  "usage".username,
-  "usage".api_key_name,
-  "usage".provider_name,
-  "usage".model,
-  "usage".target_model,
-  "usage".provider_id,
-  "usage".provider_endpoint_id,
-  "usage".provider_api_key_id,
-  "usage".request_type,
-  "usage".api_format,
-  "usage".api_family,
-  "usage".endpoint_kind,
-  "usage".endpoint_api_format,
-  "usage".provider_api_family,
-  "usage".provider_endpoint_kind,
-  COALESCE("usage".has_format_conversion, FALSE) AS has_format_conversion,
-  COALESCE("usage".is_stream, FALSE) AS is_stream,
-  "usage".input_tokens,
-  "usage".output_tokens,
-  "usage".total_tokens,
-  COALESCE("usage".cache_creation_input_tokens, 0) AS cache_creation_input_tokens,
-  COALESCE("usage".cache_creation_input_tokens_5m, 0) AS cache_creation_ephemeral_5m_input_tokens,
-  COALESCE("usage".cache_creation_input_tokens_1h, 0) AS cache_creation_ephemeral_1h_input_tokens,
-  COALESCE("usage".cache_read_input_tokens, 0) AS cache_read_input_tokens,
-  COALESCE(CAST("usage".cache_creation_cost_usd AS DOUBLE PRECISION), 0) AS cache_creation_cost_usd,
-  COALESCE(CAST("usage".cache_read_cost_usd AS DOUBLE PRECISION), 0) AS cache_read_cost_usd,
-  COALESCE(
-    CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION),
-    CAST("usage".output_price_per_1m AS DOUBLE PRECISION)
-  ) AS output_price_per_1m,
-  COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
-  COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
-  "usage".status_code,
-  "usage".error_message,
-  "usage".error_category,
-  "usage".response_time_ms,
-  "usage".first_byte_time_ms,
-  "usage".status,
-  COALESCE(usage_settlement_snapshots.billing_status, "usage".billing_status) AS billing_status,
-  COALESCE(usage_http_audits.request_headers, "usage".request_headers) AS request_headers,
-  "usage".request_body,
-  "usage".request_body_compressed,
-  COALESCE(
-    usage_http_audits.provider_request_headers,
-    "usage".provider_request_headers
-  ) AS provider_request_headers,
-  "usage".provider_request_body,
-  "usage".provider_request_body_compressed,
-  COALESCE(usage_http_audits.response_headers, "usage".response_headers) AS response_headers,
-  "usage".response_body,
-  "usage".response_body_compressed,
-  COALESCE(
-    usage_http_audits.client_response_headers,
-    "usage".client_response_headers
-  ) AS client_response_headers,
-  "usage".client_response_body,
-  "usage".client_response_body_compressed,
-  "usage".request_metadata,
-  usage_http_audits.request_body_ref AS http_request_body_ref,
-  usage_http_audits.provider_request_body_ref AS http_provider_request_body_ref,
-  usage_http_audits.response_body_ref AS http_response_body_ref,
-  usage_http_audits.client_response_body_ref AS http_client_response_body_ref,
-  usage_http_audits.request_body_state AS http_request_body_state,
-  usage_http_audits.provider_request_body_state AS http_provider_request_body_state,
-  usage_http_audits.response_body_state AS http_response_body_state,
-  usage_http_audits.client_response_body_state AS http_client_response_body_state,
-  usage_routing_snapshots.candidate_id AS routing_candidate_id,
-  usage_routing_snapshots.candidate_index AS routing_candidate_index,
-  usage_routing_snapshots.key_name AS routing_key_name,
-  usage_routing_snapshots.planner_kind AS routing_planner_kind,
-  usage_routing_snapshots.route_family AS routing_route_family,
-  usage_routing_snapshots.route_kind AS routing_route_kind,
-  usage_routing_snapshots.execution_path AS routing_execution_path,
-  usage_routing_snapshots.local_execution_runtime_miss_reason AS routing_local_execution_runtime_miss_reason,
-  usage_settlement_snapshots.billing_snapshot_schema_version AS settlement_billing_snapshot_schema_version,
-  usage_settlement_snapshots.billing_snapshot_status AS settlement_billing_snapshot_status,
-  CAST(usage_settlement_snapshots.rate_multiplier AS DOUBLE PRECISION) AS settlement_rate_multiplier,
-  usage_settlement_snapshots.is_free_tier AS settlement_is_free_tier,
-  CAST(usage_settlement_snapshots.input_price_per_1m AS DOUBLE PRECISION) AS settlement_input_price_per_1m,
-  CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION) AS settlement_output_price_per_1m,
-  CAST(usage_settlement_snapshots.cache_creation_price_per_1m AS DOUBLE PRECISION) AS settlement_cache_creation_price_per_1m,
-  CAST(usage_settlement_snapshots.cache_read_price_per_1m AS DOUBLE PRECISION) AS settlement_cache_read_price_per_1m,
-  CAST(usage_settlement_snapshots.price_per_request AS DOUBLE PRECISION) AS settlement_price_per_request,
-  CAST(EXTRACT(EPOCH FROM "usage".created_at) AS BIGINT) AS created_at_unix_ms,
-  CAST(
-    EXTRACT(
-      EPOCH FROM COALESCE(
-        usage_settlement_snapshots.finalized_at,
-        "usage".finalized_at,
-        "usage".created_at
-      )
-    ) AS BIGINT
-  ) AS updated_at_unix_secs,
-  CAST(
-    EXTRACT(
-      EPOCH FROM COALESCE(usage_settlement_snapshots.finalized_at, "usage".finalized_at)
-    ) AS BIGINT
-  ) AS finalized_at_unix_secs
-FROM "usage"
-LEFT JOIN usage_http_audits
-  ON usage_http_audits.request_id = "usage".request_id
-LEFT JOIN usage_routing_snapshots
-  ON usage_routing_snapshots.request_id = "usage".request_id
-LEFT JOIN usage_settlement_snapshots
-  ON usage_settlement_snapshots.request_id = "usage".request_id
-WHERE "usage".request_id = $1
-LIMIT 1
-"#;
+const FIND_BY_REQUEST_ID_SQL: &str = include_str!("queries/find_by_request_id_sql.sql");
 
-const FIND_BY_ID_SQL: &str = r#"
-SELECT
-  "usage".id,
-  "usage".request_id,
-  "usage".user_id,
-  "usage".api_key_id,
-  "usage".username,
-  "usage".api_key_name,
-  "usage".provider_name,
-  "usage".model,
-  "usage".target_model,
-  "usage".provider_id,
-  "usage".provider_endpoint_id,
-  "usage".provider_api_key_id,
-  "usage".request_type,
-  "usage".api_format,
-  "usage".api_family,
-  "usage".endpoint_kind,
-  "usage".endpoint_api_format,
-  "usage".provider_api_family,
-  "usage".provider_endpoint_kind,
-  COALESCE("usage".has_format_conversion, FALSE) AS has_format_conversion,
-  COALESCE("usage".is_stream, FALSE) AS is_stream,
-  "usage".input_tokens,
-  "usage".output_tokens,
-  "usage".total_tokens,
-  COALESCE("usage".cache_creation_input_tokens, 0) AS cache_creation_input_tokens,
-  COALESCE("usage".cache_creation_input_tokens_5m, 0) AS cache_creation_ephemeral_5m_input_tokens,
-  COALESCE("usage".cache_creation_input_tokens_1h, 0) AS cache_creation_ephemeral_1h_input_tokens,
-  COALESCE("usage".cache_read_input_tokens, 0) AS cache_read_input_tokens,
-  COALESCE(CAST("usage".cache_creation_cost_usd AS DOUBLE PRECISION), 0) AS cache_creation_cost_usd,
-  COALESCE(CAST("usage".cache_read_cost_usd AS DOUBLE PRECISION), 0) AS cache_read_cost_usd,
-  COALESCE(
-    CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION),
-    CAST("usage".output_price_per_1m AS DOUBLE PRECISION)
-  ) AS output_price_per_1m,
-  COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
-  COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
-  "usage".status_code,
-  "usage".error_message,
-  "usage".error_category,
-  "usage".response_time_ms,
-  "usage".first_byte_time_ms,
-  "usage".status,
-  COALESCE(usage_settlement_snapshots.billing_status, "usage".billing_status) AS billing_status,
-  COALESCE(usage_http_audits.request_headers, "usage".request_headers) AS request_headers,
-  "usage".request_body,
-  "usage".request_body_compressed,
-  COALESCE(
-    usage_http_audits.provider_request_headers,
-    "usage".provider_request_headers
-  ) AS provider_request_headers,
-  "usage".provider_request_body,
-  "usage".provider_request_body_compressed,
-  COALESCE(usage_http_audits.response_headers, "usage".response_headers) AS response_headers,
-  "usage".response_body,
-  "usage".response_body_compressed,
-  COALESCE(
-    usage_http_audits.client_response_headers,
-    "usage".client_response_headers
-  ) AS client_response_headers,
-  "usage".client_response_body,
-  "usage".client_response_body_compressed,
-  "usage".request_metadata,
-  usage_http_audits.request_body_ref AS http_request_body_ref,
-  usage_http_audits.provider_request_body_ref AS http_provider_request_body_ref,
-  usage_http_audits.response_body_ref AS http_response_body_ref,
-  usage_http_audits.client_response_body_ref AS http_client_response_body_ref,
-  usage_routing_snapshots.candidate_id AS routing_candidate_id,
-  usage_routing_snapshots.candidate_index AS routing_candidate_index,
-  usage_routing_snapshots.key_name AS routing_key_name,
-  usage_routing_snapshots.planner_kind AS routing_planner_kind,
-  usage_routing_snapshots.route_family AS routing_route_family,
-  usage_routing_snapshots.route_kind AS routing_route_kind,
-  usage_routing_snapshots.execution_path AS routing_execution_path,
-  usage_routing_snapshots.local_execution_runtime_miss_reason AS routing_local_execution_runtime_miss_reason,
-  usage_settlement_snapshots.billing_snapshot_schema_version AS settlement_billing_snapshot_schema_version,
-  usage_settlement_snapshots.billing_snapshot_status AS settlement_billing_snapshot_status,
-  CAST(usage_settlement_snapshots.rate_multiplier AS DOUBLE PRECISION) AS settlement_rate_multiplier,
-  usage_settlement_snapshots.is_free_tier AS settlement_is_free_tier,
-  CAST(usage_settlement_snapshots.input_price_per_1m AS DOUBLE PRECISION) AS settlement_input_price_per_1m,
-  CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION) AS settlement_output_price_per_1m,
-  CAST(usage_settlement_snapshots.cache_creation_price_per_1m AS DOUBLE PRECISION) AS settlement_cache_creation_price_per_1m,
-  CAST(usage_settlement_snapshots.cache_read_price_per_1m AS DOUBLE PRECISION) AS settlement_cache_read_price_per_1m,
-  CAST(usage_settlement_snapshots.price_per_request AS DOUBLE PRECISION) AS settlement_price_per_request,
-  CAST(EXTRACT(EPOCH FROM "usage".created_at) AS BIGINT) AS created_at_unix_ms,
-  CAST(
-    EXTRACT(
-      EPOCH FROM COALESCE(
-        usage_settlement_snapshots.finalized_at,
-        "usage".finalized_at,
-        "usage".created_at
-      )
-    ) AS BIGINT
-  ) AS updated_at_unix_secs,
-  CAST(
-    EXTRACT(
-      EPOCH FROM COALESCE(usage_settlement_snapshots.finalized_at, "usage".finalized_at)
-    ) AS BIGINT
-  ) AS finalized_at_unix_secs
-FROM "usage"
-LEFT JOIN usage_http_audits
-  ON usage_http_audits.request_id = "usage".request_id
-LEFT JOIN usage_routing_snapshots
-  ON usage_routing_snapshots.request_id = "usage".request_id
-LEFT JOIN usage_settlement_snapshots
-  ON usage_settlement_snapshots.request_id = "usage".request_id
-WHERE "usage".id = $1
-LIMIT 1
-"#;
+const FIND_BY_ID_SQL: &str = include_str!("queries/find_by_id_sql.sql");
 
-const SUMMARIZE_PROVIDER_USAGE_SINCE_SQL: &str = r#"
-SELECT
-  COALESCE(SUM(total_requests), 0) AS total_requests,
-  COALESCE(SUM(successful_requests), 0) AS successful_requests,
-  COALESCE(SUM(failed_requests), 0) AS failed_requests,
-  COALESCE(AVG(avg_response_time_ms), 0) AS avg_response_time_ms,
-  COALESCE(SUM(total_cost_usd), 0) AS total_cost_usd
-FROM provider_usage_tracking
-WHERE provider_id = $1
-  AND window_start >= TO_TIMESTAMP($2::double precision)
-"#;
+const SUMMARIZE_PROVIDER_USAGE_SINCE_SQL: &str =
+    include_str!("queries/summarize_provider_usage_since_sql.sql");
 
-const SUMMARIZE_TOTAL_TOKENS_BY_API_KEY_IDS_SQL: &str = r#"
-SELECT
-  api_key_id,
-  COALESCE(
-    SUM(
-      COALESCE(
-        total_tokens,
-        COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)
-      )
-    ),
-    0
-  ) AS total_tokens
-FROM "usage"
-WHERE api_key_id = ANY($1::TEXT[])
-GROUP BY api_key_id
-ORDER BY api_key_id ASC
-"#;
+const SUMMARIZE_TOTAL_TOKENS_BY_API_KEY_IDS_SQL: &str =
+    include_str!("queries/summarize_total_tokens_by_api_key_ids_sql.sql");
 
-const SUMMARIZE_USAGE_TOTALS_BY_USER_IDS_SQL: &str = r#"
-SELECT
-  "usage".user_id,
-  COUNT(*)::BIGINT AS request_count,
-  COALESCE(SUM(GREATEST(COALESCE("usage".total_tokens, 0), 0)), 0)::BIGINT AS total_tokens
-FROM "usage"
-WHERE "usage".user_id = ANY($1::TEXT[])
-  AND "usage".status NOT IN ('pending', 'streaming')
-  AND "usage".provider_name NOT IN ('unknown', 'pending')
-GROUP BY "usage".user_id
-ORDER BY "usage".user_id ASC
-"#;
+const SUMMARIZE_USAGE_TOTALS_BY_USER_IDS_SQL: &str =
+    include_str!("queries/summarize_usage_totals_by_user_ids_sql.sql");
 
-const SUMMARIZE_USAGE_BY_PROVIDER_API_KEY_IDS_SQL: &str = r#"
-SELECT
-  id AS provider_api_key_id,
-  COALESCE(request_count, 0)::BIGINT AS request_count,
-  COALESCE(total_tokens, 0)::BIGINT AS total_tokens,
-  CAST(COALESCE(total_cost_usd, 0) AS DOUBLE PRECISION) AS total_cost_usd,
-  CAST(EXTRACT(EPOCH FROM last_used_at) AS BIGINT) AS last_used_at_unix_secs
-FROM provider_api_keys
-WHERE id = ANY($1::TEXT[])
-  AND COALESCE(request_count, 0) > 0
-ORDER BY id ASC
-"#;
+const SUMMARIZE_USAGE_BY_PROVIDER_API_KEY_IDS_SQL: &str =
+    include_str!("queries/summarize_usage_by_provider_api_key_ids_sql.sql");
 
-const APPLY_API_KEY_USAGE_DELTA_SQL: &str = r#"
-UPDATE api_keys
-SET
-  total_requests = GREATEST(COALESCE(total_requests, 0) + $2, 0),
-  total_tokens = GREATEST(COALESCE(total_tokens, 0) + $3, 0),
-  total_cost_usd = CAST(
-    GREATEST(CAST(COALESCE(total_cost_usd, 0) AS DOUBLE PRECISION) + $4, 0) AS NUMERIC(20,8)
-  ),
-  last_used_at = CASE
-    WHEN $5::double precision IS NOT NULL THEN CASE
-      WHEN last_used_at IS NULL THEN TO_TIMESTAMP($5::double precision)
-      ELSE GREATEST(last_used_at, TO_TIMESTAMP($5::double precision))
-    END
-    WHEN $6::double precision IS NOT NULL
-      AND last_used_at IS NOT NULL
-      AND EXTRACT(EPOCH FROM last_used_at)::BIGINT = $6::BIGINT
-    THEN (
-      SELECT MAX(created_at)
-      FROM "usage"
-      WHERE api_key_id = $1
-    )
-    ELSE last_used_at
-  END
-WHERE id = $1
-"#;
+const APPLY_API_KEY_USAGE_DELTA_SQL: &str =
+    include_str!("queries/apply_api_key_usage_delta_sql.sql");
 
-const RESET_API_KEY_USAGE_STATS_SQL: &str = r#"
-UPDATE api_keys
-SET
-  total_requests = 0,
-  total_tokens = 0,
-  total_cost_usd = 0,
-  last_used_at = NULL
-"#;
+const RESET_API_KEY_USAGE_STATS_SQL: &str =
+    include_str!("queries/reset_api_key_usage_stats_sql.sql");
 
-const REBUILD_API_KEY_USAGE_STATS_SQL: &str = r#"
-WITH aggregated AS (
-  SELECT
-    api_key_id,
-    COUNT(*)::INTEGER AS total_requests,
-    COALESCE(SUM(
-      GREATEST(
-        COALESCE(
-          total_tokens,
-          COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)
-        ),
-        0
-      )::BIGINT
-    ), 0)::BIGINT AS total_tokens,
-    COALESCE(SUM(COALESCE(total_cost_usd, 0)), 0)::NUMERIC(20,8) AS total_cost_usd,
-    MAX(created_at) AS last_used_at
-  FROM "usage"
-  WHERE api_key_id IS NOT NULL
-    AND BTRIM(api_key_id) <> ''
-  GROUP BY api_key_id
-)
-UPDATE api_keys
-SET
-  total_requests = aggregated.total_requests,
-  total_tokens = aggregated.total_tokens,
-  total_cost_usd = aggregated.total_cost_usd,
-  last_used_at = aggregated.last_used_at
-FROM aggregated
-WHERE api_keys.id = aggregated.api_key_id
-"#;
+const REBUILD_API_KEY_USAGE_STATS_SQL: &str =
+    include_str!("queries/rebuild_api_key_usage_stats_sql.sql");
 
-const APPLY_PROVIDER_API_KEY_USAGE_DELTA_SQL: &str = r#"
-UPDATE provider_api_keys
-SET
-  request_count = GREATEST(COALESCE(request_count, 0) + $2, 0),
-  success_count = GREATEST(COALESCE(success_count, 0) + $3, 0),
-  error_count = GREATEST(COALESCE(error_count, 0) + $4, 0),
-  total_tokens = GREATEST(total_tokens + $5, 0),
-  total_cost_usd = CAST(
-    GREATEST(CAST(total_cost_usd AS DOUBLE PRECISION) + $6, 0) AS NUMERIC(20,8)
-  ),
-  total_response_time_ms = GREATEST(COALESCE(total_response_time_ms, 0) + $7, 0),
-  last_used_at = CASE
-    WHEN $8::double precision IS NOT NULL THEN CASE
-      WHEN last_used_at IS NULL THEN TO_TIMESTAMP($8::double precision)
-      ELSE GREATEST(last_used_at, TO_TIMESTAMP($8::double precision))
-    END
-    WHEN $9::double precision IS NOT NULL
-      AND last_used_at IS NOT NULL
-      AND EXTRACT(EPOCH FROM last_used_at)::BIGINT = $9::BIGINT
-    THEN (
-      SELECT MAX(created_at)
-      FROM "usage"
-      WHERE provider_api_key_id = $1
-    )
-    ELSE last_used_at
-  END
-WHERE id = $1
-"#;
+const APPLY_PROVIDER_API_KEY_USAGE_DELTA_SQL: &str =
+    include_str!("queries/apply_provider_api_key_usage_delta_sql.sql");
 
-const RESET_PROVIDER_API_KEY_USAGE_STATS_SQL: &str = r#"
-UPDATE provider_api_keys
-SET
-  request_count = 0,
-  success_count = 0,
-  error_count = 0,
-  total_tokens = 0,
-  total_cost_usd = 0,
-  total_response_time_ms = 0,
-  last_used_at = NULL
-"#;
+const RESET_PROVIDER_API_KEY_USAGE_STATS_SQL: &str =
+    include_str!("queries/reset_provider_api_key_usage_stats_sql.sql");
 
-const REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL: &str = r#"
-WITH aggregated AS (
-  SELECT
-    provider_api_key_id,
-    COUNT(*)::INTEGER AS request_count,
-    COALESCE(SUM(
-      CASE
-        WHEN status IN ('completed', 'success', 'ok', 'billed', 'settled')
-             AND (status_code IS NULL OR status_code < 400)
-             AND NULLIF(BTRIM(error_message), '') IS NULL
-        THEN 1
-        ELSE 0
-      END
-    ), 0)::INTEGER AS success_count,
-    COALESCE(SUM(
-      CASE
-        WHEN status NOT IN ('pending', 'streaming')
-             AND NOT (
-               status IN ('completed', 'success', 'ok', 'billed', 'settled')
-               AND (status_code IS NULL OR status_code < 400)
-               AND NULLIF(BTRIM(error_message), '') IS NULL
-             )
-        THEN 1
-        ELSE 0
-      END
-    ), 0)::INTEGER AS error_count,
-    COALESCE(SUM(
-      GREATEST(
-        COALESCE(
-          total_tokens,
-          COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)
-        ),
-        0
-      )::BIGINT
-    ), 0)::BIGINT AS total_tokens,
-    COALESCE(SUM(COALESCE(total_cost_usd, 0)), 0)::NUMERIC(20,8) AS total_cost_usd,
-    COALESCE(SUM(
-      CASE
-        WHEN status IN ('completed', 'success', 'ok', 'billed', 'settled')
-             AND (status_code IS NULL OR status_code < 400)
-             AND NULLIF(BTRIM(error_message), '') IS NULL
-             AND response_time_ms IS NOT NULL
-        THEN GREATEST(response_time_ms, 0)
-        ELSE 0
-      END
-    ), 0)::INTEGER AS total_response_time_ms,
-    MAX(created_at) AS last_used_at
-  FROM "usage"
-  WHERE provider_api_key_id IS NOT NULL
-    AND BTRIM(provider_api_key_id) <> ''
-  GROUP BY provider_api_key_id
-)
-UPDATE provider_api_keys
-SET
-  request_count = aggregated.request_count,
-  success_count = aggregated.success_count,
-  error_count = aggregated.error_count,
-  total_tokens = aggregated.total_tokens,
-  total_cost_usd = aggregated.total_cost_usd,
-  total_response_time_ms = aggregated.total_response_time_ms,
-  last_used_at = aggregated.last_used_at
-FROM aggregated
-WHERE provider_api_keys.id = aggregated.provider_api_key_id
-"#;
+const REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL: &str =
+    include_str!("queries/rebuild_provider_api_key_usage_stats_sql.sql");
 
-const LIST_USAGE_AUDITS_PREFIX: &str = r#"
-SELECT
-  "usage".id,
-  "usage".request_id,
-  "usage".user_id,
-  "usage".api_key_id,
-  "usage".username,
-  "usage".api_key_name,
-  "usage".provider_name,
-  "usage".model,
-  "usage".target_model,
-  "usage".provider_id,
-  "usage".provider_endpoint_id,
-  "usage".provider_api_key_id,
-  "usage".request_type,
-  "usage".api_format,
-  "usage".api_family,
-  "usage".endpoint_kind,
-  "usage".endpoint_api_format,
-  "usage".provider_api_family,
-  "usage".provider_endpoint_kind,
-  COALESCE("usage".has_format_conversion, FALSE) AS has_format_conversion,
-  COALESCE("usage".is_stream, FALSE) AS is_stream,
-  "usage".input_tokens,
-  "usage".output_tokens,
-  "usage".total_tokens,
-  COALESCE("usage".cache_creation_input_tokens, 0) AS cache_creation_input_tokens,
-  COALESCE("usage".cache_creation_input_tokens_5m, 0) AS cache_creation_ephemeral_5m_input_tokens,
-  COALESCE("usage".cache_creation_input_tokens_1h, 0) AS cache_creation_ephemeral_1h_input_tokens,
-  COALESCE("usage".cache_read_input_tokens, 0) AS cache_read_input_tokens,
-  COALESCE(CAST("usage".cache_creation_cost_usd AS DOUBLE PRECISION), 0) AS cache_creation_cost_usd,
-  COALESCE(CAST("usage".cache_read_cost_usd AS DOUBLE PRECISION), 0) AS cache_read_cost_usd,
-  COALESCE(
-    CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION),
-    CAST("usage".output_price_per_1m AS DOUBLE PRECISION)
-  ) AS output_price_per_1m,
-  COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
-  COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
-  "usage".status_code,
-  "usage".error_message,
-  "usage".error_category,
-  "usage".response_time_ms,
-  "usage".first_byte_time_ms,
-  "usage".status,
-  COALESCE(usage_settlement_snapshots.billing_status, "usage".billing_status) AS billing_status,
-  NULL::json AS request_headers,
-  NULL::json AS request_body,
-  NULL::bytea AS request_body_compressed,
-  NULL::json AS provider_request_headers,
-  NULL::json AS provider_request_body,
-  NULL::bytea AS provider_request_body_compressed,
-  NULL::json AS response_headers,
-  NULL::json AS response_body,
-  NULL::bytea AS response_body_compressed,
-  NULL::json AS client_response_headers,
-  NULL::json AS client_response_body,
-  NULL::bytea AS client_response_body_compressed,
-  NULL::json AS request_metadata,
-  NULL::varchar AS http_request_body_ref,
-  NULL::varchar AS http_provider_request_body_ref,
-  NULL::varchar AS http_response_body_ref,
-  NULL::varchar AS http_client_response_body_ref,
-  NULL::varchar AS http_request_body_state,
-  NULL::varchar AS http_provider_request_body_state,
-  NULL::varchar AS http_response_body_state,
-  NULL::varchar AS http_client_response_body_state,
-  COALESCE(
-    usage_routing_snapshots.candidate_id,
-    NULLIF(BTRIM("usage".request_metadata->>'candidate_id'), '')
-  ) AS routing_candidate_id,
-  COALESCE(
-    usage_routing_snapshots.candidate_index,
-    CASE
-      WHEN ("usage".request_metadata->>'candidate_index') ~ '^[0-9]+$'
-        THEN ("usage".request_metadata->>'candidate_index')::integer
-      ELSE NULL
-    END
-  ) AS routing_candidate_index,
-  COALESCE(
-    usage_routing_snapshots.key_name,
-    NULLIF(BTRIM("usage".request_metadata->>'key_name'), '')
-  ) AS routing_key_name,
-  COALESCE(
-    usage_routing_snapshots.planner_kind,
-    NULLIF(BTRIM("usage".request_metadata->>'planner_kind'), '')
-  ) AS routing_planner_kind,
-  COALESCE(
-    usage_routing_snapshots.route_family,
-    NULLIF(BTRIM("usage".request_metadata->>'route_family'), '')
-  ) AS routing_route_family,
-  COALESCE(
-    usage_routing_snapshots.route_kind,
-    NULLIF(BTRIM("usage".request_metadata->>'route_kind'), '')
-  ) AS routing_route_kind,
-  COALESCE(
-    usage_routing_snapshots.execution_path,
-    NULLIF(BTRIM("usage".request_metadata->>'execution_path'), '')
-  ) AS routing_execution_path,
-  COALESCE(
-    usage_routing_snapshots.local_execution_runtime_miss_reason,
-    NULLIF(BTRIM("usage".request_metadata->>'local_execution_runtime_miss_reason'), '')
-  ) AS routing_local_execution_runtime_miss_reason,
-  usage_settlement_snapshots.billing_snapshot_schema_version AS settlement_billing_snapshot_schema_version,
-  usage_settlement_snapshots.billing_snapshot_status AS settlement_billing_snapshot_status,
-  CAST(usage_settlement_snapshots.rate_multiplier AS DOUBLE PRECISION) AS settlement_rate_multiplier,
-  usage_settlement_snapshots.is_free_tier AS settlement_is_free_tier,
-  CAST(usage_settlement_snapshots.input_price_per_1m AS DOUBLE PRECISION) AS settlement_input_price_per_1m,
-  CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION) AS settlement_output_price_per_1m,
-  CAST(usage_settlement_snapshots.cache_creation_price_per_1m AS DOUBLE PRECISION) AS settlement_cache_creation_price_per_1m,
-  CAST(usage_settlement_snapshots.cache_read_price_per_1m AS DOUBLE PRECISION) AS settlement_cache_read_price_per_1m,
-  CAST(usage_settlement_snapshots.price_per_request AS DOUBLE PRECISION) AS settlement_price_per_request,
-  CAST(EXTRACT(EPOCH FROM "usage".created_at) AS BIGINT) AS created_at_unix_ms,
-  CAST(
-    EXTRACT(
-      EPOCH FROM COALESCE(
-        usage_settlement_snapshots.finalized_at,
-        "usage".finalized_at,
-        "usage".created_at
-      )
-    ) AS BIGINT
-  ) AS updated_at_unix_secs,
-  CAST(
-    EXTRACT(
-      EPOCH FROM COALESCE(usage_settlement_snapshots.finalized_at, "usage".finalized_at)
-    ) AS BIGINT
-  ) AS finalized_at_unix_secs
-FROM "usage"
-LEFT JOIN usage_routing_snapshots
-  ON usage_routing_snapshots.request_id = "usage".request_id
-LEFT JOIN usage_settlement_snapshots
-  ON usage_settlement_snapshots.request_id = "usage".request_id
-"#;
+const LIST_USAGE_AUDITS_PREFIX: &str = include_str!("queries/list_usage_audits_prefix.sql");
 
 struct UsageAuditAggregationSqlFragments {
     filtered_extra_where: &'static str,
@@ -1846,432 +1057,10 @@ fn usage_leaderboard_sql_fragments(
     }
 }
 
-const LIST_RECENT_USAGE_AUDITS_PREFIX: &str = r#"
-SELECT
-  "usage".id,
-  "usage".request_id,
-  "usage".user_id,
-  "usage".api_key_id,
-  "usage".username,
-  "usage".api_key_name,
-  "usage".provider_name,
-  "usage".model,
-  "usage".target_model,
-  "usage".provider_id,
-  "usage".provider_endpoint_id,
-  "usage".provider_api_key_id,
-  "usage".request_type,
-  "usage".api_format,
-  "usage".api_family,
-  "usage".endpoint_kind,
-  "usage".endpoint_api_format,
-  "usage".provider_api_family,
-  "usage".provider_endpoint_kind,
-  COALESCE("usage".has_format_conversion, FALSE) AS has_format_conversion,
-  COALESCE("usage".is_stream, FALSE) AS is_stream,
-  "usage".input_tokens,
-  "usage".output_tokens,
-  "usage".total_tokens,
-  COALESCE("usage".cache_creation_input_tokens, 0) AS cache_creation_input_tokens,
-  COALESCE("usage".cache_creation_input_tokens_5m, 0) AS cache_creation_ephemeral_5m_input_tokens,
-  COALESCE("usage".cache_creation_input_tokens_1h, 0) AS cache_creation_ephemeral_1h_input_tokens,
-  COALESCE("usage".cache_read_input_tokens, 0) AS cache_read_input_tokens,
-  COALESCE(CAST("usage".cache_creation_cost_usd AS DOUBLE PRECISION), 0) AS cache_creation_cost_usd,
-  COALESCE(CAST("usage".cache_read_cost_usd AS DOUBLE PRECISION), 0) AS cache_read_cost_usd,
-  COALESCE(
-    CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION),
-    CAST("usage".output_price_per_1m AS DOUBLE PRECISION)
-  ) AS output_price_per_1m,
-  COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
-  COALESCE(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
-  "usage".status_code,
-  "usage".error_message,
-  "usage".error_category,
-  "usage".response_time_ms,
-  "usage".first_byte_time_ms,
-  "usage".status,
-  COALESCE(usage_settlement_snapshots.billing_status, "usage".billing_status) AS billing_status,
-  NULL::json AS request_headers,
-  NULL::json AS request_body,
-  NULL::bytea AS request_body_compressed,
-  NULL::json AS provider_request_headers,
-  NULL::json AS provider_request_body,
-  NULL::bytea AS provider_request_body_compressed,
-  NULL::json AS response_headers,
-  NULL::json AS response_body,
-  NULL::bytea AS response_body_compressed,
-  NULL::json AS client_response_headers,
-  NULL::json AS client_response_body,
-  NULL::bytea AS client_response_body_compressed,
-  NULL::json AS request_metadata,
-  NULL::varchar AS http_request_body_ref,
-  NULL::varchar AS http_provider_request_body_ref,
-  NULL::varchar AS http_response_body_ref,
-  NULL::varchar AS http_client_response_body_ref,
-  NULL::varchar AS http_request_body_state,
-  NULL::varchar AS http_provider_request_body_state,
-  NULL::varchar AS http_response_body_state,
-  NULL::varchar AS http_client_response_body_state,
-  COALESCE(
-    usage_routing_snapshots.candidate_id,
-    NULLIF(BTRIM("usage".request_metadata->>'candidate_id'), '')
-  ) AS routing_candidate_id,
-  COALESCE(
-    usage_routing_snapshots.candidate_index,
-    CASE
-      WHEN ("usage".request_metadata->>'candidate_index') ~ '^[0-9]+$'
-        THEN ("usage".request_metadata->>'candidate_index')::integer
-      ELSE NULL
-    END
-  ) AS routing_candidate_index,
-  COALESCE(
-    usage_routing_snapshots.key_name,
-    NULLIF(BTRIM("usage".request_metadata->>'key_name'), '')
-  ) AS routing_key_name,
-  COALESCE(
-    usage_routing_snapshots.planner_kind,
-    NULLIF(BTRIM("usage".request_metadata->>'planner_kind'), '')
-  ) AS routing_planner_kind,
-  COALESCE(
-    usage_routing_snapshots.route_family,
-    NULLIF(BTRIM("usage".request_metadata->>'route_family'), '')
-  ) AS routing_route_family,
-  COALESCE(
-    usage_routing_snapshots.route_kind,
-    NULLIF(BTRIM("usage".request_metadata->>'route_kind'), '')
-  ) AS routing_route_kind,
-  COALESCE(
-    usage_routing_snapshots.execution_path,
-    NULLIF(BTRIM("usage".request_metadata->>'execution_path'), '')
-  ) AS routing_execution_path,
-  COALESCE(
-    usage_routing_snapshots.local_execution_runtime_miss_reason,
-    NULLIF(BTRIM("usage".request_metadata->>'local_execution_runtime_miss_reason'), '')
-  ) AS routing_local_execution_runtime_miss_reason,
-  usage_settlement_snapshots.billing_snapshot_schema_version AS settlement_billing_snapshot_schema_version,
-  usage_settlement_snapshots.billing_snapshot_status AS settlement_billing_snapshot_status,
-  CAST(usage_settlement_snapshots.rate_multiplier AS DOUBLE PRECISION) AS settlement_rate_multiplier,
-  usage_settlement_snapshots.is_free_tier AS settlement_is_free_tier,
-  CAST(usage_settlement_snapshots.input_price_per_1m AS DOUBLE PRECISION) AS settlement_input_price_per_1m,
-  CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION) AS settlement_output_price_per_1m,
-  CAST(usage_settlement_snapshots.cache_creation_price_per_1m AS DOUBLE PRECISION) AS settlement_cache_creation_price_per_1m,
-  CAST(usage_settlement_snapshots.cache_read_price_per_1m AS DOUBLE PRECISION) AS settlement_cache_read_price_per_1m,
-  CAST(usage_settlement_snapshots.price_per_request AS DOUBLE PRECISION) AS settlement_price_per_request,
-  CAST(EXTRACT(EPOCH FROM "usage".created_at) AS BIGINT) AS created_at_unix_ms,
-  CAST(
-    EXTRACT(
-      EPOCH FROM COALESCE(
-        usage_settlement_snapshots.finalized_at,
-        "usage".finalized_at,
-        "usage".created_at
-      )
-    ) AS BIGINT
-  ) AS updated_at_unix_secs,
-  CAST(
-    EXTRACT(
-      EPOCH FROM COALESCE(usage_settlement_snapshots.finalized_at, "usage".finalized_at)
-    ) AS BIGINT
-  ) AS finalized_at_unix_secs
-FROM "usage"
-LEFT JOIN usage_routing_snapshots
-  ON usage_routing_snapshots.request_id = "usage".request_id
-LEFT JOIN usage_settlement_snapshots
-  ON usage_settlement_snapshots.request_id = "usage".request_id
-"#;
+const LIST_RECENT_USAGE_AUDITS_PREFIX: &str =
+    include_str!("queries/list_recent_usage_audits_prefix.sql");
 
-const UPSERT_SQL: &str = r#"
-INSERT INTO "usage" (
-  id,
-  request_id,
-  user_id,
-  api_key_id,
-  username,
-  api_key_name,
-  provider_name,
-  model,
-  target_model,
-  provider_id,
-  provider_endpoint_id,
-  provider_api_key_id,
-  request_type,
-  api_format,
-  api_family,
-  endpoint_kind,
-  endpoint_api_format,
-  provider_api_family,
-  provider_endpoint_kind,
-  has_format_conversion,
-  is_stream,
-  input_tokens,
-  output_tokens,
-  total_tokens,
-  cache_creation_input_tokens,
-  cache_creation_input_tokens_5m,
-  cache_creation_input_tokens_1h,
-  cache_read_input_tokens,
-  cache_creation_cost_usd,
-  cache_read_cost_usd,
-  output_price_per_1m,
-  total_cost_usd,
-  actual_total_cost_usd,
-  status_code,
-  error_message,
-  error_category,
-  response_time_ms,
-  first_byte_time_ms,
-  status,
-  billing_status,
-  request_headers,
-  request_body,
-  request_body_compressed,
-  provider_request_headers,
-  provider_request_body,
-  provider_request_body_compressed,
-  response_headers,
-  response_body,
-  response_body_compressed,
-  client_response_headers,
-  client_response_body,
-  client_response_body_compressed,
-  request_metadata,
-  finalized_at,
-  created_at
-) VALUES (
-  $1,
-  $2,
-  $3,
-  $4,
-  $5,
-  $6,
-  $7,
-  $8,
-  $9,
-  $10,
-  $11,
-  $12,
-  $13,
-  $14,
-  $15,
-  $16,
-  $17,
-  $18,
-  $19,
-  COALESCE($20, FALSE),
-  COALESCE($21, FALSE),
-  COALESCE($22, 0),
-  COALESCE($23, 0),
-  COALESCE($24, COALESCE($22, 0) + COALESCE($23, 0)),
-  COALESCE($25, 0),
-  COALESCE($26, 0),
-  COALESCE($27, 0),
-  COALESCE($28, 0),
-  COALESCE($29, 0),
-  $30,
-  COALESCE($31, 0),
-  COALESCE($32, 0),
-  $33,
-  $34,
-  $35,
-  $36,
-  $37,
-  $38,
-  $39,
-  $40,
-  $41::json,
-  $42::json,
-  $43,
-  $44::json,
-  $45::json,
-  $46,
-  $47::json,
-  $48::json,
-  $49,
-  $50::json,
-  $51::json,
-  $52,
-  $53::json,
-  CASE
-    WHEN $54 IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($54::double precision)
-  END,
-  COALESCE(TO_TIMESTAMP($55::double precision), NOW())
-)
-ON CONFLICT (request_id)
-DO UPDATE SET
-  user_id = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.user_id, "usage".user_id) ELSE "usage".user_id END,
-  api_key_id = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.api_key_id, "usage".api_key_id) ELSE "usage".api_key_id END,
-  username = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.username, "usage".username) ELSE "usage".username END,
-  api_key_name = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.api_key_name, "usage".api_key_name) ELSE "usage".api_key_name END,
-  provider_name = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.provider_name, "usage".provider_name) ELSE "usage".provider_name END,
-  model = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.model, "usage".model) ELSE "usage".model END,
-  target_model = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.target_model, "usage".target_model) ELSE "usage".target_model END,
-  provider_id = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.provider_id, "usage".provider_id) ELSE "usage".provider_id END,
-  provider_endpoint_id = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.provider_endpoint_id, "usage".provider_endpoint_id) ELSE "usage".provider_endpoint_id END,
-  provider_api_key_id = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.provider_api_key_id, "usage".provider_api_key_id) ELSE "usage".provider_api_key_id END,
-  request_type = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.request_type, "usage".request_type) ELSE "usage".request_type END,
-  api_format = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.api_format, "usage".api_format) ELSE "usage".api_format END,
-  api_family = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.api_family, "usage".api_family) ELSE "usage".api_family END,
-  endpoint_kind = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.endpoint_kind, "usage".endpoint_kind) ELSE "usage".endpoint_kind END,
-  endpoint_api_format = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.endpoint_api_format, "usage".endpoint_api_format) ELSE "usage".endpoint_api_format END,
-  provider_api_family = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.provider_api_family, "usage".provider_api_family) ELSE "usage".provider_api_family END,
-  provider_endpoint_kind = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.provider_endpoint_kind, "usage".provider_endpoint_kind) ELSE "usage".provider_endpoint_kind END,
-  has_format_conversion = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.has_format_conversion, "usage".has_format_conversion) ELSE "usage".has_format_conversion END,
-  is_stream = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.is_stream, "usage".is_stream) ELSE "usage".is_stream END,
-  input_tokens = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.input_tokens, "usage".input_tokens) ELSE "usage".input_tokens END,
-  output_tokens = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.output_tokens, "usage".output_tokens) ELSE "usage".output_tokens END,
-  total_tokens = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.total_tokens, "usage".total_tokens) ELSE "usage".total_tokens END,
-  cache_creation_input_tokens = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.cache_creation_input_tokens, "usage".cache_creation_input_tokens) ELSE "usage".cache_creation_input_tokens END,
-  cache_creation_input_tokens_5m = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.cache_creation_input_tokens_5m, "usage".cache_creation_input_tokens_5m) ELSE "usage".cache_creation_input_tokens_5m END,
-  cache_creation_input_tokens_1h = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.cache_creation_input_tokens_1h, "usage".cache_creation_input_tokens_1h) ELSE "usage".cache_creation_input_tokens_1h END,
-  cache_read_input_tokens = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.cache_read_input_tokens, "usage".cache_read_input_tokens) ELSE "usage".cache_read_input_tokens END,
-  cache_creation_cost_usd = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.cache_creation_cost_usd, "usage".cache_creation_cost_usd) ELSE "usage".cache_creation_cost_usd END,
-  cache_read_cost_usd = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.cache_read_cost_usd, "usage".cache_read_cost_usd) ELSE "usage".cache_read_cost_usd END,
-  output_price_per_1m = NULL,
-  total_cost_usd = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.total_cost_usd, "usage".total_cost_usd) ELSE "usage".total_cost_usd END,
-  actual_total_cost_usd = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.actual_total_cost_usd, "usage".actual_total_cost_usd) ELSE "usage".actual_total_cost_usd END,
-  status_code = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN "usage".status = 'streaming' AND EXCLUDED.status = 'pending' THEN "usage".status_code
-    WHEN EXCLUDED.status IN ('pending', 'streaming', 'completed', 'cancelled') AND EXCLUDED.status_code IS NULL THEN NULL
-    ELSE COALESCE(EXCLUDED.status_code, "usage".status_code)
-  END ELSE "usage".status_code END,
-  error_message = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN "usage".status = 'streaming' AND EXCLUDED.status = 'pending' THEN "usage".error_message
-    WHEN EXCLUDED.status IN ('pending', 'streaming', 'completed', 'cancelled') THEN EXCLUDED.error_message
-    ELSE COALESCE(EXCLUDED.error_message, "usage".error_message)
-  END ELSE "usage".error_message END,
-  error_category = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN "usage".status = 'streaming' AND EXCLUDED.status = 'pending' THEN "usage".error_category
-    WHEN EXCLUDED.status IN ('pending', 'streaming', 'completed', 'cancelled') THEN EXCLUDED.error_category
-    ELSE COALESCE(EXCLUDED.error_category, "usage".error_category)
-  END ELSE "usage".error_category END,
-  response_time_ms = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.response_time_ms, "usage".response_time_ms) ELSE "usage".response_time_ms END,
-  first_byte_time_ms = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.first_byte_time_ms, "usage".first_byte_time_ms) ELSE "usage".first_byte_time_ms END,
-  status = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN "usage".status = 'streaming' AND EXCLUDED.status = 'pending' THEN "usage".status
-    ELSE EXCLUDED.status
-  END ELSE "usage".status END,
-  billing_status = CASE WHEN "usage".billing_status = 'pending' THEN EXCLUDED.billing_status ELSE "usage".billing_status END,
-  request_headers = NULL,
-  request_body = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN EXCLUDED.request_body_compressed IS NOT NULL OR $56 THEN NULL
-    ELSE COALESCE(EXCLUDED.request_body, "usage".request_body)
-  END ELSE "usage".request_body END,
-  request_body_compressed = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN EXCLUDED.request_body IS NOT NULL OR $56 THEN NULL
-    ELSE COALESCE(EXCLUDED.request_body_compressed, "usage".request_body_compressed)
-  END ELSE "usage".request_body_compressed END,
-  provider_request_headers = NULL,
-  provider_request_body = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN EXCLUDED.provider_request_body_compressed IS NOT NULL OR $57 THEN NULL
-    ELSE COALESCE(EXCLUDED.provider_request_body, "usage".provider_request_body)
-  END ELSE "usage".provider_request_body END,
-  provider_request_body_compressed = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN EXCLUDED.provider_request_body IS NOT NULL OR $57 THEN NULL
-    ELSE COALESCE(EXCLUDED.provider_request_body_compressed, "usage".provider_request_body_compressed)
-  END ELSE "usage".provider_request_body_compressed END,
-  response_headers = NULL,
-  response_body = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN EXCLUDED.response_body_compressed IS NOT NULL OR $58 THEN NULL
-    ELSE COALESCE(EXCLUDED.response_body, "usage".response_body)
-  END ELSE "usage".response_body END,
-  response_body_compressed = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN EXCLUDED.response_body IS NOT NULL OR $58 THEN NULL
-    ELSE COALESCE(EXCLUDED.response_body_compressed, "usage".response_body_compressed)
-  END ELSE "usage".response_body_compressed END,
-  client_response_headers = NULL,
-  client_response_body = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN EXCLUDED.client_response_body_compressed IS NOT NULL OR $59 THEN NULL
-    ELSE COALESCE(EXCLUDED.client_response_body, "usage".client_response_body)
-  END ELSE "usage".client_response_body END,
-  client_response_body_compressed = CASE WHEN "usage".billing_status = 'pending' THEN CASE
-    WHEN EXCLUDED.client_response_body IS NOT NULL OR $59 THEN NULL
-    ELSE COALESCE(EXCLUDED.client_response_body_compressed, "usage".client_response_body_compressed)
-  END ELSE "usage".client_response_body_compressed END,
-  request_metadata = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.request_metadata, "usage".request_metadata) ELSE "usage".request_metadata END,
-  finalized_at = CASE WHEN "usage".billing_status = 'pending' THEN COALESCE(EXCLUDED.finalized_at, "usage".finalized_at) ELSE "usage".finalized_at END
-RETURNING
-  id,
-  request_id,
-  user_id,
-  api_key_id,
-  username,
-  api_key_name,
-  provider_name,
-  model,
-  target_model,
-  provider_id,
-  provider_endpoint_id,
-  provider_api_key_id,
-  request_type,
-  api_format,
-  api_family,
-  endpoint_kind,
-  endpoint_api_format,
-  provider_api_family,
-  provider_endpoint_kind,
-  COALESCE(has_format_conversion, FALSE) AS has_format_conversion,
-  COALESCE(is_stream, FALSE) AS is_stream,
-  input_tokens,
-  output_tokens,
-  total_tokens,
-  COALESCE(cache_creation_input_tokens, 0) AS cache_creation_input_tokens,
-  COALESCE(cache_creation_input_tokens_5m, 0) AS cache_creation_ephemeral_5m_input_tokens,
-  COALESCE(cache_creation_input_tokens_1h, 0) AS cache_creation_ephemeral_1h_input_tokens,
-  COALESCE(cache_read_input_tokens, 0) AS cache_read_input_tokens,
-  COALESCE(CAST(cache_creation_cost_usd AS DOUBLE PRECISION), 0) AS cache_creation_cost_usd,
-  COALESCE(CAST(cache_read_cost_usd AS DOUBLE PRECISION), 0) AS cache_read_cost_usd,
-  CAST(output_price_per_1m AS DOUBLE PRECISION) AS output_price_per_1m,
-  COALESCE(CAST(total_cost_usd AS DOUBLE PRECISION), 0) AS total_cost_usd,
-  COALESCE(CAST(actual_total_cost_usd AS DOUBLE PRECISION), 0) AS actual_total_cost_usd,
-  status_code,
-  error_message,
-  error_category,
-  response_time_ms,
-  first_byte_time_ms,
-  status,
-  billing_status,
-  request_headers,
-  request_body,
-  request_body_compressed,
-  provider_request_headers,
-  provider_request_body,
-  provider_request_body_compressed,
-  response_headers,
-  response_body,
-  response_body_compressed,
-  client_response_headers,
-  client_response_body,
-  client_response_body_compressed,
-  request_metadata,
-  NULL::varchar AS http_request_body_ref,
-  NULL::varchar AS http_provider_request_body_ref,
-  NULL::varchar AS http_response_body_ref,
-  NULL::varchar AS http_client_response_body_ref,
-  NULL::varchar AS http_request_body_state,
-  NULL::varchar AS http_provider_request_body_state,
-  NULL::varchar AS http_response_body_state,
-  NULL::varchar AS http_client_response_body_state,
-  NULL::varchar AS routing_candidate_id,
-  NULL::integer AS routing_candidate_index,
-  NULL::varchar AS routing_key_name,
-  NULL::varchar AS routing_planner_kind,
-  NULL::varchar AS routing_route_family,
-  NULL::varchar AS routing_route_kind,
-  NULL::varchar AS routing_execution_path,
-  NULL::varchar AS routing_local_execution_runtime_miss_reason,
-  NULL::varchar AS settlement_billing_snapshot_schema_version,
-  NULL::varchar AS settlement_billing_snapshot_status,
-  NULL::double precision AS settlement_rate_multiplier,
-  NULL::boolean AS settlement_is_free_tier,
-  NULL::double precision AS settlement_input_price_per_1m,
-  NULL::double precision AS settlement_output_price_per_1m,
-  NULL::double precision AS settlement_cache_creation_price_per_1m,
-  NULL::double precision AS settlement_cache_read_price_per_1m,
-  NULL::double precision AS settlement_price_per_request,
-  CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT) AS created_at_unix_ms,
-  CAST(EXTRACT(EPOCH FROM COALESCE(finalized_at, created_at)) AS BIGINT) AS updated_at_unix_secs,
-  CAST(EXTRACT(EPOCH FROM finalized_at) AS BIGINT) AS finalized_at_unix_secs
-"#;
+const UPSERT_SQL: &str = include_str!("queries/upsert_sql.sql");
 
 #[derive(Debug, Clone)]
 pub struct SqlxUsageReadRepository {
@@ -2542,7 +1331,7 @@ SELECT
       ELSE 0
     END
   ), 0)::BIGINT AS response_time_samples
-FROM "usage"
+FROM usage_billing_facts AS "usage"
 "#,
         );
         let mut has_where = false;
@@ -2632,7 +1421,7 @@ ORDER BY request_count DESC, provider_name ASC
 SELECT
   "usage".provider_name AS provider_name,
   COUNT(*)::BIGINT AS request_count
-FROM "usage"
+FROM usage_billing_facts AS "usage"
 "#,
         );
         let mut has_where = false;
@@ -3488,7 +2277,7 @@ SELECT
       ELSE 0
     END
   ), 0)::BIGINT AS error_requests
-FROM "usage"
+FROM usage_billing_facts AS "usage"
 "#,
         );
         let mut has_where = false;
@@ -3627,7 +2416,7 @@ SELECT
   COUNT(*) FILTER (
     WHERE GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0) > 0
   )::BIGINT AS cache_hit_requests
-FROM "usage"
+FROM usage_billing_facts AS "usage"
 "#,
         );
         let mut has_where = false;
@@ -3843,7 +2632,7 @@ SELECT
     AS first_finalized_at_unix_secs,
   MAX(CAST(EXTRACT(EPOCH FROM "usage".finalized_at) AS BIGINT))
     AS last_finalized_at_unix_secs
-FROM "usage"
+FROM usage_billing_facts AS "usage"
 "#,
         );
         let mut has_where = false;
@@ -4206,7 +2995,7 @@ SELECT
     AS cache_read_cost_usd,
   COALESCE(SUM(COALESCE(CAST("usage".cache_creation_cost_usd AS DOUBLE PRECISION), 0)), 0)
     AS cache_creation_cost_usd
-FROM "usage"
+FROM usage_billing_facts AS "usage"
 "#,
         );
         let mut has_where = false;
@@ -4710,7 +3499,7 @@ SELECT
       ELSE 0
     END
   ), 0)::BIGINT AS response_time_samples
-FROM "usage"
+FROM usage_billing_facts AS "usage"
 "#,
         );
         let mut has_where = false;
@@ -5008,7 +3797,7 @@ WITH filtered_usage AS (
       ELSE 0
     END AS successful_response_time_samples,
     COALESCE(COALESCE("usage".endpoint_api_format, "usage".api_format), '') AS normalized_api_format
-  FROM "usage"
+  FROM usage_billing_facts AS "usage"
 "#,
         ));
         let mut has_where = false;
@@ -5605,14 +4394,11 @@ SELECT
     AS cache_creation_cost_usd,
   COALESCE(SUM(
     COALESCE(
-      CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION),
       CAST("usage".output_price_per_1m AS DOUBLE PRECISION),
       0
     ) * GREATEST(COALESCE("usage".cache_read_input_tokens, 0), 0)::DOUBLE PRECISION / 1000000.0
   ), 0) AS estimated_full_cost_usd
-FROM "usage"
-LEFT JOIN usage_settlement_snapshots
-  ON usage_settlement_snapshots.request_id = "usage".request_id
+FROM usage_billing_facts AS "usage"
 "#,
         );
         builder
@@ -5941,7 +4727,7 @@ WHERE user_id = $1
     AS total_cost_usd,
   COALESCE(SUM(GREATEST(COALESCE("usage".response_time_ms, 0), 0)::DOUBLE PRECISION), 0)
     AS total_response_time_ms
-FROM "usage"
+FROM usage_billing_facts AS "usage"
 "#,
         );
         let mut has_where = false;
@@ -6296,7 +5082,7 @@ SELECT
   ), 0)::BIGINT AS total_tokens,
   COALESCE(SUM(COALESCE(CAST("usage".total_cost_usd AS DOUBLE PRECISION), 0)), 0)
     AS total_cost_usd
-FROM "usage"
+FROM usage_billing_facts AS "usage"
 WHERE "usage".created_at >= TO_TIMESTAMP($1::double precision)
   AND "usage".created_at < TO_TIMESTAMP($2::double precision)
   AND "usage".status NOT IN ('pending', 'streaming')
@@ -6707,7 +5493,7 @@ WITH filtered_usage AS (
       THEN 1
       ELSE 0
     END AS success_flag
-  FROM "usage"
+  FROM usage_billing_facts AS "usage"
   WHERE "usage".created_at >= TO_TIMESTAMP($1::double precision)
     AND "usage".created_at < TO_TIMESTAMP($2::double precision)
     AND "usage".status NOT IN ('pending', 'streaming')
@@ -6911,7 +5697,7 @@ LIMIT $3
     + COALESCE("usage".cache_read_input_tokens, 0)), 0)::BIGINT AS total_tokens,
   COALESCE(SUM(CAST("usage".total_cost_usd AS DOUBLE PRECISION)), 0) AS total_cost_usd,
   COALESCE(SUM(CAST("usage".actual_total_cost_usd AS DOUBLE PRECISION)), 0) AS actual_total_cost_usd
-FROM "usage"
+FROM usage_billing_facts AS "usage"
 WHERE "usage".created_at >= $1
   AND "usage".created_at < $2
   AND "usage".status NOT IN ('pending', 'streaming')
@@ -7160,7 +5946,7 @@ SELECT
     ),
     0
   ) AS total_tokens
-FROM "usage"
+FROM usage_billing_facts AS "usage"
 WHERE api_key_id = ANY(
 "#,
             );
@@ -7258,7 +6044,7 @@ SELECT
   "usage".user_id,
   COUNT(*)::BIGINT AS request_count,
   COALESCE(SUM(GREATEST(COALESCE("usage".total_tokens, 0), 0)), 0)::BIGINT AS total_tokens
-FROM "usage"
+FROM usage_billing_facts AS "usage"
 WHERE "usage".user_id = ANY(
 "#,
             );
@@ -7513,9 +6299,9 @@ ORDER BY "usage".user_id ASC
                     let settlement_pricing_snapshot = usage_settlement_pricing_snapshot_from_usage(
                         &usage,
                         request_metadata_value.as_ref(),
-                    );
+                    )?;
                     let request_metadata_json = json_bind_text(request_metadata_value.as_ref())?;
-                    let row = sqlx::query(UPSERT_SQL)
+                    let _row = sqlx::query(UPSERT_SQL)
                         .bind(Uuid::new_v4().to_string())
                         .bind(&usage.request_id)
                         .bind(&usage.user_id)
@@ -7539,18 +6325,7 @@ ORDER BY "usage".user_id ASC
                         .bind(usage.is_stream)
                         .bind(usage.input_tokens.map(to_i32).transpose()?)
                         .bind(usage.output_tokens.map(to_i32).transpose()?)
-                        .bind(
-                            usage
-                                .total_tokens
-                                .or_else(|| {
-                                    Some(
-                                        usage.input_tokens.unwrap_or_default()
-                                            + usage.output_tokens.unwrap_or_default(),
-                                    )
-                                })
-                                .map(to_i32)
-                                .transpose()?,
-                        )
+                        .bind(usage.total_tokens.map(to_i32).transpose()?)
                         .bind(usage.cache_creation_input_tokens.map(to_i32).transpose()?)
                         .bind(
                             usage
@@ -7659,7 +6434,14 @@ ORDER BY "usage".user_id ASC
                     )
                     .await?;
 
-                    let mut stored = map_usage_row(&row, true)?;
+                    let mut stored = find_usage_by_request_id_in_tx(tx, &usage.request_id)
+                        .await?
+                        .ok_or_else(|| {
+                            DataLayerError::UnexpectedValue(format!(
+                                "usage row missing after upsert: {}",
+                                usage.request_id
+                            ))
+                        })?;
                     if request_body_storage.has_detached_blob() {
                         stored.request_body = usage.request_body.clone();
                     }
@@ -8540,6 +7322,24 @@ struct UsageSettlementPricingSnapshot {
     billing_status: Option<String>,
     billing_snapshot_schema_version: Option<String>,
     billing_snapshot_status: Option<String>,
+    settlement_snapshot_schema_version: Option<String>,
+    settlement_snapshot: Option<Value>,
+    billing_dimensions: Option<Value>,
+    billing_input_tokens: Option<i64>,
+    billing_effective_input_tokens: Option<i64>,
+    billing_output_tokens: Option<i64>,
+    billing_cache_creation_tokens: Option<i64>,
+    billing_cache_creation_5m_tokens: Option<i64>,
+    billing_cache_creation_1h_tokens: Option<i64>,
+    billing_cache_read_tokens: Option<i64>,
+    billing_total_input_context: Option<i64>,
+    billing_cache_creation_cost_usd: Option<f64>,
+    billing_cache_read_cost_usd: Option<f64>,
+    billing_total_cost_usd: Option<f64>,
+    billing_actual_total_cost_usd: Option<f64>,
+    billing_pricing_source: Option<String>,
+    billing_rule_id: Option<String>,
+    billing_rule_version: Option<String>,
     rate_multiplier: Option<f64>,
     is_free_tier: Option<bool>,
     input_price_per_1m: Option<f64>,
@@ -8554,6 +7354,24 @@ impl UsageSettlementPricingSnapshot {
         self.billing_status.is_some()
             || self.billing_snapshot_schema_version.is_some()
             || self.billing_snapshot_status.is_some()
+            || self.settlement_snapshot_schema_version.is_some()
+            || self.settlement_snapshot.is_some()
+            || self.billing_dimensions.is_some()
+            || self.billing_input_tokens.is_some()
+            || self.billing_effective_input_tokens.is_some()
+            || self.billing_output_tokens.is_some()
+            || self.billing_cache_creation_tokens.is_some()
+            || self.billing_cache_creation_5m_tokens.is_some()
+            || self.billing_cache_creation_1h_tokens.is_some()
+            || self.billing_cache_read_tokens.is_some()
+            || self.billing_total_input_context.is_some()
+            || self.billing_cache_creation_cost_usd.is_some()
+            || self.billing_cache_read_cost_usd.is_some()
+            || self.billing_total_cost_usd.is_some()
+            || self.billing_actual_total_cost_usd.is_some()
+            || self.billing_pricing_source.is_some()
+            || self.billing_rule_id.is_some()
+            || self.billing_rule_version.is_some()
             || self.rate_multiplier.is_some()
             || self.is_free_tier.is_some()
             || self.input_price_per_1m.is_some()
@@ -8765,6 +7583,157 @@ fn billing_snapshot_resolved_number(
         .filter(|value| value.is_finite())
 }
 
+fn settlement_snapshot_object(
+    metadata: Option<&serde_json::Map<String, Value>>,
+) -> Option<&serde_json::Map<String, Value>> {
+    metadata
+        .and_then(|object| object.get("settlement_snapshot"))
+        .and_then(Value::as_object)
+}
+
+fn settlement_snapshot_schema_version(
+    metadata: Option<&serde_json::Map<String, Value>>,
+) -> Option<String> {
+    metadata_ref_value(metadata, "settlement_snapshot_schema_version").or_else(|| {
+        settlement_snapshot_object(metadata)
+            .and_then(|snapshot| snapshot.get("schema_version"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn settlement_snapshot_value(metadata: Option<&serde_json::Map<String, Value>>) -> Option<Value> {
+    metadata
+        .and_then(|object| object.get("settlement_snapshot"))
+        .cloned()
+}
+
+fn settlement_snapshot_child_value<'a>(
+    metadata: Option<&'a serde_json::Map<String, Value>>,
+    child: &str,
+) -> Option<&'a Value> {
+    settlement_snapshot_object(metadata).and_then(|snapshot| snapshot.get(child))
+}
+
+fn settlement_snapshot_child_object<'a>(
+    metadata: Option<&'a serde_json::Map<String, Value>>,
+    child: &str,
+) -> Option<&'a serde_json::Map<String, Value>> {
+    settlement_snapshot_child_value(metadata, child).and_then(Value::as_object)
+}
+
+fn metadata_or_snapshot_dimensions(
+    metadata: Option<&serde_json::Map<String, Value>>,
+) -> Option<Value> {
+    metadata
+        .and_then(|object| object.get("billing_dimensions"))
+        .cloned()
+        .or_else(|| settlement_snapshot_child_value(metadata, "resolved_dimensions").cloned())
+        .or_else(|| {
+            billing_snapshot_object(metadata)
+                .and_then(|snapshot| snapshot.get("resolved_dimensions"))
+                .cloned()
+        })
+}
+
+fn json_i64_value(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+}
+
+fn billing_dimension_i64(
+    metadata: Option<&serde_json::Map<String, Value>>,
+    key: &str,
+) -> Option<i64> {
+    metadata_or_snapshot_dimensions(metadata)
+        .and_then(|dimensions| dimensions.get(key).and_then(json_i64_value))
+        .filter(|value| *value >= 0)
+}
+
+fn settlement_snapshot_number(
+    metadata: Option<&serde_json::Map<String, Value>>,
+    key: &str,
+) -> Option<f64> {
+    settlement_snapshot_object(metadata)
+        .and_then(|snapshot| snapshot.get(key))
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+}
+
+fn billing_snapshot_number(
+    metadata: Option<&serde_json::Map<String, Value>>,
+    key: &str,
+) -> Option<f64> {
+    billing_snapshot_object(metadata)
+        .and_then(|snapshot| snapshot.get(key))
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+}
+
+fn settlement_cost_breakdown_number(
+    metadata: Option<&serde_json::Map<String, Value>>,
+    key: &str,
+) -> Option<f64> {
+    settlement_snapshot_child_object(metadata, "cost_breakdown")
+        .or_else(|| {
+            billing_snapshot_object(metadata)
+                .and_then(|snapshot| snapshot.get("cost_breakdown"))
+                .and_then(Value::as_object)
+        })
+        .and_then(|breakdown| breakdown.get(key))
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+}
+
+fn settlement_cache_creation_cost(
+    metadata: Option<&serde_json::Map<String, Value>>,
+) -> Option<f64> {
+    let keys = [
+        "cache_creation_uncategorized_cost",
+        "cache_creation_ephemeral_5m_cost",
+        "cache_creation_ephemeral_1h_cost",
+        "cache_creation_cost",
+    ];
+    let mut found = false;
+    let total = keys.into_iter().fold(0.0, |sum, key| {
+        if let Some(value) = settlement_cost_breakdown_number(metadata, key) {
+            found = true;
+            sum + value
+        } else {
+            sum
+        }
+    });
+    found.then_some(total)
+}
+
+fn settlement_snapshot_nested_string(
+    metadata: Option<&serde_json::Map<String, Value>>,
+    child: &str,
+    key: &str,
+) -> Option<String> {
+    settlement_snapshot_child_object(metadata, child)
+        .and_then(|object| object.get(key))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn billing_snapshot_string_field(
+    metadata: Option<&serde_json::Map<String, Value>>,
+    key: &str,
+) -> Option<String> {
+    billing_snapshot_object(metadata)
+        .and_then(|snapshot| snapshot.get(key))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn usage_http_audit_capture_mode(
     refs: &UsageHttpAuditRefs,
     body_values: [Option<&Value>; 4],
@@ -8831,11 +7800,171 @@ fn usage_routing_snapshot_from_usage(
     snapshot
 }
 
+fn usage_optional_i64(value: Option<u64>, field_name: &str) -> Result<Option<i64>, DataLayerError> {
+    value
+        .map(|value| {
+            i64::try_from(value).map_err(|_| {
+                DataLayerError::UnexpectedValue(format!(
+                    "usage {field_name} exceeds bigint: {value}"
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn usage_cache_creation_tokens_from_parts(
+    uncategorized: Option<i64>,
+    ephemeral_5m: Option<i64>,
+    ephemeral_1h: Option<i64>,
+) -> Option<i64> {
+    let categorized = ephemeral_5m
+        .unwrap_or_default()
+        .saturating_add(ephemeral_1h.unwrap_or_default());
+    match uncategorized {
+        Some(0) if categorized > 0 => Some(categorized),
+        Some(value) => Some(value),
+        None if categorized > 0 => Some(categorized),
+        None => None,
+    }
+}
+
+fn usage_normalized_api_family(usage: &UpsertUsageRecord) -> String {
+    usage
+        .endpoint_api_format
+        .as_deref()
+        .or(usage.api_format.as_deref())
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn usage_effective_input_tokens(
+    input_tokens: Option<i64>,
+    cache_read_tokens: Option<i64>,
+    api_family: &str,
+) -> Option<i64> {
+    let input_tokens = input_tokens?;
+    let cache_read_tokens = cache_read_tokens.unwrap_or_default();
+    if matches!(api_family, "openai" | "gemini" | "google")
+        && input_tokens > 0
+        && cache_read_tokens > 0
+    {
+        return Some(input_tokens.saturating_sub(cache_read_tokens));
+    }
+    Some(input_tokens)
+}
+
+fn usage_total_input_context(
+    input_tokens: Option<i64>,
+    effective_input_tokens: Option<i64>,
+    cache_creation_tokens: Option<i64>,
+    cache_read_tokens: Option<i64>,
+    api_family: &str,
+) -> Option<i64> {
+    if input_tokens.is_none()
+        && effective_input_tokens.is_none()
+        && cache_creation_tokens.is_none()
+        && cache_read_tokens.is_none()
+    {
+        return None;
+    }
+
+    let input_tokens = input_tokens.unwrap_or_default();
+    let effective_input_tokens = effective_input_tokens.unwrap_or(input_tokens);
+    let cache_creation_tokens = cache_creation_tokens.unwrap_or_default();
+    let cache_read_tokens = cache_read_tokens.unwrap_or_default();
+    match api_family {
+        "claude" | "anthropic" => Some(
+            input_tokens
+                .saturating_add(cache_creation_tokens)
+                .saturating_add(cache_read_tokens),
+        ),
+        "openai" | "gemini" | "google" => {
+            Some(effective_input_tokens.saturating_add(cache_read_tokens))
+        }
+        _ => Some(
+            input_tokens
+                .saturating_add(cache_creation_tokens)
+                .saturating_add(cache_read_tokens),
+        ),
+    }
+}
+
 fn usage_settlement_pricing_snapshot_from_usage(
     usage: &UpsertUsageRecord,
     metadata: Option<&Value>,
-) -> UsageSettlementPricingSnapshot {
+) -> Result<UsageSettlementPricingSnapshot, DataLayerError> {
     let object = metadata.and_then(Value::as_object);
+    let billing_dimensions = metadata_or_snapshot_dimensions(object);
+    let has_billing_dimensions = billing_dimensions.is_some();
+    let usage_input_tokens = usage_optional_i64(usage.input_tokens, "input_tokens")?;
+    let usage_output_tokens = usage_optional_i64(usage.output_tokens, "output_tokens")?;
+    let usage_cache_creation_uncategorized_tokens = usage_optional_i64(
+        usage.cache_creation_input_tokens,
+        "cache_creation_input_tokens",
+    )?;
+    let usage_cache_creation_5m_tokens = usage_optional_i64(
+        usage.cache_creation_ephemeral_5m_input_tokens,
+        "cache_creation_ephemeral_5m_input_tokens",
+    )?;
+    let usage_cache_creation_1h_tokens = usage_optional_i64(
+        usage.cache_creation_ephemeral_1h_input_tokens,
+        "cache_creation_ephemeral_1h_input_tokens",
+    )?;
+    let usage_cache_read_tokens =
+        usage_optional_i64(usage.cache_read_input_tokens, "cache_read_input_tokens")?;
+    let usage_cache_creation_tokens = usage_cache_creation_tokens_from_parts(
+        usage_cache_creation_uncategorized_tokens,
+        usage_cache_creation_5m_tokens,
+        usage_cache_creation_1h_tokens,
+    );
+    let billing_cache_creation_tokens = billing_dimension_i64(object, "cache_creation_tokens")
+        .or_else(|| {
+            usage_cache_creation_tokens_from_parts(
+                billing_dimension_i64(object, "cache_creation_uncategorized_tokens"),
+                billing_dimension_i64(object, "cache_creation_ephemeral_5m_tokens"),
+                billing_dimension_i64(object, "cache_creation_ephemeral_1h_tokens"),
+            )
+        })
+        .or(usage_cache_creation_tokens);
+    let billing_cache_creation_5m_tokens =
+        billing_dimension_i64(object, "cache_creation_ephemeral_5m_tokens")
+            .or(usage_cache_creation_5m_tokens);
+    let billing_cache_creation_1h_tokens =
+        billing_dimension_i64(object, "cache_creation_ephemeral_1h_tokens")
+            .or(usage_cache_creation_1h_tokens);
+    let billing_input_tokens = billing_dimension_i64(object, "input_tokens").or(usage_input_tokens);
+    let billing_output_tokens =
+        billing_dimension_i64(object, "output_tokens").or(usage_output_tokens);
+    let billing_cache_read_tokens =
+        billing_dimension_i64(object, "cache_read_tokens").or(usage_cache_read_tokens);
+    let api_family = usage_normalized_api_family(usage);
+    let billing_effective_input_tokens = billing_dimension_i64(object, "effective_input_tokens")
+        .or_else(|| {
+            has_billing_dimensions
+                .then(|| billing_dimension_i64(object, "input_tokens"))
+                .flatten()
+        })
+        .or_else(|| {
+            usage_effective_input_tokens(
+                billing_input_tokens,
+                billing_cache_read_tokens,
+                api_family.as_str(),
+            )
+        });
+    let billing_total_input_context =
+        billing_dimension_i64(object, "total_input_context").or_else(|| {
+            usage_total_input_context(
+                billing_input_tokens,
+                billing_effective_input_tokens,
+                billing_cache_creation_tokens,
+                billing_cache_read_tokens,
+                api_family.as_str(),
+            )
+        });
     let snapshot = UsageSettlementPricingSnapshot {
         billing_status: Some(usage.billing_status.clone()),
         billing_snapshot_schema_version: metadata_ref_value(
@@ -8845,6 +7974,42 @@ fn usage_settlement_pricing_snapshot_from_usage(
         .or_else(|| billing_snapshot_string_value(object, "schema_version")),
         billing_snapshot_status: metadata_ref_value(object, "billing_snapshot_status")
             .or_else(|| billing_snapshot_string_value(object, "status")),
+        settlement_snapshot_schema_version: settlement_snapshot_schema_version(object),
+        settlement_snapshot: settlement_snapshot_value(object),
+        billing_dimensions,
+        billing_input_tokens,
+        billing_effective_input_tokens,
+        billing_output_tokens,
+        billing_cache_creation_tokens,
+        billing_cache_creation_5m_tokens,
+        billing_cache_creation_1h_tokens,
+        billing_cache_read_tokens,
+        billing_total_input_context,
+        billing_cache_creation_cost_usd: settlement_cache_creation_cost(object)
+            .or(usage.cache_creation_cost_usd),
+        billing_cache_read_cost_usd: settlement_cost_breakdown_number(object, "cache_read_cost")
+            .or(usage.cache_read_cost_usd),
+        billing_total_cost_usd: settlement_snapshot_number(object, "total_cost")
+            .or_else(|| billing_snapshot_number(object, "total_cost"))
+            .or(usage.total_cost_usd),
+        billing_actual_total_cost_usd: settlement_snapshot_number(object, "actual_total_cost")
+            .or(usage.actual_total_cost_usd),
+        billing_pricing_source: settlement_snapshot_nested_string(
+            object,
+            "pricing_snapshot",
+            "pricing_source",
+        ),
+        billing_rule_id: settlement_snapshot_nested_string(
+            object,
+            "billing_plan_snapshot",
+            "rule_id",
+        )
+        .or_else(|| billing_snapshot_string_field(object, "rule_id")),
+        billing_rule_version: settlement_snapshot_nested_string(
+            object,
+            "billing_plan_snapshot",
+            "rule_version",
+        ),
         rate_multiplier: metadata_number_value(object, "rate_multiplier"),
         is_free_tier: metadata_bool_value(object, "is_free_tier"),
         input_price_per_1m: metadata_number_value(object, "input_price_per_1m")
@@ -8859,11 +8024,11 @@ fn usage_settlement_pricing_snapshot_from_usage(
         price_per_request: metadata_number_value(object, "price_per_request")
             .or_else(|| billing_snapshot_resolved_number(object, "price_per_request")),
     };
-    if snapshot.any_present() {
+    Ok(if snapshot.any_present() {
         snapshot
     } else {
         UsageSettlementPricingSnapshot::default()
-    }
+    })
 }
 
 // Decode deprecated inline/compressed body columns from `public.usage`.
@@ -9208,6 +8373,24 @@ where
         .bind(snapshot.billing_status.as_deref().unwrap_or("pending"))
         .bind(snapshot.billing_snapshot_schema_version.as_deref())
         .bind(snapshot.billing_snapshot_status.as_deref())
+        .bind(snapshot.settlement_snapshot_schema_version.as_deref())
+        .bind(snapshot.settlement_snapshot.as_ref())
+        .bind(snapshot.billing_dimensions.as_ref())
+        .bind(snapshot.billing_input_tokens)
+        .bind(snapshot.billing_effective_input_tokens)
+        .bind(snapshot.billing_output_tokens)
+        .bind(snapshot.billing_cache_creation_tokens)
+        .bind(snapshot.billing_cache_creation_5m_tokens)
+        .bind(snapshot.billing_cache_creation_1h_tokens)
+        .bind(snapshot.billing_cache_read_tokens)
+        .bind(snapshot.billing_total_input_context)
+        .bind(snapshot.billing_cache_creation_cost_usd)
+        .bind(snapshot.billing_cache_read_cost_usd)
+        .bind(snapshot.billing_total_cost_usd)
+        .bind(snapshot.billing_actual_total_cost_usd)
+        .bind(snapshot.billing_pricing_source.as_deref())
+        .bind(snapshot.billing_rule_id.as_deref())
+        .bind(snapshot.billing_rule_version.as_deref())
         .bind(snapshot.rate_multiplier)
         .bind(snapshot.is_free_tier)
         .bind(snapshot.input_price_per_1m)
@@ -9309,6 +8492,54 @@ fn usage_settlement_pricing_snapshot_from_row(
             "settlement_billing_snapshot_schema_version",
         )?,
         billing_snapshot_status: row_try_get_optional(row, "settlement_billing_snapshot_status")?,
+        settlement_snapshot_schema_version: row_try_get_optional(
+            row,
+            "settlement_snapshot_schema_version",
+        )?,
+        settlement_snapshot: row_try_get_optional(row, "settlement_snapshot")?,
+        billing_dimensions: row_try_get_optional(row, "settlement_billing_dimensions")?,
+        billing_input_tokens: row_try_get_optional(row, "settlement_billing_input_tokens")?,
+        billing_effective_input_tokens: row_try_get_optional(
+            row,
+            "settlement_billing_effective_input_tokens",
+        )?,
+        billing_output_tokens: row_try_get_optional(row, "settlement_billing_output_tokens")?,
+        billing_cache_creation_tokens: row_try_get_optional(
+            row,
+            "settlement_billing_cache_creation_tokens",
+        )?,
+        billing_cache_creation_5m_tokens: row_try_get_optional(
+            row,
+            "settlement_billing_cache_creation_5m_tokens",
+        )?,
+        billing_cache_creation_1h_tokens: row_try_get_optional(
+            row,
+            "settlement_billing_cache_creation_1h_tokens",
+        )?,
+        billing_cache_read_tokens: row_try_get_optional(
+            row,
+            "settlement_billing_cache_read_tokens",
+        )?,
+        billing_total_input_context: row_try_get_optional(
+            row,
+            "settlement_billing_total_input_context",
+        )?,
+        billing_cache_creation_cost_usd: row_try_get_optional(
+            row,
+            "settlement_billing_cache_creation_cost_usd",
+        )?,
+        billing_cache_read_cost_usd: row_try_get_optional(
+            row,
+            "settlement_billing_cache_read_cost_usd",
+        )?,
+        billing_total_cost_usd: row_try_get_optional(row, "settlement_billing_total_cost_usd")?,
+        billing_actual_total_cost_usd: row_try_get_optional(
+            row,
+            "settlement_billing_actual_total_cost_usd",
+        )?,
+        billing_pricing_source: row_try_get_optional(row, "settlement_billing_pricing_source")?,
+        billing_rule_id: row_try_get_optional(row, "settlement_billing_rule_id")?,
+        billing_rule_version: row_try_get_optional(row, "settlement_billing_rule_version")?,
         rate_multiplier: row_try_get_optional(row, "settlement_rate_multiplier")?,
         is_free_tier: row_try_get_optional(row, "settlement_is_free_tier")?,
         input_price_per_1m: row_try_get_optional(row, "settlement_input_price_per_1m")?,
@@ -9345,6 +8576,21 @@ fn attach_usage_settlement_pricing_snapshot_metadata(
         "billing_snapshot_status",
         snapshot.billing_snapshot_status.as_deref(),
     );
+    maybe_insert_string_value(
+        &mut metadata,
+        "settlement_snapshot_schema_version",
+        snapshot.settlement_snapshot_schema_version.as_deref(),
+    );
+    if !metadata.contains_key("settlement_snapshot") {
+        if let Some(value) = snapshot.settlement_snapshot.clone() {
+            metadata.insert("settlement_snapshot".to_string(), value);
+        }
+    }
+    if !metadata.contains_key("billing_dimensions") {
+        if let Some(value) = snapshot.billing_dimensions.clone() {
+            metadata.insert("billing_dimensions".to_string(), value);
+        }
+    }
     maybe_insert_number_value(&mut metadata, "rate_multiplier", snapshot.rate_multiplier);
     maybe_insert_bool_value(&mut metadata, "is_free_tier", snapshot.is_free_tier);
     maybe_insert_number_value(
@@ -9389,1405 +8635,4 @@ fn usage_body_sql_columns(field: UsageBodyField) -> (&'static str, &'static str)
 }
 
 #[cfg(test)]
-mod tests {
-    use chrono::{TimeZone, Utc};
-    use serde_json::json;
-
-    use super::{
-        attach_compressed_body_refs, attach_usage_http_audit_body_refs,
-        attach_usage_routing_snapshot_metadata, attach_usage_settlement_pricing_snapshot_metadata,
-        inflate_usage_json_value, prepare_request_metadata_for_body_storage,
-        prepare_usage_body_storage, resolved_read_usage_body_ref, resolved_write_usage_body_ref,
-        split_dashboard_daily_aggregate_range, split_dashboard_hourly_aggregate_range,
-        usage_body_ref, usage_http_audit_body_refs, usage_http_audit_capture_mode,
-        usage_routing_snapshot_from_usage, usage_settlement_pricing_snapshot_from_usage,
-        AggregateRangeSplit, SqlxUsageReadRepository, UsageHttpAuditRefs, UsageRoutingSnapshot,
-        UsageSettlementPricingSnapshot, MAX_INLINE_USAGE_BODY_BYTES,
-    };
-    use crate::postgres::{PostgresPoolConfig, PostgresPoolFactory};
-    use crate::repository::usage::UpsertUsageRecord;
-    use aether_data_contracts::repository::usage::UsageBodyField;
-
-    #[tokio::test]
-    async fn repository_constructs_from_lazy_pool() {
-        let factory = PostgresPoolFactory::new(PostgresPoolConfig {
-            database_url: "postgres://localhost/aether".to_string(),
-            min_connections: 1,
-            max_connections: 4,
-            acquire_timeout_ms: 1_000,
-            idle_timeout_ms: 5_000,
-            max_lifetime_ms: 30_000,
-            statement_cache_capacity: 64,
-            require_ssl: false,
-        })
-        .expect("factory should build");
-
-        let pool = factory.connect_lazy().expect("pool should build");
-        let repository = SqlxUsageReadRepository::new(pool);
-        let _ = repository.pool();
-        let _ = repository.transaction_runner();
-    }
-
-    #[tokio::test]
-    async fn validates_upsert_before_hitting_database() {
-        let factory = PostgresPoolFactory::new(PostgresPoolConfig {
-            database_url: "postgres://localhost/aether".to_string(),
-            min_connections: 1,
-            max_connections: 4,
-            acquire_timeout_ms: 1_000,
-            idle_timeout_ms: 5_000,
-            max_lifetime_ms: 30_000,
-            statement_cache_capacity: 64,
-            require_ssl: false,
-        })
-        .expect("factory should build");
-
-        let pool = factory.connect_lazy().expect("pool should build");
-        let repository = SqlxUsageReadRepository::new(pool);
-        let result = repository
-            .upsert(UpsertUsageRecord {
-                request_id: "".to_string(),
-                user_id: None,
-                api_key_id: None,
-                username: None,
-                api_key_name: None,
-                provider_name: "openai".to_string(),
-                model: "gpt-5".to_string(),
-                target_model: None,
-                provider_id: None,
-                provider_endpoint_id: None,
-                provider_api_key_id: None,
-                request_type: Some("chat".to_string()),
-                api_format: Some("openai:chat".to_string()),
-                api_family: Some("openai".to_string()),
-                endpoint_kind: Some("chat".to_string()),
-                endpoint_api_format: Some("openai:chat".to_string()),
-                provider_api_family: Some("openai".to_string()),
-                provider_endpoint_kind: Some("chat".to_string()),
-                has_format_conversion: Some(false),
-                is_stream: Some(false),
-                input_tokens: Some(10),
-                output_tokens: Some(20),
-                total_tokens: Some(30),
-                cache_creation_input_tokens: None,
-                cache_creation_ephemeral_5m_input_tokens: None,
-                cache_creation_ephemeral_1h_input_tokens: None,
-                cache_read_input_tokens: None,
-                cache_creation_cost_usd: None,
-                cache_read_cost_usd: None,
-                output_price_per_1m: None,
-                total_cost_usd: None,
-                actual_total_cost_usd: None,
-                status_code: Some(200),
-                error_message: None,
-                error_category: None,
-                response_time_ms: Some(100),
-                first_byte_time_ms: None,
-                status: "completed".to_string(),
-                billing_status: "pending".to_string(),
-                request_headers: None,
-                request_body: None,
-                request_body_ref: None,
-                provider_request_headers: None,
-                provider_request_body: None,
-                provider_request_body_ref: None,
-                response_headers: None,
-                response_body: None,
-                response_body_ref: None,
-                client_response_headers: None,
-                client_response_body: None,
-                client_response_body_ref: None,
-                request_body_state: None,
-                provider_request_body_state: None,
-                response_body_state: None,
-                client_response_body_state: None,
-                candidate_id: None,
-                candidate_index: None,
-                key_name: None,
-                planner_kind: None,
-                route_family: None,
-                route_kind: None,
-                execution_path: None,
-                local_execution_runtime_miss_reason: None,
-                request_metadata: None,
-                finalized_at_unix_secs: None,
-                created_at_unix_ms: Some(100),
-                updated_at_unix_secs: 101,
-            })
-            .await;
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn dashboard_daily_aggregate_split_keeps_partial_days_raw() {
-        let start_utc = Utc
-            .with_ymd_and_hms(2026, 4, 20, 13, 15, 0)
-            .single()
-            .unwrap();
-        let end_utc = Utc
-            .with_ymd_and_hms(2026, 4, 23, 4, 45, 0)
-            .single()
-            .unwrap();
-        let cutoff_utc = Utc.with_ymd_and_hms(2026, 4, 23, 0, 0, 0).single().unwrap();
-
-        let split = split_dashboard_daily_aggregate_range(start_utc, end_utc, cutoff_utc);
-
-        assert_eq!(
-            split,
-            AggregateRangeSplit {
-                raw_leading: Some((
-                    Utc.with_ymd_and_hms(2026, 4, 20, 13, 15, 0)
-                        .single()
-                        .unwrap(),
-                    Utc.with_ymd_and_hms(2026, 4, 21, 0, 0, 0).single().unwrap(),
-                )),
-                aggregate: Some((
-                    Utc.with_ymd_and_hms(2026, 4, 21, 0, 0, 0).single().unwrap(),
-                    Utc.with_ymd_and_hms(2026, 4, 23, 0, 0, 0).single().unwrap(),
-                )),
-                raw_trailing: Some((
-                    Utc.with_ymd_and_hms(2026, 4, 23, 0, 0, 0).single().unwrap(),
-                    Utc.with_ymd_and_hms(2026, 4, 23, 4, 45, 0)
-                        .single()
-                        .unwrap(),
-                )),
-            }
-        );
-    }
-
-    #[test]
-    fn dashboard_hourly_aggregate_split_keeps_partial_hours_raw() {
-        let start_utc = Utc
-            .with_ymd_and_hms(2026, 4, 20, 10, 15, 0)
-            .single()
-            .unwrap();
-        let end_utc = Utc
-            .with_ymd_and_hms(2026, 4, 20, 15, 30, 0)
-            .single()
-            .unwrap();
-        let cutoff_utc = Utc
-            .with_ymd_and_hms(2026, 4, 20, 15, 0, 0)
-            .single()
-            .unwrap();
-
-        let split = split_dashboard_hourly_aggregate_range(start_utc, end_utc, cutoff_utc);
-
-        assert_eq!(
-            split,
-            AggregateRangeSplit {
-                raw_leading: Some((
-                    Utc.with_ymd_and_hms(2026, 4, 20, 10, 15, 0)
-                        .single()
-                        .unwrap(),
-                    Utc.with_ymd_and_hms(2026, 4, 20, 11, 0, 0)
-                        .single()
-                        .unwrap(),
-                )),
-                aggregate: Some((
-                    Utc.with_ymd_and_hms(2026, 4, 20, 11, 0, 0)
-                        .single()
-                        .unwrap(),
-                    Utc.with_ymd_and_hms(2026, 4, 20, 15, 0, 0)
-                        .single()
-                        .unwrap(),
-                )),
-                raw_trailing: Some((
-                    Utc.with_ymd_and_hms(2026, 4, 20, 15, 0, 0)
-                        .single()
-                        .unwrap(),
-                    Utc.with_ymd_and_hms(2026, 4, 20, 15, 30, 0)
-                        .single()
-                        .unwrap(),
-                )),
-            }
-        );
-    }
-
-    #[test]
-    fn usage_sql_does_not_require_updated_at_column() {
-        assert!(!super::FIND_BY_REQUEST_ID_SQL.contains("COALESCE(updated_at, created_at)"));
-        assert!(!super::LIST_USAGE_AUDITS_PREFIX.contains("COALESCE(updated_at, created_at)"));
-        assert!(!super::UPSERT_SQL.contains("\n  updated_at\n"));
-        assert!(!super::UPSERT_SQL.contains("updated_at = CASE"));
-    }
-
-    #[test]
-    fn usage_sql_summarizes_tokens_by_api_key_ids_in_database() {
-        assert!(super::SUMMARIZE_TOTAL_TOKENS_BY_API_KEY_IDS_SQL.contains("GROUP BY api_key_id"));
-        assert!(super::SUMMARIZE_TOTAL_TOKENS_BY_API_KEY_IDS_SQL.contains("ANY($1::TEXT[])"));
-    }
-
-    #[test]
-    fn usage_sql_summarizes_usage_by_provider_api_key_ids_in_database() {
-        assert!(
-            super::SUMMARIZE_USAGE_BY_PROVIDER_API_KEY_IDS_SQL.contains("FROM provider_api_keys")
-        );
-        assert!(super::SUMMARIZE_USAGE_BY_PROVIDER_API_KEY_IDS_SQL
-            .contains("COALESCE(request_count, 0) > 0"));
-        assert!(super::SUMMARIZE_USAGE_BY_PROVIDER_API_KEY_IDS_SQL.contains("ANY($1::TEXT[])"));
-    }
-
-    #[test]
-    fn usage_sql_serializes_request_id_upserts_before_reading_previous_usage() {
-        assert!(super::LOCK_USAGE_REQUEST_ID_SQL.contains("pg_advisory_xact_lock"));
-        assert!(super::LOCK_USAGE_REQUEST_ID_SQL.contains("hashtext($1)::BIGINT"));
-        assert!(include_str!("sql.rs")
-            .contains("lock_usage_request_id_in_tx(tx, &usage.request_id).await?;"));
-    }
-
-    #[test]
-    fn usage_sql_rebuild_matches_online_api_key_usage_semantics() {
-        assert!(super::REBUILD_API_KEY_USAGE_STATS_SQL.contains("COUNT(*)::INTEGER"));
-        assert!(super::REBUILD_API_KEY_USAGE_STATS_SQL.contains("COALESCE("));
-        assert!(super::REBUILD_API_KEY_USAGE_STATS_SQL.contains("total_tokens,"));
-        assert!(super::REBUILD_API_KEY_USAGE_STATS_SQL
-            .contains("COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)"));
-        assert!(super::REBUILD_API_KEY_USAGE_STATS_SQL.contains("AND BTRIM(api_key_id) <> ''"));
-    }
-
-    #[test]
-    fn usage_sql_rebuild_matches_online_provider_key_usage_semantics() {
-        assert!(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL
-            .contains("NULLIF(BTRIM(error_message), '') IS NULL"));
-        assert!(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL.contains("COALESCE("));
-        assert!(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL.contains("total_tokens,"));
-        assert!(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL
-            .contains("COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)"));
-        assert!(super::REBUILD_PROVIDER_API_KEY_USAGE_STATS_SQL
-            .contains("AND BTRIM(provider_api_key_id) <> ''"));
-    }
-
-    #[test]
-    fn usage_sql_supports_recent_usage_audits_query() {
-        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX.contains("FROM \"usage\""));
-    }
-
-    #[test]
-    fn usage_sql_cache_affinity_interval_query_coalesces_nullable_model_values() {
-        assert!(include_str!("sql.rs").contains("COALESCE(\"usage\".model, '') AS model"));
-    }
-
-    #[test]
-    fn usage_sql_cache_affinity_interval_query_casts_interval_minutes_to_double_precision() {
-        assert!(include_str!("sql.rs").contains("AS DOUBLE PRECISION) AS interval_minutes"));
-    }
-
-    #[test]
-    fn usage_sql_summarize_usage_audits_supports_daily_aggregates() {
-        let source = include_str!("sql.rs");
-        assert!(source.contains("summarize_usage_audits_from_daily_aggregates"));
-        assert!(source.contains("FROM stats_daily"));
-        assert!(source.contains("FROM stats_user_daily"));
-        assert!(source.contains("cache_creation_ephemeral_5m_tokens"));
-        assert!(source
-            .contains("split_dashboard_daily_aggregate_range(start_utc, end_utc, cutoff_utc)"));
-    }
-
-    #[test]
-    fn usage_sql_summarize_usage_cache_hit_summary_supports_global_aggregates() {
-        let source = include_str!("sql.rs");
-        assert!(source.contains("summarize_usage_cache_hit_summary_from_daily_aggregates"));
-        assert!(source.contains("summarize_usage_cache_hit_summary_from_hourly_aggregates"));
-        assert!(source.contains("FROM stats_daily"));
-        assert!(source.contains("FROM stats_hourly"));
-        assert!(source
-            .contains("split_dashboard_hourly_aggregate_range(start_utc, end_utc, cutoff_utc)"));
-    }
-
-    #[test]
-    fn usage_sql_summarize_usage_cache_affinity_hit_summary_supports_global_aggregates() {
-        let source = include_str!("sql.rs");
-        assert!(source.contains("summarize_usage_cache_affinity_hit_summary_from_daily_aggregates"));
-        assert!(
-            source.contains("summarize_usage_cache_affinity_hit_summary_from_hourly_aggregates")
-        );
-        assert!(source.contains("FROM stats_daily"));
-        assert!(source.contains("FROM stats_hourly"));
-        assert!(source.contains("completed_total_requests"));
-        assert!(source
-            .contains("split_dashboard_hourly_aggregate_range(start_utc, end_utc, cutoff_utc)"));
-    }
-
-    #[test]
-    fn usage_sql_summarize_usage_settled_cost_supports_user_and_global_aggregates() {
-        let source = include_str!("sql.rs");
-        assert!(source.contains("summarize_usage_settled_cost_from_daily_aggregates"));
-        assert!(source.contains("summarize_usage_settled_cost_from_hourly_aggregates"));
-        assert!(source.contains("FROM stats_daily"));
-        assert!(source.contains("FROM stats_user_daily"));
-        assert!(source.contains("FROM stats_hourly"));
-        assert!(source.contains("FROM stats_hourly_user"));
-        assert!(source.contains("settled_total_cost"));
-        assert!(source
-            .contains("split_dashboard_hourly_aggregate_range(start_utc, end_utc, cutoff_utc)"));
-    }
-
-    #[test]
-    fn usage_sql_summarize_usage_error_distribution_supports_daily_aggregates() {
-        let source = include_str!("sql.rs");
-        assert!(source.contains("summarize_usage_error_distribution_from_daily_aggregates"));
-        assert!(source.contains("FROM stats_daily_error"));
-        assert!(source
-            .contains("split_dashboard_daily_aggregate_range(start_utc, end_utc, cutoff_utc)"));
-    }
-
-    #[test]
-    fn usage_sql_summarize_usage_performance_percentiles_supports_daily_aggregates() {
-        let source = include_str!("sql.rs");
-        assert!(source.contains("summarize_usage_performance_percentiles_from_daily_aggregates"));
-        assert!(source.contains("FROM stats_daily"));
-        assert!(source.contains("p50_response_time_ms"));
-        assert!(source
-            .contains("split_dashboard_daily_aggregate_range(start_utc, end_utc, cutoff_utc)"));
-    }
-
-    #[test]
-    fn usage_sql_summarize_usage_cost_savings_supports_daily_aggregates() {
-        let source = include_str!("sql.rs");
-        assert!(source.contains("summarize_usage_cost_savings_from_daily_aggregates"));
-        assert!(source.contains("FROM stats_daily_cost_savings"));
-        assert!(source.contains("FROM stats_daily_cost_savings_model_provider"));
-        assert!(source.contains("FROM stats_user_daily_cost_savings"));
-        assert!(source.contains("FROM stats_user_daily_cost_savings_model_provider"));
-        assert!(source
-            .contains("split_dashboard_daily_aggregate_range(start_utc, end_utc, cutoff_utc)"));
-    }
-
-    #[test]
-    fn usage_sql_summarize_usage_time_series_supports_global_aggregates() {
-        let source = include_str!("sql.rs");
-        assert!(source.contains("summarize_usage_time_series_from_daily_aggregates"));
-        assert!(source.contains("summarize_usage_time_series_from_hourly_aggregates"));
-        assert!(source.contains("FROM stats_hourly"));
-        assert!(source
-            .contains("split_dashboard_hourly_aggregate_range(start_utc, end_utc, cutoff_utc)"));
-    }
-
-    #[test]
-    fn usage_sql_summarize_usage_daily_heatmap_supports_daily_aggregates() {
-        let source = include_str!("sql.rs");
-        assert!(source.contains("summarize_usage_daily_heatmap_from_daily_aggregates"));
-        assert!(source.contains("FROM stats_daily"));
-        assert!(source.contains("FROM stats_user_daily"));
-        assert!(source
-            .contains("split_dashboard_daily_aggregate_range(start_utc, end_utc, cutoff_utc)"));
-    }
-
-    #[test]
-    fn usage_sql_summarize_usage_leaderboard_supports_daily_aggregates() {
-        let source = include_str!("sql.rs");
-        assert!(source.contains("summarize_usage_leaderboard_from_daily_aggregates"));
-        assert!(source.contains("FROM stats_daily_model"));
-        assert!(source.contains("FROM stats_user_daily"));
-        assert!(source.contains("FROM stats_daily_api_key"));
-        assert!(source
-            .contains("split_dashboard_daily_aggregate_range(start_utc, end_utc, cutoff_utc)"));
-    }
-
-    #[test]
-    fn usage_sql_summarize_total_tokens_by_api_key_ids_supports_daily_aggregates() {
-        let source = include_str!("sql.rs");
-        assert!(source.contains("FROM stats_daily_api_key"));
-        assert!(source.contains("read_stats_daily_cutoff_date().await?"));
-    }
-
-    #[test]
-    fn usage_sql_summarize_usage_totals_by_user_ids_supports_user_summary_aggregates() {
-        let source = include_str!("sql.rs");
-        assert!(source.contains("FROM stats_user_summary"));
-        assert!(source.contains("all_time_input_tokens"));
-    }
-
-    #[test]
-    fn usage_sql_reads_http_audits_for_single_record_fetches() {
-        assert!(super::FIND_BY_REQUEST_ID_SQL.contains("LEFT JOIN usage_http_audits"));
-        assert!(super::FIND_BY_ID_SQL.contains("LEFT JOIN usage_http_audits"));
-        assert!(super::FIND_BY_REQUEST_ID_SQL.contains("http_request_body_ref"));
-        assert!(super::FIND_BY_ID_SQL.contains("http_client_response_body_ref"));
-    }
-
-    #[test]
-    fn usage_sql_reads_routing_snapshots_for_single_record_fetches() {
-        assert!(super::FIND_BY_REQUEST_ID_SQL.contains("LEFT JOIN usage_routing_snapshots"));
-        assert!(super::FIND_BY_ID_SQL.contains("LEFT JOIN usage_routing_snapshots"));
-        assert!(super::FIND_BY_REQUEST_ID_SQL.contains("routing_candidate_id"));
-        assert!(super::FIND_BY_REQUEST_ID_SQL.contains("routing_candidate_index"));
-        assert!(super::FIND_BY_ID_SQL.contains("routing_local_execution_runtime_miss_reason"));
-    }
-
-    #[test]
-    fn usage_sql_reads_settlement_snapshots_for_single_record_fetches() {
-        assert!(super::FIND_BY_REQUEST_ID_SQL.contains("LEFT JOIN usage_settlement_snapshots"));
-        assert!(super::FIND_BY_ID_SQL.contains("LEFT JOIN usage_settlement_snapshots"));
-        assert!(
-            super::FIND_BY_REQUEST_ID_SQL.contains("settlement_billing_snapshot_schema_version")
-        );
-        assert!(super::FIND_BY_ID_SQL.contains("settlement_price_per_request"));
-    }
-
-    #[test]
-    fn usage_sql_qualifies_shared_usage_columns_for_single_record_fetches() {
-        for sql in [super::FIND_BY_REQUEST_ID_SQL, super::FIND_BY_ID_SQL] {
-            assert!(sql.contains("\"usage\".request_id"));
-            assert!(
-                sql.contains(
-                    "COALESCE(usage_settlement_snapshots.billing_status, \"usage\".billing_status) AS billing_status"
-                )
-            );
-            assert!(sql.contains(
-                "CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION)"
-            ));
-            assert!(sql.contains("EXTRACT(EPOCH FROM \"usage\".created_at)"));
-            assert!(sql.contains("usage_settlement_snapshots.finalized_at"));
-            assert!(!sql.contains("CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT)"));
-            assert!(!sql.contains("CAST(output_price_per_1m AS DOUBLE PRECISION)"));
-        }
-
-        assert!(super::FIND_BY_REQUEST_ID_SQL.contains("WHERE \"usage\".request_id = $1"));
-        assert!(super::FIND_BY_ID_SQL.contains("WHERE \"usage\".id = $1"));
-    }
-
-    #[test]
-    fn usage_sql_uses_json_null_placeholders_for_usage_payload_columns() {
-        assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("NULL::json AS request_headers"));
-        assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("NULL::json AS provider_request_body"));
-        assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("NULL::bytea AS request_body_compressed"));
-        assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("NULL::varchar AS http_request_body_ref"));
-        assert!(
-            super::LIST_USAGE_AUDITS_PREFIX.contains("NULL::varchar AS http_request_body_state")
-        );
-        assert!(super::LIST_USAGE_AUDITS_PREFIX
-            .contains("NULL::varchar AS http_client_response_body_state"));
-        assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("usage_routing_snapshots.candidate_id"));
-        assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("usage_routing_snapshots.candidate_index"));
-        assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("request_metadata->>'candidate_index'"));
-        assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("LEFT JOIN usage_routing_snapshots"));
-        assert!(super::LIST_USAGE_AUDITS_PREFIX.contains("LEFT JOIN usage_settlement_snapshots"));
-        assert!(
-            super::LIST_USAGE_AUDITS_PREFIX.contains("settlement_billing_snapshot_schema_version")
-        );
-        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX.contains("NULL::json AS request_headers"));
-        assert!(
-            super::LIST_RECENT_USAGE_AUDITS_PREFIX.contains("NULL::json AS provider_request_body")
-        );
-        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX
-            .contains("NULL::bytea AS client_response_body_compressed"));
-        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX
-            .contains("NULL::varchar AS http_client_response_body_ref"));
-        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX
-            .contains("NULL::varchar AS http_request_body_state"));
-        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX
-            .contains("NULL::varchar AS http_client_response_body_state"));
-        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX
-            .contains("usage_routing_snapshots.candidate_index"));
-        assert!(
-            super::LIST_RECENT_USAGE_AUDITS_PREFIX.contains("request_metadata->>'candidate_index'")
-        );
-        assert!(
-            super::LIST_RECENT_USAGE_AUDITS_PREFIX.contains("LEFT JOIN usage_routing_snapshots")
-        );
-        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX
-            .contains("usage_routing_snapshots.execution_path"));
-        assert!(
-            super::LIST_RECENT_USAGE_AUDITS_PREFIX.contains("LEFT JOIN usage_settlement_snapshots")
-        );
-        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX.contains("settlement_price_per_request"));
-        assert!(!super::LIST_USAGE_AUDITS_PREFIX.contains("NULL::jsonb"));
-        assert!(!super::LIST_RECENT_USAGE_AUDITS_PREFIX.contains("NULL::jsonb"));
-    }
-
-    #[test]
-    fn usage_sql_reads_list_output_price_from_settlement_snapshots_before_legacy_usage_column() {
-        assert!(super::LIST_USAGE_AUDITS_PREFIX
-            .contains("CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION)"));
-        assert!(super::LIST_RECENT_USAGE_AUDITS_PREFIX
-            .contains("CAST(usage_settlement_snapshots.output_price_per_1m AS DOUBLE PRECISION)"));
-    }
-
-    #[test]
-    fn usage_sql_casts_json_payload_bind_parameters_explicitly() {
-        for placeholder in [41, 42, 44, 45, 47, 48, 50, 51, 53] {
-            assert!(
-                super::UPSERT_SQL.contains(format!("${placeholder}::json").as_str()),
-                "missing ::json cast for placeholder ${placeholder}"
-            );
-        }
-    }
-
-    #[test]
-    fn usage_sql_insert_values_aligns_request_metadata_and_timestamps() {
-        assert!(super::UPSERT_SQL.contains("\n  $51::json,\n  $52,\n  $53::json,\n  CASE"));
-        assert!(super::UPSERT_SQL.contains("WHEN $54 IS NULL THEN NULL"));
-        assert!(super::UPSERT_SQL.contains("TO_TIMESTAMP($55::double precision)"));
-    }
-
-    #[test]
-    fn usage_sql_upsert_returning_includes_routing_placeholders() {
-        assert!(super::UPSERT_SQL.contains("NULL::varchar AS http_request_body_state"));
-        assert!(super::UPSERT_SQL.contains("NULL::varchar AS http_client_response_body_state"));
-        assert!(super::UPSERT_SQL.contains("NULL::varchar AS routing_candidate_id"));
-        assert!(super::UPSERT_SQL.contains("NULL::varchar AS routing_planner_kind"));
-        assert!(super::UPSERT_SQL.contains("NULL::varchar AS routing_execution_path"));
-        assert!(super::UPSERT_SQL
-            .contains("NULL::varchar AS settlement_billing_snapshot_schema_version"));
-        assert!(
-            super::UPSERT_SQL.contains("NULL::double precision AS settlement_input_price_per_1m")
-        );
-    }
-
-    #[test]
-    fn usage_sql_dual_writes_usage_settlement_pricing_snapshots() {
-        assert!(super::UPSERT_USAGE_SETTLEMENT_PRICING_SNAPSHOT_SQL
-            .contains("INSERT INTO usage_settlement_snapshots"));
-        assert!(super::UPSERT_USAGE_SETTLEMENT_PRICING_SNAPSHOT_SQL
-            .contains("billing_snapshot_schema_version"));
-        assert!(super::UPSERT_USAGE_SETTLEMENT_PRICING_SNAPSHOT_SQL.contains("price_per_request"));
-    }
-
-    #[test]
-    fn usage_sql_clears_legacy_output_price_column_on_upsert() {
-        assert!(super::UPSERT_SQL.contains("output_price_per_1m = NULL"));
-        assert!(include_str!("sql.rs").contains(".bind(None::<f64>)"));
-    }
-
-    #[test]
-    fn usage_sql_clears_legacy_header_columns_on_upsert() {
-        assert!(super::UPSERT_SQL.contains("request_headers = NULL"));
-        assert!(super::UPSERT_SQL.contains("provider_request_headers = NULL"));
-        assert!(super::UPSERT_SQL.contains("response_headers = NULL"));
-        assert!(super::UPSERT_SQL.contains("client_response_headers = NULL"));
-    }
-
-    #[test]
-    fn usage_sql_detached_body_flags_clear_inline_and_compressed_columns() {
-        assert!(super::UPSERT_SQL
-            .contains("WHEN EXCLUDED.request_body_compressed IS NOT NULL OR $56 THEN NULL"));
-        assert!(super::UPSERT_SQL.contains(
-            "WHEN EXCLUDED.provider_request_body_compressed IS NOT NULL OR $57 THEN NULL"
-        ));
-        assert!(super::UPSERT_SQL
-            .contains("WHEN EXCLUDED.response_body_compressed IS NOT NULL OR $58 THEN NULL"));
-        assert!(super::UPSERT_SQL.contains(
-            "WHEN EXCLUDED.client_response_body_compressed IS NOT NULL OR $59 THEN NULL"
-        ));
-    }
-
-    #[test]
-    fn usage_sql_clears_stale_failure_fields_for_non_failed_status_updates() {
-        assert!(super::UPSERT_SQL.contains(
-            "WHEN EXCLUDED.status IN ('pending', 'streaming', 'completed', 'cancelled') AND EXCLUDED.status_code IS NULL THEN NULL"
-        ));
-        assert!(super::UPSERT_SQL.contains(
-            "WHEN EXCLUDED.status IN ('pending', 'streaming', 'completed', 'cancelled') THEN EXCLUDED.error_message"
-        ));
-        assert!(super::UPSERT_SQL.contains(
-            "WHEN EXCLUDED.status IN ('pending', 'streaming', 'completed', 'cancelled') THEN EXCLUDED.error_category"
-        ));
-    }
-
-    #[test]
-    fn usage_sql_does_not_allow_streaming_to_regress_back_to_pending() {
-        assert!(super::UPSERT_SQL.contains(
-            "WHEN \"usage\".status = 'streaming' AND EXCLUDED.status = 'pending' THEN \"usage\".status_code"
-        ));
-        assert!(super::UPSERT_SQL.contains(
-            "WHEN \"usage\".status = 'streaming' AND EXCLUDED.status = 'pending' THEN \"usage\".error_message"
-        ));
-        assert!(super::UPSERT_SQL.contains(
-            "WHEN \"usage\".status = 'streaming' AND EXCLUDED.status = 'pending' THEN \"usage\".status"
-        ));
-    }
-
-    #[test]
-    fn usage_sql_recovers_void_failures_before_upsert_and_settlement() {
-        assert!(super::RESET_STALE_VOID_USAGE_SQL.contains("UPDATE \"usage\""));
-        assert!(super::RESET_STALE_VOID_USAGE_SQL.contains("billing_status = 'pending'"));
-        assert!(super::RESET_STALE_VOID_USAGE_SQL.contains("finalized_at = NULL"));
-        assert!(super::RESET_STALE_VOID_USAGE_SQL.contains("status IN ('failed', 'cancelled')"));
-        assert!(super::RESET_STALE_VOID_USAGE_SETTLEMENT_SNAPSHOT_SQL
-            .contains("UPDATE usage_settlement_snapshots"));
-        assert!(super::RESET_STALE_VOID_USAGE_SETTLEMENT_SNAPSHOT_SQL
-            .contains("billing_status = 'pending'"));
-        assert!(
-            super::RESET_STALE_VOID_USAGE_SETTLEMENT_SNAPSHOT_SQL.contains("finalized_at = NULL")
-        );
-    }
-
-    #[test]
-    fn prepare_usage_body_storage_detaches_small_payloads_into_blob_storage() {
-        let payload = json!({"message": "hello"});
-        let storage = prepare_usage_body_storage(Some(&payload)).expect("storage should serialize");
-
-        assert!(storage.inline_json.is_none());
-        let compressed = storage
-            .detached_blob_bytes
-            .as_deref()
-            .expect("small payload should now be ref-backed");
-        assert_eq!(
-            inflate_usage_json_value(compressed).expect("payload should inflate"),
-            payload
-        );
-    }
-
-    #[test]
-    fn prepare_usage_body_storage_compresses_large_payloads() {
-        let payload = json!({
-            "content": "x".repeat(MAX_INLINE_USAGE_BODY_BYTES + 128)
-        });
-        let storage = prepare_usage_body_storage(Some(&payload)).expect("storage should serialize");
-
-        assert!(storage.inline_json.is_none());
-        let compressed = storage
-            .detached_blob_bytes
-            .as_deref()
-            .expect("large payload should be compressed");
-        assert_eq!(
-            inflate_usage_json_value(compressed).expect("payload should inflate"),
-            payload
-        );
-    }
-
-    #[test]
-    fn prepare_request_metadata_for_body_storage_strips_body_ref_compatibility_keys() {
-        let detached = prepare_usage_body_storage(Some(&json!({
-            "content": "x".repeat(MAX_INLINE_USAGE_BODY_BYTES + 32)
-        })))
-        .expect("detached storage should build");
-        let inline =
-            prepare_usage_body_storage(Some(&json!({"message": "inline"}))).expect("inline body");
-
-        let metadata = prepare_request_metadata_for_body_storage(
-            Some(json!({
-                "trace_id": "trace-1",
-                "request_body_ref": "blob://old-request",
-                "provider_request_body_ref": "blob://old-provider"
-            })),
-            [
-                (
-                    UsageBodyField::RequestBody,
-                    &detached,
-                    Some(&json!({"request": true})),
-                    Some("usage://request/req-123/request_body"),
-                ),
-                (
-                    UsageBodyField::ProviderRequestBody,
-                    &inline,
-                    Some(&json!({"provider": true})),
-                    None,
-                ),
-            ],
-        )
-        .expect("metadata should be present");
-
-        assert_eq!(
-            metadata,
-            json!({
-                "trace_id": "trace-1"
-            })
-        );
-    }
-
-    #[test]
-    fn attach_compressed_body_refs_adds_missing_ref_metadata() {
-        let metadata = attach_compressed_body_refs(
-            "req-123",
-            Some(json!({
-                "candidate_id": "cand-1",
-                "provider_request_body_ref": "blob://existing"
-            })),
-            true,
-            true,
-            true,
-            false,
-        )
-        .expect("metadata should remain");
-
-        assert_eq!(
-            metadata,
-            json!({
-                "candidate_id": "cand-1",
-                "request_body_ref": usage_body_ref("req-123", UsageBodyField::RequestBody),
-                "provider_request_body_ref": "blob://existing",
-                "response_body_ref": usage_body_ref("req-123", UsageBodyField::ResponseBody)
-            })
-        );
-    }
-
-    #[test]
-    fn usage_http_audit_body_refs_extracts_only_non_empty_values() {
-        let refs = usage_http_audit_body_refs(Some(&json!({
-            "request_body_ref": "usage://request/req-123/request_body",
-            "provider_request_body_ref": "  ",
-            "response_body_ref": "usage://request/req-123/response_body"
-        })));
-
-        assert_eq!(
-            refs,
-            UsageHttpAuditRefs {
-                request_body_ref: Some("usage://request/req-123/request_body".to_string()),
-                provider_request_body_ref: None,
-                response_body_ref: Some("usage://request/req-123/response_body".to_string()),
-                client_response_body_ref: None,
-            }
-        );
-    }
-
-    #[test]
-    fn resolved_read_usage_body_ref_prefers_typed_then_http_audit_then_compressed_then_metadata() {
-        let metadata = json!({
-            "request_body_ref": "usage://request/req-123/request_body"
-        });
-        let invalid_metadata = json!({
-            "request_body_ref": "blob://metadata-request"
-        });
-        let mismatched_metadata = json!({
-            "request_body_ref": "usage://request/req-other/request_body"
-        });
-
-        assert_eq!(
-            resolved_read_usage_body_ref(
-                Some("usage://request/req-123/request_body"),
-                metadata.as_object(),
-                "req-123",
-                UsageBodyField::RequestBody,
-                true,
-                Some("usage://request/req-123/request_body"),
-            ),
-            Some("usage://request/req-123/request_body".to_string())
-        );
-        assert_eq!(
-            resolved_read_usage_body_ref(
-                None,
-                metadata.as_object(),
-                "req-123",
-                UsageBodyField::RequestBody,
-                false,
-                Some("usage://request/req-123/request_body"),
-            ),
-            Some("usage://request/req-123/request_body".to_string())
-        );
-        assert_eq!(
-            resolved_read_usage_body_ref(
-                None,
-                metadata.as_object(),
-                "req-123",
-                UsageBodyField::RequestBody,
-                true,
-                None,
-            ),
-            Some(usage_body_ref("req-123", UsageBodyField::RequestBody))
-        );
-        assert_eq!(
-            resolved_read_usage_body_ref(
-                None,
-                invalid_metadata.as_object(),
-                "req-123",
-                UsageBodyField::RequestBody,
-                false,
-                None,
-            ),
-            None
-        );
-        assert_eq!(
-            resolved_read_usage_body_ref(
-                None,
-                mismatched_metadata.as_object(),
-                "req-123",
-                UsageBodyField::RequestBody,
-                false,
-                None,
-            ),
-            None
-        );
-        assert_eq!(
-            resolved_read_usage_body_ref(
-                None,
-                None,
-                "req-123",
-                UsageBodyField::ResponseBody,
-                true,
-                Some("usage://request/req-123/response_body"),
-            ),
-            Some(usage_body_ref("req-123", UsageBodyField::ResponseBody))
-        );
-        assert_eq!(
-            resolved_read_usage_body_ref(
-                None,
-                None,
-                "req-123",
-                UsageBodyField::ClientResponseBody,
-                false,
-                Some("usage://request/req-123/client_response_body"),
-            ),
-            Some("usage://request/req-123/client_response_body".to_string())
-        );
-    }
-
-    #[test]
-    fn resolved_write_usage_body_ref_ignores_metadata_compatibility_keys() {
-        assert_eq!(
-            resolved_write_usage_body_ref(
-                None,
-                "req-123",
-                UsageBodyField::RequestBody,
-                false,
-                None,
-            ),
-            None
-        );
-        assert_eq!(
-            resolved_write_usage_body_ref(
-                Some("usage://request/req-123/request_body"),
-                "req-123",
-                UsageBodyField::RequestBody,
-                true,
-                Some("usage://request/req-123/request_body"),
-            ),
-            Some("usage://request/req-123/request_body".to_string())
-        );
-        assert_eq!(
-            resolved_write_usage_body_ref(
-                None,
-                "req-123",
-                UsageBodyField::ResponseBody,
-                true,
-                Some("usage://request/req-123/response_body"),
-            ),
-            Some(usage_body_ref("req-123", UsageBodyField::ResponseBody))
-        );
-        assert_eq!(
-            resolved_write_usage_body_ref(
-                None,
-                "req-123",
-                UsageBodyField::ClientResponseBody,
-                false,
-                Some("usage://request/req-123/client_response_body"),
-            ),
-            Some("usage://request/req-123/client_response_body".to_string())
-        );
-    }
-
-    #[test]
-    fn usage_http_audit_capture_mode_prefers_refs_over_inline_legacy() {
-        let refs = UsageHttpAuditRefs {
-            request_body_ref: Some("usage://request/req-123/request_body".to_string()),
-            ..UsageHttpAuditRefs::default()
-        };
-        assert_eq!(
-            usage_http_audit_capture_mode(
-                &refs,
-                [Some(&json!({"request": true})), None, None, None]
-            ),
-            "ref_backed"
-        );
-        assert_eq!(
-            usage_http_audit_capture_mode(
-                &UsageHttpAuditRefs::default(),
-                [Some(&json!({"request": true})), None, None, None]
-            ),
-            "inline_legacy"
-        );
-        assert_eq!(
-            usage_http_audit_capture_mode(&UsageHttpAuditRefs::default(), [None, None, None, None]),
-            "none"
-        );
-    }
-
-    #[test]
-    fn attach_usage_http_audit_body_refs_adds_missing_metadata_without_overwriting_existing_keys() {
-        let metadata = attach_usage_http_audit_body_refs(
-            Some(json!({
-                "candidate_id": "cand-1",
-                "request_body_ref": "blob://existing"
-            })),
-            &UsageHttpAuditRefs {
-                request_body_ref: Some("usage://request/req-123/request_body".to_string()),
-                provider_request_body_ref: Some(
-                    "usage://request/req-123/provider_request_body".to_string(),
-                ),
-                response_body_ref: None,
-                client_response_body_ref: Some(
-                    "usage://request/req-123/client_response_body".to_string(),
-                ),
-            },
-        )
-        .expect("metadata should remain");
-
-        assert_eq!(
-            metadata,
-            json!({
-                "candidate_id": "cand-1",
-                "request_body_ref": "blob://existing",
-                "provider_request_body_ref": "usage://request/req-123/provider_request_body",
-                "client_response_body_ref": "usage://request/req-123/client_response_body"
-            })
-        );
-    }
-
-    #[test]
-    fn usage_routing_snapshot_from_usage_only_activates_for_routing_metadata() {
-        let snapshot = usage_routing_snapshot_from_usage(
-            &UpsertUsageRecord {
-                request_id: "req-123".to_string(),
-                user_id: None,
-                api_key_id: None,
-                username: None,
-                api_key_name: None,
-                provider_name: "openai".to_string(),
-                model: "gpt-5".to_string(),
-                target_model: None,
-                provider_id: Some("provider-1".to_string()),
-                provider_endpoint_id: Some("endpoint-1".to_string()),
-                provider_api_key_id: Some("provider-key-1".to_string()),
-                request_type: Some("chat".to_string()),
-                api_format: Some("openai:chat".to_string()),
-                api_family: Some("openai".to_string()),
-                endpoint_kind: Some("chat".to_string()),
-                endpoint_api_format: Some("openai:chat".to_string()),
-                provider_api_family: Some("openai".to_string()),
-                provider_endpoint_kind: Some("chat".to_string()),
-                has_format_conversion: Some(false),
-                is_stream: Some(false),
-                input_tokens: Some(1),
-                output_tokens: Some(2),
-                total_tokens: Some(3),
-                cache_creation_input_tokens: None,
-                cache_creation_ephemeral_5m_input_tokens: None,
-                cache_creation_ephemeral_1h_input_tokens: None,
-                cache_read_input_tokens: None,
-                cache_creation_cost_usd: None,
-                cache_read_cost_usd: None,
-                output_price_per_1m: None,
-                total_cost_usd: None,
-                actual_total_cost_usd: None,
-                status_code: Some(200),
-                error_message: None,
-                error_category: None,
-                response_time_ms: Some(100),
-                first_byte_time_ms: None,
-                status: "completed".to_string(),
-                billing_status: "pending".to_string(),
-                request_headers: None,
-                request_body: None,
-                request_body_ref: None,
-                provider_request_headers: None,
-                provider_request_body: None,
-                provider_request_body_ref: None,
-                response_headers: None,
-                response_body: None,
-                response_body_ref: None,
-                client_response_headers: None,
-                client_response_body: None,
-                client_response_body_ref: None,
-                request_body_state: None,
-                provider_request_body_state: None,
-                response_body_state: None,
-                client_response_body_state: None,
-                candidate_id: None,
-                candidate_index: None,
-                key_name: None,
-                planner_kind: None,
-                route_family: None,
-                route_kind: None,
-                execution_path: None,
-                local_execution_runtime_miss_reason: None,
-                request_metadata: None,
-                finalized_at_unix_secs: None,
-                created_at_unix_ms: Some(100),
-                updated_at_unix_secs: 100,
-            },
-            Some(&json!({
-                "candidate_id": "cand-1",
-                "key_name": "primary",
-                "planner_kind": "claude_cli_sync",
-                "route_family": "claude",
-                "route_kind": "cli",
-                "execution_path": "local_execution_runtime_miss",
-                "local_execution_runtime_miss_reason": "all_candidates_skipped"
-            })),
-        );
-
-        assert_eq!(
-            snapshot,
-            UsageRoutingSnapshot {
-                candidate_id: Some("cand-1".to_string()),
-                candidate_index: None,
-                key_name: Some("primary".to_string()),
-                planner_kind: Some("claude_cli_sync".to_string()),
-                route_family: Some("claude".to_string()),
-                route_kind: Some("cli".to_string()),
-                execution_path: Some("local_execution_runtime_miss".to_string()),
-                local_execution_runtime_miss_reason: Some("all_candidates_skipped".to_string()),
-                selected_provider_id: Some("provider-1".to_string()),
-                selected_endpoint_id: Some("endpoint-1".to_string()),
-                selected_provider_api_key_id: Some("provider-key-1".to_string()),
-                has_format_conversion: Some(false),
-            }
-        );
-
-        let empty_snapshot = usage_routing_snapshot_from_usage(
-            &UpsertUsageRecord {
-                request_id: "req-124".to_string(),
-                user_id: None,
-                api_key_id: None,
-                username: None,
-                api_key_name: None,
-                provider_name: "openai".to_string(),
-                model: "gpt-5".to_string(),
-                target_model: None,
-                provider_id: Some("provider-2".to_string()),
-                provider_endpoint_id: Some("endpoint-2".to_string()),
-                provider_api_key_id: Some("provider-key-2".to_string()),
-                request_type: Some("chat".to_string()),
-                api_format: Some("openai:chat".to_string()),
-                api_family: Some("openai".to_string()),
-                endpoint_kind: Some("chat".to_string()),
-                endpoint_api_format: Some("openai:chat".to_string()),
-                provider_api_family: Some("openai".to_string()),
-                provider_endpoint_kind: Some("chat".to_string()),
-                has_format_conversion: Some(true),
-                is_stream: Some(false),
-                input_tokens: Some(1),
-                output_tokens: Some(2),
-                total_tokens: Some(3),
-                cache_creation_input_tokens: None,
-                cache_creation_ephemeral_5m_input_tokens: None,
-                cache_creation_ephemeral_1h_input_tokens: None,
-                cache_read_input_tokens: None,
-                cache_creation_cost_usd: None,
-                cache_read_cost_usd: None,
-                output_price_per_1m: None,
-                total_cost_usd: None,
-                actual_total_cost_usd: None,
-                status_code: Some(200),
-                error_message: None,
-                error_category: None,
-                response_time_ms: Some(100),
-                first_byte_time_ms: None,
-                status: "completed".to_string(),
-                billing_status: "pending".to_string(),
-                request_headers: None,
-                request_body: None,
-                request_body_ref: None,
-                provider_request_headers: None,
-                provider_request_body: None,
-                provider_request_body_ref: None,
-                response_headers: None,
-                response_body: None,
-                response_body_ref: None,
-                client_response_headers: None,
-                client_response_body: None,
-                client_response_body_ref: None,
-                request_body_state: None,
-                provider_request_body_state: None,
-                response_body_state: None,
-                client_response_body_state: None,
-                candidate_id: None,
-                candidate_index: None,
-                key_name: None,
-                planner_kind: None,
-                route_family: None,
-                route_kind: None,
-                execution_path: None,
-                local_execution_runtime_miss_reason: None,
-                request_metadata: None,
-                finalized_at_unix_secs: None,
-                created_at_unix_ms: Some(100),
-                updated_at_unix_secs: 100,
-            },
-            Some(&json!({"trace_id": "trace-1"})),
-        );
-
-        assert_eq!(empty_snapshot, UsageRoutingSnapshot::default());
-    }
-
-    #[test]
-    fn usage_routing_snapshot_from_usage_prefers_typed_routing_fields_without_metadata() {
-        let snapshot = usage_routing_snapshot_from_usage(
-            &UpsertUsageRecord {
-                request_id: "req-typed-routing-1".to_string(),
-                user_id: None,
-                api_key_id: None,
-                username: None,
-                api_key_name: None,
-                provider_name: "openai".to_string(),
-                model: "gpt-5".to_string(),
-                target_model: None,
-                provider_id: Some("provider-1".to_string()),
-                provider_endpoint_id: Some("endpoint-1".to_string()),
-                provider_api_key_id: Some("provider-key-1".to_string()),
-                request_type: Some("chat".to_string()),
-                api_format: Some("openai:chat".to_string()),
-                api_family: Some("openai".to_string()),
-                endpoint_kind: Some("chat".to_string()),
-                endpoint_api_format: Some("openai:chat".to_string()),
-                provider_api_family: Some("openai".to_string()),
-                provider_endpoint_kind: Some("chat".to_string()),
-                has_format_conversion: Some(true),
-                is_stream: Some(false),
-                input_tokens: Some(1),
-                output_tokens: Some(2),
-                total_tokens: Some(3),
-                cache_creation_input_tokens: None,
-                cache_creation_ephemeral_5m_input_tokens: None,
-                cache_creation_ephemeral_1h_input_tokens: None,
-                cache_read_input_tokens: None,
-                cache_creation_cost_usd: None,
-                cache_read_cost_usd: None,
-                output_price_per_1m: None,
-                total_cost_usd: None,
-                actual_total_cost_usd: None,
-                status_code: Some(200),
-                error_message: None,
-                error_category: None,
-                response_time_ms: Some(100),
-                first_byte_time_ms: None,
-                status: "completed".to_string(),
-                billing_status: "pending".to_string(),
-                request_headers: None,
-                request_body: None,
-                request_body_ref: None,
-                provider_request_headers: None,
-                provider_request_body: None,
-                provider_request_body_ref: None,
-                response_headers: None,
-                response_body: None,
-                response_body_ref: None,
-                client_response_headers: None,
-                client_response_body: None,
-                client_response_body_ref: None,
-                request_body_state: None,
-                provider_request_body_state: None,
-                response_body_state: None,
-                client_response_body_state: None,
-                candidate_id: Some("cand-typed".to_string()),
-                candidate_index: Some(2),
-                key_name: Some("primary".to_string()),
-                planner_kind: Some("claude_cli_sync".to_string()),
-                route_family: Some("claude".to_string()),
-                route_kind: Some("cli".to_string()),
-                execution_path: Some("local_execution_runtime_miss".to_string()),
-                local_execution_runtime_miss_reason: Some("all_candidates_skipped".to_string()),
-                request_metadata: Some(json!({
-                    "trace_id": "trace-1"
-                })),
-                finalized_at_unix_secs: None,
-                created_at_unix_ms: Some(100),
-                updated_at_unix_secs: 100,
-            },
-            None,
-        );
-
-        assert_eq!(
-            snapshot,
-            UsageRoutingSnapshot {
-                candidate_id: Some("cand-typed".to_string()),
-                candidate_index: Some(2),
-                key_name: Some("primary".to_string()),
-                planner_kind: Some("claude_cli_sync".to_string()),
-                route_family: Some("claude".to_string()),
-                route_kind: Some("cli".to_string()),
-                execution_path: Some("local_execution_runtime_miss".to_string()),
-                local_execution_runtime_miss_reason: Some("all_candidates_skipped".to_string()),
-                selected_provider_id: Some("provider-1".to_string()),
-                selected_endpoint_id: Some("endpoint-1".to_string()),
-                selected_provider_api_key_id: Some("provider-key-1".to_string()),
-                has_format_conversion: Some(true),
-            }
-        );
-    }
-
-    #[test]
-    fn attach_usage_routing_snapshot_metadata_adds_missing_keys_without_overwriting_existing_values(
-    ) {
-        let metadata = attach_usage_routing_snapshot_metadata(
-            Some(json!({
-                "candidate_id": "cand-existing",
-                "route_kind": "cli"
-            })),
-            &UsageRoutingSnapshot {
-                candidate_id: Some("cand-1".to_string()),
-                candidate_index: Some(2),
-                key_name: Some("primary".to_string()),
-                planner_kind: Some("claude_cli_sync".to_string()),
-                route_family: Some("claude".to_string()),
-                route_kind: Some("chat".to_string()),
-                execution_path: Some("local_execution_runtime_miss".to_string()),
-                local_execution_runtime_miss_reason: Some("all_candidates_skipped".to_string()),
-                selected_provider_id: None,
-                selected_endpoint_id: None,
-                selected_provider_api_key_id: None,
-                has_format_conversion: None,
-            },
-        )
-        .expect("metadata should remain");
-
-        assert_eq!(
-            metadata,
-            json!({
-                "candidate_id": "cand-existing",
-                "key_name": "primary",
-                "planner_kind": "claude_cli_sync",
-                "route_family": "claude",
-                "route_kind": "cli",
-                "execution_path": "local_execution_runtime_miss",
-                "local_execution_runtime_miss_reason": "all_candidates_skipped"
-            })
-        );
-    }
-
-    #[test]
-    fn usage_settlement_pricing_snapshot_from_usage_extracts_typed_billing_fields() {
-        let snapshot = usage_settlement_pricing_snapshot_from_usage(
-            &UpsertUsageRecord {
-                request_id: "req-125".to_string(),
-                user_id: None,
-                api_key_id: None,
-                username: None,
-                api_key_name: None,
-                provider_name: "openai".to_string(),
-                model: "gpt-5".to_string(),
-                target_model: None,
-                provider_id: Some("provider-1".to_string()),
-                provider_endpoint_id: Some("endpoint-1".to_string()),
-                provider_api_key_id: Some("provider-key-1".to_string()),
-                request_type: Some("chat".to_string()),
-                api_format: Some("openai:chat".to_string()),
-                api_family: Some("openai".to_string()),
-                endpoint_kind: Some("chat".to_string()),
-                endpoint_api_format: Some("openai:chat".to_string()),
-                provider_api_family: Some("openai".to_string()),
-                provider_endpoint_kind: Some("chat".to_string()),
-                has_format_conversion: Some(false),
-                is_stream: Some(false),
-                input_tokens: Some(1),
-                output_tokens: Some(2),
-                total_tokens: Some(3),
-                cache_creation_input_tokens: None,
-                cache_creation_ephemeral_5m_input_tokens: None,
-                cache_creation_ephemeral_1h_input_tokens: None,
-                cache_read_input_tokens: None,
-                cache_creation_cost_usd: None,
-                cache_read_cost_usd: None,
-                output_price_per_1m: Some(15.0),
-                total_cost_usd: None,
-                actual_total_cost_usd: None,
-                status_code: Some(200),
-                error_message: None,
-                error_category: None,
-                response_time_ms: Some(100),
-                first_byte_time_ms: None,
-                status: "completed".to_string(),
-                billing_status: "pending".to_string(),
-                request_headers: None,
-                request_body: None,
-                request_body_ref: None,
-                provider_request_headers: None,
-                provider_request_body: None,
-                provider_request_body_ref: None,
-                response_headers: None,
-                response_body: None,
-                response_body_ref: None,
-                client_response_headers: None,
-                client_response_body: None,
-                client_response_body_ref: None,
-                request_body_state: None,
-                provider_request_body_state: None,
-                response_body_state: None,
-                client_response_body_state: None,
-                candidate_id: None,
-                candidate_index: None,
-                key_name: None,
-                planner_kind: None,
-                route_family: None,
-                route_kind: None,
-                execution_path: None,
-                local_execution_runtime_miss_reason: None,
-                request_metadata: None,
-                finalized_at_unix_secs: None,
-                created_at_unix_ms: Some(100),
-                updated_at_unix_secs: 100,
-            },
-            Some(&json!({
-                "rate_multiplier": 0.5,
-                "is_free_tier": false,
-                "billing_snapshot": {
-                    "schema_version": "2.0",
-                    "status": "complete",
-                    "resolved_variables": {
-                        "input_price_per_1m": 3.0,
-                        "output_price_per_1m": 15.0,
-                        "cache_creation_price_per_1m": 3.75,
-                        "cache_read_price_per_1m": 0.30,
-                        "price_per_request": 0.02
-                    }
-                }
-            })),
-        );
-
-        assert_eq!(
-            snapshot,
-            UsageSettlementPricingSnapshot {
-                billing_status: Some("pending".to_string()),
-                billing_snapshot_schema_version: Some("2.0".to_string()),
-                billing_snapshot_status: Some("complete".to_string()),
-                rate_multiplier: Some(0.5),
-                is_free_tier: Some(false),
-                input_price_per_1m: Some(3.0),
-                output_price_per_1m: Some(15.0),
-                cache_creation_price_per_1m: Some(3.75),
-                cache_read_price_per_1m: Some(0.30),
-                price_per_request: Some(0.02),
-            }
-        );
-    }
-
-    #[test]
-    fn usage_settlement_pricing_snapshot_with_billing_status_only_is_still_persisted() {
-        let snapshot = UsageSettlementPricingSnapshot {
-            billing_status: Some("pending".to_string()),
-            ..UsageSettlementPricingSnapshot::default()
-        };
-
-        assert!(snapshot.any_present());
-    }
-
-    #[test]
-    fn attach_usage_settlement_pricing_snapshot_metadata_adds_missing_values_without_overwriting() {
-        let metadata = attach_usage_settlement_pricing_snapshot_metadata(
-            Some(json!({
-                "rate_multiplier": 1.0,
-                "billing_snapshot_status": "complete"
-            })),
-            &UsageSettlementPricingSnapshot {
-                billing_status: None,
-                billing_snapshot_schema_version: Some("2.0".to_string()),
-                billing_snapshot_status: Some("incomplete".to_string()),
-                rate_multiplier: Some(0.5),
-                is_free_tier: Some(false),
-                input_price_per_1m: Some(3.0),
-                output_price_per_1m: Some(15.0),
-                cache_creation_price_per_1m: Some(3.75),
-                cache_read_price_per_1m: Some(0.30),
-                price_per_request: Some(0.02),
-            },
-        )
-        .expect("metadata should remain");
-
-        assert_eq!(
-            metadata,
-            json!({
-                "rate_multiplier": 1.0,
-                "billing_snapshot_status": "complete",
-                "billing_snapshot_schema_version": "2.0",
-                "is_free_tier": false,
-                "input_price_per_1m": 3.0,
-                "output_price_per_1m": 15.0,
-                "cache_creation_price_per_1m": 3.75,
-                "cache_read_price_per_1m": 0.30,
-                "price_per_request": 0.02
-            })
-        );
-    }
-}
+mod tests;

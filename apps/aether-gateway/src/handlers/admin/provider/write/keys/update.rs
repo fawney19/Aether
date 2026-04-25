@@ -7,9 +7,11 @@ use crate::handlers::admin::shared::{
     decrypt_catalog_secret_with_fallbacks, encrypt_catalog_secret_with_fallbacks, json_string_list,
     normalize_json_object, normalize_string_list, parse_catalog_auth_config_json,
 };
+use crate::provider_key_auth::provider_key_is_oauth_managed;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
+use aether_provider_transport::provider_types::provider_type_is_fixed;
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,6 +37,9 @@ pub(crate) async fn build_admin_update_provider_key_record(
         .auth_type
         .as_deref()
         .is_some_and(|_| target_auth_type != current_auth_type);
+    let managed_fixed_oauth_key = provider_type_is_fixed(&provider.provider_type)
+        && (provider_key_is_oauth_managed(existing, &provider.provider_type)
+            || target_auth_type.eq_ignore_ascii_case("oauth"));
 
     let api_key_present = fields.contains("api_key");
     let api_key_value = payload
@@ -187,11 +192,19 @@ pub(crate) async fn build_admin_update_provider_key_record(
     if fields.contains("api_formats") {
         let api_formats = normalize_string_list(payload.api_formats)
             .ok_or_else(|| "api_formats 为必填字段".to_string())?;
-        validate_vertex_api_formats(&provider.provider_type, &target_auth_type, &api_formats)?;
-        updated.api_formats = Some(json!(api_formats));
+        if managed_fixed_oauth_key {
+            updated.api_formats = None;
+        } else {
+            validate_vertex_api_formats(&provider.provider_type, &target_auth_type, &api_formats)?;
+            updated.api_formats = Some(json!(api_formats));
+        }
     } else if payload.auth_type.is_some() {
-        let api_formats = json_string_list(existing.api_formats.as_ref());
-        validate_vertex_api_formats(&provider.provider_type, &target_auth_type, &api_formats)?;
+        if managed_fixed_oauth_key {
+            updated.api_formats = None;
+        } else {
+            let api_formats = json_string_list(existing.api_formats.as_ref());
+            validate_vertex_api_formats(&provider.provider_type, &target_auth_type, &api_formats)?;
+        }
     }
 
     updated.auth_type = target_auth_type;

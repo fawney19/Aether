@@ -562,7 +562,7 @@ async fn gateway_surfaces_candidate_list_empty_reason_for_claude_chat_runtime_mi
     assert_eq!(payload["error"]["type"], "http_error");
     assert_eq!(
         payload["error"]["message"],
-        "没有可用的提供商支持模型 claude-sonnet-4-5 的同步请求"
+        "没有可用提供商支持模型 claude-sonnet-4-5 的同步请求。请检查模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）"
     );
 
     let stored_candidates = request_candidate_repository

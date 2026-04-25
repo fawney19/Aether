@@ -209,6 +209,7 @@
         请前往"模型目录"页面添加模型
       </p>
     </div>
+
   </Card>
 
   <ModelTestDialog
@@ -516,6 +517,7 @@ async function handleStartPendingTest() {
     displayLabel: `${endpointPrefix}${modelName}`,
     apiFormat: endpoint.api_format,
     endpointId: endpoint.id,
+    endpointBaseUrl: endpoint.base_url,
     requestHeaders,
     requestBody,
     concurrency: isPoolManagedProvider.value ? POOL_TEST_CONCURRENCY : SINGLE_TEST_CONCURRENCY,

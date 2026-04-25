@@ -17,6 +17,11 @@ pub struct SchedulerRequestCandidateReportContext {
     pub key_id: Option<String>,
     pub client_api_format: Option<String>,
     pub provider_api_format: Option<String>,
+    pub upstream_url: Option<String>,
+    pub mapped_model: Option<String>,
+    pub key_name: Option<String>,
+    pub header_rules: Option<Value>,
+    pub body_rules: Option<Value>,
     pub proxy: Option<Value>,
 }
 
@@ -103,6 +108,17 @@ pub fn parse_request_candidate_report_context(
         key_id: string_field(report_context, "key_id"),
         client_api_format: string_field(report_context, "client_api_format"),
         provider_api_format: string_field(report_context, "provider_api_format"),
+        upstream_url: string_field(report_context, "upstream_url"),
+        mapped_model: string_field(report_context, "mapped_model"),
+        key_name: string_field(report_context, "key_name"),
+        header_rules: report_context
+            .get("header_rules")
+            .cloned()
+            .filter(|value| !value.is_null()),
+        body_rules: report_context
+            .get("body_rules")
+            .cloned()
+            .filter(|value| !value.is_null()),
         proxy: report_context
             .get("proxy")
             .cloned()
@@ -129,11 +145,24 @@ pub fn resolve_report_request_candidate_slot(
         key_id,
         client_api_format,
         provider_api_format,
+        upstream_url,
+        mapped_model,
+        key_name,
+        header_rules,
+        body_rules,
         proxy,
     } = metadata;
     let request_id = request_id?;
-    let synthesized_extra_data =
-        build_report_candidate_extra_data(client_api_format, provider_api_format, proxy);
+    let synthesized_extra_data = build_report_candidate_extra_data(
+        client_api_format,
+        provider_api_format,
+        upstream_url,
+        mapped_model,
+        key_name,
+        header_rules,
+        body_rules,
+        proxy,
+    );
     let created_at_unix_ms = matched_candidate
         .as_ref()
         .map(|candidate| candidate.created_at_unix_ms)
@@ -287,6 +316,17 @@ pub fn build_local_request_candidate_status_record(
         .filter(|value| !value.is_empty())?;
     let metadata = parse_request_candidate_report_context(report_context)?;
     let candidate_index = metadata.candidate_index?;
+    let extra_data = build_report_candidate_extra_data(
+        metadata.client_api_format.clone(),
+        metadata.provider_api_format.clone(),
+        metadata.upstream_url.clone(),
+        metadata.mapped_model.clone(),
+        metadata.key_name.clone(),
+        metadata.header_rules.clone(),
+        metadata.body_rules.clone(),
+        metadata.proxy.clone(),
+    );
+    let created_at_unix_ms = started_at_unix_ms.or(finished_at_unix_ms);
 
     Some(UpsertRequestCandidateRecord {
         id: candidate_id.to_string(),
@@ -308,9 +348,9 @@ pub fn build_local_request_candidate_status_record(
         error_message,
         latency_ms,
         concurrent_requests: None,
-        extra_data: None,
+        extra_data,
         required_capabilities: None,
-        created_at_unix_ms: None,
+        created_at_unix_ms,
         started_at_unix_ms,
         finished_at_unix_ms,
     })
@@ -489,9 +529,14 @@ fn next_candidate_index(candidates: &[StoredRequestCandidate]) -> u32 {
 fn build_report_candidate_extra_data(
     client_api_format: Option<String>,
     provider_api_format: Option<String>,
+    upstream_url: Option<String>,
+    mapped_model: Option<String>,
+    key_name: Option<String>,
+    header_rules: Option<Value>,
+    body_rules: Option<Value>,
     proxy: Option<Value>,
 ) -> Option<Value> {
-    let mut extra_data = Map::with_capacity(5);
+    let mut extra_data = Map::with_capacity(8);
     extra_data.insert("gateway_execution_runtime".to_string(), Value::Bool(true));
     extra_data.insert("phase".to_string(), Value::String("3c_trial".to_string()));
     if let Some(client_api_format) = client_api_format {
@@ -505,6 +550,21 @@ fn build_report_candidate_extra_data(
             "provider_api_format".to_string(),
             Value::String(provider_api_format),
         );
+    }
+    if let Some(upstream_url) = upstream_url {
+        extra_data.insert("upstream_url".to_string(), Value::String(upstream_url));
+    }
+    if let Some(mapped_model) = mapped_model {
+        extra_data.insert("mapped_model".to_string(), Value::String(mapped_model));
+    }
+    if let Some(key_name) = key_name {
+        extra_data.insert("key_name".to_string(), Value::String(key_name));
+    }
+    if let Some(header_rules) = header_rules {
+        extra_data.insert("header_rules".to_string(), header_rules);
+    }
+    if let Some(body_rules) = body_rules {
+        extra_data.insert("body_rules".to_string(), body_rules);
     }
     if let Some(proxy) = proxy {
         extra_data.insert("proxy".to_string(), proxy);
@@ -647,6 +707,12 @@ mod tests {
             "key_id": "catalog-key-1",
             "client_api_format": "openai:chat",
             "provider_api_format": "openai:cli",
+            "header_rules": [
+                {"op": "set", "name": "x-test", "value": "1"}
+            ],
+            "body_rules": [
+                {"op": "remove", "path": "/store"}
+            ],
             "proxy": {
                 "node_id": "proxy-node-1",
                 "node_name": "edge-1",
@@ -682,6 +748,22 @@ mod tests {
                 .and_then(|value| value.get("proxy"))
                 .and_then(|value| value.get("source")),
             Some(&json!("provider"))
+        );
+        assert_eq!(
+            slot.extra_data
+                .as_ref()
+                .and_then(|value| value.get("header_rules"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            slot.extra_data
+                .as_ref()
+                .and_then(|value| value.get("body_rules"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
         );
     }
 
@@ -756,7 +838,12 @@ mod tests {
                     "candidate_index": 1,
                     "retry_index": 2,
                     "user_id": "user-1",
-                    "api_key_id": "api-key-1"
+                    "api_key_id": "api-key-1",
+                    "client_api_format": "openai:chat",
+                    "provider_api_format": "openai:cli",
+                    "upstream_url": "https://example.com/v1/responses",
+                    "mapped_model": "gpt-5-upstream",
+                    "key_name": "primary"
                 })),
                 status_update: SchedulerRequestCandidateStatusUpdate {
                     status: RequestCandidateStatus::Failed,
@@ -775,6 +862,21 @@ mod tests {
         assert_eq!(record.retry_index, 2);
         assert_eq!(record.user_id.as_deref(), Some("user-1"));
         assert_eq!(record.status, RequestCandidateStatus::Failed);
+        assert_eq!(record.created_at_unix_ms, Some(100));
+        assert_eq!(
+            record
+                .extra_data
+                .as_ref()
+                .and_then(|value| value.get("provider_api_format")),
+            Some(&json!("openai:cli"))
+        );
+        assert_eq!(
+            record
+                .extra_data
+                .as_ref()
+                .and_then(|value| value.get("mapped_model")),
+            Some(&json!("gpt-5-upstream"))
+        );
     }
 
     #[test]

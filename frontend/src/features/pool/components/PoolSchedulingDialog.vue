@@ -321,8 +321,17 @@ const FALLBACK_PRESET_DEFS: PoolPresetMeta[] = [
   {
     name: 'plus_first',
     label: 'Plus 优先',
-    description: '优先消耗 Plus/Pro 账号（依赖 plan_type）',
-    evidence_hint: '依据 plan_type（Plus/Pro 账号优先调度）',
+    description: '优先消耗 Plus 账号（依赖 plan_type）',
+    evidence_hint: '依据 plan_type（Plus 账号优先调度）',
+    providers: ['codex', 'kiro'],
+    modes: null,
+    default_mode: null,
+  },
+  {
+    name: 'pro_first',
+    label: 'Pro 优先',
+    description: '优先消耗 Pro 账号（依赖 plan_type）',
+    evidence_hint: '依据 plan_type（Pro 账号优先调度）',
     providers: ['codex', 'kiro'],
     modes: null,
     default_mode: null,
@@ -608,7 +617,7 @@ function loadFromConfig(cfg: PoolAdvancedConfig | null): PresetListItem[] {
 
   const rawPresets = cfg.scheduling_presets
   if (!Array.isArray(rawPresets) || rawPresets.length === 0) {
-    if (cfg.scheduling_mode === 'lru' || (!cfg.scheduling_mode && cfg.lru_enabled !== false)) {
+    if (cfg.scheduling_mode === 'lru' || cfg.lru_enabled === true) {
       return defaults.map(item => ({
         ...item,
         enabled: item.preset === 'lru',

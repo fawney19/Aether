@@ -70,4 +70,43 @@ describe('Conversation stream compatibility', () => {
       content: 'Hello from CLI stream',
     })
   })
+
+  it('renders legacy OpenAI CLI outtext delta alias from stored usage records', () => {
+    const requestBody = {
+      model: 'gpt-5.4',
+      stream: true,
+      input: 'Hello',
+    }
+    const rawSse = [
+      'event: response.created',
+      'data: {"type":"response.created","response":{"id":"resp_legacy_123","object":"response","model":"gpt-5.4","status":"in_progress"}}',
+      '',
+      'event: response.outtext.delta',
+      'data: {"type":"response.outtext.delta","delta":"Hello from legacy alias"}',
+      '',
+      'event: response.completed',
+      'data: {"type":"response.completed","response":{"id":"resp_legacy_123","object":"response","model":"gpt-5.4","status":"completed","output":[]}}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n')
+
+    const rendered = renderResponse(rawSse, requestBody, 'openai:cli')
+    expect(rendered.error).toBeUndefined()
+    expect(rendered.isStream).toBe(true)
+    expect(rendered.blocks[0]).toMatchObject({
+      type: 'message',
+      role: 'assistant',
+    })
+
+    const firstBlock = rendered.blocks[0]
+    if (!firstBlock || firstBlock.type !== 'message') {
+      throw new Error('expected first render block to be message')
+    }
+
+    expect(firstBlock.content[0]).toMatchObject({
+      type: 'text',
+      content: 'Hello from legacy alias',
+    })
+  })
 })

@@ -9,6 +9,7 @@ use crate::ai_pipeline::planner::candidate_eligibility::{
 use crate::ai_pipeline::planner::runtime_miss::record_local_runtime_candidate_skip_reason;
 use crate::ai_pipeline::{GatewayAuthApiKeySnapshot, PlannerAppState};
 use crate::clock::current_unix_ms;
+use crate::handlers::shared::provider_pool::admin_provider_pool_config_from_config_value;
 use crate::orchestration::{local_attempt_slot_count, ExecutionAttemptIdentity};
 use crate::AppState;
 
@@ -67,6 +68,16 @@ pub(crate) fn remember_first_local_candidate_affinity(
     );
 }
 
+fn should_persist_available_local_candidate(eligible: &EligibleLocalExecutionCandidate) -> bool {
+    eligible.orchestration.pool_key_index.is_none()
+}
+
+fn should_persist_skipped_local_candidate(candidate: &SkippedLocalExecutionCandidate) -> bool {
+    candidate.transport.as_ref().is_none_or(|transport| {
+        admin_provider_pool_config_from_config_value(transport.provider.config.as_ref()).is_none()
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn persist_available_local_execution_candidates<F>(
     state: PlannerAppState<'_>,
@@ -102,21 +113,25 @@ where
             let attempt_identity = ExecutionAttemptIdentity::new(candidate_index, retry_index)
                 .with_pool_key_index(pool_key_index);
             let generated_candidate_id = Uuid::new_v4().to_string();
-            let candidate_id = state
-                .persist_available_local_candidate(
-                    trace_id,
-                    user_id,
-                    api_key_id,
-                    &eligible.candidate,
-                    attempt_identity.candidate_index,
-                    attempt_identity.retry_index,
-                    &generated_candidate_id,
-                    required_capabilities,
-                    extra_data.clone(),
-                    created_at_unix_ms,
-                    error_context,
-                )
-                .await;
+            let candidate_id = if should_persist_available_local_candidate(eligible) {
+                state
+                    .persist_available_local_candidate(
+                        trace_id,
+                        user_id,
+                        api_key_id,
+                        &eligible.candidate,
+                        attempt_identity.candidate_index,
+                        attempt_identity.retry_index,
+                        &generated_candidate_id,
+                        required_capabilities,
+                        extra_data.clone(),
+                        created_at_unix_ms,
+                        error_context,
+                    )
+                    .await
+            } else {
+                generated_candidate_id
+            };
 
             let eligible = if retry_index + 1 == attempt_slots {
                 owned_eligible
@@ -235,7 +250,11 @@ pub(crate) async fn persist_skipped_local_execution_candidates(
     error_context: &'static str,
     record_runtime_miss_diagnostic: bool,
 ) {
-    for (skipped_offset, skipped_candidate) in skipped_candidates.into_iter().enumerate() {
+    let mut next_candidate_index = starting_candidate_index;
+    for skipped_candidate in skipped_candidates {
+        if !should_persist_skipped_local_candidate(&skipped_candidate) {
+            continue;
+        }
         let generated_candidate_id = Uuid::new_v4().to_string();
         persist_skipped_local_execution_candidate(
             state,
@@ -243,7 +262,7 @@ pub(crate) async fn persist_skipped_local_execution_candidates(
             user_id,
             api_key_id,
             &skipped_candidate.candidate,
-            starting_candidate_index + skipped_offset as u32,
+            next_candidate_index,
             &generated_candidate_id,
             required_capabilities,
             skipped_candidate.skip_reason,
@@ -252,6 +271,7 @@ pub(crate) async fn persist_skipped_local_execution_candidates(
             record_runtime_miss_diagnostic,
         )
         .await;
+        next_candidate_index = next_candidate_index.saturating_add(1);
     }
 }
 
@@ -274,4 +294,201 @@ pub(crate) async fn persist_skipped_local_execution_candidates_with_context(
         context.record_runtime_miss_diagnostic,
     )
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
+    use aether_provider_transport::snapshot::{
+        GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
+        GatewayProviderTransportProvider,
+    };
+    use aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate;
+    use serde_json::json;
+
+    use super::*;
+    use crate::data::GatewayDataState;
+    use crate::orchestration::LocalExecutionCandidateMetadata;
+
+    fn sample_candidate(key_id: &str) -> SchedulerMinimalCandidateSelectionCandidate {
+        SchedulerMinimalCandidateSelectionCandidate {
+            provider_id: "provider-1".to_string(),
+            provider_name: "provider-1".to_string(),
+            provider_type: "codex".to_string(),
+            provider_priority: 10,
+            endpoint_id: "endpoint-1".to_string(),
+            endpoint_api_format: "openai:chat".to_string(),
+            key_id: key_id.to_string(),
+            key_name: key_id.to_string(),
+            key_auth_type: "api_key".to_string(),
+            key_internal_priority: 10,
+            key_global_priority_for_format: Some(10),
+            key_capabilities: None,
+            model_id: "model-1".to_string(),
+            global_model_id: "global-model-1".to_string(),
+            global_model_name: "gpt-5".to_string(),
+            selected_provider_model_name: "gpt-5".to_string(),
+            mapping_matched_model: None,
+        }
+    }
+
+    fn sample_transport(
+        key_id: &str,
+        provider_config: Option<serde_json::Value>,
+    ) -> Arc<crate::ai_pipeline::GatewayProviderTransportSnapshot> {
+        Arc::new(crate::ai_pipeline::GatewayProviderTransportSnapshot {
+            provider: GatewayProviderTransportProvider {
+                id: "provider-1".to_string(),
+                name: "provider-1".to_string(),
+                provider_type: "codex".to_string(),
+                website: None,
+                is_active: true,
+                keep_priority_on_conversion: false,
+                enable_format_conversion: false,
+                concurrent_limit: None,
+                max_retries: None,
+                proxy: None,
+                request_timeout_secs: None,
+                stream_first_byte_timeout_secs: None,
+                config: provider_config,
+            },
+            endpoint: GatewayProviderTransportEndpoint {
+                id: "endpoint-1".to_string(),
+                provider_id: "provider-1".to_string(),
+                api_format: "openai:chat".to_string(),
+                api_family: Some("openai".to_string()),
+                endpoint_kind: Some("chat".to_string()),
+                is_active: true,
+                base_url: "https://example.com".to_string(),
+                header_rules: None,
+                body_rules: None,
+                max_retries: None,
+                custom_path: None,
+                config: None,
+                format_acceptance_config: None,
+                proxy: None,
+            },
+            key: GatewayProviderTransportKey {
+                id: key_id.to_string(),
+                provider_id: "provider-1".to_string(),
+                name: key_id.to_string(),
+                auth_type: "api_key".to_string(),
+                is_active: true,
+                api_formats: Some(vec!["openai:chat".to_string()]),
+                allowed_models: None,
+                capabilities: None,
+                rate_multipliers: None,
+                global_priority_by_format: None,
+                expires_at_unix_secs: None,
+                proxy: None,
+                fingerprint: None,
+                decrypted_api_key: "secret".to_string(),
+                decrypted_auth_config: None,
+            },
+        })
+    }
+
+    fn sample_eligible(
+        key_id: &str,
+        pool_key_index: Option<u32>,
+    ) -> EligibleLocalExecutionCandidate {
+        EligibleLocalExecutionCandidate {
+            candidate: sample_candidate(key_id),
+            transport: sample_transport(
+                key_id,
+                pool_key_index.map(|_| json!({ "pool_advanced": {} })),
+            ),
+            provider_api_format: "openai:chat".to_string(),
+            orchestration: LocalExecutionCandidateMetadata {
+                candidate_group_id: pool_key_index.map(|_| "pool-group".to_string()),
+                pool_key_index,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn pool_candidates_are_not_persisted_as_available_before_attempt() {
+        let repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let app = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_request_candidate_repository_for_tests(Arc::clone(
+                    &repository,
+                )),
+            );
+
+        let attempts = persist_available_local_execution_candidates(
+            PlannerAppState::new(&app),
+            "trace-pool-lazy",
+            "user-1",
+            "api-key-1",
+            None,
+            vec![
+                sample_eligible("pool-key", Some(0)),
+                sample_eligible("normal-key", None),
+            ],
+            "persist should not fail",
+            |_| None,
+        )
+        .await;
+
+        assert_eq!(attempts.len(), 2);
+        let stored = app
+            .read_request_candidates_by_request_id("trace-pool-lazy")
+            .await
+            .expect("request candidates should read");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].key_id.as_deref(), Some("normal-key"));
+    }
+
+    #[tokio::test]
+    async fn pool_internal_skipped_candidates_are_not_persisted() {
+        let repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let app = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_request_candidate_repository_for_tests(Arc::clone(
+                    &repository,
+                )),
+            );
+
+        persist_skipped_local_execution_candidates(
+            &app,
+            "trace-pool-skipped",
+            "user-1",
+            "api-key-1",
+            None,
+            0,
+            vec![
+                SkippedLocalExecutionCandidate {
+                    candidate: sample_candidate("pool-skipped"),
+                    skip_reason: "pool_cooldown",
+                    transport: Some(sample_transport(
+                        "pool-skipped",
+                        Some(json!({ "pool_advanced": {} })),
+                    )),
+                    extra_data: None,
+                },
+                SkippedLocalExecutionCandidate {
+                    candidate: sample_candidate("normal-skipped"),
+                    skip_reason: "key_inactive",
+                    transport: None,
+                    extra_data: None,
+                },
+            ],
+            "persist skipped should not fail",
+            false,
+        )
+        .await;
+
+        let stored = app
+            .read_request_candidates_by_request_id("trace-pool-skipped")
+            .await
+            .expect("request candidates should read");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].key_id.as_deref(), Some("normal-skipped"));
+        assert_eq!(stored[0].candidate_index, 0);
+    }
 }

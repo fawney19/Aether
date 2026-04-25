@@ -23,6 +23,7 @@ pub(super) struct RefreshRequestContext {
 pub(super) struct RefreshSuccessContext {
     pub(super) provider_type: String,
     pub(super) refreshed_auth_config: Map<String, Value>,
+    pub(super) refreshed_expires_at_unix_secs: Option<u64>,
     pub(super) account_state_recheck_attempted: bool,
     pub(super) account_state_recheck_error: Option<String>,
 }

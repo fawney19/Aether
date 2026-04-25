@@ -19,13 +19,16 @@ pub(crate) use self::adaptation::{
 };
 pub(crate) use self::finalize::common::LocalCoreSyncFinalizeOutcome;
 pub(crate) use self::finalize::internal::{
-    maybe_build_stream_response_rewriter, maybe_build_sync_finalize_outcome,
-    maybe_compile_sync_finalize_response,
+    maybe_bridge_standard_sync_json_to_stream, maybe_build_stream_response_rewriter,
+    maybe_build_sync_finalize_outcome, maybe_compile_sync_finalize_response,
+    SyncToStreamBridgeOutcome,
 };
 pub(crate) use self::planner::{
     build_gemini_stream_plan_from_decision, build_gemini_sync_plan_from_decision,
     build_local_gemini_files_stream_plan_and_reports_for_kind,
     build_local_gemini_files_sync_plan_and_reports_for_kind,
+    build_local_image_stream_plan_and_reports_for_kind,
+    build_local_image_sync_plan_and_reports_for_kind,
     build_local_openai_chat_stream_plan_and_reports_for_kind,
     build_local_openai_chat_sync_plan_and_reports_for_kind,
     build_local_openai_cli_stream_plan_and_reports_for_kind,
@@ -37,13 +40,33 @@ pub(crate) use self::planner::{
     build_standard_stream_plan_from_decision, build_standard_sync_plan_from_decision,
     extract_pool_sticky_session_token, maybe_build_stream_decision_payload,
     maybe_build_stream_plan_payload, maybe_build_sync_decision_payload,
-    maybe_build_sync_plan_payload, set_local_openai_chat_execution_exhausted_diagnostic,
-    GatewayAuthApiKeySnapshot, GatewayProviderTransportSnapshot, LocalResolvedOAuthRequestAuth,
-    PlannerAppState,
+    maybe_build_sync_plan_payload, planner_is_matching_stream_request,
+    set_local_openai_chat_execution_exhausted_diagnostic, GatewayAuthApiKeySnapshot,
+    GatewayProviderTransportSnapshot, LocalResolvedOAuthRequestAuth, PlannerAppState,
 };
 pub(crate) use self::pure::*;
 pub(crate) use crate::control::GatewayControlDecision;
 pub(crate) use crate::execution_runtime::{ConversionMode, ExecutionStrategy};
+
+pub(crate) fn build_provider_transport_request_url(
+    transport: &GatewayProviderTransportSnapshot,
+    provider_api_format: &str,
+    mapped_model: Option<&str>,
+    upstream_is_stream: bool,
+    request_query: Option<&str>,
+    kiro_api_region: Option<&str>,
+) -> Option<String> {
+    crate::provider_transport::build_transport_request_url(
+        transport,
+        crate::provider_transport::TransportRequestUrlParams {
+            provider_api_format,
+            mapped_model,
+            upstream_is_stream,
+            request_query,
+            kiro_api_region,
+        },
+    )
+}
 
 pub(crate) async fn resolve_execution_runtime_auth_context(
     state: &AppState,

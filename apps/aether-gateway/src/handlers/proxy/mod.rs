@@ -5,10 +5,15 @@ use self::local::{
 };
 use super::internal::resolve_local_proxy_execution_path;
 pub(crate) use super::public::matches_model_mapping_for_models;
-use crate::ai_pipeline_api;
+use crate::ai_pipeline_api::{
+    aggregate_claude_stream_sync_response, aggregate_gemini_stream_sync_response,
+    aggregate_openai_chat_stream_sync_response, aggregate_openai_cli_stream_sync_response,
+    maybe_bridge_standard_sync_json_to_stream,
+};
 use crate::api::response::{
-    build_client_response, build_local_auth_rejection_response, build_local_http_error_response,
-    build_local_overloaded_response, build_local_user_rpm_limited_response,
+    build_client_response, build_client_response_from_parts, build_local_auth_rejection_response,
+    build_local_http_error_response, build_local_overloaded_response,
+    build_local_user_rpm_limited_response,
 };
 use crate::constants::{
     DEPENDENCY_REASON_HEADER, EXECUTION_PATH_CONTROL_EXECUTE_STREAM,
@@ -53,23 +58,23 @@ use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{self, header::HeaderName, header::HeaderValue, Response};
 use sha2::{Digest, Sha256};
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 use tracing::{debug, info, warn};
 
 const OPENAI_CHAT_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
-    "OpenAI chat execution runtime miss did not match a Rust execution path";
+    "当前 OpenAI Chat Completions 请求无法在本地执行：没有匹配到可用的执行路径";
 const OPENAI_RESPONSES_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
-    "OpenAI responses execution runtime miss did not match a Rust execution path";
+    "当前 OpenAI Responses 请求无法在本地执行：没有匹配到可用的执行路径";
 const OPENAI_COMPACT_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
-    "OpenAI compact execution runtime miss did not match a Rust execution path";
+    "当前 OpenAI Responses Compact 请求无法在本地执行：没有匹配到可用的执行路径";
 const OPENAI_VIDEO_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
-    "OpenAI video execution runtime miss did not match a Rust execution path";
+    "当前 OpenAI Video 请求无法在本地执行：没有匹配到可用的执行路径";
 const CLAUDE_MESSAGES_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
-    "Claude messages execution runtime miss did not match a Rust execution path";
+    "当前 Claude Messages 请求无法在本地执行：没有匹配到可用的执行路径";
 const GEMINI_PUBLIC_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
-    "Gemini public execution runtime miss did not match a Rust execution path";
+    "当前 Gemini Public 请求无法在本地执行：没有匹配到可用的执行路径";
 const GEMINI_FILES_LOCAL_EXECUTION_RUNTIME_MISS_DETAIL: &str =
-    "Gemini files execution runtime miss did not match a Rust execution path";
+    "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径";
 const LOCAL_ROUTE_NOT_FOUND_DETAIL: &str = "Route not found";
 const LOCAL_PROXY_PASSTHROUGH_REMOVED_DETAIL: &str =
     "Route matched a removed compatibility passthrough; implement it in Rust or retire the route";
@@ -406,14 +411,232 @@ async fn maybe_forward_public_request_to_tunnel_owner(
             message: format!("owner gateway affinity forward failed: {err}"),
         })?;
 
-    let mut response =
-        build_client_response(upstream_response, &request_context.trace_id, Some(decision))?;
+    let mut response = build_sync_aware_affinity_forward_response(
+        request_context,
+        buffered_body,
+        decision,
+        upstream_response,
+    )
+    .await?;
     response.headers_mut().insert(
         HeaderName::from_static(TUNNEL_AFFINITY_OWNER_INSTANCE_HEADER),
         HeaderValue::from_str(owner.gateway_instance_id.as_str())
             .map_err(|err| GatewayError::Internal(err.to_string()))?,
     );
     Ok(Some(response))
+}
+
+fn upstream_response_is_sse(headers: &reqwest::header::HeaderMap) -> bool {
+    headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"))
+}
+
+fn collect_upstream_response_headers(
+    headers: &reqwest::header::HeaderMap,
+) -> BTreeMap<String, String> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_string(),
+                value.to_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+fn aggregate_sync_sse_response_for_client(
+    decision: &GatewayControlDecision,
+    public_path: &str,
+    body: &[u8],
+) -> Option<serde_json::Value> {
+    let api_format = decision
+        .auth_endpoint_signature
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match api_format {
+        Some(value) if value.eq_ignore_ascii_case("openai:chat") => {
+            aggregate_openai_chat_stream_sync_response(body)
+        }
+        Some(value)
+            if value.eq_ignore_ascii_case("openai:cli")
+                || value.eq_ignore_ascii_case("openai:compact") =>
+        {
+            aggregate_openai_cli_stream_sync_response(body)
+        }
+        Some(value)
+            if value.eq_ignore_ascii_case("claude:chat")
+                || value.eq_ignore_ascii_case("claude:cli") =>
+        {
+            aggregate_claude_stream_sync_response(body)
+        }
+        Some(value)
+            if value.eq_ignore_ascii_case("gemini:chat")
+                || value.eq_ignore_ascii_case("gemini:cli") =>
+        {
+            aggregate_gemini_stream_sync_response(body)
+        }
+        _ if public_path == "/v1/chat/completions" => {
+            aggregate_openai_chat_stream_sync_response(body)
+        }
+        _ if public_path == "/v1/responses" || public_path == "/v1/responses/compact" => {
+            aggregate_openai_cli_stream_sync_response(body)
+        }
+        _ if public_path == "/v1/messages" => aggregate_claude_stream_sync_response(body),
+        _ if decision.route_family.as_deref() == Some("gemini")
+            && (public_path.contains(":generateContent")
+                || public_path.contains(":streamGenerateContent")) =>
+        {
+            aggregate_gemini_stream_sync_response(body)
+        }
+        _ => None,
+    }
+}
+
+fn build_sync_json_proxy_response(
+    status_code: u16,
+    upstream_headers: &BTreeMap<String, String>,
+    body_json: &serde_json::Value,
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+) -> Result<Response<Body>, GatewayError> {
+    let mut headers = upstream_headers.clone();
+    headers.remove("content-encoding");
+    headers.remove("content-length");
+    headers.insert("content-type".to_string(), "application/json".to_string());
+    let body_bytes =
+        serde_json::to_vec(body_json).map_err(|err| GatewayError::Internal(err.to_string()))?;
+    headers.insert("content-length".to_string(), body_bytes.len().to_string());
+    build_client_response_from_parts(
+        status_code,
+        &headers,
+        Body::from(body_bytes),
+        trace_id,
+        Some(decision),
+    )
+}
+
+fn resolve_affinity_forward_client_api_format(
+    decision: &GatewayControlDecision,
+    public_path: &str,
+) -> Option<&'static str> {
+    let api_format = decision
+        .auth_endpoint_signature
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match api_format {
+        Some(value) if value.eq_ignore_ascii_case("openai:chat") => Some("openai:chat"),
+        Some(value) if value.eq_ignore_ascii_case("openai:cli") => Some("openai:cli"),
+        Some(value) if value.eq_ignore_ascii_case("openai:compact") => Some("openai:compact"),
+        Some(value) if value.eq_ignore_ascii_case("claude:chat") => Some("claude:chat"),
+        Some(value) if value.eq_ignore_ascii_case("claude:cli") => Some("claude:cli"),
+        Some(value) if value.eq_ignore_ascii_case("gemini:chat") => Some("gemini:chat"),
+        Some(value) if value.eq_ignore_ascii_case("gemini:cli") => Some("gemini:cli"),
+        _ if public_path == "/v1/chat/completions" => Some("openai:chat"),
+        _ if public_path == "/v1/responses" => Some("openai:cli"),
+        _ if public_path == "/v1/responses/compact" => Some("openai:compact"),
+        _ if public_path == "/v1/messages" => Some("claude:chat"),
+        _ if decision.route_family.as_deref() == Some("gemini")
+            && (public_path.contains(":generateContent")
+                || public_path.contains(":streamGenerateContent")) =>
+        {
+            Some("gemini:chat")
+        }
+        _ => None,
+    }
+}
+
+fn build_stream_sse_proxy_response(
+    status_code: u16,
+    upstream_headers: &BTreeMap<String, String>,
+    sse_body: &[u8],
+    trace_id: &str,
+    decision: &GatewayControlDecision,
+) -> Result<Response<Body>, GatewayError> {
+    let mut headers = upstream_headers.clone();
+    headers.remove("content-encoding");
+    headers.remove("content-length");
+    headers.insert("content-type".to_string(), "text/event-stream".to_string());
+    headers.insert("content-length".to_string(), sse_body.len().to_string());
+    build_client_response_from_parts(
+        status_code,
+        &headers,
+        Body::from(sse_body.to_vec()),
+        trace_id,
+        Some(decision),
+    )
+}
+
+async fn build_sync_aware_affinity_forward_response(
+    request_context: &GatewayPublicRequestContext,
+    buffered_body: Option<&Bytes>,
+    decision: &GatewayControlDecision,
+    upstream_response: reqwest::Response,
+) -> Result<Response<Body>, GatewayError> {
+    let Some(buffered_body) = buffered_body else {
+        return build_client_response(upstream_response, &request_context.trace_id, Some(decision));
+    };
+    let stream_request = request_wants_stream(request_context, buffered_body);
+    let upstream_is_sse = upstream_response_is_sse(upstream_response.headers());
+    if (!stream_request && !upstream_is_sse) || (stream_request && upstream_is_sse) {
+        return build_client_response(upstream_response, &request_context.trace_id, Some(decision));
+    }
+
+    let status_code = upstream_response.status().as_u16();
+    let headers = collect_upstream_response_headers(upstream_response.headers());
+    let body_bytes = upstream_response
+        .bytes()
+        .await
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    if stream_request {
+        if (200..300).contains(&status_code) {
+            if let Some(client_api_format) = resolve_affinity_forward_client_api_format(
+                decision,
+                request_context.request_path.as_str(),
+            ) {
+                if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+                    if let Some(outcome) = maybe_bridge_standard_sync_json_to_stream(
+                        &body_json,
+                        client_api_format,
+                        client_api_format,
+                        None,
+                    )? {
+                        return build_stream_sse_proxy_response(
+                            status_code,
+                            &headers,
+                            &outcome.sse_body,
+                            &request_context.trace_id,
+                            decision,
+                        );
+                    }
+                }
+            }
+        }
+    } else if let Some(body_json) = aggregate_sync_sse_response_for_client(
+        decision,
+        request_context.request_path.as_str(),
+        &body_bytes,
+    ) {
+        return build_sync_json_proxy_response(
+            status_code,
+            &headers,
+            &body_json,
+            &request_context.trace_id,
+            decision,
+        );
+    }
+
+    build_client_response_from_parts(
+        status_code,
+        &headers,
+        Body::from(body_bytes),
+        &request_context.trace_id,
+        Some(decision),
+    )
 }
 
 pub(crate) async fn proxy_request(
@@ -1035,9 +1258,7 @@ pub(crate) async fn proxy_request(
             auth_api_key_concurrency_limited,
             stream_request,
         )
-        .unwrap_or_else(|| {
-            "AI public execution runtime miss did not match a Rust execution path".to_string()
-        });
+        .unwrap_or_else(|| "当前 AI 请求无法在本地执行：没有匹配到可用的执行路径".to_string());
         let local_execution_failure_path = if auth_api_key_concurrency_limited {
             EXECUTION_PATH_LOCAL_API_KEY_CONCURRENCY_LIMITED
         } else {
@@ -1201,34 +1422,237 @@ fn local_execution_runtime_miss_detail(
         return Some(AUTH_API_KEY_CONCURRENCY_LIMIT_REACHED_DETAIL.to_string());
     }
 
-    if let Some(detail) = local_execution_runtime_miss_model_detail(diagnostic, stream_request) {
+    if let Some(detail) =
+        local_execution_runtime_miss_diagnostic_detail(decision, diagnostic, stream_request)
+    {
         return Some(detail);
     }
 
     local_execution_runtime_miss_route_detail(decision).map(ToOwned::to_owned)
 }
 
-fn local_execution_runtime_miss_model_detail(
+fn local_execution_runtime_miss_diagnostic_detail(
+    decision: Option<&GatewayControlDecision>,
     diagnostic: Option<&LocalExecutionRuntimeMissDiagnostic>,
     stream_request: bool,
 ) -> Option<String> {
     let diagnostic = diagnostic?;
-    if !matches!(
-        diagnostic.reason.as_str(),
-        "candidate_list_empty" | "all_candidates_skipped"
-    ) {
-        return None;
+    let route_label = local_execution_runtime_miss_route_label(decision);
+    let request_mode = local_execution_runtime_miss_request_mode(stream_request);
+
+    match diagnostic.reason.as_str() {
+        "candidate_list_empty" => {
+            return Some(local_execution_runtime_miss_candidate_list_empty_detail(
+                diagnostic,
+                request_mode,
+            ));
+        }
+        "all_candidates_skipped" => {
+            return Some(local_execution_runtime_miss_all_candidates_skipped_detail(
+                diagnostic,
+                request_mode,
+            ));
+        }
+        "missing_auth_context" => {
+            return Some(format!(
+                "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商（{route_label}，原因代码: missing_auth_context）"
+            ));
+        }
+        "missing_requested_model" => {
+            return Some(format!(
+                "请求缺少 model 字段，无法选择上游提供商（{route_label}，原因代码: missing_requested_model）"
+            ));
+        }
+        "auth_snapshot_missing" => {
+            return Some(format!(
+                "当前 API Key 的本地执行配置不存在或已过期，无法选择上游提供商（{route_label}，原因代码: auth_snapshot_missing）"
+            ));
+        }
+        "auth_snapshot_read_failed" => {
+            return Some(format!(
+                "读取 API Key 的本地执行配置失败，无法选择上游提供商（{route_label}，原因代码: auth_snapshot_read_failed）"
+            ));
+        }
+        "decision_input_unavailable" => {
+            return Some(format!(
+                "请求缺少本地执行所需的认证、模型或配置上下文，无法选择上游提供商（{route_label}，原因代码: decision_input_unavailable）"
+            ));
+        }
+        "execution_runtime_candidates_exhausted" => {
+            return Some(format!(
+                "已尝试所有本地执行候选提供商，但没有任何候选成功完成请求（{route_label}，原因代码: execution_runtime_candidates_exhausted）"
+            ));
+        }
+        "candidate_evaluation_incomplete" => {
+            return Some(format!(
+                "本地执行候选评估未完成，暂时无法为本次{request_mode}请求选择上游提供商（{route_label}，原因代码: candidate_evaluation_incomplete）"
+            ));
+        }
+        "no_local_sync_plans" | "no_local_stream_plans" => {
+            return Some(format!(
+                "找到了候选提供商，但无法为本次{request_mode}请求构建本地执行计划。请检查端点路径、认证方式、Header/Body 规则和格式转换配置（{route_label}，原因代码: {}）",
+                diagnostic.reason
+            ));
+        }
+        _ => {}
     }
 
-    let requested_model = diagnostic
+    let reason = diagnostic.reason.trim();
+    if reason.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "当前请求无法在本地执行：{route_label} 的执行路径未就绪（原因代码: {reason}）"
+        ))
+    }
+}
+
+fn local_execution_runtime_miss_candidate_list_empty_detail(
+    diagnostic: &LocalExecutionRuntimeMissDiagnostic,
+    request_mode: &str,
+) -> String {
+    if let Some(requested_model) = diagnostic_requested_model(diagnostic) {
+        return format!(
+            "没有可用提供商支持模型 {requested_model} 的{request_mode}请求。请检查模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）"
+        );
+    }
+
+    format!(
+        "没有可用提供商支持本次{request_mode}请求。请检查模型字段、模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）"
+    )
+}
+
+fn local_execution_runtime_miss_all_candidates_skipped_detail(
+    diagnostic: &LocalExecutionRuntimeMissDiagnostic,
+    request_mode: &str,
+) -> String {
+    let candidate_count = diagnostic.candidate_count.unwrap_or(0);
+    let skipped_count = diagnostic
+        .skipped_candidate_count
+        .unwrap_or(candidate_count);
+    let skipped_summary =
+        local_execution_runtime_miss_skip_reasons_summary(&diagnostic.skip_reasons);
+    let requested_model = diagnostic_requested_model(diagnostic);
+
+    match (candidate_count, skipped_summary, requested_model) {
+        (count, Some(summary), Some(model)) if count > 0 => format!(
+            "找到 {count} 个支持模型 {model} 的候选提供商，但本次{request_mode}请求全部不可用：{summary}（原因代码: all_candidates_skipped）"
+        ),
+        (count, Some(summary), None) if count > 0 => format!(
+            "找到 {count} 个候选提供商，但本次{request_mode}请求全部不可用：{summary}（原因代码: all_candidates_skipped）"
+        ),
+        (_, Some(summary), Some(model)) => format!(
+            "支持模型 {model} 的候选提供商全部不可用：{summary}（原因代码: all_candidates_skipped）"
+        ),
+        (_, Some(summary), None) => format!(
+            "候选提供商全部不可用：{summary}（原因代码: all_candidates_skipped）"
+        ),
+        (count, None, Some(model)) if count > 0 => format!(
+            "找到 {count} 个支持模型 {model} 的候选提供商，但都不满足本次{request_mode}请求要求（原因代码: all_candidates_skipped）"
+        ),
+        (count, None, None) if count > 0 => format!(
+            "找到 {count} 个候选提供商，但都不满足本次{request_mode}请求要求（原因代码: all_candidates_skipped）"
+        ),
+        (_, None, Some(model)) if skipped_count > 0 => format!(
+            "支持模型 {model} 的 {skipped_count} 个候选提供商都不满足本次{request_mode}请求要求（原因代码: all_candidates_skipped）"
+        ),
+        _ => format!(
+            "候选提供商都不满足本次{request_mode}请求要求（原因代码: all_candidates_skipped）"
+        ),
+    }
+}
+
+fn diagnostic_requested_model(diagnostic: &LocalExecutionRuntimeMissDiagnostic) -> Option<&str> {
+    diagnostic
         .requested_model
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    let request_mode = if stream_request { "流式" } else { "同步" };
-    Some(format!(
-        "没有可用的提供商支持模型 {requested_model} 的{request_mode}请求"
-    ))
+        .filter(|value| !value.is_empty())
+}
+
+fn local_execution_runtime_miss_skip_reasons_summary(
+    skip_reasons: &BTreeMap<String, usize>,
+) -> Option<String> {
+    if skip_reasons.is_empty() {
+        return None;
+    }
+
+    Some(
+        skip_reasons
+            .iter()
+            .map(|(reason, count)| {
+                format!(
+                    "{} {} 次",
+                    local_execution_runtime_miss_skip_reason_label(reason),
+                    count
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("，"),
+    )
+}
+
+fn local_execution_runtime_miss_skip_reason_label(reason: &str) -> &str {
+    match reason {
+        "api_key_concurrency_limit_reached" => "API Key 并发已达上限",
+        "auth_snapshot_missing" => "API Key 本地执行配置缺失",
+        "endpoint_api_format_changed" => "端点 API 格式已变更",
+        "endpoint_inactive" => "端点未启用",
+        "key_api_format_disabled" => "API Key 未启用该 API 格式",
+        "key_inactive" => "API Key 未启用",
+        "key_model_disabled" => "API Key 未允许该模型",
+        "mapped_model_missing" => "模型映射缺失",
+        "provider_inactive" => "提供商未启用",
+        "provider_request_body_missing" => "无法构建上游请求体",
+        "transport_api_format_mismatch" => "传输层 API 格式不匹配",
+        "transport_api_format_unsupported" => "传输层不支持该 API 格式",
+        "transport_auth_unavailable" => "上游认证信息不可用",
+        "transport_body_rules_unsupported" => "Body 规则不支持本地执行",
+        "transport_custom_path_unsupported" => "自定义路径不支持本地执行",
+        "transport_header_rules_unsupported" => "Header 规则不支持本地执行",
+        "transport_header_rules_apply_failed" => "Header 规则应用失败",
+        "transport_oauth_resolution_unsupported" => "OAuth 认证解析不支持本地执行",
+        "transport_provider_type_unsupported" => "提供商类型不支持本地执行",
+        "transport_proxy_or_tls_unsupported" => "代理或 TLS 配置不支持本地执行",
+        "transport_proxy_unsupported" => "代理配置不支持本地执行",
+        "transport_snapshot_missing" => "提供商传输配置缺失",
+        "transport_tls_profile_unsupported" => "TLS 指纹配置不支持本地执行",
+        "transport_unsupported" => "传输配置不支持本地执行",
+        "upstream_url_missing" => "无法构建上游请求地址",
+        other => other,
+    }
+}
+
+fn local_execution_runtime_miss_request_mode(stream_request: bool) -> &'static str {
+    if stream_request {
+        "流式"
+    } else {
+        "同步"
+    }
+}
+
+fn local_execution_runtime_miss_route_label(
+    decision: Option<&GatewayControlDecision>,
+) -> &'static str {
+    let Some(decision) = decision else {
+        return "AI 请求";
+    };
+    match decision.public_path.as_str() {
+        "/v1/chat/completions" => "OpenAI Chat Completions",
+        "/v1/responses" => "OpenAI Responses",
+        "/v1/responses/compact" => "OpenAI Responses Compact",
+        "/v1/messages" => "Claude Messages",
+        path if path.starts_with("/v1/videos") => "OpenAI Video",
+        path if path.starts_with("/upload/v1beta/files") || path.starts_with("/v1beta/files") => {
+            "Gemini Files"
+        }
+        path if decision.route_family.as_deref() == Some("gemini")
+            && (path.starts_with("/v1beta/models/") || path.starts_with("/v1/models/")) =>
+        {
+            "Gemini Public"
+        }
+        _ => "AI 请求",
+    }
 }
 
 fn diagnostic_is_auth_api_key_concurrency_limited(
@@ -1303,12 +1727,14 @@ mod tests {
 
         assert_eq!(
             detail.as_deref(),
-            Some("没有可用的提供商支持模型 gpt-5.4 的流式请求")
+            Some(
+                "没有可用提供商支持模型 gpt-5.4 的流式请求。请检查模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）"
+            )
         );
     }
 
     #[test]
-    fn runtime_miss_detail_falls_back_to_route_default_when_reason_is_not_model_unavailable() {
+    fn runtime_miss_detail_returns_auth_context_message_when_auth_context_is_missing() {
         let decision = GatewayControlDecision::synthetic(
             "/v1/messages",
             Some("ai_public".to_string()),
@@ -1327,7 +1753,9 @@ mod tests {
 
         assert_eq!(
             detail.as_deref(),
-            Some("Claude messages execution runtime miss did not match a Rust execution path")
+            Some(
+                "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商（Claude Messages，原因代码: missing_auth_context）"
+            )
         );
     }
 

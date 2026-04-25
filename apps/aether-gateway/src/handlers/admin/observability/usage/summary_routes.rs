@@ -6,10 +6,11 @@ use crate::handlers::admin::shared::query_param_value;
 use crate::GatewayError;
 use aether_admin::observability::usage::{
     admin_usage_bad_request_response, admin_usage_data_unavailable_response,
-    admin_usage_has_fallback, admin_usage_matches_search, admin_usage_matches_username,
-    admin_usage_parse_ids, admin_usage_parse_limit, admin_usage_parse_offset,
-    build_admin_usage_active_requests_response, build_admin_usage_records_response,
-    build_admin_usage_summary_stats_response_from_summary, ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL,
+    admin_usage_has_fallback, admin_usage_is_failed, admin_usage_matches_search,
+    admin_usage_matches_username, admin_usage_parse_ids, admin_usage_parse_limit,
+    admin_usage_parse_offset, build_admin_usage_active_requests_response,
+    build_admin_usage_records_response, build_admin_usage_summary_stats_response_from_summary,
+    ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL,
 };
 use aether_data_contracts::repository::usage::{
     StoredRequestUsageAudit, UsageAuditKeywordSearchQuery, UsageAuditListQuery,
@@ -304,6 +305,14 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                         ..Default::default()
                     })
                     .await?
+            };
+            let items = if requested_ids.is_some() {
+                items
+            } else {
+                items
+                    .into_iter()
+                    .filter(|item| !admin_usage_is_failed(item))
+                    .collect::<Vec<_>>()
             };
             let api_key_names = admin_usage_api_key_names(state, &items).await?;
             let provider_key_names = admin_usage_provider_key_names(state, &items).await?;

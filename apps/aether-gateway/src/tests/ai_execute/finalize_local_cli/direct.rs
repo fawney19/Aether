@@ -387,7 +387,17 @@ async fn gateway_executes_openai_cli_sync_upstream_stream_via_local_finalize_res
             "object": "response",
             "model": "gpt-5-upstream",
             "status": "completed",
-            "output": [],
+            "output": [{
+                "type": "message",
+                "id": "resp_stream_001_msg",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{
+                    "type": "output_text",
+                    "text": "Hello",
+                    "annotations": []
+                }]
+            }],
             "usage": {
                 "input_tokens": 1,
                 "output_tokens": 2,

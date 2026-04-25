@@ -877,7 +877,7 @@ async fn gateway_executes_openai_chat_cross_format_upstream_stream_via_local_fin
                 "index": 0,
                 "message": {
                     "role": "assistant",
-                    "content": "Gemini Chat"
+                    "content": "Hello Gemini Chat"
                 },
                 "finish_reason": "stop"
             }],

@@ -336,6 +336,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                     trace_id.as_str(),
                     &resolved,
                     &payload.body_json,
+                    payload.body_base64.as_deref(),
                 )
                 .await?
                 else {
@@ -484,6 +485,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                     trace_id.as_str(),
                     &resolved,
                     &payload.body_json,
+                    payload.body_base64.as_deref(),
                 )
                 .await?
                 {
@@ -638,6 +640,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                     trace_id.as_str(),
                     &resolved,
                     &payload.body_json,
+                    payload.body_base64.as_deref(),
                 )
                 .await?
                 {

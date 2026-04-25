@@ -7,8 +7,10 @@ use crate::adaptation::surfaces::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FinalizeStreamRewriteMode {
     EnvelopeUnwrap,
+    OpenAiImage,
     Standard,
     KiroToClaudeCli,
+    KiroToClaudeCliThenStandard,
 }
 
 pub fn resolve_finalize_stream_rewrite_mode(
@@ -37,12 +39,27 @@ pub fn resolve_finalize_stream_rewrite_mode(
         .trim()
         .to_ascii_lowercase();
 
+    if needs_conversion
+        && envelope_name.eq_ignore_ascii_case(KIRO_ENVELOPE_NAME)
+        && provider_api_format == "claude:cli"
+    {
+        return supports_standard_stream_rewrite(
+            provider_api_format.as_str(),
+            client_api_format.as_str(),
+        )
+        .then_some(FinalizeStreamRewriteMode::KiroToClaudeCliThenStandard);
+    }
+
     if needs_conversion {
         return supports_standard_stream_rewrite(
             provider_api_format.as_str(),
             client_api_format.as_str(),
         )
         .then_some(FinalizeStreamRewriteMode::Standard);
+    }
+
+    if provider_api_format == "openai:image" && client_api_format == "openai:image" {
+        return Some(FinalizeStreamRewriteMode::OpenAiImage);
     }
 
     if envelope_name.eq_ignore_ascii_case(KIRO_ENVELOPE_NAME) {
@@ -143,5 +160,18 @@ mod tests {
             "needs_conversion": false,
         });
         assert_eq!(resolve_finalize_stream_rewrite_mode(&report_context), None);
+    }
+
+    #[test]
+    fn resolves_openai_image_mode_for_same_format_image_streams() {
+        let report_context = json!({
+            "provider_api_format": "openai:image",
+            "client_api_format": "openai:image",
+            "needs_conversion": false,
+        });
+        assert_eq!(
+            resolve_finalize_stream_rewrite_mode(&report_context),
+            Some(FinalizeStreamRewriteMode::OpenAiImage)
+        );
     }
 }

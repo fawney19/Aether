@@ -36,13 +36,14 @@ pub(super) fn oauth_refresh_failed_service_unavailable_response(
 pub(super) fn admin_provider_oauth_refresh_success_response(
     success: RefreshSuccessContext,
 ) -> Response<Body> {
+    let expires_at = success
+        .refreshed_expires_at_unix_secs
+        .map(serde_json::Value::from)
+        .or_else(|| success.refreshed_auth_config.get("expires_at").cloned())
+        .unwrap_or(Value::Null);
     Json(json!({
         "provider_type": success.provider_type,
-        "expires_at": success
-            .refreshed_auth_config
-            .get("expires_at")
-            .cloned()
-            .unwrap_or(Value::Null),
+        "expires_at": expires_at,
         "has_refresh_token": success
             .refreshed_auth_config
             .get("refresh_token")

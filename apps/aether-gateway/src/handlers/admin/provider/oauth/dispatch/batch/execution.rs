@@ -201,8 +201,10 @@ pub(super) async fn execute_admin_provider_oauth_batch_import(
             match update_existing_provider_oauth_catalog_key(
                 state,
                 &existing_key,
+                provider_type,
                 &access_token,
                 &auth_config,
+                &api_formats,
                 None,
                 expires_at,
             )
@@ -242,6 +244,7 @@ pub(super) async fn execute_admin_provider_oauth_batch_import(
             match create_provider_oauth_catalog_key(
                 state,
                 provider_id,
+                provider_type,
                 key_name.as_str(),
                 &access_token,
                 &auth_config,

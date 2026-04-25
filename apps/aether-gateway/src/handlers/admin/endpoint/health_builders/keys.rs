@@ -1,5 +1,5 @@
 use crate::handlers::admin::request::AdminAppState;
-use crate::handlers::public::provider_key_api_formats;
+use crate::provider_key_auth::provider_key_effective_api_formats;
 use aether_scheduler_core::count_recent_rpm_requests_for_provider_key_since;
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,6 +18,16 @@ pub(crate) async fn build_admin_key_health_payload(
         .await
         .ok()
         .and_then(|mut keys| keys.drain(..).next())?;
+    let provider = state
+        .read_provider_catalog_providers_by_ids(std::slice::from_ref(&key.provider_id))
+        .await
+        .ok()
+        .and_then(|mut providers| providers.drain(..).next())?;
+    let endpoints = state
+        .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&key.provider_id))
+        .await
+        .ok()
+        .unwrap_or_default();
 
     let request_count = key.request_count.unwrap_or(0);
     let success_count = key.success_count.unwrap_or(0);
@@ -97,7 +107,9 @@ pub(crate) async fn build_admin_key_health_payload(
             .unwrap_or(0));
     } else {
         let mut formats_payload = serde_json::Map::new();
-        for format_name in provider_key_api_formats(&key) {
+        for format_name in
+            provider_key_effective_api_formats(&key, &provider.provider_type, &endpoints)
+        {
             let health_data = health_by_format.and_then(|formats| formats.get(&format_name));
             let circuit_data = circuit_by_format.and_then(|formats| formats.get(&format_name));
             let is_open = circuit_data
@@ -363,11 +375,27 @@ pub(crate) async fn recover_all_admin_key_health(
         if !updated {
             continue;
         }
+        let provider = state
+            .read_provider_catalog_providers_by_ids(std::slice::from_ref(&key.provider_id))
+            .await
+            .ok()
+            .and_then(|mut providers| providers.drain(..).next());
+        let endpoints = state
+            .list_provider_catalog_endpoints_by_provider_ids(std::slice::from_ref(&key.provider_id))
+            .await
+            .ok()
+            .unwrap_or_default();
+        let api_formats = provider
+            .as_ref()
+            .map(|provider| {
+                provider_key_effective_api_formats(&key, &provider.provider_type, &endpoints)
+            })
+            .unwrap_or_default();
         payload_items.push(json!({
             "key_id": key.id,
             "key_name": key.name,
             "provider_id": key.provider_id,
-            "api_formats": key.api_formats.unwrap_or_else(|| json!([])),
+            "api_formats": api_formats,
         }));
     }
 

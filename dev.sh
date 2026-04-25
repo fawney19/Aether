@@ -249,7 +249,7 @@ wait_for_startup() {
 # - ./dev.sh 不再启动 Python 宿主；本地默认只验证 Rust-owned 路径
 export APP_PORT=${APP_PORT:-8084}
 export RUST_LOG=${RUST_LOG:-aether_gateway=info}
-RUST_SERVICE_STARTUP_TIMEOUT_SECONDS=${RUST_SERVICE_STARTUP_TIMEOUT_SECONDS:-120}
+RUST_SERVICE_STARTUP_TIMEOUT_SECONDS=${RUST_SERVICE_STARTUP_TIMEOUT_SECONDS:-180}
 GATEWAY_STARTUP_TIMEOUT_SECONDS=${GATEWAY_STARTUP_TIMEOUT_SECONDS:-${RUST_SERVICE_STARTUP_TIMEOUT_SECONDS}}
 
 if ! command -v cargo >/dev/null 2>&1; then
@@ -299,15 +299,8 @@ GATEWAY_ARGS=(--app-port "${APP_PORT}")
 create_gateway_log_file
 echo "=> 启动 aether-gateway (Rust frontdoor: 0.0.0.0:${APP_PORT})..."
 echo "=> 日志过滤: ${RUST_LOG} (需要更详细日志可用: RUST_LOG=aether_gateway=debug ./dev.sh)"
-if command -v script >/dev/null 2>&1; then
-    script -q /dev/null cargo run -q -p aether-gateway -- "${GATEWAY_ARGS[@]}" \
-        > >(tee -a "${GATEWAY_LOG_FILE}") \
-        2> >(tee -a "${GATEWAY_LOG_FILE}" >&2) &
-else
-    cargo run -q -p aether-gateway -- "${GATEWAY_ARGS[@]}" \
-        > >(tee -a "${GATEWAY_LOG_FILE}") \
-        2> >(tee -a "${GATEWAY_LOG_FILE}" >&2) &
-fi
+echo "=> 执行命令: cargo run -p aether-gateway -- ${GATEWAY_ARGS[*]}"
+cargo run -p aether-gateway -- "${GATEWAY_ARGS[@]}" > >(tee -a "${GATEWAY_LOG_FILE}") 2>&1 &
 GATEWAY_PID=$!
 
 if ! wait_for_startup "${GATEWAY_PID}" "${GATEWAY_STARTUP_TIMEOUT_SECONDS}" "aether-gateway" curl -sf "http://127.0.0.1:${APP_PORT}/_gateway/health"; then

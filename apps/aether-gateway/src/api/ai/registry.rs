@@ -13,6 +13,9 @@ const AI_POST_ROUTE_PATTERNS: &[&str] = &[
     "/v1/messages/count_tokens",
     "/v1/responses",
     "/v1/responses/compact",
+    "/v1/images/generations",
+    "/v1/images/edits",
+    "/v1/images/variations",
 ];
 
 const AI_ANY_ROUTE_PATTERNS: &[&str] = &[

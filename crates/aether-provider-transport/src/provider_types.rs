@@ -11,6 +11,146 @@ pub struct ProviderOAuthTemplate {
     pub use_pkce: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixedProviderEndpointConfigValue {
+    String(&'static str),
+    Bool(bool),
+    I64(i64),
+}
+
+impl FixedProviderEndpointConfigValue {
+    pub fn to_json_value(self) -> serde_json::Value {
+        match self {
+            Self::String(value) => serde_json::Value::String(value.to_string()),
+            Self::Bool(value) => serde_json::Value::Bool(value),
+            Self::I64(value) => serde_json::Value::Number(value.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixedProviderEndpointConfigDefault {
+    pub key: &'static str,
+    pub value: FixedProviderEndpointConfigValue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixedProviderEndpointTemplate {
+    pub item_key: &'static str,
+    pub api_format: &'static str,
+    pub custom_path: Option<&'static str>,
+    pub config_defaults: &'static [FixedProviderEndpointConfigDefault],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixedProviderTemplate {
+    pub provider_type: &'static str,
+    pub version: u32,
+    pub base_url: &'static str,
+    pub endpoints: &'static [FixedProviderEndpointTemplate],
+}
+
+const EMPTY_ENDPOINT_CONFIG_DEFAULTS: &[FixedProviderEndpointConfigDefault] = &[];
+const FORCE_STREAM_ENDPOINT_CONFIG_DEFAULTS: &[FixedProviderEndpointConfigDefault] =
+    &[FixedProviderEndpointConfigDefault {
+        key: "upstream_stream_policy",
+        value: FixedProviderEndpointConfigValue::String("force_stream"),
+    }];
+
+const CLAUDE_CODE_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
+    provider_type: "claude_code",
+    version: 1,
+    base_url: "https://api.anthropic.com",
+    endpoints: &[FixedProviderEndpointTemplate {
+        item_key: "claude:cli",
+        api_format: "claude:cli",
+        custom_path: None,
+        config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
+    }],
+};
+
+const CODEX_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
+    provider_type: "codex",
+    version: 1,
+    base_url: "https://chatgpt.com/backend-api/codex",
+    endpoints: &[
+        FixedProviderEndpointTemplate {
+            item_key: "openai:cli",
+            api_format: "openai:cli",
+            custom_path: None,
+            config_defaults: FORCE_STREAM_ENDPOINT_CONFIG_DEFAULTS,
+        },
+        FixedProviderEndpointTemplate {
+            item_key: "openai:compact",
+            api_format: "openai:compact",
+            custom_path: None,
+            config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
+        },
+        FixedProviderEndpointTemplate {
+            item_key: "openai:image",
+            api_format: "openai:image",
+            custom_path: None,
+            config_defaults: FORCE_STREAM_ENDPOINT_CONFIG_DEFAULTS,
+        },
+    ],
+};
+
+const KIRO_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
+    provider_type: "kiro",
+    version: 1,
+    base_url: "https://q.{region}.amazonaws.com",
+    endpoints: &[FixedProviderEndpointTemplate {
+        item_key: "claude:cli",
+        api_format: "claude:cli",
+        custom_path: None,
+        config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
+    }],
+};
+
+const GEMINI_CLI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
+    provider_type: "gemini_cli",
+    version: 1,
+    base_url: "https://cloudcode-pa.googleapis.com",
+    endpoints: &[FixedProviderEndpointTemplate {
+        item_key: "gemini:cli",
+        api_format: "gemini:cli",
+        custom_path: None,
+        config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
+    }],
+};
+
+const VERTEX_AI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
+    provider_type: "vertex_ai",
+    version: 1,
+    base_url: "https://aiplatform.googleapis.com",
+    endpoints: &[
+        FixedProviderEndpointTemplate {
+            item_key: "gemini:chat",
+            api_format: "gemini:chat",
+            custom_path: None,
+            config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
+        },
+        FixedProviderEndpointTemplate {
+            item_key: "claude:chat",
+            api_format: "claude:chat",
+            custom_path: None,
+            config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
+        },
+    ],
+};
+
+const ANTIGRAVITY_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplate {
+    provider_type: "antigravity",
+    version: 1,
+    base_url: "https://cloudcode-pa.googleapis.com",
+    endpoints: &[FixedProviderEndpointTemplate {
+        item_key: "gemini:chat",
+        api_format: "gemini:chat",
+        custom_path: None,
+        config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
+    }],
+};
+
 pub fn provider_type_is_fixed(provider_type: &str) -> bool {
     matches!(
         provider_type.trim().to_ascii_lowercase().as_str(),
@@ -25,24 +165,27 @@ pub fn provider_type_enables_format_conversion_by_default(provider_type: &str) -
     )
 }
 
-pub fn fixed_provider_template(
-    provider_type: &str,
-) -> Option<(&'static str, &'static [&'static str])> {
+pub fn fixed_provider_template(provider_type: &str) -> Option<&'static FixedProviderTemplate> {
     match provider_type.trim().to_ascii_lowercase().as_str() {
-        "claude_code" => Some(("https://api.anthropic.com", &["claude:cli"])),
-        "codex" => Some((
-            "https://chatgpt.com/backend-api/codex",
-            &["openai:cli", "openai:compact"],
-        )),
-        "kiro" => Some(("https://q.{region}.amazonaws.com", &["claude:cli"])),
-        "gemini_cli" => Some(("https://cloudcode-pa.googleapis.com", &["gemini:cli"])),
-        "vertex_ai" => Some((
-            "https://aiplatform.googleapis.com",
-            &["gemini:chat", "claude:chat"],
-        )),
-        "antigravity" => Some(("https://cloudcode-pa.googleapis.com", &["gemini:chat"])),
+        "claude_code" => Some(&CLAUDE_CODE_FIXED_PROVIDER_TEMPLATE),
+        "codex" => Some(&CODEX_FIXED_PROVIDER_TEMPLATE),
+        "kiro" => Some(&KIRO_FIXED_PROVIDER_TEMPLATE),
+        "gemini_cli" => Some(&GEMINI_CLI_FIXED_PROVIDER_TEMPLATE),
+        "vertex_ai" => Some(&VERTEX_AI_FIXED_PROVIDER_TEMPLATE),
+        "antigravity" => Some(&ANTIGRAVITY_FIXED_PROVIDER_TEMPLATE),
         _ => None,
     }
+}
+
+pub fn fixed_provider_endpoint_template_by_api_format(
+    provider_type: &str,
+    api_format: &str,
+) -> Option<&'static FixedProviderEndpointTemplate> {
+    let normalized = api_format.trim();
+    fixed_provider_template(provider_type)?
+        .endpoints
+        .iter()
+        .find(|item| item.api_format.eq_ignore_ascii_case(normalized))
 }
 
 pub fn provider_type_supports_model_fetch(provider_type: &str) -> bool {
@@ -137,3 +280,41 @@ pub fn provider_type_admin_oauth_template(provider_type: &str) -> Option<Provide
 
 pub const ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES: &[&str] =
     &["claude_code", "codex", "gemini_cli", "antigravity"];
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        fixed_provider_endpoint_template_by_api_format, fixed_provider_template,
+        FixedProviderEndpointConfigValue,
+    };
+
+    #[test]
+    fn codex_fixed_provider_template_includes_openai_image() {
+        let template = fixed_provider_template("codex").expect("codex template should exist");
+        assert_eq!(template.base_url, "https://chatgpt.com/backend-api/codex");
+        assert_eq!(template.version, 1);
+        assert_eq!(
+            template
+                .endpoints
+                .iter()
+                .map(|item| item.api_format)
+                .collect::<Vec<_>>(),
+            vec!["openai:cli", "openai:compact", "openai:image"]
+        );
+
+        let image_template =
+            fixed_provider_endpoint_template_by_api_format("codex", "openai:image")
+                .expect("codex image endpoint should exist");
+        assert_eq!(
+            image_template
+                .config_defaults
+                .iter()
+                .map(|item| (item.key, item.value))
+                .collect::<Vec<_>>(),
+            vec![(
+                "upstream_stream_policy",
+                FixedProviderEndpointConfigValue::String("force_stream")
+            )]
+        );
+    }
+}

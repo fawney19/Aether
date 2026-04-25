@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
 use crate::wait_until;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Debug)]
 pub struct ManagedRedisServer {
@@ -76,11 +77,7 @@ impl ManagedRedisServer {
         let ready = wait_until(
             std::time::Duration::from_secs(5),
             std::time::Duration::from_millis(50),
-            || async move {
-                tokio::net::TcpStream::connect(("127.0.0.1", port))
-                    .await
-                    .is_ok()
-            },
+            || async move { redis_ping(("127.0.0.1", port)).await.unwrap_or(false) },
         )
         .await;
         if !ready {
@@ -93,6 +90,14 @@ impl ManagedRedisServer {
         }
         Ok(())
     }
+}
+
+async fn redis_ping(addr: (&str, u16)) -> Result<bool, std::io::Error> {
+    let mut stream = tokio::net::TcpStream::connect(addr).await?;
+    stream.write_all(b"*1\r\n$4\r\nPING\r\n").await?;
+    let mut buffer = [0_u8; 16];
+    let len = stream.read(&mut buffer).await?;
+    Ok(buffer[..len].starts_with(b"+PONG"))
 }
 
 impl Drop for ManagedRedisServer {

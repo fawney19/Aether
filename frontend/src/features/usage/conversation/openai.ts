@@ -525,7 +525,8 @@ export class OpenAIParser implements ApiFormatParser {
         }
 
         // 处理文本增量: response.output_text.delta
-        if (eventType === 'response.output_text.delta') {
+        // 兼容旧别名 response.outtext.delta
+        if (eventType === 'response.output_text.delta' || eventType === 'response.outtext.delta') {
           const delta = chunk.delta
           if (typeof delta === 'string') {
             textParts.push(delta)

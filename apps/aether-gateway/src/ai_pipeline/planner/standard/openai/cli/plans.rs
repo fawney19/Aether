@@ -9,6 +9,10 @@ use crate::ai_pipeline::planner::plan_builders::{
     build_openai_cli_stream_plan_from_decision, build_openai_cli_sync_plan_from_decision,
     LocalStreamPlanAndReport, LocalSyncPlanAndReport,
 };
+use crate::ai_pipeline::planner::runtime_miss::{
+    apply_local_runtime_candidate_evaluation_progress,
+    apply_local_runtime_candidate_terminal_reason, set_local_runtime_miss_diagnostic_reason,
+};
 use crate::ai_pipeline::planner::spec_metadata::local_openai_cli_spec_metadata;
 use crate::ai_pipeline::GatewayControlDecision;
 pub(crate) use crate::ai_pipeline::{
@@ -26,15 +30,33 @@ pub(super) async fn build_local_sync_plan_and_reports(
     spec: LocalOpenAiCliSpec,
 ) -> Result<Vec<LocalSyncPlanAndReport>, GatewayError> {
     let spec_metadata = local_openai_cli_spec_metadata(spec);
-    let Some(input) =
-        resolve_local_openai_cli_decision_input(state, trace_id, decision, body_json).await
+    let Some(input) = resolve_local_openai_cli_decision_input(
+        state,
+        trace_id,
+        decision,
+        body_json,
+        spec_metadata.decision_kind,
+    )
+    .await
     else {
         return Ok(Vec::new());
     };
+    set_local_runtime_miss_diagnostic_reason(
+        state,
+        trace_id,
+        decision,
+        spec_metadata.decision_kind,
+        Some(input.requested_model.as_str()),
+        "candidate_evaluation_incomplete",
+    );
 
-    let attempts =
+    let (attempts, candidate_count) =
         materialize_local_openai_cli_candidate_attempts(state, trace_id, &input, body_json, spec)
             .await?;
+    apply_local_runtime_candidate_evaluation_progress(state, trace_id, candidate_count);
+    if candidate_count == 0 {
+        return Ok(Vec::new());
+    }
 
     let mut plans = Vec::new();
     for attempt in attempts {
@@ -60,6 +82,7 @@ pub(super) async fn build_local_sync_plan_and_reports(
         }
     }
 
+    apply_local_runtime_candidate_terminal_reason(state, trace_id, "no_local_sync_plans");
     Ok(plans)
 }
 
@@ -72,15 +95,33 @@ pub(super) async fn build_local_stream_plan_and_reports(
     spec: LocalOpenAiCliSpec,
 ) -> Result<Vec<LocalStreamPlanAndReport>, GatewayError> {
     let spec_metadata = local_openai_cli_spec_metadata(spec);
-    let Some(input) =
-        resolve_local_openai_cli_decision_input(state, trace_id, decision, body_json).await
+    let Some(input) = resolve_local_openai_cli_decision_input(
+        state,
+        trace_id,
+        decision,
+        body_json,
+        spec_metadata.decision_kind,
+    )
+    .await
     else {
         return Ok(Vec::new());
     };
+    set_local_runtime_miss_diagnostic_reason(
+        state,
+        trace_id,
+        decision,
+        spec_metadata.decision_kind,
+        Some(input.requested_model.as_str()),
+        "candidate_evaluation_incomplete",
+    );
 
-    let attempts =
+    let (attempts, candidate_count) =
         materialize_local_openai_cli_candidate_attempts(state, trace_id, &input, body_json, spec)
             .await?;
+    apply_local_runtime_candidate_evaluation_progress(state, trace_id, candidate_count);
+    if candidate_count == 0 {
+        return Ok(Vec::new());
+    }
 
     let mut plans = Vec::new();
     for attempt in attempts {
@@ -106,5 +147,6 @@ pub(super) async fn build_local_stream_plan_and_reports(
         }
     }
 
+    apply_local_runtime_candidate_terminal_reason(state, trace_id, "no_local_stream_plans");
     Ok(plans)
 }

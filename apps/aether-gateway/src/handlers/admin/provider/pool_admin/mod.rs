@@ -35,8 +35,8 @@ pub(crate) use self::batch_shared::{
 };
 pub(crate) use self::support::{
     admin_pool_provider_id_from_path, parse_admin_pool_page, parse_admin_pool_page_size,
-    parse_admin_pool_search, parse_admin_pool_status_filter, AdminPoolResolveSelectionRequest,
-    ADMIN_POOL_BANNED_KEY_CLEANUP_EMPTY_MESSAGE,
+    parse_admin_pool_quick_selectors, parse_admin_pool_search, parse_admin_pool_status_filter,
+    AdminPoolResolveSelectionRequest, ADMIN_POOL_BANNED_KEY_CLEANUP_EMPTY_MESSAGE,
     ADMIN_POOL_PROVIDER_CATALOG_READER_UNAVAILABLE_DETAIL,
     ADMIN_POOL_PROVIDER_CATALOG_WRITER_UNAVAILABLE_DETAIL,
 };

@@ -6,7 +6,8 @@ use crate::ai_pipeline::planner::payload_metadata::{
     build_local_execution_decision_response, LocalExecutionDecisionResponseParts,
 };
 use crate::ai_pipeline::planner::report_context::{
-    build_local_execution_report_context, LocalExecutionReportContextParts,
+    build_local_execution_report_context, insert_provider_stream_event_api_format,
+    LocalExecutionReportContextParts,
 };
 use crate::ai_pipeline::planner::spec_metadata::local_openai_cli_spec_metadata;
 use crate::ai_pipeline::transport::{
@@ -70,9 +71,13 @@ pub(crate) async fn maybe_build_local_openai_cli_decision_payload_for_candidate(
     {
         extra_fields.insert("proxy".to_string(), proxy_value);
     }
-    if resolved.is_antigravity {
-        extra_fields.insert("envelope_name".to_string(), json!("antigravity:v1internal"));
+    if let Some(envelope_name) = resolved.envelope_name {
+        extra_fields.insert("envelope_name".to_string(), json!(envelope_name));
     }
+    insert_provider_stream_event_api_format(
+        &mut extra_fields,
+        resolved.transport.provider.provider_type.as_str(),
+    );
     let report_context = append_local_failover_policy_to_value(
         append_execution_contract_fields_to_value(
             build_local_execution_report_context(LocalExecutionReportContextParts {
@@ -86,17 +91,27 @@ pub(crate) async fn maybe_build_local_openai_cli_decision_payload_for_candidate(
                 endpoint_id: &candidate.endpoint_id,
                 key_id: &candidate.key_id,
                 key_name: Some(&candidate.key_name),
+                model_id: Some(&candidate.model_id),
+                global_model_id: Some(&candidate.global_model_id),
+                global_model_name: Some(&candidate.global_model_name),
                 provider_api_format: &resolved.provider_api_format,
                 client_api_format: spec_metadata.api_format,
                 mapped_model: Some(&resolved.mapped_model),
                 candidate_group_id: eligible.orchestration.candidate_group_id.as_deref(),
                 upstream_url: Some(&resolved.upstream_url),
+                header_rules: resolved.transport.endpoint.header_rules.as_ref(),
+                body_rules: resolved.transport.endpoint.body_rules.as_ref(),
                 provider_request_method: Some(serde_json::Value::Null),
                 provider_request_headers: Some(&resolved.provider_request_headers),
                 original_headers: &parts.headers,
                 original_request_body_json: Some(body_json),
                 original_request_body_base64: None,
-                has_envelope: resolved.is_antigravity,
+                client_requested_stream: body_json
+                    .get("stream")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                upstream_is_stream: resolved.upstream_is_stream,
+                has_envelope: resolved.envelope_name.is_some(),
                 needs_conversion: matches!(
                     resolved.conversion_mode,
                     crate::ai_pipeline::ConversionMode::Bidirectional
@@ -131,7 +146,7 @@ pub(crate) async fn maybe_build_local_openai_cli_decision_payload_for_candidate(
         upstream_base_url = %resolved.transport.endpoint.base_url,
         upstream_url = %resolved.upstream_url,
         upstream_is_stream = resolved.upstream_is_stream,
-        has_envelope = resolved.is_antigravity,
+        has_envelope = resolved.envelope_name.is_some(),
         "gateway built local openai cli decision payload"
     );
     let super::request::LocalOpenAiCliCandidatePayloadParts {
@@ -145,6 +160,7 @@ pub(crate) async fn maybe_build_local_openai_cli_decision_payload_for_candidate(
         execution_strategy,
         conversion_mode,
         is_antigravity: _,
+        envelope_name: _,
         upstream_is_stream,
         transport,
     } = resolved;

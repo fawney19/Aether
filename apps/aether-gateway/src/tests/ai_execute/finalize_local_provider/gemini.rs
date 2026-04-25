@@ -912,6 +912,7 @@ async fn gateway_executes_gemini_chat_sync_upstream_stream_via_local_finalize_re
     assert_eq!(
         response_json,
         json!({
+            "responseId": "resp-local-stream",
             "candidates": [{
                 "content": {
                     "parts": [{"text": "Hello Gemini"}],
@@ -1972,10 +1973,18 @@ async fn gateway_executes_antigravity_gemini_cli_sync_upstream_stream_via_local_
     assert_eq!(
         response_json,
         json!({
+            "responseId": "resp-local-stream",
             "_v1internal_response_id": "resp_antigravity_cli_sync_123",
             "candidates": [{
                 "content": {
                     "parts": [
+                        {
+                            "functionCall": {
+                                "name": "get_weather",
+                                "args": {"city": "SF"},
+                                "id": "call_get_weather_0"
+                            }
+                        },
                         {"text": "Hello Antigravity CLI"},
                         {
                             "functionCall": {

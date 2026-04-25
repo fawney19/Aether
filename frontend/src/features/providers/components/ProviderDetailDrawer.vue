@@ -1420,21 +1420,23 @@ watch(
   [() => props.providerId, () => props.open],
   async ([newId, newOpen], [_oldId, oldOpen]) => {
     if (newOpen && newId) {
-      if (props.initialProvider?.id === newId) {
+      const hasInitialProvider = props.initialProvider?.id === newId
+      if (hasInitialProvider) {
         provider.value = props.initialProvider
         loading.value = false
       }
+      void loadSystemFormatConversionConfig()
       // mapping-preview 较慢，不阻塞首屏渲染
       void loadMappingPreview()
-      await Promise.all([
-        loadProvider(),
-        loadEndpoints(),
-      ])
+      const endpointsPromise = loadEndpoints()
+      if (!hasInitialProvider) {
+        await loadProvider()
+      }
       // 仅在抽屉刚打开时启动倒计时
       if (newOpen && !oldOpen) {
         startCountdownTimer()
       }
-      void autoRefreshQuotaInBackground()
+      void endpointsPromise.then(() => autoRefreshQuotaInBackground())
     } else if (!newOpen && oldOpen) {
       // 使在途请求失效，避免关闭后旧响应回写
       providerLoadRequestId += 1
@@ -1701,19 +1703,28 @@ async function handleRefreshOAuth(key: EndpointAPIKey) {
   refreshingOAuthKeyId.value = key.id
   try {
     const result = await refreshProviderOAuth(key.id)
+    const refreshedExpiresAt = typeof result.expires_at === 'number' ? result.expires_at : null
     let refreshedKey: EndpointAPIKey | null = null
     // 更新本地数据
     const keyInList = providerKeys.value.find(k => k.id === key.id)
     if (keyInList) {
-      keyInList.oauth_expires_at = result.expires_at
+      keyInList.oauth_expires_at = refreshedExpiresAt
     }
     // 只重新加载 keys 数据，避免整个表格刷新
     if (props.providerId) {
       const freshKeys = await getProviderKeys(props.providerId).catch(() => null)
       if (freshKeys) {
-        providerKeys.value = freshKeys
-        syncCurrentSelections(endpoints.value, freshKeys)
-        refreshedKey = freshKeys.find(item => item.id === key.id) ?? null
+        const mergedKeys = freshKeys.map((item) => {
+          if (item.id !== key.id) return item
+          if (refreshedExpiresAt == null) return item
+          if (typeof item.oauth_expires_at === 'number' && item.oauth_expires_at >= refreshedExpiresAt) {
+            return item
+          }
+          return { ...item, oauth_expires_at: refreshedExpiresAt }
+        })
+        providerKeys.value = mergedKeys
+        syncCurrentSelections(endpoints.value, mergedKeys)
+        refreshedKey = mergedKeys.find(item => item.id === key.id) ?? null
       }
     }
     const feedback = getOAuthRefreshFeedback({
@@ -2705,8 +2716,16 @@ async function handleKeyDrop(event: DragEvent, targetIndex: number) {
 
 // 获取密钥的 API 格式列表（按指定顺序排序）
 function getKeyApiFormats(key: EndpointAPIKey, endpoint?: ProviderEndpointWithKeys): string[] {
+  const providerType = provider.value?.provider_type
   let formats: string[] = []
-  if (key.api_formats && key.api_formats.length > 0) {
+
+  if (
+    providerType
+    && isOAuthAccountProviderType(providerType)
+    && isOAuthManagedCredential(key)
+  ) {
+    formats = [...availableKeyApiFormats.value]
+  } else if (key.api_formats && key.api_formats.length > 0) {
     formats = [...key.api_formats]
   } else if (endpoint) {
     formats = [endpoint.api_format]

@@ -351,8 +351,10 @@ pub(super) async fn handle_admin_provider_oauth_device_poll(
         match state
             .update_existing_provider_oauth_catalog_key(
                 &existing_key,
+                &provider.provider_type,
                 &access_token,
                 &auth_config,
+                &api_formats,
                 key_proxy.clone(),
                 Some(expires_at),
             )
@@ -374,6 +376,7 @@ pub(super) async fn handle_admin_provider_oauth_device_poll(
         match state
             .create_provider_oauth_catalog_key(
                 &provider_id,
+                &provider.provider_type,
                 &key_name,
                 &access_token,
                 &auth_config,

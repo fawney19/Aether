@@ -20,6 +20,7 @@ pub struct ClaudeProviderState {
     model: Option<String>,
     started: bool,
     finished: bool,
+    usage: Option<CanonicalUsage>,
     tool_calls: BTreeMap<usize, ClaudeProviderToolState>,
 }
 
@@ -73,6 +74,7 @@ impl ClaudeProviderState {
                         .get("model")
                         .and_then(Value::as_str)
                         .map(ToOwned::to_owned);
+                    self.merge_usage(canonical_usage_from_claude_usage(message.get("usage")));
                 }
                 self.ensure_started(report_context, &mut out);
             }
@@ -164,6 +166,21 @@ impl ClaudeProviderState {
                             event: CanonicalStreamEvent::ReasoningDelta(piece.to_string()),
                         });
                     }
+                    "signature_delta" => {
+                        let Some(signature) = delta.get("signature").and_then(Value::as_str) else {
+                            return Ok(out);
+                        };
+                        if signature.is_empty() {
+                            return Ok(out);
+                        }
+                        self.ensure_started(report_context, &mut out);
+                        let (id, model) = self.identity(report_context);
+                        out.push(CanonicalStreamFrame {
+                            id,
+                            model,
+                            event: CanonicalStreamEvent::ReasoningSignature(signature.to_string()),
+                        });
+                    }
                     _ => {}
                 }
             }
@@ -214,6 +231,16 @@ impl ClaudeProviderState {
                         id,
                         model,
                         event: CanonicalStreamEvent::TextDelta(text.to_string()),
+                    });
+                    return Ok(out);
+                }
+                if let Some(part) = canonical_content_part_from_claude_block(block) {
+                    self.ensure_started(report_context, &mut out);
+                    let (id, model) = self.identity(report_context);
+                    out.push(CanonicalStreamFrame {
+                        id,
+                        model,
+                        event: CanonicalStreamEvent::ContentPart(part),
                     });
                     return Ok(out);
                 }
@@ -278,7 +305,9 @@ impl ClaudeProviderState {
                     model,
                     event: CanonicalStreamEvent::Finish {
                         finish_reason,
-                        usage: canonical_usage_from_claude_usage(event_object.get("usage")),
+                        usage: self.finish_usage(canonical_usage_from_claude_usage(
+                            event_object.get("usage"),
+                        )),
                     },
                 });
                 self.finished = true;
@@ -305,6 +334,19 @@ impl ClaudeProviderState {
                 usage: None,
             },
         }])
+    }
+
+    fn merge_usage(&mut self, usage: Option<CanonicalUsage>) {
+        let Some(usage) = usage else {
+            return;
+        };
+        let current = self.usage.take().unwrap_or_default();
+        self.usage = Some(merge_claude_usage(current, usage));
+    }
+
+    fn finish_usage(&mut self, usage: Option<CanonicalUsage>) -> Option<CanonicalUsage> {
+        self.merge_usage(usage);
+        self.usage.take()
     }
 }
 
@@ -526,6 +568,27 @@ impl ClaudeClientEmitter {
                 )?);
                 Ok(out)
             }
+            CanonicalStreamEvent::ReasoningSignature(signature) => {
+                let mut out = self.ensure_started()?;
+                out.extend(self.ensure_thinking_block()?);
+                let block_index = match self.open_block {
+                    Some(ClaudeOpenBlock::Thinking { block_index }) => block_index,
+                    _ => return Ok(out),
+                };
+                out.extend(encode_json_sse(
+                    Some("content_block_delta"),
+                    &json!({
+                        "type": "content_block_delta",
+                        "index": block_index,
+                        "delta": {
+                            "type": "signature_delta",
+                            "signature": signature,
+                        }
+                    }),
+                )?);
+                Ok(out)
+            }
+            CanonicalStreamEvent::ContentPart(part) => self.emit_content_part(part),
             CanonicalStreamEvent::ToolCallStart {
                 index,
                 call_id,
@@ -632,6 +695,217 @@ impl ClaudeClientEmitter {
             },
         })
     }
+
+    fn emit_content_part(
+        &mut self,
+        part: CanonicalContentPart,
+    ) -> Result<Vec<u8>, PipelineFinalizeError> {
+        let mut out = self.ensure_started()?;
+        out.extend(self.close_open_block()?);
+        let block_index = self.next_block_index;
+        self.next_block_index += 1;
+        let content_block = match part {
+            CanonicalContentPart::ImageUrl(url) => {
+                if let Some((media_type, data)) = parse_data_url(url.as_str()) {
+                    json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": data,
+                        }
+                    })
+                } else {
+                    json!({
+                        "type": "image",
+                        "source": {
+                            "type": "url",
+                            "url": url,
+                        }
+                    })
+                }
+            }
+            CanonicalContentPart::File {
+                file_data,
+                reference,
+                mime_type: _,
+                filename: _,
+            } => {
+                if let Some(file_data) = file_data {
+                    if let Some((media_type, data)) = parse_data_url(file_data.as_str()) {
+                        json!({
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": data,
+                            }
+                        })
+                    } else {
+                        json!({
+                            "type": "text",
+                            "text": "[File]",
+                        })
+                    }
+                } else if let Some(reference) = reference {
+                    json!({
+                        "type": "document",
+                        "source": {
+                            "type": "url",
+                            "url": reference,
+                        }
+                    })
+                } else {
+                    json!({
+                        "type": "text",
+                        "text": "[File]",
+                    })
+                }
+            }
+            CanonicalContentPart::Audio { data, format } => json!({
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": format!("audio/{format}"),
+                    "data": data,
+                }
+            }),
+        };
+        out.extend(encode_json_sse(
+            Some("content_block_start"),
+            &json!({
+                "type": "content_block_start",
+                "index": block_index,
+                "content_block": content_block,
+            }),
+        )?);
+        out.extend(encode_json_sse(
+            Some("content_block_stop"),
+            &json!({
+                "type": "content_block_stop",
+                "index": block_index,
+            }),
+        )?);
+        Ok(out)
+    }
+}
+
+fn merge_claude_usage(mut current: CanonicalUsage, next: CanonicalUsage) -> CanonicalUsage {
+    if next.input_tokens > 0 {
+        current.input_tokens = next.input_tokens;
+    }
+    if next.output_tokens > 0 {
+        current.output_tokens = next.output_tokens;
+    }
+    if next.cache_creation_tokens > 0 {
+        current.cache_creation_tokens = next.cache_creation_tokens;
+    }
+    if next.cache_creation_ephemeral_5m_tokens > 0 {
+        current.cache_creation_ephemeral_5m_tokens = next.cache_creation_ephemeral_5m_tokens;
+    }
+    if next.cache_creation_ephemeral_1h_tokens > 0 {
+        current.cache_creation_ephemeral_1h_tokens = next.cache_creation_ephemeral_1h_tokens;
+    }
+    if next.cache_read_tokens > 0 {
+        current.cache_read_tokens = next.cache_read_tokens;
+    }
+    current.total_tokens = current
+        .input_tokens
+        .saturating_add(current.output_tokens)
+        .saturating_add(current.cache_creation_tokens)
+        .saturating_add(current.cache_read_tokens);
+    current
+}
+
+fn canonical_content_part_from_claude_block(
+    block: &Map<String, Value>,
+) -> Option<CanonicalContentPart> {
+    match block
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "image" => {
+            let source = block.get("source")?.as_object()?;
+            match source.get("type")?.as_str()? {
+                "base64" => {
+                    let media_type = source
+                        .get("media_type")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())?;
+                    let data = source
+                        .get("data")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())?;
+                    Some(CanonicalContentPart::ImageUrl(format!(
+                        "data:{media_type};base64,{data}"
+                    )))
+                }
+                "url" => source
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| CanonicalContentPart::ImageUrl(value.to_string())),
+                _ => None,
+            }
+        }
+        "document" => {
+            let source = block.get("source")?.as_object()?;
+            match source.get("type")?.as_str()? {
+                "base64" => {
+                    let media_type = source
+                        .get("media_type")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())?;
+                    let data = source
+                        .get("data")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())?;
+                    if let Some(format) = media_type.strip_prefix("audio/") {
+                        Some(CanonicalContentPart::Audio {
+                            data: data.to_string(),
+                            format: format.to_string(),
+                        })
+                    } else {
+                        Some(CanonicalContentPart::File {
+                            file_data: Some(format!("data:{media_type};base64,{data}")),
+                            reference: None,
+                            mime_type: Some(media_type.to_string()),
+                            filename: None,
+                        })
+                    }
+                }
+                "url" => source
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| CanonicalContentPart::File {
+                        file_data: None,
+                        reference: Some(value.to_string()),
+                        mime_type: None,
+                        filename: None,
+                    }),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn parse_data_url(value: &str) -> Option<(String, String)> {
+    let rest = value.strip_prefix("data:")?;
+    let (meta, data) = rest.split_once(',')?;
+    let media_type = meta.strip_suffix(";base64")?;
+    if media_type.trim().is_empty() || data.trim().is_empty() {
+        return None;
+    }
+    Some((media_type.to_string(), data.to_string()))
 }
 
 #[cfg(test)]
@@ -680,6 +954,94 @@ mod tests {
     }
 
     #[test]
+    fn claude_provider_state_parses_signature_deltas() {
+        let mut state = ClaudeProviderState::default();
+        let report_context = json!({});
+        let _ = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_123",
+                        "model": "claude-sonnet-4-5"
+                    }
+                })),
+            )
+            .expect("message_start should parse");
+        let frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "signature_delta",
+                        "signature": "sig_123"
+                    }
+                })),
+            )
+            .expect("signature delta should parse");
+
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ReasoningSignature(ref signature) if signature == "sig_123"
+        )));
+    }
+
+    #[test]
+    fn claude_provider_state_merges_start_and_delta_usage() {
+        let mut state = ClaudeProviderState::default();
+        let report_context = json!({});
+        let _ = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_123",
+                        "model": "claude-sonnet-4-5",
+                        "usage": {
+                            "input_tokens": 5,
+                            "cache_creation_input_tokens": 59_573,
+                            "cache_read_input_tokens": 0,
+                            "output_tokens": 0,
+                        },
+                    },
+                })),
+            )
+            .expect("message_start should parse");
+        let frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "message_delta",
+                    "delta": {
+                        "stop_reason": "end_turn",
+                    },
+                    "usage": {
+                        "output_tokens": 162,
+                    },
+                })),
+            )
+            .expect("message_delta should parse");
+
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::Finish {
+                usage: Some(CanonicalUsage {
+                    input_tokens: 5,
+                    output_tokens: 162,
+                    cache_creation_tokens: 59_573,
+                    cache_read_tokens: 0,
+                    ..
+                }),
+                ..
+            }
+        )));
+    }
+
+    #[test]
     fn claude_client_emitter_preserves_tool_identity_and_emits_thinking_blocks() {
         let mut emitter = ClaudeClientEmitter::default();
         let mut bytes = emitter
@@ -697,6 +1059,15 @@ mod tests {
                     event: CanonicalStreamEvent::ReasoningDelta("step by step".to_string()),
                 })
                 .expect("reasoning should encode"),
+        );
+        bytes.extend(
+            emitter
+                .emit(CanonicalStreamFrame {
+                    id: "msg_123".to_string(),
+                    model: "claude-sonnet-4-5".to_string(),
+                    event: CanonicalStreamEvent::ReasoningSignature("sig_123".to_string()),
+                })
+                .expect("signature should encode"),
         );
         bytes.extend(
             emitter
@@ -727,6 +1098,8 @@ mod tests {
         let sse = String::from_utf8(bytes).expect("sse should be utf8");
         assert!(sse.contains("\"type\":\"thinking\""));
         assert!(sse.contains("\"type\":\"thinking_delta\""));
+        assert!(sse.contains("\"type\":\"signature_delta\""));
+        assert!(sse.contains("\"signature\":\"sig_123\""));
         assert!(sse.contains("\"id\":\"toolu_1\""));
         assert!(sse.contains("\"name\":\"lookup\""));
         assert!(sse.contains("\"partial_json\":\"{\\\"city\\\":\\\"Shanghai\\\"}\""));
@@ -752,5 +1125,25 @@ mod tests {
         assert!(sse.contains("event: message_delta"));
         assert!(sse.contains("\"stop_reason\":\"end_turn\""));
         assert!(sse.contains("\"usage\":{\"input_tokens\":0,\"output_tokens\":0}"));
+    }
+
+    #[test]
+    fn claude_client_emitter_emits_image_blocks_for_media_parts() {
+        let mut emitter = ClaudeClientEmitter::default();
+        let bytes = emitter
+            .emit(CanonicalStreamFrame {
+                id: "msg_img_123".to_string(),
+                model: "claude-sonnet-4-5".to_string(),
+                event: CanonicalStreamEvent::ContentPart(CanonicalContentPart::ImageUrl(
+                    "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                )),
+            })
+            .expect("image should encode");
+
+        let sse = String::from_utf8(bytes).expect("sse should be utf8");
+        assert!(sse.contains("\"type\":\"image\""));
+        assert!(sse.contains("\"media_type\":\"image/png\""));
+        assert!(sse.contains("\"data\":\"iVBORw0KGgo=\""));
+        assert!(sse.contains("event: content_block_stop"));
     }
 }

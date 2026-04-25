@@ -28,6 +28,7 @@ use crate::ai_pipeline::planner::decision_input::{
 use crate::ai_pipeline::planner::materialization_policy::{
     build_local_candidate_persistence_policy, LocalCandidatePersistencePolicyKind,
 };
+use crate::ai_pipeline::planner::runtime_miss::set_local_runtime_miss_diagnostic_reason;
 use crate::ai_pipeline::planner::spec_metadata::local_openai_cli_spec_metadata;
 use crate::ai_pipeline::PlannerAppState;
 use crate::ai_pipeline::{
@@ -47,27 +48,82 @@ pub(crate) async fn resolve_local_openai_cli_decision_input(
     trace_id: &str,
     decision: &GatewayControlDecision,
     body_json: &serde_json::Value,
+    plan_kind: &str,
 ) -> Option<LocalOpenAiCliDecisionInput> {
-    let auth_context: ExecutionRuntimeAuthContext =
-        resolve_local_decision_execution_runtime_auth_context(decision)?;
+    let Some(auth_context) = resolve_local_decision_execution_runtime_auth_context(decision) else {
+        warn!(
+            trace_id = %trace_id,
+            route_class = ?decision.route_class,
+            route_family = ?decision.route_family,
+            route_kind = ?decision.route_kind,
+            "gateway local openai cli decision skipped: missing_auth_context"
+        );
+        set_local_runtime_miss_diagnostic_reason(
+            state,
+            trace_id,
+            decision,
+            plan_kind,
+            extract_standard_requested_model(body_json).as_deref(),
+            "missing_auth_context",
+        );
+        return None;
+    };
 
-    let requested_model = extract_standard_requested_model(body_json)?;
+    let Some(requested_model) = extract_standard_requested_model(body_json) else {
+        warn!(
+            trace_id = %trace_id,
+            "gateway local openai cli decision skipped: missing_requested_model"
+        );
+        set_local_runtime_miss_diagnostic_reason(
+            state,
+            trace_id,
+            decision,
+            plan_kind,
+            None,
+            "missing_requested_model",
+        );
+        return None;
+    };
 
     let resolved_input = match resolve_local_authenticated_decision_input(
         state,
-        auth_context,
+        auth_context.clone(),
         Some(requested_model.as_str()),
         None,
     )
     .await
     {
         Ok(Some(resolved_input)) => resolved_input,
-        Ok(None) => return None,
+        Ok(None) => {
+            warn!(
+                trace_id = %trace_id,
+                user_id = %auth_context.user_id,
+                api_key_id = %auth_context.api_key_id,
+                "gateway local openai cli decision skipped: auth_snapshot_missing"
+            );
+            set_local_runtime_miss_diagnostic_reason(
+                state,
+                trace_id,
+                decision,
+                plan_kind,
+                Some(requested_model.as_str()),
+                "auth_snapshot_missing",
+            );
+            return None;
+        }
         Err(err) => {
             warn!(
                 trace_id = %trace_id,
                 error = ?err,
                 "gateway local openai cli decision auth snapshot read failed"
+            );
+            set_local_runtime_miss_diagnostic_reason(
+                state,
+                trace_id,
+                decision,
+                plan_kind,
+                Some(requested_model.as_str()),
+                "auth_snapshot_read_failed",
             );
             return None;
         }
@@ -85,7 +141,7 @@ pub(crate) async fn materialize_local_openai_cli_candidate_attempts(
     input: &LocalOpenAiCliDecisionInput,
     body_json: &serde_json::Value,
     spec: LocalOpenAiCliSpec,
-) -> Result<Vec<LocalOpenAiCliCandidateAttempt>, GatewayError> {
+) -> Result<(Vec<LocalOpenAiCliCandidateAttempt>, usize), GatewayError> {
     let spec_metadata = local_openai_cli_spec_metadata(spec);
     let client_api_format = spec_metadata.api_format.trim().to_ascii_lowercase();
     let planner_state = PlannerAppState::new(state);
@@ -223,6 +279,8 @@ pub(crate) async fn materialize_local_openai_cli_candidate_attempts(
         })
         .collect::<Vec<_>>();
 
+    let candidate_count = candidates.len() + skipped_candidates.len();
+
     remember_first_local_candidate_affinity(
         planner_state,
         Some(&input.auth_snapshot),
@@ -275,7 +333,7 @@ pub(crate) async fn materialize_local_openai_cli_candidate_attempts(
     )
     .await;
 
-    Ok(attempts)
+    Ok((attempts, candidate_count))
 }
 pub(crate) async fn mark_skipped_local_openai_cli_candidate(
     state: &AppState,

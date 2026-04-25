@@ -3,8 +3,6 @@ use crate::handlers::admin::request::AdminAppState;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey,
 };
-use aether_data_contracts::repository::quota::StoredProviderQuotaSnapshot;
-use futures_util::future::join_all;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -235,17 +233,6 @@ pub(crate) async fn build_admin_providers_summary_payload(
             .or_default()
             .insert(row.global_model_id);
     }
-    let quota_snapshots_by_provider = join_all(provider_ids.iter().map(|provider_id| async {
-        let quota_snapshot = state
-            .read_provider_quota_snapshot(provider_id)
-            .await
-            .ok()
-            .flatten();
-        (provider_id.clone(), quota_snapshot)
-    }))
-    .await
-    .into_iter()
-    .collect::<BTreeMap<String, Option<StoredProviderQuotaSnapshot>>>();
     let now_unix_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -268,9 +255,7 @@ pub(crate) async fn build_admin_providers_summary_payload(
                 .get(&provider.id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]),
-            quota_snapshots_by_provider
-                .get(&provider.id)
-                .and_then(Option::as_ref),
+            None,
             model_stats_by_provider.get(&provider.id),
             active_global_model_ids,
             now_unix_secs,

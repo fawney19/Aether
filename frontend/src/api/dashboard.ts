@@ -167,6 +167,9 @@ export interface RequestDetail {
   price_per_request?: number  // 按次计费价格
   request_type: string
   is_stream: boolean
+  upstream_is_stream?: boolean
+  client_requested_stream?: boolean
+  client_is_stream?: boolean
   status_code: number
   status?: string  // pending, streaming, completed, failed, cancelled
   error_message?: string

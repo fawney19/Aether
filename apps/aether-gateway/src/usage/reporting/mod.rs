@@ -40,6 +40,25 @@ fn log_local_report_handled(
     );
 }
 
+fn log_local_report_effect_only(
+    trace_id: &str,
+    report_kind: &str,
+    report_scope: &'static str,
+    report_context: Option<&serde_json::Value>,
+) {
+    debug!(
+        event_name = "execution_report_effect_handled_locally",
+        log_type = "debug",
+        debug_context = "redacted",
+        trace_id = %trace_id,
+        report_scope,
+        report_kind = %report_kind,
+        report_request_id = %short_request_id(report_request_id(report_context)),
+        has_report_context = report_context.is_some(),
+        "gateway handled execution report locally without actionable request-candidate context"
+    );
+}
+
 fn log_dropped_report(
     trace_id: &str,
     report_kind: &str,
@@ -90,6 +109,19 @@ pub(crate) async fn submit_sync_report(
     ) {
         handle_local_sync_report(state, &payload).await;
         log_local_report_handled(
+            payload.trace_id.as_str(),
+            &payload.report_kind,
+            "sync",
+            payload.report_context.as_ref(),
+        );
+        return Ok(());
+    }
+
+    if payload.report_context.is_some()
+        && is_local_ai_sync_report_kind(payload.report_kind.as_str())
+    {
+        handle_local_sync_report(state, &payload).await;
+        log_local_report_effect_only(
             payload.trace_id.as_str(),
             &payload.report_kind,
             "sync",
@@ -157,6 +189,19 @@ pub(crate) async fn submit_stream_report(
     ) {
         handle_local_stream_report(state, &payload).await;
         log_local_report_handled(
+            payload.trace_id.as_str(),
+            &payload.report_kind,
+            "stream",
+            payload.report_context.as_ref(),
+        );
+        return Ok(());
+    }
+
+    if payload.report_context.is_some()
+        && is_local_ai_stream_report_kind(payload.report_kind.as_str())
+    {
+        handle_local_stream_report(state, &payload).await;
+        log_local_report_effect_only(
             payload.trace_id.as_str(),
             &payload.report_kind,
             "stream",
@@ -563,6 +608,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_sync_report_handles_openai_image_success_locally_when_unique_candidate_exists()
+    {
+        let repository = Arc::new(InMemoryRequestCandidateRepository::seed(vec![
+            sample_request_candidate(
+                "cand-reporting-image-sync-123",
+                "req-reporting-image-sync-123",
+            ),
+        ]));
+        let state = build_test_state(Arc::clone(&repository));
+
+        submit_sync_report(
+            &state,
+            GatewaySyncReportRequest {
+                trace_id: "trace-reporting-image-sync-123".to_string(),
+                report_kind: "openai_image_sync_success".to_string(),
+                report_context: Some(json!({
+                    "request_id": "req-reporting-image-sync-123",
+                    "client_api_format": "openai:image"
+                })),
+                status_code: 200,
+                headers: BTreeMap::new(),
+                body_json: Some(json!({
+                    "created": 1776855978,
+                    "data": [{
+                        "b64_json": "aGVsbG8="
+                    }]
+                })),
+                client_body_json: None,
+                body_base64: None,
+                telemetry: None,
+            },
+        )
+        .await
+        .expect("image sync report should stay local");
+
+        let stored = repository
+            .list_by_request_id("req-reporting-image-sync-123")
+            .await
+            .expect("request candidates should list");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].id, "cand-reporting-image-sync-123");
+        assert_eq!(stored[0].status, RequestCandidateStatus::Success);
+        assert_eq!(stored[0].status_code, Some(200));
+    }
+
+    #[tokio::test]
     async fn submit_sync_report_treats_null_error_field_as_success() {
         let repository = Arc::new(InMemoryRequestCandidateRepository::seed(vec![
             sample_request_candidate("cand-reporting-sync-null-1", "req-reporting-sync-null-1"),
@@ -834,6 +925,57 @@ mod tests {
         assert_eq!(stored.key_id, "key-reporting-tests-123");
         assert_eq!(stored.user_id.as_deref(), Some("user-reporting-tests-123"));
         assert_eq!(stored.display_name.as_deref(), Some("test-image"));
+        assert_eq!(stored.mime_type.as_deref(), Some("image/png"));
+    }
+
+    #[tokio::test]
+    async fn submit_sync_report_stores_gemini_file_mapping_without_actionable_candidate_context() {
+        let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+        let gemini_file_mapping_repository =
+            Arc::new(InMemoryGeminiFileMappingRepository::default());
+        let state = build_gemini_file_mapping_test_state(
+            Arc::clone(&request_candidate_repository),
+            Arc::clone(&gemini_file_mapping_repository),
+        );
+
+        submit_sync_report(
+            &state,
+            GatewaySyncReportRequest {
+                trace_id: "trace-gemini-files-store-no-candidate-123".to_string(),
+                report_kind: "gemini_files_store_mapping".to_string(),
+                report_context: Some(json!({
+                    "request_id": "req-gemini-files-store-no-candidate-123",
+                    "file_key_id": "key-reporting-tests-123",
+                    "user_id": "user-reporting-tests-123",
+                })),
+                status_code: 200,
+                headers: BTreeMap::from([(
+                    "content-type".to_string(),
+                    "application/json".to_string(),
+                )]),
+                body_json: Some(json!({
+                    "file": {
+                        "name": "fallback123",
+                        "displayName": "fallback-image",
+                        "mimeType": "image/png"
+                    }
+                })),
+                client_body_json: None,
+                body_base64: None,
+                telemetry: None,
+            },
+        )
+        .await
+        .expect("gemini files mapping fallback report should stay local");
+
+        let stored = gemini_file_mapping_repository
+            .find_by_file_name("files/fallback123")
+            .await
+            .expect("gemini file mapping should read")
+            .expect("gemini file mapping should exist");
+        assert_eq!(stored.key_id, "key-reporting-tests-123");
+        assert_eq!(stored.user_id.as_deref(), Some("user-reporting-tests-123"));
+        assert_eq!(stored.display_name.as_deref(), Some("fallback-image"));
         assert_eq!(stored.mime_type.as_deref(), Some("image/png"));
     }
 

@@ -3,8 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_contracts::{ExecutionPlan, ExecutionResult, RequestBody};
 use aether_provider_transport::{
-    resolve_transport_execution_timeouts, resolve_transport_tls_profile,
-    GatewayProviderTransportSnapshot,
+    is_vertex_api_key_transport_context, resolve_transport_execution_timeouts,
+    resolve_transport_tls_profile, GatewayProviderTransportSnapshot,
 };
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
@@ -59,6 +59,10 @@ pub async fn fetch_models_from_transports(
             return fetch_gemini_cli_models(runtime, first_transport, models).await;
         }
         return Ok(build_success_outcome(models, None, true));
+    }
+
+    if transports.iter().any(is_vertex_api_key_transport_context) {
+        return fetch_vertex_models(runtime, transports).await;
     }
 
     match provider_type.as_str() {
@@ -1059,5 +1063,148 @@ impl OutcomeExt for ModelsFetchOutcome {
     fn with_errors(mut self, errors: Vec<String>) -> Self {
         self.errors = errors;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    use aether_contracts::{ExecutionResult, ResponseBody};
+    use aether_provider_transport::snapshot::{
+        GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
+        GatewayProviderTransportProvider, GatewayProviderTransportSnapshot,
+    };
+    use async_trait::async_trait;
+    use serde_json::json;
+
+    use crate::fetch_models_from_transports;
+    use crate::transport::ModelFetchTransportRuntime;
+
+    struct TestRuntime {
+        executed_urls: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl ModelFetchTransportRuntime for TestRuntime {
+        async fn resolve_local_oauth_request_auth(
+            &self,
+            _transport: &GatewayProviderTransportSnapshot,
+        ) -> Result<Option<aether_provider_transport::LocalResolvedOAuthRequestAuth>, String>
+        {
+            Ok(None)
+        }
+
+        async fn resolve_model_fetch_proxy(
+            &self,
+            _transport: &GatewayProviderTransportSnapshot,
+        ) -> Option<aether_contracts::ProxySnapshot> {
+            None
+        }
+
+        async fn execute_model_fetch_execution_plan(
+            &self,
+            plan: &aether_contracts::ExecutionPlan,
+        ) -> Result<ExecutionResult, String> {
+            self.executed_urls
+                .lock()
+                .expect("executed_urls lock")
+                .push(plan.url.clone());
+            Ok(ExecutionResult {
+                request_id: plan.request_id.clone(),
+                candidate_id: plan.candidate_id.clone(),
+                status_code: 200,
+                headers: BTreeMap::new(),
+                body: Some(ResponseBody {
+                    json_body: Some(json!({
+                        "models": [{
+                            "name": "publishers/google/models/gemini-3.1-pro-preview"
+                        }]
+                    })),
+                    body_bytes_b64: None,
+                }),
+                telemetry: None,
+                error: None,
+            })
+        }
+    }
+
+    fn sample_custom_aiplatform_transport() -> GatewayProviderTransportSnapshot {
+        GatewayProviderTransportSnapshot {
+            provider: GatewayProviderTransportProvider {
+                id: "provider-1".to_string(),
+                name: "Vertex".to_string(),
+                provider_type: "custom".to_string(),
+                website: None,
+                is_active: true,
+                keep_priority_on_conversion: false,
+                enable_format_conversion: true,
+                concurrent_limit: None,
+                max_retries: None,
+                proxy: None,
+                request_timeout_secs: None,
+                stream_first_byte_timeout_secs: None,
+                config: None,
+            },
+            endpoint: GatewayProviderTransportEndpoint {
+                id: "endpoint-1".to_string(),
+                provider_id: "provider-1".to_string(),
+                api_format: "gemini:cli".to_string(),
+                api_family: Some("gemini".to_string()),
+                endpoint_kind: Some("cli".to_string()),
+                is_active: true,
+                base_url: "https://aiplatform.googleapis.com".to_string(),
+                header_rules: None,
+                body_rules: None,
+                max_retries: None,
+                custom_path: Some("/v1/publishers/google/models/{model}:{action}".to_string()),
+                config: None,
+                format_acceptance_config: None,
+                proxy: None,
+            },
+            key: GatewayProviderTransportKey {
+                id: "key-1".to_string(),
+                provider_id: "provider-1".to_string(),
+                name: "key".to_string(),
+                auth_type: "api_key".to_string(),
+                is_active: true,
+                api_formats: Some(vec!["gemini:cli".to_string()]),
+                allowed_models: None,
+                capabilities: None,
+                rate_multipliers: None,
+                global_priority_by_format: None,
+                expires_at_unix_secs: None,
+                proxy: None,
+                fingerprint: None,
+                decrypted_api_key: "vertex-secret".to_string(),
+                decrypted_auth_config: None,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_aiplatform_transport_uses_vertex_models_fetch_path_and_normalizes_chat_format()
+    {
+        let executed_urls = Arc::new(Mutex::new(Vec::new()));
+        let runtime = TestRuntime {
+            executed_urls: Arc::clone(&executed_urls),
+        };
+        let outcome =
+            fetch_models_from_transports(&runtime, &[sample_custom_aiplatform_transport()])
+                .await
+                .expect("models fetch should succeed");
+
+        let urls = executed_urls.lock().expect("executed_urls lock");
+        assert_eq!(
+            urls.as_slice(),
+            &["https://aiplatform.googleapis.com/v1/publishers/google/models?key=vertex-secret&pageSize=100"]
+        );
+        assert_eq!(outcome.fetched_model_ids, vec!["gemini-3.1-pro-preview"]);
+        assert_eq!(outcome.cached_models.len(), 1);
+        assert_eq!(
+            outcome.cached_models[0]["api_formats"][0].as_str(),
+            Some("gemini:chat")
+        );
     }
 }

@@ -1,7 +1,7 @@
 use super::{
     any, build_router_with_state, build_state_with_execution_runtime_override, json, start_server,
     to_bytes, Arc, Body, Bytes, HeaderName, HeaderValue, Infallible, Json, Mutex, Request,
-    Response, Router, StatusCode, TRACE_ID_HEADER,
+    Response, Router, StatusCode, UsageRuntimeConfig, TRACE_ID_HEADER,
 };
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::auth::{
@@ -10,6 +10,7 @@ use aether_data::repository::auth::{
 use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelectionReadRepository;
 use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+use aether_data::repository::usage::InMemoryUsageReadRepository;
 use aether_data_contracts::repository::candidate_selection::{
     StoredMinimalCandidateSelectionRow, StoredProviderModelMapping,
 };
@@ -19,6 +20,7 @@ use aether_data_contracts::repository::candidates::{
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
+use aether_data_contracts::repository::usage::UsageReadRepository;
 use sha2::{Digest, Sha256};
 
 #[tokio::test]
@@ -381,7 +383,7 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
                     });
                 let frames = concat!(
                     "{\"type\":\"headers\",\"payload\":{\"kind\":\"headers\",\"status_code\":200,\"headers\":{\"content-type\":\"text/event-stream\"}}}\n",
-                    "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"event: response.completed\\ndata: {\\\"type\\\":\\\"response.completed\\\"}\\n\\n\"}}\n",
+                    "{\"type\":\"data\",\"payload\":{\"kind\":\"data\",\"text\":\"event: response.completed\\ndata: {\\\"type\\\":\\\"response.completed\\\",\\\"response\\\":{\\\"id\\\":\\\"resp_codex_cli_stream_local_123\\\",\\\"object\\\":\\\"response\\\",\\\"model\\\":\\\"gpt-5.4\\\",\\\"status\\\":\\\"completed\\\",\\\"usage\\\":{\\\"input_tokens\\\":1,\\\"output_tokens\\\":2,\\\"total_tokens\\\":3}}}\\n\\n\"}}\n",
                     "{\"type\":\"telemetry\",\"payload\":{\"kind\":\"telemetry\",\"telemetry\":{\"elapsed_ms\":41}}}\n",
                     "{\"type\":\"eof\",\"payload\":{\"kind\":\"eof\"}}\n"
                 );
@@ -416,6 +418,7 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
         vec![sample_provider_catalog_key()],
     ));
     let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::default());
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::default());
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
     let (refresh_url, refresh_handle) = start_server(refresh).await;
@@ -429,15 +432,24 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
         ]);
     let gateway_state = build_state_with_execution_runtime_override(execution_runtime_url.clone())
     .with_data_state_for_tests(
-        crate::data::GatewayDataState::with_auth_candidate_selection_provider_catalog_and_request_candidate_repository_for_tests(
+        crate::data::GatewayDataState::with_auth_candidate_selection_provider_catalog_request_candidates_and_usage_for_tests(
             auth_repository,
             candidate_selection_repository,
             provider_catalog_repository,
             Arc::clone(&request_candidate_repository),
+            Arc::clone(&usage_repository),
             DEVELOPMENT_ENCRYPTION_KEY,
-        ),
+        )
+        .with_system_config_values_for_tests([(
+            "request_record_level".to_string(),
+            json!("base"),
+        )]),
     )
-    .with_oauth_refresh_coordinator_for_tests(oauth_refresh);
+    .with_oauth_refresh_coordinator_for_tests(oauth_refresh)
+    .with_usage_runtime_for_tests(UsageRuntimeConfig {
+        enabled: true,
+        ..UsageRuntimeConfig::default()
+    });
     let gateway = build_router_with_state(gateway_state);
     let (gateway_url, gateway_handle) = start_server(gateway).await;
 
@@ -457,7 +469,7 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.text().await.expect("body should read"),
-        "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_codex_cli_stream_local_123\",\"object\":\"response\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n"
     );
 
     let seen_refresh_request = seen_refresh
@@ -510,6 +522,34 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
         .expect("request candidate trace should read");
     assert_eq!(stored_candidates.len(), 1);
     assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Success);
+
+    let mut stored_usage = None;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        stored_usage = usage_repository
+            .find_by_request_id("trace-codex-cli-stream-local-123")
+            .await
+            .expect("usage lookup should succeed");
+        if stored_usage
+            .as_ref()
+            .is_some_and(|usage| usage.status == "completed")
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "usage should reach completed status"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let stored_usage = stored_usage.expect("usage should be recorded");
+    assert_eq!(stored_usage.input_tokens, 1);
+    assert_eq!(stored_usage.output_tokens, 2);
+    assert_eq!(stored_usage.total_tokens, 3);
+    assert!(stored_usage.request_body.is_none());
+    assert!(stored_usage.provider_request_body.is_none());
+    assert!(stored_usage.response_body.is_none());
+    assert!(stored_usage.client_response_body.is_none());
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(

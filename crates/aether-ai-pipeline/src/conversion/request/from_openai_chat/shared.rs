@@ -10,12 +10,12 @@ pub(super) fn parse_openai_tool_arguments(arguments: Option<&Value>) -> Option<V
             } else {
                 match serde_json::from_str::<Value>(trimmed) {
                     Ok(Value::Object(object)) => Some(Value::Object(object)),
-                    Ok(other) => Some(json!({ "input": other })),
-                    Err(_) => Some(json!({ "input": trimmed })),
+                    Ok(other) => Some(json!({ "raw": other })),
+                    Err(_) => Some(json!({ "raw": trimmed })),
                 }
             }
         }
-        Some(other) => Some(json!({ "input": other })),
+        Some(other) => Some(json!({ "raw": other })),
         None => Some(json!({})),
     }
 }

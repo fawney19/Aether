@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use std::io::Error as IoError;
+use std::time::Instant;
 
 use aether_contracts::{
     ExecutionError, ExecutionErrorKind, ExecutionPhase, ExecutionStreamTerminalSummary,
@@ -12,12 +14,13 @@ use serde_json::Value;
 use tracing::warn;
 
 use crate::ai_pipeline_api::{
-    maybe_build_provider_private_stream_normalizer, normalize_provider_private_report_context,
-    StreamingStandardTerminalObserver,
+    maybe_bridge_standard_sync_json_to_stream, maybe_build_provider_private_stream_normalizer,
+    normalize_provider_private_report_context, StreamingStandardTerminalObserver,
 };
 use crate::execution_runtime::ndjson::encode_stream_frame_ndjson;
 use crate::execution_runtime::transport::DirectUpstreamResponse;
 use crate::execution_runtime::DirectUpstreamStreamExecution;
+use crate::GatewayError;
 
 pub(crate) fn build_direct_execution_frame_stream(
     execution: DirectUpstreamStreamExecution,
@@ -56,6 +59,113 @@ pub(crate) fn build_direct_execution_frame_stream(
             maybe_build_provider_private_stream_normalizer(Some(&observer_context));
         let mut stream_terminal_observer = StreamingStandardTerminalObserver::default();
         let mut observer_buffered = Vec::new();
+
+        if should_buffer_non_stream_response(&headers, &observer_context) {
+            let original_headers = headers.clone();
+            match buffer_non_sse_upstream_body(response, started_at).await {
+                Ok(buffered) => {
+                    let mut response_headers = original_headers;
+                    let mut response_body = Bytes::from(buffered.body_bytes);
+                    let mut summary = None;
+                    match maybe_bridge_non_sse_sync_json_to_stream(
+                        status_code,
+                        &response_headers,
+                        response_body.as_ref(),
+                        provider_api_format.as_str(),
+                        &observer_context,
+                    ) {
+                        Ok(Some(outcome)) => {
+                            response_headers = rewrite_headers_for_bridged_sse_response(
+                                &response_headers,
+                                outcome.sse_body.len(),
+                            );
+                            response_body = Bytes::from(outcome.sse_body);
+                            summary = outcome.terminal_summary;
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            yield Err(IoError::other(format!("{err:?}")));
+                            return;
+                        }
+                    }
+
+                    match encode_headers_frame(status_code, response_headers) {
+                        Ok(frame) => yield Ok(frame),
+                        Err(err) => {
+                            yield Err(err);
+                            return;
+                        }
+                    }
+                    if !response_body.is_empty() {
+                        match encode_telemetry_frame(buffered.ttfb_ms, buffered.ttfb_ms, 0) {
+                            Ok(frame) => yield Ok(frame),
+                            Err(err) => {
+                                yield Err(err);
+                                return;
+                            }
+                        }
+                        match encode_data_frame(&response_body) {
+                            Ok(frame) => yield Ok(frame),
+                            Err(err) => {
+                                yield Err(err);
+                                return;
+                            }
+                        }
+                    }
+                    match encode_telemetry_frame(
+                        buffered.ttfb_ms,
+                        Some(started_at.elapsed().as_millis() as u64),
+                        buffered.upstream_bytes,
+                    ) {
+                        Ok(frame) => yield Ok(frame),
+                        Err(err) => {
+                            yield Err(err);
+                            return;
+                        }
+                    }
+                    match encode_stream_frame_ndjson(&StreamFrame::eof_with_summary(summary)) {
+                        Ok(frame) => yield Ok(frame),
+                        Err(err) => yield Err(err),
+                    }
+                }
+                Err(BufferedUpstreamBodyError {
+                    message,
+                    ttfb_ms,
+                    upstream_bytes,
+                }) => {
+                    match encode_headers_frame(status_code, original_headers) {
+                        Ok(frame) => yield Ok(frame),
+                        Err(err) => {
+                            yield Err(err);
+                            return;
+                        }
+                    }
+                    match encode_error_frame(status_code, message) {
+                        Ok(frame) => yield Ok(frame),
+                        Err(err) => {
+                            yield Err(err);
+                            return;
+                        }
+                    }
+                    match encode_telemetry_frame(
+                        ttfb_ms,
+                        Some(started_at.elapsed().as_millis() as u64),
+                        upstream_bytes,
+                    ) {
+                        Ok(frame) => yield Ok(frame),
+                        Err(err) => {
+                            yield Err(err);
+                            return;
+                        }
+                    }
+                    match encode_stream_frame_ndjson(&StreamFrame::eof_with_summary(None)) {
+                        Ok(frame) => yield Ok(frame),
+                        Err(err) => yield Err(err),
+                    }
+                }
+            }
+            return;
+        }
 
         match encode_headers_frame(status_code, headers) {
             Ok(frame) => yield Ok(frame),
@@ -206,7 +316,7 @@ pub(crate) fn build_direct_execution_frame_stream(
 
 fn encode_headers_frame(
     status_code: u16,
-    headers: std::collections::BTreeMap<String, String>,
+    headers: BTreeMap<String, String>,
 ) -> Result<Bytes, IoError> {
     encode_stream_frame_ndjson(&StreamFrame {
         frame_type: StreamFrameType::Headers,
@@ -258,6 +368,206 @@ fn encode_error_frame(status_code: u16, message: String) -> Result<Bytes, IoErro
             },
         },
     })
+}
+
+struct BufferedUpstreamBody {
+    body_bytes: Vec<u8>,
+    ttfb_ms: Option<u64>,
+    upstream_bytes: u64,
+}
+
+struct BufferedUpstreamBodyError {
+    message: String,
+    ttfb_ms: Option<u64>,
+    upstream_bytes: u64,
+}
+
+fn response_headers_indicate_sse(headers: &BTreeMap<String, String>) -> bool {
+    headers
+        .get("content-type")
+        .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"))
+}
+
+fn should_treat_upstream_response_as_stream(
+    headers: &BTreeMap<String, String>,
+    report_context: &Value,
+) -> bool {
+    if response_headers_indicate_sse(headers) {
+        return true;
+    }
+
+    report_context
+        .get("envelope_name")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case(crate::ai_pipeline::KIRO_ENVELOPE_NAME))
+}
+
+fn should_buffer_non_stream_response(
+    headers: &BTreeMap<String, String>,
+    report_context: &Value,
+) -> bool {
+    if should_treat_upstream_response_as_stream(headers, report_context) {
+        return false;
+    }
+
+    headers
+        .get("content-length")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .is_some()
+}
+
+async fn buffer_non_sse_upstream_body(
+    response: DirectUpstreamResponse,
+    started_at: Instant,
+) -> Result<BufferedUpstreamBody, BufferedUpstreamBodyError> {
+    let mut body_bytes = Vec::new();
+    let mut upstream_bytes = 0u64;
+    let mut ttfb_ms = None;
+
+    match response {
+        DirectUpstreamResponse::Reqwest(response) => {
+            let mut bytes_stream = response.bytes_stream();
+            while let Some(item) = bytes_stream.next().await {
+                match item {
+                    Ok(chunk) => {
+                        if ttfb_ms.is_none() {
+                            ttfb_ms = Some(started_at.elapsed().as_millis() as u64);
+                        }
+                        upstream_bytes += chunk.len() as u64;
+                        body_bytes.extend_from_slice(&chunk);
+                    }
+                    Err(err) => {
+                        let message = format_error_chain(&err);
+                        warn!(
+                            event_name = "stream_pump_body_read_error",
+                            log_type = "ops",
+                            upstream_bytes,
+                            error = %message,
+                            "upstream body stream read error"
+                        );
+                        return Err(BufferedUpstreamBodyError {
+                            message,
+                            ttfb_ms,
+                            upstream_bytes,
+                        });
+                    }
+                }
+            }
+        }
+        DirectUpstreamResponse::LocalTunnel(mut response) => loop {
+            match response.next_chunk().await {
+                Ok(Some(chunk)) => {
+                    if ttfb_ms.is_none() {
+                        ttfb_ms = Some(started_at.elapsed().as_millis() as u64);
+                    }
+                    upstream_bytes += chunk.len() as u64;
+                    body_bytes.extend_from_slice(&chunk);
+                }
+                Ok(None) => break,
+                Err(message) => {
+                    warn!(
+                        event_name = "stream_pump_body_read_error",
+                        log_type = "ops",
+                        upstream_bytes,
+                        error = %message,
+                        "upstream body stream read error"
+                    );
+                    return Err(BufferedUpstreamBodyError {
+                        message,
+                        ttfb_ms,
+                        upstream_bytes,
+                    });
+                }
+            }
+        },
+    }
+
+    Ok(BufferedUpstreamBody {
+        body_bytes,
+        ttfb_ms,
+        upstream_bytes,
+    })
+}
+
+fn maybe_bridge_non_sse_sync_json_to_stream(
+    status_code: u16,
+    headers: &BTreeMap<String, String>,
+    body_bytes: &[u8],
+    provider_api_format: &str,
+    report_context: &Value,
+) -> Result<Option<crate::ai_pipeline::SyncToStreamBridgeOutcome>, GatewayError> {
+    if !(200..300).contains(&status_code) || body_bytes.is_empty() {
+        return Ok(None);
+    }
+
+    let decoded_body_bytes = decode_non_sse_response_body_bytes(headers, body_bytes)
+        .unwrap_or_else(|| body_bytes.to_vec());
+    if !response_body_is_json(headers, &decoded_body_bytes) {
+        return Ok(None);
+    }
+
+    let body_json: Value = serde_json::from_slice(&decoded_body_bytes)
+        .map_err(|err| GatewayError::Internal(err.to_string()))?;
+    let client_api_format = report_context
+        .get("client_api_format")
+        .and_then(Value::as_str)
+        .unwrap_or(provider_api_format);
+    maybe_bridge_standard_sync_json_to_stream(
+        &body_json,
+        provider_api_format,
+        client_api_format,
+        Some(report_context),
+    )
+}
+
+fn rewrite_headers_for_bridged_sse_response(
+    headers: &BTreeMap<String, String>,
+    body_len: usize,
+) -> BTreeMap<String, String> {
+    let mut rewritten = headers.clone();
+    rewritten.remove("content-encoding");
+    rewritten.insert("content-type".to_string(), "text/event-stream".to_string());
+    rewritten.insert("content-length".to_string(), body_len.to_string());
+    rewritten
+}
+
+fn decode_non_sse_response_body_bytes(
+    headers: &BTreeMap<String, String>,
+    body_bytes: &[u8],
+) -> Option<Vec<u8>> {
+    let encoding = headers
+        .get("content-encoding")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+    match encoding.as_deref() {
+        Some("gzip") => {
+            let mut decoder = flate2::read::GzDecoder::new(body_bytes);
+            let mut out = Vec::new();
+            std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
+            Some(out)
+        }
+        Some("deflate") => {
+            let mut decoder = flate2::read::DeflateDecoder::new(body_bytes);
+            let mut out = Vec::new();
+            std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+fn response_body_is_json(headers: &BTreeMap<String, String>, body_bytes: &[u8]) -> bool {
+    if headers
+        .get("content-type")
+        .map(|value| value.to_ascii_lowercase())
+        .is_some_and(|value| value.contains("json"))
+    {
+        return true;
+    }
+
+    serde_json::from_slice::<Value>(body_bytes).is_ok()
 }
 
 fn format_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
@@ -361,11 +671,15 @@ mod tests {
     use axum::extract::ws::Message;
     use axum::routing::post;
     use axum::{http::header, http::HeaderValue, Router};
+    use base64::Engine as _;
     use futures_util::StreamExt;
     use serde_json::Value;
     use tokio::sync::watch;
 
-    use super::build_direct_execution_frame_stream;
+    use super::{
+        build_direct_execution_frame_stream, should_buffer_non_stream_response,
+        should_treat_upstream_response_as_stream,
+    };
     use crate::execution_runtime::transport::{
         execute_stream_plan_via_local_tunnel, DirectSyncExecutionRuntime, DirectUpstreamResponse,
     };
@@ -381,6 +695,39 @@ mod tests {
             url: None,
             extra: Some(serde_json::json!({"tunnel_base_url": base_url})),
         }
+    }
+
+    #[test]
+    fn treats_kiro_eventstream_envelope_as_stream_even_when_content_type_is_json() {
+        let headers = BTreeMap::from([("content-type".into(), "application/json".into())]);
+        let report_context = serde_json::json!({
+            "envelope_name": "kiro:generateAssistantResponse",
+        });
+
+        assert!(should_treat_upstream_response_as_stream(
+            &headers,
+            &report_context
+        ));
+    }
+
+    #[test]
+    fn buffers_non_sse_response_only_when_content_length_is_known() {
+        let report_context = serde_json::json!({
+            "provider_api_format": "openai:chat",
+            "client_api_format": "openai:chat",
+        });
+
+        assert!(!should_buffer_non_stream_response(
+            &BTreeMap::from([("content-type".into(), "application/json".into())]),
+            &report_context
+        ));
+        assert!(should_buffer_non_stream_response(
+            &BTreeMap::from([
+                ("content-type".into(), "application/json".into()),
+                ("content-length".into(), "128".into()),
+            ]),
+            &report_context
+        ));
     }
 
     #[tokio::test]
@@ -565,6 +912,282 @@ mod tests {
         assert!(
             first_telemetry_idx < first_data_idx,
             "first telemetry frame should be emitted before the first data frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_execution_frame_stream_bridges_sync_json_body_to_sse_for_standard_stream_request(
+    ) {
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/responses",
+                post(|| async {
+                    let body = serde_json::json!({
+                        "id": "resp_sync_bridge_123",
+                        "object": "response",
+                        "model": "gpt-5.4",
+                        "status": "completed",
+                        "output": [{
+                            "type": "message",
+                            "id": "msg_sync_bridge_123",
+                            "role": "assistant",
+                            "content": [{
+                                "type": "output_text",
+                                "text": "Hello from buffered JSON stream",
+                                "annotations": []
+                            }]
+                        }],
+                        "usage": {
+                            "input_tokens": 1,
+                            "output_tokens": 2,
+                            "total_tokens": 3
+                        }
+                    });
+                    let mut response = axum::http::Response::new(Body::from(
+                        serde_json::to_vec(&body).expect("json should encode"),
+                    ));
+                    response.headers_mut().insert(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    );
+                    response
+                }),
+            );
+            axum::serve(listener, app)
+                .await
+                .expect("server should start");
+        });
+
+        let runtime = DirectSyncExecutionRuntime::new();
+        let execution = runtime
+            .execute_stream(&ExecutionPlan {
+                request_id: "req-sync-bridge".to_string(),
+                candidate_id: Some("cand-sync-bridge".to_string()),
+                provider_name: Some("OpenAI".to_string()),
+                provider_id: "provider-1".to_string(),
+                endpoint_id: "endpoint-1".to_string(),
+                key_id: "key-1".to_string(),
+                method: "POST".to_string(),
+                url: format!("http://{addr}/responses"),
+                headers: BTreeMap::new(),
+                content_type: None,
+                content_encoding: None,
+                body: RequestBody::from_json(serde_json::json!({
+                    "model": "gpt-5.4",
+                    "input": "hello",
+                    "stream": true
+                })),
+                stream: true,
+                client_api_format: "openai:cli".to_string(),
+                provider_api_format: "openai:cli".to_string(),
+                model_name: Some("gpt-5.4".into()),
+                proxy: None,
+                tls_profile: None,
+                timeouts: Some(ExecutionTimeouts {
+                    connect_ms: Some(5_000),
+                    total_ms: Some(5_000),
+                    ..ExecutionTimeouts::default()
+                }),
+            })
+            .await
+            .expect("stream execution should succeed");
+
+        let frames = build_direct_execution_frame_stream(execution)
+            .map(|item| item.expect("frame should encode"))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|bytes| String::from_utf8(bytes.to_vec()).expect("frame should be utf8"))
+            .collect::<Vec<_>>();
+
+        server.abort();
+
+        let header_frame: Value =
+            serde_json::from_str(&frames[0]).expect("headers frame should parse");
+        assert_eq!(
+            header_frame
+                .get("payload")
+                .and_then(|payload| payload.get("headers"))
+                .and_then(|headers| headers.get("content-type"))
+                .and_then(Value::as_str),
+            Some("text/event-stream")
+        );
+
+        let data_frame = frames
+            .iter()
+            .map(|line| serde_json::from_str::<Value>(line).expect("frame should parse"))
+            .find(|frame| frame.get("type").and_then(Value::as_str) == Some("data"))
+            .expect("data frame should exist");
+        let bridged_body = base64::engine::general_purpose::STANDARD
+            .decode(
+                data_frame
+                    .get("payload")
+                    .and_then(|payload| payload.get("chunk_b64"))
+                    .and_then(Value::as_str)
+                    .expect("chunk_b64 should exist"),
+            )
+            .expect("data frame should decode");
+        let bridged_text = String::from_utf8(bridged_body).expect("bridged body should be utf8");
+        assert!(bridged_text.contains("event: response.output_text.delta"));
+        assert!(bridged_text.contains("\"delta\":\"Hello from buffered JSON stream\""));
+        assert!(bridged_text.contains("event: response.completed"));
+
+        let eof_frame = frames
+            .iter()
+            .map(|line| serde_json::from_str::<Value>(line).expect("frame should parse"))
+            .find(|frame| frame.get("type").and_then(Value::as_str) == Some("eof"))
+            .expect("eof frame should exist");
+        assert_eq!(
+            eof_frame
+                .get("payload")
+                .and_then(|payload| payload.get("summary"))
+                .and_then(|summary| summary.get("response_id"))
+                .and_then(Value::as_str),
+            Some("resp_sync_bridge_123")
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_execution_frame_stream_bridges_openai_image_sync_json_to_image_sse() {
+        let listener = crate::test_support::bind_loopback_listener()
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let server = tokio::spawn(async move {
+            let app = Router::new().route(
+                "/responses",
+                post(|| async {
+                    let body = serde_json::json!({
+                        "created": 1776971267_u64,
+                        "data": [{
+                            "b64_json": "aGVsbG8="
+                        }],
+                        "usage": {
+                            "total_tokens": 100,
+                            "input_tokens": 50,
+                            "output_tokens": 50,
+                            "input_tokens_details": {
+                                "text_tokens": 10,
+                                "image_tokens": 40
+                            }
+                        }
+                    });
+                    let mut response = axum::http::Response::new(Body::from(
+                        serde_json::to_vec(&body).expect("json should encode"),
+                    ));
+                    response.headers_mut().insert(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/json"),
+                    );
+                    response
+                }),
+            );
+            axum::serve(listener, app)
+                .await
+                .expect("server should start");
+        });
+
+        let runtime = DirectSyncExecutionRuntime::new();
+        let execution = runtime
+            .execute_stream(&ExecutionPlan {
+                request_id: "req-image-sync-bridge".to_string(),
+                candidate_id: Some("cand-image-sync-bridge".to_string()),
+                provider_name: Some("OpenAI".to_string()),
+                provider_id: "provider-1".to_string(),
+                endpoint_id: "endpoint-1".to_string(),
+                key_id: "key-1".to_string(),
+                method: "POST".to_string(),
+                url: format!("http://{addr}/responses"),
+                headers: BTreeMap::new(),
+                content_type: None,
+                content_encoding: None,
+                body: RequestBody::from_json(serde_json::json!({
+                    "model": "gpt-image-1",
+                    "prompt": "poster",
+                    "stream": true
+                })),
+                stream: true,
+                client_api_format: "openai:image".to_string(),
+                provider_api_format: "openai:image".to_string(),
+                model_name: Some("gpt-image-1".into()),
+                proxy: None,
+                tls_profile: None,
+                timeouts: Some(ExecutionTimeouts {
+                    connect_ms: Some(5_000),
+                    total_ms: Some(5_000),
+                    ..ExecutionTimeouts::default()
+                }),
+            })
+            .await
+            .expect("stream execution should succeed");
+
+        let frames = build_direct_execution_frame_stream(execution)
+            .map(|item| item.expect("frame should encode"))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|bytes| String::from_utf8(bytes.to_vec()).expect("frame should be utf8"))
+            .collect::<Vec<_>>();
+
+        server.abort();
+
+        let header_frame: Value =
+            serde_json::from_str(&frames[0]).expect("headers frame should parse");
+        assert_eq!(
+            header_frame
+                .get("payload")
+                .and_then(|payload| payload.get("headers"))
+                .and_then(|headers| headers.get("content-type"))
+                .and_then(Value::as_str),
+            Some("text/event-stream")
+        );
+
+        let data_frame = frames
+            .iter()
+            .map(|line| serde_json::from_str::<Value>(line).expect("frame should parse"))
+            .find(|frame| frame.get("type").and_then(Value::as_str) == Some("data"))
+            .expect("data frame should exist");
+        let bridged_body = base64::engine::general_purpose::STANDARD
+            .decode(
+                data_frame
+                    .get("payload")
+                    .and_then(|payload| payload.get("chunk_b64"))
+                    .and_then(Value::as_str)
+                    .expect("chunk_b64 should exist"),
+            )
+            .expect("data frame should decode");
+        let bridged_text = String::from_utf8(bridged_body).expect("bridged body should be utf8");
+        assert!(bridged_text.contains("event: image_generation.completed"));
+        assert!(bridged_text.contains("\"type\":\"image_generation.completed\""));
+        assert!(bridged_text.contains("\"b64_json\":\"aGVsbG8=\""));
+        assert!(bridged_text.contains("\"total_tokens\":100"));
+
+        let eof_frame = frames
+            .iter()
+            .map(|line| serde_json::from_str::<Value>(line).expect("frame should parse"))
+            .find(|frame| frame.get("type").and_then(Value::as_str) == Some("eof"))
+            .expect("eof frame should exist");
+        assert_eq!(
+            eof_frame
+                .get("payload")
+                .and_then(|payload| payload.get("summary"))
+                .and_then(|summary| summary.get("model"))
+                .and_then(Value::as_str),
+            Some("gpt-image-1")
+        );
+        assert_eq!(
+            eof_frame
+                .get("payload")
+                .and_then(|payload| payload.get("summary"))
+                .and_then(|summary| summary.get("standardized_usage"))
+                .and_then(|usage| usage.get("dimensions"))
+                .and_then(|dimensions| dimensions.get("total_tokens"))
+                .and_then(Value::as_i64),
+            Some(100)
         );
     }
 

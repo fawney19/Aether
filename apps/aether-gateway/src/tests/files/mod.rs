@@ -227,7 +227,7 @@ async fn gateway_locally_denies_gemini_files_download_control_sync_even_with_opt
     assert_eq!(payload["error"]["type"], "http_error");
     assert_eq!(
         payload["error"]["message"],
-        "Gemini files execution runtime miss did not match a Rust execution path"
+        "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径"
     );
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
@@ -306,7 +306,7 @@ async fn gateway_locally_denies_gemini_files_download_control_sync_without_opt_i
     assert_eq!(payload["error"]["type"], "http_error");
     assert_eq!(
         payload["error"]["message"],
-        "Gemini files execution runtime miss did not match a Rust execution path"
+        "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径"
     );
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
@@ -378,7 +378,7 @@ async fn gateway_skips_gemini_files_download_control_sync_without_opt_in_header(
     assert_eq!(payload["error"]["type"], "http_error");
     assert_eq!(
         payload["error"]["message"],
-        "Gemini files execution runtime miss did not match a Rust execution path"
+        "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径"
     );
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);

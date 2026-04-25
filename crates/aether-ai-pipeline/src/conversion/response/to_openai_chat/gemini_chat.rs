@@ -18,6 +18,7 @@ pub fn convert_gemini_chat_response_to_openai_chat(
         let mut text = String::new();
         let mut content_parts = Vec::new();
         let mut reasoning_content = String::new();
+        let mut reasoning_parts = Vec::new();
         let mut tool_calls = Vec::new();
         let mut has_non_text_content = false;
         for (index, part) in parts.iter().enumerate() {
@@ -29,6 +30,22 @@ pub fn convert_gemini_chat_response_to_openai_chat(
                     .unwrap_or(false)
                 {
                     reasoning_content.push_str(piece);
+                    let mut reasoning_part = Map::new();
+                    reasoning_part
+                        .insert("type".to_string(), Value::String("thinking".to_string()));
+                    reasoning_part.insert("thinking".to_string(), Value::String(piece.to_string()));
+                    if let Some(signature) = part
+                        .get("thoughtSignature")
+                        .or_else(|| part.get("thought_signature"))
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                    {
+                        reasoning_part.insert(
+                            "signature".to_string(),
+                            Value::String(signature.to_string()),
+                        );
+                    }
+                    reasoning_parts.push(Value::Object(reasoning_part));
                 } else {
                     text.push_str(piece);
                     content_parts.push(json!({
@@ -60,14 +77,15 @@ pub fn convert_gemini_chat_response_to_openai_chat(
                     "type": "text",
                     "text": rendered_text,
                 }));
-            } else if let Some(image_url) = extract_gemini_image_url(part) {
-                content_parts.push(json!({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": image_url,
+            } else if let Some(content_part) = convert_gemini_part_to_openai_content_part(part) {
+                if content_part.get("type").and_then(Value::as_str) == Some("text") {
+                    if let Some(piece) = content_part.get("text").and_then(Value::as_str) {
+                        text.push_str(piece);
                     }
-                }));
-                has_non_text_content = true;
+                } else {
+                    has_non_text_content = true;
+                }
+                content_parts.push(content_part);
             } else {
                 continue;
             }
@@ -99,6 +117,9 @@ pub fn convert_gemini_chat_response_to_openai_chat(
                 "reasoning_content".to_string(),
                 Value::String(reasoning_content),
             );
+        }
+        if !reasoning_parts.is_empty() {
+            message.insert("reasoning_parts".to_string(), Value::Array(reasoning_parts));
         }
         if !tool_calls.is_empty() {
             message.insert("tool_calls".to_string(), Value::Array(tool_calls));
@@ -177,6 +198,69 @@ fn render_gemini_textual_part(part: &Map<String, Value>) -> Option<String> {
     None
 }
 
+fn convert_gemini_part_to_openai_content_part(part: &Map<String, Value>) -> Option<Value> {
+    if let Some(image_url) = extract_gemini_image_url(part) {
+        return Some(json!({
+            "type": "image_url",
+            "image_url": {
+                "url": image_url,
+            }
+        }));
+    }
+
+    if let Some(inline_data) = part
+        .get("inlineData")
+        .or_else(|| part.get("inline_data"))
+        .and_then(Value::as_object)
+    {
+        let mime_type = inline_data
+            .get("mimeType")
+            .or_else(|| inline_data.get("mime_type"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        let data = inline_data
+            .get("data")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        if let Some(format) = mime_type.strip_prefix("audio/") {
+            return Some(json!({
+                "type": "input_audio",
+                "input_audio": {
+                    "data": data,
+                    "format": format,
+                }
+            }));
+        }
+        return Some(json!({
+            "type": "file",
+            "file": {
+                "file_data": format!("data:{mime_type};base64,{data}"),
+            }
+        }));
+    }
+
+    if let Some(file_data) = part
+        .get("fileData")
+        .or_else(|| part.get("file_data"))
+        .and_then(Value::as_object)
+    {
+        let file_uri = file_data
+            .get("fileUri")
+            .or_else(|| file_data.get("file_uri"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        return Some(json!({
+            "type": "text",
+            "text": format!("[File: {file_uri}]"),
+        }));
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::convert_gemini_chat_response_to_openai_chat;
@@ -193,7 +277,7 @@ mod tests {
                     "finishReason": "RECITATION",
                     "content": {
                         "parts": [
-                            { "text": "thinking", "thought": true },
+                            { "text": "thinking", "thought": true, "thoughtSignature": "sig_123" },
                             { "executableCode": { "language": "python", "code": "print(1)" } },
                             { "codeExecutionResult": { "output": "1" } }
                         ]
@@ -226,6 +310,16 @@ mod tests {
             converted["choices"][0]["message"]["reasoning_content"],
             "thinking"
         );
+        assert_eq!(
+            converted["choices"][0]["message"]["reasoning_parts"],
+            json!([
+                {
+                    "type": "thinking",
+                    "thinking": "thinking",
+                    "signature": "sig_123"
+                }
+            ])
+        );
         let content = converted["choices"][0]["message"]["content"]
             .as_str()
             .expect("content should be string");
@@ -237,5 +331,54 @@ mod tests {
             2
         );
         assert_eq!(converted["usage"]["completion_tokens"], 7);
+    }
+
+    #[test]
+    fn preserves_gemini_multimodal_parts_in_openai_chat_response() {
+        let response = json!({
+            "responseId": "resp_mm_123",
+            "modelVersion": "gemini-2.5-pro",
+            "candidates": [{
+                "index": 0,
+                "finishReason": "STOP",
+                "content": {
+                    "parts": [
+                        { "text": "Attached." },
+                        { "inlineData": { "mimeType": "image/png", "data": "iVBORw0KGgo=" } },
+                        { "inlineData": { "mimeType": "application/pdf", "data": "JVBERi0x" } },
+                        { "inline_data": { "mime_type": "audio/mp3", "data": "SUQz" } },
+                        { "fileData": { "fileUri": "https://example.com/report.pdf", "mimeType": "application/pdf" } }
+                    ]
+                }
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 4,
+                "candidatesTokenCount": 2,
+                "totalTokenCount": 6
+            }
+        });
+
+        let converted = convert_gemini_chat_response_to_openai_chat(&response, &json!({}))
+            .expect("response should convert");
+
+        assert_eq!(
+            converted["choices"][0]["message"]["content"],
+            json!([
+                { "type": "text", "text": "Attached." },
+                {
+                    "type": "image_url",
+                    "image_url": { "url": "data:image/png;base64,iVBORw0KGgo=" }
+                },
+                {
+                    "type": "file",
+                    "file": { "file_data": "data:application/pdf;base64,JVBERi0x" }
+                },
+                {
+                    "type": "input_audio",
+                    "input_audio": { "data": "SUQz", "format": "mp3" }
+                },
+                { "type": "text", "text": "[File: https://example.com/report.pdf]" }
+            ])
+        );
     }
 }

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use aether_provider_transport::provider_types::provider_type_is_fixed;
 use tracing::warn;
 
 use aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate;
@@ -295,6 +296,22 @@ fn transport_key_supports_api_format(
     transport: &GatewayProviderTransportSnapshot,
     endpoint_api_format: &str,
 ) -> bool {
+    let provider_type = transport.provider.provider_type.trim();
+    let auth_type = transport.key.auth_type.trim();
+    let inherits_provider_api_formats = provider_type_is_fixed(provider_type)
+        && (auth_type.eq_ignore_ascii_case("oauth")
+            || (provider_type.eq_ignore_ascii_case("kiro")
+                && auth_type.eq_ignore_ascii_case("bearer")
+                && transport
+                    .key
+                    .decrypted_auth_config
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|value| !value.is_empty())));
+    if inherits_provider_api_formats {
+        return true;
+    }
+
     match transport.key.api_formats.as_deref() {
         None => true,
         Some(formats) => formats
