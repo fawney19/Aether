@@ -22,12 +22,17 @@ pub fn build_kiro_request_auth_from_config(
     auth_config: KiroAuthConfig,
     fallback_secret: Option<&str>,
 ) -> Option<KiroRequestAuth> {
+    let cached_token_needs_refresh = auth_config.cached_access_token_requires_refresh(120);
     let fallback_secret = fallback_secret
         .map(str::trim)
         .filter(|value| !value.is_empty() && *value != "__placeholder__");
+    if cached_token_needs_refresh && auth_config.can_refresh_access_token() {
+        return None;
+    }
+
     let token = auth_config
         .cached_access_token()
-        .filter(|_| !auth_config.cached_access_token_requires_refresh(120))
+        .filter(|_| !cached_token_needs_refresh)
         .or(fallback_secret)?;
     let machine_id = generate_machine_id(&auth_config, Some(token))?;
 
@@ -291,9 +296,9 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_decrypted_api_key_when_cached_access_token_is_expired() {
+    fn refreshable_expired_cached_access_token_does_not_fallback_to_decrypted_api_key() {
         let mut transport = sample_transport();
-        transport.key.decrypted_api_key = "live-upstream-token".to_string();
+        transport.key.decrypted_api_key = "stale-upstream-token".to_string();
         transport.key.decrypted_auth_config = Some(
             r#"{
                 "access_token":"expired-token",
@@ -303,9 +308,8 @@ mod tests {
             .to_string(),
         );
 
-        let auth = resolve_local_kiro_request_auth(&transport)
-            .expect("request auth should fall back to decrypted api key");
-        assert_eq!(auth.value, "Bearer live-upstream-token");
+        assert!(resolve_local_kiro_request_auth(&transport).is_none());
+        assert!(supports_local_kiro_request_auth_resolution(&transport));
     }
 
     #[test]
