@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use serde_json::{Map, Value};
@@ -10,7 +11,7 @@ use crate::ai_pipeline::planner::candidate_eligibility::{
     EligibleLocalExecutionCandidate, SkippedLocalExecutionCandidate,
 };
 use crate::ai_pipeline::PlannerAppState;
-use crate::clock::current_unix_secs;
+use crate::clock::current_unix_ms;
 use crate::handlers::shared::provider_pool::admin_provider_pool_config_from_config_value;
 use crate::handlers::shared::provider_pool::read_admin_provider_pool_runtime_state;
 use crate::handlers::shared::provider_pool::{
@@ -27,6 +28,7 @@ const POOL_ACCOUNT_BLOCKED_SKIP_REASON: &str = "pool_account_blocked";
 const POOL_ACCOUNT_EXHAUSTED_SKIP_REASON: &str = "pool_account_exhausted";
 const POOL_COOLDOWN_SKIP_REASON: &str = "pool_cooldown";
 const POOL_COST_LIMIT_REACHED_SKIP_REASON: &str = "pool_cost_limit_reached";
+static LOAD_BALANCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct PoolGroupKey {
@@ -785,16 +787,17 @@ fn group_sort_seed(
     provider_type: &str,
     candidate: Option<&aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate>,
 ) -> String {
-    let minute_bucket = current_unix_secs() / 60;
+    let now_ms = current_unix_ms();
+    let sequence = LOAD_BALANCE_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed);
     match candidate {
         Some(candidate) => format!(
-            "{provider_type}:{}:{}:{}:{}:{minute_bucket}",
+            "{provider_type}:{}:{}:{}:{}:{now_ms}:{sequence}",
             candidate.provider_id,
             candidate.endpoint_id,
             candidate.model_id,
             candidate.selected_provider_model_name,
         ),
-        None => format!("{provider_type}:{minute_bucket}"),
+        None => format!("{provider_type}:{now_ms}:{sequence}"),
     }
 }
 
@@ -911,9 +914,8 @@ fn plan_priority_score(plan_type: Option<&str>, mode: Option<&str>) -> f64 {
             None => 0.8,
         },
         "plus_only" => match plan_type {
-            Some("plus") => 0.0,
-            Some("pro") => 0.3,
-            Some("enterprise" | "business") => 0.4,
+            Some("plus" | "pro") => 0.0,
+            Some("enterprise" | "business") => 0.3,
             Some("free" | "team") => 0.7,
             Some(_) => 0.7,
             None => 0.8,
@@ -1227,14 +1229,22 @@ mod tests {
             "endpoint-1",
             "key-a",
             10,
-            Some(json!({ "pool_advanced": { "lru_enabled": true } })),
+            Some(json!({
+                "pool_advanced": {
+                    "scheduling_presets": [{"preset": "cache_affinity", "enabled": true}]
+                }
+            })),
         );
         let key_b = sample_eligible_candidate(
             "provider-pool",
             "endpoint-1",
             "key-b",
             10,
-            Some(json!({ "pool_advanced": { "lru_enabled": true } })),
+            Some(json!({
+                "pool_advanced": {
+                    "scheduling_presets": [{"preset": "cache_affinity", "enabled": true}]
+                }
+            })),
         );
 
         let mut runtime_by_provider = BTreeMap::new();
@@ -1252,6 +1262,55 @@ mod tests {
 
         let (reordered, skipped) = apply_local_execution_pool_scheduler_with_runtime_map(
             vec![key_a, key_b],
+            &runtime_by_provider,
+            &BTreeMap::new(),
+        );
+
+        assert!(skipped.is_empty());
+        assert_eq!(
+            reordered
+                .iter()
+                .map(|item| item.candidate.key_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["key-a", "key-b"]
+        );
+    }
+
+    #[test]
+    fn pool_scheduler_promotes_sticky_hit_regardless_distribution_mode() {
+        let key_a = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "key-a",
+            10,
+            Some(json!({
+                "pool_advanced": {
+                    "scheduling_presets": [{"preset": "quota_balanced", "enabled": true}]
+                }
+            })),
+        );
+        let key_b = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "key-b",
+            10,
+            Some(json!({
+                "pool_advanced": {
+                    "scheduling_presets": [{"preset": "quota_balanced", "enabled": true}]
+                }
+            })),
+        );
+
+        let runtime_by_provider = BTreeMap::from([(
+            "provider-pool".to_string(),
+            AdminProviderPoolRuntimeState {
+                sticky_bound_key_id: Some("key-a".to_string()),
+                ..AdminProviderPoolRuntimeState::default()
+            },
+        )]);
+
+        let (reordered, skipped) = apply_local_execution_pool_scheduler_with_runtime_map(
+            vec![key_b, key_a],
             &runtime_by_provider,
             &BTreeMap::new(),
         );
@@ -1454,6 +1513,85 @@ mod tests {
                 .map(|item| item.candidate.key_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["key-plus", "key-free"]
+        );
+    }
+
+    #[test]
+    fn pool_scheduler_plus_first_treats_plus_and_pro_as_top_tier() {
+        let key_plus = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "key-plus",
+            10,
+            Some(json!({
+                "pool_advanced": {
+                    "scheduling_presets": [{"preset": "plus_first", "enabled": true}]
+                }
+            })),
+        );
+        let key_pro = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "key-pro",
+            10,
+            Some(json!({
+                "pool_advanced": {
+                    "scheduling_presets": [{"preset": "plus_first", "enabled": true}]
+                }
+            })),
+        );
+        let key_team = sample_eligible_candidate(
+            "provider-pool",
+            "endpoint-1",
+            "key-team",
+            10,
+            Some(json!({
+                "pool_advanced": {
+                    "scheduling_presets": [{"preset": "plus_first", "enabled": true}]
+                }
+            })),
+        );
+
+        let key_context_by_id = BTreeMap::from([
+            (
+                "key-plus".to_string(),
+                PoolCatalogKeyContext {
+                    oauth_plan_type: Some("plus".to_string()),
+                    catalog_lru_score: Some(300.0),
+                    ..PoolCatalogKeyContext::default()
+                },
+            ),
+            (
+                "key-pro".to_string(),
+                PoolCatalogKeyContext {
+                    oauth_plan_type: Some("pro".to_string()),
+                    catalog_lru_score: Some(100.0),
+                    ..PoolCatalogKeyContext::default()
+                },
+            ),
+            (
+                "key-team".to_string(),
+                PoolCatalogKeyContext {
+                    oauth_plan_type: Some("team".to_string()),
+                    catalog_lru_score: Some(50.0),
+                    ..PoolCatalogKeyContext::default()
+                },
+            ),
+        ]);
+
+        let (reordered, skipped) = apply_local_execution_pool_scheduler_with_runtime_map(
+            vec![key_plus, key_pro, key_team],
+            &BTreeMap::new(),
+            &key_context_by_id,
+        );
+
+        assert!(skipped.is_empty());
+        assert_eq!(
+            reordered
+                .iter()
+                .map(|item| item.candidate.key_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["key-plus", "key-pro", "key-team"]
         );
     }
 

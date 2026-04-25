@@ -52,7 +52,7 @@ fn should_touch_lru(pool_config: &AdminProviderPoolConfig) -> bool {
 }
 
 fn should_record_latency(pool_config: &AdminProviderPoolConfig) -> bool {
-    enabled_pool_presets(pool_config).any(|preset| preset.eq_ignore_ascii_case("latency_first"))
+    enabled_pool_presets(pool_config).any(|preset| !preset.eq_ignore_ascii_case("lru"))
 }
 
 fn oauth_cache_key(key_id: &str) -> String {
@@ -589,11 +589,18 @@ mod tests {
 
     fn sample_pool_config() -> AdminProviderPoolConfig {
         AdminProviderPoolConfig {
-            scheduling_presets: vec![AdminProviderPoolSchedulingPreset {
-                preset: "latency_first".to_string(),
-                enabled: true,
-                mode: None,
-            }],
+            scheduling_presets: vec![
+                AdminProviderPoolSchedulingPreset {
+                    preset: "cache_affinity".to_string(),
+                    enabled: true,
+                    mode: None,
+                },
+                AdminProviderPoolSchedulingPreset {
+                    preset: "latency_first".to_string(),
+                    enabled: true,
+                    mode: None,
+                },
+            ],
             unschedulable_rules: Vec::new(),
             lru_enabled: true,
             skip_exhausted_accounts: false,
@@ -717,6 +724,44 @@ mod tests {
         assert_eq!(runtime.sticky_sessions_by_key.get("key-1"), Some(&1));
         assert_eq!(runtime.cost_window_usage_by_key.get("key-1"), Some(&120));
         assert_eq!(runtime.latency_avg_ms_by_key.get("key-1"), Some(&80.0));
+        assert!(runtime.lru_score_by_key.contains_key("key-1"));
+    }
+
+    #[tokio::test]
+    async fn success_feedback_does_not_write_sticky_when_ttl_is_zero() {
+        let Some(redis) = start_managed_redis_or_skip().await else {
+            return;
+        };
+        let app = build_runner_app(redis.redis_url(), "pool_runtime_no_sticky_without_affinity");
+        let runner = app.redis_kv_runner().expect("redis runner should exist");
+        let mut pool_config = sample_pool_config();
+        pool_config.sticky_session_ttl_seconds = 0;
+        let key_ids = vec!["key-1".to_string()];
+
+        record_admin_provider_pool_success(
+            &runner,
+            "provider-1",
+            "key-1",
+            &pool_config,
+            Some("session-1"),
+            120,
+            Some(80),
+        )
+        .await;
+
+        let runtime = read_admin_provider_pool_runtime_state(
+            &runner,
+            "provider-1",
+            &key_ids,
+            &pool_config,
+            Some("session-1"),
+        )
+        .await;
+
+        assert_eq!(runtime.total_sticky_sessions, 0);
+        assert_eq!(runtime.sticky_bound_key_id, None);
+        assert_eq!(runtime.sticky_sessions_by_key.get("key-1"), None);
+        assert_eq!(runtime.cost_window_usage_by_key.get("key-1"), Some(&120));
         assert!(runtime.lru_score_by_key.contains_key("key-1"));
     }
 

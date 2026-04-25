@@ -266,7 +266,6 @@ pub(crate) fn admin_provider_pool_config_from_config_value(
         sticky_session_ttl_seconds: pool_advanced
             .get("sticky_session_ttl_seconds")
             .and_then(json_u64)
-            .filter(|value| *value > 0)
             .unwrap_or(3600),
         latency_window_seconds: pool_advanced
             .get("latency_window_seconds")
@@ -387,6 +386,18 @@ mod tests {
         assert_eq!(config.stream_timeout_threshold, 4);
         assert_eq!(config.stream_timeout_window_seconds, 900);
         assert_eq!(config.stream_timeout_cooldown_seconds, 180);
+    }
+
+    #[test]
+    fn parses_zero_sticky_session_ttl_to_disable_sticky_sessions() {
+        let config = admin_provider_pool_config_from_config_value(Some(&json!({
+            "pool_advanced": {
+                "sticky_session_ttl_seconds": 0
+            }
+        })))
+        .expect("pool config should parse");
+
+        assert_eq!(config.sticky_session_ttl_seconds, 0);
     }
 
     #[test]
