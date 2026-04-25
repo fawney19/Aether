@@ -32,6 +32,63 @@ import {
 /** Raw JSON object from API (loosely typed) */
 type RawObject = Record<string, unknown>
 
+type JsonParseResult =
+  | { ok: true; value: unknown }
+  | { ok: false }
+
+const HTML_ENTITY_MAP: Record<string, string> = {
+  amp: '&',
+  apos: "'",
+  gt: '>',
+  lt: '<',
+  nbsp: '\u00A0',
+  quot: '"',
+}
+
+const parseJsonString = (input: string): JsonParseResult => {
+  try {
+    return { ok: true, value: JSON.parse(input) as unknown }
+  } catch {
+    return { ok: false }
+  }
+}
+
+const decodeHtmlEntityToken = (entity: string): string => {
+  const normalized = entity.toLowerCase()
+  const named = HTML_ENTITY_MAP[normalized]
+  if (named !== undefined) {
+    return named
+  }
+
+  if (normalized.startsWith('#x')) {
+    const codePoint = Number.parseInt(normalized.slice(2), 16)
+    if (Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10FFFF) {
+      return String.fromCodePoint(codePoint)
+    }
+  }
+
+  if (normalized.startsWith('#')) {
+    const codePoint = Number.parseInt(normalized.slice(1), 10)
+    if (Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10FFFF) {
+      return String.fromCodePoint(codePoint)
+    }
+  }
+
+  return `&${entity};`
+}
+
+const decodeHtmlEntities = (input: string): string => {
+  let decoded = input
+  for (let pass = 0; pass < 3; pass += 1) {
+    const next = decoded.replace(/&(#x[0-9a-f]+|#\d+|[a-z][a-z0-9]+);/gi, (_match, entity: string) => decodeHtmlEntityToken(entity))
+    if (next === decoded) {
+      break
+    }
+    decoded = next
+  }
+  return decoded
+}
+
 /**
  * OpenAI API 格式解析器
  */
@@ -1153,12 +1210,21 @@ export class OpenAIParser implements ApiFormatParser {
    */
   private formatJson(input: unknown): string {
     if (typeof input === 'string') {
-      try {
-        const parsed = JSON.parse(input) as unknown
-        return JSON.stringify(parsed, null, 2)
-      } catch {
-        return input
+      const parsed = parseJsonString(input)
+      if (parsed.ok) {
+        return JSON.stringify(parsed.value, null, 2)
       }
+
+      const decoded = decodeHtmlEntities(input)
+      if (decoded !== input) {
+        const parsedDecoded = parseJsonString(decoded)
+        if (parsedDecoded.ok) {
+          return JSON.stringify(parsedDecoded.value, null, 2)
+        }
+        return decoded
+      }
+
+      return input
     }
     return JSON.stringify(input, null, 2)
   }

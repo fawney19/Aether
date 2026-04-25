@@ -109,4 +109,55 @@ describe('Conversation stream compatibility', () => {
       content: 'Hello from legacy alias',
     })
   })
+
+  it('renders HTML-entity encoded OpenAI tool arguments as formatted JSON', () => {
+    const requestBody = {
+      model: 'gpt-5.4',
+      messages: [
+        { role: 'user', content: 'Call a tool' },
+      ],
+    }
+    const responseBody = {
+      id: 'chatcmpl_tool_123',
+      object: 'chat.completion',
+      model: 'gpt-5.4',
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: null,
+            tool_calls: [
+              {
+                id: 'call_123',
+                type: 'function',
+                function: {
+                  name: 'skill',
+                  arguments: '{&quot;name&quot;:&quot;hai-ai&quot;,&quot;user_message&quot;:&quot;A &amp; B &lt; C &gt; D &#39;ok&#39;&quot;}',
+                },
+              },
+            ],
+          },
+          finish_reason: 'tool_calls',
+        },
+      ],
+    }
+
+    const rendered = renderResponse(responseBody, requestBody, 'openai:chat')
+    expect(rendered.error).toBeUndefined()
+
+    const firstBlock = rendered.blocks[0]
+    if (!firstBlock || firstBlock.type !== 'message') {
+      throw new Error('expected first render block to be message')
+    }
+
+    expect(firstBlock.content[0]).toMatchObject({
+      type: 'tool_use',
+      toolName: 'skill',
+      input: JSON.stringify({
+        name: 'hai-ai',
+        user_message: "A & B < C > D 'ok'",
+      }, null, 2),
+    })
+  })
 })
