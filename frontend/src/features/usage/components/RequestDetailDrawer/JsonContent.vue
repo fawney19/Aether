@@ -180,6 +180,8 @@ const escapeHtml = (str: string): string => {
     .replace(/"/g, '&quot;')
 }
 
+const jsonStringLiteral = (value: string): string => JSON.stringify(value)
+
 const parseJsonToLines = (data: unknown): JsonLine[] => {
   const result: JsonLine[] = []
   let lineNumber = 1
@@ -222,7 +224,7 @@ const parseJsonToLines = (data: unknown): JsonLine[] => {
         id: result.length,
         lineNumber: lineNumber++,
         indent,
-        html: keyPrefix + getTokenHtml(`"${escapeHtml(value)}"`, 'string') + comma,
+        html: keyPrefix + getTokenHtml(jsonStringLiteral(value), 'string') + comma,
         canFold: false,
         blockId: '',
       })
@@ -294,7 +296,7 @@ const parseJsonToLines = (data: unknown): JsonLine[] => {
         })
 
         keys.forEach((key, i) => {
-          const keyHtml = getTokenHtml(`"${escapeHtml(key)}"`, 'key') + getTokenHtml(': ', 'punctuation')
+          const keyHtml = getTokenHtml(jsonStringLiteral(key), 'key') + getTokenHtml(': ', 'punctuation')
           processValue(obj[key], indent + 1, i === keys.length - 1, keyHtml)
         })
 
