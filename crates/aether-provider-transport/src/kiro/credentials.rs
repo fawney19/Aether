@@ -141,7 +141,7 @@ impl KiroAuthConfig {
 
     pub fn cached_access_token_requires_refresh(&self, skew_seconds: u64) -> bool {
         let Some(expires_at) = self.expires_at else {
-            return false;
+            return self.can_refresh_access_token();
         };
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)

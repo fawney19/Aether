@@ -664,6 +664,7 @@ async fn gateway_executes_kiro_claude_cli_sync_upstream_stream_via_local_finaliz
         let auth_config = serde_json::json!({
             "provider_type": "kiro",
             "access_token": "cached-kiro-finalize-access-token",
+            "expires_at": 4102444800_u64,
             "refresh_token": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
             "machine_id": "123e4567-e89b-12d3-a456-426614174000",
             "api_region": "us-east-1",

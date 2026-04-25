@@ -51,6 +51,7 @@ use crate::clock::current_unix_ms as current_request_candidate_unix_ms;
 use crate::constants::{CONTROL_CANDIDATE_ID_HEADER, CONTROL_REQUEST_ID_HEADER};
 use crate::control::GatewayControlDecision;
 use crate::execution_runtime::build_direct_execution_frame_stream;
+use crate::execution_runtime::oauth_retry::refresh_oauth_plan_auth_for_retry;
 #[cfg(test)]
 use crate::execution_runtime::remote_compat::post_stream_plan_to_remote_execution_runtime;
 use crate::execution_runtime::submission::{
@@ -312,6 +313,24 @@ async fn execute_in_process_stream(
     DirectSyncExecutionRuntime::new().execute_stream(plan).await
 }
 
+async fn execute_in_process_stream_with_oauth_retry(
+    state: &AppState,
+    plan: &mut ExecutionPlan,
+    trace_id: &str,
+    report_context: Option<&Value>,
+) -> Result<DirectUpstreamStreamExecution, ExecutionRuntimeTransportError> {
+    let mut execution = execute_in_process_stream(state, plan).await?;
+    apply_stream_summary_report_context(&mut execution, report_context);
+    if execution.status_code >= 400
+        && refresh_oauth_plan_auth_for_retry(state, plan, execution.status_code, None, trace_id)
+            .await
+    {
+        execution = execute_in_process_stream(state, plan).await?;
+        apply_stream_summary_report_context(&mut execution, report_context);
+    }
+    Ok(execution)
+}
+
 #[allow(clippy::too_many_arguments)] // internal function, grouping would add unnecessary indirection
 pub(crate) async fn execute_execution_runtime_stream(
     state: &AppState,
@@ -351,21 +370,28 @@ pub(crate) async fn execute_execution_runtime_stream(
         });
     }
     let plan_request_id_for_log = short_request_id(plan.request_id.as_str());
-    let provider_name = plan.provider_name.as_deref().unwrap_or("-");
-    let endpoint_id = plan.endpoint_id.as_str();
-    let key_id = plan.key_id.as_str();
-    let model_name = plan.model_name.as_deref().unwrap_or("-");
+    let provider_name = plan
+        .provider_name
+        .clone()
+        .unwrap_or_else(|| "-".to_string());
+    let endpoint_id = plan.endpoint_id.clone();
+    let key_id = plan.key_id.clone();
+    let model_name = plan.model_name.clone().unwrap_or_else(|| "-".to_string());
     let candidate_index = parse_request_candidate_report_context(report_context.as_ref())
         .and_then(|context| context.candidate_index)
         .map(|value| value.to_string())
         .unwrap_or_else(|| "-".to_string());
     #[cfg(not(test))]
     {
-        let execution = match execute_in_process_stream(state, &plan).await {
-            Ok(mut execution) => {
-                apply_stream_summary_report_context(&mut execution, report_context.as_ref());
-                execution
-            }
+        let execution = match execute_in_process_stream_with_oauth_retry(
+            state,
+            &mut plan,
+            trace_id,
+            report_context.as_ref(),
+        )
+        .await
+        {
+            Ok(execution) => execution,
             Err(err) => {
                 info!(
                     event_name = "stream_execution_runtime_unavailable",
@@ -421,11 +447,15 @@ pub(crate) async fn execute_execution_runtime_stream(
             .execution_runtime_override_base_url()
             .unwrap_or_default();
         if remote_execution_runtime_base_url.trim().is_empty() {
-            let execution = match execute_in_process_stream(state, &plan).await {
-                Ok(mut execution) => {
-                    apply_stream_summary_report_context(&mut execution, report_context.as_ref());
-                    execution
-                }
+            let execution = match execute_in_process_stream_with_oauth_retry(
+                state,
+                &mut plan,
+                trace_id,
+                report_context.as_ref(),
+            )
+            .await
+            {
+                Ok(execution) => execution,
                 Err(err) => {
                     info!(
                         event_name = "stream_execution_runtime_unavailable",

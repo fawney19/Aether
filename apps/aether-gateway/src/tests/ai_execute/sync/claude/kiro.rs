@@ -198,6 +198,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
         let auth_config = serde_json::json!({
             "provider_type": "kiro",
             "access_token": "cached-kiro-access-token",
+            "expires_at": 4102444800_u64,
             "refresh_token": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
             "machine_id": "123e4567-e89b-12d3-a456-426614174000",
             "api_region": "us-east-1",
@@ -750,6 +751,8 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
     fn sample_provider_catalog_key() -> StoredProviderCatalogKey {
         let auth_config = serde_json::json!({
             "provider_type": "kiro",
+            "access_token": "stale-kiro-access-token",
+            "expires_at": 4102444800_u64,
             "refresh_token": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
             "machine_id": "123e4567-e89b-12d3-a456-426614174000",
             "api_region": "us-east-1",
@@ -791,6 +794,8 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
 
     let seen_execution_runtime = Arc::new(Mutex::new(None::<SeenExecutionRuntimeSyncRequest>));
     let seen_execution_runtime_clone = Arc::clone(&seen_execution_runtime);
+    let execution_hits = Arc::new(Mutex::new(0usize));
+    let execution_hits_clone = Arc::clone(&execution_hits);
     let refresh_hits = Arc::new(Mutex::new(0usize));
     let refresh_hits_clone = Arc::clone(&refresh_hits);
 
@@ -864,11 +869,19 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
         "/v1/execute/sync",
         any(move |request: Request| {
             let seen_execution_runtime_inner = Arc::clone(&seen_execution_runtime_clone);
+            let execution_hits_inner = Arc::clone(&execution_hits_clone);
             async move {
                 let (parts, body) = request.into_parts();
                 let raw_body = to_bytes(body, usize::MAX).await.expect("body should read");
                 let payload: serde_json::Value =
                     serde_json::from_slice(&raw_body).expect("execution runtime payload should parse");
+                *execution_hits_inner.lock().expect("mutex should lock") += 1;
+                let authorization = payload
+                    .get("headers")
+                    .and_then(|value| value.get("authorization"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 *seen_execution_runtime_inner.lock().expect("mutex should lock") =
                     Some(SeenExecutionRuntimeSyncRequest {
                         trace_id: parts
@@ -877,12 +890,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
                             .and_then(|value| value.to_str().ok())
                             .unwrap_or_default()
                             .to_string(),
-                        authorization: payload
-                            .get("headers")
-                            .and_then(|value| value.get("authorization"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
+                        authorization: authorization.clone(),
                         mapped_model: payload
                             .get("body")
                             .and_then(|value| value.get("json_body"))
@@ -904,6 +912,24 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
                             .unwrap_or_default()
                             .to_string(),
                     });
+
+                if authorization == "Bearer stale-kiro-access-token" {
+                    return Json(json!({
+                        "request_id": "trace-kiro-cli-local-refresh-123",
+                        "status_code": 401,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {
+                                "message": "The security token included in the request is expired"
+                            }
+                        },
+                        "telemetry": {
+                            "elapsed_ms": 7
+                        }
+                    }));
+                }
 
                 let kiro_frames = [
                     encode_event_frame(
@@ -1001,6 +1027,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
     );
 
     assert_eq!(*refresh_hits.lock().expect("mutex should lock"), 1);
+    assert_eq!(*execution_hits.lock().expect("mutex should lock"), 2);
     let seen_execution_runtime_request = seen_execution_runtime
         .lock()
         .expect("mutex should lock")

@@ -24,6 +24,7 @@ use crate::api::response::{
 };
 use crate::clock::current_unix_ms as current_request_candidate_unix_ms;
 use crate::control::GatewayControlDecision;
+use crate::execution_runtime::oauth_retry::refresh_oauth_plan_auth_for_retry;
 #[cfg(test)]
 use crate::execution_runtime::remote_compat::post_sync_plan_to_remote_execution_runtime;
 use crate::execution_runtime::submission::submit_local_core_error_or_sync_finalize;
@@ -155,13 +156,16 @@ pub(crate) async fn execute_execution_runtime_sync(
     mut report_context: Option<serde_json::Value>,
 ) -> Result<Option<Response<Body>>, GatewayError> {
     ensure_execution_request_candidate_slot(state, &mut plan, &mut report_context).await;
-    let plan_request_id = plan.request_id.as_str();
-    let plan_request_id_for_log = short_request_id(plan_request_id);
-    let plan_candidate_id = plan.candidate_id.as_deref();
-    let provider_name = plan.provider_name.as_deref().unwrap_or("-");
-    let endpoint_id = plan.endpoint_id.as_str();
-    let key_id = plan.key_id.as_str();
-    let model_name = plan.model_name.as_deref().unwrap_or("-");
+    let plan_request_id = plan.request_id.clone();
+    let plan_request_id_for_log = short_request_id(plan_request_id.as_str());
+    let plan_candidate_id = plan.candidate_id.clone();
+    let provider_name = plan
+        .provider_name
+        .clone()
+        .unwrap_or_else(|| "-".to_string());
+    let endpoint_id = plan.endpoint_id.clone();
+    let key_id = plan.key_id.clone();
+    let model_name = plan.model_name.clone().unwrap_or_else(|| "-".to_string());
     let candidate_index = parse_request_candidate_report_context(report_context.as_ref())
         .and_then(|context| context.candidate_index)
         .map(|value| value.to_string())
@@ -316,8 +320,8 @@ pub(crate) async fn execute_execution_runtime_sync(
                 trace_id,
                 decision,
                 &plan,
-                plan_request_id,
-                plan_candidate_id,
+                plan_request_id.as_str(),
+                plan_candidate_id.as_deref(),
                 report_context.as_ref(),
                 candidate_started_unix_secs,
             )
@@ -329,33 +333,100 @@ pub(crate) async fn execute_execution_runtime_sync(
             }
         }
     };
-    let result_body_json = result
-        .body
-        .as_ref()
-        .and_then(|body| body.json_body.as_ref());
-    let (result_error_type, result_error_message) =
-        execution_error_details(result.error.as_ref(), result_body_json);
-    let result_latency_ms = result
-        .telemetry
-        .as_ref()
-        .and_then(|telemetry| telemetry.elapsed_ms);
-    let mut headers = std::mem::take(&mut result.headers);
-    let (body_bytes, body_json, body_base64) =
-        decode_execution_result_body(result.body.take(), &mut headers)?;
-    let local_failover_response_text = local_failover_response_text(
-        body_json.as_ref(),
-        &body_bytes,
-        result.error.as_ref().map(|error| error.message.as_str()),
-    );
-    let local_failover_analysis = analyze_local_candidate_failover_sync(
-        state,
-        &plan,
-        plan_kind,
-        report_context.as_ref(),
-        &result,
-        local_failover_response_text.as_deref(),
-    )
-    .await;
+    let mut oauth_retry_attempted = false;
+    let (
+        result_error_type,
+        result_error_message,
+        result_latency_ms,
+        headers,
+        body_bytes,
+        body_json,
+        body_base64,
+        local_failover_response_text,
+        local_failover_analysis,
+    ) = loop {
+        let result_body_json = result
+            .body
+            .as_ref()
+            .and_then(|body| body.json_body.as_ref());
+        let (result_error_type, result_error_message) =
+            execution_error_details(result.error.as_ref(), result_body_json);
+        let result_latency_ms = result
+            .telemetry
+            .as_ref()
+            .and_then(|telemetry| telemetry.elapsed_ms);
+        let mut headers = std::mem::take(&mut result.headers);
+        let (body_bytes, body_json, body_base64) =
+            decode_execution_result_body(result.body.take(), &mut headers)?;
+        let local_failover_response_text = local_failover_response_text(
+            body_json.as_ref(),
+            &body_bytes,
+            result.error.as_ref().map(|error| error.message.as_str()),
+        );
+
+        if result.status_code >= 400
+            && !oauth_retry_attempted
+            && refresh_oauth_plan_auth_for_retry(
+                state,
+                &mut plan,
+                result.status_code,
+                local_failover_response_text.as_deref(),
+                trace_id,
+            )
+            .await
+        {
+            oauth_retry_attempted = true;
+            match crate::execution_runtime::execute_execution_runtime_sync_plan(
+                state,
+                Some(trace_id),
+                &plan,
+            )
+            .await
+            {
+                Ok(retry_result) => {
+                    result = retry_result;
+                    continue;
+                }
+                Err(err) => {
+                    warn!(
+                        event_name = "local_sync_oauth_retry_execution_failed",
+                        log_type = "ops",
+                        trace_id = %trace_id,
+                        request_id = %plan_request_id_for_log,
+                        candidate_id = ?plan_candidate_id,
+                        provider_name,
+                        endpoint_id,
+                        key_id,
+                        model_name,
+                        candidate_index = candidate_index.as_str(),
+                        error = ?err,
+                        "gateway oauth retry sync execution failed"
+                    );
+                }
+            }
+        }
+
+        let local_failover_analysis = analyze_local_candidate_failover_sync(
+            state,
+            &plan,
+            plan_kind,
+            report_context.as_ref(),
+            &result,
+            local_failover_response_text.as_deref(),
+        )
+        .await;
+        break (
+            result_error_type,
+            result_error_message,
+            result_latency_ms,
+            headers,
+            body_bytes,
+            body_json,
+            body_base64,
+            local_failover_response_text,
+            local_failover_analysis,
+        );
+    };
     if result.status_code >= 400 {
         apply_local_execution_effect(
             state,
@@ -531,11 +602,12 @@ pub(crate) async fn execute_execution_runtime_sync(
     let candidate_id_owned = result.candidate_id;
     let request_id = (!request_id_owned.trim().is_empty())
         .then_some(request_id_owned.as_str())
-        .or(Some(plan_request_id));
+        .or(Some(plan_request_id.as_str()));
     let request_id_for_log = short_request_id(request_id.unwrap_or("-"));
-    let candidate_id = candidate_id_owned.as_deref().or(plan_candidate_id);
+    let candidate_id = candidate_id_owned
+        .as_deref()
+        .or(plan_candidate_id.as_deref());
     let report_context = report_context;
-    let headers = headers;
     let body_json = body_json;
     let telemetry = result.telemetry;
 
