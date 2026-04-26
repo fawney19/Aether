@@ -27,6 +27,8 @@ mod config;
 mod db_maintenance;
 #[path = "runtime/pending_cleanup.rs"]
 mod pending_cleanup;
+#[path = "runtime/pool_quota_probe.rs"]
+mod pool_quota_probe;
 #[path = "runtime/provider_checkin.rs"]
 mod provider_checkin;
 #[path = "runtime/proxy_node_staleness.rs"]
@@ -56,6 +58,11 @@ use audit_cleanup::*;
 use config::*;
 use db_maintenance::*;
 use pending_cleanup::*;
+pub(crate) use pool_quota_probe::{
+    perform_pool_quota_probe_once, perform_pool_quota_probe_once_with_config,
+    select_pool_quota_probe_key_ids, spawn_pool_quota_probe_worker, PoolQuotaProbeRunSummary,
+    PoolQuotaProbeWorkerConfig,
+};
 pub(crate) use provider_checkin::{perform_provider_checkin_once, ProviderCheckinRunSummary};
 use proxy_node_staleness::*;
 use proxy_upgrade_rollout::*;

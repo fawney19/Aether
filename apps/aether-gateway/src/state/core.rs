@@ -40,6 +40,7 @@ use crate::maintenance::spawn_db_maintenance_worker;
 use crate::maintenance::spawn_gemini_file_mapping_cleanup_worker;
 use crate::maintenance::spawn_pending_cleanup_worker;
 use crate::maintenance::spawn_pool_monitor_worker;
+use crate::maintenance::spawn_pool_quota_probe_worker;
 use crate::maintenance::spawn_provider_checkin_worker;
 use crate::maintenance::spawn_proxy_node_stale_cleanup_worker;
 use crate::maintenance::spawn_proxy_upgrade_rollout_worker;
@@ -818,6 +819,9 @@ impl AppState {
             tasks.push(handle);
         }
         if let Some(handle) = spawn_pool_monitor_worker(self.data.clone()) {
+            tasks.push(handle);
+        }
+        if let Some(handle) = spawn_pool_quota_probe_worker(self.clone()) {
             tasks.push(handle);
         }
         if let Some(handle) = spawn_stats_hourly_aggregation_worker(self.data.clone()) {

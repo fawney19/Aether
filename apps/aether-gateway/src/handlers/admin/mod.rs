@@ -21,7 +21,12 @@ pub(crate) use self::observability::{
     round_to, AdminStatsTimeRange, AdminStatsUsageFilter,
 };
 pub(crate) use self::provider::oauth::errors::build_internal_control_error_response;
+pub(crate) use self::provider::oauth::quota::antigravity::refresh_antigravity_provider_quota_locally;
+pub(crate) use self::provider::oauth::quota::codex::refresh_codex_provider_quota_locally;
+pub(crate) use self::provider::oauth::quota::kiro::refresh_kiro_provider_quota_locally;
+pub(crate) use self::provider::oauth::runtime::provider_oauth_runtime_endpoint_for_provider;
 pub(crate) use self::provider::ops::providers::actions::admin_provider_ops_local_action_response;
+pub(crate) use self::provider::pool::config::admin_provider_pool_config;
 pub(crate) use self::provider::pool_admin::maybe_build_local_admin_pool_response;
 pub(crate) use self::provider::{
     maybe_build_local_admin_provider_oauth_response, maybe_build_local_admin_providers_response,
