@@ -409,6 +409,24 @@ impl AppState {
             .map_err(|err| GatewayError::Internal(err.to_string()))
     }
 
+    async fn apply_global_format_conversion_override(
+        &self,
+        mut snapshot: crate::provider_transport::GatewayProviderTransportSnapshot,
+    ) -> crate::provider_transport::GatewayProviderTransportSnapshot {
+        let global_config =
+            Box::pin(self.read_system_config_json_value("enable_format_conversion"))
+                .await
+                .ok()
+                .flatten();
+        let global_enabled = global_config
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        if global_enabled {
+            snapshot.provider.enable_format_conversion = true;
+        }
+        snapshot
+    }
+
     pub(crate) async fn list_enabled_oauth_module_providers(
         &self,
     ) -> Result<
@@ -663,7 +681,9 @@ impl AppState {
                 .await;
         };
         if let Some(snapshot) = self.get_cached_provider_transport_snapshot(&cache_key) {
-            return Ok(Some(snapshot));
+            return Ok(Some(
+                self.apply_global_format_conversion_override(snapshot).await,
+            ));
         }
 
         let snapshot = self
@@ -672,7 +692,12 @@ impl AppState {
         if let Some(snapshot) = snapshot.as_ref() {
             self.put_cached_provider_transport_snapshot(cache_key, snapshot.clone());
         }
-        Ok(snapshot)
+        match snapshot {
+            Some(snapshot) => Ok(Some(
+                self.apply_global_format_conversion_override(snapshot).await,
+            )),
+            None => Ok(None),
+        }
     }
 
     pub(crate) async fn update_provider_catalog_key_oauth_credentials(
@@ -1258,4 +1283,129 @@ fn local_oauth_request_uses_direct_client(url: &str) -> bool {
                     .map(|addr| addr.is_loopback())
                     .unwrap_or(false)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
+    use aether_data_contracts::repository::provider_catalog::{
+        StoredProviderCatalogEndpoint, StoredProviderCatalogKey, StoredProviderCatalogProvider,
+    };
+    use serde_json::json;
+
+    use super::AppState;
+    use crate::data::GatewayDataState;
+
+    fn sample_provider() -> StoredProviderCatalogProvider {
+        StoredProviderCatalogProvider::new(
+            "provider-1".to_string(),
+            "provider-1".to_string(),
+            Some("https://provider.example".to_string()),
+            "custom".to_string(),
+        )
+        .expect("provider should build")
+        .with_transport_fields(true, false, false, None, None, None, None, None, None)
+    }
+
+    fn sample_endpoint() -> StoredProviderCatalogEndpoint {
+        StoredProviderCatalogEndpoint::new(
+            "endpoint-1".to_string(),
+            "provider-1".to_string(),
+            "openai:chat".to_string(),
+            Some("openai".to_string()),
+            Some("chat".to_string()),
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://api.provider.example".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build")
+    }
+
+    fn sample_key() -> StoredProviderCatalogKey {
+        StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "default".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+        .with_transport_fields(
+            Some(json!(["openai:chat"])),
+            "plain-upstream-key".to_string(),
+            None,
+            None,
+            Some(json!({"openai:chat": 1})),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("key transport should build")
+    }
+
+    fn state_with_global_format_conversion(enabled: bool) -> AppState {
+        let repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider()],
+            vec![sample_endpoint()],
+            vec![sample_key()],
+        ));
+        let data_state = GatewayDataState::with_provider_transport_reader_for_tests(
+            repository,
+            "test-encryption-key",
+        )
+        .with_system_config_values_for_tests(vec![(
+            "enable_format_conversion".to_string(),
+            json!(enabled),
+        )]);
+        AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data_state)
+    }
+
+    #[tokio::test]
+    async fn global_format_conversion_overrides_snapshot_without_persisting_provider_value() {
+        let state = state_with_global_format_conversion(false);
+
+        let snapshot = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("snapshot read should succeed")
+            .expect("snapshot should exist");
+        assert!(!snapshot.provider.enable_format_conversion);
+
+        state
+            .upsert_system_config_json_value("enable_format_conversion", &json!(true), None)
+            .await
+            .expect("global config update should succeed");
+        let snapshot = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("snapshot read should succeed")
+            .expect("snapshot should exist");
+        assert!(snapshot.provider.enable_format_conversion);
+
+        state
+            .upsert_system_config_json_value("enable_format_conversion", &json!(false), None)
+            .await
+            .expect("global config update should succeed");
+        let snapshot = state
+            .read_provider_transport_snapshot("provider-1", "endpoint-1", "key-1")
+            .await
+            .expect("snapshot read should succeed")
+            .expect("snapshot should exist");
+        assert!(!snapshot.provider.enable_format_conversion);
+    }
 }
