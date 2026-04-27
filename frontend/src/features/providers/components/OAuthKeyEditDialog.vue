@@ -75,6 +75,24 @@
         </div>
         <div>
           <Label
+            for="concurrent_limit"
+            class="text-xs"
+          >并发请求上限</Label>
+          <Input
+            id="concurrent_limit"
+            :model-value="form.concurrent_limit ?? ''"
+            type="number"
+            min="0"
+            placeholder="不限制"
+            class="h-8"
+            @update:model-value="(v) => form.concurrent_limit = parseNullableNumberInput(v, { min: 0 })"
+          />
+          <p class="text-xs text-muted-foreground mt-0.5">
+            同一时间允许使用该 Key 的最大请求数，留空或 0 表示不限制
+          </p>
+        </div>
+        <div>
+          <Label
             for="cache_ttl_minutes"
             class="text-xs"
           >缓存 TTL</Label>
@@ -243,6 +261,7 @@ const form = ref({
   name: '',
   internal_priority: 10,
   rpm_limit: undefined as number | null | undefined,
+  concurrent_limit: undefined as number | null | undefined,
   cache_ttl_minutes: 5,
   max_probe_interval_minutes: 32,
   note: '',
@@ -278,6 +297,7 @@ function resetForm() {
     name: '',
     internal_priority: 10,
     rpm_limit: undefined,
+    concurrent_limit: undefined,
     cache_ttl_minutes: 5,
     max_probe_interval_minutes: 32,
     note: '',
@@ -295,6 +315,7 @@ function loadKeyData() {
     name: props.editingKey.name,
     internal_priority: props.editingKey.internal_priority ?? 10,
     rpm_limit: props.editingKey.rpm_limit ?? undefined,
+    concurrent_limit: props.editingKey.concurrent_limit ?? undefined,
     cache_ttl_minutes: props.editingKey.cache_ttl_minutes ?? 5,
     max_probe_interval_minutes: props.editingKey.max_probe_interval_minutes ?? 32,
     note: props.editingKey.note || '',
@@ -359,6 +380,7 @@ async function handleSave() {
       name: form.value.name,
       internal_priority: form.value.internal_priority,
       rpm_limit: form.value.rpm_limit,
+      concurrent_limit: form.value.concurrent_limit,
       cache_ttl_minutes: form.value.cache_ttl_minutes,
       max_probe_interval_minutes: form.value.max_probe_interval_minutes,
       note: form.value.note,
