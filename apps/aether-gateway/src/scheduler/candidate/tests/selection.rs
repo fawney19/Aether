@@ -5,10 +5,13 @@ use aether_data::repository::candidate_selection::InMemoryMinimalCandidateSelect
 use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::quota::InMemoryProviderQuotaRepository;
-use aether_data_contracts::repository::candidate_selection::StoredProviderModelMapping;
+use aether_data_contracts::repository::candidate_selection::{
+    StoredMinimalCandidateSelectionRow, StoredProviderModelMapping,
+};
 use aether_data_contracts::repository::candidates::{
     RequestCandidateStatus, StoredRequestCandidate,
 };
+use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use aether_data_contracts::repository::quota::StoredProviderQuotaSnapshot;
 use aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate;
 use serde_json::json;
@@ -97,6 +100,102 @@ async fn collect_selectable_candidates_with_skip_reasons(
         now_unix_secs,
     )
     .await
+}
+
+fn provider_key_concurrency_row(
+    provider_id: &str,
+    endpoint_id: &str,
+    key_id: &str,
+    key_name: &str,
+    provider_priority: i32,
+    key_priority: i32,
+) -> StoredMinimalCandidateSelectionRow {
+    let mut row = sample_row();
+    row.provider_id = provider_id.to_string();
+    row.provider_name = provider_id.to_string();
+    row.endpoint_id = endpoint_id.to_string();
+    row.key_id = key_id.to_string();
+    row.key_name = key_name.to_string();
+    row.provider_priority = provider_priority;
+    row.key_internal_priority = key_priority;
+    row.key_global_priority_by_format = Some(serde_json::json!({"openai:chat": key_priority}));
+    row
+}
+
+fn provider_key_with_concurrent_limit(
+    key_id: &str,
+    provider_id: &str,
+    concurrent_limit: Option<i32>,
+) -> StoredProviderCatalogKey {
+    let mut key = sample_key(key_id, provider_id, Some(10));
+    key.concurrent_limit = concurrent_limit;
+    key
+}
+
+fn active_provider_key_candidate(
+    candidate_id: &str,
+    request_id: &str,
+    provider_id: &str,
+    endpoint_id: &str,
+    key_id: &str,
+    status: RequestCandidateStatus,
+) -> StoredRequestCandidate {
+    StoredRequestCandidate::new(
+        candidate_id.to_string(),
+        request_id.to_string(),
+        None,
+        None,
+        None,
+        None,
+        0,
+        0,
+        Some(provider_id.to_string()),
+        Some(endpoint_id.to_string()),
+        Some(key_id.to_string()),
+        status,
+        None,
+        false,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        95_000,
+        Some(95_000),
+        None,
+    )
+    .expect("candidate should build")
+}
+
+fn provider_key_concurrency_state(
+    rows: Vec<StoredMinimalCandidateSelectionRow>,
+    keys: Vec<StoredProviderCatalogKey>,
+    request_candidates: Vec<StoredRequestCandidate>,
+) -> AppState {
+    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(rows));
+    let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![
+            sample_provider("test-provider-a", None),
+            sample_provider("test-provider-b", None),
+        ],
+        Vec::new(),
+        keys,
+    ));
+    let quotas = Arc::new(InMemoryProviderQuotaRepository::seed(vec![]));
+    let request_candidates = Arc::new(InMemoryRequestCandidateRepository::seed(request_candidates));
+
+    AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_candidate_selection_provider_catalog_quota_and_request_candidates_for_tests(
+                candidates,
+                provider_catalog,
+                quotas,
+                request_candidates,
+            ),
+        )
 }
 
 #[test]
@@ -845,6 +944,294 @@ async fn selects_next_candidate_when_first_provider_concurrent_limit_is_reached(
 
     assert_eq!(selected.provider_id, "provider-b");
     assert_eq!(selected.key_id, "key-b");
+}
+
+#[tokio::test]
+async fn provider_key_concurrency_selects_next_key_when_first_provider_key_concurrent_limit_is_reached(
+) {
+    let state = provider_key_concurrency_state(
+        vec![
+            provider_key_concurrency_row(
+                "test-provider-a",
+                "endpoint-a",
+                "provider-key-a",
+                "alpha",
+                0,
+                0,
+            ),
+            provider_key_concurrency_row(
+                "test-provider-a",
+                "endpoint-a",
+                "provider-key-b",
+                "beta",
+                0,
+                1,
+            ),
+        ],
+        vec![
+            provider_key_with_concurrent_limit("provider-key-a", "test-provider-a", Some(1)),
+            provider_key_with_concurrent_limit("provider-key-b", "test-provider-a", Some(1)),
+        ],
+        vec![active_provider_key_candidate(
+            "cand-provider-key-a",
+            "req-provider-key-a",
+            "test-provider-a",
+            "endpoint-a",
+            "provider-key-a",
+            RequestCandidateStatus::Streaming,
+        )],
+    );
+
+    let selected = select_candidate(
+        state.data.as_ref(),
+        &state,
+        "openai:chat",
+        "gpt-4.1",
+        false,
+        None,
+        100,
+    )
+    .await
+    .expect("selection should succeed")
+    .expect("candidate should exist");
+
+    assert_eq!(selected.provider_id, "test-provider-a");
+    assert_eq!(selected.key_id, "provider-key-b");
+}
+
+#[tokio::test]
+async fn provider_key_concurrency_selects_next_provider_when_all_provider_keys_concurrent_limit_reached(
+) {
+    let state = provider_key_concurrency_state(
+        vec![
+            provider_key_concurrency_row(
+                "test-provider-a",
+                "endpoint-a",
+                "provider-key-a",
+                "alpha",
+                0,
+                0,
+            ),
+            provider_key_concurrency_row(
+                "test-provider-a",
+                "endpoint-a",
+                "provider-key-b",
+                "beta",
+                0,
+                1,
+            ),
+            provider_key_concurrency_row(
+                "test-provider-b",
+                "endpoint-b",
+                "provider-key-c",
+                "gamma",
+                1,
+                0,
+            ),
+        ],
+        vec![
+            provider_key_with_concurrent_limit("provider-key-a", "test-provider-a", Some(1)),
+            provider_key_with_concurrent_limit("provider-key-b", "test-provider-a", Some(1)),
+            provider_key_with_concurrent_limit("provider-key-c", "test-provider-b", Some(1)),
+        ],
+        vec![
+            active_provider_key_candidate(
+                "cand-provider-key-a",
+                "req-provider-key-a",
+                "test-provider-a",
+                "endpoint-a",
+                "provider-key-a",
+                RequestCandidateStatus::Pending,
+            ),
+            active_provider_key_candidate(
+                "cand-provider-key-b",
+                "req-provider-key-b",
+                "test-provider-a",
+                "endpoint-a",
+                "provider-key-b",
+                RequestCandidateStatus::Streaming,
+            ),
+        ],
+    );
+
+    let selected = select_candidate(
+        state.data.as_ref(),
+        &state,
+        "openai:chat",
+        "gpt-4.1",
+        false,
+        None,
+        100,
+    )
+    .await
+    .expect("selection should succeed")
+    .expect("candidate should exist");
+
+    assert_eq!(selected.provider_id, "test-provider-b");
+    assert_eq!(selected.key_id, "provider-key-c");
+}
+
+#[tokio::test]
+async fn provider_key_concurrency_returns_none_when_all_provider_keys_concurrent_limit_reached() {
+    let state = provider_key_concurrency_state(
+        vec![
+            provider_key_concurrency_row(
+                "test-provider-a",
+                "endpoint-a",
+                "provider-key-a",
+                "alpha",
+                0,
+                0,
+            ),
+            provider_key_concurrency_row(
+                "test-provider-a",
+                "endpoint-a",
+                "provider-key-b",
+                "beta",
+                0,
+                1,
+            ),
+            provider_key_concurrency_row(
+                "test-provider-b",
+                "endpoint-b",
+                "provider-key-c",
+                "gamma",
+                1,
+                0,
+            ),
+        ],
+        vec![
+            provider_key_with_concurrent_limit("provider-key-a", "test-provider-a", Some(1)),
+            provider_key_with_concurrent_limit("provider-key-b", "test-provider-a", Some(1)),
+            provider_key_with_concurrent_limit("provider-key-c", "test-provider-b", Some(1)),
+        ],
+        vec![
+            active_provider_key_candidate(
+                "cand-provider-key-a",
+                "req-provider-key-a",
+                "test-provider-a",
+                "endpoint-a",
+                "provider-key-a",
+                RequestCandidateStatus::Pending,
+            ),
+            active_provider_key_candidate(
+                "cand-provider-key-b",
+                "req-provider-key-b",
+                "test-provider-a",
+                "endpoint-a",
+                "provider-key-b",
+                RequestCandidateStatus::Streaming,
+            ),
+            active_provider_key_candidate(
+                "cand-provider-key-c",
+                "req-provider-key-c",
+                "test-provider-b",
+                "endpoint-b",
+                "provider-key-c",
+                RequestCandidateStatus::Streaming,
+            ),
+        ],
+    );
+
+    let selected = select_candidate(
+        state.data.as_ref(),
+        &state,
+        "openai:chat",
+        "gpt-4.1",
+        false,
+        None,
+        100,
+    )
+    .await
+    .expect("selection should succeed");
+
+    assert!(selected.is_none());
+
+    let (selected_candidates, skipped_candidates) =
+        collect_selectable_candidates_with_skip_reasons(
+            state.data.as_ref(),
+            &state,
+            "openai:chat",
+            "gpt-4.1",
+            false,
+            None,
+            100,
+        )
+        .await
+        .expect("selection should succeed");
+
+    assert!(selected_candidates.is_empty());
+    assert_eq!(skipped_candidates.len(), 3);
+    assert!(skipped_candidates
+        .iter()
+        .all(|skipped| { skipped.skip_reason == "provider_key_concurrency_limit_reached" }));
+    assert!(!is_exact_all_skipped_by_auth_limit(
+        &selected_candidates,
+        &skipped_candidates,
+    ));
+}
+
+#[tokio::test]
+async fn provider_key_concurrency_collects_exact_skip_reason_for_saturated_provider_keys() {
+    let state = provider_key_concurrency_state(
+        vec![
+            provider_key_concurrency_row(
+                "test-provider-a",
+                "endpoint-a",
+                "provider-key-a",
+                "alpha",
+                0,
+                0,
+            ),
+            provider_key_concurrency_row(
+                "test-provider-a",
+                "endpoint-a",
+                "provider-key-b",
+                "beta",
+                0,
+                1,
+            ),
+        ],
+        vec![
+            provider_key_with_concurrent_limit("provider-key-a", "test-provider-a", Some(1)),
+            provider_key_with_concurrent_limit("provider-key-b", "test-provider-a", Some(1)),
+        ],
+        vec![active_provider_key_candidate(
+            "cand-provider-key-a",
+            "req-provider-key-a",
+            "test-provider-a",
+            "endpoint-a",
+            "provider-key-a",
+            RequestCandidateStatus::Pending,
+        )],
+    );
+
+    let (selected_candidates, skipped_candidates) =
+        collect_selectable_candidates_with_skip_reasons(
+            state.data.as_ref(),
+            &state,
+            "openai:chat",
+            "gpt-4.1",
+            false,
+            None,
+            100,
+        )
+        .await
+        .expect("selection should succeed");
+
+    assert_eq!(selected_candidates.len(), 1);
+    assert_eq!(selected_candidates[0].provider_id, "test-provider-a");
+    assert_eq!(selected_candidates[0].key_id, "provider-key-b");
+    assert_eq!(skipped_candidates.len(), 1);
+    assert_eq!(
+        skipped_candidates[0].candidate.provider_id,
+        "test-provider-a"
+    );
+    assert_eq!(skipped_candidates[0].candidate.key_id, "provider-key-a");
+    assert_eq!(
+        skipped_candidates[0].skip_reason,
+        "provider_key_concurrency_limit_reached",
+    );
 }
 
 #[tokio::test]
