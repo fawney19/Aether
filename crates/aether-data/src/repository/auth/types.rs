@@ -182,18 +182,30 @@ impl ResolvedAuthApiKeySnapshot {
     }
 
     pub fn effective_allowed_providers(&self) -> Option<&[String]> {
+        if self.api_key_is_standalone {
+            return self.api_key_allowed_providers.as_deref();
+        }
+
         self.api_key_allowed_providers
             .as_deref()
             .or(self.user_allowed_providers.as_deref())
     }
 
     pub fn effective_allowed_api_formats(&self) -> Option<&[String]> {
+        if self.api_key_is_standalone {
+            return self.api_key_allowed_api_formats.as_deref();
+        }
+
         self.api_key_allowed_api_formats
             .as_deref()
             .or(self.user_allowed_api_formats.as_deref())
     }
 
     pub fn effective_allowed_models(&self) -> Option<&[String]> {
+        if self.api_key_is_standalone {
+            return self.api_key_allowed_models.as_deref();
+        }
+
         self.api_key_allowed_models
             .as_deref()
             .or(self.user_allowed_models.as_deref())
@@ -842,6 +854,162 @@ mod tests {
             resolved.effective_allowed_models(),
             Some(&["gpt-4.1".to_string()][..])
         );
+    }
+
+    #[test]
+    fn standalone_snapshot_does_not_inherit_user_allowed_lists() {
+        let snapshot = StoredAuthApiKeySnapshot::new(
+            "admin-user".to_string(),
+            "admin".to_string(),
+            None,
+            "admin".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            Some(serde_json::json!(["openai"])),
+            Some(serde_json::json!(["openai:chat"])),
+            Some(serde_json::json!(["gpt-4.1"])),
+            "standalone-key".to_string(),
+            Some("standalone".to_string()),
+            true,
+            false,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("snapshot should build");
+
+        let resolved = ResolvedAuthApiKeySnapshot::from_stored(snapshot, 150);
+
+        assert!(resolved.api_key_is_standalone);
+        assert_eq!(resolved.effective_allowed_providers(), None);
+        assert_eq!(resolved.effective_allowed_api_formats(), None);
+        assert_eq!(resolved.effective_allowed_models(), None);
+    }
+
+    #[test]
+    fn standalone_snapshot_uses_its_own_allowed_lists_when_present() {
+        let snapshot = StoredAuthApiKeySnapshot::new(
+            "admin-user".to_string(),
+            "admin".to_string(),
+            None,
+            "admin".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            Some(serde_json::json!(["openai"])),
+            Some(serde_json::json!(["openai:chat"])),
+            Some(serde_json::json!(["gpt-4.1"])),
+            "standalone-key".to_string(),
+            Some("standalone".to_string()),
+            true,
+            false,
+            true,
+            None,
+            None,
+            None,
+            Some(serde_json::json!(["anthropic"])),
+            Some(serde_json::json!(["claude:chat"])),
+            Some(serde_json::json!(["claude-sonnet-4-5"])),
+        )
+        .expect("snapshot should build");
+
+        let resolved = ResolvedAuthApiKeySnapshot::from_stored(snapshot, 150);
+
+        assert_eq!(
+            resolved.effective_allowed_providers(),
+            Some(&["anthropic".to_string()][..])
+        );
+        assert_eq!(
+            resolved.effective_allowed_api_formats(),
+            Some(&["claude:chat".to_string()][..])
+        );
+        assert_eq!(
+            resolved.effective_allowed_models(),
+            Some(&["claude-sonnet-4-5".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn non_standalone_snapshot_inherits_user_allowed_lists_when_key_lists_absent() {
+        let snapshot = StoredAuthApiKeySnapshot::new(
+            "user-1".to_string(),
+            "alice".to_string(),
+            None,
+            "user".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            Some(serde_json::json!(["openai"])),
+            Some(serde_json::json!(["openai:chat"])),
+            Some(serde_json::json!(["gpt-4.1"])),
+            "user-key".to_string(),
+            Some("default".to_string()),
+            true,
+            false,
+            false,
+            Some(60),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("snapshot should build");
+
+        let resolved = ResolvedAuthApiKeySnapshot::from_stored(snapshot, 150);
+
+        assert!(!resolved.api_key_is_standalone);
+        assert_eq!(
+            resolved.effective_allowed_providers(),
+            Some(&["openai".to_string()][..])
+        );
+        assert_eq!(
+            resolved.effective_allowed_api_formats(),
+            Some(&["openai:chat".to_string()][..])
+        );
+        assert_eq!(
+            resolved.effective_allowed_models(),
+            Some(&["gpt-4.1".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn standalone_snapshot_keeps_empty_key_allowed_lists_as_deny_all() {
+        let snapshot = StoredAuthApiKeySnapshot::new(
+            "admin-user".to_string(),
+            "admin".to_string(),
+            None,
+            "admin".to_string(),
+            "local".to_string(),
+            true,
+            false,
+            Some(serde_json::json!(["openai"])),
+            Some(serde_json::json!(["openai:chat"])),
+            Some(serde_json::json!(["gpt-4.1"])),
+            "standalone-key".to_string(),
+            Some("standalone".to_string()),
+            true,
+            false,
+            true,
+            None,
+            None,
+            None,
+            Some(serde_json::json!([])),
+            Some(serde_json::json!([])),
+            Some(serde_json::json!([])),
+        )
+        .expect("snapshot should build");
+
+        let resolved = ResolvedAuthApiKeySnapshot::from_stored(snapshot, 150);
+
+        assert_eq!(resolved.effective_allowed_providers(), Some(&[][..]));
+        assert_eq!(resolved.effective_allowed_api_formats(), Some(&[][..]));
+        assert_eq!(resolved.effective_allowed_models(), Some(&[][..]));
     }
 
     #[test]
