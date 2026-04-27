@@ -1,4 +1,0 @@
-Command: rtk npm run type-check --prefix frontend
-Result: PASS (exit code 0)
-Output:
-> vue-tsc --noEmit

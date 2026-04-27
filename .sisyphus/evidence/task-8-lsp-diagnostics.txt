@@ -1,7 +1,0 @@
-Command: lsp_diagnostics frontend/src/features/providers/components/__tests__/provider-key-concurrent_limit.spec.ts severity=all
-Result: UNAVAILABLE (missing language server)
-Output:
-Error: LSP server 'typescript' is configured but NOT INSTALLED.
-Command not found: typescript-language-server
-To install:
-  npm install -g typescript-language-server typescript
