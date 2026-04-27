@@ -641,7 +641,7 @@ async fn data_state_reads_minimal_candidate_selection_with_auth_filters() {
     assert_eq!(selection[1].key_id, "key-3");
     assert_eq!(
         selection[1].selected_provider_model_name,
-        "gpt-4.1-edge".to_string()
+        "gpt-4.1-canary".to_string()
     );
     assert_eq!(
         selection[1].mapping_matched_model,
