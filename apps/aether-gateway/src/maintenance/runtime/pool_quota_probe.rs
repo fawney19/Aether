@@ -20,6 +20,7 @@ const POOL_QUOTA_PROBE_DEFAULT_SCAN_INTERVAL_SECONDS: u64 = 60;
 const POOL_QUOTA_PROBE_MIN_SCAN_INTERVAL_SECONDS: u64 = 15;
 const POOL_QUOTA_PROBE_DEFAULT_MAX_KEYS_PER_PROVIDER: usize = 50;
 const POOL_QUOTA_PROBE_PROVIDER_LOCK_TTL_MS: u64 = 30_000;
+const POOL_QUOTA_PROBE_OAUTH_REFRESH_SKEW_SECONDS: u64 = 120;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PoolQuotaProbeRunSummary {
@@ -140,6 +141,15 @@ fn parse_probe_stamp(raw_value: Option<&str>) -> Option<u64> {
     Some(parsed as u64)
 }
 
+fn oauth_token_needs_probe_refresh(key: &StoredProviderCatalogKey, now_ts: u64) -> bool {
+    if !key.auth_type.trim().eq_ignore_ascii_case("oauth") {
+        return false;
+    }
+    key.expires_at_unix_secs.is_some_and(|expires_at| {
+        now_ts >= expires_at.saturating_sub(POOL_QUOTA_PROBE_OAUTH_REFRESH_SKEW_SECONDS)
+    })
+}
+
 pub(crate) fn select_pool_quota_probe_key_ids(
     keys: &[StoredProviderCatalogKey],
     provider_type: &str,
@@ -148,11 +158,16 @@ pub(crate) fn select_pool_quota_probe_key_ids(
     last_probe_timestamps: &BTreeMap<String, u64>,
     limit: usize,
 ) -> Vec<String> {
-    let mut stale = Vec::<(u64, String)>::new();
+    let mut stale = Vec::<(u8, u64, String)>::new();
     for key in keys {
         if key.id.trim().is_empty() {
             continue;
         }
+        if oauth_token_needs_probe_refresh(key, now_ts) {
+            stale.push((0, key.expires_at_unix_secs.unwrap_or(0), key.id.clone()));
+            continue;
+        }
+
         let quota_updated_ts =
             extract_quota_updated_at(provider_type, key.upstream_metadata.as_ref());
         let last_probe_ts = last_probe_timestamps.get(&key.id).copied();
@@ -160,15 +175,20 @@ pub(crate) fn select_pool_quota_probe_key_ids(
             .unwrap_or(0)
             .max(last_probe_ts.unwrap_or(0));
         if anchor_ts == 0 || now_ts.saturating_sub(anchor_ts) >= interval_seconds {
-            stale.push((anchor_ts, key.id.clone()));
+            stale.push((1, anchor_ts, key.id.clone()));
         }
     }
 
-    stale.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    stale.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
     if limit > 0 && stale.len() > limit {
         stale.truncate(limit);
     }
-    stale.into_iter().map(|(_, key_id)| key_id).collect()
+    stale.into_iter().map(|(_, _, key_id)| key_id).collect()
 }
 
 fn probe_stamp_key(provider_id: &str, key_id: &str) -> String {
@@ -618,6 +638,38 @@ mod tests {
         let selected = select_pool_quota_probe_key_ids(&keys, "codex", 2_000, 600, &stamps, 2);
 
         assert_eq!(selected, vec!["never".to_string(), "old".to_string()]);
+    }
+
+    #[test]
+    fn selects_oauth_keys_near_expiry_before_fresh_quota_keys() {
+        let mut expiring = key(
+            "expiring",
+            "provider-1",
+            Some(json!({ "antigravity": { "updated_at": 1_990 } })),
+        );
+        expiring.expires_at_unix_secs = Some(2_100);
+        let mut fresh = key(
+            "fresh",
+            "provider-1",
+            Some(json!({ "antigravity": { "updated_at": 1_990 } })),
+        );
+        fresh.expires_at_unix_secs = Some(3_000);
+        let stale = key(
+            "stale",
+            "provider-1",
+            Some(json!({ "antigravity": { "updated_at": 1_000 } })),
+        );
+
+        let selected = select_pool_quota_probe_key_ids(
+            &[fresh, stale, expiring],
+            "antigravity",
+            2_000,
+            600,
+            &BTreeMap::new(),
+            1,
+        );
+
+        assert_eq!(selected, vec!["expiring".to_string()]);
     }
 
     #[test]
