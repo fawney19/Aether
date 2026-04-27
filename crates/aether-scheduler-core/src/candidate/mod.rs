@@ -32,9 +32,9 @@ mod tests {
 
     use super::{
         auth_api_key_concurrency_limit_reached, candidate_is_selectable_with_runtime_state,
-        candidate_supports_required_capability, collect_global_model_names_for_required_capability,
-        CandidateRuntimeSelectabilityInput, EnumerateMinimalCandidateSelectionInput,
-        SchedulerMinimalCandidateSelectionCandidate,
+        candidate_runtime_skip_reason_with_state, candidate_supports_required_capability,
+        collect_global_model_names_for_required_capability, CandidateRuntimeSelectabilityInput,
+        EnumerateMinimalCandidateSelectionInput, SchedulerMinimalCandidateSelectionCandidate,
     };
     use crate::SchedulerAuthConstraints;
 
@@ -115,6 +115,15 @@ mod tests {
                 "health_score": health_score
             }
         }));
+        key
+    }
+
+    fn sample_key_with_concurrent_limit(
+        id: &str,
+        concurrent_limit: Option<i32>,
+    ) -> StoredProviderCatalogKey {
+        let mut key = sample_key(id, 1.0);
+        key.concurrent_limit = concurrent_limit;
         key
     }
 
@@ -302,6 +311,198 @@ mod tests {
                 rpm_reset_at: None,
             },
         ));
+    }
+
+    #[test]
+    fn provider_key_concurrency_limit_unset_or_zero_is_unlimited() {
+        let recent_candidates = vec![stored_candidate("one", RequestCandidateStatus::Pending, 95)];
+        for concurrent_limit in [None, Some(0)] {
+            let provider_key_rpm_states = BTreeMap::from([(
+                "key-1".to_string(),
+                sample_key_with_concurrent_limit("1", concurrent_limit),
+            )]);
+
+            assert_eq!(
+                candidate_runtime_skip_reason_with_state(CandidateRuntimeSelectabilityInput {
+                    candidate: &sample_candidate("1", None),
+                    recent_candidates: &recent_candidates,
+                    provider_concurrent_limits: &BTreeMap::new(),
+                    provider_key_rpm_states: &provider_key_rpm_states,
+                    now_unix_secs: 100,
+                    cached_affinity_target: None,
+                    provider_quota_blocks_requests: false,
+                    account_quota_exhausted: false,
+                    oauth_invalid: false,
+                    rpm_reset_at: None,
+                }),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn provider_key_concurrency_limit_rejects_pending_active_with_exact_skip_reason() {
+        let recent_candidates = vec![stored_candidate("one", RequestCandidateStatus::Pending, 95)];
+        let provider_key_rpm_states = BTreeMap::from([(
+            "key-1".to_string(),
+            sample_key_with_concurrent_limit("1", Some(1)),
+        )]);
+
+        assert_eq!(
+            candidate_runtime_skip_reason_with_state(CandidateRuntimeSelectabilityInput {
+                candidate: &sample_candidate("1", None),
+                recent_candidates: &recent_candidates,
+                provider_concurrent_limits: &BTreeMap::new(),
+                provider_key_rpm_states: &provider_key_rpm_states,
+                now_unix_secs: 100,
+                cached_affinity_target: None,
+                provider_quota_blocks_requests: false,
+                account_quota_exhausted: false,
+                oauth_invalid: false,
+                rpm_reset_at: None,
+            }),
+            Some("provider_key_concurrency_limit_reached")
+        );
+    }
+
+    #[test]
+    fn provider_key_concurrency_limit_rejects_streaming_active() {
+        let recent_candidates = vec![stored_candidate(
+            "streaming",
+            RequestCandidateStatus::Streaming,
+            95,
+        )];
+        let provider_key_rpm_states = BTreeMap::from([(
+            "key-1".to_string(),
+            sample_key_with_concurrent_limit("1", Some(1)),
+        )]);
+
+        assert_eq!(
+            candidate_runtime_skip_reason_with_state(CandidateRuntimeSelectabilityInput {
+                candidate: &sample_candidate("1", None),
+                recent_candidates: &recent_candidates,
+                provider_concurrent_limits: &BTreeMap::new(),
+                provider_key_rpm_states: &provider_key_rpm_states,
+                now_unix_secs: 100,
+                cached_affinity_target: None,
+                provider_quota_blocks_requests: false,
+                account_quota_exhausted: false,
+                oauth_invalid: false,
+                rpm_reset_at: None,
+            }),
+            Some("provider_key_concurrency_limit_reached")
+        );
+    }
+
+    #[test]
+    fn provider_key_concurrency_limit_ignores_finished_and_stale_active_requests() {
+        let recent_candidates = vec![
+            stored_candidate("finished", RequestCandidateStatus::Success, 95),
+            stored_candidate("failed", RequestCandidateStatus::Failed, 96),
+            stored_candidate("cancelled", RequestCandidateStatus::Cancelled, 97),
+            stored_candidate("stale", RequestCandidateStatus::Pending, 699_000),
+        ];
+        let provider_key_rpm_states = BTreeMap::from([(
+            "key-1".to_string(),
+            sample_key_with_concurrent_limit("1", Some(1)),
+        )]);
+
+        assert_eq!(
+            candidate_runtime_skip_reason_with_state(CandidateRuntimeSelectabilityInput {
+                candidate: &sample_candidate("1", None),
+                recent_candidates: &recent_candidates,
+                provider_concurrent_limits: &BTreeMap::new(),
+                provider_key_rpm_states: &provider_key_rpm_states,
+                now_unix_secs: 1_000,
+                cached_affinity_target: None,
+                provider_quota_blocks_requests: false,
+                account_quota_exhausted: false,
+                oauth_invalid: false,
+                rpm_reset_at: None,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_key_concurrency_limit_missing_state_does_not_skip() {
+        let recent_candidates = vec![stored_candidate("one", RequestCandidateStatus::Pending, 95)];
+
+        assert_eq!(
+            candidate_runtime_skip_reason_with_state(CandidateRuntimeSelectabilityInput {
+                candidate: &sample_candidate("1", None),
+                recent_candidates: &recent_candidates,
+                provider_concurrent_limits: &BTreeMap::new(),
+                provider_key_rpm_states: &BTreeMap::new(),
+                now_unix_secs: 100,
+                cached_affinity_target: None,
+                provider_quota_blocks_requests: false,
+                account_quota_exhausted: false,
+                oauth_invalid: false,
+                rpm_reset_at: None,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_key_concurrency_limit_preserves_key_circuit_and_rpm_checks() {
+        let mut circuit_open_key = sample_key_with_concurrent_limit("1", Some(2));
+        circuit_open_key.circuit_breaker_by_format = Some(serde_json::json!({
+            "openai:chat": {"open": true}
+        }));
+        let provider_key_rpm_states = BTreeMap::from([("key-1".to_string(), circuit_open_key)]);
+        assert_eq!(
+            candidate_runtime_skip_reason_with_state(CandidateRuntimeSelectabilityInput {
+                candidate: &sample_candidate("1", None),
+                recent_candidates: &[],
+                provider_concurrent_limits: &BTreeMap::new(),
+                provider_key_rpm_states: &provider_key_rpm_states,
+                now_unix_secs: 100,
+                cached_affinity_target: None,
+                provider_quota_blocks_requests: false,
+                account_quota_exhausted: false,
+                oauth_invalid: false,
+                rpm_reset_at: None,
+            }),
+            Some("key_circuit_open")
+        );
+
+        let recent_candidates = vec![stored_candidate(
+            "one",
+            RequestCandidateStatus::Pending,
+            95_000,
+        )];
+        let provider_key_rpm_states = BTreeMap::from([(
+            "key-1".to_string(),
+            sample_key_with_concurrent_limit("1", Some(2)).with_rate_limit_fields(
+                Some(1),
+                Some(2),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
+        )]);
+
+        assert_eq!(
+            candidate_runtime_skip_reason_with_state(CandidateRuntimeSelectabilityInput {
+                candidate: &sample_candidate("1", None),
+                recent_candidates: &recent_candidates,
+                provider_concurrent_limits: &BTreeMap::new(),
+                provider_key_rpm_states: &provider_key_rpm_states,
+                now_unix_secs: 100,
+                cached_affinity_target: None,
+                provider_quota_blocks_requests: false,
+                account_quota_exhausted: false,
+                oauth_invalid: false,
+                rpm_reset_at: None,
+            }),
+            Some("key_rpm_exhausted")
+        );
     }
 
     #[test]

@@ -1,12 +1,15 @@
 use aether_scheduler_core::{
-    apply_scheduler_candidate_ranking, candidate_affinity_hash,
-    effective_provider_key_health_score, matches_affinity_target, provider_key_health_bucket,
-    requested_capability_priority_for_candidate, SchedulerAffinityTarget,
-    SchedulerRankableCandidate, SchedulerRankingContext, SchedulerRankingMode,
+    apply_scheduler_candidate_ranking, effective_provider_key_health_score,
+    provider_key_health_bucket, requested_capability_priority_for_candidate,
+    SchedulerAffinityTarget, SchedulerRankableCandidate, SchedulerRankingContext,
+    SchedulerRankingMode,
 };
 
 use crate::scheduler::config::{SchedulerOrderingConfig, SchedulerSchedulingMode};
 
+use super::affinity::{
+    scheduler_candidate_affinity_hash, scheduler_candidate_matches_affinity_target,
+};
 use super::runtime::CandidateRuntimeSelectionSnapshot;
 use super::SchedulerMinimalCandidateSelectionCandidate;
 
@@ -31,12 +34,12 @@ pub(super) fn rank_scheduler_candidates(
                     required_capabilities,
                     candidate,
                 ))
-                .with_cached_affinity_match(
-                    cached_affinity_target
-                        .is_some_and(|target| matches_affinity_target(candidate, target)),
-                )
+                .with_cached_affinity_match(cached_affinity_target.is_some_and(|target| {
+                    scheduler_candidate_matches_affinity_target(candidate, target)
+                }))
                 .with_affinity_hash(
-                    priority_affinity_key.map(|key| candidate_affinity_hash(key, candidate)),
+                    priority_affinity_key
+                        .map(|key| scheduler_candidate_affinity_hash(key, candidate)),
                 )
                 .with_health(
                     provider_key.and_then(|key| {

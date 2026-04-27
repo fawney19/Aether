@@ -86,9 +86,27 @@ pub fn candidate_runtime_skip_reason_with_state(
         return Some("provider_concurrency_limit_reached");
     }
 
+    let provider_key = provider_key_rpm_states.get(&candidate.key_id);
+    if let Some(provider_key) = provider_key {
+        if let Some(limit) = provider_key
+            .concurrent_limit
+            .filter(|limit| *limit > 0)
+            .and_then(|limit| usize::try_from(limit).ok())
+        {
+            if crate::count_recent_active_requests_for_provider_key(
+                recent_candidates,
+                candidate.key_id.as_str(),
+                now_unix_secs,
+            ) >= limit
+            {
+                return Some("provider_key_concurrency_limit_reached");
+            }
+        }
+    }
+
     let is_cached_user = cached_affinity_target
         .is_some_and(|target| crate::matches_affinity_target(candidate, target));
-    if let Some(provider_key) = provider_key_rpm_states.get(&candidate.key_id) {
+    if let Some(provider_key) = provider_key {
         if crate::is_provider_key_circuit_open(provider_key, candidate.endpoint_api_format.as_str())
         {
             return Some("key_circuit_open");

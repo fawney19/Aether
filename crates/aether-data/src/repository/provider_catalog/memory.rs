@@ -843,6 +843,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_api_keys_concurrent_limit_defaults_and_round_trips_in_memory() {
+        let repository = InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider("test-provider-a")],
+            vec![],
+            vec![],
+        );
+        let mut key = sample_key("provider-key-a", "test-provider-a");
+        assert_eq!(key.concurrent_limit, None);
+        key.concurrent_limit = Some(1);
+
+        let created = repository
+            .create_key(&key)
+            .await
+            .expect("key should create");
+        assert_eq!(created.concurrent_limit, Some(1));
+
+        let mut updated = created.clone();
+        updated.concurrent_limit = None;
+        repository
+            .update_key(&updated)
+            .await
+            .expect("key should update");
+        let reloaded = repository
+            .list_keys_by_ids(&["provider-key-a".to_string()])
+            .await
+            .expect("keys should read");
+        assert_eq!(reloaded[0].concurrent_limit, None);
+    }
+
+    #[tokio::test]
     async fn creates_endpoint() {
         let repository = InMemoryProviderCatalogReadRepository::seed(
             vec![sample_provider("provider-1")],

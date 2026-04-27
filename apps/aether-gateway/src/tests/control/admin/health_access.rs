@@ -334,7 +334,7 @@ async fn gateway_handles_admin_key_health_locally_with_trusted_admin_principal()
         )],
         vec![
             sample_key("key-openai", "provider-openai", "openai:chat", "sk-test")
-                .with_rate_limit_fields(None, None, None, None, None, None, Some(10), Some(7))
+                .with_rate_limit_fields(None, None, None, None, None, None, None, Some(10), Some(7))
                 .with_usage_fields(Some(3), Some(2100))
                 .with_health_fields(
                     Some(json!({"openai:chat": {

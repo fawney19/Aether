@@ -160,6 +160,15 @@ where
         }
     }
 
+    if selectable.is_empty()
+        && !skipped.is_empty()
+        && skipped
+            .iter()
+            .all(|candidate| candidate.skip_reason == "format_conversion_disabled")
+    {
+        skipped.clear();
+    }
+
     let ranked = rank_eligible_local_execution_candidates(
         state,
         selectable,

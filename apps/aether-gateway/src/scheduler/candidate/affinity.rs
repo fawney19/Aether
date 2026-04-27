@@ -1,5 +1,6 @@
 use aether_scheduler_core::{
-    build_scheduler_affinity_cache_key_for_api_key_id, SchedulerAffinityTarget,
+    build_scheduler_affinity_cache_key_for_api_key_id, candidate_affinity_hash, candidate_key,
+    matches_affinity_target, SchedulerAffinityTarget,
 };
 
 use crate::data::auth::GatewayAuthApiKeySnapshot;
@@ -21,6 +22,20 @@ pub(super) fn build_scheduler_affinity_cache_key(
     build_scheduler_affinity_cache_key_for_api_key_id(api_key_id, api_format, global_model_name)
 }
 
+pub(super) fn scheduler_candidate_affinity_hash(
+    affinity_key: &str,
+    candidate: &SchedulerMinimalCandidateSelectionCandidate,
+) -> u64 {
+    candidate_affinity_hash(affinity_key, candidate)
+}
+
+pub(super) fn scheduler_candidate_matches_affinity_target(
+    candidate: &SchedulerMinimalCandidateSelectionCandidate,
+    target: &SchedulerAffinityTarget,
+) -> bool {
+    matches_affinity_target(candidate, target)
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn remember_scheduler_affinity(
     affinity_cache_key: Option<&str>,
@@ -30,13 +45,14 @@ pub(super) fn remember_scheduler_affinity(
     let Some(cache_key) = affinity_cache_key else {
         return;
     };
+    let (provider_id, endpoint_id, key_id) = candidate_key(candidate);
 
     state.remember_scheduler_affinity_target(
         cache_key,
         SchedulerAffinityTarget {
-            provider_id: candidate.provider_id.clone(),
-            endpoint_id: candidate.endpoint_id.clone(),
-            key_id: candidate.key_id.clone(),
+            provider_id,
+            endpoint_id,
+            key_id,
         },
         SCHEDULER_AFFINITY_TTL,
         SCHEDULER_AFFINITY_MAX_ENTRIES,

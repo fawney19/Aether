@@ -470,6 +470,7 @@ CREATE TABLE IF NOT EXISTS public.provider_api_keys (
     note character varying(500),
     internal_priority integer DEFAULT 50,
     rpm_limit integer,
+    concurrent_limit integer,
     allowed_models json,
     capabilities json,
     learned_rpm_limit integer,

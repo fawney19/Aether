@@ -153,6 +153,7 @@ SELECT
   proxy,
   fingerprint,
   rpm_limit,
+  concurrent_limit,
   learned_rpm_limit,
   concurrent_429_count,
   rpm_429_count,
@@ -209,6 +210,7 @@ SELECT
   proxy,
   fingerprint,
   rpm_limit,
+  concurrent_limit,
   learned_rpm_limit,
   concurrent_429_count,
   rpm_429_count,
@@ -268,6 +270,7 @@ SELECT
   NULL::jsonb AS proxy,
   NULL::jsonb AS fingerprint,
   NULL::integer AS rpm_limit,
+  NULL::integer AS concurrent_limit,
   NULL::integer AS learned_rpm_limit,
   NULL::integer AS concurrent_429_count,
   NULL::integer AS rpm_429_count,
@@ -605,6 +608,7 @@ SELECT
   proxy,
   fingerprint,
   rpm_limit,
+  concurrent_limit,
   learned_rpm_limit,
   concurrent_429_count,
   rpm_429_count,
@@ -1192,6 +1196,7 @@ INSERT INTO provider_api_keys (
   internal_priority,
   global_priority_by_format,
   rpm_limit,
+  concurrent_limit,
   learned_rpm_limit,
   allowed_models,
   capabilities,
@@ -1255,55 +1260,56 @@ INSERT INTO provider_api_keys (
   $22,
   $23,
   $24,
-  CASE
-    WHEN $25::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($25::double precision)
-  END,
+  $25,
   CASE
     WHEN $26::double precision IS NULL THEN NULL
     ELSE TO_TIMESTAMP($26::double precision)
   END,
-  $27,
-  $28,
-  COALESCE($29, 0),
-  COALESCE($30, 0),
   CASE
-    WHEN $31::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($31::double precision)
+    WHEN $27::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($27::double precision)
   END,
-  $32,
+  $28,
+  $29,
+  COALESCE($30, 0),
+  COALESCE($31, 0),
+  CASE
+    WHEN $32::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($32::double precision)
+  END,
   $33,
   $34,
+  $35,
   CASE
-    WHEN $35::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($35::double precision)
+    WHEN $36::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($36::double precision)
   END,
-  $36,
-  COALESCE($37, 0),
+  $37,
   COALESCE($38, 0),
   COALESCE($39, 0),
   COALESCE($40, 0),
   COALESCE($41, 0),
   COALESCE($42, 0),
-  CASE
-    WHEN $43::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($43::double precision)
-  END,
+  COALESCE($43, 0),
   CASE
     WHEN $44::double precision IS NULL THEN NULL
     ELSE TO_TIMESTAMP($44::double precision)
   END,
-  $45,
+  CASE
+    WHEN $45::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($45::double precision)
+  END,
   $46,
   $47,
   $48,
-  CASE
-    WHEN $49::double precision IS NULL THEN NOW()
-    ELSE TO_TIMESTAMP($49::double precision)
-  END,
+  $49,
   CASE
     WHEN $50::double precision IS NULL THEN NOW()
     ELSE TO_TIMESTAMP($50::double precision)
+  END,
+  CASE
+    WHEN $51::double precision IS NULL THEN NOW()
+    ELSE TO_TIMESTAMP($51::double precision)
   END
 )
 "#,
@@ -1320,6 +1326,7 @@ INSERT INTO provider_api_keys (
         .bind(key.internal_priority)
         .bind(&key.global_priority_by_format)
         .bind(key.rpm_limit.map(|value| value as i32))
+        .bind(key.concurrent_limit)
         .bind(key.learned_rpm_limit.map(|value| value as i32))
         .bind(&key.allowed_models)
         .bind(&key.capabilities)
@@ -1366,7 +1373,6 @@ INSERT INTO provider_api_keys (
         .bind(key.is_active)
         .bind(key.created_at_unix_ms.map(|value| value as f64))
         .bind(key.updated_at_unix_secs.map(|value| value as f64))
-        .bind(key.expires_at_unix_secs.map(|value| value as f64))
         .execute(&self.pool)
         .await
         .map_postgres_err()?;
@@ -1724,46 +1730,47 @@ SET
   internal_priority = $10,
   global_priority_by_format = $11,
   rpm_limit = $12,
-  learned_rpm_limit = $13,
-  allowed_models = $14,
-  capabilities = $15,
-  cache_ttl_minutes = $16,
-  max_probe_interval_minutes = $17,
-  auto_fetch_models = $18,
-  locked_models = $19,
-  model_include_patterns = $20,
-  model_exclude_patterns = $21,
-  proxy = $22,
-  fingerprint = $23,
-  upstream_metadata = $24,
+  concurrent_limit = $13,
+  learned_rpm_limit = $14,
+  allowed_models = $15,
+  capabilities = $16,
+  cache_ttl_minutes = $17,
+  max_probe_interval_minutes = $18,
+  auto_fetch_models = $19,
+  locked_models = $20,
+  model_include_patterns = $21,
+  model_exclude_patterns = $22,
+  proxy = $23,
+  fingerprint = $24,
+  upstream_metadata = $25,
   expires_at = CASE
-    WHEN $38::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($38::double precision)
+    WHEN $39::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($39::double precision)
   END,
   oauth_invalid_at = CASE
-    WHEN $25::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($25::double precision)
+    WHEN $26::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($26::double precision)
   END,
-  oauth_invalid_reason = $26,
-  status_snapshot = $27,
-  concurrent_429_count = COALESCE($28, 0),
-  rpm_429_count = COALESCE($29, 0),
+  oauth_invalid_reason = $27,
+  status_snapshot = $28,
+  concurrent_429_count = COALESCE($29, 0),
+  rpm_429_count = COALESCE($30, 0),
   last_429_at = CASE
-    WHEN $30::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($30::double precision)
+    WHEN $31::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($31::double precision)
   END,
-  last_429_type = $31,
-  adjustment_history = $32,
-  utilization_samples = $33,
+  last_429_type = $32,
+  adjustment_history = $33,
+  utilization_samples = $34,
   last_probe_increase_at = CASE
-    WHEN $34::double precision IS NULL THEN NULL
-    ELSE TO_TIMESTAMP($34::double precision)
+    WHEN $35::double precision IS NULL THEN NULL
+    ELSE TO_TIMESTAMP($35::double precision)
   END,
-  last_rpm_peak = $35,
-  is_active = $36,
+  last_rpm_peak = $36,
+  is_active = $37,
   updated_at = CASE
-    WHEN $37::double precision IS NULL THEN NOW()
-    ELSE TO_TIMESTAMP($37::double precision)
+    WHEN $38::double precision IS NULL THEN NOW()
+    ELSE TO_TIMESTAMP($38::double precision)
   END
 WHERE id = $1
 "#,
@@ -1780,6 +1787,7 @@ WHERE id = $1
         .bind(key.internal_priority)
         .bind(&key.global_priority_by_format)
         .bind(key.rpm_limit.map(|value| value as i32))
+        .bind(key.concurrent_limit)
         .bind(key.learned_rpm_limit.map(|value| value as i32))
         .bind(&key.allowed_models)
         .bind(&key.capabilities)
@@ -2286,6 +2294,7 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
             })
         })
         .transpose()?;
+    let concurrent_limit = row_get::<Option<i32>>(row, "concurrent_limit")?;
     let learned_rpm_limit = row_get::<Option<i32>>(row, "learned_rpm_limit")?
         .map(|value| {
             u32::try_from(value).map_err(|_| {
@@ -2451,6 +2460,7 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
         let mut key = key
             .with_rate_limit_fields(
                 rpm_limit,
+                concurrent_limit,
                 learned_rpm_limit,
                 concurrent_429_count,
                 rpm_429_count,
@@ -2525,6 +2535,43 @@ mod tests {
         ] {
             assert!(sql.contains("total_tokens"));
             assert!(sql.contains("total_cost_usd"));
+        }
+    }
+
+    #[test]
+    fn provider_api_keys_concurrent_limit_queries_include_field() {
+        for sql in [
+            super::LIST_KEYS_BY_IDS_PREFIX,
+            super::LIST_KEYS_BY_PROVIDER_IDS_PREFIX,
+            super::LIST_KEY_SUMMARIES_BY_PROVIDER_IDS_PREFIX,
+        ] {
+            assert!(sql.contains("concurrent_limit"));
+        }
+
+        let source = include_str!("sql.rs");
+        assert!(source.contains("concurrent_limit,"));
+        assert!(source.contains("concurrent_limit = $13"));
+        assert!(source.contains(".bind(key.concurrent_limit)"));
+        assert!(source.contains("row_get::<Option<i32>>(row, \"concurrent_limit\")"));
+    }
+
+    #[test]
+    fn provider_api_keys_concurrent_limit_schema_is_nullable_without_default() {
+        let migration = include_str!(
+            "../../../migrations/20260427000000_add_provider_api_key_concurrent_limit.sql"
+        );
+        assert!(migration
+            .contains("provider_api_keys ADD COLUMN IF NOT EXISTS concurrent_limit integer"));
+        let normalized_migration = migration.to_ascii_lowercase();
+        assert!(!normalized_migration.contains("not null"));
+        assert!(!normalized_migration.contains("default"));
+
+        for baseline in [
+            include_str!("../../../migrations/20260403000000_baseline.sql"),
+            include_str!("../../../bootstrap/20260413020000_baseline_v2.sql"),
+        ] {
+            assert!(baseline.contains("CREATE TABLE IF NOT EXISTS public.provider_api_keys"));
+            assert!(baseline.contains("concurrent_limit integer,"));
         }
     }
 }
