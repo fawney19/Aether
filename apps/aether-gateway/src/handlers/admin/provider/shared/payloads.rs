@@ -21,6 +21,8 @@ pub(crate) struct AdminProviderKeyCreateRequest {
     #[serde(default)]
     pub(crate) rpm_limit: Option<u32>,
     #[serde(default)]
+    pub(crate) concurrent_limit: Option<i32>,
+    #[serde(default)]
     pub(crate) allowed_models: Option<Vec<String>>,
     #[serde(default)]
     pub(crate) capabilities: Option<serde_json::Value>,
@@ -60,6 +62,8 @@ pub(crate) struct AdminProviderKeyUpdateRequest {
     pub(crate) global_priority_by_format: Option<serde_json::Value>,
     #[serde(default)]
     pub(crate) rpm_limit: Option<u32>,
+    #[serde(default)]
+    pub(crate) concurrent_limit: Option<i32>,
     #[serde(default)]
     pub(crate) allowed_models: Option<Vec<String>>,
     #[serde(default)]
