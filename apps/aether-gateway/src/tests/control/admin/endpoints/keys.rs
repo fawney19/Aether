@@ -283,6 +283,232 @@ async fn gateway_creates_admin_provider_key_locally_with_trusted_admin_principal
 }
 
 #[tokio::test]
+async fn provider_key_concurrent_limit_create_and_list_responses() {
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider("provider-openai", "openai", 10)],
+        vec![],
+        vec![],
+    ));
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let create_with_limit_response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/endpoints/providers/provider-openai/keys"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "api_formats": ["openai:chat"],
+            "api_key": "sk-created-openai-concurrent",
+            "name": "created key with concurrency",
+            "rpm_limit": 60,
+            "concurrent_limit": 3
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(create_with_limit_response.status(), StatusCode::OK);
+    let create_payload: serde_json::Value = create_with_limit_response
+        .json()
+        .await
+        .expect("json body should parse");
+    let create_with_limit_id = create_payload["id"]
+        .as_str()
+        .expect("created key id should be returned")
+        .to_string();
+    assert_eq!(create_payload["rpm_limit"], 60);
+    assert_eq!(create_payload["concurrent_limit"], 3);
+
+    let create_null_response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/endpoints/providers/provider-openai/keys"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "api_formats": ["openai:chat"],
+            "api_key": "sk-created-openai-concurrent-null",
+            "name": "created key with null concurrency",
+            "concurrent_limit": null
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(create_null_response.status(), StatusCode::OK);
+    let null_payload: serde_json::Value = create_null_response
+        .json()
+        .await
+        .expect("json body should parse");
+    let create_null_id = null_payload["id"]
+        .as_str()
+        .expect("created null-limit key id should be returned")
+        .to_string();
+    assert_eq!(null_payload["concurrent_limit"], serde_json::Value::Null);
+
+    let create_negative_response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/endpoints/providers/provider-openai/keys"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "api_formats": ["openai:chat"],
+            "api_key": "sk-created-openai-concurrent-negative",
+            "name": "created key with negative concurrency",
+            "concurrent_limit": -1
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(create_negative_response.status(), StatusCode::BAD_REQUEST);
+    let negative_payload: serde_json::Value = create_negative_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert!(negative_payload["detail"]
+        .as_str()
+        .expect("detail should be string")
+        .contains("concurrent_limit"));
+
+    let list_response = reqwest::Client::new()
+        .get(format!(
+            "{gateway_url}/api/admin/endpoints/providers/provider-openai/keys?skip=0&limit=50"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let list_payload: serde_json::Value =
+        list_response.json().await.expect("json body should parse");
+    let items = list_payload.as_array().expect("payload should be an array");
+    assert_eq!(items.len(), 2);
+    let with_limit = items
+        .iter()
+        .find(|item| item["name"].as_str() == Some("created key with concurrency"))
+        .expect("created key with concurrency should be listed");
+    let with_null = items
+        .iter()
+        .find(|item| item["name"].as_str() == Some("created key with null concurrency"))
+        .expect("created key with null concurrency should be listed");
+    assert_eq!(with_limit["concurrent_limit"], 3);
+    assert_eq!(with_null["concurrent_limit"], serde_json::Value::Null);
+
+    let read_back = provider_catalog_repository
+        .list_keys_by_ids(&[create_with_limit_id, create_null_id])
+        .await
+        .expect("created keys should read by id");
+    assert_eq!(read_back.len(), 2);
+    assert!(read_back.iter().any(|key| {
+        key.name == "created key with concurrency" && key.concurrent_limit == Some(3)
+    }));
+    assert!(read_back.iter().any(|key| {
+        key.name == "created key with null concurrency" && key.concurrent_limit.is_none()
+    }));
+
+    let keys = provider_catalog_repository
+        .list_keys_by_provider_ids(&["provider-openai".to_string()])
+        .await
+        .expect("keys should read");
+    assert_eq!(keys.len(), 2);
+    assert!(keys
+        .iter()
+        .any(|key| key.name == "created key with concurrency" && key.concurrent_limit == Some(3)));
+    assert!(keys.iter().any(
+        |key| key.name == "created key with null concurrency" && key.concurrent_limit.is_none()
+    ));
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
+async fn provider_key_concurrent_limit_reads_existing_list_response() {
+    let mut key_a = sample_key(
+        "provider-key-a",
+        "test-provider-a",
+        "openai:chat",
+        "sk-provider-key-a",
+    );
+    key_a.concurrent_limit = Some(1);
+
+    let mut key_b = sample_key(
+        "provider-key-b",
+        "test-provider-a",
+        "openai:chat",
+        "sk-provider-key-b",
+    );
+    key_b.concurrent_limit = None;
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider("test-provider-a", "openai", 10)],
+        vec![],
+        vec![key_a, key_b],
+    ));
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+                provider_catalog_repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{gateway_url}/api/admin/endpoints/providers/test-provider-a/keys?skip=0&limit=50"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    let items = payload.as_array().expect("payload should be an array");
+    assert_eq!(items.len(), 2);
+    let provider_key_a = items
+        .iter()
+        .find(|item| item["id"].as_str() == Some("provider-key-a"))
+        .expect("provider-key-a should be listed");
+    let provider_key_b = items
+        .iter()
+        .find(|item| item["id"].as_str() == Some("provider-key-b"))
+        .expect("provider-key-b should be listed");
+    assert_eq!(provider_key_a["concurrent_limit"], 1);
+    assert_eq!(provider_key_b["concurrent_limit"], serde_json::Value::Null);
+
+    gateway_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_fetches_allowed_models_immediately_when_creating_key_with_auto_fetch() {
     let execution_runtime_hits = Arc::new(Mutex::new(0usize));
     let execution_runtime_hits_clone = Arc::clone(&execution_runtime_hits);
@@ -806,6 +1032,132 @@ async fn gateway_updates_admin_provider_key_locally_with_trusted_admin_principal
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn provider_key_concurrent_limit_update_presence_semantics() {
+    let mut key = sample_key(
+        "key-openai-a",
+        "provider-openai",
+        "openai:chat",
+        "sk-test-a",
+    );
+    key.concurrent_limit = Some(4);
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider("provider-openai", "openai", 10)],
+        vec![],
+        vec![key],
+    ));
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let omitted_response = reqwest::Client::new()
+        .put(format!(
+            "{gateway_url}/api/admin/endpoints/keys/key-openai-a"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "name": "renamed without concurrency"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(omitted_response.status(), StatusCode::OK);
+    let omitted_payload: serde_json::Value = omitted_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert_eq!(omitted_payload["name"], "renamed without concurrency");
+    assert_eq!(omitted_payload["concurrent_limit"], 4);
+
+    let set_response = reqwest::Client::new()
+        .put(format!(
+            "{gateway_url}/api/admin/endpoints/keys/key-openai-a"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "concurrent_limit": 7
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(set_response.status(), StatusCode::OK);
+    let set_payload: serde_json::Value = set_response.json().await.expect("json body should parse");
+    assert_eq!(set_payload["concurrent_limit"], 7);
+
+    let clear_response = reqwest::Client::new()
+        .put(format!(
+            "{gateway_url}/api/admin/endpoints/keys/key-openai-a"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "concurrent_limit": null
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(clear_response.status(), StatusCode::OK);
+    let clear_payload: serde_json::Value =
+        clear_response.json().await.expect("json body should parse");
+    assert_eq!(clear_payload["concurrent_limit"], serde_json::Value::Null);
+
+    let negative_response = reqwest::Client::new()
+        .put(format!(
+            "{gateway_url}/api/admin/endpoints/keys/key-openai-a"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "concurrent_limit": -1
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(negative_response.status(), StatusCode::BAD_REQUEST);
+    let negative_payload: serde_json::Value = negative_response
+        .json()
+        .await
+        .expect("json body should parse");
+    assert!(negative_payload["detail"]
+        .as_str()
+        .expect("detail should be string")
+        .contains("concurrent_limit"));
+
+    let reloaded = provider_catalog_repository
+        .list_keys_by_ids(&["key-openai-a".to_string()])
+        .await
+        .expect("keys should read");
+    assert_eq!(reloaded.len(), 1);
+    assert_eq!(reloaded[0].name, "renamed without concurrency");
+    assert_eq!(reloaded[0].concurrent_limit, None);
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]
