@@ -1,0 +1,3 @@
+Command: GIT_MASTER=1 rtk git diff --check
+Result: PASS (exit code 0)
+Output: <none>
