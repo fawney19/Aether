@@ -2807,7 +2807,29 @@ pub(crate) fn openai_responses_tools_to_canonical(
             .unwrap_or("function")
             .trim()
             .to_ascii_lowercase();
-        if tool_type == "function" && tool_object.get("function").is_none() {
+        if tool_type == "function" {
+            if let Some(function) = tool_object.get("function").and_then(Value::as_object) {
+                let name = function
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())?;
+                let mut extensions =
+                    openai_responses_extensions(tool_object, &["type", "function"]);
+                let function_extensions =
+                    openai_responses_extensions(function, &["name", "description", "parameters"]);
+                merge_tool_extensions(&mut extensions, function_extensions);
+                canonical.push(CanonicalToolDefinition {
+                    name: name.to_string(),
+                    description: function
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    parameters: function.get("parameters").cloned(),
+                    extensions,
+                });
+                continue;
+            }
             let name = tool_object
                 .get("name")
                 .and_then(Value::as_str)
@@ -2825,6 +2847,41 @@ pub(crate) fn openai_responses_tools_to_canonical(
                     &["type", "name", "description", "parameters"],
                 ),
             });
+        } else if tool_type == "custom" {
+            let custom = tool_object.get("custom").and_then(Value::as_object);
+            let name = tool_object
+                .get("name")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    custom
+                        .and_then(|value| value.get("name"))
+                        .and_then(Value::as_str)
+                })
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            let description = tool_object
+                .get("description")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    custom
+                        .and_then(|value| value.get("description"))
+                        .and_then(Value::as_str)
+                })
+                .map(ToOwned::to_owned);
+            let parameters = tool_object
+                .get("parameters")
+                .or_else(|| custom.and_then(|value| value.get("parameters")))
+                .filter(|value| value.is_object())
+                .cloned();
+            canonical.push(CanonicalToolDefinition {
+                name: name.to_string(),
+                description,
+                parameters,
+                extensions: BTreeMap::from([(
+                    OPENAI_RESPONSES_EXTENSION_NAMESPACE.to_string(),
+                    tool.clone(),
+                )]),
+            });
         } else if tool_type.starts_with("web_search") {
             canonical.push(CanonicalToolDefinition {
                 name: tool_type,
@@ -2838,6 +2895,19 @@ pub(crate) fn openai_responses_tools_to_canonical(
         }
     }
     Some(canonical)
+}
+
+fn merge_tool_extensions(target: &mut BTreeMap<String, Value>, source: BTreeMap<String, Value>) {
+    for (namespace, value) in source {
+        match (target.get_mut(&namespace), value) {
+            (Some(Value::Object(target)), Value::Object(source)) => {
+                target.extend(source);
+            }
+            (_, value) => {
+                target.insert(namespace, value);
+            }
+        }
+    }
 }
 
 pub(crate) fn canonical_tool_to_openai(tool: &CanonicalToolDefinition) -> Value {
@@ -2901,6 +2971,31 @@ pub(crate) fn openai_responses_tool_choice_to_canonical(
                 object
                     .get("name")
                     .and_then(Value::as_str)
+                    .or_else(|| {
+                        object
+                            .get("function")
+                            .and_then(Value::as_object)
+                            .and_then(|function| function.get("name"))
+                            .and_then(Value::as_str)
+                    })
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|name| CanonicalToolChoice::Tool {
+                        name: name.to_string(),
+                    })
+            } else if choice_type == "custom" {
+                object
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .or_else(|| {
+                        object
+                            .get("custom")
+                            .and_then(Value::as_object)
+                            .and_then(|custom| custom.get("name"))
+                            .and_then(Value::as_str)
+                    })
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
                     .map(|name| CanonicalToolChoice::Tool {
                         name: name.to_string(),
                     })
@@ -4269,6 +4364,72 @@ mod tests {
         assert_eq!(rebuilt["text"]["format"]["json_schema"]["name"], "answer");
         assert_eq!(rebuilt["text"]["verbosity"], "low");
         assert_eq!(rebuilt["tool_choice"]["name"], "lookup");
+    }
+
+    #[test]
+    fn openai_responses_request_adapter_accepts_nested_function_and_custom_tools() {
+        let request = json!({
+            "model": "gpt-5",
+            "input": "Use a tool",
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "lookup_weather",
+                        "description": "Lookup weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "city": {"type": "string"}
+                            },
+                            "required": ["city"]
+                        }
+                    }
+                },
+                {
+                    "type": "custom",
+                    "custom": {
+                        "name": "shell_command",
+                        "description": "Run a shell command"
+                    }
+                }
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "lookup_weather"}
+            }
+        });
+
+        let canonical =
+            from_openai_responses_to_canonical_request(&request).expect("canonical request");
+        assert_eq!(canonical.tools.len(), 2);
+        assert_eq!(canonical.tools[0].name, "lookup_weather");
+        assert_eq!(
+            canonical.tools[0]
+                .parameters
+                .as_ref()
+                .and_then(|value| value.get("required"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(canonical.tools[1].name, "shell_command");
+        assert!(matches!(
+            canonical.tool_choice,
+            Some(super::CanonicalToolChoice::Tool { ref name }) if name == "lookup_weather"
+        ));
+
+        let claude = canonical_to_claude_request(&canonical, "claude-sonnet-4-upstream", false)
+            .expect("claude request");
+        assert_eq!(claude["tools"][0]["name"], "lookup_weather");
+        assert_eq!(claude["tools"][1]["name"], "shell_command");
+        assert_eq!(claude["tool_choice"]["name"], "lookup_weather");
+
+        let rebuilt = canonical_to_openai_responses_request(&canonical, "gpt-5-upstream", false)
+            .expect("openai responses request");
+        assert_eq!(rebuilt["tools"][0]["name"], "lookup_weather");
+        assert_eq!(rebuilt["tools"][1]["type"], "custom");
+        assert_eq!(rebuilt["tools"][1]["custom"]["name"], "shell_command");
     }
 
     #[test]

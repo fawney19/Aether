@@ -1071,4 +1071,76 @@ mod tests {
             "image/jpeg"
         );
     }
+
+    #[test]
+    fn openai_responses_nested_tools_survive_claude_cli_and_kiro_envelope_conversion() {
+        let request = json!({
+            "model": "gpt-5",
+            "input": "Use the weather tool for Shanghai.",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string"}
+                        },
+                        "required": []
+                    }
+                }
+            }],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_weather"}
+            }
+        });
+
+        let claude = build_standard_request_body(
+            &request,
+            "openai:responses",
+            "claude-sonnet-4.6",
+            "kiro",
+            "claude:cli",
+            "/v1/responses",
+            true,
+            None,
+            None,
+        )
+        .expect("openai responses should convert to claude cli");
+        assert_eq!(claude["tools"][0]["name"], "get_weather");
+        assert_eq!(claude["tool_choice"]["name"], "get_weather");
+
+        let auth_config = aether_provider_transport::kiro::KiroAuthConfig {
+            auth_method: None,
+            refresh_token: None,
+            expires_at: None,
+            profile_arn: Some("arn:aws:bedrock:demo".to_string()),
+            region: None,
+            auth_region: None,
+            api_region: Some("us-east-1".to_string()),
+            client_id: None,
+            client_secret: None,
+            machine_id: None,
+            kiro_version: None,
+            system_version: None,
+            node_version: None,
+            access_token: Some("token".to_string()),
+        };
+        let kiro = aether_provider_transport::kiro::build_kiro_provider_request_body(
+            &claude,
+            "claude-sonnet-4.6",
+            &auth_config,
+            None,
+        )
+        .expect("kiro envelope should build");
+        let tool_spec = &kiro["conversationState"]["currentMessage"]["userInputMessage"]
+            ["userInputMessageContext"]["tools"][0]["toolSpecification"];
+        assert_eq!(tool_spec["name"], "get_weather");
+        assert!(
+            tool_spec["inputSchema"]["json"].get("required").is_none(),
+            "Kiro envelope should strip empty required arrays from tool schema"
+        );
+    }
 }

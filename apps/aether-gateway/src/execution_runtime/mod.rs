@@ -5,6 +5,7 @@ use serde_json::{Map, Value};
 
 mod constants;
 mod fallback;
+mod kiro_web_search;
 pub(crate) mod ndjson;
 mod oauth_retry;
 #[cfg(test)]

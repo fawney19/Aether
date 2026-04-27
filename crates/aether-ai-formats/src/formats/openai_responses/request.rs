@@ -447,7 +447,9 @@ fn canonical_tool_to_responses(tool: &CanonicalToolDefinition) -> Value {
             value
                 .get("type")
                 .and_then(Value::as_str)
-                .is_some_and(|tool_type| tool_type.starts_with("web_search"))
+                .is_some_and(|tool_type| {
+                    tool_type == "custom" || tool_type.starts_with("web_search")
+                })
         })
     {
         return raw.clone();

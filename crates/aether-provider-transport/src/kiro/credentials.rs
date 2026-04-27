@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_REGION: &str = "us-east-1";
-pub const DEFAULT_KIRO_VERSION: &str = "0.8.0";
+pub const DEFAULT_KIRO_VERSION: &str = "0.3.210";
 pub const DEFAULT_NODE_VERSION: &str = "22.21.1";
 pub const DEFAULT_SYSTEM_VERSION: &str = "other#unknown";
 
@@ -158,7 +158,7 @@ impl KiroAuthConfig {
             .map(normalize_auth_method)
             .unwrap_or_else(|| "social".to_string());
         if explicit_method != "social" {
-            return explicit_method == "idc";
+            return matches!(explicit_method.as_str(), "idc" | "external_idp");
         }
         self.client_id
             .as_deref()
@@ -173,10 +173,25 @@ impl KiroAuthConfig {
                 .is_some()
     }
 
+    pub fn uses_external_idp_token_type(&self) -> bool {
+        self.auth_method
+            .as_deref()
+            .map(normalize_auth_method)
+            .as_deref()
+            == Some("external_idp")
+    }
+
     pub fn profile_arn_for_payload(&self) -> Option<&str> {
         if self.is_idc_auth() {
             return None;
         }
+        self.profile_arn
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    pub fn profile_arn_for_mcp(&self) -> Option<&str> {
         self.profile_arn
             .as_deref()
             .map(str::trim)
@@ -309,6 +324,7 @@ fn normalize_auth_method(raw: &str) -> String {
         | "identity_center"
         | "identitycenter"
         | "idc" => "idc".to_string(),
+        "external-idp" | "external_idp" | "externalidp" => "external_idp".to_string(),
         _ => value,
     }
 }
@@ -395,6 +411,29 @@ mod tests {
     }
 
     #[test]
+    fn preserves_external_idp_auth_method_for_header_selection() {
+        let auth_config = KiroAuthConfig::from_raw_json(Some(
+            r#"{
+                "authMethod":"external_idp",
+                "refreshToken":"rt-1",
+                "clientId":"cid",
+                "clientSecret":"secret",
+                "profileArn":"arn:aws:bedrock:demo"
+            }"#,
+        ))
+        .expect("auth config should parse");
+
+        assert_eq!(auth_config.auth_method.as_deref(), Some("external_idp"));
+        assert!(auth_config.is_idc_auth());
+        assert!(auth_config.uses_external_idp_token_type());
+        assert!(auth_config.profile_arn_for_payload().is_none());
+        assert_eq!(
+            auth_config.profile_arn_for_mcp(),
+            Some("arn:aws:bedrock:demo")
+        );
+    }
+
+    #[test]
     fn infers_idc_when_client_credentials_exist() {
         let auth_config = KiroAuthConfig::from_raw_json(Some(
             r#"{
@@ -407,7 +446,12 @@ mod tests {
         .expect("auth config should parse");
 
         assert!(auth_config.is_idc_auth());
+        assert!(!auth_config.uses_external_idp_token_type());
         assert!(auth_config.profile_arn_for_payload().is_none());
+        assert_eq!(
+            auth_config.profile_arn_for_mcp(),
+            Some("arn:aws:bedrock:demo")
+        );
     }
 
     #[test]

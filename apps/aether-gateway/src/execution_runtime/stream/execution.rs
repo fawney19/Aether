@@ -51,6 +51,7 @@ use crate::clock::current_unix_ms as current_request_candidate_unix_ms;
 use crate::constants::{CONTROL_CANDIDATE_ID_HEADER, CONTROL_REQUEST_ID_HEADER};
 use crate::control::GatewayControlDecision;
 use crate::execution_runtime::build_direct_execution_frame_stream;
+use crate::execution_runtime::kiro_web_search::maybe_execute_kiro_web_search_stream;
 use crate::execution_runtime::oauth_retry::refresh_oauth_plan_auth_for_retry;
 #[cfg(test)]
 use crate::execution_runtime::remote_compat::post_stream_plan_to_remote_execution_runtime;
@@ -384,6 +385,57 @@ pub(crate) async fn execute_execution_runtime_stream(
         .and_then(|context| context.candidate_index)
         .map(|value| value.to_string())
         .unwrap_or_else(|| "-".to_string());
+    match maybe_execute_kiro_web_search_stream(state, &plan, report_context.as_ref()).await {
+        Ok(Some(kiro_web_search)) => {
+            return execute_stream_from_frame_stream(
+                state,
+                plan,
+                trace_id,
+                decision,
+                plan_kind,
+                report_kind,
+                kiro_web_search.report_context.or(report_context),
+                candidate_started_unix_secs,
+                stream_started_at,
+                kiro_web_search.frame_stream,
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(err) => {
+            info!(
+                event_name = "kiro_web_search_mcp_unavailable",
+                log_type = "ops",
+                trace_id = %trace_id,
+                request_id = %plan_request_id_for_log,
+                candidate_id = ?plan.candidate_id,
+                provider_name = provider_name.as_str(),
+                endpoint_id = %endpoint_id,
+                key_id = %key_id,
+                model_name = model_name.as_str(),
+                candidate_index = candidate_index.as_str(),
+                error = %err,
+                "gateway Kiro web_search MCP execution unavailable"
+            );
+            let terminal_unix_secs = current_request_candidate_unix_ms();
+            record_local_request_candidate_status(
+                state,
+                &plan,
+                report_context.as_ref(),
+                SchedulerRequestCandidateStatusUpdate {
+                    status: RequestCandidateStatus::Failed,
+                    status_code: None,
+                    error_type: Some("kiro_web_search_mcp_unavailable".to_string()),
+                    error_message: Some(format!("{err:?}")),
+                    latency_ms: None,
+                    started_at_unix_ms: Some(candidate_started_unix_secs),
+                    finished_at_unix_ms: Some(terminal_unix_secs),
+                },
+            )
+            .await;
+            return Ok(None);
+        }
+    }
     #[cfg(not(test))]
     {
         let execution = match execute_in_process_stream_with_oauth_retry(
