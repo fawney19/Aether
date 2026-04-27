@@ -1,8 +1,8 @@
 use aether_contracts::ProxySnapshot;
-use aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate;
+use aether_scheduler_core::{SchedulerMinimalCandidateSelectionCandidate, SchedulerRankingOutcome};
 use serde_json::{json, Map, Value};
 
-use crate::ai_pipeline::planner::candidate_eligibility::EligibleLocalExecutionCandidate;
+use crate::ai_pipeline::planner::candidate_resolution::EligibleLocalExecutionCandidate;
 use crate::ai_pipeline::planner::passthrough::resolve_same_format_provider_transport_unsupported_reason_for_trace;
 use crate::ai_pipeline::transport::{
     body_rules_are_locally_supported, header_rules_are_locally_supported,
@@ -24,6 +24,40 @@ pub(crate) struct LocalExecutionCandidateMetadataParts<'a> {
     pub(crate) provider_api_format: &'a str,
     pub(crate) client_api_format: &'a str,
     pub(crate) extra_fields: Map<String, Value>,
+}
+
+pub(crate) fn append_ranking_metadata_to_object(
+    object: &mut Map<String, Value>,
+    ranking: &SchedulerRankingOutcome,
+) {
+    object.insert(
+        "ranking_mode".to_string(),
+        Value::String(format!("{:?}", ranking.ranking_mode)),
+    );
+    object.insert(
+        "priority_mode".to_string(),
+        Value::String(format!("{:?}", ranking.priority_mode)),
+    );
+    object.insert(
+        "ranking_index".to_string(),
+        Value::Number(serde_json::Number::from(ranking.ranking_index as u64)),
+    );
+    object.insert(
+        "priority_slot".to_string(),
+        Value::Number(serde_json::Number::from(i64::from(ranking.priority_slot))),
+    );
+    if let Some(promoted_by) = ranking.promoted_by {
+        object.insert(
+            "promoted_by".to_string(),
+            Value::String(promoted_by.to_string()),
+        );
+    }
+    if let Some(demoted_by) = ranking.demoted_by {
+        object.insert(
+            "demoted_by".to_string(),
+            Value::String(demoted_by.to_string()),
+        );
+    }
 }
 
 pub(crate) fn build_request_trace_proxy_value(
@@ -391,7 +425,7 @@ mod tests {
             provider_type: "codex".to_string(),
             provider_priority: 22,
             endpoint_id: "endpoint-1".to_string(),
-            endpoint_api_format: "openai:cli".to_string(),
+            endpoint_api_format: "openai:responses".to_string(),
             key_id: "key-1".to_string(),
             key_name: "codex".to_string(),
             key_auth_type: "oauth".to_string(),
@@ -426,7 +460,7 @@ mod tests {
             endpoint: GatewayProviderTransportEndpoint {
                 id: "endpoint-1".to_string(),
                 provider_id: "provider-1".to_string(),
-                api_format: "openai:cli".to_string(),
+                api_format: "openai:responses".to_string(),
                 api_family: None,
                 endpoint_kind: None,
                 is_active: true,
@@ -523,12 +557,12 @@ mod tests {
         let metadata = build_local_execution_candidate_contract_metadata_for_candidate(
             &sample_candidate(),
             Some(&sample_transport()),
-            "openai:cli",
+            "openai:responses",
             "claude:cli",
             serde_json::Map::new(),
             ExecutionStrategy::LocalCrossFormat,
             ConversionMode::Bidirectional,
-            "openai:cli",
+            "openai:responses",
         );
 
         assert_eq!(metadata["transport_diagnostics"]["provider_type"], "codex");
@@ -555,8 +589,8 @@ mod tests {
         let metadata = build_local_execution_candidate_metadata_for_candidate(
             &sample_candidate(),
             None,
-            "openai:cli",
-            "openai:cli",
+            "openai:responses",
+            "openai:responses",
             serde_json::Map::new(),
         );
 

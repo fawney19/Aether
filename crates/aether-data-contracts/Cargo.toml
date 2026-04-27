@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Shared data contracts and repository traits for Aether Rust services"
 
 [dependencies]
+aether-ai-formats.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

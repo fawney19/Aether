@@ -3,11 +3,12 @@ use serde_json::Value;
 use crate::ai_pipeline::conversion::{request_conversion_kind, RequestConversionKind};
 use crate::ai_pipeline::transport::apply_local_body_rules;
 use crate::ai_pipeline::transport::url::{
-    build_claude_messages_url, build_openai_chat_url, build_openai_cli_url,
+    build_claude_messages_url, build_openai_chat_url, build_openai_responses_url,
     build_passthrough_path_url,
 };
 use crate::ai_pipeline::{
-    apply_codex_openai_cli_special_body_edits, apply_openai_compact_special_body_edits,
+    apply_codex_openai_responses_special_body_edits,
+    apply_openai_responses_compact_special_body_edits,
     build_cross_format_openai_chat_request_body as pipeline_build_cross_format_openai_chat_request_body,
     build_local_openai_chat_request_body as pipeline_build_local_openai_chat_request_body,
     GatewayProviderTransportSnapshot,
@@ -67,14 +68,17 @@ pub(crate) fn build_cross_format_openai_chat_request_body(
     if !apply_local_body_rules(&mut provider_request_body, body_rules, Some(body_json)) {
         return None;
     }
-    apply_codex_openai_cli_special_body_edits(
+    apply_codex_openai_responses_special_body_edits(
         &mut provider_request_body,
         provider_type,
         provider_api_format,
         body_rules,
         user_api_key_id,
     );
-    apply_openai_compact_special_body_edits(&mut provider_request_body, provider_api_format);
+    apply_openai_responses_compact_special_body_edits(
+        &mut provider_request_body,
+        provider_api_format,
+    );
     Some(provider_request_body)
 }
 
@@ -112,7 +116,7 @@ pub(crate) fn build_cross_format_openai_chat_upstream_url(
                     None,
                 )
             }
-            RequestConversionKind::ToOpenAIFamilyCli => Some(build_openai_cli_url(
+            RequestConversionKind::ToOpenAiResponses => Some(build_openai_responses_url(
                 &transport.endpoint.base_url,
                 parts.uri.query(),
                 false,

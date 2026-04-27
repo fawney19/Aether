@@ -37,8 +37,8 @@ pub fn build_core_error_body_for_client_format(
     let mut error_object = Map::new();
     error_object.insert("message".to_string(), Value::String(message.to_string()));
 
-    match client_api_format.trim().to_ascii_lowercase().as_str() {
-        "openai:chat" | "openai:cli" | "openai:compact" => {
+    match aether_ai_formats::normalize_legacy_openai_format_alias(client_api_format).as_str() {
+        "openai:chat" | "openai:responses" | "openai:responses:compact" => {
             error_object.insert(
                 "type".to_string(),
                 Value::String(map_local_sync_error_kind_to_openai_type(kind).to_string()),

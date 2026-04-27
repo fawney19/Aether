@@ -955,7 +955,7 @@ async fn gateway_records_failed_usage_for_claude_runtime_miss_without_execution_
     assert_eq!(body_json["error"]["type"], "http_error");
     assert_eq!(
         body_json["error"]["message"],
-        "没有可用提供商支持模型 claude-sonnet-4-5 的同步请求。请检查模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）"
+        "没有可用提供商支持模型 claude-sonnet-4-5 的同步请求"
     );
 
     let stored_usage = wait_for_usage_status(
@@ -972,7 +972,7 @@ async fn gateway_records_failed_usage_for_claude_runtime_miss_without_execution_
         stored_usage.user_id.as_deref(),
         Some("user-claude-runtime-miss-usage-1")
     );
-    assert_eq!(stored_usage.provider_name, "claude");
+    assert_eq!(stored_usage.provider_name, "unknown");
     assert_eq!(stored_usage.model, "claude-sonnet-4-5");
     assert_eq!(stored_usage.api_format.as_deref(), Some("claude:chat"));
     assert_eq!(
@@ -1394,7 +1394,7 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-claude-cli-usage-local-miss-1".to_string(),
-            endpoint_api_format: "openai:cli".to_string(),
+            endpoint_api_format: "openai:responses".to_string(),
             endpoint_api_family: Some("openai".to_string()),
             endpoint_kind: Some("cli".to_string()),
             endpoint_is_active: true,
@@ -1402,11 +1402,11 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
             key_name: "codex".to_string(),
             key_auth_type: "bearer".to_string(),
             key_is_active: true,
-            key_api_formats: Some(vec!["openai:cli".to_string()]),
+            key_api_formats: Some(vec!["openai:responses".to_string()]),
             key_allowed_models: None,
             key_capabilities: None,
             key_internal_priority: 5,
-            key_global_priority_by_format: Some(serde_json::json!({"openai:cli": 1})),
+            key_global_priority_by_format: Some(serde_json::json!({"openai:responses": 1})),
             model_id: "model-claude-cli-usage-local-miss-1".to_string(),
             global_model_id: "global-model-claude-cli-usage-local-miss-1".to_string(),
             global_model_name: "gpt-5.4".to_string(),
@@ -1416,7 +1416,7 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
                 name: "gpt-5.4".to_string(),
                 priority: 1,
-                api_formats: Some(vec!["openai:cli".to_string()]),
+                api_formats: Some(vec!["openai:responses".to_string()]),
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1449,7 +1449,7 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
         StoredProviderCatalogEndpoint::new(
             "endpoint-claude-cli-usage-local-miss-1".to_string(),
             "provider-claude-cli-usage-local-miss-1".to_string(),
-            "openai:cli".to_string(),
+            "openai:responses".to_string(),
             Some("openai".to_string()),
             Some("cli".to_string()),
             true,
@@ -1479,7 +1479,7 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             encrypt_python_fernet_plaintext(
                 DEVELOPMENT_ENCRYPTION_KEY,
                 "sk-upstream-openai-cli-usage-local-miss",
@@ -1487,7 +1487,7 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
             .expect("api key should encrypt"),
             None,
             None,
-            Some(serde_json::json!({"openai:cli": 1})),
+            Some(serde_json::json!({"openai:responses": 1})),
             None,
             None,
             None,
@@ -1576,7 +1576,7 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
     assert_eq!(body_json["error"]["type"], "http_error");
     assert_eq!(
         body_json["error"]["message"],
-        "没有可用提供商支持模型 gpt-5.4 的同步请求。请检查模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）"
+        "没有可用提供商支持模型 gpt-5.4 的同步请求"
     );
 
     let stored_usage = wait_for_usage_status(
@@ -1593,7 +1593,7 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
         stored_usage.user_id.as_deref(),
         Some("user-claude-cli-usage-local-miss-1")
     );
-    assert_eq!(stored_usage.provider_name, "claude");
+    assert_eq!(stored_usage.provider_name, "unknown");
     assert_eq!(stored_usage.model, "gpt-5.4");
     assert_eq!(stored_usage.api_format.as_deref(), Some("claude:cli"));
     assert_eq!(
@@ -1618,6 +1618,31 @@ async fn gateway_records_failed_usage_when_all_local_claude_cli_candidates_are_s
             "没有可用提供商支持模型 gpt-5.4 的同步请求。请检查模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）"
         )
     );
+    assert_eq!(
+        stored_usage
+            .request_headers
+            .as_ref()
+            .and_then(|value| value.get("authorization"))
+            .and_then(|value| value.as_str()),
+        Some("Bear****miss")
+    );
+    assert_eq!(
+        stored_usage
+            .request_headers
+            .as_ref()
+            .and_then(|value| value.get("content-type"))
+            .and_then(|value| value.as_str()),
+        Some("application/json")
+    );
+    assert_eq!(
+        stored_usage
+            .request_body
+            .as_ref()
+            .and_then(|value| value.get("model"))
+            .and_then(|value| value.as_str()),
+        Some("gpt-5.4")
+    );
+    assert!(stored_usage.provider_request_body.is_none());
     assert_eq!(
         stored_usage
             .request_metadata
@@ -1678,7 +1703,7 @@ async fn gateway_keeps_failed_usage_request_capture_lightweight_for_large_local_
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-claude-cli-usage-local-miss-large-1".to_string(),
-            endpoint_api_format: "openai:cli".to_string(),
+            endpoint_api_format: "openai:responses".to_string(),
             endpoint_api_family: Some("openai".to_string()),
             endpoint_kind: Some("cli".to_string()),
             endpoint_is_active: true,
@@ -1686,11 +1711,11 @@ async fn gateway_keeps_failed_usage_request_capture_lightweight_for_large_local_
             key_name: "codex".to_string(),
             key_auth_type: "bearer".to_string(),
             key_is_active: true,
-            key_api_formats: Some(vec!["openai:cli".to_string()]),
+            key_api_formats: Some(vec!["openai:responses".to_string()]),
             key_allowed_models: None,
             key_capabilities: None,
             key_internal_priority: 5,
-            key_global_priority_by_format: Some(serde_json::json!({"openai:cli": 1})),
+            key_global_priority_by_format: Some(serde_json::json!({"openai:responses": 1})),
             model_id: "model-claude-cli-usage-local-miss-large-1".to_string(),
             global_model_id: "global-model-claude-cli-usage-local-miss-large-1".to_string(),
             global_model_name: "gpt-5.4".to_string(),
@@ -1700,7 +1725,7 @@ async fn gateway_keeps_failed_usage_request_capture_lightweight_for_large_local_
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
                 name: "gpt-5.4".to_string(),
                 priority: 1,
-                api_formats: Some(vec!["openai:cli".to_string()]),
+                api_formats: Some(vec!["openai:responses".to_string()]),
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1733,7 +1758,7 @@ async fn gateway_keeps_failed_usage_request_capture_lightweight_for_large_local_
         StoredProviderCatalogEndpoint::new(
             "endpoint-claude-cli-usage-local-miss-large-1".to_string(),
             "provider-claude-cli-usage-local-miss-large-1".to_string(),
-            "openai:cli".to_string(),
+            "openai:responses".to_string(),
             Some("openai".to_string()),
             Some("cli".to_string()),
             true,
@@ -1763,7 +1788,7 @@ async fn gateway_keeps_failed_usage_request_capture_lightweight_for_large_local_
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             encrypt_python_fernet_plaintext(
                 DEVELOPMENT_ENCRYPTION_KEY,
                 "sk-upstream-openai-cli-usage-local-miss-large",
@@ -1771,7 +1796,7 @@ async fn gateway_keeps_failed_usage_request_capture_lightweight_for_large_local_
             .expect("api key should encrypt"),
             None,
             None,
-            Some(serde_json::json!({"openai:cli": 1})),
+            Some(serde_json::json!({"openai:responses": 1})),
             None,
             None,
             None,
@@ -1863,7 +1888,19 @@ async fn gateway_keeps_failed_usage_request_capture_lightweight_for_large_local_
     )
     .await;
     assert_eq!(stored_usage.status, "failed");
-    assert!(stored_usage.request_body.is_none());
+    assert_eq!(
+        stored_usage.request_body_state,
+        Some(UsageBodyCaptureState::Inline)
+    );
+    assert_eq!(
+        stored_usage
+            .request_body
+            .as_ref()
+            .and_then(|value| value.get("model"))
+            .and_then(|value| value.as_str()),
+        Some("gpt-5.4")
+    );
+    assert!(stored_usage.provider_request_body.is_none());
     assert_eq!(
         stored_usage
             .request_metadata

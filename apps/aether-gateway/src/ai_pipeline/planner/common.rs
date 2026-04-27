@@ -9,8 +9,9 @@ pub(crate) use crate::ai_pipeline::contracts::{
     GEMINI_FILES_DELETE_PLAN_KIND, GEMINI_FILES_DOWNLOAD_PLAN_KIND, GEMINI_FILES_GET_PLAN_KIND,
     GEMINI_FILES_LIST_PLAN_KIND, GEMINI_FILES_UPLOAD_PLAN_KIND, GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND,
     GEMINI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_CHAT_SYNC_PLAN_KIND,
-    OPENAI_CLI_STREAM_PLAN_KIND, OPENAI_CLI_SYNC_PLAN_KIND, OPENAI_COMPACT_STREAM_PLAN_KIND,
-    OPENAI_COMPACT_SYNC_PLAN_KIND, OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND,
+    OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND,
+    OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND, OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND,
+    OPENAI_RESPONSES_STREAM_PLAN_KIND, OPENAI_RESPONSES_SYNC_PLAN_KIND,
     OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND, OPENAI_VIDEO_CONTENT_PLAN_KIND,
     OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND,
     OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
@@ -131,12 +132,20 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn forces_streaming_for_codex_openai_cli() {
+    fn forces_streaming_for_codex_openai_responses_and_alias() {
+        assert!(force_upstream_streaming_for_provider(
+            "codex",
+            "openai:responses"
+        ));
         assert!(force_upstream_streaming_for_provider("codex", "openai:cli"));
     }
 
     #[test]
     fn does_not_force_streaming_for_compact_or_other_provider_types() {
+        assert!(!force_upstream_streaming_for_provider(
+            "codex",
+            "openai:responses:compact"
+        ));
         assert!(!force_upstream_streaming_for_provider(
             "codex",
             "openai:compact"

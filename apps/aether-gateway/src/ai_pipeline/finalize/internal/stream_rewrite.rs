@@ -148,6 +148,7 @@ struct OpenAiImageStreamState {
     latest_image: Option<OpenAiImageFrame>,
     emitted_partial_count: u64,
     saw_upstream_partial: bool,
+    emitted_failure: bool,
 }
 
 #[derive(Clone)]
@@ -208,6 +209,7 @@ impl OpenAiImageStreamState {
             .or(event_name.as_deref())
             .unwrap_or_default();
         match event_type {
+            "error" | "response.failed" => self.handle_failed(report_context, &event),
             "response.image_generation_call.partial_image" => {
                 self.handle_image_generation_partial(report_context, &event)
             }
@@ -222,6 +224,9 @@ impl OpenAiImageStreamState {
         report_context: &Value,
         event: &Value,
     ) -> Result<Vec<u8>, GatewayError> {
+        if self.emitted_failure {
+            return Ok(Vec::new());
+        }
         if requested_partial_images(report_context) == 0 {
             return Ok(Vec::new());
         }
@@ -262,6 +267,9 @@ impl OpenAiImageStreamState {
         report_context: &Value,
         event: &Value,
     ) -> Result<Vec<u8>, GatewayError> {
+        if self.emitted_failure {
+            return Ok(Vec::new());
+        }
         let Some(item) = event.get("item").and_then(Value::as_object) else {
             return Ok(Vec::new());
         };
@@ -303,6 +311,9 @@ impl OpenAiImageStreamState {
         report_context: &Value,
         event: &Value,
     ) -> Result<Vec<u8>, GatewayError> {
+        if self.emitted_failure {
+            return Ok(Vec::new());
+        }
         if self.latest_image.is_none() {
             if let Some(result) = completed_response_image_result(event) {
                 self.latest_image = Some(OpenAiImageFrame {
@@ -334,6 +345,82 @@ impl OpenAiImageStreamState {
             }),
         )
     }
+
+    fn handle_failed(
+        &mut self,
+        report_context: &Value,
+        event: &Value,
+    ) -> Result<Vec<u8>, GatewayError> {
+        if self.emitted_failure {
+            return Ok(Vec::new());
+        }
+        self.emitted_failure = true;
+        let error = image_failure_error(event);
+        encode_json_sse(
+            Some(image_failed_event_name(report_context)),
+            &serde_json::json!({
+                "type": image_failed_event_name(report_context),
+                "error": error,
+            }),
+        )
+    }
+}
+
+fn image_failure_error(event: &Value) -> Value {
+    let mut error = event
+        .get("error")
+        .or_else(|| event.get("response").and_then(|value| value.get("error")))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    if !error.contains_key("message") {
+        if let Some(message) = event
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                event
+                    .get("response")
+                    .and_then(|value| value.get("error"))
+                    .and_then(|value| value.get("message"))
+                    .and_then(Value::as_str)
+            })
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            error.insert("message".to_string(), Value::String(message.to_string()));
+        }
+    }
+    if !error.contains_key("code") {
+        if let Some(code) = event
+            .get("code")
+            .or_else(|| {
+                event
+                    .get("response")
+                    .and_then(|value| value.get("error"))
+                    .and_then(|value| value.get("code"))
+            })
+            .cloned()
+        {
+            error.insert("code".to_string(), code);
+        }
+    }
+    if !error.contains_key("type") {
+        let inferred_type = error
+            .get("code")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("upstream_error");
+        error.insert("type".to_string(), Value::String(inferred_type.to_string()));
+    }
+    if !error.contains_key("message") {
+        error.insert(
+            "message".to_string(),
+            Value::String("Image generation failed".to_string()),
+        );
+    }
+
+    Value::Object(error)
 }
 
 fn completed_response_image_result(event: &Value) -> Option<&str> {
@@ -370,6 +457,14 @@ fn image_completed_event_name(report_context: &Value) -> &'static str {
         "image_edit.completed"
     } else {
         "image_generation.completed"
+    }
+}
+
+fn image_failed_event_name(report_context: &Value) -> &'static str {
+    if image_request_operation(report_context) == Some("edit") {
+        "image_edit.failed"
+    } else {
+        "image_generation.failed"
     }
 }
 

@@ -7,7 +7,11 @@ use regex::Regex;
 use serde_json::{json, Value};
 
 const MODEL_FETCH_FORMAT_PRIORITY: &[&[&str]] = &[
-    &["openai:chat", "openai:cli", "openai:compact"],
+    &[
+        "openai:chat",
+        "openai:responses",
+        "openai:responses:compact",
+    ],
     &["claude:chat", "claude:cli"],
     &["gemini:chat", "gemini:cli"],
 ];
@@ -180,9 +184,15 @@ pub fn selected_models_fetch_endpoints(
         if !key_formats.is_empty() && !key_formats.contains(&api_format) {
             continue;
         }
-        by_format
-            .entry(api_format)
-            .or_insert_with(|| endpoint.clone());
+        if let Some(existing) = by_format.get_mut(&api_format) {
+            if endpoint.api_format.trim().eq_ignore_ascii_case(&api_format)
+                && !existing.api_format.trim().eq_ignore_ascii_case(&api_format)
+            {
+                *existing = endpoint.clone();
+            }
+        } else {
+            by_format.insert(api_format, endpoint.clone());
+        }
     }
 
     MODEL_FETCH_FORMAT_PRIORITY
@@ -209,8 +219,8 @@ pub fn endpoint_supports_rust_models_fetch(api_format: &str) -> bool {
     matches!(
         api_format.as_str(),
         "openai:chat"
-            | "openai:cli"
-            | "openai:compact"
+            | "openai:responses"
+            | "openai:responses:compact"
             | "claude:chat"
             | "claude:cli"
             | "gemini:chat"
@@ -250,7 +260,7 @@ pub fn preset_models_for_provider(provider_type: &str) -> Option<Vec<Value>> {
             preset_model("claude-haiku-4-5-20251001", "anthropic", "Claude Haiku 4.5", "claude:cli"),
         ],
         "codex" => vec![
-            preset_model("gpt-5", "openai", "GPT-5", "openai:cli"),
+            preset_model("gpt-5", "openai", "GPT-5", "openai:responses"),
             preset_model("gpt-image-1", "openai", "GPT Image 1", "openai:image"),
             preset_model("gpt-image-1.5", "openai", "GPT Image 1.5", "openai:image"),
             preset_model("gpt-image-1-mini", "openai", "GPT Image 1 Mini", "openai:image"),
@@ -258,16 +268,26 @@ pub fn preset_models_for_provider(provider_type: &str) -> Option<Vec<Value>> {
             preset_model("chatgpt-image-latest", "openai", "ChatGPT Image Latest", "openai:image"),
             preset_model("dall-e-2", "openai", "DALL-E 2", "openai:image"),
             preset_model("dall-e-3", "openai", "DALL-E 3", "openai:image"),
-            preset_model("gpt-5-codex", "openai", "GPT-5 Codex", "openai:cli"),
-            preset_model("gpt-5-codex-mini", "openai", "GPT-5 Codex Mini", "openai:cli"),
-            preset_model("gpt-5.1", "openai", "GPT-5.1", "openai:cli"),
-            preset_model("gpt-5.1-codex", "openai", "GPT-5.1 Codex", "openai:cli"),
-            preset_model("gpt-5.1-codex-mini", "openai", "GPT-5.1 Codex Mini", "openai:cli"),
-            preset_model("gpt-5.1-codex-max", "openai", "GPT-5.1 Codex Max", "openai:cli"),
-            preset_model("gpt-5.2", "openai", "GPT-5.2", "openai:cli"),
-            preset_model("gpt-5.2-codex", "openai", "GPT-5.2 Codex", "openai:cli"),
-            preset_model("gpt-5.3-codex", "openai", "GPT-5.3 Codex", "openai:cli"),
-            preset_model("gpt-5.4", "openai", "GPT-5.4", "openai:cli"),
+            preset_model("gpt-5-codex", "openai", "GPT-5 Codex", "openai:responses"),
+            preset_model("gpt-5-codex-mini", "openai", "GPT-5 Codex Mini", "openai:responses"),
+            preset_model("gpt-5.1", "openai", "GPT-5.1", "openai:responses"),
+            preset_model("gpt-5.1-codex", "openai", "GPT-5.1 Codex", "openai:responses"),
+            preset_model(
+                "gpt-5.1-codex-mini",
+                "openai",
+                "GPT-5.1 Codex Mini",
+                "openai:responses",
+            ),
+            preset_model(
+                "gpt-5.1-codex-max",
+                "openai",
+                "GPT-5.1 Codex Max",
+                "openai:responses",
+            ),
+            preset_model("gpt-5.2", "openai", "GPT-5.2", "openai:responses"),
+            preset_model("gpt-5.2-codex", "openai", "GPT-5.2 Codex", "openai:responses"),
+            preset_model("gpt-5.3-codex", "openai", "GPT-5.3 Codex", "openai:responses"),
+            preset_model("gpt-5.4", "openai", "GPT-5.4", "openai:responses"),
         ],
         _ => return None,
     };
@@ -550,7 +570,7 @@ fn wildcard_matches(pattern: &str, model_id: &str) -> bool {
 }
 
 fn normalize_api_format(value: &str) -> String {
-    value.trim().to_ascii_lowercase()
+    aether_ai_formats::normalize_legacy_openai_format_alias(value)
 }
 
 #[cfg(test)]
@@ -644,7 +664,7 @@ mod tests {
     fn aggregate_models_for_cache_merges_api_formats_and_sorts_by_model_id() {
         let aggregated = aggregate_models_for_cache(&[
             json!({"id":"zeta","api_formats":["openai:chat"]}),
-            json!({"id":"alpha","api_formats":["openai:cli"]}),
+            json!({"id":"alpha","api_formats":["openai:responses"]}),
             json!({"id":"alpha","api_formats":["openai:chat"]}),
         ]);
         assert_eq!(aggregated.len(), 2);
@@ -652,7 +672,7 @@ mod tests {
         assert_eq!(aggregated[1]["id"], "zeta");
         assert_eq!(
             aggregated[0]["api_formats"],
-            json!(["openai:chat", "openai:cli"])
+            json!(["openai:chat", "openai:responses"])
         );
     }
 
@@ -679,10 +699,13 @@ mod tests {
     }
 
     #[test]
-    fn build_models_fetch_url_excludes_openai_responses() {
+    fn build_models_fetch_url_supports_openai_responses() {
         assert_eq!(
             build_models_fetch_url("openai", "openai:responses", "https://example.com"),
-            None
+            Some((
+                "https://example.com/v1/models".to_string(),
+                "openai:responses".to_string()
+            ))
         );
     }
 
@@ -716,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_models_fetch_endpoints_prefers_chat_and_excludes_responses() {
+    fn selected_models_fetch_endpoints_prefers_chat_then_responses() {
         let key = sample_key("provider-1", "key-1", &["openai:chat", "openai:responses"]);
         let endpoints = vec![
             sample_endpoint(
@@ -741,6 +764,25 @@ mod tests {
         let selected = selected_models_fetch_endpoints(&endpoints, &key);
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].id, "endpoint-chat");
+
+        let key = sample_key("provider-1", "key-1", &["openai:responses"]);
+        let endpoints = vec![
+            sample_endpoint(
+                "provider-1",
+                "endpoint-cli",
+                "openai:cli",
+                "https://example.com",
+            ),
+            sample_endpoint(
+                "provider-1",
+                "endpoint-responses",
+                "openai:responses",
+                "https://example.com",
+            ),
+        ];
+        let selected = selected_models_fetch_endpoints(&endpoints, &key);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id, "endpoint-responses");
     }
 
     #[test]

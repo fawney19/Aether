@@ -247,11 +247,31 @@ impl SettlementWriteRepository for SqlxSettlementRepository {
                     };
 
                     if final_billing_status == "settled" {
-                        let wallet_row = if let Some(api_key_id) = input
+                        let api_key_id = input
                             .api_key_id
                             .as_deref()
-                            .filter(|value| !value.is_empty())
-                        {
+                            .filter(|value| !value.is_empty());
+                        let api_key_is_standalone = if input.api_key_is_standalone {
+                            true
+                        } else if let Some(api_key_id) = api_key_id {
+                            sqlx::query_scalar::<_, bool>(
+                                r#"
+SELECT is_standalone
+FROM api_keys
+WHERE id = $1
+LIMIT 1
+                                "#,
+                            )
+                            .bind(api_key_id)
+                            .fetch_optional(&mut **tx)
+                            .await
+                            .map_postgres_err()?
+                            .unwrap_or(false)
+                        } else {
+                            false
+                        };
+
+                        let wallet_row = if let Some(api_key_id) = api_key_id {
                             sqlx::query(
                                 r#"
 SELECT
@@ -275,11 +295,12 @@ LIMIT 1
 
                         let wallet_row = if wallet_row.is_some() {
                             wallet_row
-                        } else if let Some(user_id) =
-                            input.user_id.as_deref().filter(|value| !value.is_empty())
-                        {
-                            sqlx::query(
-                                r#"
+                        } else if !api_key_is_standalone {
+                            if let Some(user_id) =
+                                input.user_id.as_deref().filter(|value| !value.is_empty())
+                            {
+                                sqlx::query(
+                                    r#"
 SELECT
   id,
   CAST(balance AS DOUBLE PRECISION) AS balance,
@@ -289,12 +310,15 @@ FROM wallets
 WHERE user_id = $1
 FOR UPDATE
 LIMIT 1
-                                "#,
-                            )
-                            .bind(user_id)
-                            .fetch_optional(&mut **tx)
-                            .await
-                            .map_postgres_err()?
+                                    "#,
+                                )
+                                .bind(user_id)
+                                .fetch_optional(&mut **tx)
+                                .await
+                                .map_postgres_err()?
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         };
@@ -416,5 +440,12 @@ mod tests {
     fn settlement_sql_no_longer_dual_writes_wallet_snapshots_to_usage_rows() {
         let source = include_str!("sql.rs");
         assert!(!source.contains("UPDATE \"usage\"\nSET\n  wallet_id = $2"));
+    }
+
+    #[test]
+    fn settlement_sql_blocks_standalone_key_owner_wallet_fallback() {
+        let source = include_str!("sql.rs");
+        assert!(source.contains("SELECT is_standalone"));
+        assert!(source.contains("} else if !api_key_is_standalone {"));
     }
 }

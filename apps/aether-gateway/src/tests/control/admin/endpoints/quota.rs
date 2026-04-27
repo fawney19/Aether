@@ -123,13 +123,13 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_codex_with_trusted_a
         vec![sample_endpoint(
             "endpoint-codex-cli",
             "provider-codex",
-            "openai:cli",
+            "openai:responses",
             "https://chatgpt.com/backend-api",
         )],
         vec![sample_key(
             "key-codex-a",
             "provider-codex",
-            "openai:cli",
+            "openai:responses",
             "sk-codex-123",
         )],
     ));
@@ -197,7 +197,7 @@ async fn gateway_refreshes_admin_provider_quota_locally_for_codex_with_trusted_a
     );
     assert_eq!(
         seen_execution_runtime_request.provider_api_format,
-        "openai:cli"
+        "openai:responses"
     );
     assert_eq!(seen_execution_runtime_request.total_ms, Some(30_000));
 
@@ -306,13 +306,13 @@ async fn gateway_refreshes_admin_provider_quota_for_codex_proxy_with_extended_ti
         vec![sample_endpoint(
             "endpoint-codex-cli",
             "provider-codex",
-            "openai:cli",
+            "openai:responses",
             "https://chatgpt.com/backend-api",
         )],
         vec![sample_key(
             "key-codex-a",
             "provider-codex",
-            "openai:cli",
+            "openai:responses",
             "sk-codex-123",
         )],
     ));
@@ -670,13 +670,13 @@ async fn gateway_reports_codex_quota_runtime_failures_locally_without_falling_ba
         vec![sample_endpoint(
             "endpoint-codex-cli",
             "provider-codex",
-            "openai:cli",
+            "openai:responses",
             "https://chatgpt.com/backend-api",
         )],
         vec![sample_key(
             "key-codex-a",
             "provider-codex",
-            "openai:cli",
+            "openai:responses",
             "sk-codex-123",
         )],
     ));

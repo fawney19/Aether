@@ -16,7 +16,8 @@ use crate::{AppState, GatewayError, GatewayFallbackReason};
 use super::{
     build_direct_plan_bypass_cache_key, execute_sync_plan_and_reports,
     maybe_execute_sync_via_local_decision, maybe_execute_sync_via_local_gemini_files_decision,
-    maybe_execute_sync_via_local_image_decision, maybe_execute_sync_via_local_openai_cli_decision,
+    maybe_execute_sync_via_local_image_decision,
+    maybe_execute_sync_via_local_openai_responses_decision,
     maybe_execute_sync_via_local_same_format_provider_decision,
     maybe_execute_sync_via_local_standard_decision, maybe_execute_sync_via_local_video_decision,
     maybe_execute_sync_via_plan_fallback, maybe_execute_sync_via_remote_decision,
@@ -113,7 +114,7 @@ pub(crate) async fn maybe_execute_via_sync_decision_path(
             LocalExecutionRequestOutcome::NoPath => {}
         }
 
-        match maybe_execute_sync_via_local_openai_cli_decision(
+        match maybe_execute_sync_via_local_openai_responses_decision(
             state, parts, trace_id, decision, &body_json, plan_kind,
         )
         .await?

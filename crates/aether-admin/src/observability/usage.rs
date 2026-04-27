@@ -315,6 +315,340 @@ fn admin_usage_strip_trace_metadata(metadata: &mut serde_json::Map<String, Value
     metadata.remove("trace_id");
 }
 
+fn admin_usage_string_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn admin_usage_error_field<'a>(body: &'a Value, field: &str) -> Option<&'a str> {
+    body.get("error")
+        .and_then(|error| match error {
+            Value::Object(object) => object.get(field).and_then(Value::as_str),
+            _ => None,
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| admin_usage_string_field(body, field))
+}
+
+fn admin_usage_error_message_from_body(body: &Value) -> Option<String> {
+    body.get("error")
+        .and_then(|error| match error {
+            Value::Object(object) => object.get("message").and_then(Value::as_str),
+            Value::String(message) => Some(message.as_str()),
+            _ => None,
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            admin_usage_string_field(body, "message")
+                .or_else(|| admin_usage_string_field(body, "detail"))
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn admin_usage_error_type_from_body(body: &Value) -> Option<String> {
+    admin_usage_error_field(body, "type")
+        .or_else(|| admin_usage_error_field(body, "status"))
+        .or_else(|| admin_usage_error_field(body, "kind"))
+        .map(ToOwned::to_owned)
+}
+
+fn admin_usage_error_code_from_body(body: &Value) -> Option<Value> {
+    body.get("error")
+        .and_then(|error| match error {
+            Value::Object(object) => object.get("code").cloned(),
+            _ => None,
+        })
+        .or_else(|| body.get("code").cloned())
+}
+
+fn admin_usage_header_content_type(headers: Option<&Value>) -> Option<String> {
+    let object = headers?.as_object()?;
+    for (key, value) in object {
+        if key.eq_ignore_ascii_case("content-type") {
+            return value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .or_else(|| (!value.is_null()).then(|| value.to_string()));
+        }
+    }
+    None
+}
+
+fn admin_usage_error_domain_json(
+    source: &str,
+    status_code: Option<u16>,
+    headers: Option<&Value>,
+    body: Option<&Value>,
+    fallback_type: Option<&str>,
+    fallback_message: Option<&str>,
+) -> Value {
+    let error_type = body
+        .and_then(admin_usage_error_type_from_body)
+        .or_else(|| fallback_type.map(ToOwned::to_owned));
+    let message = body
+        .and_then(admin_usage_error_message_from_body)
+        .or_else(|| {
+            fallback_message
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        });
+    let code = body.and_then(admin_usage_error_code_from_body);
+    let content_type = admin_usage_header_content_type(headers);
+
+    if status_code.is_none()
+        && error_type.is_none()
+        && message.is_none()
+        && code.is_none()
+        && body.is_none()
+    {
+        return Value::Null;
+    }
+
+    json!({
+        "source": source,
+        "status_code": status_code,
+        "type": error_type,
+        "message": message,
+        "code": code,
+        "content_type": content_type,
+        "body": body.cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn admin_usage_local_execution_client_error_message(message: &str) -> String {
+    let without_reason = message
+        .split_once("（原因代码:")
+        .map(|(prefix, _)| prefix)
+        .unwrap_or(message);
+    let mut simplified = without_reason.trim().to_string();
+    for marker in ["。请检查", "。请确认", ". 请检查", ". 请确认"] {
+        if let Some(index) = simplified.find(marker) {
+            simplified.truncate(index);
+            break;
+        }
+    }
+    simplified
+        .trim()
+        .trim_end_matches(['。', '.', '！', '!', '？', '?'])
+        .to_string()
+}
+
+fn admin_usage_client_error_fallback_message(item: &StoredRequestUsageAudit) -> Option<String> {
+    item.error_message
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|message| {
+            if item.routing_execution_path() == Some("local_execution_runtime_miss") {
+                admin_usage_local_execution_client_error_message(message)
+            } else {
+                message.to_string()
+            }
+        })
+}
+
+fn admin_usage_error_domain_message(domain: &Value) -> Option<String> {
+    domain
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn admin_usage_error_domain_type(domain: &Value) -> Option<String> {
+    domain
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn admin_usage_error_domain_source(domain: &Value) -> Option<String> {
+    domain
+        .get("source")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn admin_usage_failure_summary_json(
+    item: &StoredRequestUsageAudit,
+    request_error: &Value,
+    upstream_error: &Value,
+    client_error: &Value,
+) -> Value {
+    let selected = [client_error, upstream_error, request_error]
+        .into_iter()
+        .find(|domain| !domain.is_null() && admin_usage_error_domain_message(domain).is_some());
+    let message = selected
+        .and_then(admin_usage_error_domain_message)
+        .or_else(|| {
+            item.error_message
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        });
+    let Some(message) = message else {
+        return Value::Null;
+    };
+    let error_type = selected
+        .and_then(admin_usage_error_domain_type)
+        .or_else(|| item.error_category.clone());
+    let source = selected
+        .and_then(admin_usage_error_domain_source)
+        .unwrap_or_else(|| "usage_summary".to_string());
+
+    json!({
+        "source": source,
+        "status_code": item.status_code,
+        "type": error_type,
+        "message": message,
+        "category": item.error_category,
+    })
+}
+
+fn admin_usage_error_domains_json(item: &StoredRequestUsageAudit) -> Value {
+    let has_upstream_attempt = item.candidate_id.is_some()
+        || item.provider_api_key_id.is_some()
+        || item.provider_request_headers.is_some()
+        || item.provider_request_body.is_some()
+        || item.provider_request_body_ref.is_some();
+    let upstream_error = if has_upstream_attempt {
+        admin_usage_error_domain_json(
+            "upstream_response",
+            item.status_code,
+            item.response_headers.as_ref(),
+            item.response_body.as_ref(),
+            item.error_category.as_deref(),
+            item.error_message.as_deref(),
+        )
+    } else {
+        Value::Null
+    };
+    let client_error_fallback_message = admin_usage_client_error_fallback_message(item);
+    let client_error = admin_usage_error_domain_json(
+        "client_response",
+        item.status_code,
+        item.client_response_headers.as_ref(),
+        item.client_response_body.as_ref(),
+        item.error_category.as_deref(),
+        client_error_fallback_message.as_deref(),
+    );
+    let request_error = Value::Null;
+    let failure_summary =
+        admin_usage_failure_summary_json(item, &request_error, &upstream_error, &client_error);
+
+    json!({
+        "request_error": request_error,
+        "upstream_error": upstream_error,
+        "client_error": client_error,
+        "failure_summary": failure_summary,
+    })
+}
+
+fn admin_usage_error_domain_search_text(domain: &Value) -> String {
+    [
+        domain.get("type").and_then(Value::as_str),
+        domain.get("message").and_then(Value::as_str),
+        domain.get("code").and_then(Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::to_ascii_lowercase)
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+fn admin_usage_upstream_error_is_sensitive(domain: &Value) -> bool {
+    let text = admin_usage_error_domain_search_text(domain);
+    [
+        "insufficient_quota",
+        "insufficient quota",
+        "quota exhausted",
+        "credits exhausted",
+        "credit balance",
+        "credit limit",
+        "payment_required",
+        "payment required",
+        "account disabled",
+        "account_deactivated",
+        "subscription inactive",
+        "verification required",
+    ]
+    .iter()
+    .any(|pattern| text.contains(pattern))
+}
+
+fn admin_usage_error_flow_json(item: &StoredRequestUsageAudit, error_domains: &Value) -> Value {
+    let request_error = &error_domains["request_error"];
+    let upstream_error = &error_domains["upstream_error"];
+    let client_error = &error_domains["client_error"];
+    let failure_summary = &error_domains["failure_summary"];
+    if request_error.is_null()
+        && upstream_error.is_null()
+        && client_error.is_null()
+        && failure_summary.is_null()
+    {
+        return Value::Null;
+    }
+
+    let upstream_sensitive =
+        !upstream_error.is_null() && admin_usage_upstream_error_is_sensitive(upstream_error);
+    let propagation = if upstream_sensitive {
+        "suppressed"
+    } else if !client_error.is_null() && !upstream_error.is_null() {
+        let upstream_message = admin_usage_error_domain_message(upstream_error);
+        let client_message = admin_usage_error_domain_message(client_error);
+        if upstream_message.is_some() && upstream_message == client_message {
+            "passthrough"
+        } else {
+            "converted"
+        }
+    } else if !client_error.is_null() {
+        "local"
+    } else if !upstream_error.is_null() {
+        "captured"
+    } else {
+        "none"
+    };
+    let source = if !request_error.is_null() {
+        "request"
+    } else if !upstream_error.is_null() {
+        "upstream"
+    } else if !client_error.is_null() {
+        "gateway"
+    } else {
+        "summary"
+    };
+    let client_response_source = if client_error.is_null() {
+        Value::Null
+    } else if !upstream_error.is_null() {
+        Value::String("converted_or_sanitized_upstream".to_string())
+    } else {
+        Value::String("gateway_generated".to_string())
+    };
+
+    json!({
+        "source": source,
+        "status_code": item.status_code,
+        "propagation": propagation,
+        "client_response_source": client_response_source,
+        "safe_to_expose_upstream": !upstream_sensitive,
+        "summary_source": failure_summary.get("source").cloned().unwrap_or(Value::Null),
+    })
+}
+
 fn maybe_insert_number_field(
     object: &mut serde_json::Map<String, Value>,
     key: &str,
@@ -501,15 +835,17 @@ fn admin_usage_api_format_defaults_to_non_stream(item: &StoredRequestUsageAudit)
         .or(item.endpoint_api_format.as_deref())
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let Some(value) = api_format else {
+        return false;
+    };
     matches!(
-        api_format,
-        Some(value)
-            if value.eq_ignore_ascii_case("openai:chat")
-                || value.eq_ignore_ascii_case("openai:cli")
-                || value.eq_ignore_ascii_case("openai:compact")
-                || value.eq_ignore_ascii_case("openai:image")
-                || value.eq_ignore_ascii_case("claude:chat")
-                || value.eq_ignore_ascii_case("claude:cli")
+        aether_ai_formats::normalize_legacy_openai_format_alias(value).as_str(),
+        "openai:chat"
+            | "openai:responses"
+            | "openai:responses:compact"
+            | "openai:image"
+            | "claude:chat"
+            | "claude:cli"
     )
 }
 
@@ -1790,6 +2126,14 @@ pub fn build_admin_usage_detail_payload(
     payload["body_capture"] = admin_usage_body_capture_json(item);
     payload["settlement"] = admin_usage_settlement_json(item);
     payload["trace"] = admin_usage_trace_json(item);
+    let error_domains = admin_usage_error_domains_json(item);
+    let error_flow = admin_usage_error_flow_json(item, &error_domains);
+    payload["errors"] = error_domains.clone();
+    payload["request_error"] = error_domains["request_error"].clone();
+    payload["upstream_error"] = error_domains["upstream_error"].clone();
+    payload["client_error"] = error_domains["client_error"].clone();
+    payload["failure_summary"] = error_domains["failure_summary"].clone();
+    payload["error_flow"] = error_flow;
     payload["has_request_body"] = json!(admin_usage_has_body_value(
         item,
         item.request_body.as_ref(),
@@ -1991,10 +2335,11 @@ mod tests {
     }
 
     #[test]
-    fn client_requested_stream_defaults_to_non_stream_for_openai_cli_request_body_without_flag() {
+    fn client_requested_stream_defaults_to_non_stream_for_openai_responses_request_body_without_flag(
+    ) {
         let item = StoredRequestUsageAudit {
             is_stream: true,
-            api_format: Some("openai:cli".to_string()),
+            api_format: Some("openai:responses".to_string()),
             request_body: Some(json!({
                 "model": "gpt-5.4",
                 "input": [{"role": "user", "content": "hi"}],
@@ -2259,6 +2604,203 @@ mod tests {
         assert_eq!(payload["has_provider_request_body"], true);
         assert_eq!(payload["has_response_body"], true);
         assert_eq!(payload["has_client_response_body"], true);
+    }
+
+    #[test]
+    fn detail_payload_separates_upstream_client_and_summary_errors() {
+        let item = StoredRequestUsageAudit {
+            error_message: Some(
+                "execution runtime stream returned retryable status 400".to_string(),
+            ),
+            error_category: Some("server_error".to_string()),
+            response_headers: Some(json!({
+                "content-type": "application/json"
+            })),
+            response_body: Some(json!({
+                "error": {
+                    "type": "retryable_upstream_status",
+                    "message": "execution runtime stream returned retryable status 400",
+                    "code": 400
+                }
+            })),
+            client_response_headers: Some(json!({
+                "content-type": "application/json"
+            })),
+            client_response_body: Some(json!({
+                "error": {
+                    "type": "http_error",
+                    "message": "local execution runtime exhausted"
+                }
+            })),
+            ..sample_usage(
+                "failed",
+                Some(503),
+                Some("execution runtime stream returned retryable status 400"),
+            )
+        };
+
+        let payload = build_admin_usage_detail_payload(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+            true,
+            Some(json!({"model": "gpt-5.4"})),
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(payload["upstream_error"]["source"], "upstream_response");
+        assert_eq!(
+            payload["errors"]["upstream_error"],
+            payload["upstream_error"]
+        );
+        assert_eq!(
+            payload["upstream_error"]["message"],
+            "execution runtime stream returned retryable status 400"
+        );
+        assert_eq!(payload["client_error"]["source"], "client_response");
+        assert_eq!(
+            payload["client_error"]["message"],
+            "local execution runtime exhausted"
+        );
+        assert_eq!(payload["failure_summary"]["source"], "client_response");
+        assert_eq!(
+            payload["failure_summary"]["message"],
+            "local execution runtime exhausted"
+        );
+        assert_eq!(payload["error_flow"]["propagation"], "converted");
+        assert!(payload["request_error"].is_null());
+    }
+
+    #[test]
+    fn detail_payload_marks_sensitive_upstream_account_errors_suppressed() {
+        let item = StoredRequestUsageAudit {
+            error_message: Some("credit balance exhausted".to_string()),
+            error_category: Some("server_error".to_string()),
+            response_body: Some(json!({
+                "error": {
+                    "type": "insufficient_quota",
+                    "message": "credit balance exhausted"
+                }
+            })),
+            client_response_body: Some(json!({
+                "error": {
+                    "type": "http_error",
+                    "message": "upstream provider unavailable"
+                }
+            })),
+            ..sample_usage("failed", Some(503), Some("credit balance exhausted"))
+        };
+
+        let payload = build_admin_usage_detail_payload(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+            true,
+            Some(json!({"model": "gpt-5.4"})),
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(payload["error_flow"]["propagation"], "suppressed");
+        assert_eq!(payload["error_flow"]["safe_to_expose_upstream"], false);
+        assert_eq!(payload["upstream_error"]["type"], "insufficient_quota");
+        assert_eq!(
+            payload["client_error"]["message"],
+            "upstream provider unavailable"
+        );
+    }
+
+    #[test]
+    fn detail_payload_does_not_promote_local_client_error_to_upstream_error() {
+        let message = "没有可用提供商支持模型 gpt-5.4 的同步请求。请检查模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）";
+        let client_message = "没有可用提供商支持模型 gpt-5.4 的同步请求";
+        let item = StoredRequestUsageAudit {
+            provider_api_key_id: None,
+            provider_request_headers: None,
+            provider_request_body: None,
+            provider_request_body_ref: None,
+            candidate_id: None,
+            execution_path: Some("local_execution_runtime_miss".to_string()),
+            local_execution_runtime_miss_reason: Some("candidate_list_empty".to_string()),
+            error_category: Some("http_error".to_string()),
+            client_response_body: Some(json!({
+                "error": {
+                    "type": "http_error",
+                    "message": client_message
+                }
+            })),
+            response_body: Some(json!({
+                "error": {
+                    "type": "http_error",
+                    "message": message
+                }
+            })),
+            ..sample_usage("failed", Some(503), Some(message))
+        };
+
+        let payload = build_admin_usage_detail_payload(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+            true,
+            Some(json!({"model": "gpt-5.4"})),
+            &BTreeMap::new(),
+        );
+
+        assert!(payload["upstream_error"].is_null());
+        assert_eq!(payload["client_error"]["message"], client_message);
+        assert_eq!(
+            payload["client_response_body"]["error"]["message"],
+            client_message
+        );
+        assert_eq!(payload["error_flow"]["source"], "gateway");
+        assert_eq!(payload["error_flow"]["propagation"], "local");
+    }
+
+    #[test]
+    fn detail_payload_simplifies_local_client_error_when_client_body_is_unloaded() {
+        let message = "没有可用提供商支持模型 gpt-5.4 的流式请求。请检查模型映射、端点启用状态和 API Key 权限（原因代码: candidate_list_empty）";
+        let item = StoredRequestUsageAudit {
+            execution_path: Some("local_execution_runtime_miss".to_string()),
+            local_execution_runtime_miss_reason: Some("candidate_list_empty".to_string()),
+            error_category: Some("http_error".to_string()),
+            client_response_headers: Some(json!({"content-type": "application/json"})),
+            client_response_body: None,
+            client_response_body_ref: Some(
+                "usage://request/req-1/client_response_body".to_string(),
+            ),
+            response_body: None,
+            ..sample_usage("failed", Some(503), Some(message))
+        };
+
+        let payload = build_admin_usage_detail_payload(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+            false,
+            Some(json!({"model": "gpt-5.4", "stream": true})),
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(
+            payload["client_error"]["message"],
+            "没有可用提供商支持模型 gpt-5.4 的流式请求"
+        );
+        assert_eq!(
+            payload["failure_summary"]["message"],
+            "没有可用提供商支持模型 gpt-5.4 的流式请求"
+        );
     }
 
     #[test]

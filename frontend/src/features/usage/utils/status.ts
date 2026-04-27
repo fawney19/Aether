@@ -124,6 +124,10 @@ function normalizeUsageStreamApiFormat(value: string | null | undefined): string
   switch (normalized) {
     case 'openai':
       return 'openai:chat'
+    case 'openai:cli':
+      return 'openai:responses'
+    case 'openai:compact':
+      return 'openai:responses:compact'
     case 'claude':
       return 'claude:chat'
     case 'gemini':
@@ -136,8 +140,8 @@ function normalizeUsageStreamApiFormat(value: string | null | undefined): string
 function usageApiFormatDefaultsToNonStream(apiFormat: string): boolean {
   switch (apiFormat) {
     case 'openai:chat':
-    case 'openai:cli':
-    case 'openai:compact':
+    case 'openai:responses':
+    case 'openai:responses:compact':
     case 'openai:image':
     case 'claude:chat':
     case 'claude:cli':

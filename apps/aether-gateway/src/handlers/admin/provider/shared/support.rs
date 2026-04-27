@@ -37,6 +37,8 @@ pub(crate) struct AdminProviderPoolConfig {
     pub(crate) rate_limit_cooldown_seconds: u64,
     pub(crate) overload_cooldown_seconds: u64,
     pub(crate) health_policy_enabled: bool,
+    pub(crate) probing_enabled: bool,
+    pub(crate) probing_interval_minutes: u64,
     pub(crate) stream_timeout_threshold: u64,
     pub(crate) stream_timeout_window_seconds: u64,
     pub(crate) stream_timeout_cooldown_seconds: u64,

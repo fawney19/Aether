@@ -69,6 +69,7 @@ fn copy_allowed_metadata_fields(source: &Map<String, Value>, target: &mut Map<St
     copy_non_empty_string(source, target, "trace_id");
     copy_bool(source, target, "client_requested_stream");
     copy_bool(source, target, "upstream_is_stream");
+    copy_bool(source, target, "api_key_is_standalone");
     copy_number(source, target, "provider_request_body_base64_bytes");
     copy_number(source, target, "provider_response_body_base64_bytes");
     copy_number(source, target, "client_response_body_base64_bytes");
@@ -97,6 +98,7 @@ fn move_allowed_metadata_fields(mut source: Map<String, Value>, target: &mut Map
     remove_non_empty_string(&mut source, target, "trace_id");
     remove_bool(&mut source, target, "client_requested_stream");
     remove_bool(&mut source, target, "upstream_is_stream");
+    remove_bool(&mut source, target, "api_key_is_standalone");
     remove_number(&mut source, target, "provider_request_body_base64_bytes");
     remove_number(&mut source, target, "provider_response_body_base64_bytes");
     remove_number(&mut source, target, "client_response_body_base64_bytes");
@@ -384,6 +386,7 @@ mod tests {
             "trace_id": "trace-1",
             "client_requested_stream": false,
             "upstream_is_stream": true,
+            "api_key_is_standalone": true,
             "provider_request_body_base64_bytes": 512,
             "provider_response_body_base64_bytes": 1024,
             "client_response_body_base64_bytes": 2048,
@@ -414,6 +417,7 @@ mod tests {
                 "trace_id": "trace-1",
                 "client_requested_stream": false,
                 "upstream_is_stream": true,
+                "api_key_is_standalone": true,
                 "provider_request_body_base64_bytes": 512,
                 "provider_response_body_base64_bytes": 1024,
                 "client_response_body_base64_bytes": 2048,
@@ -472,6 +476,7 @@ mod tests {
                     "candidate_index": 0,
                     "client_requested_stream": false,
                     "upstream_is_stream": true,
+                    "api_key_is_standalone": true,
                     "provider_id": "provider-1",
                     "model_id": "model-1",
                     "global_model_id": "global-model-1",
@@ -489,6 +494,7 @@ mod tests {
             json!({
                 "client_requested_stream": false,
                 "upstream_is_stream": true,
+                "api_key_is_standalone": true,
                 "model_id": "model-1",
                 "global_model_id": "global-model-1",
                 "global_model_name": "gpt-5",

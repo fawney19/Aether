@@ -125,7 +125,7 @@
                       :key="fmt"
                       class="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground whitespace-nowrap"
                     >
-                      {{ API_FORMAT_SHORT[fmt] || fmt }}
+                      {{ formatApiFormatShort(fmt) }}
                     </span>
                   </template>
                 </div>
@@ -472,8 +472,14 @@ import { updateProvider, updateProviderKey } from '@/api/endpoints'
 import { getProvidersSummary, type ProviderWithEndpointsSummary } from '@/api/endpoints'
 import { adminApi } from '@/api/admin'
 import { batchQueryBalance, type ActionResultResponse, type BalanceInfo } from '@/api/providerOps'
-import { API_FORMAT_SHORT } from '@/api/endpoints/types'
-import { sortApiFormats, groupApiFormats, parseApiFormat, API_FORMAT_KIND_LABELS } from '@/api/endpoints/types/api-format'
+import {
+  sortApiFormats,
+  groupApiFormats,
+  parseApiFormat,
+  API_FORMAT_KIND_LABELS,
+  formatApiFormatShort,
+  normalizeApiFormatAlias,
+} from '@/api/endpoints/types/api-format'
 import { log } from '@/utils/logger'
 
 interface KeyWithMeta {
@@ -611,8 +617,10 @@ const LEGACY_API_FORMAT_MAP: Record<string, string> = {
   CLAUDE: 'claude:chat',
   CLAUDE_CLI: 'claude:cli',
   OPENAI: 'openai:chat',
-  OPENAI_CLI: 'openai:cli',
-  OPENAI_COMPACT: 'openai:compact',
+  OPENAI_CLI: 'openai:responses',
+  OPENAI_COMPACT: 'openai:responses:compact',
+  OPENAI_RESPONSES: 'openai:responses',
+  OPENAI_RESPONSES_COMPACT: 'openai:responses:compact',
   OPENAI_VIDEO: 'openai:video',
   GEMINI: 'gemini:chat',
   GEMINI_CLI: 'gemini:cli',
@@ -891,7 +899,7 @@ const groupedFormats = computed(() => {
 
 // 获取格式的 kind 显示名称
 function formatKind(format: string): string {
-  const { kind } = parseApiFormat(format)
+  const { kind } = parseApiFormat(normalizeApiFormatAlias(format))
   return API_FORMAT_KIND_LABELS[kind] || kind || format
 }
 

@@ -75,14 +75,14 @@ const CODEX_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTempla
     base_url: "https://chatgpt.com/backend-api/codex",
     endpoints: &[
         FixedProviderEndpointTemplate {
-            item_key: "openai:cli",
-            api_format: "openai:cli",
+            item_key: "openai:responses",
+            api_format: "openai:responses",
             custom_path: None,
             config_defaults: FORCE_STREAM_ENDPOINT_CONFIG_DEFAULTS,
         },
         FixedProviderEndpointTemplate {
-            item_key: "openai:compact",
-            api_format: "openai:compact",
+            item_key: "openai:responses:compact",
+            api_format: "openai:responses:compact",
             custom_path: None,
             config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
         },
@@ -181,11 +181,11 @@ pub fn fixed_provider_endpoint_template_by_api_format(
     provider_type: &str,
     api_format: &str,
 ) -> Option<&'static FixedProviderEndpointTemplate> {
-    let normalized = api_format.trim();
+    let normalized = aether_ai_formats::normalize_legacy_openai_format_alias(api_format);
     fixed_provider_template(provider_type)?
         .endpoints
         .iter()
-        .find(|item| item.api_format.eq_ignore_ascii_case(normalized))
+        .find(|item| item.api_format.eq_ignore_ascii_case(&normalized))
 }
 
 pub fn provider_type_supports_model_fetch(provider_type: &str) -> bool {
@@ -299,7 +299,11 @@ mod tests {
                 .iter()
                 .map(|item| item.api_format)
                 .collect::<Vec<_>>(),
-            vec!["openai:cli", "openai:compact", "openai:image"]
+            vec![
+                "openai:responses",
+                "openai:responses:compact",
+                "openai:image"
+            ]
         );
 
         let image_template =

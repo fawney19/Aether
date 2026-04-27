@@ -140,7 +140,11 @@ mod tests {
     use super::openai_chat_sync_upstream_is_stream_for_candidate;
 
     #[test]
-    fn openai_chat_sync_forces_streaming_for_codex_openai_cli_candidates() {
+    fn openai_chat_sync_forces_streaming_for_codex_openai_responses_candidates() {
+        assert!(openai_chat_sync_upstream_is_stream_for_candidate(
+            "codex",
+            "openai:responses"
+        ));
         assert!(openai_chat_sync_upstream_is_stream_for_candidate(
             "codex",
             "openai:cli"

@@ -3427,14 +3427,14 @@ async fn gateway_marks_lazy_codex_oauth_refresh_failures_as_invalid() {
     let endpoint = sample_endpoint(
         "endpoint-codex-cli",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "https://chatgpt.com/backend-api/codex",
     );
 
     let mut key = sample_key(
         "key-codex-oauth-lazy",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "stale-codex-access-token",
     );
     key.auth_type = "oauth".to_string();
@@ -3608,14 +3608,14 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_p
     let endpoint = sample_endpoint(
         "endpoint-codex-cli",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "https://chatgpt.com/backend-api/codex",
     );
 
     let mut key = sample_key(
         "key-codex-oauth-refresh",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "stale-codex-access-token",
     );
     key.auth_type = "oauth".to_string();
@@ -3902,14 +3902,14 @@ async fn gateway_marks_manual_oauth_refresh_failures_as_invalid_in_pool_payload(
     let endpoint = sample_endpoint(
         "endpoint-codex-cli",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "https://chatgpt.com/backend-api/codex",
     );
 
     let mut key = sample_key(
         "key-codex-oauth-refresh-invalid",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "stale-codex-access-token",
     );
     key.auth_type = "oauth".to_string();
@@ -4107,14 +4107,14 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_via_execution_runtim
     let endpoint = sample_endpoint(
         "endpoint-codex-cli",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "https://chatgpt.com/backend-api/codex",
     );
 
     let mut key = sample_key(
         "key-codex-oauth-refresh-provider",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "stale-codex-access-token",
     );
     key.auth_type = "oauth".to_string();
@@ -4261,14 +4261,14 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_via_execution_runtim
     let endpoint = sample_endpoint(
         "endpoint-codex-cli",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "https://chatgpt.com/backend-api/codex",
     );
 
     let mut key = sample_key(
         "key-codex-oauth-refresh",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "stale-codex-access-token",
     );
     key.auth_type = "oauth".to_string();

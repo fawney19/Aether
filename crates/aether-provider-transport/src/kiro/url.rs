@@ -2,6 +2,8 @@ use super::super::url::build_passthrough_path_url;
 use super::credentials::DEFAULT_REGION;
 
 pub const GENERATE_ASSISTANT_RESPONSE_PATH: &str = "/generateAssistantResponse";
+pub const MCP_PATH: &str = "/mcp";
+pub const MCP_STREAM_PATH: &str = "/mcp/stream";
 pub const KIRO_ENVELOPE_NAME: &str = "kiro:generateAssistantResponse";
 
 pub fn resolve_kiro_base_url(upstream_base_url: &str, api_region: Option<&str>) -> String {
@@ -30,11 +32,24 @@ pub fn build_kiro_generate_assistant_response_url(
     )
 }
 
+pub fn build_kiro_mcp_url(upstream_base_url: &str, api_region: Option<&str>) -> Option<String> {
+    let upstream_base_url = resolve_kiro_base_url(upstream_base_url, api_region);
+    build_passthrough_path_url(upstream_base_url.as_str(), MCP_PATH, None, &[])
+}
+
+pub fn build_kiro_mcp_url_from_resolved_url(resolved_url: &str) -> Option<String> {
+    let mut parsed = url::Url::parse(resolved_url).ok()?;
+    parsed.set_path(MCP_PATH);
+    parsed.set_query(None);
+    Some(parsed.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        build_kiro_generate_assistant_response_url, resolve_kiro_base_url,
-        GENERATE_ASSISTANT_RESPONSE_PATH, KIRO_ENVELOPE_NAME,
+        build_kiro_generate_assistant_response_url, build_kiro_mcp_url,
+        build_kiro_mcp_url_from_resolved_url, resolve_kiro_base_url,
+        GENERATE_ASSISTANT_RESPONSE_PATH, KIRO_ENVELOPE_NAME, MCP_PATH, MCP_STREAM_PATH,
     };
 
     #[test]
@@ -43,6 +58,8 @@ mod tests {
             GENERATE_ASSISTANT_RESPONSE_PATH,
             "/generateAssistantResponse"
         );
+        assert_eq!(MCP_PATH, "/mcp");
+        assert_eq!(MCP_STREAM_PATH, "/mcp/stream");
         assert_eq!(KIRO_ENVELOPE_NAME, "kiro:generateAssistantResponse");
     }
 
@@ -66,6 +83,25 @@ mod tests {
         assert_eq!(
             resolve_kiro_base_url("https://kiro.{region}.example/", Some("us-west-2")),
             "https://kiro.us-west-2.example"
+        );
+    }
+
+    #[test]
+    fn builds_mcp_url_for_latest_kiro_endpoint() {
+        assert_eq!(
+            build_kiro_mcp_url("https://q.{region}.amazonaws.com", Some("eu-west-1")).as_deref(),
+            Some("https://q.eu-west-1.amazonaws.com/mcp")
+        );
+    }
+
+    #[test]
+    fn rewrites_generate_assistant_url_to_mcp_url() {
+        assert_eq!(
+            build_kiro_mcp_url_from_resolved_url(
+                "https://q.us-east-1.amazonaws.com/generateAssistantResponse?beta=true"
+            )
+            .as_deref(),
+            Some("https://q.us-east-1.amazonaws.com/mcp")
         );
     }
 }

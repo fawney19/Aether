@@ -1,9 +1,5 @@
 use tracing::warn;
 
-use crate::ai_pipeline::planner::candidate_eligibility::{
-    extract_pool_sticky_session_token, filter_and_rank_local_execution_candidates,
-    SkippedLocalExecutionCandidate,
-};
 use crate::ai_pipeline::planner::candidate_materialization::{
     persist_available_local_execution_candidates_with_context,
     persist_skipped_local_execution_candidates_with_context,
@@ -13,6 +9,10 @@ use crate::ai_pipeline::planner::candidate_metadata::{
     build_local_execution_candidate_contract_metadata,
     build_local_execution_candidate_contract_metadata_for_candidate,
     LocalExecutionCandidateMetadataParts,
+};
+use crate::ai_pipeline::planner::candidate_resolution::{
+    extract_pool_sticky_session_token, resolve_and_rank_local_execution_candidates,
+    SkippedLocalExecutionCandidate,
 };
 use crate::ai_pipeline::planner::common::extract_requested_model_from_request;
 use crate::ai_pipeline::planner::decision_input::{
@@ -107,11 +107,12 @@ pub(crate) async fn materialize_local_same_format_provider_candidate_attempts(
             current_unix_secs(),
         )
         .await?;
-    let (candidates, skipped_candidates) = filter_and_rank_local_execution_candidates(
+    let (candidates, skipped_candidates) = resolve_and_rank_local_execution_candidates(
         planner_state,
         candidates,
         spec_metadata.api_format,
         &input.requested_model,
+        Some(&input.auth_snapshot),
         input.required_capabilities.as_ref(),
         sticky_session_token.as_deref(),
     )
@@ -122,6 +123,7 @@ pub(crate) async fn materialize_local_same_format_provider_candidate_attempts(
             candidate: item.candidate,
             skip_reason: item.skip_reason,
             transport: None,
+            ranking: None,
             extra_data: None,
         })
         .chain(skipped_candidates)

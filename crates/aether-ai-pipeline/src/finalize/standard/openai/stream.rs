@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
 
-use crate::conversion::response::OpenAiCliResponseUsage;
 use crate::finalize::common::build_generated_tool_call_id;
 use crate::finalize::sse::{encode_done_sse, encode_json_sse};
 use crate::finalize::standard::stream_core::common::*;
@@ -26,7 +25,7 @@ pub struct OpenAIChatProviderState {
 }
 
 #[derive(Default)]
-struct OpenAICliProviderToolState {
+struct OpenAIResponsesProviderToolState {
     call_id: String,
     name: String,
     arguments: String,
@@ -34,14 +33,21 @@ struct OpenAICliProviderToolState {
 }
 
 #[derive(Default)]
-pub struct OpenAICliProviderState {
+struct OpenAIResponsesProviderToolResultState {
+    content: String,
+    emitted: bool,
+}
+
+#[derive(Default)]
+pub struct OpenAIResponsesProviderState {
     response_id: Option<String>,
     model: Option<String>,
     started: bool,
     finished: bool,
     text: String,
     reasoning: String,
-    tool_calls: BTreeMap<usize, OpenAICliProviderToolState>,
+    tool_calls: BTreeMap<usize, OpenAIResponsesProviderToolState>,
+    tool_results: BTreeMap<usize, OpenAIResponsesProviderToolResultState>,
     tool_index_by_key: BTreeMap<String, usize>,
     last_tool_index: Option<usize>,
 }
@@ -86,6 +92,15 @@ impl OpenAIChatProviderState {
         self.started = true;
     }
 
+    fn unknown_frame(&self, report_context: &Value, payload: Value) -> CanonicalStreamFrame {
+        let (id, model) = self.identity(report_context);
+        CanonicalStreamFrame {
+            id,
+            model,
+            event: CanonicalStreamEvent::UnknownEvent(payload),
+        }
+    }
+
     pub fn push_line(
         &mut self,
         report_context: &Value,
@@ -122,6 +137,13 @@ impl OpenAIChatProviderState {
                     },
                 });
                 self.finished = true;
+            } else if chunk_object.contains_key("choices")
+                || chunk_object
+                    .get("object")
+                    .and_then(Value::as_str)
+                    .is_some_and(|object| object.contains("chat.completion"))
+            {
+                out.push(self.unknown_frame(report_context, value.clone()));
             }
             return Ok(out);
         };
@@ -146,8 +168,10 @@ impl OpenAIChatProviderState {
         }
         for chunk_choice in chunk_choices {
             let Some(choice_object) = chunk_choice.as_object() else {
+                out.push(self.unknown_frame(report_context, chunk_choice.clone()));
                 continue;
             };
+            let finish_reason_key_present = choice_object.contains_key("finish_reason");
             let Some(delta) = choice_object.get("delta").and_then(Value::as_object) else {
                 if let Some(finish_reason) = normalize_openai_finish_reason(
                     choice_object.get("finish_reason").and_then(Value::as_str),
@@ -167,15 +191,24 @@ impl OpenAIChatProviderState {
                     } else {
                         self.pending_finish_reason = Some(finish_reason);
                     }
+                } else if !finish_reason_key_present {
+                    out.push(
+                        self.unknown_frame(report_context, Value::Object(choice_object.clone())),
+                    );
                 }
                 continue;
             };
 
+            let mut recognized_delta = false;
             if delta.get("role").and_then(Value::as_str) == Some("assistant") {
+                recognized_delta = true;
                 self.ensure_started(report_context, &mut out);
+            } else if delta.contains_key("role") {
+                recognized_delta = true;
             }
 
             if let Some(content) = delta.get("content").and_then(Value::as_str) {
+                recognized_delta = true;
                 if !content.is_empty() {
                     self.ensure_started(report_context, &mut out);
                     let (id, model) = self.identity(report_context);
@@ -185,9 +218,12 @@ impl OpenAIChatProviderState {
                         event: CanonicalStreamEvent::TextDelta(content.to_string()),
                     });
                 }
+            } else if delta.contains_key("content") {
+                recognized_delta = true;
             }
             if let Some(reasoning_content) = delta.get("reasoning_content").and_then(Value::as_str)
             {
+                recognized_delta = true;
                 if !reasoning_content.is_empty() {
                     self.ensure_started(report_context, &mut out);
                     let (id, model) = self.identity(report_context);
@@ -197,9 +233,12 @@ impl OpenAIChatProviderState {
                         event: CanonicalStreamEvent::ReasoningDelta(reasoning_content.to_string()),
                     });
                 }
+            } else if delta.contains_key("reasoning_content") {
+                recognized_delta = true;
             }
 
             if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                recognized_delta = true;
                 self.ensure_started(report_context, &mut out);
                 let (id, model) = self.identity(report_context);
                 for tool_call in tool_calls {
@@ -270,11 +309,14 @@ impl OpenAIChatProviderState {
                         }
                     }
                 }
+            } else if delta.contains_key("tool_calls") {
+                recognized_delta = true;
             }
 
             if let Some(finish_reason) = normalize_openai_finish_reason(
                 choice_object.get("finish_reason").and_then(Value::as_str),
             ) {
+                recognized_delta = true;
                 if let Some(usage) = Self::finish_usage(chunk_object.get("usage")) {
                     self.ensure_started(report_context, &mut out);
                     let (id, model) = self.identity(report_context);
@@ -290,6 +332,9 @@ impl OpenAIChatProviderState {
                 } else {
                     self.pending_finish_reason = Some(finish_reason);
                 }
+            }
+            if !recognized_delta && !finish_reason_key_present {
+                out.push(self.unknown_frame(report_context, Value::Object(choice_object.clone())));
             }
         }
 
@@ -316,7 +361,7 @@ impl OpenAIChatProviderState {
     }
 }
 
-impl OpenAICliProviderState {
+impl OpenAIResponsesProviderState {
     fn identity(&self, report_context: &Value) -> (String, String) {
         resolve_identity(
             self.response_id.as_deref(),
@@ -337,6 +382,15 @@ impl OpenAICliProviderState {
             event: CanonicalStreamEvent::Start,
         });
         self.started = true;
+    }
+
+    fn unknown_frame(&self, report_context: &Value, payload: Value) -> CanonicalStreamFrame {
+        let (id, model) = self.identity(report_context);
+        CanonicalStreamFrame {
+            id,
+            model,
+            event: CanonicalStreamEvent::UnknownEvent(payload),
+        }
     }
 
     fn tool_index_for_key(&mut self, key: Option<String>, output_index: Option<usize>) -> usize {
@@ -489,6 +543,79 @@ impl OpenAICliProviderState {
                 arguments: missing,
             },
         });
+    }
+
+    fn emit_missing_tool_result(
+        &mut self,
+        report_context: &Value,
+        out: &mut Vec<CanonicalStreamFrame>,
+        index: usize,
+        tool_use_id: String,
+        name: Option<String>,
+        content: &str,
+    ) {
+        self.ensure_started(report_context, out);
+        let state = self.tool_results.entry(index).or_default();
+        let missing = if !state.emitted {
+            content.to_string()
+        } else if content.starts_with(&state.content) {
+            content[state.content.len()..].to_string()
+        } else if state.content == content {
+            String::new()
+        } else {
+            content.to_string()
+        };
+        if missing.is_empty() && state.emitted {
+            return;
+        }
+        state.emitted = true;
+        state.content.push_str(&missing);
+        let (id, model) = self.identity(report_context);
+        out.push(CanonicalStreamFrame {
+            id,
+            model,
+            event: CanonicalStreamEvent::ToolResultDelta {
+                index,
+                tool_use_id,
+                name,
+                content: missing,
+            },
+        });
+    }
+
+    fn emit_tool_result_item(
+        &mut self,
+        report_context: &Value,
+        out: &mut Vec<CanonicalStreamFrame>,
+        item: &Map<String, Value>,
+        output_index: Option<usize>,
+    ) {
+        if item.get("type").and_then(Value::as_str) != Some("function_call_output") {
+            return;
+        }
+        let tool_use_id = item
+            .get("call_id")
+            .or_else(|| item.get("tool_call_id"))
+            .or_else(|| item.get("id"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("call_auto_0")
+            .to_string();
+        let index = self.tool_index_for_key(
+            Some(format!("function_call_output:{tool_use_id}")),
+            output_index,
+        );
+        let content = openai_tool_result_content_from_value(
+            item.get("output")
+                .or_else(|| item.get("content"))
+                .or_else(|| item.get("delta")),
+        );
+        let name = item
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(ToOwned::to_owned);
+        self.emit_missing_tool_result(report_context, out, index, tool_use_id, name, &content);
     }
 
     fn emit_message_item(
@@ -684,13 +811,18 @@ impl OpenAICliProviderState {
                     "function_call" => {
                         self.emit_tool_call_item(report_context, &mut out, item, output_index);
                     }
+                    "function_call_output" => {
+                        self.emit_tool_result_item(report_context, &mut out, item, output_index);
+                    }
                     "message" => {
                         self.emit_message_item(report_context, &mut out, item);
                     }
                     "reasoning" => {
                         self.emit_reasoning_item(report_context, &mut out, item);
                     }
-                    _ => {}
+                    _ => {
+                        out.push(self.unknown_frame(report_context, Value::Object(item.clone())));
+                    }
                 }
             }
             "response.function_call_arguments.delta" => {
@@ -842,6 +974,44 @@ impl OpenAICliProviderState {
                     });
                 }
             }
+            "response.function_call_output.delta" | "response.function_call_output.done" => {
+                let tool_use_id = value
+                    .get("call_id")
+                    .or_else(|| value.get("tool_call_id"))
+                    .or_else(|| value.get("item_id"))
+                    .or_else(|| value.get("id"))
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("call_auto_0")
+                    .to_string();
+                let output_index = value
+                    .get("output_index")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize);
+                let index = self.tool_index_for_key(
+                    Some(format!("function_call_output:{tool_use_id}")),
+                    output_index,
+                );
+                let content = openai_tool_result_content_from_value(
+                    value
+                        .get("delta")
+                        .or_else(|| value.get("output"))
+                        .or_else(|| value.get("content")),
+                );
+                let name = value
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(ToOwned::to_owned);
+                self.emit_missing_tool_result(
+                    report_context,
+                    &mut out,
+                    index,
+                    tool_use_id,
+                    name,
+                    &content,
+                );
+            }
             "response.output_item.done" => {
                 let Some(item) = value.get("item").and_then(Value::as_object) else {
                     return Ok(out);
@@ -854,13 +1024,18 @@ impl OpenAICliProviderState {
                     "function_call" => {
                         self.emit_tool_call_item(report_context, &mut out, item, output_index);
                     }
+                    "function_call_output" => {
+                        self.emit_tool_result_item(report_context, &mut out, item, output_index);
+                    }
                     "message" => {
                         self.emit_message_item(report_context, &mut out, item);
                     }
                     "reasoning" => {
                         self.emit_reasoning_item(report_context, &mut out, item);
                     }
-                    _ => {}
+                    _ => {
+                        out.push(self.unknown_frame(report_context, Value::Object(item.clone())));
+                    }
                 }
             }
             "response.completed" => {
@@ -870,11 +1045,12 @@ impl OpenAICliProviderState {
                 self.ensure_started(report_context, &mut out);
                 let (id, model) = self.identity(report_context);
 
-                for raw_item in response
+                for (output_index, raw_item) in response
                     .get("output")
                     .and_then(Value::as_array)
                     .into_iter()
                     .flatten()
+                    .enumerate()
                 {
                     let Some(item) = raw_item.as_object() else {
                         continue;
@@ -884,12 +1060,29 @@ impl OpenAICliProviderState {
                             self.emit_message_item(report_context, &mut out, item);
                         }
                         "function_call" => {
-                            self.emit_tool_call_item(report_context, &mut out, item, None);
+                            self.emit_tool_call_item(
+                                report_context,
+                                &mut out,
+                                item,
+                                Some(output_index),
+                            );
+                        }
+                        "function_call_output" => {
+                            self.emit_tool_result_item(
+                                report_context,
+                                &mut out,
+                                item,
+                                Some(output_index),
+                            );
                         }
                         "reasoning" => {
                             self.emit_reasoning_item(report_context, &mut out, item);
                         }
-                        _ => {}
+                        _ => {
+                            out.push(
+                                self.unknown_frame(report_context, Value::Object(item.clone())),
+                            );
+                        }
                     }
                 }
 
@@ -908,7 +1101,9 @@ impl OpenAICliProviderState {
                 });
                 self.finished = true;
             }
-            _ => {}
+            _ => {
+                out.push(self.unknown_frame(report_context, value.clone()));
+            }
         }
 
         Ok(out)
@@ -948,15 +1143,24 @@ pub struct OpenAIChatClientEmitter {
 }
 
 #[derive(Clone, Default)]
-struct OpenAICliClientToolState {
+struct OpenAIResponsesClientToolState {
     call_id: String,
     name: String,
     arguments: String,
     output_index: Option<usize>,
 }
 
+#[derive(Clone, Default)]
+struct OpenAIResponsesClientToolResultState {
+    tool_use_id: String,
+    name: Option<String>,
+    content: String,
+    output_index: Option<usize>,
+    item_started: bool,
+}
+
 #[derive(Default)]
-pub struct OpenAICliClientEmitter {
+pub struct OpenAIResponsesClientEmitter {
     response_id: Option<String>,
     model: Option<String>,
     message_item_id: Option<String>,
@@ -973,7 +1177,8 @@ pub struct OpenAICliClientEmitter {
     message_output_index: Option<usize>,
     text: String,
     reasoning: String,
-    tool_calls: BTreeMap<usize, OpenAICliClientToolState>,
+    tool_calls: BTreeMap<usize, OpenAIResponsesClientToolState>,
+    tool_results: BTreeMap<usize, OpenAIResponsesClientToolResultState>,
 }
 
 impl OpenAIChatClientEmitter {
@@ -1111,6 +1316,38 @@ impl OpenAIChatClientEmitter {
                 )?);
                 Ok(out)
             }
+            CanonicalStreamEvent::ToolResultDelta {
+                tool_use_id,
+                name,
+                content,
+                ..
+            } => {
+                let mut out = self.ensure_started()?;
+                let mut delta = Map::new();
+                delta.insert("role".to_string(), Value::String("tool".to_string()));
+                delta.insert("tool_call_id".to_string(), Value::String(tool_use_id));
+                if let Some(name) = name.filter(|value| !value.trim().is_empty()) {
+                    delta.insert("name".to_string(), Value::String(name));
+                }
+                delta.insert("content".to_string(), Value::String(content));
+                out.extend(encode_json_sse(
+                    None,
+                    &json!({
+                        "id": self.response_id
+                            .as_deref()
+                            .unwrap_or("chatcmpl-local-stream"),
+                        "object": "chat.completion.chunk",
+                        "model": self.model.as_deref().unwrap_or("unknown"),
+                        "choices": [{
+                            "index": 0,
+                            "delta": Value::Object(delta),
+                            "finish_reason": Value::Null
+                        }]
+                    }),
+                )?);
+                Ok(out)
+            }
+            CanonicalStreamEvent::UnknownEvent(_) => Ok(Vec::new()),
             CanonicalStreamEvent::Finish {
                 finish_reason,
                 usage,
@@ -1140,6 +1377,7 @@ impl OpenAIChatClientEmitter {
                             usage.input_tokens,
                             usage.output_tokens,
                             usage.total_tokens,
+                            usage.reasoning_tokens,
                         ),
                     )?);
                 }
@@ -1171,7 +1409,7 @@ impl OpenAIChatClientEmitter {
     }
 }
 
-impl OpenAICliClientEmitter {
+impl OpenAIResponsesClientEmitter {
     fn response_id(&self) -> &str {
         self.response_id.as_deref().unwrap_or("resp-local-stream")
     }
@@ -1296,6 +1534,19 @@ impl OpenAICliClientEmitter {
         }
         let output_index = self.allocate_output_index();
         self.tool_calls.entry(index).or_default().output_index = Some(output_index);
+        output_index
+    }
+
+    fn ensure_tool_result_output_index(&mut self, index: usize) -> usize {
+        if let Some(output_index) = self
+            .tool_results
+            .get(&index)
+            .and_then(|state| state.output_index)
+        {
+            return output_index;
+        }
+        let output_index = self.allocate_output_index();
+        self.tool_results.entry(index).or_default().output_index = Some(output_index);
         output_index
     }
 
@@ -1539,7 +1790,42 @@ impl OpenAICliClientEmitter {
         Ok(out)
     }
 
-    fn completed_response(&self, usage: OpenAiCliResponseUsage) -> Value {
+    fn finish_tool_result_items(&mut self) -> Result<Vec<u8>, PipelineFinalizeError> {
+        let mut out = Vec::new();
+        let indices = self.tool_results.keys().copied().collect::<Vec<_>>();
+        for index in indices {
+            let output_index = self.ensure_tool_result_output_index(index);
+            let state = self.tool_results.get(&index).cloned().unwrap_or_default();
+            let item_id = if state.tool_use_id.is_empty() {
+                build_generated_tool_call_id(index)
+            } else {
+                state.tool_use_id.clone()
+            };
+            let mut item = Map::new();
+            item.insert(
+                "type".to_string(),
+                Value::String("function_call_output".to_string()),
+            );
+            item.insert("id".to_string(), Value::String(format!("{item_id}_output")));
+            item.insert("call_id".to_string(), Value::String(item_id));
+            if let Some(name) = state.name.filter(|value| !value.trim().is_empty()) {
+                item.insert("name".to_string(), Value::String(name));
+            }
+            item.insert("output".to_string(), Value::String(state.content));
+            out.extend(self.encode_response_event(
+                "response.output_item.done",
+                json!({
+                    "type": "response.output_item.done",
+                    "response_id": self.response_id(),
+                    "output_index": output_index,
+                    "item": Value::Object(item),
+                }),
+            )?);
+        }
+        Ok(out)
+    }
+
+    fn completed_response(&self, usage: CanonicalUsage) -> Value {
         let mut ordered_output = Vec::new();
         if !self.reasoning.trim().is_empty() {
             ordered_output.push((
@@ -1598,7 +1884,47 @@ impl OpenAICliClientEmitter {
                 ));
             }
         }
+        for (index, state) in &self.tool_results {
+            if let Some(output_index) = state.output_index {
+                let item_id = if state.tool_use_id.is_empty() {
+                    build_generated_tool_call_id(*index)
+                } else {
+                    state.tool_use_id.clone()
+                };
+                let mut item = Map::new();
+                item.insert(
+                    "type".to_string(),
+                    Value::String("function_call_output".to_string()),
+                );
+                item.insert("id".to_string(), Value::String(format!("{item_id}_output")));
+                item.insert("call_id".to_string(), Value::String(item_id));
+                if let Some(name) = state
+                    .name
+                    .as_ref()
+                    .filter(|value| !value.trim().is_empty())
+                    .cloned()
+                {
+                    item.insert("name".to_string(), Value::String(name));
+                }
+                item.insert("output".to_string(), Value::String(state.content.clone()));
+                ordered_output.push((output_index, Value::Object(item)));
+            }
+        }
         ordered_output.sort_by_key(|(output_index, _)| *output_index);
+
+        let mut usage_payload = Map::new();
+        usage_payload.insert("input_tokens".to_string(), Value::from(usage.input_tokens));
+        usage_payload.insert(
+            "output_tokens".to_string(),
+            Value::from(usage.output_tokens),
+        );
+        usage_payload.insert("total_tokens".to_string(), Value::from(usage.total_tokens));
+        if usage.reasoning_tokens > 0 {
+            usage_payload.insert(
+                "output_tokens_details".to_string(),
+                json!({ "reasoning_tokens": usage.reasoning_tokens }),
+            );
+        }
 
         json!({
             "id": self.response_id(),
@@ -1609,11 +1935,7 @@ impl OpenAICliClientEmitter {
                 .into_iter()
                 .map(|(_, item)| item)
                 .collect::<Vec<_>>(),
-            "usage": {
-                "input_tokens": usage.prompt_tokens,
-                "output_tokens": usage.output_tokens,
-                "total_tokens": usage.total_tokens,
-            }
+            "usage": usage_payload,
         })
     }
 
@@ -1726,6 +2048,82 @@ impl OpenAICliClientEmitter {
                 )?);
                 Ok(out)
             }
+            CanonicalStreamEvent::ToolResultDelta {
+                index,
+                tool_use_id,
+                name,
+                content,
+            } => {
+                let mut out = self.ensure_started()?;
+                let output_index = self.ensure_tool_result_output_index(index);
+                let response_id = self.response_id().to_string();
+                let state = self.tool_results.entry(index).or_default();
+                if state.tool_use_id.is_empty() {
+                    state.tool_use_id = tool_use_id.clone();
+                }
+                if name.is_some() {
+                    state.name = name.clone();
+                }
+                let emitted_tool_use_id = if state.tool_use_id.is_empty() {
+                    tool_use_id
+                } else {
+                    state.tool_use_id.clone()
+                };
+                if !state.item_started {
+                    let mut item = Map::new();
+                    item.insert(
+                        "type".to_string(),
+                        Value::String("function_call_output".to_string()),
+                    );
+                    item.insert(
+                        "id".to_string(),
+                        Value::String(format!("{emitted_tool_use_id}_output")),
+                    );
+                    item.insert(
+                        "call_id".to_string(),
+                        Value::String(emitted_tool_use_id.clone()),
+                    );
+                    if let Some(name) = state
+                        .name
+                        .as_ref()
+                        .filter(|value| !value.trim().is_empty())
+                        .cloned()
+                    {
+                        item.insert("name".to_string(), Value::String(name));
+                    }
+                    item.insert("output".to_string(), Value::String(String::new()));
+                    out.extend(self.encode_response_event(
+                        "response.output_item.added",
+                        json!({
+                            "type": "response.output_item.added",
+                            "response_id": response_id,
+                            "output_index": output_index,
+                            "item": Value::Object(item),
+                        }),
+                    )?);
+                    self.tool_results.entry(index).or_default().item_started = true;
+                }
+                self.tool_results
+                    .entry(index)
+                    .or_default()
+                    .content
+                    .push_str(&content);
+                if !content.is_empty() {
+                    out.extend(self.encode_response_event(
+                        "response.function_call_output.delta",
+                        json!({
+                            "type": "response.function_call_output.delta",
+                            "response_id": self.response_id(),
+                            "output_index": output_index,
+                            "item_id": format!("{emitted_tool_use_id}_output"),
+                            "call_id": emitted_tool_use_id,
+                            "delta": content,
+                        }),
+                    )?);
+                }
+                Ok(out)
+            }
+            CanonicalStreamEvent::UnknownEvent(_) => Ok(Vec::new()),
             CanonicalStreamEvent::Finish { usage, .. } => {
                 if self.finished {
                     return Ok(Vec::new());
@@ -1734,16 +2132,13 @@ impl OpenAICliClientEmitter {
                 out.extend(self.finish_reasoning_item()?);
                 out.extend(self.finish_text_item()?);
                 out.extend(self.finish_tool_items()?);
+                out.extend(self.finish_tool_result_items()?);
                 let usage = usage.unwrap_or_default();
                 out.extend(self.encode_response_event(
                     "response.completed",
                     json!({
                         "type": "response.completed",
-                        "response": self.completed_response(OpenAiCliResponseUsage {
-                            prompt_tokens: usage.input_tokens,
-                            output_tokens: usage.output_tokens,
-                            total_tokens: usage.total_tokens,
-                        }),
+                        "response": self.completed_response(usage),
                     }),
                 )?);
                 self.finished = true;
@@ -1808,6 +2203,14 @@ fn openai_stream_placeholder_for_content_part(part: &CanonicalContentPart) -> St
     }
 }
 
+fn openai_tool_result_content_from_value(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Null) | None => String::new(),
+        Some(value) => value.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1836,9 +2239,70 @@ mod tests {
     }
 
     #[test]
+    fn openai_chat_provider_state_emits_unknown_events_for_unrecognized_deltas() {
+        let mut state = OpenAIChatProviderState::default();
+        let report_context = json!({});
+        let frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "id": "chatcmpl_unknown_123",
+                    "model": "gpt-5.4",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "future_delta_type": {
+                                "payload": true
+                            }
+                        }
+                    }]
+                })),
+            )
+            .expect("unknown delta should parse");
+
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::UnknownEvent(ref payload)
+                if payload.get("delta")
+                    .and_then(|delta| delta.get("future_delta_type"))
+                    .is_some()
+        )));
+    }
+
+    #[test]
+    fn openai_responses_provider_state_emits_unknown_events_for_unknown_response_types() {
+        let mut state = OpenAIResponsesProviderState::default();
+        let report_context = json!({});
+        let frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "response.future.delta",
+                    "response": {
+                        "id": "resp_unknown_123",
+                        "model": "gpt-5.4"
+                    },
+                    "delta": {
+                        "payload": true
+                    }
+                })),
+            )
+            .expect("unknown response event should parse");
+
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::UnknownEvent(ref payload)
+                if payload.get("type").and_then(Value::as_str) == Some("response.future.delta")
+        )));
+    }
+
+    #[test]
     fn openai_usage_derives_missing_input_tokens_from_total() {
         let usage = canonical_usage_from_openai_usage(Some(&json!({
             "output_tokens": 177,
+            "output_tokens_details": {
+                "reasoning_tokens": 7,
+            },
             "total_tokens": 20_612,
             "input_tokens_details": {
                 "cached_tokens": 19_840,
@@ -1849,6 +2313,7 @@ mod tests {
         assert_eq!(usage.input_tokens, 20_435);
         assert_eq!(usage.output_tokens, 177);
         assert_eq!(usage.cache_read_tokens, 19_840);
+        assert_eq!(usage.reasoning_tokens, 7);
     }
 
     #[test]
@@ -1897,6 +2362,7 @@ mod tests {
                     input_tokens: 26,
                     output_tokens: 144,
                     cache_read_tokens: 0,
+                    reasoning_tokens: 10,
                     ..
                 }),
             } if reason == "stop"
@@ -1904,8 +2370,8 @@ mod tests {
     }
 
     #[test]
-    fn openai_cli_provider_state_extracts_response_completed_usage() {
-        let mut state = OpenAICliProviderState::default();
+    fn openai_responses_provider_state_extracts_response_completed_usage() {
+        let mut state = OpenAIResponsesProviderState::default();
         let report_context = json!({});
         let frames = state
             .push_line(
@@ -1950,8 +2416,8 @@ mod tests {
     }
 
     #[test]
-    fn openai_cli_client_emitter_emits_doc_like_text_events() {
-        let mut emitter = OpenAICliClientEmitter::default();
+    fn openai_responses_client_emitter_emits_doc_like_text_events() {
+        let mut emitter = OpenAIResponsesClientEmitter::default();
         let start = CanonicalStreamFrame {
             id: "chatcmpl_stream_123".to_string(),
             model: "gpt-5.4".to_string(),
@@ -1997,8 +2463,8 @@ mod tests {
     }
 
     #[test]
-    fn openai_cli_client_emitter_keeps_text_item_id_stable_after_text_started() {
-        let mut emitter = OpenAICliClientEmitter::default();
+    fn openai_responses_client_emitter_keeps_text_item_id_stable_after_text_started() {
+        let mut emitter = OpenAIResponsesClientEmitter::default();
         let mut bytes = emitter
             .emit(CanonicalStreamFrame {
                 id: "msg_first".to_string(),
@@ -2022,8 +2488,8 @@ mod tests {
     }
 
     #[test]
-    fn openai_cli_provider_state_accepts_done_events_without_deltas() {
-        let mut state = OpenAICliProviderState::default();
+    fn openai_responses_provider_state_accepts_done_events_without_deltas() {
+        let mut state = OpenAIResponsesProviderState::default();
         let report_context = json!({});
         let mut frames = Vec::new();
 
@@ -2142,8 +2608,90 @@ mod tests {
     }
 
     #[test]
-    fn openai_cli_provider_state_accepts_legacy_outtext_delta_alias() {
-        let mut state = OpenAICliProviderState::default();
+    fn openai_responses_provider_state_parses_function_call_output_as_tool_result() {
+        let mut state = OpenAIResponsesProviderState::default();
+        let report_context = json!({});
+        let mut frames = Vec::new();
+
+        frames.extend(
+            state
+                .push_line(
+                    &report_context,
+                    data_line(json!({
+                        "type": "response.created",
+                        "response": {
+                            "id": "resp_123",
+                            "model": "gpt-5.4",
+                        }
+                    })),
+                )
+                .expect("created should parse"),
+        );
+        frames.extend(
+            state
+                .push_line(
+                    &report_context,
+                    data_line(json!({
+                        "type": "response.function_call_output.done",
+                        "response_id": "resp_123",
+                        "output_index": 2,
+                        "call_id": "call_123",
+                        "name": "lookup",
+                        "output": {"ok": true},
+                    })),
+                )
+                .expect("tool result should parse"),
+        );
+
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ToolResultDelta {
+                index: 2,
+                ref tool_use_id,
+                name: Some(ref name),
+                ref content,
+            } if tool_use_id == "call_123" && name == "lookup" && content == "{\"ok\":true}"
+        )));
+    }
+
+    #[test]
+    fn openai_responses_client_emitter_emits_function_call_output_events() {
+        let mut emitter = OpenAIResponsesClientEmitter::default();
+        let mut bytes = emitter
+            .emit(CanonicalStreamFrame {
+                id: "resp_123".to_string(),
+                model: "gpt-5.4".to_string(),
+                event: CanonicalStreamEvent::ToolResultDelta {
+                    index: 1,
+                    tool_use_id: "call_123".to_string(),
+                    name: Some("lookup".to_string()),
+                    content: "{\"ok\":true}".to_string(),
+                },
+            })
+            .expect("tool result should encode");
+        bytes.extend(
+            emitter
+                .emit(CanonicalStreamFrame {
+                    id: "resp_123".to_string(),
+                    model: "gpt-5.4".to_string(),
+                    event: CanonicalStreamEvent::Finish {
+                        finish_reason: Some("stop".to_string()),
+                        usage: None,
+                    },
+                })
+                .expect("finish should encode"),
+        );
+
+        let sse = String::from_utf8(bytes).expect("sse should be utf8");
+        assert!(sse.contains("event: response.function_call_output.delta\n"));
+        assert!(sse.contains("\"type\":\"function_call_output\""));
+        assert!(sse.contains("\"call_id\":\"call_123\""));
+        assert!(sse.contains("\"output\":\"{\\\"ok\\\":true}\""));
+    }
+
+    #[test]
+    fn openai_responses_provider_state_accepts_legacy_outtext_delta_alias() {
+        let mut state = OpenAIResponsesProviderState::default();
         let report_context = json!({});
         let mut frames = Vec::new();
 
@@ -2254,6 +2802,7 @@ mod tests {
                             input_tokens: 1,
                             output_tokens: 2,
                             total_tokens: 3,
+                            reasoning_tokens: 1,
                             ..CanonicalUsage::default()
                         }),
                     },
@@ -2266,6 +2815,7 @@ mod tests {
         assert!(sse.contains("\"choices\":[]"));
         assert!(sse.contains("\"prompt_tokens\":1"));
         assert!(sse.contains("\"completion_tokens\":2"));
+        assert!(sse.contains("\"completion_tokens_details\":{\"reasoning_tokens\":1}"));
         assert!(sse.contains("\"total_tokens\":3"));
         assert!(sse.contains("data: [DONE]\n\n"));
     }
@@ -2344,8 +2894,8 @@ mod tests {
     }
 
     #[test]
-    fn openai_cli_client_emitter_includes_reasoning_in_completed_response() {
-        let mut emitter = OpenAICliClientEmitter::default();
+    fn openai_responses_client_emitter_includes_reasoning_in_completed_response() {
+        let mut emitter = OpenAIResponsesClientEmitter::default();
         let mut bytes = emitter
             .emit(CanonicalStreamFrame {
                 id: "resp_123".to_string(),
@@ -2373,6 +2923,7 @@ mod tests {
                             input_tokens: 1,
                             output_tokens: 2,
                             total_tokens: 3,
+                            reasoning_tokens: 1,
                             ..CanonicalUsage::default()
                         }),
                     },
@@ -2383,11 +2934,12 @@ mod tests {
         let sse = String::from_utf8(bytes).expect("sse should be utf8");
         assert!(sse.contains("\"type\":\"reasoning\""));
         assert!(sse.contains("\"text\":\"because\""));
+        assert!(sse.contains("\"output_tokens_details\":{\"reasoning_tokens\":1}"));
     }
 
     #[test]
-    fn openai_cli_client_emitter_emits_doc_like_reasoning_events() {
-        let mut emitter = OpenAICliClientEmitter::default();
+    fn openai_responses_client_emitter_emits_doc_like_reasoning_events() {
+        let mut emitter = OpenAIResponsesClientEmitter::default();
         let mut bytes = emitter
             .emit(CanonicalStreamFrame {
                 id: "resp_456".to_string(),
@@ -2428,8 +2980,8 @@ mod tests {
     }
 
     #[test]
-    fn openai_cli_client_emitter_emits_failed_event_with_sequence_number() {
-        let mut emitter = OpenAICliClientEmitter::default();
+    fn openai_responses_client_emitter_emits_failed_event_with_sequence_number() {
+        let mut emitter = OpenAIResponsesClientEmitter::default();
         let mut bytes = emitter
             .emit(CanonicalStreamFrame {
                 id: "resp_err_123".to_string(),
@@ -2466,8 +3018,8 @@ mod tests {
     }
 
     #[test]
-    fn openai_cli_provider_state_accepts_reasoning_summary_events() {
-        let mut state = OpenAICliProviderState::default();
+    fn openai_responses_provider_state_accepts_reasoning_summary_events() {
+        let mut state = OpenAIResponsesProviderState::default();
         let report_context = json!({});
         let mut frames = Vec::new();
 

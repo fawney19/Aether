@@ -27,7 +27,7 @@ use base64::Engine as _;
 use sha2::{Digest, Sha256};
 
 #[tokio::test]
-async fn gateway_executes_openai_cli_sync_via_local_decision_gate_with_local_sync_decision() {
+async fn gateway_executes_openai_responses_sync_via_local_decision_gate_with_local_sync_decision() {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeSyncRequest {
         trace_id: String,
@@ -62,7 +62,7 @@ async fn gateway_executes_openai_cli_sync_via_local_decision_gate_with_local_syn
             true,
             false,
             Some(serde_json::json!(["openai"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -73,7 +73,7 @@ async fn gateway_executes_openai_cli_sync_via_local_decision_gate_with_local_syn
             Some(5),
             Some(4_102_444_800_i64),
             Some(serde_json::json!(["openai"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
         )
         .expect("auth snapshot should build")
@@ -87,7 +87,7 @@ async fn gateway_executes_openai_cli_sync_via_local_decision_gate_with_local_syn
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-openai-cli-local-1".to_string(),
-            endpoint_api_format: "openai:cli".to_string(),
+            endpoint_api_format: "openai:responses".to_string(),
             endpoint_api_family: Some("openai".to_string()),
             endpoint_kind: Some("cli".to_string()),
             endpoint_is_active: true,
@@ -95,11 +95,11 @@ async fn gateway_executes_openai_cli_sync_via_local_decision_gate_with_local_syn
             key_name: "prod".to_string(),
             key_auth_type: "api_key".to_string(),
             key_is_active: true,
-            key_api_formats: Some(vec!["openai:cli".to_string()]),
+            key_api_formats: Some(vec!["openai:responses".to_string()]),
             key_allowed_models: None,
             key_capabilities: None,
             key_internal_priority: 5,
-            key_global_priority_by_format: Some(serde_json::json!({"openai:cli": 1})),
+            key_global_priority_by_format: Some(serde_json::json!({"openai:responses": 1})),
             model_id: "model-openai-cli-local-1".to_string(),
             global_model_id: "global-model-openai-cli-local-1".to_string(),
             global_model_name: "gpt-5".to_string(),
@@ -109,7 +109,7 @@ async fn gateway_executes_openai_cli_sync_via_local_decision_gate_with_local_syn
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
                 name: "gpt-5-upstream".to_string(),
                 priority: 1,
-                api_formats: Some(vec!["openai:cli".to_string()]),
+                api_formats: Some(vec!["openai:responses".to_string()]),
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -142,7 +142,7 @@ async fn gateway_executes_openai_cli_sync_via_local_decision_gate_with_local_syn
         StoredProviderCatalogEndpoint::new(
             "endpoint-openai-cli-local-1".to_string(),
             "provider-openai-cli-local-1".to_string(),
-            "openai:cli".to_string(),
+            "openai:responses".to_string(),
             Some("openai".to_string()),
             Some("cli".to_string()),
             true,
@@ -182,12 +182,12 @@ async fn gateway_executes_openai_cli_sync_via_local_decision_gate_with_local_syn
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "sk-upstream-openai-cli")
                 .expect("api key should encrypt"),
             None,
             None,
-            Some(serde_json::json!({"openai:cli": 1})),
+            Some(serde_json::json!({"openai:responses": 1})),
             None,
             None,
             Some(serde_json::json!({"enabled": true, "node_id":"proxy-node-openai-cli-local"})),
@@ -217,7 +217,7 @@ async fn gateway_executes_openai_cli_sync_via_local_decision_gate_with_local_syn
                     "route_class": "ai_public",
                     "route_family": "openai",
                     "route_kind": "cli",
-                    "auth_endpoint_signature": "openai:cli",
+                    "auth_endpoint_signature": "openai:responses",
                     "execution_runtime_candidate": true,
                     "auth_context": {
                         "user_id": "user-openai-cli-local-123",
@@ -442,6 +442,7 @@ async fn gateway_executes_openai_cli_sync_via_local_decision_gate_with_local_syn
         .await
         .expect("request should succeed");
 
+    eprintln!("codex oauth response status: {}", response.status());
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response
@@ -541,7 +542,7 @@ async fn gateway_executes_openai_cli_sync_via_local_decision_gate_with_local_syn
 }
 
 #[tokio::test]
-async fn gateway_waits_for_api_key_concurrency_slot_then_executes_openai_cli_sync() {
+async fn gateway_waits_for_api_key_concurrency_slot_then_executes_openai_responses_sync() {
     fn hash_api_key(value: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(value.as_bytes());
@@ -558,7 +559,7 @@ async fn gateway_waits_for_api_key_concurrency_slot_then_executes_openai_cli_syn
             true,
             false,
             Some(serde_json::json!(["openai"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -569,7 +570,7 @@ async fn gateway_waits_for_api_key_concurrency_slot_then_executes_openai_cli_syn
             Some(5),
             Some(4_102_444_800),
             Some(serde_json::json!(["openai"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
         )
         .expect("auth snapshot should build")
@@ -583,7 +584,7 @@ async fn gateway_waits_for_api_key_concurrency_slot_then_executes_openai_cli_syn
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-openai-cli-local-limit-1".to_string(),
-            endpoint_api_format: "openai:cli".to_string(),
+            endpoint_api_format: "openai:responses".to_string(),
             endpoint_api_family: Some("openai".to_string()),
             endpoint_kind: Some("cli".to_string()),
             endpoint_is_active: true,
@@ -591,11 +592,11 @@ async fn gateway_waits_for_api_key_concurrency_slot_then_executes_openai_cli_syn
             key_name: "prod".to_string(),
             key_auth_type: "api_key".to_string(),
             key_is_active: true,
-            key_api_formats: Some(vec!["openai:cli".to_string()]),
+            key_api_formats: Some(vec!["openai:responses".to_string()]),
             key_allowed_models: None,
             key_capabilities: None,
             key_internal_priority: 5,
-            key_global_priority_by_format: Some(serde_json::json!({"openai:cli": 1})),
+            key_global_priority_by_format: Some(serde_json::json!({"openai:responses": 1})),
             model_id: "model-openai-cli-local-limit-1".to_string(),
             global_model_id: "global-model-openai-cli-local-limit-1".to_string(),
             global_model_name: "gpt-5".to_string(),
@@ -605,7 +606,7 @@ async fn gateway_waits_for_api_key_concurrency_slot_then_executes_openai_cli_syn
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
                 name: "gpt-5-upstream".to_string(),
                 priority: 1,
-                api_formats: Some(vec!["openai:cli".to_string()]),
+                api_formats: Some(vec!["openai:responses".to_string()]),
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -638,7 +639,7 @@ async fn gateway_waits_for_api_key_concurrency_slot_then_executes_openai_cli_syn
         StoredProviderCatalogEndpoint::new(
             "endpoint-openai-cli-local-limit-1".to_string(),
             "provider-openai-cli-local-limit-1".to_string(),
-            "openai:cli".to_string(),
+            "openai:responses".to_string(),
             Some("openai".to_string()),
             Some("cli".to_string()),
             true,
@@ -668,7 +669,7 @@ async fn gateway_waits_for_api_key_concurrency_slot_then_executes_openai_cli_syn
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             encrypt_python_fernet_plaintext(
                 DEVELOPMENT_ENCRYPTION_KEY,
                 "sk-upstream-openai-cli-limit",
@@ -676,7 +677,7 @@ async fn gateway_waits_for_api_key_concurrency_slot_then_executes_openai_cli_syn
             .expect("api key should encrypt"),
             None,
             None,
-            Some(serde_json::json!({"openai:cli": 1})),
+            Some(serde_json::json!({"openai:responses": 1})),
             None,
             None,
             None,
@@ -729,7 +730,7 @@ async fn gateway_waits_for_api_key_concurrency_slot_then_executes_openai_cli_syn
                     "route_class": "ai_public",
                     "route_family": "openai",
                     "route_kind": "cli",
-                    "auth_endpoint_signature": "openai:cli",
+                    "auth_endpoint_signature": "openai:responses",
                     "execution_runtime_candidate": true,
                     "auth_context": {
                         "user_id": "user-openai-cli-local-limit-123",
@@ -923,7 +924,7 @@ async fn gateway_waits_for_api_key_concurrency_slot_then_executes_openai_cli_syn
 }
 
 #[tokio::test]
-async fn gateway_returns_concurrency_limited_after_wait_budget_expires_for_openai_cli_sync() {
+async fn gateway_returns_concurrency_limited_after_wait_budget_expires_for_openai_responses_sync() {
     fn hash_api_key(value: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(value.as_bytes());
@@ -940,7 +941,7 @@ async fn gateway_returns_concurrency_limited_after_wait_budget_expires_for_opena
             true,
             false,
             Some(serde_json::json!(["openai"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -951,7 +952,7 @@ async fn gateway_returns_concurrency_limited_after_wait_budget_expires_for_opena
             Some(5),
             Some(4_102_444_800),
             Some(serde_json::json!(["openai"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
         )
         .expect("auth snapshot should build")
@@ -965,7 +966,7 @@ async fn gateway_returns_concurrency_limited_after_wait_budget_expires_for_opena
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-openai-cli-local-timeout-1".to_string(),
-            endpoint_api_format: "openai:cli".to_string(),
+            endpoint_api_format: "openai:responses".to_string(),
             endpoint_api_family: Some("openai".to_string()),
             endpoint_kind: Some("cli".to_string()),
             endpoint_is_active: true,
@@ -973,11 +974,11 @@ async fn gateway_returns_concurrency_limited_after_wait_budget_expires_for_opena
             key_name: "prod".to_string(),
             key_auth_type: "api_key".to_string(),
             key_is_active: true,
-            key_api_formats: Some(vec!["openai:cli".to_string()]),
+            key_api_formats: Some(vec!["openai:responses".to_string()]),
             key_allowed_models: None,
             key_capabilities: None,
             key_internal_priority: 5,
-            key_global_priority_by_format: Some(serde_json::json!({"openai:cli": 1})),
+            key_global_priority_by_format: Some(serde_json::json!({"openai:responses": 1})),
             model_id: "model-openai-cli-local-timeout-1".to_string(),
             global_model_id: "global-model-openai-cli-local-timeout-1".to_string(),
             global_model_name: "gpt-5".to_string(),
@@ -987,7 +988,7 @@ async fn gateway_returns_concurrency_limited_after_wait_budget_expires_for_opena
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
                 name: "gpt-5-upstream".to_string(),
                 priority: 1,
-                api_formats: Some(vec!["openai:cli".to_string()]),
+                api_formats: Some(vec!["openai:responses".to_string()]),
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1020,7 +1021,7 @@ async fn gateway_returns_concurrency_limited_after_wait_budget_expires_for_opena
         StoredProviderCatalogEndpoint::new(
             "endpoint-openai-cli-local-timeout-1".to_string(),
             "provider-openai-cli-local-timeout-1".to_string(),
-            "openai:cli".to_string(),
+            "openai:responses".to_string(),
             Some("openai".to_string()),
             Some("cli".to_string()),
             true,
@@ -1050,7 +1051,7 @@ async fn gateway_returns_concurrency_limited_after_wait_budget_expires_for_opena
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             encrypt_python_fernet_plaintext(
                 DEVELOPMENT_ENCRYPTION_KEY,
                 "sk-upstream-openai-cli-timeout",
@@ -1058,7 +1059,7 @@ async fn gateway_returns_concurrency_limited_after_wait_budget_expires_for_opena
             .expect("api key should encrypt"),
             None,
             None,
-            Some(serde_json::json!({"openai:cli": 1})),
+            Some(serde_json::json!({"openai:responses": 1})),
             None,
             None,
             None,
@@ -1111,7 +1112,7 @@ async fn gateway_returns_concurrency_limited_after_wait_budget_expires_for_opena
                     "route_class": "ai_public",
                     "route_family": "openai",
                     "route_kind": "cli",
-                    "auth_endpoint_signature": "openai:cli",
+                    "auth_endpoint_signature": "openai:responses",
                     "execution_runtime_candidate": true,
                     "auth_context": {
                         "user_id": "user-openai-cli-local-timeout-123",
@@ -1271,7 +1272,7 @@ async fn gateway_returns_concurrency_limited_after_wait_budget_expires_for_opena
 }
 
 #[tokio::test]
-async fn gateway_returns_openai_cli_error_for_local_sync_failure() {
+async fn gateway_returns_openai_responses_error_for_local_sync_failure() {
     fn hash_api_key(value: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(value.as_bytes());
@@ -1288,7 +1289,7 @@ async fn gateway_returns_openai_cli_error_for_local_sync_failure() {
             true,
             false,
             Some(serde_json::json!(["openai"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -1299,7 +1300,7 @@ async fn gateway_returns_openai_cli_error_for_local_sync_failure() {
             Some(5),
             Some(4_102_444_800_i64),
             Some(serde_json::json!(["openai"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
         )
         .expect("auth snapshot should build")
@@ -1313,7 +1314,7 @@ async fn gateway_returns_openai_cli_error_for_local_sync_failure() {
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-openai-cli-local-1".to_string(),
-            endpoint_api_format: "openai:cli".to_string(),
+            endpoint_api_format: "openai:responses".to_string(),
             endpoint_api_family: Some("openai".to_string()),
             endpoint_kind: Some("cli".to_string()),
             endpoint_is_active: true,
@@ -1321,11 +1322,11 @@ async fn gateway_returns_openai_cli_error_for_local_sync_failure() {
             key_name: "prod".to_string(),
             key_auth_type: "bearer".to_string(),
             key_is_active: true,
-            key_api_formats: Some(vec!["openai:cli".to_string()]),
+            key_api_formats: Some(vec!["openai:responses".to_string()]),
             key_allowed_models: None,
             key_capabilities: None,
             key_internal_priority: 5,
-            key_global_priority_by_format: Some(serde_json::json!({"openai:cli": 1})),
+            key_global_priority_by_format: Some(serde_json::json!({"openai:responses": 1})),
             model_id: "model-openai-cli-local-1".to_string(),
             global_model_id: "global-model-openai-cli-local-1".to_string(),
             global_model_name: "gpt-5".to_string(),
@@ -1335,7 +1336,7 @@ async fn gateway_returns_openai_cli_error_for_local_sync_failure() {
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
                 name: "gpt-5-upstream".to_string(),
                 priority: 1,
-                api_formats: Some(vec!["openai:cli".to_string()]),
+                api_formats: Some(vec!["openai:responses".to_string()]),
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1368,7 +1369,7 @@ async fn gateway_returns_openai_cli_error_for_local_sync_failure() {
         StoredProviderCatalogEndpoint::new(
             "endpoint-openai-cli-local-1".to_string(),
             "provider-openai-cli-local-1".to_string(),
-            "openai:cli".to_string(),
+            "openai:responses".to_string(),
             Some("openai".to_string()),
             Some("cli".to_string()),
             true,
@@ -1404,12 +1405,12 @@ async fn gateway_returns_openai_cli_error_for_local_sync_failure() {
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "sk-upstream-openai-cli")
                 .expect("api key should encrypt"),
             None,
             None,
-            Some(serde_json::json!({"openai:cli": 1})),
+            Some(serde_json::json!({"openai:responses": 1})),
             None,
             None,
             Some(serde_json::json!({"enabled": true, "node_id":"proxy-node-openai-cli-local"})),
@@ -1431,7 +1432,7 @@ async fn gateway_returns_openai_cli_error_for_local_sync_failure() {
                     "route_class": "ai_public",
                     "route_family": "openai",
                     "route_kind": "cli",
-                    "auth_endpoint_signature": "openai:cli",
+                    "auth_endpoint_signature": "openai:responses",
                     "execution_runtime_candidate": true,
                     "auth_context": {
                         "user_id": "user-openai-cli-local-error-123",
@@ -1563,7 +1564,7 @@ async fn gateway_returns_openai_cli_error_for_local_sync_failure() {
 }
 
 #[tokio::test]
-async fn gateway_returns_openai_cli_error_for_local_cross_format_gemini_sync_failure() {
+async fn gateway_returns_openai_responses_error_for_local_cross_format_gemini_sync_failure() {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeSyncRequest {
         trace_id: String,
@@ -1590,7 +1591,7 @@ async fn gateway_returns_openai_cli_error_for_local_cross_format_gemini_sync_fai
             true,
             false,
             Some(serde_json::json!(["openai", "gemini"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -1601,7 +1602,7 @@ async fn gateway_returns_openai_cli_error_for_local_cross_format_gemini_sync_fai
             Some(5),
             Some(4_102_444_800_i64),
             Some(serde_json::json!(["openai", "gemini"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
         )
         .expect("auth snapshot should build")
@@ -1734,7 +1735,7 @@ async fn gateway_returns_openai_cli_error_for_local_cross_format_gemini_sync_fai
                     "route_class": "ai_public",
                     "route_family": "openai",
                     "route_kind": "cli",
-                    "auth_endpoint_signature": "openai:cli",
+                    "auth_endpoint_signature": "openai:responses",
                     "execution_runtime_candidate": true,
                     "auth_context": {
                         "user_id": "user-openai-cli-gemini-local-error-123",
@@ -1939,7 +1940,7 @@ async fn gateway_returns_openai_cli_error_for_local_cross_format_gemini_sync_fai
 }
 
 #[tokio::test]
-async fn gateway_returns_openai_cli_error_for_local_cross_format_claude_sync_failure() {
+async fn gateway_returns_openai_responses_error_for_local_cross_format_claude_sync_failure() {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeSyncRequest {
         trace_id: String,
@@ -1966,7 +1967,7 @@ async fn gateway_returns_openai_cli_error_for_local_cross_format_claude_sync_fai
             true,
             false,
             Some(serde_json::json!(["openai", "claude"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -1977,7 +1978,7 @@ async fn gateway_returns_openai_cli_error_for_local_cross_format_claude_sync_fai
             Some(5),
             Some(4_102_444_800_i64),
             Some(serde_json::json!(["openai", "claude"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
         )
         .expect("auth snapshot should build")
@@ -2110,7 +2111,7 @@ async fn gateway_returns_openai_cli_error_for_local_cross_format_claude_sync_fai
                     "route_class": "ai_public",
                     "route_family": "openai",
                     "route_kind": "cli",
-                    "auth_endpoint_signature": "openai:cli",
+                    "auth_endpoint_signature": "openai:responses",
                     "execution_runtime_candidate": true,
                     "auth_context": {
                         "user_id": "user-openai-cli-claude-local-error-123",
@@ -2315,7 +2316,7 @@ async fn gateway_returns_openai_cli_error_for_local_cross_format_claude_sync_fai
 }
 
 #[tokio::test]
-async fn gateway_returns_openai_cli_error_for_local_cross_format_claude_chat_sync_failure() {
+async fn gateway_returns_openai_responses_error_for_local_cross_format_claude_chat_sync_failure() {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeSyncRequest {
         trace_id: String,
@@ -2342,7 +2343,7 @@ async fn gateway_returns_openai_cli_error_for_local_cross_format_claude_chat_syn
             true,
             false,
             Some(serde_json::json!(["openai", "claude"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -2353,7 +2354,7 @@ async fn gateway_returns_openai_cli_error_for_local_cross_format_claude_chat_syn
             Some(5),
             Some(4_102_444_800_i64),
             Some(serde_json::json!(["openai", "claude"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
         )
         .expect("auth snapshot should build")
@@ -2486,7 +2487,7 @@ async fn gateway_returns_openai_cli_error_for_local_cross_format_claude_chat_syn
                     "route_class": "ai_public",
                     "route_family": "openai",
                     "route_kind": "cli",
-                    "auth_endpoint_signature": "openai:cli",
+                    "auth_endpoint_signature": "openai:responses",
                     "execution_runtime_candidate": true,
                     "auth_context": {
                         "user_id": "user-openai-cli-claude-chat-local-error-123",
@@ -2694,7 +2695,7 @@ async fn gateway_returns_openai_cli_error_for_local_cross_format_claude_chat_syn
 }
 
 #[tokio::test]
-async fn gateway_returns_openai_cli_error_for_local_cross_format_gemini_chat_sync_failure() {
+async fn gateway_returns_openai_responses_error_for_local_cross_format_gemini_chat_sync_failure() {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeSyncRequest {
         trace_id: String,
@@ -2721,7 +2722,7 @@ async fn gateway_returns_openai_cli_error_for_local_cross_format_gemini_chat_syn
             true,
             false,
             Some(serde_json::json!(["openai", "gemini"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -2732,7 +2733,7 @@ async fn gateway_returns_openai_cli_error_for_local_cross_format_gemini_chat_syn
             Some(5),
             Some(4_102_444_800_i64),
             Some(serde_json::json!(["openai", "gemini"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
         )
         .expect("auth snapshot should build")
@@ -2865,7 +2866,7 @@ async fn gateway_returns_openai_cli_error_for_local_cross_format_gemini_chat_syn
                     "route_class": "ai_public",
                     "route_family": "openai",
                     "route_kind": "cli",
-                    "auth_endpoint_signature": "openai:cli",
+                    "auth_endpoint_signature": "openai:responses",
                     "execution_runtime_candidate": true,
                     "auth_context": {
                         "user_id": "user-openai-cli-gemini-chat-local-error-123",
@@ -3107,7 +3108,7 @@ async fn gateway_executes_codex_cli_sync_via_local_decision_gate_after_oauth_ref
             true,
             false,
             Some(serde_json::json!(["openai", "codex"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5.4"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -3118,7 +3119,7 @@ async fn gateway_executes_codex_cli_sync_via_local_decision_gate_after_oauth_ref
             Some(5),
             Some(4_102_444_800_i64),
             Some(serde_json::json!(["openai", "codex"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5.4"])),
         )
         .expect("auth snapshot should build")
@@ -3132,7 +3133,7 @@ async fn gateway_executes_codex_cli_sync_via_local_decision_gate_after_oauth_ref
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-codex-cli-local-1".to_string(),
-            endpoint_api_format: "openai:cli".to_string(),
+            endpoint_api_format: "openai:responses".to_string(),
             endpoint_api_family: Some("openai".to_string()),
             endpoint_kind: Some("cli".to_string()),
             endpoint_is_active: true,
@@ -3140,11 +3141,11 @@ async fn gateway_executes_codex_cli_sync_via_local_decision_gate_after_oauth_ref
             key_name: "oauth".to_string(),
             key_auth_type: "oauth".to_string(),
             key_is_active: true,
-            key_api_formats: Some(vec!["openai:cli".to_string()]),
+            key_api_formats: Some(vec!["openai:responses".to_string()]),
             key_allowed_models: None,
             key_capabilities: None,
             key_internal_priority: 5,
-            key_global_priority_by_format: Some(serde_json::json!({"openai:cli": 1})),
+            key_global_priority_by_format: Some(serde_json::json!({"openai:responses": 1})),
             model_id: "model-codex-cli-local-1".to_string(),
             global_model_id: "global-model-codex-cli-local-1".to_string(),
             global_model_name: "gpt-5.4".to_string(),
@@ -3154,7 +3155,7 @@ async fn gateway_executes_codex_cli_sync_via_local_decision_gate_after_oauth_ref
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
                 name: "gpt-5.4".to_string(),
                 priority: 1,
-                api_formats: Some(vec!["openai:cli".to_string()]),
+                api_formats: Some(vec!["openai:responses".to_string()]),
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -3187,7 +3188,7 @@ async fn gateway_executes_codex_cli_sync_via_local_decision_gate_after_oauth_ref
         StoredProviderCatalogEndpoint::new(
             "endpoint-codex-cli-local-1".to_string(),
             "provider-codex-cli-local-1".to_string(),
-            "openai:cli".to_string(),
+            "openai:responses".to_string(),
             Some("openai".to_string()),
             Some("cli".to_string()),
             true,
@@ -3222,12 +3223,12 @@ async fn gateway_executes_codex_cli_sync_via_local_decision_gate_after_oauth_ref
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "__placeholder__")
                 .expect("placeholder api key should encrypt"),
             Some(encrypted_auth_config),
             None,
-            Some(serde_json::json!({"openai:cli": 1})),
+            Some(serde_json::json!({"openai:responses": 1})),
             None,
             None,
             None,

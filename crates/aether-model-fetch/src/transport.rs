@@ -19,7 +19,7 @@ use serde_json::json;
 
 use crate::build_models_fetch_url;
 
-const OPENAI_CLI_USER_AGENT: &str = "openai-codex/1.0";
+const OPENAI_RESPONSES_USER_AGENT: &str = "openai-codex/1.0";
 const CLAUDE_CLI_USER_AGENT: &str = "claude-code/1.0.1";
 const GEMINI_CLI_USER_AGENT: &str = "GeminiCLI/0.1.5 (Windows; AMD64)";
 const CLAUDE_VERSION_HEADER: &str = "2023-06-01";
@@ -381,11 +381,12 @@ fn apply_fetch_header_rules(
 }
 
 fn standard_models_fetch_headers(api_format: &str) -> BTreeMap<String, String> {
-    let api_format = api_format.trim().to_ascii_lowercase();
+    let api_format = aether_ai_formats::normalize_legacy_openai_format_alias(api_format);
     match api_format.as_str() {
-        "openai:cli" | "openai:compact" => {
-            BTreeMap::from([("user-agent".to_string(), OPENAI_CLI_USER_AGENT.to_string())])
-        }
+        "openai:responses" | "openai:responses:compact" => BTreeMap::from([(
+            "user-agent".to_string(),
+            OPENAI_RESPONSES_USER_AGENT.to_string(),
+        )]),
         "claude:chat" => BTreeMap::from([(
             "anthropic-version".to_string(),
             CLAUDE_VERSION_HEADER.to_string(),
@@ -577,12 +578,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builds_openai_cli_models_fetch_plan_with_cli_user_agent() {
+    async fn builds_openai_responses_models_fetch_plan_with_codex_user_agent() {
         let runtime = TestRuntime {
             oauth_auth: None,
             proxy: None,
         };
-        let mut transport = sample_transport("openai", "openai:cli", "api_key");
+        let mut transport = sample_transport("openai", "openai:responses", "api_key");
         transport.key.decrypted_auth_config = None;
         let plan = build_models_fetch_execution_plan(&runtime, &transport)
             .await
@@ -600,12 +601,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builds_openai_compact_models_fetch_plan_with_bearer_authorization() {
+    async fn builds_openai_responses_compact_models_fetch_plan_with_bearer_authorization() {
         let runtime = TestRuntime {
             oauth_auth: None,
             proxy: None,
         };
-        let mut transport = sample_transport("openai", "openai:compact", "api_key");
+        let mut transport = sample_transport("openai", "openai:responses:compact", "api_key");
         transport.key.decrypted_auth_config = None;
         let plan = build_models_fetch_execution_plan(&runtime, &transport)
             .await

@@ -443,7 +443,7 @@ mod tests {
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(json!(["openai:cli"])),
+            Some(json!(["openai:responses"])),
             "sk-codex-test".to_string(),
             None,
             None,
@@ -668,7 +668,7 @@ mod tests {
                 report_context: Some(json!({
                     "request_id": "req-reporting-sync-null-1",
                     "client_api_format": "claude:cli",
-                    "provider_api_format": "openai:cli"
+                    "provider_api_format": "openai:responses"
                 })),
                 status_code: 200,
                 headers: BTreeMap::new(),
@@ -758,7 +758,7 @@ mod tests {
             &state,
             GatewaySyncReportRequest {
                 trace_id: "trace-codex-reporting-sync".to_string(),
-                report_kind: "openai_cli_sync_success".to_string(),
+                report_kind: "openai_responses_sync_success".to_string(),
                 report_context: Some(json!({
                     "request_id": "req-codex-reporting-sync",
                     "key_id": "key-codex-sync"
@@ -821,7 +821,7 @@ mod tests {
             &state,
             GatewayStreamReportRequest {
                 trace_id: "trace-codex-reporting-stream".to_string(),
-                report_kind: "openai_cli_stream_success".to_string(),
+                report_kind: "openai_responses_stream_success".to_string(),
                 report_context: Some(json!({
                     "request_id": "req-codex-reporting-stream",
                     "key_id": "key-codex-stream"

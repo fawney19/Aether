@@ -7,7 +7,7 @@ use aether_scheduler_core::{
     resolve_requested_global_model_name, SchedulerMinimalCandidateSelectionCandidate,
 };
 
-use crate::data::candidate_selection::read_minimal_candidate_selection;
+use crate::data::candidate_selection::enumerate_minimal_candidate_selection_with_required_capabilities;
 use crate::data::GatewayDataState;
 
 use super::super::{
@@ -119,7 +119,7 @@ fn scheduler_candidate_is_serializable() {
 }
 
 #[tokio::test]
-async fn read_minimal_candidate_selection_resolves_provider_model_alias() {
+async fn enumerate_minimal_candidate_selection_resolves_provider_model_alias() {
     let mut row = sample_row();
     row.global_model_name = "gpt-5".to_string();
     row.model_provider_model_name = "gpt-5.2".to_string();
@@ -135,9 +135,16 @@ async fn read_minimal_candidate_selection_resolves_provider_model_alias() {
     let quotas = Arc::new(InMemoryProviderQuotaRepository::seed(vec![]));
     let state = GatewayDataState::with_candidate_selection_and_quota_for_tests(candidates, quotas);
 
-    let selection = read_minimal_candidate_selection(&state, "openai:chat", "gpt-5.2", false, None)
-        .await
-        .expect("selection should succeed");
+    let selection = enumerate_minimal_candidate_selection_with_required_capabilities(
+        &state,
+        "openai:chat",
+        "gpt-5.2",
+        false,
+        None,
+        None,
+    )
+    .await
+    .expect("selection should succeed");
 
     assert_eq!(selection.len(), 1);
     assert_eq!(selection[0].global_model_name, "gpt-5");
@@ -145,7 +152,62 @@ async fn read_minimal_candidate_selection_resolves_provider_model_alias() {
 }
 
 #[tokio::test]
-async fn read_minimal_candidate_selection_allows_resolved_global_model_in_auth_snapshot() {
+async fn enumerate_minimal_candidate_selection_keeps_all_rows_supporting_requested_model() {
+    let mut exact = sample_row();
+    exact.provider_id = "provider-exact".to_string();
+    exact.endpoint_id = "endpoint-exact".to_string();
+    exact.key_id = "key-exact".to_string();
+    exact.model_id = "model-exact".to_string();
+    exact.global_model_id = "global-exact".to_string();
+    exact.global_model_name = "gpt-5".to_string();
+    exact.model_provider_model_name = "gpt-5".to_string();
+    exact.model_provider_model_mappings = None;
+
+    let mut mapped = sample_row();
+    mapped.provider_id = "provider-mapped".to_string();
+    mapped.endpoint_id = "endpoint-mapped".to_string();
+    mapped.key_id = "key-mapped".to_string();
+    mapped.model_id = "model-mapped".to_string();
+    mapped.global_model_id = "global-mapped".to_string();
+    mapped.global_model_name = "claude-sonnet".to_string();
+    mapped.global_model_mappings = Some(vec!["gpt-5".to_string()]);
+    mapped.model_provider_model_name = "claude-sonnet-upstream".to_string();
+    mapped.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
+        name: "claude-sonnet-upstream".to_string(),
+        priority: 1,
+        api_formats: Some(vec!["openai:chat".to_string()]),
+    }]);
+
+    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+        exact, mapped,
+    ]));
+    let quotas = Arc::new(InMemoryProviderQuotaRepository::seed(vec![]));
+    let state = GatewayDataState::with_candidate_selection_and_quota_for_tests(candidates, quotas);
+
+    let selection = enumerate_minimal_candidate_selection_with_required_capabilities(
+        &state,
+        "openai:chat",
+        "gpt-5",
+        false,
+        None,
+        None,
+    )
+    .await
+    .expect("selection should succeed");
+
+    let provider_ids = selection
+        .iter()
+        .map(|candidate| candidate.provider_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(provider_ids, vec!["provider-exact", "provider-mapped"]);
+    assert_eq!(
+        selection[1].selected_provider_model_name,
+        "claude-sonnet-upstream"
+    );
+}
+
+#[tokio::test]
+async fn enumerate_minimal_candidate_selection_allows_resolved_global_model_in_auth_snapshot() {
     let mut row = sample_row();
     row.global_model_name = "gpt-5".to_string();
     row.global_model_mappings = Some(vec!["gpt-5(?:\\.\\d+)?".to_string()]);
@@ -165,12 +227,13 @@ async fn read_minimal_candidate_selection_allows_resolved_global_model_in_auth_s
     auth_snapshot.user_allowed_models = Some(vec!["gpt-5".to_string()]);
     auth_snapshot.api_key_allowed_models = Some(vec!["gpt-5".to_string()]);
 
-    let selection = read_minimal_candidate_selection(
+    let selection = enumerate_minimal_candidate_selection_with_required_capabilities(
         &state,
         "openai:chat",
         "gpt-5.2",
         false,
         Some(&auth_snapshot),
+        None,
     )
     .await
     .expect("selection should succeed");

@@ -268,6 +268,7 @@ mod tests {
                 api_key_name: None,
                 balance_remaining: Some(12.5),
                 access_allowed: true,
+                api_key_is_standalone: false,
             }),
         );
 

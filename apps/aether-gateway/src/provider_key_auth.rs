@@ -306,15 +306,15 @@ mod tests {
     #[test]
     fn deduplicates_active_provider_api_formats() {
         let endpoints = vec![
-            sample_endpoint("openai:cli", true),
+            sample_endpoint("openai:responses", true),
             sample_endpoint("openai:image", true),
-            sample_endpoint("openai:cli", true),
-            sample_endpoint("openai:compact", false),
+            sample_endpoint("openai:responses", true),
+            sample_endpoint("openai:responses:compact", false),
         ];
 
         assert_eq!(
             provider_active_api_formats(&endpoints),
-            vec!["openai:cli".to_string(), "openai:image".to_string()]
+            vec!["openai:responses".to_string(), "openai:image".to_string()]
         );
     }
 
@@ -322,50 +322,50 @@ mod tests {
     fn fixed_oauth_key_with_null_formats_inherits_provider_formats() {
         let key = sample_key("oauth");
         let endpoints = vec![
-            sample_endpoint("openai:cli", true),
+            sample_endpoint("openai:responses", true),
             sample_endpoint("openai:image", true),
         ];
 
         assert!(provider_key_inherits_provider_api_formats(&key, "codex"));
         assert_eq!(
             provider_key_effective_api_formats(&key, "codex", &endpoints),
-            vec!["openai:cli".to_string(), "openai:image".to_string()]
+            vec!["openai:responses".to_string(), "openai:image".to_string()]
         );
     }
 
     #[test]
     fn fixed_oauth_key_with_legacy_explicit_formats_still_inherits_provider_formats() {
         let mut key = sample_key("oauth");
-        key.api_formats = Some(json!(["openai:compact"]));
+        key.api_formats = Some(json!(["openai:responses:compact"]));
         let endpoints = vec![
-            sample_endpoint("openai:cli", true),
+            sample_endpoint("openai:responses", true),
             sample_endpoint("openai:image", true),
         ];
 
         assert!(provider_key_inherits_provider_api_formats(&key, "codex"));
         assert_eq!(
             provider_key_effective_api_formats(&key, "codex", &endpoints),
-            vec!["openai:cli".to_string(), "openai:image".to_string()]
+            vec!["openai:responses".to_string(), "openai:image".to_string()]
         );
     }
 
     #[test]
     fn explicit_formats_do_not_inherit_for_non_fixed_key() {
         let mut key = sample_key("oauth");
-        key.api_formats = Some(json!(["openai:compact"]));
+        key.api_formats = Some(json!(["openai:responses:compact"]));
         let endpoints = vec![
-            sample_endpoint("openai:cli", true),
+            sample_endpoint("openai:responses", true),
             sample_endpoint("openai:image", true),
         ];
 
         assert!(!provider_key_inherits_provider_api_formats(&key, "openai"));
         assert_eq!(
             provider_key_configured_api_formats(&key),
-            vec!["openai:compact".to_string()]
+            vec!["openai:responses:compact".to_string()]
         );
         assert_eq!(
             provider_key_effective_api_formats(&key, "openai", &endpoints),
-            vec!["openai:compact".to_string()]
+            vec!["openai:responses:compact".to_string()]
         );
     }
 }

@@ -1,10 +1,12 @@
-use self::affinity::candidate_affinity_hash;
 use self::selection::{
     collect_selectable_candidates, collect_selectable_candidates_with_skip_reasons,
 };
 use super::state::SchedulerRuntimeState;
 
 mod affinity;
+mod enumeration;
+mod ranking;
+mod resolution;
 mod runtime;
 mod selection;
 
@@ -170,7 +172,7 @@ pub(crate) async fn list_selectable_candidates_for_required_capability_without_r
     let mut all_attempts_blocked_by_auth_limit = !model_names.is_empty();
 
     for global_model_name in model_names {
-        let (mut candidates, skipped_candidates) = collect_selectable_candidates_with_skip_reasons(
+        let (candidates, skipped_candidates) = collect_selectable_candidates_with_skip_reasons(
             selection_row_source,
             runtime_state,
             &normalized_api_format,
@@ -199,9 +201,6 @@ pub(crate) async fn list_selectable_candidates_for_required_capability_without_r
                 if candidates.is_empty() {
                     continue;
                 }
-                candidates.sort_by_key(|candidate| {
-                    !candidate_supports_required_capability(candidate, required_capability)
-                });
                 return Ok((candidates, false));
             }
         }

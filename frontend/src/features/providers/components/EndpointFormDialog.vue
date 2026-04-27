@@ -1285,6 +1285,17 @@ function hasDefaultBodyRules(apiFormat: string): boolean {
   return (defaultBodyRulesByFormat.value[cacheKey]?.length || 0) > 0
 }
 
+function normalizeLegacyOpenAIFormatAlias(apiFormat: string): string {
+  switch (apiFormat.trim().toLowerCase()) {
+    case 'openai:cli':
+      return 'openai:responses'
+    case 'openai:compact':
+      return 'openai:responses:compact'
+    default:
+      return apiFormat.trim().toLowerCase()
+  }
+}
+
 async function loadDefaultBodyRulesForFormat(apiFormat: string, force = false): Promise<BodyRule[]> {
   if (!apiFormat) return []
   const providerType = (props.provider?.provider_type || '').toLowerCase()
@@ -1321,22 +1332,23 @@ async function preloadDefaultBodyRules(endpoints: ProviderEndpoint[]): Promise<v
 // 获取指定 API 格式的默认路径
 function getDefaultPath(apiFormat: string, baseUrl?: string): string {
   const providerType = (props.provider?.provider_type || '').toLowerCase()
+  const normalizedApiFormat = normalizeLegacyOpenAIFormatAlias(apiFormat)
   if (providerType === 'vertex_ai') {
-    if (apiFormat === 'gemini:chat') {
+    if (normalizedApiFormat === 'gemini:chat') {
       return '/v1/publishers/google/models/{model}:{action}'
     }
-    if (apiFormat === 'claude:chat') {
+    if (normalizedApiFormat === 'claude:chat') {
       return '/v1/projects/{project_id}/locations/{region}/publishers/anthropic/models/{model}:{action}'
     }
   }
 
-  const format = apiFormats.value.find(f => f.value === apiFormat)
+  const format = apiFormats.value.find(f => f.value === normalizedApiFormat)
   const defaultPath = format?.default_path || ''
   // Codex 端点使用 /responses 而非 /v1/responses
   const isCodex = providerType
     ? providerType === 'codex'
     : (!!baseUrl && isCodexUrl(baseUrl))
-  if (apiFormat === 'openai:cli' && isCodex) {
+  if (normalizedApiFormat === 'openai:responses' && isCodex) {
     return '/responses'
   }
   return defaultPath
@@ -2381,7 +2393,7 @@ function getCurrentUpstreamStreamPolicy(endpoint: ProviderEndpoint): string {
 
 function isUpstreamStreamPolicyLocked(endpoint: ProviderEndpoint): boolean {
   return (props.provider?.provider_type || '').toLowerCase() === 'codex'
-    && endpoint.api_format === 'openai:cli'
+    && normalizeLegacyOpenAIFormatAlias(endpoint.api_format) === 'openai:responses'
 }
 
 // 获取上游流式按钮的样式类
@@ -2398,7 +2410,7 @@ function getUpstreamStreamButtonClass(endpoint: ProviderEndpoint): string {
 
 // 获取上游流式按钮的提示文字
 function getUpstreamStreamTooltip(endpoint: ProviderEndpoint): string {
-  if (isUpstreamStreamPolicyLocked(endpoint)) return '固定流式（Codex OpenAI CLI，已锁定）'
+  if (isUpstreamStreamPolicyLocked(endpoint)) return '固定流式（Codex OpenAI Responses，已锁定）'
   const policy = getCurrentUpstreamStreamPolicy(endpoint)
   if (policy === 'force_stream') return '固定流式（点击切换为固定非流）'
   if (policy === 'force_non_stream') return '固定非流（点击切换为跟随请求）'

@@ -19,8 +19,8 @@ pub(crate) use super::specialized::{
 };
 pub(crate) use super::standard::{
     maybe_build_stream_local_decision_payload,
-    maybe_build_stream_local_openai_cli_decision_payload,
+    maybe_build_stream_local_openai_responses_decision_payload,
     maybe_build_stream_local_standard_decision_payload, maybe_build_sync_local_decision_payload,
-    maybe_build_sync_local_openai_cli_decision_payload,
+    maybe_build_sync_local_openai_responses_decision_payload,
     maybe_build_sync_local_standard_decision_payload,
 };

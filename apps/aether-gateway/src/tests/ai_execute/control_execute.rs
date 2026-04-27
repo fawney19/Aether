@@ -120,7 +120,7 @@ async fn gateway_locally_denies_sync_ai_control_execute_when_opted_in_and_execut
     );
     assert_eq!(
         payload["error"]["message"],
-        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商（OpenAI Chat Completions，原因代码: missing_auth_context）"
+        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商"
     );
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
@@ -255,7 +255,7 @@ async fn gateway_locally_denies_stream_ai_control_execute_when_opted_in_and_exec
     );
     assert_eq!(
         payload["error"]["message"],
-        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商（OpenAI Chat Completions，原因代码: missing_auth_context）"
+        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商"
     );
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
@@ -393,7 +393,7 @@ async fn gateway_does_not_proxy_control_execute_over_http_when_opted_in_and_exec
     let payload: serde_json::Value = response.json().await.expect("body should parse");
     assert_eq!(
         payload["error"]["message"],
-        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商（OpenAI Chat Completions，原因代码: missing_auth_context）"
+        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商"
     );
     assert_eq!(*plan_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);
@@ -526,7 +526,7 @@ async fn gateway_does_not_proxy_control_execute_over_http_when_opted_in_and_exec
     let payload: serde_json::Value = response.json().await.expect("body should parse");
     assert_eq!(
         payload["error"]["message"],
-        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商（OpenAI Chat Completions，原因代码: missing_auth_context）"
+        "请求缺少有效的用户或 API Key 认证上下文，无法选择上游提供商"
     );
     assert_eq!(*plan_hits.lock().expect("mutex should lock"), 0);
     assert_eq!(*execute_hits.lock().expect("mutex should lock"), 0);

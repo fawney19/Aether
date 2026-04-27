@@ -47,6 +47,15 @@ impl ClaudeProviderState {
         self.started = true;
     }
 
+    fn unknown_frame(&self, report_context: &Value, payload: Value) -> CanonicalStreamFrame {
+        let (id, model) = self.identity(report_context);
+        CanonicalStreamFrame {
+            id,
+            model,
+            event: CanonicalStreamEvent::UnknownEvent(payload),
+        }
+    }
+
     pub fn push_line(
         &mut self,
         report_context: &Value,
@@ -181,7 +190,11 @@ impl ClaudeProviderState {
                             event: CanonicalStreamEvent::ReasoningSignature(signature.to_string()),
                         });
                     }
-                    _ => {}
+                    _ => {
+                        out.push(
+                            self.unknown_frame(report_context, Value::Object(event_object.clone())),
+                        );
+                    }
                 }
             }
             "content_block_start" => {
@@ -245,6 +258,9 @@ impl ClaudeProviderState {
                     return Ok(out);
                 }
                 if block_type != "tool_use" {
+                    out.push(
+                        self.unknown_frame(report_context, Value::Object(event_object.clone())),
+                    );
                     return Ok(out);
                 }
                 self.ensure_started(report_context, &mut out);
@@ -312,7 +328,10 @@ impl ClaudeProviderState {
                 });
                 self.finished = true;
             }
-            _ => {}
+            "content_block_stop" | "message_stop" | "ping" => {}
+            _ => {
+                out.push(self.unknown_frame(report_context, value.clone()));
+            }
         }
         Ok(out)
     }
@@ -524,6 +543,43 @@ impl ClaudeClientEmitter {
         Ok(out)
     }
 
+    fn emit_tool_result_block(
+        &mut self,
+        index: usize,
+        tool_use_id: String,
+        name: Option<String>,
+        content: String,
+    ) -> Result<Vec<u8>, PipelineFinalizeError> {
+        let mut out = self.ensure_started()?;
+        out.extend(self.close_open_block()?);
+        let block_index = self.next_block_index;
+        self.next_block_index += 1;
+        let mut content_block = Map::new();
+        content_block.insert("type".to_string(), Value::String("tool_result".to_string()));
+        content_block.insert("tool_use_id".to_string(), Value::String(tool_use_id));
+        if let Some(name) = name.filter(|value| !value.trim().is_empty()) {
+            content_block.insert("name".to_string(), Value::String(name));
+        }
+        content_block.insert("content".to_string(), Value::String(content));
+        out.extend(encode_json_sse(
+            Some("content_block_start"),
+            &json!({
+                "type": "content_block_start",
+                "index": block_index,
+                "content_block": Value::Object(content_block),
+            }),
+        )?);
+        out.extend(encode_json_sse(
+            Some("content_block_stop"),
+            &json!({
+                "type": "content_block_stop",
+                "index": block_index,
+                "canonical_index": index,
+            }),
+        )?);
+        Ok(out)
+    }
+
     pub fn emit(&mut self, frame: CanonicalStreamFrame) -> Result<Vec<u8>, PipelineFinalizeError> {
         self.update_identity(&frame);
         match frame.event {
@@ -632,6 +688,13 @@ impl ClaudeClientEmitter {
                 )?);
                 Ok(out)
             }
+            CanonicalStreamEvent::ToolResultDelta {
+                index,
+                tool_use_id,
+                name,
+                content,
+            } => self.emit_tool_result_block(index, tool_use_id, name, content),
+            CanonicalStreamEvent::UnknownEvent(_) => Ok(Vec::new()),
             CanonicalStreamEvent::Finish {
                 finish_reason,
                 usage,
@@ -809,6 +872,9 @@ fn merge_claude_usage(mut current: CanonicalUsage, next: CanonicalUsage) -> Cano
     if next.cache_read_tokens > 0 {
         current.cache_read_tokens = next.cache_read_tokens;
     }
+    if next.reasoning_tokens > 0 {
+        current.reasoning_tokens = next.reasoning_tokens;
+    }
     current.total_tokens = current
         .input_tokens
         .saturating_add(current.output_tokens)
@@ -915,6 +981,29 @@ mod tests {
 
     fn data_line(value: Value) -> Vec<u8> {
         format!("data: {}\n", value).into_bytes()
+    }
+
+    #[test]
+    fn claude_provider_state_emits_unknown_events_for_unknown_stream_types() {
+        let mut state = ClaudeProviderState::default();
+        let report_context = json!({});
+        let frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "future_event",
+                    "payload": {
+                        "kept": true
+                    }
+                })),
+            )
+            .expect("unknown stream event should parse");
+
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::UnknownEvent(ref payload)
+                if payload.get("type").and_then(Value::as_str) == Some("future_event")
+        )));
     }
 
     #[test]
@@ -1145,5 +1234,29 @@ mod tests {
         assert!(sse.contains("\"media_type\":\"image/png\""));
         assert!(sse.contains("\"data\":\"iVBORw0KGgo=\""));
         assert!(sse.contains("event: content_block_stop"));
+    }
+
+    #[test]
+    fn claude_client_emitter_emits_tool_result_blocks() {
+        let mut emitter = ClaudeClientEmitter::default();
+        let bytes = emitter
+            .emit(CanonicalStreamFrame {
+                id: "msg_tool_result_123".to_string(),
+                model: "claude-sonnet-4-5".to_string(),
+                event: CanonicalStreamEvent::ToolResultDelta {
+                    index: 2,
+                    tool_use_id: "toolu_1".to_string(),
+                    name: Some("lookup".to_string()),
+                    content: "{\"ok\":true}".to_string(),
+                },
+            })
+            .expect("tool result should encode");
+
+        let sse = String::from_utf8(bytes).expect("sse should be utf8");
+        assert!(sse.contains("\"type\":\"tool_result\""));
+        assert!(sse.contains("\"tool_use_id\":\"toolu_1\""));
+        assert!(sse.contains("\"name\":\"lookup\""));
+        assert!(sse.contains("\"content\":\"{\\\"ok\\\":true}\""));
+        assert!(sse.contains("\"canonical_index\":2"));
     }
 }

@@ -414,25 +414,58 @@
                   :request-status="detail.status"
                   :request-api-format="detail.api_format || null"
                   :request-metadata="traceRequestMetadata"
+                  @trace-state="handleTraceState"
                 />
               </div>
 
-              <!-- 响应客户端错误卡片 -->
-              <Card
-                v-if="detail.error_message"
-                class="border-red-200 dark:border-red-800"
+              <!-- 错误域卡片：保持上游响应与客户端响应两个边界可对照 -->
+              <div
+                v-if="hasVisibleErrorCards"
+                class="space-y-3"
               >
-                <div class="p-4">
-                  <h4 class="text-sm font-semibold text-red-600 dark:text-red-400 mb-2">
-                    响应客户端错误
-                  </h4>
-                  <div class="bg-red-50 dark:bg-red-900/20 rounded-lg p-3">
-                    <p class="text-sm text-red-800 dark:text-red-300">
-                      {{ detail.error_message }}
-                    </p>
-                  </div>
+                <div
+                  class="grid gap-3"
+                  :class="visibleErrorCardCount > 1 ? 'lg:grid-cols-2' : 'grid-cols-1'"
+                >
+                  <Card
+                    v-if="displayClientErrorMessage"
+                    class="border-amber-200 dark:border-amber-800"
+                  >
+                    <div class="p-4">
+                      <h4 class="text-sm font-semibold text-amber-700 dark:text-amber-300 mb-2">
+                        返回客户端错误
+                      </h4>
+                      <div class="bg-amber-50 dark:bg-amber-900/20 rounded-lg p-3 space-y-1">
+                        <p class="text-sm text-amber-900 dark:text-amber-200">
+                          {{ displayClientErrorMessage }}
+                        </p>
+                      </div>
+                    </div>
+                  </Card>
+
+                  <Card
+                    v-if="normalizedUpstreamError"
+                    class="border-orange-200 dark:border-orange-800"
+                  >
+                    <div class="p-4">
+                      <h4 class="text-sm font-semibold text-orange-700 dark:text-orange-300 mb-2">
+                        上游响应错误
+                      </h4>
+                      <div class="bg-orange-50 dark:bg-orange-900/20 rounded-lg p-3 space-y-1">
+                        <p class="text-sm text-orange-900 dark:text-orange-200">
+                          {{ normalizedUpstreamError.message }}
+                        </p>
+                        <p
+                          v-if="formatErrorDomainMeta(normalizedUpstreamError)"
+                          class="text-xs text-orange-800/70 dark:text-orange-200/70 font-mono"
+                        >
+                          {{ formatErrorDomainMeta(normalizedUpstreamError) }}
+                        </p>
+                      </div>
+                    </div>
+                  </Card>
                 </div>
-              </Card>
+              </div>
 
               <!-- Tabs 区域 -->
               <Card>
@@ -676,7 +709,7 @@ import Skeleton from '@/components/ui/skeleton.vue'
 import Tabs from '@/components/ui/tabs.vue'
 import TabsContent from '@/components/ui/tabs-content.vue'
 import { Check, Columns2, RefreshCw, X, Monitor, Server, MessageSquareText, Code2, Terminal, Play } from 'lucide-vue-next'
-import { dashboardApi, type RequestDetail } from '@/api/dashboard'
+import { dashboardApi, type RequestDetail, type RequestErrorDomain } from '@/api/dashboard'
 import { formatApiFormat } from '@/api/endpoints/types/api-format'
 import { formatShortRequestId } from '@/utils/format'
 import { log } from '@/utils/logger'
@@ -717,6 +750,8 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const detail = ref<RequestDetail | null>(null)
 const timelineRef = ref<InstanceType<typeof HorizontalRequestTimeline> | null>(null)
+const timelineLoaded = ref(false)
+const timelineHasTrace = ref(false)
 const activeTab = ref('request-body')
 const copiedStates = ref<Record<string, boolean>>({})
 const viewMode = ref<'compare' | 'formatted' | 'raw'>('formatted')
@@ -749,9 +784,45 @@ type PricingTierLike = {
 
 type JsonRecord = Record<string, unknown>
 
+type NormalizedErrorDomain = {
+  source?: string | null
+  status_code?: number | null
+  type?: string | null
+  message: string
+  code?: string | number | null
+  category?: string | null
+}
+
 function asRecord(value: unknown): JsonRecord | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   return value as JsonRecord
+}
+
+function normalizeErrorDomain(domain: RequestErrorDomain | null | undefined): NormalizedErrorDomain | null {
+  if (!domain || typeof domain !== 'object') return null
+  const message = typeof domain.message === 'string' ? domain.message.trim() : ''
+  if (!message) return null
+  return {
+    source: domain.source ?? null,
+    status_code: domain.status_code ?? null,
+    type: domain.type ?? null,
+    message,
+    code: domain.code ?? null,
+    category: domain.category ?? null,
+  }
+}
+
+function formatErrorDomainMeta(domain: NormalizedErrorDomain): string {
+  const parts: string[] = []
+  if (domain.status_code != null) parts.push(`HTTP ${domain.status_code}`)
+  if (domain.type) parts.push(domain.type)
+  if (domain.source) parts.push(`source=${domain.source}`)
+  return parts.join(' · ')
+}
+
+function handleTraceState(state: { loaded: boolean, hasTrace: boolean }) {
+  timelineLoaded.value = state.loaded
+  timelineHasTrace.value = state.hasTrace
 }
 
 function toNumber(value: unknown): number | null {
@@ -870,6 +941,27 @@ const metadataPanelData = computed<Record<string, unknown> | null>(() => {
 
   return Object.keys(merged).length > 0 ? merged : null
 })
+
+const normalizedClientError = computed(() =>
+  normalizeErrorDomain(detail.value?.errors?.client_error ?? detail.value?.client_error),
+)
+
+const normalizedUpstreamError = computed(() =>
+  normalizeErrorDomain(detail.value?.errors?.upstream_error ?? detail.value?.upstream_error),
+)
+
+const displayClientErrorMessage = computed(() =>
+  normalizedClientError.value?.message ?? '',
+)
+
+const hasVisibleErrorCards = computed(() =>
+  Boolean(displayClientErrorMessage.value || normalizedUpstreamError.value),
+)
+
+const visibleErrorCardCount = computed(() =>
+  (displayClientErrorMessage.value ? 1 : 0)
+    + (normalizedUpstreamError.value ? 1 : 0),
+)
 
 const settlementInfo = computed<JsonRecord | null>(() =>
   asRecord(detail.value?.settlement ?? null),
@@ -1652,6 +1744,12 @@ async function ensureBodyContentLoaded() {
       has_provider_request_body: response.has_provider_request_body,
       has_response_body: response.has_response_body,
       has_client_response_body: response.has_client_response_body,
+      request_error: response.request_error,
+      upstream_error: response.upstream_error,
+      client_error: response.client_error,
+      failure_summary: response.failure_summary,
+      errors: response.errors,
+      error_flow: response.error_flow,
     }
     bodiesLoadedForRequestId.value = cacheKey
   } catch (err) {
@@ -1673,6 +1771,8 @@ async function loadDetail(id: string, silent = false) {
   if (!silent) {
     loading.value = true
     historicalPricing.value = null
+    timelineLoaded.value = false
+    timelineHasTrace.value = false
     showTimeline.value = false
     clearTimelineMountTimer()
     ++bodyLoadRequestId
@@ -1696,6 +1796,12 @@ async function loadDetail(id: string, silent = false) {
       provider_request_body: sameRequest ? previousDetail?.provider_request_body : undefined,
       response_body: sameRequest ? previousDetail?.response_body : undefined,
       client_response_body: sameRequest ? previousDetail?.client_response_body : undefined,
+      request_error: sameRequest ? (previousDetail?.request_error ?? response.request_error) : response.request_error,
+      upstream_error: sameRequest ? (previousDetail?.upstream_error ?? response.upstream_error) : response.upstream_error,
+      client_error: sameRequest ? (previousDetail?.client_error ?? response.client_error) : response.client_error,
+      failure_summary: sameRequest ? (previousDetail?.failure_summary ?? response.failure_summary) : response.failure_summary,
+      errors: sameRequest ? (previousDetail?.errors ?? response.errors) : response.errors,
+      error_flow: sameRequest ? (previousDetail?.error_flow ?? response.error_flow) : response.error_flow,
     }
     bodiesLoadedForRequestId.value = sameRequest ? bodiesLoadedForRequestId.value : null
 

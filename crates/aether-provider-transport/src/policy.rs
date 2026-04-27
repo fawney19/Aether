@@ -148,12 +148,7 @@ fn local_same_format_transport_unsupported_reason(
             Some("key_inactive")
         };
     }
-    if !transport
-        .endpoint
-        .api_format
-        .trim()
-        .eq_ignore_ascii_case(api_format.trim())
-    {
+    if !same_api_format(&transport.endpoint.api_format, api_format) {
         return Some("transport_api_format_mismatch");
     }
     if !header_rules_are_locally_supported(transport.endpoint.header_rules.as_ref()) {
@@ -202,4 +197,8 @@ fn local_same_format_transport_unsupported_reason(
     }
 
     None
+}
+
+fn same_api_format(left: &str, right: &str) -> bool {
+    aether_ai_formats::legacy_openai_format_alias_matches(left, right)
 }

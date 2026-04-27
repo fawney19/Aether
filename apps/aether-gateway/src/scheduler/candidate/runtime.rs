@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use aether_admin::provider::pool as admin_provider_pool_pure;
+use aether_admin::provider::{
+    pool as admin_provider_pool_pure, status as admin_provider_status_pure,
+};
 use aether_data_contracts::repository::candidates::StoredRequestCandidate;
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use aether_scheduler_core::{
@@ -294,13 +296,19 @@ fn read_key_oauth_invalid_map(
         .map(|candidate| {
             let oauth_invalid = provider_key_rpm_states
                 .get(candidate.key_id.as_str())
-                .is_some_and(|key| key_requires_oauth_reauth(key, now_unix_secs));
+                .is_some_and(|key| {
+                    key_requires_oauth_reauth(key, candidate.provider_type.as_str(), now_unix_secs)
+                });
             (candidate.key_id.clone(), oauth_invalid)
         })
         .collect()
 }
 
-fn key_requires_oauth_reauth(key: &StoredProviderCatalogKey, now_unix_secs: u64) -> bool {
+fn key_requires_oauth_reauth(
+    key: &StoredProviderCatalogKey,
+    provider_type: &str,
+    now_unix_secs: u64,
+) -> bool {
     if !key.auth_type.trim().eq_ignore_ascii_case("oauth") {
         return false;
     }
@@ -311,11 +319,46 @@ fn key_requires_oauth_reauth(key: &StoredProviderCatalogKey, now_unix_secs: u64)
         .map(str::trim)
         .unwrap_or_default();
     if !invalid_reason.is_empty() {
-        return !invalid_reason.starts_with("[REQUEST_FAILED]");
+        return oauth_invalid_reason_requires_reauth(key, provider_type, invalid_reason);
     }
 
     key.expires_at_unix_secs
         .is_some_and(|value| value > 0 && value <= now_unix_secs)
+        && !kiro_key_has_refreshable_session(key, provider_type)
+}
+
+fn oauth_invalid_reason_requires_reauth(
+    key: &StoredProviderCatalogKey,
+    provider_type: &str,
+    invalid_reason: &str,
+) -> bool {
+    if invalid_reason.starts_with("[REQUEST_FAILED]") {
+        return false;
+    }
+    let account_state = admin_provider_status_pure::resolve_pool_account_state(
+        Some(provider_type),
+        key.upstream_metadata.as_ref(),
+        Some(invalid_reason),
+    );
+    if account_state.blocked && !account_state.recoverable {
+        return true;
+    }
+    if invalid_reason.starts_with("[REFRESH_FAILED]")
+        || invalid_reason.starts_with("[ACCOUNT_BLOCK]")
+        || invalid_reason.starts_with("[OAUTH_EXPIRED]")
+    {
+        return true;
+    }
+    !kiro_key_has_refreshable_session(key, provider_type)
+}
+
+fn kiro_key_has_refreshable_session(key: &StoredProviderCatalogKey, provider_type: &str) -> bool {
+    provider_type.trim().eq_ignore_ascii_case("kiro")
+        && key
+            .encrypted_auth_config
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
 }
 
 fn read_provider_key_rpm_reset_at_map(

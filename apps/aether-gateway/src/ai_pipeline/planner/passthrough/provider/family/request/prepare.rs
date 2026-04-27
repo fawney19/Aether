@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use crate::ai_pipeline::planner::candidate_eligibility::EligibleLocalExecutionCandidate;
 use crate::ai_pipeline::planner::candidate_preparation::{
     resolve_candidate_mapped_model, resolve_candidate_oauth_auth, OauthPreparationContext,
 };
+use crate::ai_pipeline::planner::candidate_resolution::EligibleLocalExecutionCandidate;
 use crate::ai_pipeline::planner::spec_metadata::local_same_format_provider_spec_metadata;
 use crate::ai_pipeline::transport::kiro::KiroRequestAuth;
 use crate::ai_pipeline::transport::vertex::resolve_local_vertex_api_key_query_auth;

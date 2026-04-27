@@ -39,7 +39,7 @@ impl MinimalCandidateSelectionReadRepository for InMemoryMinimalCandidateSelecti
                     && row.key_is_active
                     && row.model_is_active
                     && row.model_is_available
-                    && row.endpoint_api_format.eq_ignore_ascii_case(api_format)
+                    && api_format_matches(&row.endpoint_api_format, api_format)
                     && row.key_supports_api_format(api_format)
             })
             .cloned()
@@ -67,6 +67,14 @@ impl MinimalCandidateSelectionReadRepository for InMemoryMinimalCandidateSelecti
             .filter(|row| row.global_model_name == global_model_name)
             .collect())
     }
+}
+
+fn normalize_api_format(value: &str) -> String {
+    aether_ai_formats::normalize_legacy_openai_format_alias(value)
+}
+
+fn api_format_matches(left: &str, right: &str) -> bool {
+    normalize_api_format(left) == normalize_api_format(right)
 }
 
 #[cfg(test)]

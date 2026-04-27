@@ -425,11 +425,11 @@
               <div class="flex flex-col text-xs gap-0.5">
                 <span>{{ record.provider }}</span>
                 <span
-                  v-if="record.provider_key_name || record.api_key_name"
+                  v-if="record.provider_key_name"
                   class="text-muted-foreground truncate"
-                  :title="record.provider_key_name || record.api_key_name"
+                  :title="record.provider_key_name"
                 >
-                  {{ record.provider_key_name || record.api_key_name }}
+                  {{ record.provider_key_name }}
                   <span
                     v-if="record.rate_multiplier && record.rate_multiplier !== 1.0"
                     class="text-foreground/60"
@@ -754,8 +754,8 @@ const emit = defineEmits<{
 // 静态常量（放在 defineProps/defineEmits 之后）
 const AVAILABLE_API_FORMATS = [
   { value: 'openai:chat', label: 'OpenAI Chat' },
-  { value: 'openai:cli', label: 'OpenAI CLI' },
-  { value: 'openai:compact', label: 'OpenAI Compact' },
+  { value: 'openai:responses', label: 'OpenAI Responses' },
+  { value: 'openai:responses:compact', label: 'OpenAI Responses Compact' },
   { value: 'openai:video', label: 'OpenAI Video' },
   { value: 'claude:chat', label: 'Claude Chat' },
   { value: 'claude:cli', label: 'Claude CLI' },

@@ -328,11 +328,8 @@ fn resolve_fixed_provider_endpoint_template<'a>(
     }
 
     template.endpoints.iter().find(|item| {
-        item.api_format
-            .eq_ignore_ascii_case(updated_endpoint.api_format.trim())
-            || item
-                .api_format
-                .eq_ignore_ascii_case(existing_endpoint.api_format.trim())
+        api_format_matches(item.api_format, updated_endpoint.api_format.trim())
+            || api_format_matches(item.api_format, existing_endpoint.api_format.trim())
     })
 }
 
@@ -349,6 +346,15 @@ fn endpoint_matches_fixed_provider_template(
         .api_format
         .trim()
         .eq_ignore_ascii_case(endpoint_template.api_format)
+        || api_format_matches(&endpoint.api_format, endpoint_template.api_format)
+}
+
+fn normalize_api_format_alias(value: &str) -> String {
+    crate::ai_pipeline::normalize_legacy_openai_format_alias(value)
+}
+
+fn api_format_matches(left: &str, right: &str) -> bool {
+    normalize_api_format_alias(left) == normalize_api_format_alias(right)
 }
 
 fn fixed_provider_endpoint_metadata(

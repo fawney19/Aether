@@ -3,9 +3,9 @@ use serde_json::json;
 use tracing::warn;
 
 use crate::ai_pipeline::contracts::ExecutionRuntimeAuthContext;
-use crate::ai_pipeline::planner::candidate_eligibility::filter_and_rank_local_execution_candidates_without_transport_pair_gate;
 use crate::ai_pipeline::planner::candidate_materialization::{
     mark_skipped_local_execution_candidate,
+    mark_skipped_local_execution_candidate_with_failure_diagnostic,
     persist_available_local_execution_candidates_with_context,
     persist_skipped_local_execution_candidates_with_context,
     remember_first_local_candidate_affinity,
@@ -14,6 +14,7 @@ use crate::ai_pipeline::planner::candidate_metadata::{
     build_local_execution_candidate_metadata,
     build_local_execution_candidate_metadata_for_candidate, LocalExecutionCandidateMetadataParts,
 };
+use crate::ai_pipeline::planner::candidate_resolution::resolve_and_rank_local_execution_candidates_without_transport_pair_gate;
 use crate::ai_pipeline::planner::decision_input::{
     build_local_authenticated_decision_input, resolve_local_authenticated_decision_input,
 };
@@ -22,7 +23,8 @@ use crate::ai_pipeline::planner::materialization_policy::{
 };
 use crate::ai_pipeline::PlannerAppState;
 use crate::ai_pipeline::{
-    resolve_local_decision_execution_runtime_auth_context, GatewayControlDecision,
+    resolve_local_decision_execution_runtime_auth_context, CandidateFailureDiagnostic,
+    GatewayControlDecision,
 };
 use crate::clock::current_unix_secs;
 use crate::{AppState, GatewayError};
@@ -88,11 +90,12 @@ pub(super) async fn materialize_local_gemini_files_candidate_attempts(
         )
         .await?;
     let (candidates, skipped_candidates) =
-        filter_and_rank_local_execution_candidates_without_transport_pair_gate(
+        resolve_and_rank_local_execution_candidates_without_transport_pair_gate(
             planner_state,
             candidates,
             GEMINI_FILES_CLIENT_API_FORMAT,
             None,
+            Some(&input.auth_snapshot),
             input.required_capabilities.as_ref(),
             None,
         )
@@ -181,6 +184,34 @@ pub(super) async fn mark_skipped_local_gemini_files_candidate(
         candidate_index,
         candidate_id,
         skip_reason,
+    )
+    .await;
+}
+
+pub(super) async fn mark_skipped_local_gemini_files_candidate_with_failure_diagnostic(
+    state: &AppState,
+    input: &LocalGeminiFilesDecisionInput,
+    trace_id: &str,
+    candidate: &SchedulerMinimalCandidateSelectionCandidate,
+    candidate_index: u32,
+    candidate_id: &str,
+    skip_reason: &'static str,
+    diagnostic: CandidateFailureDiagnostic,
+) {
+    let persistence_policy = build_local_candidate_persistence_policy(
+        &input.auth_context,
+        input.required_capabilities.as_ref(),
+        LocalCandidatePersistencePolicyKind::GeminiFilesDecision,
+    );
+    mark_skipped_local_execution_candidate_with_failure_diagnostic(
+        state,
+        trace_id,
+        persistence_policy.skipped,
+        candidate,
+        candidate_index,
+        candidate_id,
+        skip_reason,
+        diagnostic,
     )
     .await;
 }

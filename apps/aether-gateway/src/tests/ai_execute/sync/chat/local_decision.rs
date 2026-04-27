@@ -476,6 +476,23 @@ async fn gateway_executes_openai_chat_sync_via_local_cross_format_gemini_candida
         }
     }
 
+    fn sample_disabled_conversion_candidate_row() -> StoredMinimalCandidateSelectionRow {
+        let mut row = sample_candidate_row();
+        row.provider_id = "provider-openai-chat-gemini-local-disabled".to_string();
+        row.provider_priority = 20;
+        row.endpoint_id = "endpoint-openai-chat-gemini-local-disabled".to_string();
+        row.key_id = "key-openai-chat-gemini-local-disabled".to_string();
+        row.model_id = "model-openai-chat-gemini-local-disabled".to_string();
+        row.global_model_id = "global-model-openai-chat-gemini-local-disabled".to_string();
+        row.model_provider_model_name = "gemini-2.5-flash-upstream".to_string();
+        row.model_provider_model_mappings = Some(vec![StoredProviderModelMapping {
+            name: "gemini-2.5-flash-upstream".to_string(),
+            priority: 2,
+            api_formats: Some(vec!["gemini:chat".to_string()]),
+        }]);
+        row
+    }
+
     fn sample_provider_catalog_provider() -> StoredProviderCatalogProvider {
         StoredProviderCatalogProvider::new(
             "provider-openai-chat-gemini-local-1".to_string(),
@@ -488,6 +505,27 @@ async fn gateway_executes_openai_chat_sync_via_local_cross_format_gemini_candida
             true,
             false,
             true,
+            None,
+            Some(2),
+            None,
+            Some(20.0),
+            None,
+            None,
+        )
+    }
+
+    fn sample_disabled_conversion_provider_catalog_provider() -> StoredProviderCatalogProvider {
+        StoredProviderCatalogProvider::new(
+            "provider-openai-chat-gemini-local-disabled".to_string(),
+            "gemini".to_string(),
+            Some("https://example.com".to_string()),
+            "custom".to_string(),
+        )
+        .expect("provider should build")
+        .with_transport_fields(
+            true,
+            false,
+            false,
             None,
             Some(2),
             None,
@@ -522,6 +560,29 @@ async fn gateway_executes_openai_chat_sync_via_local_cross_format_gemini_candida
         .expect("endpoint transport should build")
     }
 
+    fn sample_disabled_conversion_provider_catalog_endpoint() -> StoredProviderCatalogEndpoint {
+        StoredProviderCatalogEndpoint::new(
+            "endpoint-openai-chat-gemini-local-disabled".to_string(),
+            "provider-openai-chat-gemini-local-disabled".to_string(),
+            "gemini:chat".to_string(),
+            Some("gemini".to_string()),
+            Some("chat".to_string()),
+            true,
+        )
+        .expect("endpoint should build")
+        .with_transport_fields(
+            "https://generativelanguage.googleapis.com".to_string(),
+            None,
+            None,
+            Some(2),
+            Some("/custom/v1beta/models/gemini-2.5-flash-upstream:generateContent".to_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("endpoint transport should build")
+    }
+
     fn sample_provider_catalog_key() -> StoredProviderCatalogKey {
         StoredProviderCatalogKey::new(
             "key-openai-chat-gemini-local-1".to_string(),
@@ -542,6 +603,34 @@ async fn gateway_executes_openai_chat_sync_via_local_cross_format_gemini_candida
             None,
             None,
             Some(serde_json::json!({"gemini:chat": 1})),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("key transport should build")
+    }
+
+    fn sample_disabled_conversion_provider_catalog_key() -> StoredProviderCatalogKey {
+        StoredProviderCatalogKey::new(
+            "key-openai-chat-gemini-local-disabled".to_string(),
+            "provider-openai-chat-gemini-local-disabled".to_string(),
+            "prod".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+        .with_transport_fields(
+            Some(serde_json::json!(["gemini:chat"])),
+            encrypt_python_fernet_plaintext(
+                DEVELOPMENT_ENCRYPTION_KEY,
+                "sk-upstream-openai-chat-gemini-disabled",
+            )
+            .expect("api key should encrypt"),
+            None,
+            None,
+            Some(serde_json::json!({"gemini:chat": 2})),
             None,
             None,
             None,
@@ -730,11 +819,21 @@ async fn gateway_executes_openai_chat_sync_via_local_cross_format_gemini_candida
     let candidate_selection_repository =
         Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
             sample_candidate_row(),
+            sample_disabled_conversion_candidate_row(),
         ]));
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
-        vec![sample_provider_catalog_provider()],
-        vec![sample_provider_catalog_endpoint()],
-        vec![sample_provider_catalog_key()],
+        vec![
+            sample_provider_catalog_provider(),
+            sample_disabled_conversion_provider_catalog_provider(),
+        ],
+        vec![
+            sample_provider_catalog_endpoint(),
+            sample_disabled_conversion_provider_catalog_endpoint(),
+        ],
+        vec![
+            sample_provider_catalog_key(),
+            sample_disabled_conversion_provider_catalog_key(),
+        ],
     ));
 
     let (upstream_url, upstream_handle) = start_server(upstream).await;
@@ -833,8 +932,31 @@ async fn gateway_executes_openai_chat_sync_via_local_cross_format_gemini_candida
         .list_by_request_id("trace-openai-chat-gemini-local-123")
         .await
         .expect("request candidate trace should read");
-    assert_eq!(stored_candidates.len(), 1);
-    assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Success);
+    assert_eq!(stored_candidates.len(), 2);
+    assert_eq!(
+        stored_candidates
+            .iter()
+            .filter(|candidate| candidate.status == RequestCandidateStatus::Success)
+            .count(),
+        1
+    );
+    let skipped_candidate = stored_candidates
+        .iter()
+        .find(|candidate| candidate.status == RequestCandidateStatus::Skipped)
+        .expect("disabled conversion candidate should be persisted as skipped");
+    assert_eq!(
+        skipped_candidate.skip_reason.as_deref(),
+        Some("format_conversion_disabled")
+    );
+    let extra_data = skipped_candidate
+        .extra_data
+        .as_ref()
+        .expect("skipped cross-format candidate extra_data should exist");
+    assert_eq!(extra_data["execution_strategy"], "local_cross_format");
+    assert_eq!(
+        extra_data["transport_diagnostics"]["request_pair"]["conversion_enabled"],
+        false
+    );
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(

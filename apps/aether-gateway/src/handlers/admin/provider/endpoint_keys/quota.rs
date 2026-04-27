@@ -90,10 +90,7 @@ pub(super) async fn maybe_handle(
     let endpoint = match normalized_provider_type.as_str() {
         "codex" => endpoints.into_iter().find(|endpoint| {
             endpoint.is_active
-                && endpoint
-                    .api_format
-                    .trim()
-                    .eq_ignore_ascii_case("openai:cli")
+                && crate::ai_pipeline::is_openai_responses_format(&endpoint.api_format)
         }),
         "antigravity" => endpoints.into_iter().find(|endpoint| {
             endpoint.is_active
@@ -122,7 +119,7 @@ pub(super) async fn maybe_handle(
 
     let Some(endpoint) = endpoint else {
         let detail = match normalized_provider_type.as_str() {
-            "codex" => "找不到有效的 openai:cli 端点",
+            "codex" => "找不到有效的 openai:responses 端点",
             "antigravity" => "找不到有效的 gemini:chat/gemini:cli 端点",
             "kiro" => "找不到有效的 Kiro 端点",
             _ => "找不到有效端点",

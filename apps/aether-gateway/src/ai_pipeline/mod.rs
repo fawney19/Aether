@@ -31,18 +31,20 @@ pub(crate) use self::planner::{
     build_local_image_sync_plan_and_reports_for_kind,
     build_local_openai_chat_stream_plan_and_reports_for_kind,
     build_local_openai_chat_sync_plan_and_reports_for_kind,
-    build_local_openai_cli_stream_plan_and_reports_for_kind,
-    build_local_openai_cli_sync_plan_and_reports_for_kind,
+    build_local_openai_responses_stream_plan_and_reports_for_kind,
+    build_local_openai_responses_sync_plan_and_reports_for_kind,
     build_local_same_format_stream_plan_and_reports, build_local_same_format_sync_plan_and_reports,
-    build_local_video_sync_plan_and_reports_for_kind, build_openai_cli_stream_plan_from_decision,
-    build_openai_cli_sync_plan_from_decision, build_passthrough_sync_plan_from_decision,
+    build_local_video_sync_plan_and_reports_for_kind,
+    build_openai_responses_stream_plan_from_decision,
+    build_openai_responses_sync_plan_from_decision, build_passthrough_sync_plan_from_decision,
     build_standard_family_stream_plan_and_reports, build_standard_family_sync_plan_and_reports,
     build_standard_stream_plan_from_decision, build_standard_sync_plan_from_decision,
     extract_pool_sticky_session_token, maybe_build_stream_decision_payload,
     maybe_build_stream_plan_payload, maybe_build_sync_decision_payload,
     maybe_build_sync_plan_payload, planner_is_matching_stream_request,
-    set_local_openai_chat_execution_exhausted_diagnostic, GatewayAuthApiKeySnapshot,
-    GatewayProviderTransportSnapshot, LocalResolvedOAuthRequestAuth, PlannerAppState,
+    set_local_openai_chat_execution_exhausted_diagnostic, CandidateFailureDiagnostic,
+    CandidateFailureDiagnosticKind, GatewayAuthApiKeySnapshot, GatewayProviderTransportSnapshot,
+    LocalResolvedOAuthRequestAuth, PlannerAppState,
 };
 pub(crate) use self::pure::*;
 pub(crate) use crate::control::GatewayControlDecision;
@@ -127,6 +129,7 @@ pub(crate) fn build_execution_runtime_auth_context(
         api_key_name: auth_context.api_key_name.clone(),
         balance_remaining: auth_context.balance_remaining,
         access_allowed: auth_context.access_allowed,
+        api_key_is_standalone: auth_context.api_key_is_standalone,
     }
 }
 

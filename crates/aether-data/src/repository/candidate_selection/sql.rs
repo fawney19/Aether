@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use futures_util::{stream::TryStream, TryStreamExt};
 use sqlx::{PgPool, Row};
+use std::collections::BTreeSet;
 
 use super::{
     MinimalCandidateSelectionReadRepository, StoredMinimalCandidateSelectionRow,
@@ -226,13 +227,19 @@ impl SqlxMinimalCandidateSelectionReadRepository {
         &self,
         api_format: &str,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
-        Self::collect_query_rows(
-            sqlx::query(LIST_FOR_EXACT_API_FORMAT_SQL)
-                .bind(api_format)
-                .fetch(&self.pool),
-            map_candidate_selection_row,
-        )
-        .await
+        let mut rows = Vec::new();
+        for api_format in api_format_aliases(api_format) {
+            rows.extend(
+                Self::collect_query_rows(
+                    sqlx::query(LIST_FOR_EXACT_API_FORMAT_SQL)
+                        .bind(api_format)
+                        .fetch(&self.pool),
+                    map_candidate_selection_row,
+                )
+                .await?,
+            );
+        }
+        Ok(dedupe_candidate_selection_rows(rows))
     }
 
     pub async fn list_for_exact_api_format_and_global_model(
@@ -240,15 +247,40 @@ impl SqlxMinimalCandidateSelectionReadRepository {
         api_format: &str,
         global_model_name: &str,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
-        Self::collect_query_rows(
-            sqlx::query(LIST_FOR_EXACT_API_FORMAT_AND_GLOBAL_MODEL_SQL)
-                .bind(api_format)
-                .bind(global_model_name)
-                .fetch(&self.pool),
-            map_candidate_selection_row,
-        )
-        .await
+        let mut rows = Vec::new();
+        for api_format in api_format_aliases(api_format) {
+            rows.extend(
+                Self::collect_query_rows(
+                    sqlx::query(LIST_FOR_EXACT_API_FORMAT_AND_GLOBAL_MODEL_SQL)
+                        .bind(api_format)
+                        .bind(global_model_name)
+                        .fetch(&self.pool),
+                    map_candidate_selection_row,
+                )
+                .await?,
+            );
+        }
+        Ok(dedupe_candidate_selection_rows(rows))
     }
+}
+
+fn api_format_aliases(api_format: &str) -> Vec<String> {
+    aether_ai_formats::openai_format_storage_aliases(api_format)
+}
+
+fn dedupe_candidate_selection_rows(
+    rows: Vec<StoredMinimalCandidateSelectionRow>,
+) -> Vec<StoredMinimalCandidateSelectionRow> {
+    let mut seen = BTreeSet::new();
+    rows.into_iter()
+        .filter(|row| {
+            seen.insert((
+                row.endpoint_id.clone(),
+                row.key_id.clone(),
+                row.model_id.clone(),
+            ))
+        })
+        .collect()
 }
 
 #[async_trait]

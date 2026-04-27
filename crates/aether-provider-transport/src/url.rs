@@ -15,7 +15,11 @@ pub fn build_openai_chat_url(upstream_base_url: &str, query: Option<&str>) -> St
     url
 }
 
-pub fn build_openai_cli_url(upstream_base_url: &str, query: Option<&str>, compact: bool) -> String {
+pub fn build_openai_responses_url(
+    upstream_base_url: &str,
+    query: Option<&str>,
+    compact: bool,
+) -> String {
     let (trimmed, base_query) = split_base_url_query(upstream_base_url);
     let trimmed = trimmed.trim_end_matches('/');
     let suffix = if compact {
@@ -242,8 +246,8 @@ fn merge_query_string(
 mod tests {
     use super::{
         build_gemini_content_url, build_gemini_files_passthrough_url,
-        build_gemini_video_predict_long_running_url, build_openai_chat_url, build_openai_cli_url,
-        build_passthrough_path_url,
+        build_gemini_video_predict_long_running_url, build_openai_chat_url,
+        build_openai_responses_url, build_passthrough_path_url,
     };
 
     #[test]
@@ -258,13 +262,13 @@ mod tests {
     }
 
     #[test]
-    fn openai_cli_url_preserves_codex_path_prefix() {
+    fn openai_responses_url_preserves_codex_path_prefix() {
         assert_eq!(
-            build_openai_cli_url("https://tiger.bookapi.cc/codex", None, false),
+            build_openai_responses_url("https://tiger.bookapi.cc/codex", None, false),
             "https://tiger.bookapi.cc/codex/responses"
         );
         assert_eq!(
-            build_openai_cli_url("https://tiger.bookapi.cc/codex?tenant=demo", None, true),
+            build_openai_responses_url("https://tiger.bookapi.cc/codex?tenant=demo", None, true),
             "https://tiger.bookapi.cc/codex/responses/compact?tenant=demo"
         );
     }

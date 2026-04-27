@@ -3,9 +3,9 @@ use serde_json::{json, Value};
 
 use crate::ai_pipeline::finalize::sse::encode_json_sse;
 use crate::ai_pipeline::{
-    convert_claude_cli_response_to_openai_cli, convert_gemini_cli_response_to_openai_cli,
-    convert_openai_chat_response_to_openai_cli, ClaudeClientEmitter, GeminiClientEmitter,
-    OpenAIChatClientEmitter, OpenAICliClientEmitter, OpenAICliProviderState,
+    convert_claude_response_to_openai_responses, convert_gemini_response_to_openai_responses,
+    convert_openai_chat_response_to_openai_responses, ClaudeClientEmitter, GeminiClientEmitter,
+    OpenAIChatClientEmitter, OpenAIResponsesClientEmitter, OpenAIResponsesProviderState,
 };
 use crate::GatewayError;
 
@@ -36,16 +36,19 @@ pub(crate) fn maybe_bridge_standard_sync_json_to_stream(
         provider_api_format.as_str(),
         client_api_format.as_str(),
     );
-    let Some(openai_cli_response) = convert_provider_sync_response_to_openai_cli(
+    let Some(openai_responses_response) = convert_provider_sync_response_to_openai_responses(
         provider_body_json,
         provider_api_format.as_str(),
         &bridge_context,
     ) else {
         return Ok(None);
     };
-    let terminal_summary = build_terminal_summary_from_openai_cli_response(&openai_cli_response);
-    let canonical_frames =
-        build_canonical_frames_from_openai_cli_response(&openai_cli_response, &bridge_context)?;
+    let terminal_summary =
+        build_terminal_summary_from_openai_responses_response(&openai_responses_response);
+    let canonical_frames = build_canonical_frames_from_openai_responses_response(
+        &openai_responses_response,
+        &bridge_context,
+    )?;
     let sse_body =
         emit_client_stream_from_canonical_frames(canonical_frames, client_api_format.as_str())?;
 
@@ -100,21 +103,22 @@ fn maybe_bridge_openai_image_sync_json_to_stream(
                 .map(ToOwned::to_owned)
                 .or_else(|| image_bridge_model(report_context)),
             observed_finish: true,
+            unknown_event_count: 0,
             parser_error: None,
         }),
     }))
 }
 
 fn normalize_api_format(value: &str) -> String {
-    value.trim().to_ascii_lowercase()
+    crate::ai_pipeline::normalize_legacy_openai_format_alias(value)
 }
 
 fn is_standard_api_format(value: &str) -> bool {
     matches!(
         value,
         "openai:chat"
-            | "openai:cli"
-            | "openai:compact"
+            | "openai:responses"
+            | "openai:responses:compact"
             | "claude:chat"
             | "claude:cli"
             | "gemini:chat"
@@ -194,36 +198,38 @@ fn build_bridge_report_context(
     context
 }
 
-fn convert_provider_sync_response_to_openai_cli(
+fn convert_provider_sync_response_to_openai_responses(
     provider_body_json: &Value,
     provider_api_format: &str,
     report_context: &Value,
 ) -> Option<Value> {
     match provider_api_format {
-        "openai:cli" | "openai:compact" => Some(provider_body_json.clone()),
-        "openai:chat" => {
-            convert_openai_chat_response_to_openai_cli(provider_body_json, report_context, false)
-        }
+        "openai:responses" | "openai:responses:compact" => Some(provider_body_json.clone()),
+        "openai:chat" => convert_openai_chat_response_to_openai_responses(
+            provider_body_json,
+            report_context,
+            false,
+        ),
         "claude:chat" | "claude:cli" => {
-            convert_claude_cli_response_to_openai_cli(provider_body_json, report_context)
+            convert_claude_response_to_openai_responses(provider_body_json, report_context)
         }
         "gemini:chat" | "gemini:cli" => {
-            convert_gemini_cli_response_to_openai_cli(provider_body_json, report_context)
+            convert_gemini_response_to_openai_responses(provider_body_json, report_context)
         }
         _ => None,
     }
 }
 
-fn build_canonical_frames_from_openai_cli_response(
-    openai_cli_response: &Value,
+fn build_canonical_frames_from_openai_responses_response(
+    openai_responses_response: &Value,
     report_context: &Value,
 ) -> Result<Vec<crate::ai_pipeline::CanonicalStreamFrame>, GatewayError> {
-    let mut state = OpenAICliProviderState::default();
+    let mut state = OpenAIResponsesProviderState::default();
     let line = format!(
         "data: {}\n",
         serde_json::to_string(&json!({
             "type": "response.completed",
-            "response": openai_cli_response,
+            "response": openai_responses_response,
         }))
         .map_err(|err| GatewayError::Internal(err.to_string()))?
     );
@@ -247,9 +253,9 @@ fn emit_client_stream_from_canonical_frames(
             let mut emitter = OpenAIChatClientEmitter::default();
             emit_with_openai_chat_emitter(&mut emitter, canonical_frames)
         }
-        "openai:cli" | "openai:compact" => {
-            let mut emitter = OpenAICliClientEmitter::default();
-            emit_with_openai_cli_emitter(&mut emitter, canonical_frames)
+        "openai:responses" | "openai:responses:compact" => {
+            let mut emitter = OpenAIResponsesClientEmitter::default();
+            emit_with_openai_responses_emitter(&mut emitter, canonical_frames)
         }
         "claude:chat" | "claude:cli" => {
             let mut emitter = ClaudeClientEmitter::default();
@@ -283,8 +289,8 @@ fn emit_with_openai_chat_emitter(
     Ok(output)
 }
 
-fn emit_with_openai_cli_emitter(
-    emitter: &mut OpenAICliClientEmitter,
+fn emit_with_openai_responses_emitter(
+    emitter: &mut OpenAIResponsesClientEmitter,
     canonical_frames: Vec<crate::ai_pipeline::CanonicalStreamFrame>,
 ) -> Result<Vec<u8>, GatewayError> {
     let mut output = Vec::new();
@@ -343,10 +349,10 @@ fn emit_with_gemini_emitter(
     Ok(output)
 }
 
-fn build_terminal_summary_from_openai_cli_response(
-    openai_cli_response: &Value,
+fn build_terminal_summary_from_openai_responses_response(
+    openai_responses_response: &Value,
 ) -> Option<ExecutionStreamTerminalSummary> {
-    let response = openai_cli_response.as_object()?;
+    let response = openai_responses_response.as_object()?;
     let response_id = response
         .get("id")
         .and_then(Value::as_str)
@@ -358,7 +364,7 @@ fn build_terminal_summary_from_openai_cli_response(
     let finish_reason = response
         .get("output")
         .and_then(Value::as_array)
-        .map(|output| resolve_openai_cli_finish_reason(output))
+        .map(|output| resolve_openai_responses_finish_reason(output))
         .filter(|value| !value.trim().is_empty());
     let standardized_usage = response
         .get("usage")
@@ -369,11 +375,12 @@ fn build_terminal_summary_from_openai_cli_response(
         response_id,
         model,
         observed_finish: true,
+        unknown_event_count: 0,
         parser_error: None,
     })
 }
 
-fn resolve_openai_cli_finish_reason(output: &[Value]) -> String {
+fn resolve_openai_responses_finish_reason(output: &[Value]) -> String {
     let has_tool_calls = output.iter().filter_map(Value::as_object).any(|item| {
         item.get("type")
             .and_then(Value::as_str)

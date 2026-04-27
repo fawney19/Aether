@@ -3,10 +3,6 @@ use std::collections::BTreeSet;
 use tracing::warn;
 
 use crate::ai_pipeline::conversion::{request_candidate_api_formats, request_conversion_kind};
-use crate::ai_pipeline::planner::candidate_eligibility::{
-    extract_pool_sticky_session_token, filter_and_rank_local_execution_candidates,
-    SkippedLocalExecutionCandidate,
-};
 use crate::ai_pipeline::planner::candidate_materialization::{
     persist_available_local_execution_candidates_with_context,
     persist_skipped_local_execution_candidates_with_context,
@@ -16,6 +12,10 @@ use crate::ai_pipeline::planner::candidate_metadata::{
     build_local_execution_candidate_contract_metadata,
     build_local_execution_candidate_contract_metadata_for_candidate,
     LocalExecutionCandidateMetadataParts,
+};
+use crate::ai_pipeline::planner::candidate_resolution::{
+    extract_pool_sticky_session_token, resolve_and_rank_local_execution_candidates,
+    SkippedLocalExecutionCandidate,
 };
 use crate::ai_pipeline::planner::candidate_source::auth_snapshot_allows_cross_format_candidate;
 use crate::ai_pipeline::planner::common::extract_requested_model_from_request;
@@ -154,6 +154,7 @@ pub(super) async fn materialize_local_standard_candidate_attempts(
                     candidate: skipped_candidate.candidate,
                     skip_reason: skipped_candidate.skip_reason,
                     transport: None,
+                    ranking: None,
                     extra_data: None,
                 });
             }
@@ -173,11 +174,12 @@ pub(super) async fn materialize_local_standard_candidate_attempts(
             }
         }
     }
-    let (candidates, skipped_candidates) = filter_and_rank_local_execution_candidates(
+    let (candidates, skipped_candidates) = resolve_and_rank_local_execution_candidates(
         planner_state,
         candidates,
         spec_metadata.api_format,
         &input.requested_model,
+        Some(&input.auth_snapshot),
         input.required_capabilities.as_ref(),
         sticky_session_token.as_deref(),
     )

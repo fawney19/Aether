@@ -9,17 +9,22 @@ use aether_data_contracts::repository::candidate_selection::StoredProviderModelM
 use aether_data_contracts::repository::candidates::{
     RequestCandidateStatus, StoredRequestCandidate,
 };
-use aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate;
+use aether_scheduler_core::{
+    apply_scheduler_candidate_ranking, candidate_affinity_hash,
+    enumerate_minimal_candidate_selection, EnumerateMinimalCandidateSelectionInput,
+    SchedulerMinimalCandidateSelectionCandidate, SchedulerPriorityMode, SchedulerRankableCandidate,
+    SchedulerRankingContext, SchedulerRankingMode,
+};
 
 use crate::cache::SchedulerAffinityTarget;
 use crate::data::auth::GatewayAuthApiKeySnapshot;
 use crate::data::candidate_selection::{
-    read_minimal_candidate_selection, MinimalCandidateSelectionRowSource,
+    read_requested_model_rows, MinimalCandidateSelectionRowSource,
 };
 use crate::data::GatewayDataState;
 use crate::{AppState, GatewayError};
 
-use super::super::affinity::{build_scheduler_affinity_cache_key, candidate_affinity_hash};
+use super::super::affinity::build_scheduler_affinity_cache_key;
 use super::super::selection::select_minimal_candidate as select_candidate_impl;
 use super::support::{sample_auth_snapshot, sample_key, sample_provider, sample_row};
 
@@ -86,15 +91,41 @@ async fn same_priority_candidates_are_distributed_by_affinity_key() {
     let state = GatewayDataState::with_candidate_selection_and_quota_for_tests(candidates, quotas);
     let auth_snapshot = sample_auth_snapshot("affinity-key-1");
 
-    let selection = read_minimal_candidate_selection(
-        &state,
-        "openai:chat",
-        "gpt-4.1",
-        false,
-        Some(&auth_snapshot),
-    )
-    .await
-    .expect("selection should succeed");
+    let (_resolved_global_model_name, rows) =
+        read_requested_model_rows(&state, "openai:chat", "gpt-4.1")
+            .await
+            .expect("selection rows should read")
+            .expect("selection rows should match requested model");
+    let mut selection =
+        enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
+            rows,
+            normalized_api_format: "openai:chat",
+            requested_model_name: "gpt-4.1",
+            resolved_global_model_name: "gpt-4.1",
+            require_streaming: false,
+            required_capabilities: None,
+            auth_constraints: None,
+        })
+        .expect("selection should succeed");
+    let rankables = selection
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            SchedulerRankableCandidate::from_candidate(candidate, index).with_affinity_hash(Some(
+                candidate_affinity_hash(auth_snapshot.api_key_id.as_str(), candidate),
+            ))
+        })
+        .collect::<Vec<_>>();
+    apply_scheduler_candidate_ranking(
+        &mut selection,
+        &rankables,
+        SchedulerRankingContext {
+            priority_mode: SchedulerPriorityMode::Provider,
+            ranking_mode: SchedulerRankingMode::CacheAffinity,
+            include_health: false,
+            load_balance_seed: 0,
+        },
+    );
 
     assert_eq!(selection.len(), 2);
 

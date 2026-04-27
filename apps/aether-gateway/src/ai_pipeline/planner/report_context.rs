@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 
+use aether_scheduler_core::SchedulerRankingOutcome;
 use serde_json::{Map, Value};
 
 use crate::ai_pipeline::contracts::ExecutionRuntimeAuthContext;
+use crate::ai_pipeline::planner::candidate_metadata::append_ranking_metadata_to_object;
 use crate::orchestration::ExecutionAttemptIdentity;
 
 pub(crate) struct LocalExecutionReportContextParts<'a> {
@@ -23,6 +25,7 @@ pub(crate) struct LocalExecutionReportContextParts<'a> {
     pub(crate) client_api_format: &'a str,
     pub(crate) mapped_model: Option<&'a str>,
     pub(crate) candidate_group_id: Option<&'a str>,
+    pub(crate) ranking: Option<&'a SchedulerRankingOutcome>,
     pub(crate) upstream_url: Option<&'a str>,
     pub(crate) header_rules: Option<&'a Value>,
     pub(crate) body_rules: Option<&'a Value>,
@@ -49,6 +52,10 @@ pub(crate) fn build_local_execution_report_context(
     object.insert(
         "api_key_id".to_string(),
         Value::String(parts.auth_context.api_key_id.clone()),
+    );
+    object.insert(
+        "api_key_is_standalone".to_string(),
+        Value::Bool(parts.auth_context.api_key_is_standalone),
     );
     object.insert(
         "username".to_string(),
@@ -168,6 +175,9 @@ pub(crate) fn build_local_execution_report_context(
             Value::String(candidate_group_id.to_string()),
         );
     }
+    if let Some(ranking) = parts.ranking {
+        append_ranking_metadata_to_object(&mut object, ranking);
+    }
     if let Some(upstream_url) = parts.upstream_url {
         object.insert(
             "upstream_url".to_string(),
@@ -208,7 +218,7 @@ pub(crate) fn provider_stream_event_api_format_for_provider_type(
     provider_type: &str,
 ) -> Option<&'static str> {
     match provider_type.trim().to_ascii_lowercase().as_str() {
-        "codex" => Some("openai:cli"),
+        "codex" => Some("openai:responses"),
         _ => None,
     }
 }
@@ -230,14 +240,14 @@ mod tests {
     use super::provider_stream_event_api_format_for_provider_type;
 
     #[test]
-    fn codex_provider_uses_openai_cli_stream_event_format() {
+    fn codex_provider_uses_openai_responses_stream_event_format() {
         assert_eq!(
             provider_stream_event_api_format_for_provider_type("codex"),
-            Some("openai:cli")
+            Some("openai:responses")
         );
         assert_eq!(
             provider_stream_event_api_format_for_provider_type("CODEX"),
-            Some("openai:cli")
+            Some("openai:responses")
         );
     }
 

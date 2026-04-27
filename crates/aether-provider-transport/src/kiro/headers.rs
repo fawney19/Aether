@@ -5,6 +5,9 @@ use uuid::Uuid;
 use super::credentials::KiroAuthConfig;
 
 pub const AWS_EVENTSTREAM_CONTENT_TYPE: &str = "application/vnd.amazon.eventstream";
+pub const KIRO_PROFILE_ARN_HEADER: &str = "x-amzn-kiro-profile-arn";
+pub const KIRO_TOKEN_TYPE_HEADER: &str = "TokenType";
+pub const KIRO_EXTERNAL_IDP_TOKEN_TYPE: &str = "EXTERNAL_IDP";
 const AWS_SDK_JS_MAIN_VERSION: &str = "1.0.27";
 const CODEWHISPERER_OPTOUT: &str = "true";
 const KIRO_AGENT_MODE: &str = "vibe";
@@ -81,10 +84,55 @@ pub fn build_generate_assistant_headers(
     ])
 }
 
+pub fn build_mcp_headers(
+    auth_config: &KiroAuthConfig,
+    machine_id: &str,
+) -> BTreeMap<String, String> {
+    let kiro_version = auth_config.effective_kiro_version();
+    let system_version = auth_config.effective_system_version();
+    let node_version = auth_config.effective_node_version();
+    let region = auth_config.effective_api_region();
+    let host = format!("q.{region}.amazonaws.com");
+
+    let mut headers = BTreeMap::from([
+        ("accept".to_string(), "application/json".to_string()),
+        (
+            "amz-sdk-invocation-id".to_string(),
+            Uuid::new_v4().to_string(),
+        ),
+        (
+            "amz-sdk-request".to_string(),
+            "attempt=1; max=3".to_string(),
+        ),
+        ("connection".to_string(), "close".to_string()),
+        ("content-type".to_string(), "application/json".to_string()),
+        ("host".to_string(), host),
+        (
+            "user-agent".to_string(),
+            build_user_agent_main(system_version, node_version, kiro_version, machine_id),
+        ),
+        (
+            "x-amz-user-agent".to_string(),
+            build_x_amz_user_agent_main(kiro_version, machine_id),
+        ),
+        (
+            "x-amzn-codewhisperer-optout".to_string(),
+            CODEWHISPERER_OPTOUT.to_string(),
+        ),
+    ]);
+    if let Some(profile_arn) = auth_config.profile_arn_for_mcp() {
+        headers.insert(KIRO_PROFILE_ARN_HEADER.to_string(), profile_arn.to_string());
+    }
+    headers
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::credentials::KiroAuthConfig;
-    use super::{build_generate_assistant_headers, AWS_EVENTSTREAM_CONTENT_TYPE};
+    use super::{
+        build_generate_assistant_headers, build_mcp_headers, AWS_EVENTSTREAM_CONTENT_TYPE,
+        KIRO_PROFILE_ARN_HEADER, KIRO_TOKEN_TYPE_HEADER,
+    };
 
     #[test]
     fn builds_generate_assistant_headers_for_region() {
@@ -118,5 +166,96 @@ mod tests {
             headers.get("x-amzn-kiro-agent-mode").map(String::as_str),
             Some("vibe")
         );
+        assert!(!headers.contains_key(KIRO_TOKEN_TYPE_HEADER));
+    }
+
+    #[test]
+    fn keeps_generate_assistant_headers_without_external_idp_token_type() {
+        let auth_config = KiroAuthConfig {
+            auth_method: Some("idc".to_string()),
+            refresh_token: None,
+            expires_at: None,
+            profile_arn: Some("arn:aws:codewhisperer:us-east-1:123456789012:profile/demo".into()),
+            region: None,
+            auth_region: None,
+            api_region: Some("us-east-1".to_string()),
+            client_id: Some("client-id".to_string()),
+            client_secret: Some("client-secret".to_string()),
+            machine_id: None,
+            kiro_version: None,
+            system_version: None,
+            node_version: None,
+            access_token: None,
+        };
+
+        let headers = build_generate_assistant_headers(&auth_config, "machine-123");
+
+        assert_eq!(
+            headers.get("accept").map(String::as_str),
+            Some(AWS_EVENTSTREAM_CONTENT_TYPE)
+        );
+        assert!(!headers.contains_key(KIRO_TOKEN_TYPE_HEADER));
+    }
+
+    #[test]
+    fn builds_mcp_headers_with_profile_arn_for_social_auth() {
+        let auth_config = KiroAuthConfig {
+            auth_method: Some("social".to_string()),
+            refresh_token: None,
+            expires_at: None,
+            profile_arn: Some("arn:aws:codewhisperer:us-east-1:123456789012:profile/demo".into()),
+            region: None,
+            auth_region: None,
+            api_region: Some("us-east-1".to_string()),
+            client_id: None,
+            client_secret: None,
+            machine_id: None,
+            kiro_version: Some("0.3.210".to_string()),
+            system_version: Some("darwin#24.6.0".to_string()),
+            node_version: Some("22.21.1".to_string()),
+            access_token: None,
+        };
+
+        let headers = build_mcp_headers(&auth_config, "machine-123");
+        assert_eq!(
+            headers.get("accept").map(String::as_str),
+            Some("application/json")
+        );
+        assert_eq!(
+            headers.get(KIRO_PROFILE_ARN_HEADER).map(String::as_str),
+            Some("arn:aws:codewhisperer:us-east-1:123456789012:profile/demo")
+        );
+        assert!(!headers.contains_key(KIRO_TOKEN_TYPE_HEADER));
+    }
+
+    #[test]
+    fn builds_mcp_headers_with_profile_arn_for_idc_auth() {
+        let auth_config = KiroAuthConfig {
+            auth_method: Some("idc".to_string()),
+            refresh_token: None,
+            expires_at: None,
+            profile_arn: Some("arn:aws:codewhisperer:us-east-1:123456789012:profile/demo".into()),
+            region: None,
+            auth_region: None,
+            api_region: Some("us-west-2".to_string()),
+            client_id: Some("client-id".to_string()),
+            client_secret: Some("client-secret".to_string()),
+            machine_id: None,
+            kiro_version: None,
+            system_version: None,
+            node_version: None,
+            access_token: None,
+        };
+
+        let headers = build_mcp_headers(&auth_config, "machine-123");
+        assert_eq!(
+            headers.get("host").map(String::as_str),
+            Some("q.us-west-2.amazonaws.com")
+        );
+        assert_eq!(
+            headers.get(KIRO_PROFILE_ARN_HEADER).map(String::as_str),
+            Some("arn:aws:codewhisperer:us-east-1:123456789012:profile/demo")
+        );
+        assert!(!headers.contains_key(KIRO_TOKEN_TYPE_HEADER));
     }
 }

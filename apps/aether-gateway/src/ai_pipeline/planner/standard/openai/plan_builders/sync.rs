@@ -9,7 +9,7 @@ use crate::ai_pipeline::transport::auth::{
     build_claude_passthrough_headers, build_complete_passthrough_headers_with_auth,
     build_openai_passthrough_headers, ensure_upstream_auth_header,
 };
-use crate::ai_pipeline::transport::url::{build_openai_chat_url, build_openai_cli_url};
+use crate::ai_pipeline::transport::url::{build_openai_chat_url, build_openai_responses_url};
 use crate::{GatewayControlSyncDecisionResponse, GatewayError};
 
 pub(crate) fn build_openai_chat_sync_plan_from_decision(
@@ -169,7 +169,7 @@ pub(crate) fn build_openai_chat_sync_plan_from_decision(
     }))
 }
 
-pub(crate) fn build_openai_cli_sync_plan_from_decision(
+pub(crate) fn build_openai_responses_sync_plan_from_decision(
     parts: &http::request::Parts,
     _body_json: &serde_json::Value,
     payload: GatewayControlSyncDecisionResponse,
@@ -211,7 +211,7 @@ pub(crate) fn build_openai_cli_sync_plan_from_decision(
             return Ok(None);
         };
         (
-            build_openai_cli_url(&upstream_base_url, parts.uri.query(), compact),
+            build_openai_responses_url(&upstream_base_url, parts.uri.query(), compact),
             "upstream_base_url",
         )
     };
@@ -257,7 +257,7 @@ pub(crate) fn build_openai_cli_sync_plan_from_decision(
     };
 
     debug!(
-        event_name = "local_openai_cli_sync_plan_built",
+        event_name = "local_openai_responses_sync_plan_built",
         log_type = "debug",
         request_id = %plan.request_id,
         candidate_id = ?plan.candidate_id,
@@ -274,7 +274,7 @@ pub(crate) fn build_openai_cli_sync_plan_from_decision(
         provider_api_format = %plan.provider_api_format,
         upstream_is_stream = payload.upstream_is_stream,
         compact,
-        "gateway built local openai cli sync execution plan"
+        "gateway built local openai responses sync execution plan"
     );
 
     Ok(Some(LocalSyncPlanAndReport {
@@ -291,7 +291,7 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        build_openai_chat_sync_plan_from_decision, build_openai_cli_sync_plan_from_decision,
+        build_openai_chat_sync_plan_from_decision, build_openai_responses_sync_plan_from_decision,
     };
     use crate::GatewayControlSyncDecisionResponse;
 
@@ -304,10 +304,10 @@ mod tests {
             .collect()
     }
 
-    fn sample_cli_payload() -> GatewayControlSyncDecisionResponse {
+    fn sample_responses_payload() -> GatewayControlSyncDecisionResponse {
         GatewayControlSyncDecisionResponse {
             action: "sync".to_string(),
-            decision_kind: Some("openai_cli_sync".to_string()),
+            decision_kind: Some("openai_responses_sync".to_string()),
             execution_strategy: None,
             conversion_mode: None,
             request_id: Some("req_123".to_string()),
@@ -321,10 +321,10 @@ mod tests {
             provider_request_method: None,
             auth_header: Some("authorization".to_string()),
             auth_value: Some("Bearer test".to_string()),
-            provider_api_format: Some("openai:cli".to_string()),
-            client_api_format: Some("openai:cli".to_string()),
-            provider_contract: Some("openai:cli".to_string()),
-            client_contract: Some("openai:cli".to_string()),
+            provider_api_format: Some("openai:responses".to_string()),
+            client_api_format: Some("openai:responses".to_string()),
+            provider_contract: Some("openai:responses".to_string()),
+            client_contract: Some("openai:responses".to_string()),
             model_name: Some("gpt-5.4".to_string()),
             mapped_model: Some("gpt-5.4".to_string()),
             prompt_cache_key: Some("cache-key".to_string()),
@@ -352,25 +352,26 @@ mod tests {
             tls_profile: None,
             timeouts: None,
             upstream_is_stream: true,
-            report_kind: Some("openai_cli_sync_success".to_string()),
+            report_kind: Some("openai_responses_sync_success".to_string()),
             report_context: Some(json!({})),
             auth_context: None,
         }
     }
 
     #[test]
-    fn build_openai_cli_sync_plan_preserves_provider_request_body_order_in_plan_and_report() {
+    fn build_openai_responses_sync_plan_preserves_provider_request_body_order_in_plan_and_report() {
         let parts = http::Request::builder()
             .uri("http://localhost/v1/responses")
             .body(())
             .expect("request should build")
             .into_parts()
             .0;
-        let payload = sample_cli_payload();
+        let payload = sample_responses_payload();
 
-        let built = build_openai_cli_sync_plan_from_decision(&parts, &json!({}), payload, false)
-            .expect("plan build should succeed")
-            .expect("plan should be produced");
+        let built =
+            build_openai_responses_sync_plan_from_decision(&parts, &json!({}), payload, false)
+                .expect("plan build should succeed")
+                .expect("plan should be produced");
         let plan_body = built
             .plan
             .body

@@ -59,7 +59,7 @@ fn standard_sync_bridge_converts_openai_chat_sync_json_to_openai_chat_sse() {
 }
 
 #[test]
-fn standard_sync_bridge_converts_claude_sync_json_to_openai_cli_sse() {
+fn standard_sync_bridge_converts_claude_sync_json_to_openai_responses_sse() {
     let report_context = json!({
         "mapped_model": "claude-sonnet-4-5",
     });
@@ -80,7 +80,7 @@ fn standard_sync_bridge_converts_claude_sync_json_to_openai_cli_sse() {
             }
         }),
         "claude:chat",
-        "openai:cli",
+        "openai:responses",
         Some(&report_context),
     )
     .expect("bridge should succeed")
@@ -258,6 +258,77 @@ fn openai_image_stream_rewriter_reads_final_image_from_completed_response_output
 }
 
 #[test]
+fn openai_image_stream_rewriter_maps_upstream_error_to_generation_failed() {
+    let report_context = json!({
+        "provider_api_format": "openai:image",
+        "client_api_format": "openai:image",
+        "needs_conversion": false,
+        "image_request": {
+            "operation": "generate"
+        }
+    });
+    let mut rewriter =
+        maybe_build_local_stream_rewriter(Some(&report_context)).expect("rewriter should exist");
+
+    let output = rewriter
+        .push_chunk(
+            concat!(
+                "event: error\n",
+                "data: {\"type\":\"error\",\"error\":{\"type\":\"input-images\",\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit reached for gpt-image-2\",\"param\":null}}\n\n",
+                "event: response.failed\n",
+                "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit reached for gpt-image-2\"}}}\n\n"
+            )
+            .as_bytes(),
+        )
+        .expect("rewrite should succeed");
+    let output_text = utf8(output);
+    assert!(output_text.contains("event: image_generation.failed"));
+    assert_eq!(
+        output_text
+            .matches("event: image_generation.failed")
+            .count(),
+        1
+    );
+    assert!(output_text.contains("\"type\":\"image_generation.failed\""));
+    assert!(output_text.contains("\"type\":\"input-images\""));
+    assert!(output_text.contains("\"code\":\"rate_limit_exceeded\""));
+    assert!(output_text.contains("\"message\":\"Rate limit reached for gpt-image-2\""));
+    assert!(!output_text.contains("response.failed"));
+    assert!(rewriter.finish().expect("finish should succeed").is_empty());
+}
+
+#[test]
+fn openai_image_stream_rewriter_maps_response_failed_to_edit_failed() {
+    let report_context = json!({
+        "provider_api_format": "openai:image",
+        "client_api_format": "openai:image",
+        "needs_conversion": false,
+        "image_request": {
+            "operation": "edit"
+        }
+    });
+    let mut rewriter =
+        maybe_build_local_stream_rewriter(Some(&report_context)).expect("rewriter should exist");
+
+    let output = rewriter
+        .push_chunk(
+            concat!(
+                "event: response.failed\n",
+                "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"slow down\"}}}\n\n"
+            )
+            .as_bytes(),
+        )
+        .expect("rewrite should succeed");
+    let output_text = utf8(output);
+    assert!(output_text.contains("event: image_edit.failed"));
+    assert!(output_text.contains("\"type\":\"image_edit.failed\""));
+    assert!(output_text.contains("\"type\":\"rate_limit_exceeded\""));
+    assert!(output_text.contains("\"code\":\"rate_limit_exceeded\""));
+    assert!(output_text.contains("\"message\":\"slow down\""));
+    assert!(rewriter.finish().expect("finish should succeed").is_empty());
+}
+
+#[test]
 fn openai_image_stream_rewriter_emits_partial_and_completed_events_for_edit() {
     let report_context = json!({
         "provider_api_format": "openai:image",
@@ -327,10 +398,10 @@ fn gemini_cli_v1internal_stream_rewriter_unwraps_response_object() {
 }
 
 #[test]
-fn openai_chat_error_to_openai_cli_stream_rewriter_converts_to_response_failed() {
+fn openai_chat_error_to_openai_responses_stream_rewriter_converts_to_response_failed() {
     let report_context = json!({
         "provider_api_format": "openai:chat",
-        "client_api_format": "openai:cli",
+        "client_api_format": "openai:responses",
         "needs_conversion": true,
         "mapped_model": "gpt-5.4",
     });
@@ -351,10 +422,10 @@ fn openai_chat_error_to_openai_cli_stream_rewriter_converts_to_response_failed()
 }
 
 #[test]
-fn claude_error_to_openai_cli_stream_rewriter_converts_to_response_failed() {
+fn claude_error_to_openai_responses_stream_rewriter_converts_to_response_failed() {
     let report_context = json!({
         "provider_api_format": "claude:chat",
-        "client_api_format": "openai:cli",
+        "client_api_format": "openai:responses",
         "needs_conversion": true,
         "mapped_model": "claude-sonnet-4-5",
     });
@@ -379,10 +450,10 @@ fn claude_error_to_openai_cli_stream_rewriter_converts_to_response_failed() {
 }
 
 #[test]
-fn gemini_error_to_openai_cli_stream_rewriter_converts_to_response_failed() {
+fn gemini_error_to_openai_responses_stream_rewriter_converts_to_response_failed() {
     let report_context = json!({
         "provider_api_format": "gemini:cli",
-        "client_api_format": "openai:cli",
+        "client_api_format": "openai:responses",
         "needs_conversion": true,
         "mapped_model": "gemini-2.5-pro",
     });
@@ -584,9 +655,9 @@ fn gemini_to_openai_chat_stream_rewriter_buffers_and_converts_function_call() {
 }
 
 #[test]
-fn openai_cli_to_openai_chat_stream_rewriter_converts_text_deltas_immediately() {
+fn openai_responses_to_openai_chat_stream_rewriter_converts_text_deltas_immediately() {
     let report_context = json!({
-        "provider_api_format": "openai:cli",
+        "provider_api_format": "openai:responses",
         "client_api_format": "openai:chat",
         "needs_conversion": true,
         "mapped_model": "gpt-5.4",
@@ -653,9 +724,9 @@ fn openai_cli_to_openai_chat_stream_rewriter_converts_text_deltas_immediately() 
 }
 
 #[test]
-fn openai_cli_to_openai_chat_stream_rewriter_converts_completed_event_without_buffering() {
+fn openai_responses_to_openai_chat_stream_rewriter_converts_completed_event_without_buffering() {
     let report_context = json!({
-        "provider_api_format": "openai:cli",
+        "provider_api_format": "openai:responses",
         "client_api_format": "openai:chat",
         "needs_conversion": true,
         "mapped_model": "gpt-5.4",
@@ -715,10 +786,10 @@ fn antigravity_gemini_to_openai_chat_stream_rewriter_unwraps_and_converts_functi
 }
 
 #[test]
-fn antigravity_gemini_to_openai_cli_stream_rewriter_unwraps_and_converts_function_call() {
+fn antigravity_gemini_to_openai_responses_stream_rewriter_unwraps_and_converts_function_call() {
     let report_context = json!({
         "provider_api_format": "gemini:cli",
-        "client_api_format": "openai:cli",
+        "client_api_format": "openai:responses",
         "needs_conversion": true,
         "envelope_name": "antigravity:v1internal",
         "mapped_model": "claude-sonnet-4-5",
@@ -742,10 +813,10 @@ fn antigravity_gemini_to_openai_cli_stream_rewriter_unwraps_and_converts_functio
 }
 
 #[test]
-fn gemini_to_openai_cli_stream_rewriter_buffers_and_converts_to_completed_event() {
+fn gemini_to_openai_responses_stream_rewriter_buffers_and_converts_to_completed_event() {
     let report_context = json!({
         "provider_api_format": "gemini:cli",
-        "client_api_format": "openai:cli",
+        "client_api_format": "openai:responses",
         "needs_conversion": true,
         "mapped_model": "gemini-2.5-pro",
     });
@@ -777,10 +848,10 @@ fn gemini_to_openai_cli_stream_rewriter_buffers_and_converts_to_completed_event(
 }
 
 #[test]
-fn claude_to_openai_cli_stream_rewriter_buffers_and_converts_to_completed_event() {
+fn claude_to_openai_responses_stream_rewriter_buffers_and_converts_to_completed_event() {
     let report_context = json!({
         "provider_api_format": "claude:cli",
-        "client_api_format": "openai:cli",
+        "client_api_format": "openai:responses",
         "needs_conversion": true,
         "mapped_model": "claude-sonnet-4-5",
     });
@@ -815,10 +886,10 @@ fn claude_to_openai_cli_stream_rewriter_buffers_and_converts_to_completed_event(
 }
 
 #[test]
-fn claude_to_openai_cli_stream_rewriter_converts_tool_use_to_function_call() {
+fn claude_to_openai_responses_stream_rewriter_converts_tool_use_to_function_call() {
     let report_context = json!({
         "provider_api_format": "claude:cli",
-        "client_api_format": "openai:cli",
+        "client_api_format": "openai:responses",
         "needs_conversion": true,
         "mapped_model": "claude-sonnet-4-5",
     });
@@ -861,10 +932,10 @@ fn claude_to_openai_cli_stream_rewriter_converts_tool_use_to_function_call() {
 }
 
 #[test]
-fn gemini_to_openai_cli_stream_rewriter_converts_function_call_to_completed_event() {
+fn gemini_to_openai_responses_stream_rewriter_converts_function_call_to_completed_event() {
     let report_context = json!({
         "provider_api_format": "gemini:cli",
-        "client_api_format": "openai:cli",
+        "client_api_format": "openai:responses",
         "needs_conversion": true,
         "mapped_model": "gemini-2.5-pro",
     });
@@ -888,10 +959,10 @@ fn gemini_to_openai_cli_stream_rewriter_converts_function_call_to_completed_even
 }
 
 #[test]
-fn gemini_to_openai_compact_stream_rewriter_converts_function_call_to_completed_event() {
+fn gemini_to_openai_responses_compact_stream_rewriter_converts_function_call_to_completed_event() {
     let report_context = json!({
         "provider_api_format": "gemini:cli",
-        "client_api_format": "openai:compact",
+        "client_api_format": "openai:responses:compact",
         "needs_conversion": true,
         "mapped_model": "gemini-2.5-pro",
     });

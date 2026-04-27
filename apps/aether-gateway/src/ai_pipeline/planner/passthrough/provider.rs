@@ -11,7 +11,6 @@ use serde_json::{json, Value};
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::ai_pipeline::planner::candidate_affinity::prefer_local_tunnel_owner_candidates;
 use crate::ai_pipeline::planner::common::{
     EXECUTION_RUNTIME_STREAM_DECISION_ACTION, EXECUTION_RUNTIME_SYNC_DECISION_ACTION,
 };

@@ -83,10 +83,10 @@ fn supports_standard_stream_rewrite(provider_api_format: &str, client_api_format
 
 fn is_standard_provider_api_format(api_format: &str) -> bool {
     matches!(
-        api_format,
+        aether_ai_formats::normalize_legacy_openai_format_alias(api_format).as_str(),
         "openai:chat"
-            | "openai:cli"
-            | "openai:compact"
+            | "openai:responses"
+            | "openai:responses:compact"
             | "claude:chat"
             | "claude:cli"
             | "gemini:chat"
@@ -100,8 +100,8 @@ fn is_standard_chat_client_api_format(api_format: &str) -> bool {
 
 fn is_standard_cli_client_api_format(api_format: &str) -> bool {
     matches!(
-        api_format,
-        "openai:cli" | "openai:compact" | "claude:cli" | "gemini:cli"
+        aether_ai_formats::normalize_legacy_openai_format_alias(api_format).as_str(),
+        "openai:responses" | "openai:responses:compact" | "claude:cli" | "gemini:cli"
     )
 }
 

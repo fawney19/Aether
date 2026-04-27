@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+aether-ai-formats.workspace = true
 aether-contracts.workspace = true
 aether-data-contracts.workspace = true
 aether-provider-transport.workspace = true

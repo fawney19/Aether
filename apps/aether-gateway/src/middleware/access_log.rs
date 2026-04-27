@@ -601,7 +601,7 @@ mod tests {
         ));
         assert!(!should_downgrade_access_log(
             &Method::DELETE,
-            "/api/admin/monitoring/cache/affinity/provider/key/model/openai:cli"
+            "/api/admin/monitoring/cache/affinity/provider/key/model/openai:responses"
         ));
         assert!(!should_downgrade_access_log(&Method::GET, "/v1/responses"));
     }

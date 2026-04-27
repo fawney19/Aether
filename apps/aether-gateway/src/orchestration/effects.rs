@@ -681,8 +681,8 @@ mod tests {
             content_encoding: None,
             body: RequestBody::from_json(json!({"model":"gpt-5.4"})),
             stream: false,
-            client_api_format: "openai:cli".to_string(),
-            provider_api_format: "openai:cli".to_string(),
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.4".to_string()),
             proxy: None,
             tls_profile: None,
@@ -715,7 +715,7 @@ mod tests {
         StoredProviderCatalogEndpoint::new(
             "endpoint-codex-cli-local-1".to_string(),
             "provider-codex-cli-local-1".to_string(),
-            "openai:cli".to_string(),
+            "openai:responses".to_string(),
             Some("openai".to_string()),
             Some("cli".to_string()),
             true,
@@ -750,12 +750,12 @@ mod tests {
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "__placeholder__")
                 .expect("placeholder api key should encrypt"),
             Some(encrypted_auth_config),
             None,
-            Some(serde_json::json!({"openai:cli": 1})),
+            Some(serde_json::json!({"openai:responses": 1})),
             None,
             None,
             None,

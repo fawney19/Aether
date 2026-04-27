@@ -7,7 +7,7 @@ use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKe
 use serde_json::{Map, Value};
 use tracing::warn;
 
-use crate::ai_pipeline::planner::candidate_eligibility::{
+use crate::ai_pipeline::planner::candidate_resolution::{
     EligibleLocalExecutionCandidate, SkippedLocalExecutionCandidate,
 };
 use crate::ai_pipeline::PlannerAppState;
@@ -434,6 +434,7 @@ fn schedule_pool_group(
             transport,
             provider_api_format,
             orchestration,
+            ranking,
         } = eligible;
         let key_id = candidate.key_id.clone();
         let mut key_context = key_context_by_id.get(&key_id).cloned().unwrap_or_default();
@@ -448,6 +449,7 @@ fn schedule_pool_group(
                 candidate,
                 skip_reason: POOL_ACCOUNT_BLOCKED_SKIP_REASON,
                 transport: Some(transport),
+                ranking,
                 extra_data: None,
             });
             continue;
@@ -458,6 +460,7 @@ fn schedule_pool_group(
                 candidate,
                 skip_reason: POOL_ACCOUNT_EXHAUSTED_SKIP_REASON,
                 transport: Some(transport),
+                ranking,
                 extra_data: None,
             });
             continue;
@@ -468,6 +471,7 @@ fn schedule_pool_group(
                 candidate,
                 skip_reason: POOL_COOLDOWN_SKIP_REASON,
                 transport: Some(transport),
+                ranking,
                 extra_data: None,
             });
             continue;
@@ -481,6 +485,7 @@ fn schedule_pool_group(
                 candidate,
                 skip_reason: POOL_COST_LIMIT_REACHED_SKIP_REASON,
                 transport: Some(transport),
+                ranking,
                 extra_data: None,
             });
             continue;
@@ -495,6 +500,7 @@ fn schedule_pool_group(
                 transport,
                 provider_api_format,
                 orchestration,
+                ranking,
             },
             key_context,
             original_index,
@@ -1040,7 +1046,7 @@ mod tests {
         apply_local_execution_pool_scheduler_with_runtime_map, build_pool_catalog_key_context,
         normalize_enabled_pool_presets, PoolCatalogKeyContext,
     };
-    use crate::ai_pipeline::planner::candidate_eligibility::EligibleLocalExecutionCandidate;
+    use crate::ai_pipeline::planner::candidate_resolution::EligibleLocalExecutionCandidate;
     use crate::ai_pipeline::PlannerAppState;
     use crate::data::GatewayDataState;
     use crate::handlers::shared::provider_pool::{
@@ -1836,6 +1842,7 @@ mod tests {
             },
             provider_api_format: "openai:chat".to_string(),
             orchestration: LocalExecutionCandidateMetadata::default(),
+            ranking: None,
             transport: Arc::new(crate::ai_pipeline::GatewayProviderTransportSnapshot {
                 provider: GatewayProviderTransportProvider {
                     id: provider_id.to_string(),

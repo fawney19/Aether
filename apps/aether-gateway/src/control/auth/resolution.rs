@@ -12,7 +12,7 @@ use crate::{AppState, GatewayError};
 
 use super::super::GatewayControlDecision;
 use super::credentials::{
-    build_auth_context_cache_key, contains_string, current_unix_secs, extract_request_credentials,
+    build_auth_context_cache_key, current_unix_secs, extract_request_credentials,
     extract_trusted_admin_headers,
 };
 use super::gate::GatewayLocalAuthRejection;
@@ -631,7 +631,7 @@ async fn build_data_backed_auth_context(
         })
     } else if snapshot
         .effective_allowed_api_formats()
-        .is_some_and(|allowed| !contains_string(allowed, auth_endpoint_signature))
+        .is_some_and(|allowed| !contains_api_format_or_alias(allowed, auth_endpoint_signature))
     {
         Some(GatewayLocalAuthRejection::ApiFormatNotAllowed {
             api_format: auth_endpoint_signature.to_string(),
@@ -653,6 +653,18 @@ async fn build_data_backed_auth_context(
         local_rejection,
         allowed_models,
     }
+}
+
+fn contains_api_format_or_alias(items: &[String], target: &str) -> bool {
+    items.iter().any(|item| api_format_matches(item, target))
+}
+
+fn normalize_api_format_alias(value: &str) -> String {
+    crate::ai_pipeline::normalize_legacy_openai_format_alias(value)
+}
+
+fn api_format_matches(left: &str, right: &str) -> bool {
+    normalize_api_format_alias(left) == normalize_api_format_alias(right)
 }
 
 async fn auth_snapshot_allows_requested_provider(

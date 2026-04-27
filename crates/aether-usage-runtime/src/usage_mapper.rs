@@ -291,7 +291,7 @@ mod tests {
                     }
                 }
             }),
-            "openai:cli",
+            "openai:responses",
         );
 
         assert_eq!(usage.input_tokens, 14);
@@ -313,7 +313,7 @@ mod tests {
                     }
                 }
             }),
-            "openai:cli",
+            "openai:responses",
         );
 
         assert_eq!(usage.input_tokens, 52_600);
@@ -392,7 +392,7 @@ mod tests {
                     }
                 ]
             }),
-            "openai:cli",
+            "openai:responses",
         );
 
         assert_eq!(usage.input_tokens, 9);

@@ -29,18 +29,6 @@ pub fn build_scheduler_affinity_cache_key_for_api_key_id(
     ))
 }
 
-pub fn compare_affinity_order(
-    left: &SchedulerMinimalCandidateSelectionCandidate,
-    right: &SchedulerMinimalCandidateSelectionCandidate,
-    affinity_key: Option<&str>,
-) -> std::cmp::Ordering {
-    let Some(affinity_key) = affinity_key else {
-        return std::cmp::Ordering::Equal;
-    };
-
-    candidate_affinity_hash(affinity_key, left).cmp(&candidate_affinity_hash(affinity_key, right))
-}
-
 pub fn candidate_affinity_hash(
     affinity_key: &str,
     candidate: &SchedulerMinimalCandidateSelectionCandidate,
@@ -82,7 +70,7 @@ pub fn candidate_key(
 mod tests {
     use super::{
         build_scheduler_affinity_cache_key_for_api_key_id, candidate_affinity_hash, candidate_key,
-        compare_affinity_order, matches_affinity_target, SchedulerAffinityTarget,
+        matches_affinity_target, SchedulerAffinityTarget,
     };
     use crate::SchedulerMinimalCandidateSelectionCandidate;
 
@@ -133,21 +121,13 @@ mod tests {
     }
 
     #[test]
-    fn affinity_hash_and_order_are_candidate_specific() {
+    fn affinity_hash_is_candidate_specific() {
         let left = sample_candidate("1");
         let right = sample_candidate("2");
 
         assert_ne!(
             candidate_affinity_hash("api-key-1", &left),
             candidate_affinity_hash("api-key-1", &right)
-        );
-        assert_ne!(
-            compare_affinity_order(&left, &right, Some("api-key-1")),
-            std::cmp::Ordering::Equal
-        );
-        assert_eq!(
-            compare_affinity_order(&left, &right, None),
-            std::cmp::Ordering::Equal
         );
     }
 

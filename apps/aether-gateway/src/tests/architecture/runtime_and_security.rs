@@ -169,7 +169,7 @@ fn scheduler_candidate_runtime_paths_depend_on_scheduler_core_and_state_trait() 
         "provider_key_rpm_allows_request_since",
         "PROVIDER_KEY_RPM_WINDOW_SECS",
         "SchedulerMinimalCandidateSelectionCandidate",
-        "read_minimal_candidate_selection",
+        "read_ranked_minimal_candidate_selection",
         "read_cached_scheduler_affinity_target",
         "list_selectable_candidates",
         "list_selectable_candidates_for_required_capability_without_requested_model",
@@ -186,8 +186,8 @@ fn scheduler_candidate_runtime_paths_depend_on_scheduler_core_and_state_trait() 
         "candidate/mod.rs should depend on core minimal candidate DTO"
     );
     assert!(
-        !candidate_mod.contains("build_minimal_candidate_selection"),
-        "candidate/mod.rs should not own the core minimal candidate builder anymore"
+        !candidate_mod.contains("build_ranked_minimal_candidate_selection"),
+        "candidate/mod.rs should not own the core ranked minimal candidate builder anymore"
     );
     assert!(
         !candidate_mod.contains("collect_global_model_names_for_required_capability"),
@@ -206,7 +206,7 @@ fn scheduler_candidate_runtime_paths_depend_on_scheduler_core_and_state_trait() 
         "candidate/mod.rs should not own the minimal candidate DTO"
     );
     for pattern in [
-        "pub(crate) async fn read_minimal_candidate_selection(",
+        "pub(crate) async fn read_ranked_minimal_candidate_selection(",
         "pub(crate) async fn select_minimal_candidate(",
         "pub(crate) fn read_cached_scheduler_affinity_target(",
         "async fn collect_selectable_candidates(",
@@ -254,12 +254,20 @@ fn scheduler_candidate_runtime_paths_depend_on_scheduler_core_and_state_trait() 
         "selection.rs should not depend on gateway-local SchedulerAffinityTarget"
     );
     assert!(
-        selection.contains("reorder_candidates_by_scheduler_health_in_core"),
-        "selection.rs should depend on core candidate reorder helper"
+        selection.contains("enumerate_scheduler_candidates("),
+        "selection.rs should delegate candidate enumeration"
     );
     assert!(
-        selection.contains("collect_selectable_candidates_from_keys"),
-        "selection.rs should depend on core selectable-candidate collector"
+        selection.contains("read_candidate_runtime_selection_snapshot("),
+        "selection.rs should delegate runtime snapshot loading"
+    );
+    assert!(
+        selection.contains("resolve_scheduler_candidate_selectability("),
+        "selection.rs should delegate selectability resolution"
+    );
+    assert!(
+        selection.contains("rank_scheduler_candidates("),
+        "selection.rs should delegate final ranking"
     );
     for pattern in [
         "async fn collect_selectable_candidates(",
@@ -282,8 +290,10 @@ fn scheduler_candidate_runtime_paths_depend_on_scheduler_core_and_state_trait() 
         "read_provider_concurrent_limits(",
         "read_provider_key_rpm_states(",
         "candidate_is_selectable_with_runtime_state",
+        "collect_selectable_candidates_from_keys",
         "auth_api_key_concurrency_limit_reached",
         "build_provider_concurrent_limit_map(",
+        "reorder_candidates_by_scheduler_health",
     ] {
         assert!(
             !selection.contains(pattern),
@@ -371,7 +381,6 @@ fn scheduler_candidate_runtime_paths_depend_on_scheduler_core_and_state_trait() 
     );
     for pattern in [
         "candidate_affinity_hash",
-        "compare_affinity_order",
         "matches_affinity_target",
         "candidate_key",
     ] {
@@ -443,6 +452,39 @@ fn scheduler_candidate_runtime_paths_depend_on_scheduler_core_and_state_trait() 
         "candidate/mod.rs should depend directly on core model helper namespace"
     );
 
+    let core_candidate_enumeration =
+        read_workspace_file("crates/aether-scheduler-core/src/candidate/enumeration.rs");
+    for forbidden in [
+        "apply_scheduler_candidate_ranking",
+        "SchedulerRankableCandidate",
+        "candidate_affinity_hash",
+        "requested_capability_priority_for_candidate_descriptors",
+    ] {
+        assert!(
+            !core_candidate_enumeration.contains(forbidden),
+            "core candidate/enumeration.rs should only enumerate theoretical candidates, not rank with {forbidden}"
+        );
+    }
+
+    let core_candidate_selectability =
+        read_workspace_file("crates/aether-scheduler-core/src/candidate/selectability.rs");
+    for forbidden in [
+        "apply_scheduler_candidate_ranking",
+        "with_affinity_hash",
+        "collect_selectable_candidates_from_keys",
+        "reorder_candidates_by_scheduler_health",
+    ] {
+        assert!(
+            !core_candidate_selectability.contains(forbidden),
+            "core candidate/selectability.rs should only decide selectability, not rank with {forbidden}"
+        );
+    }
+
+    assert!(
+        !workspace_file_exists("crates/aether-scheduler-core/src/candidate/selection.rs"),
+        "core candidate/selection.rs compatibility helper should be removed"
+    );
+
     let affinity_cache = read_workspace_file("apps/aether-gateway/src/cache/scheduler_affinity.rs");
     assert!(
         affinity_cache.contains("aether_scheduler_core::SchedulerAffinityTarget"),
@@ -476,7 +518,7 @@ fn scheduler_candidate_runtime_paths_depend_on_scheduler_core_and_state_trait() 
         "impl MinimalCandidateSelectionRowSource for GatewayDataState",
         "impl MinimalCandidateSelectionRowSource for AppState",
         "impl SchedulerRuntimeState for AppState",
-        "async fn read_minimal_candidate_selection(",
+        "async fn read_ranked_minimal_candidate_selection(",
     ] {
         assert!(
             !candidate_state.contains(pattern),
@@ -495,8 +537,10 @@ fn scheduler_candidate_runtime_paths_depend_on_scheduler_core_and_state_trait() 
         "data/candidate_selection.rs should host requested-model row lookup"
     );
     assert!(
-        candidate_selection.contains("pub(crate) async fn read_minimal_candidate_selection("),
-        "data/candidate_selection.rs should host minimal candidate selection builder"
+        candidate_selection.contains(
+            "pub(crate) async fn enumerate_minimal_candidate_selection_with_required_capabilities(",
+        ),
+        "data/candidate_selection.rs should host minimal candidate enumeration builder"
     );
     assert!(
         candidate_selection
@@ -508,8 +552,12 @@ fn scheduler_candidate_runtime_paths_depend_on_scheduler_core_and_state_trait() 
         "data/candidate_selection.rs should depend on core requested-model resolver"
     );
     assert!(
-        candidate_selection.contains("build_minimal_candidate_selection"),
-        "data/candidate_selection.rs should depend on core minimal candidate builder"
+        !candidate_selection.contains("read_ranked_minimal_candidate_selection"),
+        "data/candidate_selection.rs should not host ranked candidate selection compatibility readers"
+    );
+    assert!(
+        !candidate_selection.contains("build_ranked_minimal_candidate_selection"),
+        "data/candidate_selection.rs should not depend on core ranked minimal candidate builder"
     );
     assert!(
         candidate_selection.contains("collect_global_model_names_for_required_capability"),
@@ -555,17 +603,17 @@ fn scheduler_candidate_runtime_paths_depend_on_scheduler_core_and_state_trait() 
         );
     }
 
-    let planner_candidate_affinity =
-        read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/candidate_affinity.rs");
+    let planner_candidate_ranking =
+        read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/candidate_ranking.rs");
     assert!(
-        planner_candidate_affinity
-            .contains("aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate"),
-        "planner/candidate_affinity.rs should depend directly on core minimal candidate DTO"
+        planner_candidate_ranking.contains("use aether_scheduler_core::{")
+            && planner_candidate_ranking.contains("SchedulerMinimalCandidateSelectionCandidate"),
+        "planner/candidate_ranking.rs should depend directly on core minimal candidate DTO"
     );
     assert!(
-        !planner_candidate_affinity
+        !planner_candidate_ranking
             .contains("crate::scheduler::SchedulerMinimalCandidateSelectionCandidate"),
-        "planner/candidate_affinity.rs should not depend on scheduler candidate DTO re-export"
+        "planner/candidate_ranking.rs should not depend on scheduler candidate DTO re-export"
     );
 
     let request_candidate_runtime =
@@ -590,7 +638,7 @@ fn scheduler_candidate_runtime_paths_depend_on_scheduler_core_and_state_trait() 
         "state/integrations.rs should host SchedulerRuntimeState for AppState"
     );
     assert!(
-        !state_integrations.contains("async fn read_minimal_candidate_selection("),
+        !state_integrations.contains("async fn read_ranked_minimal_candidate_selection("),
         "state/integrations.rs should not re-host scheduler minimal candidate bridge anymore"
     );
 
@@ -743,15 +791,15 @@ fn gateway_data_state_does_not_depend_on_scheduler_candidate_selection() {
         read_workspace_file("apps/aether-gateway/src/state/runtime/auth/api_keys.rs");
 
     assert!(
-        !state_mod.contains("read_minimal_candidate_selection"),
+        !state_mod.contains("read_ranked_minimal_candidate_selection"),
         "data/state/mod.rs should not import scheduler candidate selection entrypoints"
     );
     assert!(
-        !state_runtime.contains("pub(crate) async fn read_minimal_candidate_selection("),
+        !state_runtime.contains("pub(crate) async fn read_ranked_minimal_candidate_selection("),
         "data/state/runtime.rs should not own scheduler minimal candidate derived read"
     );
     assert!(
-        !auth_api_keys.contains("read_minimal_candidate_selection("),
+        !auth_api_keys.contains("read_ranked_minimal_candidate_selection("),
         "state/runtime/auth/api_keys.rs should not keep scheduler minimal candidate wrapper anymore"
     );
     for pattern in [

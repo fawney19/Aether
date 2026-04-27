@@ -612,6 +612,8 @@ mod tests {
             rate_limit_cooldown_seconds: 300,
             overload_cooldown_seconds: 30,
             health_policy_enabled: true,
+            probing_enabled: false,
+            probing_interval_minutes: 10,
             stream_timeout_threshold: 3,
             stream_timeout_window_seconds: 1800,
             stream_timeout_cooldown_seconds: 300,

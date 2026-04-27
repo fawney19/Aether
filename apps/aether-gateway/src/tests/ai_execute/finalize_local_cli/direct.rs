@@ -26,7 +26,7 @@ use aether_data_contracts::repository::provider_catalog::{
 use sha2::{Digest, Sha256};
 
 #[tokio::test]
-async fn gateway_executes_openai_cli_sync_upstream_stream_via_local_finalize_response() {
+async fn gateway_executes_openai_responses_sync_upstream_stream_via_local_finalize_response() {
     use base64::Engine as _;
 
     #[derive(Debug, Clone)]
@@ -55,7 +55,7 @@ async fn gateway_executes_openai_cli_sync_upstream_stream_via_local_finalize_res
             true,
             false,
             Some(serde_json::json!(["openai"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -66,7 +66,7 @@ async fn gateway_executes_openai_cli_sync_upstream_stream_via_local_finalize_res
             Some(5),
             Some(4_102_444_800_i64),
             Some(serde_json::json!(["openai"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
         )
         .expect("auth snapshot should build")
@@ -80,7 +80,7 @@ async fn gateway_executes_openai_cli_sync_upstream_stream_via_local_finalize_res
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-openai-cli-finalize-local-1".to_string(),
-            endpoint_api_format: "openai:cli".to_string(),
+            endpoint_api_format: "openai:responses".to_string(),
             endpoint_api_family: Some("openai".to_string()),
             endpoint_kind: Some("cli".to_string()),
             endpoint_is_active: true,
@@ -88,11 +88,11 @@ async fn gateway_executes_openai_cli_sync_upstream_stream_via_local_finalize_res
             key_name: "prod".to_string(),
             key_auth_type: "bearer".to_string(),
             key_is_active: true,
-            key_api_formats: Some(vec!["openai:cli".to_string()]),
+            key_api_formats: Some(vec!["openai:responses".to_string()]),
             key_allowed_models: None,
             key_capabilities: None,
             key_internal_priority: 5,
-            key_global_priority_by_format: Some(serde_json::json!({"openai:cli": 1})),
+            key_global_priority_by_format: Some(serde_json::json!({"openai:responses": 1})),
             model_id: "model-openai-cli-finalize-local-1".to_string(),
             global_model_id: "global-model-openai-cli-finalize-local-1".to_string(),
             global_model_name: "gpt-5".to_string(),
@@ -102,7 +102,7 @@ async fn gateway_executes_openai_cli_sync_upstream_stream_via_local_finalize_res
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
                 name: "gpt-5-upstream".to_string(),
                 priority: 1,
-                api_formats: Some(vec!["openai:cli".to_string()]),
+                api_formats: Some(vec!["openai:responses".to_string()]),
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -135,7 +135,7 @@ async fn gateway_executes_openai_cli_sync_upstream_stream_via_local_finalize_res
         StoredProviderCatalogEndpoint::new(
             "endpoint-openai-cli-finalize-local-1".to_string(),
             "provider-openai-cli-finalize-local-1".to_string(),
-            "openai:cli".to_string(),
+            "openai:responses".to_string(),
             Some("openai".to_string()),
             Some("cli".to_string()),
             true,
@@ -167,7 +167,7 @@ async fn gateway_executes_openai_cli_sync_upstream_stream_via_local_finalize_res
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             encrypt_python_fernet_plaintext(
                 DEVELOPMENT_ENCRYPTION_KEY,
                 "sk-upstream-openai-cli-finalize",
@@ -175,7 +175,7 @@ async fn gateway_executes_openai_cli_sync_upstream_stream_via_local_finalize_res
             .expect("api key should encrypt"),
             None,
             None,
-            Some(serde_json::json!({"openai:cli": 1})),
+            Some(serde_json::json!({"openai:responses": 1})),
             None,
             None,
             None,
@@ -664,6 +664,7 @@ async fn gateway_executes_kiro_claude_cli_sync_upstream_stream_via_local_finaliz
         let auth_config = serde_json::json!({
             "provider_type": "kiro",
             "access_token": "cached-kiro-finalize-access-token",
+            "expires_at": 4102444800_u64,
             "refresh_token": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
             "machine_id": "123e4567-e89b-12d3-a456-426614174000",
             "api_region": "us-east-1",

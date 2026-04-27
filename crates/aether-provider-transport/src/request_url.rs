@@ -9,7 +9,7 @@ use crate::claude_code::build_claude_code_messages_url;
 use crate::snapshot::GatewayProviderTransportSnapshot;
 use crate::url::{
     build_claude_messages_url, build_gemini_content_url, build_openai_chat_url,
-    build_openai_cli_url, build_passthrough_path_url,
+    build_openai_responses_url, build_passthrough_path_url,
 };
 use crate::vertex::{
     build_vertex_api_key_gemini_content_url, resolve_local_vertex_api_key_query_auth,
@@ -60,17 +60,19 @@ pub fn build_transport_request_url(
         ));
     }
 
-    let url = match provider_api_format.as_str() {
+    let url = match aether_ai_formats::normalize_legacy_openai_format_alias(&provider_api_format)
+        .as_str()
+    {
         "openai:chat" => Some(build_openai_chat_url(
             &transport.endpoint.base_url,
             params.request_query,
         )),
-        "openai:cli" => Some(build_openai_cli_url(
+        "openai:responses" => Some(build_openai_responses_url(
             &transport.endpoint.base_url,
             params.request_query,
             false,
         )),
-        "openai:compact" => Some(build_openai_cli_url(
+        "openai:responses:compact" => Some(build_openai_responses_url(
             &transport.endpoint.base_url,
             params.request_query,
             true,
@@ -344,6 +346,30 @@ mod tests {
             url,
             "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse&foo=bar&key=vertex-secret"
         );
+    }
+
+    #[test]
+    fn builds_openai_responses_url_for_formal_format_name() {
+        let transport = sample_transport(
+            "openai",
+            "openai:responses",
+            "https://api.openai.example/v1",
+            None,
+        );
+
+        let url = build_transport_request_url(
+            &transport,
+            TransportRequestUrlParams {
+                provider_api_format: "openai:responses",
+                mapped_model: None,
+                upstream_is_stream: false,
+                request_query: Some("tenant=demo"),
+                kiro_api_region: None,
+            },
+        )
+        .expect("openai responses url");
+
+        assert_eq!(url, "https://api.openai.example/v1/responses?tenant=demo");
     }
 
     #[test]

@@ -255,7 +255,7 @@ async fn gateway_handles_admin_provider_summary_locally_with_trusted_admin_princ
             sample_endpoint(
                 "endpoint-openai-cli",
                 "provider-openai",
-                "openai:cli",
+                "openai:responses",
                 "https://api.openai.example",
             ),
         ],
@@ -270,11 +270,11 @@ async fn gateway_handles_admin_provider_summary_locally_with_trusted_admin_princ
             sample_key(
                 "key-openai-cli",
                 "provider-openai",
-                "openai:cli",
+                "openai:responses",
                 "sk-test-cli",
             )
             .with_transport_fields(
-                Some(json!(["openai:cli"])),
+                Some(json!(["openai:responses"])),
                 encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "sk-test-cli-2")
                     .expect("api key ciphertext should build"),
                 None,
@@ -286,7 +286,10 @@ async fn gateway_handles_admin_provider_summary_locally_with_trusted_admin_princ
                 None,
             )
             .expect("key transport should build")
-            .with_health_fields(Some(json!({"openai:cli": {"health_score": 0.75}})), None),
+            .with_health_fields(
+                Some(json!({"openai:responses": {"health_score": 0.75}})),
+                None,
+            ),
         ],
     ));
     let global_model_repository = Arc::new(
@@ -342,7 +345,10 @@ async fn gateway_handles_admin_provider_summary_locally_with_trusted_admin_princ
     assert_eq!(payload["total_models"], 5);
     assert_eq!(payload["active_models"], 3);
     assert_eq!(payload["global_model_ids"], json!(["gpt-5", "gpt-5-mini"]));
-    assert_eq!(payload["api_formats"], json!(["openai:chat", "openai:cli"]));
+    assert_eq!(
+        payload["api_formats"],
+        json!(["openai:chat", "openai:responses"])
+    );
     assert_eq!(payload["ops_configured"], true);
     assert_eq!(payload["ops_architecture_id"], "anyrouter");
     assert_eq!(payload["created_at"], "2024-03-21T05:46:40Z");
@@ -358,7 +364,7 @@ async fn gateway_handles_admin_provider_summary_locally_with_trusted_admin_princ
                 "active_keys": 1
             },
             {
-                "api_format": "openai:cli",
+                "api_format": "openai:responses",
                 "health_score": 0.75,
                 "is_active": true,
                 "total_keys": 1,
@@ -943,20 +949,20 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
         .await
         .expect("endpoints should list");
     assert_eq!(endpoints.len(), 3);
-    let cli_endpoint = endpoints
+    let responses_endpoint = endpoints
         .iter()
-        .find(|endpoint| endpoint.api_format == "openai:cli")
-        .expect("cli endpoint should exist");
+        .find(|endpoint| endpoint.api_format == "openai:responses")
+        .expect("responses endpoint should exist");
     let compact_endpoint = endpoints
         .iter()
-        .find(|endpoint| endpoint.api_format == "openai:compact")
+        .find(|endpoint| endpoint.api_format == "openai:responses:compact")
         .expect("compact endpoint should exist");
     let image_endpoint = endpoints
         .iter()
         .find(|endpoint| endpoint.api_format == "openai:image")
         .expect("image endpoint should exist");
     assert_eq!(
-        cli_endpoint.base_url,
+        responses_endpoint.base_url,
         "https://chatgpt.com/backend-api/codex"
     );
     assert_eq!(
@@ -967,11 +973,11 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
         image_endpoint.base_url,
         "https://chatgpt.com/backend-api/codex"
     );
-    assert_eq!(cli_endpoint.max_retries, Some(7));
+    assert_eq!(responses_endpoint.max_retries, Some(7));
     assert_eq!(compact_endpoint.max_retries, Some(7));
     assert_eq!(image_endpoint.max_retries, Some(7));
     assert_eq!(
-        cli_endpoint
+        responses_endpoint
             .config
             .as_ref()
             .and_then(|value| value.get("upstream_stream_policy"))
@@ -986,7 +992,7 @@ async fn gateway_creates_admin_provider_locally_with_trusted_admin_principal() {
             .and_then(serde_json::Value::as_str),
         Some("force_stream")
     );
-    assert!(cli_endpoint.body_rules.is_none());
+    assert!(responses_endpoint.body_rules.is_none());
     assert!(compact_endpoint.body_rules.is_none());
     assert!(image_endpoint.body_rules.is_none());
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
@@ -1025,7 +1031,7 @@ async fn gateway_updates_fixed_provider_and_reconciles_template_managed_endpoint
     let mut cli_endpoint = sample_endpoint(
         "endpoint-codex-cli",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "https://chatgpt.com/backend-api/codex",
     );
     cli_endpoint.max_retries = Some(2);
@@ -1033,11 +1039,11 @@ async fn gateway_updates_fixed_provider_and_reconciles_template_managed_endpoint
     let mut key = sample_key(
         "key-codex-oauth",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "oauth-placeholder",
     );
     key.auth_type = "oauth".to_string();
-    key.api_formats = Some(json!(["openai:cli"]));
+    key.api_formats = Some(json!(["openai:responses"]));
 
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],
@@ -1079,24 +1085,24 @@ async fn gateway_updates_fixed_provider_and_reconciles_template_managed_endpoint
         .await
         .expect("endpoints should list");
     assert_eq!(endpoints.len(), 3);
-    let cli_endpoint = endpoints
+    let responses_endpoint = endpoints
         .iter()
-        .find(|endpoint| endpoint.api_format == "openai:cli")
-        .expect("cli endpoint should exist");
+        .find(|endpoint| endpoint.api_format == "openai:responses")
+        .expect("responses endpoint should exist");
     let compact_endpoint = endpoints
         .iter()
-        .find(|endpoint| endpoint.api_format == "openai:compact")
+        .find(|endpoint| endpoint.api_format == "openai:responses:compact")
         .expect("compact endpoint should exist");
     let image_endpoint = endpoints
         .iter()
         .find(|endpoint| endpoint.api_format == "openai:image")
         .expect("image endpoint should exist");
 
-    assert_eq!(cli_endpoint.max_retries, Some(9));
+    assert_eq!(responses_endpoint.max_retries, Some(9));
     assert_eq!(compact_endpoint.max_retries, Some(9));
     assert_eq!(image_endpoint.max_retries, Some(9));
     assert_eq!(
-        cli_endpoint
+        responses_endpoint
             .config
             .as_ref()
             .and_then(|value| value.get("_aether_fixed_provider_template"))
@@ -1133,12 +1139,12 @@ async fn gateway_lists_effective_api_formats_for_fixed_oauth_provider_keys() {
     let mut key = sample_key(
         "key-codex-legacy",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "oauth-placeholder",
     );
     key.name = "codex legacy".to_string();
     key.auth_type = "oauth".to_string();
-    key.api_formats = Some(json!(["openai:cli", "openai:compact"]));
+    key.api_formats = Some(json!(["openai:responses", "openai:responses:compact"]));
 
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],
@@ -1146,7 +1152,7 @@ async fn gateway_lists_effective_api_formats_for_fixed_oauth_provider_keys() {
             sample_endpoint(
                 "endpoint-codex-cli",
                 "provider-codex",
-                "openai:cli",
+                "openai:responses",
                 "https://chatgpt.com/backend-api/codex",
             ),
             sample_endpoint(
@@ -1186,7 +1192,7 @@ async fn gateway_lists_effective_api_formats_for_fixed_oauth_provider_keys() {
     assert_eq!(keys.len(), 1);
     assert_eq!(
         keys[0]["api_formats"],
-        json!(["openai:cli", "openai:image"])
+        json!(["openai:image", "openai:responses"])
     );
 
     gateway_handle.abort();
@@ -1219,7 +1225,7 @@ async fn gateway_handles_admin_provider_health_monitor_locally_with_trusted_admi
             sample_endpoint(
                 "endpoint-openai-cli",
                 "provider-openai",
-                "openai:cli",
+                "openai:responses",
                 "https://api.openai.example",
             ),
         ],
@@ -1311,7 +1317,7 @@ async fn gateway_handles_admin_provider_health_monitor_locally_with_trusted_admi
         .as_str()
         .is_some_and(|value| value.ends_with(".000Z")));
     assert_eq!(endpoints[1]["endpoint_id"], "endpoint-openai-cli");
-    assert_eq!(endpoints[1]["api_format"], "openai:cli");
+    assert_eq!(endpoints[1]["api_format"], "openai:responses");
     assert_eq!(endpoints[1]["total_attempts"], 1);
     assert_eq!(endpoints[1]["success_count"], 0);
     assert_eq!(endpoints[1]["failed_count"], 0);

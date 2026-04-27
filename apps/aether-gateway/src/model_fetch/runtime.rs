@@ -814,7 +814,12 @@ mod tests {
     #[tokio::test]
     async fn model_fetch_uses_preset_models_without_endpoint() {
         let provider = sample_provider("provider-codex", "codex");
-        let key = sample_key("key-codex", "provider-codex", "api_key", &["openai:cli"]);
+        let key = sample_key(
+            "key-codex",
+            "provider-codex",
+            "api_key",
+            &["openai:responses"],
+        );
         let state = TestState::new(vec![provider], vec![], vec![key], HashMap::new(), vec![]);
 
         let summary = perform_model_fetch_once_with_state(&state)
@@ -944,7 +949,7 @@ mod tests {
         assert_eq!(updated.allowed_models, Some(json!(["gpt-old"])));
         assert_eq!(
             updated.last_models_fetch_error.as_deref(),
-            Some("No supported endpoint for Rust models fetch")
+            Some("Provider transport snapshot unavailable")
         );
     }
 }

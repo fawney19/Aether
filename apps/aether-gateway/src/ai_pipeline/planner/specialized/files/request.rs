@@ -11,12 +11,14 @@ use crate::ai_pipeline::transport::auth::{
 use crate::ai_pipeline::transport::local_gemini_transport_unsupported_reason_with_network;
 use crate::ai_pipeline::transport::url::build_gemini_files_passthrough_url;
 use crate::ai_pipeline::transport::{apply_local_body_rules, apply_local_header_rules};
-use crate::ai_pipeline::GatewayProviderTransportSnapshot;
+use crate::ai_pipeline::{CandidateFailureDiagnostic, GatewayProviderTransportSnapshot};
 use crate::AppState;
 
 use super::support::{
-    mark_skipped_local_gemini_files_candidate, LocalGeminiFilesCandidateAttempt,
-    LocalGeminiFilesDecisionInput, GEMINI_FILES_CANDIDATE_API_FORMAT,
+    mark_skipped_local_gemini_files_candidate,
+    mark_skipped_local_gemini_files_candidate_with_failure_diagnostic,
+    LocalGeminiFilesCandidateAttempt, LocalGeminiFilesDecisionInput,
+    GEMINI_FILES_CANDIDATE_API_FORMAT, GEMINI_FILES_CLIENT_API_FORMAT,
 };
 use super::LocalGeminiFilesSpec;
 
@@ -90,7 +92,7 @@ pub(super) async fn resolve_local_gemini_files_candidate_payload_parts(
         passthrough_path,
         parts.uri.query(),
     ) else {
-        mark_skipped_local_gemini_files_candidate(
+        mark_skipped_local_gemini_files_candidate_with_failure_diagnostic(
             state,
             input,
             trace_id,
@@ -98,6 +100,11 @@ pub(super) async fn resolve_local_gemini_files_candidate_payload_parts(
             attempt.candidate_index,
             &attempt.candidate_id,
             "upstream_url_missing",
+            CandidateFailureDiagnostic::upstream_url_missing(
+                GEMINI_FILES_CLIENT_API_FORMAT,
+                GEMINI_FILES_CANDIDATE_API_FORMAT,
+                "gemini_files_passthrough_url",
+            ),
         )
         .await;
         return None;
@@ -120,7 +127,7 @@ pub(super) async fn resolve_local_gemini_files_candidate_payload_parts(
             None
         };
     if provider_request_body_base64.is_some() && transport.endpoint.body_rules.is_some() {
-        mark_skipped_local_gemini_files_candidate(
+        mark_skipped_local_gemini_files_candidate_with_failure_diagnostic(
             state,
             input,
             trace_id,
@@ -128,6 +135,11 @@ pub(super) async fn resolve_local_gemini_files_candidate_payload_parts(
             attempt.candidate_index,
             &attempt.candidate_id,
             "transport_body_rules_unsupported_for_binary_upload",
+            CandidateFailureDiagnostic::body_rules_unsupported_for_binary_upload(
+                GEMINI_FILES_CLIENT_API_FORMAT,
+                GEMINI_FILES_CANDIDATE_API_FORMAT,
+                "gemini_files_binary_upload",
+            ),
         )
         .await;
         return None;
@@ -138,7 +150,7 @@ pub(super) async fn resolve_local_gemini_files_candidate_payload_parts(
             transport.endpoint.body_rules.as_ref(),
             Some(body_json),
         ) {
-            mark_skipped_local_gemini_files_candidate(
+            mark_skipped_local_gemini_files_candidate_with_failure_diagnostic(
                 state,
                 input,
                 trace_id,
@@ -146,6 +158,11 @@ pub(super) async fn resolve_local_gemini_files_candidate_payload_parts(
                 attempt.candidate_index,
                 &attempt.candidate_id,
                 "transport_body_rules_apply_failed",
+                CandidateFailureDiagnostic::body_rules_apply_failed(
+                    GEMINI_FILES_CLIENT_API_FORMAT,
+                    GEMINI_FILES_CANDIDATE_API_FORMAT,
+                    "gemini_files_body_rules",
+                ),
             )
             .await;
             return None;
@@ -175,7 +192,7 @@ pub(super) async fn resolve_local_gemini_files_candidate_payload_parts(
             .unwrap_or(original_request_body),
         Some(original_request_body),
     ) {
-        mark_skipped_local_gemini_files_candidate(
+        mark_skipped_local_gemini_files_candidate_with_failure_diagnostic(
             state,
             input,
             trace_id,
@@ -183,6 +200,11 @@ pub(super) async fn resolve_local_gemini_files_candidate_payload_parts(
             attempt.candidate_index,
             &attempt.candidate_id,
             "transport_header_rules_apply_failed",
+            CandidateFailureDiagnostic::header_rules_apply_failed(
+                GEMINI_FILES_CLIENT_API_FORMAT,
+                GEMINI_FILES_CANDIDATE_API_FORMAT,
+                "gemini_files_header_rules",
+            ),
         )
         .await;
         return None;

@@ -229,6 +229,18 @@
                     </span>
                   </div>
                   <div
+                    v-if="currentAttemptRankingInfo"
+                    class="info-item"
+                  >
+                    <span class="info-label">排序原因</span>
+                    <span class="info-value info-value-stacked">
+                      <code class="format-code">{{ currentAttemptRankingInfo.summary }}</code>
+                      <span class="text-xs text-muted-foreground">
+                        {{ currentAttemptRankingInfo.hint }}
+                      </span>
+                    </span>
+                  </div>
+                  <div
                     v-if="currentAttempt.key_name || currentAttempt.key_id"
                     class="info-item"
                   >
@@ -436,19 +448,44 @@
                   class="skip-reason"
                 >
                   <span class="reason-label">跳过原因</span>
-                  <span class="reason-value">{{ currentAttemptSkipReasonDisplay }}</span>
+                  <span class="reason-content">
+                    <span class="reason-value">{{ currentAttemptSkipReasonDisplay }}</span>
+                    <span
+                      v-if="currentAttemptFailureDiagnostic"
+                      class="reason-detail"
+                    >
+                      <code>{{ currentAttemptFailureDiagnostic.path }}</code>
+                      {{ currentAttemptFailureDiagnostic.message }}
+                    </span>
+                  </span>
                 </div>
 
-                <!-- 错误信息 -->
+                <!-- 真实请求错误：节点级调试原因，和对客户端返回的摘要分开 -->
                 <div
-                  v-if="currentAttempt.status === 'failed' && (currentAttempt.error_message || currentAttempt.error_type)"
+                  v-if="currentAttempt.status === 'failed' && currentAttemptRequestError"
                   class="error-block"
                 >
                   <div class="error-type">
-                    {{ currentAttempt.error_type || '错误' }}
+                    真实请求错误
                   </div>
                   <div class="error-msg">
-                    {{ currentAttempt.error_message || '未知错误' }}
+                    {{ currentAttemptRequestError.message }}
+                  </div>
+                  <div
+                    v-if="currentAttemptRequestError.meta.length > 0"
+                    class="error-flow-meta"
+                  >
+                    <span
+                      v-for="item in currentAttemptRequestError.meta"
+                      :key="item"
+                      class="error-flow-chip"
+                    >{{ item }}</span>
+                  </div>
+                  <div
+                    v-if="currentAttemptRequestError.safetyHint"
+                    class="error-flow-safety"
+                  >
+                    {{ currentAttemptRequestError.safetyHint }}
                   </div>
                 </div>
 
@@ -521,7 +558,7 @@ interface NodeGroup {
   startIndex: number
   endIndex: number
   hasConversion: boolean  // 组内是否有格式转换候选
-  providerApiFormat: string | null  // 提供商 API 格式（如 openai:cli）
+  providerApiFormat: string | null  // 提供商 API 格式（如 openai:responses）
   isPoolGroup?: boolean
 }
 
@@ -551,6 +588,17 @@ interface UsageData {
   }
 }
 
+interface AttemptErrorFlow {
+  source?: string
+  statusCode?: number
+  classification?: string
+  decision?: string
+  retryable?: boolean
+  safeToExpose?: boolean
+  propagation?: string
+  message?: string
+}
+
 const props = defineProps<{
   requestId?: string | null
   /** 外部传入的状态码，用于覆盖 trace.final_status 的判断 */
@@ -569,6 +617,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   selectAttempt: [attempt: CandidateRecord | null]
+  traceState: [state: { loaded: boolean, hasTrace: boolean }]
 }>()
 
 // 用量数据（从 props 获取）
@@ -626,6 +675,19 @@ const trace = computed(() => props.traceData ?? internalTrace.value)
 const selectedGroupIndex = ref(0)
 const selectedAttemptIndex = ref(0)
 const hoveredGroupIndex = ref<number | null>(null)
+const traceLoadStarted = ref(false)
+
+watch(
+  [trace, loading],
+  ([value, isLoading]) => {
+    const waitingForInternalTrace = Boolean(props.requestId && !props.traceData && !traceLoadStarted.value && !value)
+    emit('traceState', {
+      loaded: !isLoading && !waitingForInternalTrace,
+      hasTrace: Boolean(value?.candidates?.length),
+    })
+  },
+  { immediate: true },
+)
 
 // 格式化延迟（自动调整单位）
 const formatLatency = (ms: number | undefined | null): string => {
@@ -1022,6 +1084,80 @@ const extractObject = (value: unknown): Record<string, unknown> | null => {
   return value as Record<string, unknown>
 }
 
+const readStringField = (obj: Record<string, unknown>, key: string): string | undefined => {
+  const value = obj[key]
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+const readNumberField = (obj: Record<string, unknown>, key: string): number | undefined => {
+  const value = obj[key]
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return undefined
+}
+
+const readBooleanField = (obj: Record<string, unknown>, key: string): boolean | undefined => {
+  const value = obj[key]
+  return typeof value === 'boolean' ? value : undefined
+}
+
+const normalizeAttemptErrorFlow = (value: unknown): AttemptErrorFlow | null => {
+  const raw = extractObject(value)
+  if (!raw) return null
+
+  const flow: AttemptErrorFlow = {
+    source: readStringField(raw, 'source'),
+    statusCode: readNumberField(raw, 'status_code') ?? readNumberField(raw, 'statusCode'),
+    classification: readStringField(raw, 'classification'),
+    decision: readStringField(raw, 'decision'),
+    retryable: readBooleanField(raw, 'retryable'),
+    safeToExpose: readBooleanField(raw, 'safe_to_expose') ?? readBooleanField(raw, 'safeToExpose'),
+    propagation: readStringField(raw, 'propagation'),
+    message: readStringField(raw, 'message'),
+  }
+
+  return Object.values(flow).some(value => value !== undefined) ? flow : null
+}
+
+const labelFromMap = (value: string | undefined, labels: Record<string, string>): string | undefined => {
+  if (!value) return undefined
+  return labels[value] || value
+}
+
+const formatErrorFlowSource = (value?: string): string | undefined => labelFromMap(value, {
+  upstream_response: '上游响应',
+  request_validation: '请求校验',
+  gateway: '网关处理',
+  transport: '传输层',
+  scheduler: '调度层',
+})
+
+const formatErrorFlowDecision = (value?: string): string | undefined => labelFromMap(value, {
+  retry_next_candidate: '重试下一个候选',
+  stop_local_failover: '停止本地转移',
+  use_default: '默认处理',
+  return_to_client: '返回客户端',
+})
+
+const formatErrorFlowPropagation = (value?: string): string | undefined => labelFromMap(value, {
+  suppressed: '已抑制',
+  converted: '已转换',
+  passthrough: '直接透传',
+  local: '本地生成',
+  captured: '仅采集',
+})
+
+const formatErrorFlowClassification = (value?: string): string | undefined => labelFromMap(value, {
+  retryable: '可重试',
+  terminal: '终止',
+  provider_auth: '上游认证',
+  provider_quota: '上游额度',
+  invalid_request: '请求无效',
+})
+
 const extractStringList = (value: unknown): string[] => {
   if (Array.isArray(value)) {
     return value
@@ -1168,6 +1304,74 @@ const currentAttemptSchedulerInfo = computed<{
   }
 })
 
+const normalizeMetadataText = (value: unknown): string => {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+const formatRankingModeLabel = (value: string): string => {
+  const normalized = value.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase()
+  const labels: Record<string, string> = {
+    fixed_order: '固定顺序',
+    cache_affinity: '亲和性优先',
+    load_balance: '负载均衡',
+  }
+  return labels[normalized] || value
+}
+
+const formatPriorityModeLabel = (value: string): string => {
+  const normalized = value.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase()
+  const labels: Record<string, string> = {
+    provider: 'Provider 优先级',
+    global_key: '全局 Key 优先级',
+  }
+  return labels[normalized] || value
+}
+
+const formatRankingReasonLabel = (value: string): string => {
+  const labels: Record<string, string> = {
+    cached_affinity: '缓存亲和性命中',
+    local_tunnel: '本地隧道优先',
+    cross_format: '跨格式降级',
+  }
+  return labels[value] || value
+}
+
+const currentAttemptRankingInfo = computed<{
+  summary: string
+  hint: string
+} | null>(() => {
+  const attempt = currentAttempt.value
+  if (!attempt) return null
+  const ranking = extractObject(attempt.ranking)
+  const extra = extractObject(attempt.extra_data)
+  if (!ranking && !extra) return null
+
+  const rankingMode = normalizeMetadataText(ranking?.mode ?? extra?.ranking_mode)
+  const priorityMode = normalizeMetadataText(ranking?.priority_mode ?? extra?.priority_mode)
+  const promotedBy = normalizeMetadataText(ranking?.promoted_by ?? extra?.promoted_by)
+  const demotedBy = normalizeMetadataText(ranking?.demoted_by ?? extra?.demoted_by)
+  const rankingIndex = normalizePriorityNumber(ranking?.index ?? extra?.ranking_index)
+  const prioritySlot = normalizePriorityNumber(ranking?.priority_slot ?? extra?.priority_slot)
+  if (!rankingMode && !priorityMode && !promotedBy && !demotedBy && rankingIndex === null && prioritySlot === null) {
+    return null
+  }
+
+  const summaryParts: string[] = []
+  if (rankingMode) summaryParts.push(formatRankingModeLabel(rankingMode))
+  if (promotedBy) summaryParts.push(formatRankingReasonLabel(promotedBy))
+  if (demotedBy) summaryParts.push(formatRankingReasonLabel(demotedBy))
+
+  const hintParts: string[] = []
+  if (rankingIndex !== null) hintParts.push(`排序 #${rankingIndex + 1}`)
+  if (priorityMode) hintParts.push(formatPriorityModeLabel(priorityMode))
+  if (prioritySlot !== null) hintParts.push(`槽位 ${prioritySlot}`)
+
+  return {
+    summary: summaryParts.length > 0 ? summaryParts.join(' / ') : '排序元数据',
+    hint: hintParts.length > 0 ? hintParts.join(' · ') : '候选排序由 scheduler ranking engine 生成',
+  }
+})
+
 const currentAttemptKeyFormatsDisplay = computed(() => {
   const attempt = currentAttempt.value
   if (!attempt) return ''
@@ -1243,6 +1447,13 @@ const currentAttemptSkipReasonDisplay = computed(() => {
   const attempt = currentAttempt.value
   if (!attempt?.skip_reason) return ''
 
+  if (attempt.skip_reason === 'provider_request_body_build_failed') {
+    return '上游请求体转换失败'
+  }
+  if (attempt.skip_reason === 'provider_request_body_missing') {
+    return '无法构建上游请求体'
+  }
+
   if (attempt.skip_reason !== 'transport_unsupported') {
     return attempt.skip_reason
   }
@@ -1254,6 +1465,70 @@ const currentAttemptSkipReasonDisplay = computed(() => {
     : ''
 
   return detailedReason || attempt.skip_reason
+})
+
+const currentAttemptFailureDiagnostic = computed<{
+  path: string
+  message: string
+} | null>(() => {
+  const attempt = currentAttempt.value
+  if (!attempt) return null
+  const extra = extractObject(attempt.extra_data)
+  const failureDiagnostic = extractObject(extra?.failure_diagnostic)
+  const safeToShow = failureDiagnostic?.safe_to_show !== false
+  const error = failureDiagnostic && safeToShow
+    ? failureDiagnostic
+    : extractObject(extra?.request_body_build_error)
+  const path = typeof error?.path === 'string' && error.path.trim()
+    ? error.path.trim()
+    : ''
+  const message = typeof error?.message === 'string' && error.message.trim()
+    ? error.message.trim()
+    : ''
+  if (!path && !message) return null
+  return {
+    path: path || '$',
+    message: message || '请求体转换失败',
+  }
+})
+
+const currentAttemptRequestError = computed<{
+  message: string
+  meta: string[]
+  safetyHint: string
+} | null>(() => {
+  const attempt = currentAttempt.value
+  if (!attempt || attempt.status !== 'failed') return null
+
+  const extra = extractObject(attempt.extra_data)
+  const flow = normalizeAttemptErrorFlow(extra?.error_flow)
+  const fallbackMessage = typeof attempt.error_message === 'string' && attempt.error_message.trim()
+    ? attempt.error_message.trim()
+    : ''
+  const fallbackType = typeof attempt.error_type === 'string' && attempt.error_type.trim()
+    ? attempt.error_type.trim()
+    : ''
+  const message = flow?.message || fallbackMessage
+  if (!message && !fallbackType && !flow) return null
+
+  const meta = [
+    flow?.statusCode != null ? `HTTP ${flow.statusCode}` : (attempt.status_code ? `HTTP ${attempt.status_code}` : ''),
+    formatErrorFlowSource(flow?.source),
+    formatErrorFlowClassification(flow?.classification) || fallbackType,
+    formatErrorFlowDecision(flow?.decision),
+    formatErrorFlowPropagation(flow?.propagation),
+    flow?.retryable != null ? (flow.retryable ? '会继续重试' : '不再重试') : '',
+  ].filter((item): item is string => Boolean(item))
+
+  const safetyHint = flow?.safeToExpose === false
+    ? '该错误被标记为敏感上游错误：仅在链路节点展示，不应完整返回给客户端。'
+    : ''
+
+  return {
+    message: message || fallbackType || '未知错误',
+    meta,
+    safetyHint,
+  }
 })
 
 // 计算当前尝试启用的能力标签（请求需要的能力）
@@ -1390,6 +1665,7 @@ const loadTrace = async (silent = false) => {
   if (!props.requestId || props.traceData) return
 
   isSilentRefresh.value = silent
+  traceLoadStarted.value = true
 
   if (!silent) {
     loading.value = true
@@ -1481,6 +1757,7 @@ watch(
   () => {
     selectedGroupIndex.value = 0
     selectedAttemptIndex.value = 0
+    traceLoadStarted.value = false
 
     if (props.traceData) {
       internalTrace.value = null
@@ -2347,6 +2624,28 @@ const getDisplayStatus = (attempt: CandidateRecord | null | undefined): string =
   color: hsl(var(--foreground));
 }
 
+.reason-content {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.reason-detail {
+  color: hsl(var(--muted-foreground));
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.reason-detail code {
+  margin-right: 0.4rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  background: hsl(var(--background) / 0.8);
+  color: hsl(var(--foreground));
+  font-size: 0.8rem;
+}
+
 /* 错误信息 */
 .error-block {
   margin-top: 1rem;
@@ -2369,6 +2668,38 @@ const getDisplayStatus = (attempt: CandidateRecord | null | undefined): string =
   font-size: 0.85rem;
   color: #dc2626;
   word-break: break-word;
+}
+
+.error-flow-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  margin-top: 0.625rem;
+}
+
+.error-flow-chip {
+  padding: 0.125rem 0.45rem;
+  border-radius: 999px;
+  background: #ef444414;
+  border: 1px solid #ef44442e;
+  color: #991b1b;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.error-flow-safety {
+  margin-top: 0.625rem;
+  color: #991b1b;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.dark .error-flow-chip {
+  color: #fecaca;
+}
+
+.dark .error-flow-safety {
+  color: #fecaca;
 }
 
 /* 额外信息 */

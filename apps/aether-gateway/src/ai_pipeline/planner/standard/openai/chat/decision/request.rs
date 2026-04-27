@@ -4,15 +4,15 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::ai_pipeline::conversion::{request_conversion_direct_auth, request_conversion_kind};
-use crate::ai_pipeline::planner::candidate_eligibility::EligibleLocalExecutionCandidate;
 use crate::ai_pipeline::planner::candidate_preparation::{
     prepare_header_authenticated_candidate, OauthPreparationContext,
 };
+use crate::ai_pipeline::planner::candidate_resolution::EligibleLocalExecutionCandidate;
 use crate::ai_pipeline::planner::common::OPENAI_CHAT_STREAM_PLAN_KIND;
 use crate::ai_pipeline::planner::standard::{
-    apply_codex_openai_cli_special_headers, build_cross_format_openai_chat_request_body,
+    apply_codex_openai_responses_special_headers, build_cross_format_openai_chat_request_body,
     build_cross_format_openai_chat_upstream_url, build_local_openai_chat_request_body,
-    build_local_openai_chat_upstream_url,
+    build_local_openai_chat_upstream_url, request_body_build_failure_extra_data,
 };
 use crate::ai_pipeline::transport::apply_local_header_rules;
 use crate::ai_pipeline::transport::auth::{
@@ -27,12 +27,16 @@ use crate::ai_pipeline::transport::kiro::{
 use crate::ai_pipeline::transport::local_openai_chat_transport_unsupported_reason;
 use crate::ai_pipeline::transport::vertex::uses_vertex_api_key_query_auth;
 use crate::ai_pipeline::{
-    ConversionMode, ExecutionStrategy, GatewayProviderTransportSnapshot,
-    LocalResolvedOAuthRequestAuth,
+    CandidateFailureDiagnostic, ConversionMode, ExecutionStrategy,
+    GatewayProviderTransportSnapshot, LocalResolvedOAuthRequestAuth,
 };
 use crate::AppState;
 
-use super::support::{mark_skipped_local_openai_chat_candidate, LocalOpenAiChatDecisionInput};
+use super::support::{
+    mark_skipped_local_openai_chat_candidate,
+    mark_skipped_local_openai_chat_candidate_with_extra_data,
+    mark_skipped_local_openai_chat_candidate_with_failure_diagnostic, LocalOpenAiChatDecisionInput,
+};
 
 pub(crate) struct LocalOpenAiChatCandidatePayloadParts {
     pub(super) auth_header: String,
@@ -118,21 +122,26 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             upstream_is_stream,
             transport.endpoint.body_rules.as_ref(),
         ) else {
-            mark_skipped_local_openai_chat_candidate(
+            mark_skipped_local_openai_chat_candidate_with_extra_data(
                 state,
                 input,
                 trace_id,
                 candidate,
                 candidate_index,
                 candidate_id,
-                "provider_request_body_missing",
+                "provider_request_body_build_failed",
+                request_body_build_failure_extra_data(
+                    body_json,
+                    "openai:chat",
+                    provider_api_format,
+                ),
             )
             .await;
             return None;
         };
 
         let Some(upstream_url) = build_local_openai_chat_upstream_url(parts, transport) else {
-            mark_skipped_local_openai_chat_candidate(
+            mark_skipped_local_openai_chat_candidate_with_failure_diagnostic(
                 state,
                 input,
                 trace_id,
@@ -140,6 +149,11 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
                 candidate_index,
                 candidate_id,
                 "upstream_url_missing",
+                CandidateFailureDiagnostic::upstream_url_missing(
+                    "openai:chat",
+                    provider_api_format,
+                    "openai_chat_same_format_url",
+                ),
             )
             .await;
             return None;
@@ -159,7 +173,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             &provider_request_body,
             Some(body_json),
         ) {
-            mark_skipped_local_openai_chat_candidate(
+            mark_skipped_local_openai_chat_candidate_with_failure_diagnostic(
                 state,
                 input,
                 trace_id,
@@ -167,11 +181,16 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
                 candidate_index,
                 candidate_id,
                 "transport_header_rules_apply_failed",
+                CandidateFailureDiagnostic::header_rules_apply_failed(
+                    "openai:chat",
+                    provider_api_format,
+                    "openai_chat_same_format_headers",
+                ),
             )
             .await;
             return None;
         }
-        apply_codex_openai_cli_special_headers(
+        apply_codex_openai_responses_special_headers(
             &mut provider_request_headers,
             &provider_request_body,
             &parts.headers,
@@ -343,14 +362,19 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         },
         Some(input.auth_context.api_key_id.as_str()),
     ) else {
-        mark_skipped_local_openai_chat_candidate(
+        mark_skipped_local_openai_chat_candidate_with_extra_data(
             state,
             input,
             trace_id,
             candidate,
             candidate_index,
             candidate_id,
-            "provider_request_body_missing",
+            "provider_request_body_build_failed",
+            request_body_build_failure_extra_data(
+                body_json,
+                "openai:chat",
+                provider_api_format.as_str(),
+            ),
         )
         .await;
         return None;
@@ -386,7 +410,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         provider_api_format.as_str(),
         upstream_is_stream,
     ) else {
-        mark_skipped_local_openai_chat_candidate(
+        mark_skipped_local_openai_chat_candidate_with_failure_diagnostic(
             state,
             input,
             trace_id,
@@ -394,6 +418,11 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             candidate_index,
             candidate_id,
             "upstream_url_missing",
+            CandidateFailureDiagnostic::upstream_url_missing(
+                "openai:chat",
+                provider_api_format.as_str(),
+                "openai_chat_cross_format_url",
+            ),
         )
         .await;
         return None;
@@ -430,7 +459,7 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
         &provider_request_body,
         Some(body_json),
     ) {
-        mark_skipped_local_openai_chat_candidate(
+        mark_skipped_local_openai_chat_candidate_with_failure_diagnostic(
             state,
             input,
             trace_id,
@@ -438,11 +467,16 @@ pub(crate) async fn resolve_local_openai_chat_candidate_payload_parts(
             candidate_index,
             candidate_id,
             "transport_header_rules_apply_failed",
+            CandidateFailureDiagnostic::header_rules_apply_failed(
+                "openai:chat",
+                provider_api_format.as_str(),
+                "openai_chat_cross_format_headers",
+            ),
         )
         .await;
         return None;
     }
-    apply_codex_openai_cli_special_headers(
+    apply_codex_openai_responses_special_headers(
         &mut provider_request_headers,
         &provider_request_body,
         &parts.headers,
@@ -522,14 +556,19 @@ async fn build_kiro_openai_chat_cross_format_payload_parts(
     ) {
         Some(body) => body,
         None => {
-            mark_skipped_local_openai_chat_candidate(
+            mark_skipped_local_openai_chat_candidate_with_failure_diagnostic(
                 state,
                 input,
                 trace_id,
                 candidate,
                 candidate_index,
                 candidate_id,
-                "provider_request_body_missing",
+                "provider_request_body_build_failed",
+                CandidateFailureDiagnostic::envelope_build_failed(
+                    "openai:chat",
+                    provider_api_format,
+                    "openai_chat_kiro_envelope",
+                ),
             )
             .await;
             return None;
@@ -545,7 +584,7 @@ async fn build_kiro_openai_chat_cross_format_payload_parts(
     ) {
         Some(url) => url,
         None => {
-            mark_skipped_local_openai_chat_candidate(
+            mark_skipped_local_openai_chat_candidate_with_failure_diagnostic(
                 state,
                 input,
                 trace_id,
@@ -553,6 +592,11 @@ async fn build_kiro_openai_chat_cross_format_payload_parts(
                 candidate_index,
                 candidate_id,
                 "upstream_url_missing",
+                CandidateFailureDiagnostic::upstream_url_missing(
+                    "openai:chat",
+                    provider_api_format,
+                    "openai_chat_kiro_url",
+                ),
             )
             .await;
             return None;
@@ -570,7 +614,7 @@ async fn build_kiro_openai_chat_cross_format_payload_parts(
     }) {
         Some(headers) => headers,
         None => {
-            mark_skipped_local_openai_chat_candidate(
+            mark_skipped_local_openai_chat_candidate_with_failure_diagnostic(
                 state,
                 input,
                 trace_id,
@@ -578,6 +622,11 @@ async fn build_kiro_openai_chat_cross_format_payload_parts(
                 candidate_index,
                 candidate_id,
                 "transport_header_rules_apply_failed",
+                CandidateFailureDiagnostic::header_rules_apply_failed(
+                    "openai:chat",
+                    provider_api_format,
+                    "openai_chat_kiro_headers",
+                ),
             )
             .await;
             return None;

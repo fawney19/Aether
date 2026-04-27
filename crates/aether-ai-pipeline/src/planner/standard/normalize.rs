@@ -2,8 +2,8 @@ use serde_json::{json, Value};
 
 use crate::conversion::request::{
     convert_openai_chat_request_to_claude_request, convert_openai_chat_request_to_gemini_request,
-    convert_openai_chat_request_to_openai_cli_request,
-    normalize_openai_cli_request_to_openai_chat_request,
+    convert_openai_chat_request_to_openai_responses_request,
+    normalize_openai_responses_request_to_openai_chat_request,
 };
 use crate::conversion::{request_conversion_kind, RequestConversionKind};
 
@@ -56,8 +56,8 @@ pub fn build_cross_format_openai_chat_request_body(
             mapped_model,
             upstream_is_stream,
         ),
-        RequestConversionKind::ToOpenAIFamilyCli => {
-            convert_openai_chat_request_to_openai_cli_request(
+        RequestConversionKind::ToOpenAiResponses => {
+            convert_openai_chat_request_to_openai_responses_request(
                 body_json,
                 mapped_model,
                 upstream_is_stream,
@@ -68,7 +68,7 @@ pub fn build_cross_format_openai_chat_request_body(
     }
 }
 
-pub fn build_local_openai_cli_request_body(
+pub fn build_local_openai_responses_request_body(
     body_json: &Value,
     mapped_model: &str,
     require_streaming: bool,
@@ -86,14 +86,14 @@ pub fn build_local_openai_cli_request_body(
     Some(Value::Object(provider_request_body))
 }
 
-pub fn build_cross_format_openai_cli_request_body(
+pub fn build_cross_format_openai_responses_request_body(
     body_json: &Value,
     mapped_model: &str,
     client_api_format: &str,
     provider_api_format: &str,
     upstream_is_stream: bool,
 ) -> Option<Value> {
-    let chat_like_request = normalize_openai_cli_request_to_openai_chat_request(body_json)?;
+    let chat_like_request = normalize_openai_responses_request_to_openai_chat_request(body_json)?;
     let conversion_kind = request_conversion_kind(client_api_format, provider_api_format)?;
     match conversion_kind {
         RequestConversionKind::ToOpenAIChat => build_local_openai_chat_request_body(
@@ -101,8 +101,8 @@ pub fn build_cross_format_openai_cli_request_body(
             mapped_model,
             upstream_is_stream,
         ),
-        RequestConversionKind::ToOpenAIFamilyCli => {
-            convert_openai_chat_request_to_openai_cli_request(
+        RequestConversionKind::ToOpenAiResponses => {
+            convert_openai_chat_request_to_openai_responses_request(
                 &chat_like_request,
                 mapped_model,
                 upstream_is_stream,
@@ -124,8 +124,10 @@ pub fn build_cross_format_openai_cli_request_body(
 
 #[cfg(test)]
 mod tests {
-    use super::build_local_openai_cli_request_body;
-    use super::{build_cross_format_openai_cli_request_body, build_local_openai_chat_request_body};
+    use super::build_local_openai_responses_request_body;
+    use super::{
+        build_cross_format_openai_responses_request_body, build_local_openai_chat_request_body,
+    };
     use serde_json::{json, Value};
 
     fn object_keys(value: &Value) -> Vec<&str> {
@@ -138,20 +140,20 @@ mod tests {
     }
 
     #[test]
-    fn builds_openai_chat_cross_format_request_body_from_openai_cli_source() {
+    fn builds_openai_chat_cross_format_request_body_from_openai_responses_source() {
         let body_json = json!({
             "model": "gpt-5",
             "input": "hello",
         });
 
-        let provider_request_body = build_cross_format_openai_cli_request_body(
+        let provider_request_body = build_cross_format_openai_responses_request_body(
             &body_json,
             "gpt-5-upstream",
-            "openai:cli",
+            "openai:responses",
             "openai:chat",
             false,
         )
-        .expect("openai cli to openai chat body should build");
+        .expect("openai responses to openai chat body should build");
 
         assert_eq!(provider_request_body["model"], "gpt-5-upstream");
         assert_eq!(provider_request_body["messages"][0]["role"], "user");
@@ -159,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn local_openai_cli_request_body_preserves_original_field_order() {
+    fn local_openai_responses_request_body_preserves_original_field_order() {
         let body_json: Value = serde_json::from_str(
             r#"{
                 "model": "gpt-5",
@@ -171,8 +173,8 @@ mod tests {
         .expect("request json should parse");
 
         let provider_request_body =
-            build_local_openai_cli_request_body(&body_json, "gpt-5-upstream", false)
-                .expect("openai cli body should build");
+            build_local_openai_responses_request_body(&body_json, "gpt-5-upstream", false)
+                .expect("openai responses body should build");
 
         assert_eq!(
             object_keys(&provider_request_body),

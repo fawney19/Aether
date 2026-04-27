@@ -446,7 +446,7 @@ async fn gateway_handles_admin_system_config_export_locally_with_trusted_admin_p
             sample_endpoint(
                 "endpoint-cli",
                 &provider_id,
-                "openai:cli",
+                "openai:responses",
                 "https://api.openai.example",
             ),
         ],

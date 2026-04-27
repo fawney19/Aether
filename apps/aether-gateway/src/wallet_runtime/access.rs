@@ -22,7 +22,10 @@ pub(crate) async fn resolve_wallet_auth_gate(
             auth_snapshot.api_key_is_standalone,
         )
         .await?;
-    let is_admin = auth_snapshot.user_role.eq_ignore_ascii_case("admin");
+    let is_admin = wallet_auth_allows_admin_bypass(
+        &auth_snapshot.user_role,
+        auth_snapshot.api_key_is_standalone,
+    );
 
     Ok(Some(match wallet.as_ref() {
         Some(wallet) => map_wallet_snapshot(wallet).access_decision(is_admin),
@@ -60,12 +63,18 @@ fn map_wallet_snapshot(snapshot: &StoredWalletSnapshot) -> WalletSnapshot {
     }
 }
 
+fn wallet_auth_allows_admin_bypass(user_role: &str, api_key_is_standalone: bool) -> bool {
+    user_role.eq_ignore_ascii_case("admin") && !api_key_is_standalone
+}
+
 #[cfg(test)]
 mod tests {
     use aether_data::repository::wallet::StoredWalletSnapshot;
     use aether_wallet::{WalletAccessFailure, WalletLimitMode, WalletSnapshot, WalletStatus};
 
-    use super::{local_rejection_from_wallet_access, map_wallet_snapshot};
+    use super::{
+        local_rejection_from_wallet_access, map_wallet_snapshot, wallet_auth_allows_admin_bypass,
+    };
     use crate::control::GatewayLocalAuthRejection;
 
     #[test]
@@ -113,5 +122,11 @@ mod tests {
 
         assert!(decision.allowed);
         assert_eq!(decision.remaining, None);
+    }
+
+    #[test]
+    fn standalone_key_never_uses_admin_wallet_bypass() {
+        assert!(wallet_auth_allows_admin_bypass("admin", false));
+        assert!(!wallet_auth_allows_admin_bypass("admin", true));
     }
 }

@@ -26,7 +26,8 @@ use aether_data_contracts::repository::provider_catalog::{
 use sha2::{Digest, Sha256};
 
 #[tokio::test]
-async fn gateway_executes_openai_cli_cross_format_upstream_stream_via_local_finalize_response() {
+async fn gateway_executes_openai_responses_cross_format_upstream_stream_via_local_finalize_response(
+) {
     use base64::Engine as _;
 
     #[derive(Debug, Clone)]
@@ -56,7 +57,7 @@ async fn gateway_executes_openai_cli_cross_format_upstream_stream_via_local_fina
             true,
             false,
             Some(serde_json::json!(["openai", "gemini"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -67,7 +68,7 @@ async fn gateway_executes_openai_cli_cross_format_upstream_stream_via_local_fina
             Some(5),
             Some(4_102_444_800_i64),
             Some(serde_json::json!(["openai", "gemini"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
         )
         .expect("auth snapshot should build")
@@ -483,7 +484,7 @@ async fn gateway_executes_openai_cli_cross_format_upstream_stream_via_local_fina
 }
 
 #[tokio::test]
-async fn gateway_executes_openai_cli_cross_format_function_call_upstream_stream_via_local_finalize_response(
+async fn gateway_executes_openai_responses_cross_format_function_call_upstream_stream_via_local_finalize_response(
 ) {
     use base64::Engine as _;
 
@@ -514,7 +515,7 @@ async fn gateway_executes_openai_cli_cross_format_function_call_upstream_stream_
             true,
             false,
             Some(serde_json::json!(["openai", "gemini"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -525,7 +526,7 @@ async fn gateway_executes_openai_cli_cross_format_function_call_upstream_stream_
             Some(5),
             Some(4_102_444_800_i64),
             Some(serde_json::json!(["openai", "gemini"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
         )
         .expect("auth snapshot should build")
@@ -939,7 +940,7 @@ async fn gateway_executes_openai_cli_cross_format_function_call_upstream_stream_
 }
 
 #[tokio::test]
-async fn gateway_executes_openai_cli_antigravity_cross_format_upstream_stream_via_local_finalize_response(
+async fn gateway_executes_openai_responses_antigravity_cross_format_upstream_stream_via_local_finalize_response(
 ) {
     use base64::Engine as _;
 
@@ -984,7 +985,7 @@ async fn gateway_executes_openai_cli_antigravity_cross_format_upstream_stream_vi
             true,
             false,
             Some(serde_json::json!(["openai", "antigravity"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -995,7 +996,7 @@ async fn gateway_executes_openai_cli_antigravity_cross_format_upstream_stream_vi
             Some(5),
             Some(4_102_444_800_i64),
             Some(serde_json::json!(["openai", "antigravity"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5"])),
         )
         .expect("auth snapshot should build")

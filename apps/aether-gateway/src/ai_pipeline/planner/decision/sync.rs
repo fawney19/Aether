@@ -67,7 +67,7 @@ pub(crate) async fn maybe_build_sync_decision_payload(
         return Ok(Some(payload));
     }
 
-    if let Some(payload) = super::maybe_build_sync_local_openai_cli_decision_payload(
+    if let Some(payload) = super::maybe_build_sync_local_openai_responses_decision_payload(
         state, parts, trace_id, decision, body_json, plan_kind,
     )
     .await?

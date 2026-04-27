@@ -982,8 +982,8 @@ mod tests {
                     "stream": true
                 })),
                 stream: true,
-                client_api_format: "openai:cli".to_string(),
-                provider_api_format: "openai:cli".to_string(),
+                client_api_format: "openai:responses".to_string(),
+                provider_api_format: "openai:responses".to_string(),
                 model_name: Some("gpt-5.4".into()),
                 proxy: None,
                 tls_profile: None,

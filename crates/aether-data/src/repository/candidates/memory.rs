@@ -595,7 +595,7 @@ mod tests {
                 latency_ms: Some(25),
                 concurrent_requests: Some(2),
                 extra_data: Some(json!({
-                    "provider_api_format": "openai:cli",
+                    "provider_api_format": "openai:responses",
                     "provider_name": "updated",
                 })),
                 required_capabilities: None,
@@ -621,7 +621,7 @@ mod tests {
                 .extra_data
                 .as_ref()
                 .and_then(|value| value.get("provider_api_format")),
-            Some(&json!("openai:cli"))
+            Some(&json!("openai:responses"))
         );
         assert_eq!(
             updated

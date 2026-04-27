@@ -2,7 +2,9 @@ use super::super::test_support::{
     request_context, sample_candidate, sample_endpoint, sample_key, sample_provider, sample_usage,
 };
 use super::local_monitoring_response;
+use crate::data::GatewayDataState;
 use crate::AppState;
+use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
 use axum::body::to_bytes;
 use serde_json::json;
@@ -74,6 +76,78 @@ async fn admin_monitoring_trace_request_returns_local_payload() {
     assert_eq!(payload["candidates"][0]["key_auth_type"], json!("api_key"));
     assert_eq!(payload["candidates"][0]["latency_ms"], json!(33));
     assert_eq!(payload["candidates"][0]["status_code"], json!(502));
+}
+
+#[tokio::test]
+async fn admin_monitoring_trace_request_returns_oauth_account_label_from_auth_config() {
+    let request_candidates = Arc::new(InMemoryRequestCandidateRepository::seed(vec![
+        sample_candidate(
+            "cand-used",
+            "request-1",
+            0,
+            RequestCandidateStatus::Failed,
+            Some(101),
+            Some(33),
+            Some(502),
+        ),
+    ]));
+    let auth_config = json!({
+        "provider_type": "codex",
+        "email": "codex_alice@example.com",
+        "plan_type": "plus",
+        "refresh_token": "rt-test"
+    })
+    .to_string();
+    let oauth_key = sample_key()
+        .with_transport_fields(
+            None,
+            encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "__placeholder__")
+                .expect("placeholder should encrypt"),
+            Some(
+                encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, &auth_config)
+                    .expect("auth config should encrypt"),
+            ),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("key transport fields should build");
+    let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider()],
+        vec![sample_endpoint()],
+        vec![oauth_key],
+    ));
+    let data_state = GatewayDataState::with_decision_trace_readers_for_tests(
+        request_candidates,
+        provider_catalog,
+    )
+    .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY);
+    let state = AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(data_state);
+    let context = request_context(http::Method::GET, "/api/admin/monitoring/trace/request-1");
+
+    let response = local_monitoring_response(&state, &context)
+        .await
+        .expect("handler should not error")
+        .expect("route should be handled locally");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
+    assert_eq!(
+        payload["candidates"][0]["key_account_label"],
+        json!("codex_alice@example.com")
+    );
+    assert_eq!(
+        payload["candidates"][0]["key_oauth_plan_type"],
+        json!("plus")
+    );
 }
 
 #[tokio::test]
@@ -281,6 +355,66 @@ async fn admin_monitoring_trace_request_enriches_proxy_timing_from_usage_audit()
     assert_eq!(
         payload["candidates"][0]["extra_data"]["proxy"]["timing"]["response_wait_ms"],
         json!(475)
+    );
+}
+
+#[tokio::test]
+async fn admin_monitoring_trace_request_exposes_structured_ranking_metadata() {
+    let mut candidate = sample_candidate(
+        "cand-used",
+        "request-1",
+        0,
+        RequestCandidateStatus::Success,
+        Some(101),
+        Some(33),
+        Some(200),
+    );
+    candidate.extra_data = Some(json!({
+        "ranking_mode": "CacheAffinity",
+        "priority_mode": "Provider",
+        "ranking_index": 0,
+        "priority_slot": 7,
+        "promoted_by": "cached_affinity",
+        "demoted_by": "cross_format",
+        "client_api_format": "openai:responses"
+    }));
+
+    let request_candidates = Arc::new(InMemoryRequestCandidateRepository::seed(vec![candidate]));
+    let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![sample_provider()],
+        vec![sample_endpoint()],
+        vec![sample_key()],
+    ));
+    let state = AppState::new()
+        .expect("state should build")
+        .with_decision_trace_data_readers_for_tests(request_candidates, provider_catalog);
+    let context = request_context(http::Method::GET, "/api/admin/monitoring/trace/request-1");
+
+    let response = local_monitoring_response(&state, &context)
+        .await
+        .expect("handler should not error")
+        .expect("route should be handled locally");
+
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should read");
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("json body should parse");
+
+    assert_eq!(
+        payload["candidates"][0]["ranking"],
+        json!({
+            "mode": "CacheAffinity",
+            "priority_mode": "Provider",
+            "index": 0,
+            "priority_slot": 7,
+            "promoted_by": "cached_affinity",
+            "demoted_by": "cross_format"
+        })
+    );
+    assert_eq!(
+        payload["candidates"][0]["extra_data"]["ranking_mode"],
+        json!("CacheAffinity")
     );
 }
 

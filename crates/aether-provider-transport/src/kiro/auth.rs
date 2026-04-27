@@ -241,6 +241,7 @@ mod tests {
         transport.key.decrypted_auth_config = Some(
             r#"{
                 "access_token":"cached-token",
+                "expires_at":4102444800,
                 "refresh_token":"rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
                 "machine_id":"123e4567-e89b-12d3-a456-426614174000",
                 "api_region":"us-west-2"
@@ -261,6 +262,7 @@ mod tests {
         transport.key.decrypted_auth_config = Some(
             r#"{
                 "access_token":"cached-token",
+                "expires_at":4102444800,
                 "refresh_token":"rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
                 "machine_id":"123e4567-e89b-12d3-a456-426614174000",
                 "api_region":"us-west-2"
@@ -293,6 +295,22 @@ mod tests {
         );
 
         assert!(resolve_local_kiro_request_auth(&transport).is_none());
+    }
+
+    #[test]
+    fn skips_refreshable_cached_access_token_without_expiry() {
+        let mut transport = sample_transport();
+        transport.key.decrypted_api_key = "__placeholder__".to_string();
+        transport.key.decrypted_auth_config = Some(
+            r#"{
+                "access_token":"cached-token-without-expiry",
+                "refresh_token":"rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+            }"#
+            .to_string(),
+        );
+
+        assert!(resolve_local_kiro_request_auth(&transport).is_none());
+        assert!(supports_local_kiro_request_auth_resolution(&transport));
     }
 
     #[test]

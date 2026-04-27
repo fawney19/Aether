@@ -12,6 +12,12 @@ use axum::{
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdminMonitoringKeyAccountDisplay {
+    pub label: Option<String>,
+    pub oauth_plan_type: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdminMonitoringRoute {
     AuditLogs,
@@ -264,6 +270,18 @@ pub fn build_admin_monitoring_trace_request_payload_response(
     trace: &DecisionTrace,
     usage: Option<&StoredRequestUsageAudit>,
 ) -> Response<Body> {
+    build_admin_monitoring_trace_request_payload_response_with_key_accounts(
+        trace,
+        usage,
+        &BTreeMap::new(),
+    )
+}
+
+pub fn build_admin_monitoring_trace_request_payload_response_with_key_accounts(
+    trace: &DecisionTrace,
+    usage: Option<&StoredRequestUsageAudit>,
+    key_accounts: &BTreeMap<String, AdminMonitoringKeyAccountDisplay>,
+) -> Response<Body> {
     let usage_candidate_id =
         usage.and_then(|item| resolve_admin_monitoring_usage_candidate_id(trace, item));
     let candidates = trace
@@ -274,7 +292,11 @@ pub fn build_admin_monitoring_trace_request_payload_response(
                 .as_deref()
                 .filter(|candidate_id| *candidate_id == item.candidate.id.as_str())
                 .and(usage);
-            build_admin_monitoring_trace_request_candidate_payload(item, matched_usage)
+            build_admin_monitoring_trace_request_candidate_payload_with_key_accounts(
+                item,
+                matched_usage,
+                key_accounts,
+            )
         })
         .collect::<Vec<_>>();
     Json(json!({
@@ -291,7 +313,23 @@ pub fn build_admin_monitoring_trace_request_candidate_payload(
     item: &DecisionTraceCandidate,
     usage: Option<&StoredRequestUsageAudit>,
 ) -> Value {
+    build_admin_monitoring_trace_request_candidate_payload_with_key_accounts(
+        item,
+        usage,
+        &BTreeMap::new(),
+    )
+}
+
+pub fn build_admin_monitoring_trace_request_candidate_payload_with_key_accounts(
+    item: &DecisionTraceCandidate,
+    usage: Option<&StoredRequestUsageAudit>,
+    key_accounts: &BTreeMap<String, AdminMonitoringKeyAccountDisplay>,
+) -> Value {
     let candidate = &item.candidate;
+    let key_account = candidate
+        .key_id
+        .as_deref()
+        .and_then(|key_id| key_accounts.get(key_id));
     json!({
         "id": candidate.id,
         "request_id": candidate.request_id,
@@ -310,13 +348,13 @@ pub fn build_admin_monitoring_trace_request_candidate_payload(
         "endpoint_format_acceptance_config": item.endpoint_format_acceptance_config,
         "key_id": candidate.key_id,
         "key_name": item.provider_key_name,
-        "key_account_label": serde_json::Value::Null,
+        "key_account_label": key_account.and_then(|item| item.label.clone()),
         "key_preview": serde_json::Value::Null,
         "key_auth_type": item.provider_key_auth_type,
         "key_api_formats": item.provider_key_api_formats,
         "key_internal_priority": item.provider_key_internal_priority,
         "key_global_priority_by_format": item.provider_key_global_priority_by_format,
-        "key_oauth_plan_type": serde_json::Value::Null,
+        "key_oauth_plan_type": key_account.and_then(|item| item.oauth_plan_type.clone()),
         "key_capabilities": item.provider_key_capabilities,
         "required_capabilities": candidate.required_capabilities,
         "status": candidate.status,
@@ -327,6 +365,7 @@ pub fn build_admin_monitoring_trace_request_candidate_payload(
         "error_message": candidate.error_message,
         "latency_ms": candidate.latency_ms,
         "concurrent_requests": candidate.concurrent_requests,
+        "ranking": build_admin_monitoring_trace_candidate_ranking(candidate.extra_data.as_ref()),
         "extra_data": build_admin_monitoring_trace_candidate_extra_data(candidate.extra_data.as_ref(), usage),
         "created_at": unix_ms_to_rfc3339(candidate.created_at_unix_ms),
         "started_at": candidate.started_at_unix_ms.and_then(unix_ms_to_rfc3339),
@@ -379,6 +418,41 @@ fn admin_monitoring_candidate_status_rank(status: RequestCandidateStatus) -> u8 
     }
 }
 
+fn build_admin_monitoring_trace_candidate_ranking(existing: Option<&Value>) -> Value {
+    let Some(object) = existing.and_then(Value::as_object) else {
+        return Value::Null;
+    };
+
+    let mut ranking = serde_json::Map::new();
+    if let Some(ranking_mode) = json_string_field(object, "ranking_mode") {
+        ranking.insert("mode".to_string(), Value::String(ranking_mode));
+    }
+    if let Some(priority_mode) = json_string_field(object, "priority_mode") {
+        ranking.insert("priority_mode".to_string(), Value::String(priority_mode));
+    }
+    if let Some(ranking_index) = json_u64_field(object, "ranking_index") {
+        ranking.insert("index".to_string(), Value::Number(ranking_index.into()));
+    }
+    if let Some(priority_slot) = json_i64_field(object, "priority_slot") {
+        ranking.insert(
+            "priority_slot".to_string(),
+            Value::Number(priority_slot.into()),
+        );
+    }
+    if let Some(promoted_by) = json_string_field(object, "promoted_by") {
+        ranking.insert("promoted_by".to_string(), Value::String(promoted_by));
+    }
+    if let Some(demoted_by) = json_string_field(object, "demoted_by") {
+        ranking.insert("demoted_by".to_string(), Value::String(demoted_by));
+    }
+
+    if ranking.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(ranking)
+    }
+}
+
 fn build_admin_monitoring_trace_candidate_extra_data(
     existing: Option<&Value>,
     usage: Option<&StoredRequestUsageAudit>,
@@ -420,6 +494,31 @@ fn build_admin_monitoring_trace_candidate_extra_data(
     match extra_data {
         Some(object) => Value::Object(object),
         None => Value::Null,
+    }
+}
+
+fn json_string_field(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn json_u64_field(object: &serde_json::Map<String, Value>, key: &str) -> Option<u64> {
+    match object.get(key)? {
+        Value::Number(value) => value.as_u64(),
+        Value::String(value) => value.trim().parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+fn json_i64_field(object: &serde_json::Map<String, Value>, key: &str) -> Option<i64> {
+    match object.get(key)? {
+        Value::Number(value) => value.as_i64().or_else(|| value.as_u64()?.try_into().ok()),
+        Value::String(value) => value.trim().parse::<i64>().ok(),
+        _ => None,
     }
 }
 

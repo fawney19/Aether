@@ -22,10 +22,6 @@ use serde_json::json;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::constants::{
-    EXECUTION_RUNTIME_LOOP_GUARD_HEADER, EXECUTION_RUNTIME_LOOP_GUARD_VALUE,
-    EXECUTION_RUNTIME_LOOP_GUARD_VIA_TOKEN,
-};
 #[cfg(test)]
 use crate::execution_runtime::remote_compat::execute_sync_plan_via_remote_execution_runtime;
 use crate::frontdoor_loop_guard::{
@@ -298,7 +294,6 @@ pub(crate) async fn execute_stream_plan_via_local_tunnel(
         plan.content_encoding.as_deref(),
         plan.body.body_bytes_b64.is_some(),
     )?;
-    let headers = append_execution_loop_guard_header(headers);
     let started_at = Instant::now();
     let response = state
         .tunnel
@@ -350,8 +345,6 @@ async fn execute_sync_plan_via_local_tunnel(
         plan.content_encoding.as_deref(),
         plan.body.body_bytes_b64.is_some(),
     )?;
-    let headers = append_execution_loop_guard_header(headers);
-
     let started_at = Instant::now();
     let mut response = state
         .tunnel
@@ -444,7 +437,6 @@ async fn send_request(
         plan.content_encoding.as_deref(),
         plan.body.body_bytes_b64.is_some(),
     )?;
-    let headers = append_execution_loop_guard_header(headers);
     let total_timeout = plan
         .timeouts
         .as_ref()
@@ -478,34 +470,6 @@ async fn send_request(
     request.send().await.map_err(|err| {
         ExecutionRuntimeTransportError::UpstreamRequest(format_upstream_request_error(&err))
     })
-}
-
-fn append_execution_loop_guard_header(mut headers: HeaderMap) -> HeaderMap {
-    headers.insert(
-        HeaderName::from_static(EXECUTION_RUNTIME_LOOP_GUARD_HEADER),
-        HeaderValue::from_static(EXECUTION_RUNTIME_LOOP_GUARD_VALUE),
-    );
-    let via_name = HeaderName::from_static("via");
-    let via_value = headers
-        .get(&via_name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| {
-            if value
-                .to_ascii_lowercase()
-                .contains(EXECUTION_RUNTIME_LOOP_GUARD_VIA_TOKEN)
-            {
-                value.to_string()
-            } else {
-                format!("{value}, 1.1 {EXECUTION_RUNTIME_LOOP_GUARD_VIA_TOKEN}")
-            }
-        })
-        .unwrap_or_else(|| format!("1.1 {EXECUTION_RUNTIME_LOOP_GUARD_VIA_TOKEN}"));
-    if let Ok(value) = HeaderValue::from_str(via_value.as_str()) {
-        headers.insert(via_name, value);
-    }
-    headers
 }
 
 async fn send_via_tunnel_relay(
@@ -972,6 +936,7 @@ mod tests {
     use axum::body::Bytes;
     use axum::extract::ws::Message;
     use axum::extract::Path;
+    use axum::http::HeaderMap as AxumHeaderMap;
     use axum::routing::post;
     use axum::{Json, Router};
     use serde_json::json;
@@ -979,6 +944,9 @@ mod tests {
 
     use super::{
         build_client, execute_sync_plan, DirectSyncExecutionRuntime, ExecutionTransportControls,
+    };
+    use crate::constants::{
+        EXECUTION_RUNTIME_LOOP_GUARD_HEADER, EXECUTION_RUNTIME_LOOP_GUARD_VIA_TOKEN,
     };
     use crate::frontdoor_loop_guard::{
         frontdoor_self_loop_public_ai_path, gateway_frontdoor_self_loop_guard_error_with_port,
@@ -1087,7 +1055,21 @@ mod tests {
         let addr = listener.local_addr().expect("local addr should resolve");
         let app = Router::new().route(
             "/chat",
-            post(|| async {
+            post(|headers: AxumHeaderMap| async move {
+                assert!(
+                    !headers.contains_key(EXECUTION_RUNTIME_LOOP_GUARD_HEADER),
+                    "plain upstream requests must not leak internal execution loop guard headers"
+                );
+                assert!(
+                    !headers
+                        .get_all("via")
+                        .iter()
+                        .filter_map(|value| value.to_str().ok())
+                        .any(|value| value
+                            .to_ascii_lowercase()
+                            .contains(EXECUTION_RUNTIME_LOOP_GUARD_VIA_TOKEN)),
+                    "plain upstream requests must not leak internal execution runtime Via markers"
+                );
                 (
                     axum::http::StatusCode::TOO_MANY_REQUESTS,
                     Json(json!({"error": {"message": "slow down"}})),
@@ -1152,6 +1134,22 @@ mod tests {
                 assert_eq!(node_id, "node-1");
                 assert_eq!(meta["method"], "POST");
                 assert_eq!(meta["url"], "https://example.com/chat");
+                let headers = meta["headers"]
+                    .as_object()
+                    .expect("relay meta headers should be an object");
+                assert!(
+                    !headers.contains_key(EXECUTION_RUNTIME_LOOP_GUARD_HEADER),
+                    "tunnel relay metadata must not leak internal execution loop guard headers"
+                );
+                let via = headers
+                    .get("via")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                assert!(
+                    !via.to_ascii_lowercase()
+                        .contains(EXECUTION_RUNTIME_LOOP_GUARD_VIA_TOKEN),
+                    "tunnel relay metadata must not leak internal execution runtime Via markers"
+                );
                 let request_json: serde_json::Value =
                     serde_json::from_slice(&request_body).expect("request body should be json");
                 assert_eq!(request_json["model"], "gpt-4.1");

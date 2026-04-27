@@ -115,6 +115,33 @@ export interface VideoBilling {
   status?: string            // 计费状态
 }
 
+export interface RequestErrorDomain {
+  source?: string | null
+  status_code?: number | null
+  type?: string | null
+  message?: string | null
+  code?: string | number | null
+  content_type?: string | null
+  body?: unknown
+  category?: string | null
+}
+
+export interface RequestErrorDomains {
+  request_error?: RequestErrorDomain | null
+  upstream_error?: RequestErrorDomain | null
+  client_error?: RequestErrorDomain | null
+  failure_summary?: RequestErrorDomain | null
+}
+
+export interface RequestErrorFlow {
+  source?: string | null
+  status_code?: number | null
+  propagation?: string | null
+  client_response_source?: string | null
+  safe_to_expose_upstream?: boolean | null
+  summary_source?: string | null
+}
+
 export interface RequestDetail {
   id: string // UUID
   request_id: string
@@ -173,6 +200,12 @@ export interface RequestDetail {
   status_code: number
   status?: string  // pending, streaming, completed, failed, cancelled
   error_message?: string
+  request_error?: RequestErrorDomain | null
+  upstream_error?: RequestErrorDomain | null
+  client_error?: RequestErrorDomain | null
+  failure_summary?: RequestErrorDomain | null
+  errors?: RequestErrorDomains | null
+  error_flow?: RequestErrorFlow | null
   response_time_ms: number
   created_at: string
   request_headers?: Record<string, unknown>

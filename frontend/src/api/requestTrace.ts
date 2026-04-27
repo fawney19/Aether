@@ -1,5 +1,14 @@
 import apiClient from './client'
 
+export interface CandidateRankingMetadata {
+  mode?: string
+  priority_mode?: string
+  index?: number
+  priority_slot?: number
+  promoted_by?: string
+  demoted_by?: string
+}
+
 export interface CandidateRecord {
   id: string
   request_id: string
@@ -36,6 +45,7 @@ export interface CandidateRecord {
   error_message?: string
   latency_ms?: number
   concurrent_requests?: number
+  ranking?: CandidateRankingMetadata | null
   extra_data?: Record<string, unknown>
   created_at: string
   started_at?: string

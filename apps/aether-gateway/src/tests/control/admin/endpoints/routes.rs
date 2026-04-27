@@ -566,7 +566,7 @@ async fn gateway_handles_admin_default_body_rules_locally_with_trusted_admin_pri
     let upstream_hits = Arc::new(Mutex::new(0usize));
     let upstream_hits_clone = Arc::clone(&upstream_hits);
     let upstream = Router::new().route(
-        "/api/admin/endpoints/defaults/openai:cli/body-rules",
+        "/api/admin/endpoints/defaults/openai:responses/body-rules",
         any(move |_request: Request| {
             let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
             async move {
@@ -582,7 +582,7 @@ async fn gateway_handles_admin_default_body_rules_locally_with_trusted_admin_pri
 
     let response = reqwest::Client::new()
         .get(format!(
-            "{gateway_url}/api/admin/endpoints/defaults/openai:cli/body-rules?provider_type=codex"
+            "{gateway_url}/api/admin/endpoints/defaults/openai:responses/body-rules?provider_type=codex"
         ))
         .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
         .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
@@ -594,7 +594,7 @@ async fn gateway_handles_admin_default_body_rules_locally_with_trusted_admin_pri
 
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
-    assert_eq!(payload["api_format"], "openai:cli");
+    assert_eq!(payload["api_format"], "openai:responses");
     let rules = payload["body_rules"]
         .as_array()
         .expect("body_rules should be an array");

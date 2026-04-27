@@ -190,7 +190,7 @@ fn sample_oauth_system_import_payload(access_token: &str, refresh_token: &str) -
             "website": "https://example.com",
             "is_active": true,
             "endpoints": [{
-                "api_format": "openai:cli",
+                "api_format": "openai:responses",
                 "base_url": "https://chatgpt.com",
                 "is_active": true
             }],
@@ -202,7 +202,7 @@ fn sample_oauth_system_import_payload(access_token: &str, refresh_token: &str) -
                     "{{\"provider_type\":\"codex\",\"refresh_token\":\"{}\",\"email\":\"alice@example.com\",\"account_id\":\"acct-codex-123\",\"plan_type\":\"plus\"}}",
                     refresh_token
                 ),
-                "api_formats": ["openai:cli"],
+                "api_formats": ["openai:responses"],
                 "is_active": true
             }],
             "models": []
@@ -1170,13 +1170,13 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
     let endpoint = sample_endpoint(
         "endpoint-codex-existing",
         "provider-codex-existing",
-        "openai:cli",
+        "openai:responses",
         "https://chatgpt.com/backend-api/codex",
     );
     let mut existing_key = sample_key(
         "key-codex-existing",
         "provider-codex-existing",
-        "openai:cli",
+        "openai:responses",
         "oauth-access-token-old",
     );
     existing_key.name = "oauth-primary".to_string();

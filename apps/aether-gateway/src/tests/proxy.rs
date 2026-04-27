@@ -71,7 +71,7 @@ fn sample_cli_auth_snapshot(
         true,
         false,
         Some(serde_json::json!(["openai"])),
-        Some(serde_json::json!(["openai:cli"])),
+        Some(serde_json::json!(["openai:responses"])),
         Some(serde_json::json!([allowed_model])),
         api_key_id.to_string(),
         Some("default".to_string()),
@@ -82,7 +82,7 @@ fn sample_cli_auth_snapshot(
         Some(5),
         Some(4_102_444_800),
         Some(serde_json::json!(["openai"])),
-        Some(serde_json::json!(["openai:cli"])),
+        Some(serde_json::json!(["openai:responses"])),
         Some(serde_json::json!([allowed_model])),
     )
     .expect("auth snapshot should build")
@@ -126,7 +126,7 @@ fn sample_codex_endpoint(endpoint_id: &str, provider_id: &str) -> StoredProvider
     StoredProviderCatalogEndpoint::new(
         endpoint_id.to_string(),
         provider_id.to_string(),
-        "openai:cli".to_string(),
+        "openai:responses".to_string(),
         Some("openai".to_string()),
         Some("cli".to_string()),
         true,
@@ -184,11 +184,11 @@ fn sample_codex_key(key_id: &str, provider_id: &str, node_id: &str) -> StoredPro
     )
     .expect("key should build")
     .with_transport_fields(
-        Some(json!(["openai:cli"])),
+        Some(json!(["openai:responses"])),
         "plain-upstream-key".to_string(),
         None,
         None,
-        Some(json!({"openai:cli": 1})),
+        Some(json!({"openai:responses": 1})),
         None,
         None,
         Some(json!({
@@ -762,7 +762,7 @@ async fn gateway_aggregates_sync_sse_from_remote_tunnel_owner_before_returning_t
         .with_data_state_for_tests(data_state)
         .with_tunnel_identity_for_tests("gateway-a", Some("http://gateway-a:8080"));
     state.scheduler_affinity_cache.insert(
-        "scheduler_affinity:api-key-affinity-cli-1:openai:cli:gpt-5.4".to_string(),
+        "scheduler_affinity:api-key-affinity-cli-1:openai:responses:gpt-5.4".to_string(),
         crate::cache::SchedulerAffinityTarget {
             provider_id: "provider-cli-owner".to_string(),
             endpoint_id: "endpoint-cli-owner".to_string(),
@@ -1002,7 +1002,7 @@ async fn gateway_streamifies_sync_json_from_remote_tunnel_owner_before_returning
         .with_data_state_for_tests(data_state)
         .with_tunnel_identity_for_tests("gateway-a", Some("http://gateway-a:8080"));
     state.scheduler_affinity_cache.insert(
-        "scheduler_affinity:api-key-affinity-cli-1:openai:cli:gpt-5.4".to_string(),
+        "scheduler_affinity:api-key-affinity-cli-1:openai:responses:gpt-5.4".to_string(),
         crate::cache::SchedulerAffinityTarget {
             provider_id: "provider-cli-owner".to_string(),
             endpoint_id: "endpoint-cli-owner".to_string(),

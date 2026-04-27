@@ -5,9 +5,10 @@ use serde_json::json;
 
 use crate::ai_pipeline_api::{
     build_gemini_stream_plan_from_decision, build_gemini_sync_plan_from_decision,
-    build_openai_cli_stream_plan_from_decision, build_openai_cli_sync_plan_from_decision,
-    build_passthrough_sync_plan_from_decision, build_standard_stream_plan_from_decision,
-    build_standard_sync_plan_from_decision, GatewayControlSyncDecisionResponse,
+    build_openai_responses_stream_plan_from_decision,
+    build_openai_responses_sync_plan_from_decision, build_passthrough_sync_plan_from_decision,
+    build_standard_stream_plan_from_decision, build_standard_sync_plan_from_decision,
+    GatewayControlSyncDecisionResponse,
 };
 use crate::execution_runtime::submission::{
     build_best_effort_local_core_error_body, resolve_core_error_background_report_kind,
@@ -102,10 +103,21 @@ fn resolve_core_error_background_report_kind_maps_all_core_finalize_kinds() {
         ("openai_chat_sync_finalize", Some("openai_chat_sync_error")),
         ("claude_chat_sync_finalize", Some("claude_chat_sync_error")),
         ("gemini_chat_sync_finalize", Some("gemini_chat_sync_error")),
-        ("openai_cli_sync_finalize", Some("openai_cli_sync_error")),
+        (
+            "openai_responses_sync_finalize",
+            Some("openai_responses_sync_error"),
+        ),
+        (
+            "openai_responses_compact_sync_finalize",
+            Some("openai_responses_compact_sync_error"),
+        ),
+        (
+            "openai_cli_sync_finalize",
+            Some("openai_responses_sync_error"),
+        ),
         (
             "openai_compact_sync_finalize",
-            Some("openai_compact_sync_error"),
+            Some("openai_responses_compact_sync_error"),
         ),
         ("claude_cli_sync_finalize", Some("claude_cli_sync_error")),
         ("gemini_cli_sync_finalize", Some("gemini_cli_sync_error")),
@@ -138,10 +150,21 @@ fn resolve_core_success_background_report_kind_maps_all_core_finalize_kinds() {
             "gemini_chat_sync_finalize",
             Some("gemini_chat_sync_success"),
         ),
-        ("openai_cli_sync_finalize", Some("openai_cli_sync_success")),
+        (
+            "openai_responses_sync_finalize",
+            Some("openai_responses_sync_success"),
+        ),
+        (
+            "openai_responses_compact_sync_finalize",
+            Some("openai_responses_compact_sync_success"),
+        ),
+        (
+            "openai_cli_sync_finalize",
+            Some("openai_responses_sync_success"),
+        ),
         (
             "openai_compact_sync_finalize",
-            Some("openai_cli_sync_success"),
+            Some("openai_responses_compact_sync_success"),
         ),
         ("claude_cli_sync_finalize", Some("claude_cli_sync_success")),
         ("gemini_cli_sync_finalize", Some("gemini_cli_sync_success")),
@@ -195,10 +218,10 @@ fn build_best_effort_local_core_error_body_converts_gemini_chat_error_to_openai_
 }
 
 #[test]
-fn build_best_effort_local_core_error_body_converts_claude_cli_error_to_openai_cli() {
+fn build_best_effort_local_core_error_body_converts_claude_cli_error_to_openai_responses() {
     let payload = core_finalize_payload(
-        "openai_cli_sync_finalize",
-        "openai:cli",
+        "openai_responses_sync_finalize",
+        "openai:responses",
         "claude:cli",
         401,
         json!({
@@ -300,10 +323,10 @@ fn build_best_effort_local_core_error_body_converts_sync_errors_across_standard_
             }),
         ),
         (
-            "gemini cli -> openai cli",
+            "gemini cli -> openai responses",
             core_finalize_payload(
-                "openai_cli_sync_finalize",
-                "openai:cli",
+                "openai_responses_sync_finalize",
+                "openai:responses",
                 "gemini:cli",
                 429,
                 json!({
@@ -388,7 +411,7 @@ fn resolve_local_core_error_response_body_json_parses_body_base64_json_for_cross
     let mut payload = core_finalize_payload(
         "claude_cli_sync_finalize",
         "claude:cli",
-        "openai:cli",
+        "openai:responses",
         401,
         json!({}),
     );
@@ -419,7 +442,7 @@ fn resolve_local_core_error_response_body_json_builds_client_error_from_plain_te
     let mut payload = core_finalize_payload(
         "claude_cli_sync_finalize",
         "claude:cli",
-        "openai:cli",
+        "openai:responses",
         400,
         json!({}),
     );
@@ -515,18 +538,18 @@ fn generic_decision_builders_require_exact_provider_request() {
     let parts = test_parts();
     let body_json = json!({"messages":[{"role":"user","content":"hi"}]});
 
-    assert!(build_openai_cli_stream_plan_from_decision(
+    assert!(build_openai_responses_stream_plan_from_decision(
         &parts,
         &body_json,
-        missing_exact_provider_request_payload("openai_cli_stream"),
+        missing_exact_provider_request_payload("openai_responses_stream"),
         false,
     )
     .expect("builder should not error")
     .is_none());
-    assert!(build_openai_cli_stream_plan_from_decision(
+    assert!(build_openai_responses_stream_plan_from_decision(
         &parts,
         &body_json,
-        missing_exact_provider_request_payload("openai_compact_stream"),
+        missing_exact_provider_request_payload("openai_responses_compact_stream"),
         true,
     )
     .expect("builder should not error")
@@ -546,10 +569,10 @@ fn generic_decision_builders_require_exact_provider_request() {
     )
     .expect("builder should not error")
     .is_none());
-    assert!(build_openai_cli_sync_plan_from_decision(
+    assert!(build_openai_responses_sync_plan_from_decision(
         &parts,
         &body_json,
-        missing_exact_provider_request_payload("openai_cli_sync"),
+        missing_exact_provider_request_payload("openai_responses_sync"),
         false,
     )
     .expect("builder should not error")
@@ -605,7 +628,7 @@ fn passthrough_sync_plan_uses_provider_request_method_override() {
 }
 
 #[test]
-fn openai_cli_sync_plan_injects_auth_header_when_exact_headers_omit_it() {
+fn openai_responses_sync_plan_injects_auth_header_when_exact_headers_omit_it() {
     let request = Request::builder()
         .method("POST")
         .uri("/v1/responses")
@@ -613,10 +636,10 @@ fn openai_cli_sync_plan_injects_auth_header_when_exact_headers_omit_it() {
         .expect("request");
     let (parts, _) = request.into_parts();
 
-    let mut payload = missing_exact_provider_request_payload("openai_cli_sync");
+    let mut payload = missing_exact_provider_request_payload("openai_responses_sync");
     payload.provider_name = Some("openai".to_string());
-    payload.provider_api_format = Some("openai:cli".to_string());
-    payload.client_api_format = Some("openai:cli".to_string());
+    payload.provider_api_format = Some("openai:responses".to_string());
+    payload.client_api_format = Some("openai:responses".to_string());
     payload.model_name = Some("gpt-5".to_string());
     payload.upstream_url = Some("https://chatgpt.com/backend-api/codex/responses".to_string());
     payload.provider_request_headers =
@@ -626,7 +649,7 @@ fn openai_cli_sync_plan_injects_auth_header_when_exact_headers_omit_it() {
     payload.provider_request_body = Some(json!({"model":"gpt-5"}));
 
     let plan_and_report =
-        build_openai_cli_sync_plan_from_decision(&parts, &json!({}), payload, false)
+        build_openai_responses_sync_plan_from_decision(&parts, &json!({}), payload, false)
             .expect("builder should not error")
             .expect("plan should be built");
 
@@ -694,7 +717,7 @@ fn passthrough_sync_plan_uses_raw_body_bytes_when_decision_provides_base64_body(
 }
 
 #[test]
-fn openai_cli_stream_plan_injects_auth_header_when_exact_headers_omit_it() {
+fn openai_responses_stream_plan_injects_auth_header_when_exact_headers_omit_it() {
     let request = Request::builder()
         .method("POST")
         .uri("/v1/responses")
@@ -702,10 +725,10 @@ fn openai_cli_stream_plan_injects_auth_header_when_exact_headers_omit_it() {
         .expect("request");
     let (parts, _) = request.into_parts();
 
-    let mut payload = missing_exact_provider_request_payload("openai_cli_stream");
+    let mut payload = missing_exact_provider_request_payload("openai_responses_stream");
     payload.provider_name = Some("openai".to_string());
-    payload.provider_api_format = Some("openai:cli".to_string());
-    payload.client_api_format = Some("openai:cli".to_string());
+    payload.provider_api_format = Some("openai:responses".to_string());
+    payload.client_api_format = Some("openai:responses".to_string());
     payload.model_name = Some("gpt-5".to_string());
     payload.upstream_url = Some("https://chatgpt.com/backend-api/codex/responses".to_string());
     payload.provider_request_headers =
@@ -715,7 +738,7 @@ fn openai_cli_stream_plan_injects_auth_header_when_exact_headers_omit_it() {
     payload.provider_request_body = Some(json!({"model":"gpt-5","stream":true}));
 
     let plan_and_report =
-        build_openai_cli_stream_plan_from_decision(&parts, &json!({}), payload, false)
+        build_openai_responses_stream_plan_from_decision(&parts, &json!({}), payload, false)
             .expect("builder should not error")
             .expect("plan should be built");
 
@@ -739,9 +762,9 @@ fn openai_cli_stream_plan_injects_auth_header_when_exact_headers_omit_it() {
 
 #[test]
 fn bypasses_execution_runtime_for_codex_backendapi_variant() {
-    let mut payload = missing_exact_provider_request_payload("openai_cli_stream");
-    payload.provider_api_format = Some("openai:cli".to_string());
-    payload.client_api_format = Some("openai:cli".to_string());
+    let mut payload = missing_exact_provider_request_payload("openai_responses_stream");
+    payload.provider_api_format = Some("openai:responses".to_string());
+    payload.client_api_format = Some("openai:responses".to_string());
     payload.upstream_url = Some("https://chatgpt.com/backendapi/codex/responses".to_string());
 
     assert!(should_bypass_execution_runtime_decision(&payload));
@@ -763,8 +786,8 @@ fn bypasses_execution_runtime_for_codex_plan_variant() {
         content_encoding: None,
         body: RequestBody::from_json(json!({"model":"gpt-5.4"})),
         stream: true,
-        client_api_format: "openai:cli".to_string(),
-        provider_api_format: "openai:cli".to_string(),
+        client_api_format: "openai:responses".to_string(),
+        provider_api_format: "openai:responses".to_string(),
         model_name: Some("gpt-5.4".to_string()),
         proxy: None,
         tls_profile: None,

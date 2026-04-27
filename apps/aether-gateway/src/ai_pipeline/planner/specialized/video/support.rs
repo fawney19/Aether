@@ -3,12 +3,9 @@ use tracing::warn;
 
 use super::{LocalVideoCreateFamily, LocalVideoCreateSpec};
 use crate::ai_pipeline::contracts::ExecutionRuntimeAuthContext;
-use crate::ai_pipeline::planner::candidate_eligibility::{
-    extract_pool_sticky_session_token, filter_and_rank_local_execution_candidates,
-    SkippedLocalExecutionCandidate,
-};
 use crate::ai_pipeline::planner::candidate_materialization::{
     mark_skipped_local_execution_candidate,
+    mark_skipped_local_execution_candidate_with_failure_diagnostic,
     persist_available_local_execution_candidates_with_context,
     persist_skipped_local_execution_candidates_with_context,
     remember_first_local_candidate_affinity,
@@ -16,6 +13,10 @@ use crate::ai_pipeline::planner::candidate_materialization::{
 use crate::ai_pipeline::planner::candidate_metadata::{
     build_local_execution_candidate_metadata,
     build_local_execution_candidate_metadata_for_candidate, LocalExecutionCandidateMetadataParts,
+};
+use crate::ai_pipeline::planner::candidate_resolution::{
+    extract_pool_sticky_session_token, resolve_and_rank_local_execution_candidates,
+    SkippedLocalExecutionCandidate,
 };
 use crate::ai_pipeline::planner::common::extract_requested_model_from_request;
 use crate::ai_pipeline::planner::decision_input::{
@@ -27,7 +28,8 @@ use crate::ai_pipeline::planner::materialization_policy::{
 use crate::ai_pipeline::planner::spec_metadata::local_video_create_spec_metadata;
 use crate::ai_pipeline::PlannerAppState;
 use crate::ai_pipeline::{
-    resolve_local_decision_execution_runtime_auth_context, GatewayControlDecision,
+    resolve_local_decision_execution_runtime_auth_context, CandidateFailureDiagnostic,
+    GatewayControlDecision,
 };
 use crate::clock::current_unix_secs;
 use crate::AppState;
@@ -138,6 +140,7 @@ pub(super) async fn list_local_video_create_candidate_attempts(
                     candidate: item.candidate,
                     skip_reason: item.skip_reason,
                     transport: None,
+                    ranking: None,
                     extra_data: None,
                 })
                 .collect(),
@@ -162,11 +165,12 @@ async fn materialize_local_video_create_candidate_attempts(
         input.required_capabilities.as_ref(),
         LocalCandidatePersistencePolicyKind::VideoDecision,
     );
-    let (candidates, skipped_candidates) = filter_and_rank_local_execution_candidates(
+    let (candidates, skipped_candidates) = resolve_and_rank_local_execution_candidates(
         state,
         candidates,
         api_format,
         &input.requested_model,
+        Some(&input.auth_snapshot),
         input.required_capabilities.as_ref(),
         sticky_session_token.as_deref(),
     )
@@ -248,6 +252,34 @@ pub(super) async fn mark_skipped_local_video_candidate(
         candidate_index,
         candidate_id,
         skip_reason,
+    )
+    .await;
+}
+
+pub(super) async fn mark_skipped_local_video_candidate_with_failure_diagnostic(
+    state: &AppState,
+    input: &LocalVideoCreateDecisionInput,
+    trace_id: &str,
+    candidate: &SchedulerMinimalCandidateSelectionCandidate,
+    candidate_index: u32,
+    candidate_id: &str,
+    skip_reason: &'static str,
+    diagnostic: CandidateFailureDiagnostic,
+) {
+    let persistence_policy = build_local_candidate_persistence_policy(
+        &input.auth_context,
+        input.required_capabilities.as_ref(),
+        LocalCandidatePersistencePolicyKind::VideoDecision,
+    );
+    mark_skipped_local_execution_candidate_with_failure_diagnostic(
+        state,
+        trace_id,
+        persistence_policy.skipped,
+        candidate,
+        candidate_index,
+        candidate_id,
+        skip_reason,
+        diagnostic,
     )
     .await;
 }

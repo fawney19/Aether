@@ -17,12 +17,12 @@ use crate::ai_pipeline::transport::{
     local_gemini_transport_unsupported_reason_with_network,
     local_standard_transport_unsupported_reason_with_network,
 };
-use crate::ai_pipeline::GatewayProviderTransportSnapshot;
+use crate::ai_pipeline::{CandidateFailureDiagnostic, GatewayProviderTransportSnapshot};
 use crate::AppState;
 
 use super::support::{
-    mark_skipped_local_video_candidate, LocalVideoCreateCandidateAttempt,
-    LocalVideoCreateDecisionInput,
+    mark_skipped_local_video_candidate, mark_skipped_local_video_candidate_with_failure_diagnostic,
+    LocalVideoCreateCandidateAttempt, LocalVideoCreateDecisionInput,
 };
 use super::{LocalVideoCreateFamily, LocalVideoCreateSpec};
 
@@ -110,7 +110,7 @@ pub(super) async fn resolve_local_video_create_candidate_payload_parts(
 
     let Some(upstream_url) = build_video_upstream_url(parts, transport, &mapped_model, spec.family)
     else {
-        mark_skipped_local_video_candidate(
+        mark_skipped_local_video_candidate_with_failure_diagnostic(
             state,
             input,
             trace_id,
@@ -118,25 +118,35 @@ pub(super) async fn resolve_local_video_create_candidate_payload_parts(
             attempt.candidate_index,
             &attempt.candidate_id,
             "upstream_url_missing",
+            CandidateFailureDiagnostic::upstream_url_missing(
+                spec_metadata.api_format,
+                spec_metadata.api_format,
+                "video_upstream_url",
+            ),
         )
         .await;
         return None;
     };
 
-    let Some(provider_request_body) = build_provider_request_body(
+    let Ok(provider_request_body) = build_provider_request_body(
         body_json,
         spec.family,
         &mapped_model,
         transport.endpoint.body_rules.as_ref(),
     ) else {
-        mark_skipped_local_video_candidate(
+        mark_skipped_local_video_candidate_with_failure_diagnostic(
             state,
             input,
             trace_id,
             candidate,
             attempt.candidate_index,
             &attempt.candidate_id,
-            "provider_request_body_missing",
+            "transport_body_rules_apply_failed",
+            CandidateFailureDiagnostic::body_rules_apply_failed(
+                spec_metadata.api_format,
+                spec_metadata.api_format,
+                "video_body_rules",
+            ),
         )
         .await;
         return None;
@@ -155,7 +165,7 @@ pub(super) async fn resolve_local_video_create_candidate_payload_parts(
         &provider_request_body,
         Some(body_json),
     ) {
-        mark_skipped_local_video_candidate(
+        mark_skipped_local_video_candidate_with_failure_diagnostic(
             state,
             input,
             trace_id,
@@ -163,6 +173,11 @@ pub(super) async fn resolve_local_video_create_candidate_payload_parts(
             attempt.candidate_index,
             &attempt.candidate_id,
             "transport_header_rules_apply_failed",
+            CandidateFailureDiagnostic::header_rules_apply_failed(
+                spec_metadata.api_format,
+                spec_metadata.api_format,
+                "video_header_rules",
+            ),
         )
         .await;
         return None;
@@ -184,7 +199,7 @@ fn build_provider_request_body(
     family: LocalVideoCreateFamily,
     mapped_model: &str,
     body_rules: Option<&serde_json::Value>,
-) -> Option<serde_json::Value> {
+) -> Result<serde_json::Value, ()> {
     let mut provider_request_body = match family {
         LocalVideoCreateFamily::OpenAi => {
             let mut provider_request_body = body_json.as_object().cloned().unwrap_or_default();
@@ -195,9 +210,9 @@ fn build_provider_request_body(
         LocalVideoCreateFamily::Gemini => body_json.clone(),
     };
     if !apply_local_body_rules(&mut provider_request_body, body_rules, Some(body_json)) {
-        return None;
+        return Err(());
     }
-    Some(provider_request_body)
+    Ok(provider_request_body)
 }
 
 fn build_video_upstream_url(

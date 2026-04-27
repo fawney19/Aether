@@ -1,4 +1,5 @@
 use aether_contracts::ExecutionPlan;
+use serde_json::{json, Value};
 
 use crate::AppState;
 
@@ -77,4 +78,44 @@ pub(crate) async fn resolve_local_failover_decision_for_attempt(
     )
     .await
     .decision
+}
+
+pub(crate) fn build_local_error_flow_metadata(
+    status_code: u16,
+    response_text: Option<&str>,
+    analysis: LocalFailoverAnalysis,
+) -> Value {
+    let safe_to_expose = matches!(
+        analysis.classification,
+        LocalFailoverClassification::StopSemanticClientError
+            | LocalFailoverClassification::StopStatusCode
+            | LocalFailoverClassification::StopErrorPattern
+    );
+    let propagation = match analysis.decision {
+        LocalFailoverDecision::RetryNextCandidate => "suppressed",
+        LocalFailoverDecision::StopLocalFailover if safe_to_expose => "converted",
+        LocalFailoverDecision::StopLocalFailover => "suppressed",
+        LocalFailoverDecision::UseDefault if status_code >= 400 => "passthrough",
+        LocalFailoverDecision::UseDefault => "none",
+    };
+    json!({
+        "stage": "candidate",
+        "source": "upstream_response",
+        "status_code": status_code,
+        "classification": analysis.classification.as_str(),
+        "decision": analysis.decision.as_str(),
+        "retryable": matches!(analysis.decision, LocalFailoverDecision::RetryNextCandidate),
+        "safe_to_expose": safe_to_expose,
+        "propagation": propagation,
+        "message": local_failover_error_message(response_text),
+    })
+}
+
+pub(crate) fn with_error_flow_report_context(
+    report_context: Option<&Value>,
+    error_flow: Value,
+) -> Option<Value> {
+    let mut object = report_context?.as_object()?.clone();
+    object.insert("error_flow".to_string(), error_flow);
+    Some(Value::Object(object))
 }

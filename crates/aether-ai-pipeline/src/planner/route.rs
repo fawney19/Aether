@@ -7,8 +7,9 @@ use crate::contracts::{
     GEMINI_FILES_DOWNLOAD_PLAN_KIND, GEMINI_FILES_GET_PLAN_KIND, GEMINI_FILES_LIST_PLAN_KIND,
     GEMINI_FILES_UPLOAD_PLAN_KIND, GEMINI_VIDEO_CANCEL_SYNC_PLAN_KIND,
     GEMINI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_CHAT_SYNC_PLAN_KIND,
-    OPENAI_CLI_STREAM_PLAN_KIND, OPENAI_CLI_SYNC_PLAN_KIND, OPENAI_COMPACT_STREAM_PLAN_KIND,
-    OPENAI_COMPACT_SYNC_PLAN_KIND, OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND,
+    OPENAI_IMAGE_STREAM_PLAN_KIND, OPENAI_IMAGE_SYNC_PLAN_KIND,
+    OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND, OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND,
+    OPENAI_RESPONSES_STREAM_PLAN_KIND, OPENAI_RESPONSES_SYNC_PLAN_KIND,
     OPENAI_VIDEO_CANCEL_SYNC_PLAN_KIND, OPENAI_VIDEO_CONTENT_PLAN_KIND,
     OPENAI_VIDEO_CREATE_SYNC_PLAN_KIND, OPENAI_VIDEO_DELETE_SYNC_PLAN_KIND,
     OPENAI_VIDEO_REMIX_SYNC_PLAN_KIND,
@@ -74,19 +75,19 @@ pub fn resolve_execution_runtime_stream_plan_kind(
     }
 
     if route_family == Some("openai")
-        && route_kind == Some("cli")
+        && is_openai_responses_route_kind(route_kind)
         && *method == Method::POST
         && path == "/v1/responses"
     {
-        return Some(OPENAI_CLI_STREAM_PLAN_KIND);
+        return Some(OPENAI_RESPONSES_STREAM_PLAN_KIND);
     }
 
     if route_family == Some("openai")
-        && route_kind == Some("compact")
+        && is_openai_responses_compact_route_kind(route_kind)
         && *method == Method::POST
         && path == "/v1/responses/compact"
     {
-        return Some(OPENAI_COMPACT_STREAM_PLAN_KIND);
+        return Some(OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND);
     }
 
     if route_family == Some("openai")
@@ -189,19 +190,19 @@ pub fn resolve_execution_runtime_sync_plan_kind(
     }
 
     if route_family == Some("openai")
-        && route_kind == Some("cli")
+        && is_openai_responses_route_kind(route_kind)
         && *method == Method::POST
         && path == "/v1/responses"
     {
-        return Some(OPENAI_CLI_SYNC_PLAN_KIND);
+        return Some(OPENAI_RESPONSES_SYNC_PLAN_KIND);
     }
 
     if route_family == Some("openai")
-        && route_kind == Some("compact")
+        && is_openai_responses_compact_route_kind(route_kind)
         && *method == Method::POST
         && path == "/v1/responses/compact"
     {
-        return Some(OPENAI_COMPACT_SYNC_PLAN_KIND);
+        return Some(OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND);
     }
 
     if route_family == Some("claude")
@@ -260,6 +261,14 @@ pub fn resolve_execution_runtime_sync_plan_kind(
     None
 }
 
+fn is_openai_responses_route_kind(route_kind: Option<&str>) -> bool {
+    matches!(route_kind, Some("responses") | Some("cli"))
+}
+
+fn is_openai_responses_compact_route_kind(route_kind: Option<&str>) -> bool {
+    matches!(route_kind, Some("responses:compact") | Some("compact"))
+}
+
 pub fn is_matching_stream_request(
     plan_kind: &str,
     path: &str,
@@ -268,8 +277,8 @@ pub fn is_matching_stream_request(
     match plan_kind {
         OPENAI_CHAT_STREAM_PLAN_KIND
         | CLAUDE_CHAT_STREAM_PLAN_KIND
-        | OPENAI_CLI_STREAM_PLAN_KIND
-        | OPENAI_COMPACT_STREAM_PLAN_KIND
+        | OPENAI_RESPONSES_STREAM_PLAN_KIND
+        | OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND
         | CLAUDE_CLI_STREAM_PLAN_KIND
         | OPENAI_IMAGE_STREAM_PLAN_KIND => body_json
             .get("stream")
@@ -287,8 +296,8 @@ pub fn supports_sync_scheduler_decision_kind(plan_kind: &str) -> bool {
         plan_kind,
         OPENAI_CHAT_SYNC_PLAN_KIND
             | OPENAI_IMAGE_SYNC_PLAN_KIND
-            | OPENAI_CLI_SYNC_PLAN_KIND
-            | OPENAI_COMPACT_SYNC_PLAN_KIND
+            | OPENAI_RESPONSES_SYNC_PLAN_KIND
+            | OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND
             | CLAUDE_CHAT_SYNC_PLAN_KIND
             | CLAUDE_CLI_SYNC_PLAN_KIND
             | GEMINI_CHAT_SYNC_PLAN_KIND
@@ -312,9 +321,9 @@ pub fn supports_stream_scheduler_decision_kind(plan_kind: &str) -> bool {
         OPENAI_CHAT_STREAM_PLAN_KIND
             | CLAUDE_CHAT_STREAM_PLAN_KIND
             | GEMINI_CHAT_STREAM_PLAN_KIND
-            | OPENAI_CLI_STREAM_PLAN_KIND
+            | OPENAI_RESPONSES_STREAM_PLAN_KIND
+            | OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND
             | OPENAI_IMAGE_STREAM_PLAN_KIND
-            | OPENAI_COMPACT_STREAM_PLAN_KIND
             | CLAUDE_CLI_STREAM_PLAN_KIND
             | GEMINI_CLI_STREAM_PLAN_KIND
             | GEMINI_FILES_DOWNLOAD_PLAN_KIND
@@ -333,7 +342,9 @@ mod tests {
     };
     use crate::contracts::{
         OPENAI_CHAT_STREAM_PLAN_KIND, OPENAI_CHAT_SYNC_PLAN_KIND, OPENAI_IMAGE_STREAM_PLAN_KIND,
-        OPENAI_IMAGE_SYNC_PLAN_KIND,
+        OPENAI_IMAGE_SYNC_PLAN_KIND, OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND,
+        OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND, OPENAI_RESPONSES_STREAM_PLAN_KIND,
+        OPENAI_RESPONSES_SYNC_PLAN_KIND,
     };
 
     #[test]
@@ -358,6 +369,86 @@ mod tests {
             ),
             Some(OPENAI_CHAT_STREAM_PLAN_KIND)
         );
+    }
+
+    #[test]
+    fn resolves_openai_responses_plan_kinds() {
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(
+                Some("ai_public"),
+                Some("openai"),
+                Some("responses"),
+                &Method::POST,
+                "/v1/responses",
+            ),
+            Some(OPENAI_RESPONSES_SYNC_PLAN_KIND)
+        );
+        assert_eq!(
+            resolve_execution_runtime_stream_plan_kind(
+                Some("ai_public"),
+                Some("openai"),
+                Some("responses"),
+                &Method::POST,
+                "/v1/responses",
+            ),
+            Some(OPENAI_RESPONSES_STREAM_PLAN_KIND)
+        );
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(
+                Some("ai_public"),
+                Some("openai"),
+                Some("cli"),
+                &Method::POST,
+                "/v1/responses",
+            ),
+            Some(OPENAI_RESPONSES_SYNC_PLAN_KIND)
+        );
+        assert!(supports_sync_scheduler_decision_kind(
+            OPENAI_RESPONSES_SYNC_PLAN_KIND
+        ));
+        assert!(supports_stream_scheduler_decision_kind(
+            OPENAI_RESPONSES_STREAM_PLAN_KIND
+        ));
+    }
+
+    #[test]
+    fn resolves_openai_responses_compact_plan_kinds() {
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(
+                Some("ai_public"),
+                Some("openai"),
+                Some("responses:compact"),
+                &Method::POST,
+                "/v1/responses/compact",
+            ),
+            Some(OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND)
+        );
+        assert_eq!(
+            resolve_execution_runtime_stream_plan_kind(
+                Some("ai_public"),
+                Some("openai"),
+                Some("responses:compact"),
+                &Method::POST,
+                "/v1/responses/compact",
+            ),
+            Some(OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND)
+        );
+        assert_eq!(
+            resolve_execution_runtime_sync_plan_kind(
+                Some("ai_public"),
+                Some("openai"),
+                Some("compact"),
+                &Method::POST,
+                "/v1/responses/compact",
+            ),
+            Some(OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND)
+        );
+        assert!(supports_sync_scheduler_decision_kind(
+            OPENAI_RESPONSES_COMPACT_SYNC_PLAN_KIND
+        ));
+        assert!(supports_stream_scheduler_decision_kind(
+            OPENAI_RESPONSES_COMPACT_STREAM_PLAN_KIND
+        ));
     }
 
     #[test]

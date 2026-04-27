@@ -15,11 +15,11 @@ pub(crate) use crate::ai_pipeline::finalize::standard::{
 };
 pub(crate) use crate::ai_pipeline::{
     aggregate_claude_stream_sync_response, aggregate_gemini_stream_sync_response,
-    aggregate_openai_chat_stream_sync_response, aggregate_openai_cli_stream_sync_response,
+    aggregate_openai_chat_stream_sync_response, aggregate_openai_responses_stream_sync_response,
 };
 pub(crate) use crate::ai_pipeline::{
-    convert_claude_chat_response_to_openai_chat, convert_claude_cli_response_to_openai_cli,
-    convert_gemini_chat_response_to_openai_chat, convert_gemini_cli_response_to_openai_cli,
+    convert_claude_chat_response_to_openai_chat, convert_claude_response_to_openai_responses,
+    convert_gemini_chat_response_to_openai_chat, convert_gemini_response_to_openai_responses,
 };
 
 pub(crate) fn maybe_build_local_core_sync_finalize_response(

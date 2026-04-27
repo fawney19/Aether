@@ -1,6 +1,5 @@
-pub(super) use aether_scheduler_core::{
-    build_scheduler_affinity_cache_key_for_api_key_id, candidate_affinity_hash, candidate_key,
-    compare_affinity_order, matches_affinity_target, SchedulerAffinityTarget,
+use aether_scheduler_core::{
+    build_scheduler_affinity_cache_key_for_api_key_id, SchedulerAffinityTarget,
 };
 
 use crate::data::auth::GatewayAuthApiKeySnapshot;

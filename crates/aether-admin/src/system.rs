@@ -530,16 +530,16 @@ const ADMIN_API_FORMAT_DEFINITIONS: &[AdminApiFormatDefinition] = &[
         ],
     },
     AdminApiFormatDefinition {
-        value: "openai:cli",
-        label: "OpenAI CLI",
+        value: "openai:responses",
+        label: "OpenAI Responses",
         default_path: "/v1/responses",
-        aliases: &["openai_cli", "responses"],
+        aliases: &["openai_cli", "openai:cli", "responses"],
     },
     AdminApiFormatDefinition {
-        value: "openai:compact",
-        label: "OpenAI Compact",
+        value: "openai:responses:compact",
+        label: "OpenAI Responses Compact",
         default_path: "/v1/responses/compact",
-        aliases: &["openai_compact", "responses_compact"],
+        aliases: &["openai_compact", "openai:compact", "responses_compact"],
     },
     AdminApiFormatDefinition {
         value: "openai:image",

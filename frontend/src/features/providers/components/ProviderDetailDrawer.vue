@@ -861,7 +861,7 @@
                           class="text-muted-foreground/40"
                         >/</span>
                         <span :class="{ 'text-destructive': isFormatCircuitOpen(key, format) }">
-                          {{ API_FORMAT_SHORT[format] || format }}
+                          {{ formatApiFormatShort(format) }}
                         </span>
                         <span
                           v-if="editingMultiplierKey !== key.id || editingMultiplierFormat !== format"
@@ -1150,7 +1150,6 @@ import {
   type EndpointAPIKey,
   type Model,
   API_FORMAT_ORDER,
-  API_FORMAT_SHORT,
   sortApiFormats,
 } from '@/api/endpoints'
 import type {
@@ -1162,7 +1161,7 @@ import type {
   QuotaStatusSnapshot,
   QuotaWindowSnapshot,
 } from '@/api/endpoints/types'
-import { formatApiFormat } from '@/api/endpoints/types/api-format'
+import { formatApiFormat, formatApiFormatShort } from '@/api/endpoints/types/api-format'
 import { isOAuthAccountProviderType, isKeyManagedProviderType } from '../utils/providerTypeUtils'
 import {
   isProviderQuotaAutoRefreshCoolingDown,

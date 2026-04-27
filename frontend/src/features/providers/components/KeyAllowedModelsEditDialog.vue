@@ -287,7 +287,7 @@
                         :key="fmt"
                         class="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground"
                       >
-                        {{ API_FORMAT_SHORT[fmt] || fmt }}
+                        {{ formatApiFormatShort(fmt) }}
                       </span>
                     </div>
                     <button
@@ -375,7 +375,7 @@ import {
   type AllowedModels,
 } from '@/api/endpoints'
 import { useUpstreamModelsCache } from '../composables/useUpstreamModelsCache'
-import { API_FORMAT_SHORT, type UpstreamModel } from '@/api/endpoints/types'
+import { formatApiFormatShort, type UpstreamModel } from '@/api/endpoints/types'
 
 interface AvailableModel {
   name: string

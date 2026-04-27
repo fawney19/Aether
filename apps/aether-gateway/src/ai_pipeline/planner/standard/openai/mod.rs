@@ -1,5 +1,5 @@
 mod chat;
-mod cli;
+mod responses;
 
 pub(crate) use crate::ai_pipeline::{
     copy_request_number_field, copy_request_number_field_as,
@@ -12,9 +12,9 @@ pub(crate) use chat::{
     maybe_build_stream_local_decision_payload, maybe_build_sync_local_decision_payload,
     set_local_openai_chat_execution_exhausted_diagnostic,
 };
-pub(crate) use cli::{
-    build_local_openai_cli_stream_plan_and_reports_for_kind,
-    build_local_openai_cli_sync_plan_and_reports_for_kind,
-    maybe_build_stream_local_openai_cli_decision_payload,
-    maybe_build_sync_local_openai_cli_decision_payload,
+pub(crate) use responses::{
+    build_local_openai_responses_stream_plan_and_reports_for_kind,
+    build_local_openai_responses_sync_plan_and_reports_for_kind,
+    maybe_build_stream_local_openai_responses_decision_payload,
+    maybe_build_sync_local_openai_responses_decision_payload,
 };

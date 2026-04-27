@@ -200,7 +200,7 @@
         <!-- 上排：缩写 + 百分比 -->
         <div class="flex items-center justify-between text-[10px] leading-none">
           <span class="font-medium text-muted-foreground/80">
-            {{ API_FORMAT_SHORT[endpoint.api_format] || endpoint.api_format.substring(0,2) }}
+            {{ formatApiFormatShort(endpoint.api_format) }}
           </span>
           <span class="font-medium text-muted-foreground/80">
             {{ isEndpointAvailable(endpoint) ? `${(endpoint.health_score * 100).toFixed(0)}%` : '-' }}
@@ -236,7 +236,7 @@ import {
 } from 'lucide-vue-next'
 import Button from '@/components/ui/button.vue'
 import Badge from '@/components/ui/badge.vue'
-import { type ProviderWithEndpointsSummary, API_FORMAT_SHORT } from '@/api/endpoints'
+import { type ProviderWithEndpointsSummary, formatApiFormatShort } from '@/api/endpoints'
 import { formatBillingType } from '@/utils/format'
 import { sortEndpoints, isEndpointAvailable, getEndpointDotColor, getEndpointTooltip } from '@/features/providers/composables/useEndpointStatus'
 import { isKeyManagedProviderType } from '../utils/providerTypeUtils'

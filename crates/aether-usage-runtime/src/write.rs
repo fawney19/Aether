@@ -1543,6 +1543,12 @@ fn build_runtime_request_metadata_seed_from_parts(
             Value::Bool(upstream_is_stream),
         );
     }
+    if let Some(api_key_is_standalone) = context_bool(context, "api_key_is_standalone") {
+        metadata.insert(
+            "api_key_is_standalone".to_string(),
+            Value::Bool(api_key_is_standalone),
+        );
+    }
     let provider_source_bytes = provider_request_body_base64.and_then(decoded_base64_len_hint);
     append_runtime_body_capture_metadata(
         &mut metadata,
@@ -2448,7 +2454,7 @@ mod tests {
             })),
             stream: false,
             client_api_format: "claude:cli".to_string(),
-            provider_api_format: "openai:cli".to_string(),
+            provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.4".to_string()),
             proxy: None,
             tls_profile: None,
@@ -2499,6 +2505,47 @@ mod tests {
     }
 
     #[test]
+    fn pending_usage_record_preserves_standalone_key_metadata() {
+        let plan = ExecutionPlan {
+            request_id: "req-pending-standalone-1".to_string(),
+            candidate_id: None,
+            provider_name: Some("OpenAI".to_string()),
+            provider_id: "provider-1".to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            key_id: "key-1".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.com/v1/responses".to_string(),
+            headers: BTreeMap::new(),
+            content_type: Some("application/json".to_string()),
+            content_encoding: None,
+            body: RequestBody::from_json(json!({"model": "gpt-5.4"})),
+            stream: false,
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
+            model_name: Some("gpt-5.4".to_string()),
+            proxy: None,
+            tls_profile: None,
+            timeouts: None,
+        };
+
+        let record = build_pending_usage_record(
+            &plan,
+            Some(&json!({
+                "api_key_is_standalone": true
+            })),
+            1_700_000_000,
+        )
+        .expect("pending usage should build");
+
+        assert_eq!(
+            record.request_metadata,
+            Some(json!({
+                "api_key_is_standalone": true
+            }))
+        );
+    }
+
+    #[test]
     fn streaming_usage_records_stay_lightweight_by_default() {
         let plan = ExecutionPlan {
             request_id: "req-streaming-usage-1".to_string(),
@@ -2515,7 +2562,7 @@ mod tests {
             body: RequestBody::from_json(json!({"model": "gpt-5.4"})),
             stream: true,
             client_api_format: "claude:cli".to_string(),
-            provider_api_format: "openai:cli".to_string(),
+            provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.4".to_string()),
             proxy: None,
             tls_profile: None,
@@ -2572,7 +2619,7 @@ mod tests {
             body: RequestBody::from_json(json!({"model": "gpt-5.4"})),
             stream: false,
             client_api_format: "claude:cli".to_string(),
-            provider_api_format: "openai:cli".to_string(),
+            provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.4".to_string()),
             proxy: None,
             tls_profile: None,
@@ -2583,7 +2630,7 @@ mod tests {
             report_kind: "claude_cli_sync_success".to_string(),
             report_context: Some(json!({
                 "client_api_format": "claude:cli",
-                "provider_api_format": "openai:cli",
+                "provider_api_format": "openai:responses",
                 "needs_conversion": true,
                 "original_request_body": nested,
                 "provider_request_body": {"input": "safe"}
@@ -2635,7 +2682,7 @@ mod tests {
             },
             stream: true,
             client_api_format: "openai:chat".to_string(),
-            provider_api_format: "openai:cli".to_string(),
+            provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.4".to_string()),
             proxy: None,
             tls_profile: None,
@@ -2646,7 +2693,7 @@ mod tests {
             report_kind: "openai_chat_stream_success".to_string(),
             report_context: Some(json!({
                 "client_api_format": "openai:chat",
-                "provider_api_format": "openai:cli",
+                "provider_api_format": "openai:responses",
                 "needs_conversion": true
             })),
             status_code: 200,
@@ -2730,7 +2777,7 @@ mod tests {
             },
             stream: true,
             client_api_format: "openai:chat".to_string(),
-            provider_api_format: "openai:cli".to_string(),
+            provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.4".to_string()),
             proxy: None,
             tls_profile: None,
@@ -2746,7 +2793,7 @@ mod tests {
             report_kind: "openai_chat_stream_success".to_string(),
             report_context: Some(json!({
                 "client_api_format": "openai:chat",
-                "provider_api_format": "openai:cli",
+                "provider_api_format": "openai:responses",
                 "needs_conversion": true
             })),
             status_code: 200,
@@ -2761,6 +2808,7 @@ mod tests {
                 response_id: Some("resp_summary_1".to_string()),
                 model: Some("gpt-5.4".to_string()),
                 observed_finish: true,
+                unknown_event_count: 0,
                 parser_error: None,
             }),
             telemetry: None,
@@ -2799,8 +2847,8 @@ mod tests {
                 body_ref: None,
             },
             stream: true,
-            client_api_format: "openai:cli".to_string(),
-            provider_api_format: "openai:cli".to_string(),
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.5".to_string()),
             proxy: None,
             tls_profile: None,
@@ -2850,10 +2898,10 @@ mod tests {
         });
         let payload = GatewayStreamReportRequest {
             trace_id: "trace-stream-provider-chunks-usage-1".to_string(),
-            report_kind: "openai_cli_stream_success".to_string(),
+            report_kind: "openai_responses_stream_success".to_string(),
             report_context: Some(json!({
-                "client_api_format": "openai:cli",
-                "provider_api_format": "openai:cli",
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:responses",
             })),
             status_code: 200,
             headers: BTreeMap::new(),
@@ -2869,6 +2917,7 @@ mod tests {
                 response_id: Some("resp_123".to_string()),
                 model: Some("gpt-5.5".to_string()),
                 observed_finish: true,
+                unknown_event_count: 0,
                 parser_error: None,
             }),
             telemetry: None,
@@ -2904,8 +2953,8 @@ mod tests {
                 body_ref: None,
             },
             stream: true,
-            client_api_format: "openai:cli".to_string(),
-            provider_api_format: "openai:cli".to_string(),
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.4".to_string()),
             proxy: None,
             tls_profile: None,
@@ -2915,17 +2964,17 @@ mod tests {
             "event: response.created\n",
             "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_123\",\"object\":\"response\",\"model\":\"gpt-5.4\",\"status\":\"in_progress\"}}\n\n",
             "event: response.output_text.delta\n",
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello from CLI stream\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello from Responses stream\"}\n\n",
             "event: response.completed\n",
-            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_123\",\"object\":\"response\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello from CLI stream\"}]}],\"usage\":{\"input_tokens\":3,\"input_tokens_details\":{\"cached_tokens\":2,\"cached_creation_tokens\":1},\"output_tokens\":5,\"output_tokens_details\":{\"reasoning_tokens\":1},\"total_tokens\":8}}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_123\",\"object\":\"response\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello from Responses stream\"}]}],\"usage\":{\"input_tokens\":3,\"input_tokens_details\":{\"cached_tokens\":2,\"cached_creation_tokens\":1},\"output_tokens\":5,\"output_tokens_details\":{\"reasoning_tokens\":1},\"total_tokens\":8}}}\n\n",
             "data: [DONE]\n",
         );
         let payload = GatewayStreamReportRequest {
             trace_id: "trace-stream-usage-2".to_string(),
-            report_kind: "openai_cli_stream_success".to_string(),
+            report_kind: "openai_responses_stream_success".to_string(),
             report_context: Some(json!({
-                "client_api_format": "openai:cli",
-                "provider_api_format": "openai:cli",
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:responses",
             })),
             status_code: 200,
             headers: BTreeMap::new(),
@@ -2961,7 +3010,7 @@ mod tests {
                     },
                     {
                         "type": "response.output_text.delta",
-                        "delta": "Hello from CLI stream"
+                        "delta": "Hello from Responses stream"
                     },
                     {
                         "type": "response.completed",
@@ -2977,7 +3026,7 @@ mod tests {
                                     "content": [
                                         {
                                             "type": "output_text",
-                                            "text": "Hello from CLI stream"
+                                            "text": "Hello from Responses stream"
                                         }
                                     ]
                                 }
@@ -3135,8 +3184,8 @@ mod tests {
                 body_ref: None,
             },
             stream: false,
-            client_api_format: "openai:cli".to_string(),
-            provider_api_format: "openai:cli".to_string(),
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.4".to_string()),
             proxy: None,
             tls_profile: None,
@@ -3144,10 +3193,10 @@ mod tests {
         };
         let payload = GatewaySyncReportRequest {
             trace_id: "trace-sync-upstream-stream-1".to_string(),
-            report_kind: "openai_cli_sync_success".to_string(),
+            report_kind: "openai_responses_sync_success".to_string(),
             report_context: Some(json!({
-                "client_api_format": "openai:cli",
-                "provider_api_format": "openai:cli",
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:responses",
                 "upstream_is_stream": true
             })),
             status_code: 200,
@@ -3315,8 +3364,8 @@ mod tests {
                 body_ref: Some("blob://provider-request-1".to_string()),
             },
             stream: false,
-            client_api_format: "openai:cli".to_string(),
-            provider_api_format: "openai:cli".to_string(),
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.4".to_string()),
             proxy: None,
             tls_profile: None,
@@ -3324,10 +3373,10 @@ mod tests {
         };
         let payload = GatewaySyncReportRequest {
             trace_id: "trace-sync-body-ref-1".to_string(),
-            report_kind: "openai_cli_sync_success".to_string(),
+            report_kind: "openai_responses_sync_success".to_string(),
             report_context: Some(json!({
-                "client_api_format": "openai:cli",
-                "provider_api_format": "openai:cli",
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:responses",
                 "trace_id": "trace-sync-body-ref-1"
             })),
             status_code: 200,
@@ -3379,7 +3428,7 @@ mod tests {
             },
             stream: true,
             client_api_format: "openai:chat".to_string(),
-            provider_api_format: "openai:cli".to_string(),
+            provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.4".to_string()),
             proxy: None,
             tls_profile: None,
@@ -3390,7 +3439,7 @@ mod tests {
             report_kind: "openai_chat_stream_success".to_string(),
             report_context: Some(json!({
                 "client_api_format": "openai:chat",
-                "provider_api_format": "openai:cli",
+                "provider_api_format": "openai:responses",
                 "trace_id": "trace-stream-bytes-1"
             })),
             status_code: 200,
@@ -3464,8 +3513,8 @@ mod tests {
                 body_ref: None,
             },
             stream: true,
-            client_api_format: "openai:cli".to_string(),
-            provider_api_format: "openai:cli".to_string(),
+            client_api_format: "openai:responses".to_string(),
+            provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.4".to_string()),
             proxy: None,
             tls_profile: None,
@@ -3473,10 +3522,10 @@ mod tests {
         };
         let payload = GatewayStreamReportRequest {
             trace_id: "trace-stream-usage-large-1".to_string(),
-            report_kind: "openai_cli_stream_success".to_string(),
+            report_kind: "openai_responses_stream_success".to_string(),
             report_context: Some(json!({
-                "client_api_format": "openai:cli",
-                "provider_api_format": "openai:cli",
+                "client_api_format": "openai:responses",
+                "provider_api_format": "openai:responses",
             })),
             status_code: 200,
             headers: BTreeMap::new(),
@@ -3531,7 +3580,7 @@ mod tests {
             })),
             stream: false,
             client_api_format: "claude:cli".to_string(),
-            provider_api_format: "openai:cli".to_string(),
+            provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.4".to_string()),
             proxy: None,
             tls_profile: None,
@@ -3542,7 +3591,7 @@ mod tests {
             report_kind: "claude_cli_sync_success".to_string(),
             report_context: Some(json!({
                 "client_api_format": "claude:cli",
-                "provider_api_format": "openai:cli",
+                "provider_api_format": "openai:responses",
                 "needs_conversion": true,
                 "original_request_body": null,
             })),
@@ -3585,7 +3634,7 @@ mod tests {
             body: RequestBody::from_json(json!({"model": "gpt-5.4"})),
             stream: false,
             client_api_format: "claude:cli".to_string(),
-            provider_api_format: "openai:cli".to_string(),
+            provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.4".to_string()),
             proxy: None,
             tls_profile: None,
@@ -3596,7 +3645,7 @@ mod tests {
             report_kind: "claude_cli_sync_success".to_string(),
             report_context: Some(json!({
                 "client_api_format": "claude:cli",
-                "provider_api_format": "openai:cli",
+                "provider_api_format": "openai:responses",
                 "needs_conversion": true,
             })),
             status_code: 200,

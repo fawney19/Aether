@@ -26,8 +26,8 @@ export function useProviderFilters(
     { value: 'claude:chat', label: 'Claude Chat' },
     { value: 'claude:cli', label: 'Claude CLI' },
     { value: 'openai:chat', label: 'OpenAI Chat' },
-    { value: 'openai:cli', label: 'OpenAI CLI' },
-    { value: 'openai:compact', label: 'OpenAI Compact' },
+    { value: 'openai:responses', label: 'OpenAI Responses' },
+    { value: 'openai:responses:compact', label: 'OpenAI Responses Compact' },
     { value: 'gemini:chat', label: 'Gemini Chat' },
     { value: 'gemini:cli', label: 'Gemini CLI' },
   ]

@@ -4,7 +4,7 @@ use aether_scheduler_core::SchedulerMinimalCandidateSelectionCandidate;
 
 use super::super::{GatewayError, LocalOpenAiChatDecisionInput};
 use crate::ai_pipeline::conversion::request_candidate_api_formats;
-use crate::ai_pipeline::planner::candidate_eligibility::SkippedLocalExecutionCandidate;
+use crate::ai_pipeline::planner::candidate_resolution::SkippedLocalExecutionCandidate;
 use crate::ai_pipeline::planner::candidate_source::auth_snapshot_allows_cross_format_candidate;
 use crate::ai_pipeline::PlannerAppState;
 use crate::clock::current_unix_secs;
@@ -78,6 +78,7 @@ pub(crate) async fn list_local_openai_chat_candidates(
                     candidate: skipped_candidate.candidate,
                     skip_reason: skipped_candidate.skip_reason,
                     transport: None,
+                    ranking: None,
                     extra_data: None,
                 });
             }

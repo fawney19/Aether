@@ -115,6 +115,9 @@ impl SettlementWriteRepository for InMemorySettlementRepository {
                         .map(|wallet| wallet.id.clone())
                 })
                 .or_else(|| {
+                    if input.api_key_is_standalone {
+                        return None;
+                    }
                     input.user_id.as_deref().and_then(|user_id| {
                         wallets
                             .values()
@@ -215,6 +218,25 @@ mod tests {
         .expect("wallet should build")
     }
 
+    fn sample_user_wallet(wallet_id: &str, user_id: &str) -> StoredWalletSnapshot {
+        StoredWalletSnapshot::new(
+            wallet_id.to_string(),
+            Some(user_id.to_string()),
+            None,
+            10.0,
+            2.0,
+            "finite".to_string(),
+            "USD".to_string(),
+            "active".to_string(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            100,
+        )
+        .expect("wallet should build")
+    }
+
     #[tokio::test]
     async fn settles_usage_against_wallet_and_provider_quota() {
         let repository = InMemorySettlementRepository::seed(vec![sample_wallet()]);
@@ -223,6 +245,7 @@ mod tests {
                 request_id: "req-1".to_string(),
                 user_id: Some("user-1".to_string()),
                 api_key_id: Some("key-1".to_string()),
+                api_key_is_standalone: false,
                 provider_id: Some("provider-1".to_string()),
                 status: "completed".to_string(),
                 billing_status: "pending".to_string(),
@@ -241,6 +264,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn normal_key_settlement_falls_back_to_user_wallet() {
+        let repository =
+            InMemorySettlementRepository::seed(vec![sample_user_wallet("wallet-user-1", "user-1")]);
+        let settlement = repository
+            .settle_usage(UsageSettlementInput {
+                request_id: "req-user-wallet".to_string(),
+                user_id: Some("user-1".to_string()),
+                api_key_id: Some("normal-key-without-wallet".to_string()),
+                api_key_is_standalone: false,
+                provider_id: None,
+                status: "completed".to_string(),
+                billing_status: "pending".to_string(),
+                total_cost_usd: 3.0,
+                actual_total_cost_usd: 1.5,
+                finalized_at_unix_secs: Some(200),
+            })
+            .await
+            .expect("settlement should succeed")
+            .expect("settlement should exist");
+
+        assert_eq!(settlement.wallet_id.as_deref(), Some("wallet-user-1"));
+        assert_eq!(settlement.wallet_balance_before, Some(12.0));
+        assert_eq!(settlement.wallet_balance_after, Some(9.0));
+    }
+
+    #[tokio::test]
+    async fn standalone_key_settlement_never_falls_back_to_owner_wallet() {
+        let repository = InMemorySettlementRepository::seed(vec![sample_user_wallet(
+            "wallet-admin-owner",
+            "admin-owner",
+        )]);
+        let settlement = repository
+            .settle_usage(UsageSettlementInput {
+                request_id: "req-standalone-no-key-wallet".to_string(),
+                user_id: Some("admin-owner".to_string()),
+                api_key_id: Some("standalone-key-without-wallet".to_string()),
+                api_key_is_standalone: true,
+                provider_id: None,
+                status: "completed".to_string(),
+                billing_status: "pending".to_string(),
+                total_cost_usd: 3.0,
+                actual_total_cost_usd: 1.5,
+                finalized_at_unix_secs: Some(200),
+            })
+            .await
+            .expect("settlement should succeed")
+            .expect("settlement should exist");
+
+        assert_eq!(settlement.wallet_id, None);
+        assert_eq!(settlement.wallet_balance_before, None);
+        assert_eq!(settlement.wallet_balance_after, None);
+    }
+
+    #[tokio::test]
     async fn returns_stored_snapshot_when_usage_is_already_finalized() {
         let repository = InMemorySettlementRepository::seed(vec![sample_wallet()]);
         let settled = repository
@@ -248,6 +325,7 @@ mod tests {
                 request_id: "req-2".to_string(),
                 user_id: Some("user-1".to_string()),
                 api_key_id: Some("key-1".to_string()),
+                api_key_is_standalone: false,
                 provider_id: Some("provider-1".to_string()),
                 status: "completed".to_string(),
                 billing_status: "pending".to_string(),
@@ -264,6 +342,7 @@ mod tests {
                 request_id: "req-2".to_string(),
                 user_id: Some("user-1".to_string()),
                 api_key_id: Some("key-1".to_string()),
+                api_key_is_standalone: false,
                 provider_id: Some("provider-1".to_string()),
                 status: "completed".to_string(),
                 billing_status: "settled".to_string(),

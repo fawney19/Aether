@@ -65,7 +65,7 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
             true,
             false,
             Some(serde_json::json!(["openai", "codex"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5.4"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -76,7 +76,7 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
             Some(5),
             Some(4_102_444_800_i64),
             Some(serde_json::json!(["openai", "codex"])),
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             Some(serde_json::json!(["gpt-5.4"])),
         )
         .expect("auth snapshot should build")
@@ -90,7 +90,7 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-codex-cli-stream-local-1".to_string(),
-            endpoint_api_format: "openai:cli".to_string(),
+            endpoint_api_format: "openai:responses".to_string(),
             endpoint_api_family: Some("openai".to_string()),
             endpoint_kind: Some("cli".to_string()),
             endpoint_is_active: true,
@@ -98,11 +98,11 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
             key_name: "oauth".to_string(),
             key_auth_type: "oauth".to_string(),
             key_is_active: true,
-            key_api_formats: Some(vec!["openai:cli".to_string()]),
+            key_api_formats: Some(vec!["openai:responses".to_string()]),
             key_allowed_models: None,
             key_capabilities: None,
             key_internal_priority: 5,
-            key_global_priority_by_format: Some(serde_json::json!({"openai:cli": 1})),
+            key_global_priority_by_format: Some(serde_json::json!({"openai:responses": 1})),
             model_id: "model-codex-cli-stream-local-1".to_string(),
             global_model_id: "global-model-codex-cli-stream-local-1".to_string(),
             global_model_name: "gpt-5.4".to_string(),
@@ -112,7 +112,7 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
                 name: "gpt-5.4".to_string(),
                 priority: 1,
-                api_formats: Some(vec!["openai:cli".to_string()]),
+                api_formats: Some(vec!["openai:responses".to_string()]),
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -145,7 +145,7 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
         StoredProviderCatalogEndpoint::new(
             "endpoint-codex-cli-stream-local-1".to_string(),
             "provider-codex-cli-stream-local-1".to_string(),
-            "openai:cli".to_string(),
+            "openai:responses".to_string(),
             Some("openai".to_string()),
             Some("cli".to_string()),
             true,
@@ -180,12 +180,12 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "__placeholder__")
                 .expect("placeholder api key should encrypt"),
             Some(encrypted_auth_config),
             None,
-            Some(serde_json::json!({"openai:cli": 1})),
+            Some(serde_json::json!({"openai:responses": 1})),
             None,
             None,
             None,
@@ -216,7 +216,7 @@ async fn gateway_executes_codex_cli_stream_via_local_decision_gate_after_oauth_r
                     "route_class": "ai_public",
                     "route_family": "openai",
                     "route_kind": "cli",
-                    "auth_endpoint_signature": "openai:cli",
+                    "auth_endpoint_signature": "openai:responses",
                     "execution_runtime_candidate": true,
                     "auth_context": {
                         "user_id": "user-codex-cli-stream-local-123",

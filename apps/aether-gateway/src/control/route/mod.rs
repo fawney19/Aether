@@ -185,10 +185,7 @@ pub(super) fn is_claude_cli_request(headers: &http::HeaderMap) -> bool {
     let auth_header = header_value_str(headers, http::header::AUTHORIZATION.as_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let has_bearer = auth_header.starts_with("bearer ");
-    let has_api_key =
-        header_value_str(headers, "x-api-key").is_some_and(|value| !value.trim().is_empty());
-    has_bearer && !has_api_key
+    auth_header.starts_with("bearer ")
 }
 
 pub(super) fn is_gemini_cli_request(headers: &http::HeaderMap) -> bool {

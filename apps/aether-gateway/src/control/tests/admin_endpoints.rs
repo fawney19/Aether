@@ -367,7 +367,7 @@ fn classifies_admin_refresh_provider_quota_as_admin_proxy_route() {
 #[test]
 fn classifies_admin_default_body_rules_as_admin_proxy_route() {
     let headers = headers(&[]);
-    let uri: Uri = "/api/admin/endpoints/defaults/openai:cli/body-rules?provider_type=codex"
+    let uri: Uri = "/api/admin/endpoints/defaults/openai:responses/body-rules?provider_type=codex"
         .parse()
         .expect("uri should parse");
     let decision =

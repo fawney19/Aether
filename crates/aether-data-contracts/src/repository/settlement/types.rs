@@ -5,6 +5,8 @@ pub struct UsageSettlementInput {
     pub request_id: String,
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
+    #[serde(default)]
+    pub api_key_is_standalone: bool,
     pub provider_id: Option<String>,
     pub status: String,
     pub billing_status: String,
@@ -71,6 +73,7 @@ mod tests {
             request_id: "".to_string(),
             user_id: None,
             api_key_id: None,
+            api_key_is_standalone: false,
             provider_id: None,
             status: "completed".to_string(),
             billing_status: "pending".to_string(),

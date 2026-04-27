@@ -271,7 +271,10 @@ where
 
 fn should_skip_unused_persistence(report_context: Option<&serde_json::Value>) -> bool {
     let metadata = local_execution_candidate_metadata_from_report_context(report_context);
-    metadata.candidate_group_id.is_some() && metadata.pool_key_index.is_some()
+    metadata.candidate_group_id.is_some()
+        && metadata
+            .pool_key_index
+            .is_some_and(|pool_key_index| pool_key_index > 0)
 }
 
 fn resolve_stream_candidate_watchdog_timeout(plan: &aether_contracts::ExecutionPlan) -> Duration {
@@ -483,6 +486,10 @@ mod tests {
         assert!(should_skip_unused_persistence(Some(&json!({
             "candidate_group_id": "pool-group",
             "pool_key_index": 1,
+        }))));
+        assert!(!should_skip_unused_persistence(Some(&json!({
+            "candidate_group_id": "pool-group",
+            "pool_key_index": 0,
         }))));
         assert!(!should_skip_unused_persistence(Some(&json!({
             "candidate_group_id": "pool-group",

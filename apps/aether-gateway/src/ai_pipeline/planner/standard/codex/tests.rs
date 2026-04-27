@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use super::{apply_codex_openai_cli_special_body_edits, apply_codex_openai_cli_special_headers};
+use super::{
+    apply_codex_openai_responses_special_body_edits, apply_codex_openai_responses_special_headers,
+};
 use http::{HeaderMap, HeaderValue};
 use serde_json::json;
 
@@ -15,7 +17,13 @@ fn applies_codex_defaults_when_body_rules_do_not_handle_fields() {
         "store": true
     });
 
-    apply_codex_openai_cli_special_body_edits(&mut body, "codex", "openai:cli", None, None);
+    apply_codex_openai_responses_special_body_edits(
+        &mut body,
+        "codex",
+        "openai:responses",
+        None,
+        None,
+    );
 
     assert!(body.get("max_output_tokens").is_none());
     assert!(body.get("temperature").is_none());
@@ -42,10 +50,10 @@ fn strips_store_for_compact_even_when_body_rules_handle_it() {
         "top_p": 0.5
     });
 
-    apply_codex_openai_cli_special_body_edits(
+    apply_codex_openai_responses_special_body_edits(
         &mut body,
         "codex",
-        "openai:compact",
+        "openai:responses:compact",
         Some(&body_rules),
         None,
     );
@@ -64,10 +72,10 @@ fn injects_stable_prompt_cache_key_for_codex_requests() {
         "input": "hello",
     });
 
-    apply_codex_openai_cli_special_body_edits(
+    apply_codex_openai_responses_special_body_edits(
         &mut body,
         "codex",
-        "openai:cli",
+        "openai:responses",
         None,
         Some("key-123"),
     );
@@ -86,10 +94,10 @@ fn keeps_existing_prompt_cache_key_for_codex_requests() {
         "prompt_cache_key": "existing-key",
     });
 
-    apply_codex_openai_cli_special_body_edits(
+    apply_codex_openai_responses_special_body_edits(
         &mut body,
         "codex",
-        "openai:cli",
+        "openai:responses",
         None,
         Some("key-123"),
     );
@@ -105,12 +113,12 @@ fn injects_chatgpt_account_id_and_session_headers_for_codex_requests() {
         "prompt_cache_key": "172c39e6-c0a0-5a70-8b63-e0f8e0d185a3",
     });
 
-    apply_codex_openai_cli_special_headers(
+    apply_codex_openai_responses_special_headers(
         &mut headers,
         &body,
         &HeaderMap::new(),
         "codex",
-        "openai:cli",
+        "openai:responses",
         Some("trace-codex-123"),
         Some(r#"{"account_id":"acc-123"}"#),
     );
@@ -175,12 +183,12 @@ fn respects_existing_codex_request_and_session_headers() {
         HeaderValue::from_static("user-specified-originator"),
     );
 
-    apply_codex_openai_cli_special_headers(
+    apply_codex_openai_responses_special_headers(
         &mut headers,
         &body,
         &original_headers,
         "codex",
-        "openai:cli",
+        "openai:responses",
         Some("trace-codex-123"),
         Some(r#"{"account_id":"acc-123"}"#),
     );
@@ -203,12 +211,12 @@ fn skips_conversation_id_for_compact_codex_requests() {
         "prompt_cache_key": "172c39e6-c0a0-5a70-8b63-e0f8e0d185a3",
     });
 
-    apply_codex_openai_cli_special_headers(
+    apply_codex_openai_responses_special_headers(
         &mut headers,
         &body,
         &HeaderMap::new(),
         "codex",
-        "openai:compact",
+        "openai:responses:compact",
         Some("trace-codex-compact-123"),
         Some(r#"{"account_id":"acc-123"}"#),
     );

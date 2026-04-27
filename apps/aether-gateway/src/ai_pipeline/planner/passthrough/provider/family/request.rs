@@ -14,27 +14,36 @@ use crate::ai_pipeline::transport::auth::{
 use crate::ai_pipeline::transport::claude_code::build_claude_code_passthrough_headers;
 use crate::ai_pipeline::transport::kiro::{build_kiro_provider_headers, KiroProviderHeadersInput};
 use crate::ai_pipeline::transport::{apply_local_header_rules, ensure_upstream_auth_header};
-use crate::ai_pipeline::GatewayProviderTransportSnapshot;
+use crate::ai_pipeline::{CandidateFailureDiagnostic, GatewayProviderTransportSnapshot};
 use crate::AppState;
 
 mod policy;
 mod prepare;
 
 use self::prepare::prepare_local_same_format_provider_candidate;
-use super::payload::mark_skipped_local_same_format_provider_candidate;
+use super::payload::{
+    mark_skipped_local_same_format_provider_candidate,
+    mark_skipped_local_same_format_provider_candidate_with_extra_data,
+    mark_skipped_local_same_format_provider_candidate_with_failure_diagnostic,
+};
 use super::{
     LocalSameFormatProviderCandidateAttempt, LocalSameFormatProviderDecisionInput,
     LocalSameFormatProviderSpec,
 };
+use crate::ai_pipeline::planner::standard::same_format_provider_request_body_failure_extra_data;
 
 pub(crate) fn resolve_same_format_provider_transport_unsupported_reason_for_trace(
     transport: &GatewayProviderTransportSnapshot,
     provider_api_format: &str,
 ) -> Option<&'static str> {
-    let provider_api_format = match provider_api_format.trim().to_ascii_lowercase().as_str() {
+    let provider_api_format = match crate::ai_pipeline::normalize_legacy_openai_format_alias(
+        provider_api_format,
+    )
+    .as_str()
+    {
         "openai:chat" => "openai:chat",
-        "openai:cli" => "openai:cli",
-        "openai:compact" => "openai:compact",
+        "openai:responses" => "openai:responses",
+        "openai:responses:compact" => "openai:responses:compact",
         "claude:chat" => "claude:chat",
         "claude:cli" => "claude:cli",
         "gemini:chat" => "gemini:chat",
@@ -118,7 +127,7 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
             prepared.is_claude_code,
         )
     else {
-        mark_skipped_local_same_format_provider_candidate(
+        mark_skipped_local_same_format_provider_candidate_with_extra_data(
             state,
             input,
             trace_id,
@@ -126,6 +135,16 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
             attempt.candidate_index,
             &attempt.candidate_id,
             "provider_request_body_missing",
+            same_format_provider_request_body_failure_extra_data(
+                body_json,
+                attempt.eligible.provider_api_format.as_str(),
+                prepared.transport.endpoint.body_rules.as_ref(),
+                if prepared.kiro_auth.is_some() {
+                    "kiro_envelope"
+                } else {
+                    "same_format"
+                },
+            ),
         )
         .await;
         return None;
@@ -165,7 +184,7 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
         ) {
             AntigravityRequestEnvelopeSupport::Supported(envelope) => envelope,
             AntigravityRequestEnvelopeSupport::Unsupported(_) => {
-                mark_skipped_local_same_format_provider_candidate(
+                mark_skipped_local_same_format_provider_candidate_with_extra_data(
                     state,
                     input,
                     trace_id,
@@ -173,6 +192,12 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
                     attempt.candidate_index,
                     &attempt.candidate_id,
                     "provider_request_body_missing",
+                    same_format_provider_request_body_failure_extra_data(
+                        body_json,
+                        attempt.eligible.provider_api_format.as_str(),
+                        prepared.transport.endpoint.body_rules.as_ref(),
+                        "antigravity_envelope",
+                    ),
                 )
                 .await;
                 return None;
@@ -190,7 +215,7 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
         prepared.upstream_is_stream,
         prepared.kiro_auth.as_ref(),
     ) else {
-        mark_skipped_local_same_format_provider_candidate(
+        mark_skipped_local_same_format_provider_candidate_with_failure_diagnostic(
             state,
             input,
             trace_id,
@@ -198,6 +223,11 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
             attempt.candidate_index,
             &attempt.candidate_id,
             "upstream_url_missing",
+            CandidateFailureDiagnostic::upstream_url_missing(
+                attempt.eligible.provider_api_format.as_str(),
+                attempt.eligible.provider_api_format.as_str(),
+                "same_format_provider_url",
+            ),
         )
         .await;
         return None;
@@ -271,7 +301,7 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
             Some(provider_request_headers)
         }
     }) else {
-        mark_skipped_local_same_format_provider_candidate(
+        mark_skipped_local_same_format_provider_candidate_with_failure_diagnostic(
             state,
             input,
             trace_id,
@@ -279,6 +309,11 @@ pub(crate) async fn resolve_local_same_format_provider_candidate_payload_parts(
             attempt.candidate_index,
             &attempt.candidate_id,
             "transport_header_rules_apply_failed",
+            CandidateFailureDiagnostic::header_rules_apply_failed(
+                attempt.eligible.provider_api_format.as_str(),
+                attempt.eligible.provider_api_format.as_str(),
+                "same_format_provider_headers",
+            ),
         )
         .await;
         return None;

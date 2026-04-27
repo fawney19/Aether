@@ -6,8 +6,8 @@ use http::Request;
 use serde_json::{json, Value};
 
 use super::{
-    build_cross_format_openai_cli_request_body, build_local_openai_cli_request_body,
-    build_local_openai_cli_upstream_url,
+    build_cross_format_openai_responses_request_body, build_local_openai_responses_request_body,
+    build_local_openai_responses_upstream_url,
 };
 
 fn object_keys(value: &Value) -> Vec<&str> {
@@ -73,23 +73,23 @@ fn sample_transport(base_url: &str, api_format: &str) -> GatewayProviderTranspor
 }
 
 #[test]
-fn builds_openai_chat_cross_format_request_body_from_openai_cli_source() {
+fn builds_openai_chat_cross_format_request_body_from_openai_responses_source() {
     let body_json = json!({
         "model": "gpt-5",
         "input": "hello",
     });
 
-    let provider_request_body = build_cross_format_openai_cli_request_body(
+    let provider_request_body = build_cross_format_openai_responses_request_body(
         &body_json,
         "gpt-5-upstream",
-        "openai:cli",
+        "openai:responses",
         "openai:chat",
         false,
         "openai",
         None,
         None,
     )
-    .expect("openai cli to openai chat body should build");
+    .expect("openai responses to openai chat body should build");
 
     assert_eq!(provider_request_body["model"], "gpt-5-upstream");
     assert_eq!(provider_request_body["messages"][0]["role"], "user");
@@ -97,7 +97,7 @@ fn builds_openai_chat_cross_format_request_body_from_openai_cli_source() {
 }
 
 #[test]
-fn local_openai_cli_wrapper_preserves_body_order_after_edits() {
+fn local_openai_responses_wrapper_preserves_body_order_after_edits() {
     let body_json: Value = serde_json::from_str(
         r#"{
             "text": {"format": {"type": "text"}},
@@ -113,16 +113,16 @@ fn local_openai_cli_wrapper_preserves_body_order_after_edits() {
     )
     .expect("request body should parse");
 
-    let provider_request_body = build_local_openai_cli_request_body(
+    let provider_request_body = build_local_openai_responses_request_body(
         &body_json,
         "gpt-5.4",
         true,
         "codex",
-        "openai:cli",
+        "openai:responses",
         None,
         Some("key-123"),
     )
-    .expect("local openai cli body should build");
+    .expect("local openai responses body should build");
 
     assert_eq!(
         object_keys(&provider_request_body),
@@ -143,19 +143,19 @@ fn local_openai_cli_wrapper_preserves_body_order_after_edits() {
 }
 
 #[test]
-fn local_openai_compact_wrapper_strips_store_for_same_format_requests() {
+fn local_openai_responses_compact_wrapper_strips_store_for_same_format_requests() {
     let body_json = json!({
         "model": "gpt-5.4",
         "input": [],
         "store": true
     });
 
-    let provider_request_body = build_local_openai_cli_request_body(
+    let provider_request_body = build_local_openai_responses_request_body(
         &body_json,
         "gpt-5.4",
         false,
         "openai",
-        "openai:compact",
+        "openai:responses:compact",
         None,
         None,
     )
@@ -165,7 +165,7 @@ fn local_openai_compact_wrapper_strips_store_for_same_format_requests() {
 }
 
 #[test]
-fn local_openai_cli_upstream_url_preserves_codex_base_path() {
+fn local_openai_responses_upstream_url_preserves_codex_base_path() {
     let request = Request::builder()
         .method("POST")
         .uri("/v1/responses")
@@ -173,18 +173,18 @@ fn local_openai_cli_upstream_url_preserves_codex_base_path() {
         .expect("request should build");
     let (parts, _) = request.into_parts();
 
-    let upstream_url = build_local_openai_cli_upstream_url(
+    let upstream_url = build_local_openai_responses_upstream_url(
         &parts,
-        &sample_transport("https://tiger.bookapi.cc/codex", "openai:cli"),
+        &sample_transport("https://tiger.bookapi.cc/codex", "openai:responses"),
         false,
     )
-    .expect("openai cli upstream url should build");
+    .expect("openai responses upstream url should build");
 
     assert_eq!(upstream_url, "https://tiger.bookapi.cc/codex/responses");
 }
 
 #[test]
-fn strips_metadata_for_codex_openai_cli_requests() {
+fn strips_metadata_for_codex_openai_responses_requests() {
     let body_json = json!({
         "model": "claude-sonnet-4-5",
         "metadata": {"trace_id": "abc"},
@@ -194,11 +194,11 @@ fn strips_metadata_for_codex_openai_cli_requests() {
         }],
     });
 
-    let provider_request_body = build_cross_format_openai_cli_request_body(
+    let provider_request_body = build_cross_format_openai_responses_request_body(
         &body_json,
         "gpt-5-upstream",
         "claude:cli",
-        "openai:cli",
+        "openai:responses",
         true,
         "codex",
         None,
@@ -226,11 +226,11 @@ fn applies_codex_defaults_unless_body_rules_handle_the_field() {
         {"action":"set","path":"metadata","value":{"trace_id":"keep-me"}}
     ]);
 
-    let provider_request_body = build_cross_format_openai_cli_request_body(
+    let provider_request_body = build_cross_format_openai_responses_request_body(
         &body_json,
         "gpt-5-upstream",
         "claude:cli",
-        "openai:cli",
+        "openai:responses",
         true,
         "codex",
         Some(&body_rules),
@@ -244,7 +244,7 @@ fn applies_codex_defaults_unless_body_rules_handle_the_field() {
 }
 
 #[test]
-fn injects_codex_prompt_cache_key_for_openai_cli_cross_format_requests() {
+fn injects_codex_prompt_cache_key_for_openai_responses_cross_format_requests() {
     let body_json = json!({
         "model": "claude-sonnet-4-5",
         "messages": [{
@@ -253,11 +253,11 @@ fn injects_codex_prompt_cache_key_for_openai_cli_cross_format_requests() {
         }],
     });
 
-    let provider_request_body = build_cross_format_openai_cli_request_body(
+    let provider_request_body = build_cross_format_openai_responses_request_body(
         &body_json,
         "gpt-5-upstream",
         "claude:cli",
-        "openai:cli",
+        "openai:responses",
         true,
         "codex",
         None,
@@ -285,7 +285,7 @@ fn injects_codex_prompt_cache_key_for_openai_chat_cross_format_requests() {
         &body_json,
         "gpt-5-upstream",
         "codex",
-        "openai:cli",
+        "openai:responses",
         false,
         None,
         Some("key-123"),

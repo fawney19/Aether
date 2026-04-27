@@ -80,6 +80,7 @@ pub(super) async fn maybe_build_local_openai_image_decision_payload_for_candidat
         client_api_format: spec_metadata.api_format,
         mapped_model: Some(&resolved.mapped_model),
         candidate_group_id: eligible.orchestration.candidate_group_id.as_deref(),
+        ranking: eligible.ranking.as_ref(),
         upstream_url: Some(&resolved.upstream_url),
         header_rules: transport.endpoint.header_rules.as_ref(),
         body_rules: transport.endpoint.body_rules.as_ref(),

@@ -714,7 +714,7 @@ async fn gateway_marks_account_blocked_pool_key_in_list_keys_response() {
     let mut key = sample_key(
         "key-codex-blocked",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "oauth-placeholder",
     );
     key.name = "blocked-codex".to_string();
@@ -1349,7 +1349,7 @@ async fn gateway_formats_codex_quota_countdown_from_reset_after_seconds() {
     let mut key = sample_key(
         "key-codex-oauth",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "oauth-placeholder",
     );
     key.name = "codex quota key".to_string();
@@ -1422,7 +1422,7 @@ async fn gateway_marks_exhausted_codex_pool_key_as_blocked_when_flag_enabled() {
     let mut key = sample_key(
         "key-codex-exhausted",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "oauth-placeholder",
     );
     key.name = "codex exhausted".to_string();
@@ -1504,12 +1504,12 @@ async fn gateway_lists_inherited_fixed_provider_api_formats_for_pool_keys() {
     let mut key = sample_key(
         "key-codex-inherited",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "oauth-placeholder",
     );
     key.name = "codex inherited".to_string();
     key.auth_type = "oauth".to_string();
-    key.api_formats = Some(json!(["openai:cli", "openai:compact"]));
+    key.api_formats = Some(json!(["openai:responses", "openai:responses:compact"]));
 
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
         vec![provider],
@@ -1517,7 +1517,7 @@ async fn gateway_lists_inherited_fixed_provider_api_formats_for_pool_keys() {
             sample_endpoint(
                 "endpoint-codex-cli",
                 "provider-codex",
-                "openai:cli",
+                "openai:responses",
                 "https://chatgpt.com/backend-api/codex",
             ),
             sample_endpoint(
@@ -1555,7 +1555,7 @@ async fn gateway_lists_inherited_fixed_provider_api_formats_for_pool_keys() {
     assert_eq!(keys.len(), 1);
     assert_eq!(
         keys[0]["api_formats"],
-        json!(["openai:cli", "openai:image"])
+        json!(["openai:image", "openai:responses"])
     );
 }
 
@@ -1582,7 +1582,7 @@ async fn gateway_prefers_status_snapshot_codex_quota_over_stale_metadata() {
     let mut key = sample_key(
         "key-codex-snapshot-fresh",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "oauth-placeholder",
     );
     key.name = "codex snapshot fresh".to_string();
@@ -1874,7 +1874,7 @@ async fn gateway_codex_quota_resets_to_full_after_countdown_elapsed() {
     let mut key = sample_key(
         "key-codex-expired",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "oauth-placeholder",
     );
     key.name = "codex expired quota key".to_string();
@@ -1942,7 +1942,7 @@ async fn gateway_pool_prefers_upstream_plan_type_over_auth_config() {
     let mut key = sample_key(
         "key-codex-precedence",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "oauth-placeholder",
     );
     key.auth_type = "oauth".to_string();
@@ -2017,7 +2017,7 @@ async fn gateway_pool_plan_free_selector_prefers_upstream_plan_type() {
     let mut key = sample_key(
         "key-codex-selector",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "oauth-placeholder",
     );
     key.auth_type = "oauth".to_string();

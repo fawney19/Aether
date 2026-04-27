@@ -20,18 +20,19 @@ use super::{
     pending_cleanup_batch_size, pending_cleanup_timeout_minutes, plan_pending_cleanup_batch,
     provider_checkin_schedule, record_proxy_upgrade_traffic_success, run_db_maintenance_with,
     run_proxy_upgrade_rollout_once, spawn_audit_cleanup_worker, spawn_db_maintenance_worker,
-    spawn_pending_cleanup_worker, spawn_pool_monitor_worker, spawn_provider_checkin_worker,
-    spawn_proxy_node_stale_cleanup_worker, spawn_proxy_upgrade_rollout_worker,
-    spawn_stats_aggregation_worker, spawn_stats_hourly_aggregation_worker,
-    spawn_usage_cleanup_worker, spawn_wallet_daily_usage_aggregation_worker,
-    start_proxy_upgrade_rollout, stats_aggregation_target_day,
-    stats_hourly_aggregation_target_hour, summarize_postgres_pool, usage_cleanup_settings,
-    usage_cleanup_window, wallet_daily_usage_aggregation_target, AppState, DbMaintenanceRunSummary,
-    FailedPendingUsageRow, GatewayDataState, ProxyUpgradeRolloutProbeConfig, StalePendingUsageRow,
-    UsageCleanupSettings, DELETE_STALE_WALLET_DAILY_USAGE_LEDGERS_SQL,
-    SELECT_STALE_PENDING_USAGE_BATCH_SQL, UPDATE_FAILED_VOID_STALE_USAGE_SQL,
-    UPSERT_WALLET_DAILY_USAGE_LEDGER_SQL, USAGE_CLEANUP_HOUR, USAGE_CLEANUP_MINUTE,
-    WALLET_DAILY_USAGE_AGGREGATION_HOUR, WALLET_DAILY_USAGE_AGGREGATION_MINUTE,
+    spawn_pending_cleanup_worker, spawn_pool_monitor_worker, spawn_pool_quota_probe_worker,
+    spawn_provider_checkin_worker, spawn_proxy_node_stale_cleanup_worker,
+    spawn_proxy_upgrade_rollout_worker, spawn_stats_aggregation_worker,
+    spawn_stats_hourly_aggregation_worker, spawn_usage_cleanup_worker,
+    spawn_wallet_daily_usage_aggregation_worker, start_proxy_upgrade_rollout,
+    stats_aggregation_target_day, stats_hourly_aggregation_target_hour, summarize_postgres_pool,
+    usage_cleanup_settings, usage_cleanup_window, wallet_daily_usage_aggregation_target, AppState,
+    DbMaintenanceRunSummary, FailedPendingUsageRow, GatewayDataState,
+    ProxyUpgradeRolloutProbeConfig, StalePendingUsageRow, UsageCleanupSettings,
+    DELETE_STALE_WALLET_DAILY_USAGE_LEDGERS_SQL, SELECT_STALE_PENDING_USAGE_BATCH_SQL,
+    UPDATE_FAILED_VOID_STALE_USAGE_SQL, UPSERT_WALLET_DAILY_USAGE_LEDGER_SQL, USAGE_CLEANUP_HOUR,
+    USAGE_CLEANUP_MINUTE, WALLET_DAILY_USAGE_AGGREGATION_HOUR,
+    WALLET_DAILY_USAGE_AGGREGATION_MINUTE,
 };
 
 #[tokio::test]
@@ -77,6 +78,15 @@ async fn spawn_proxy_upgrade_rollout_worker_skips_when_system_config_unavailable
 #[tokio::test]
 async fn spawn_pool_monitor_worker_skips_when_postgres_unavailable() {
     assert!(spawn_pool_monitor_worker(Arc::new(GatewayDataState::disabled())).is_none());
+}
+
+#[tokio::test]
+async fn spawn_pool_quota_probe_worker_skips_when_provider_catalog_unavailable() {
+    let state = AppState::new()
+        .expect("gateway state should build")
+        .with_data_state_for_tests(GatewayDataState::disabled());
+
+    assert!(spawn_pool_quota_probe_worker(state).is_none());
 }
 
 #[test]

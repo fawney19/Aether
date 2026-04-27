@@ -5,8 +5,8 @@ use crate::ai_pipeline::planner::plan_builders::{
     LocalStreamPlanAndReport, LocalSyncPlanAndReport,
 };
 use crate::ai_pipeline::{
-    GatewayControlSyncDecisionResponse, LocalGeminiFilesSpec, LocalOpenAiCliSpec,
-    LocalOpenAiImageSpec, LocalSameFormatProviderFamily, LocalSameFormatProviderSpec,
+    GatewayControlSyncDecisionResponse, LocalGeminiFilesSpec, LocalOpenAiImageSpec,
+    LocalOpenAiResponsesSpec, LocalSameFormatProviderFamily, LocalSameFormatProviderSpec,
     LocalStandardSourceFamily, LocalStandardSpec, LocalVideoCreateFamily, LocalVideoCreateSpec,
 };
 use crate::GatewayError;
@@ -53,8 +53,8 @@ pub(crate) fn local_same_format_provider_spec_metadata(
     }
 }
 
-pub(crate) fn local_openai_cli_spec_metadata(
-    spec: LocalOpenAiCliSpec,
+pub(crate) fn local_openai_responses_spec_metadata(
+    spec: LocalOpenAiResponsesSpec,
 ) -> LocalExecutionSurfaceSpecMetadata {
     LocalExecutionSurfaceSpecMetadata {
         api_format: spec.api_format,

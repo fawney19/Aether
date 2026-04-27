@@ -1,3 +1,4 @@
+use aether_ai_formats::FormatId;
 use aether_contracts::{ExecutionStreamTerminalSummary, StandardizedUsage};
 use serde_json::Value;
 
@@ -6,8 +7,8 @@ use crate::finalize::sse::encode_json_sse;
 use crate::finalize::standard::claude::stream::{ClaudeClientEmitter, ClaudeProviderState};
 use crate::finalize::standard::gemini::stream::{GeminiClientEmitter, GeminiProviderState};
 use crate::finalize::standard::openai::stream::{
-    OpenAIChatClientEmitter, OpenAIChatProviderState, OpenAICliClientEmitter,
-    OpenAICliProviderState,
+    OpenAIChatClientEmitter, OpenAIChatProviderState, OpenAIResponsesClientEmitter,
+    OpenAIResponsesProviderState,
 };
 use crate::finalize::standard::stream_core::common::{
     decode_json_data_line, CanonicalStreamEvent, CanonicalStreamFrame, CanonicalUsage,
@@ -174,33 +175,39 @@ impl StreamingStandardTerminalObserver {
         if summary.model.is_none() {
             summary.model = Some(model);
         }
-        if let CanonicalStreamEvent::Finish {
-            finish_reason,
-            usage,
-        } = event
-        {
-            summary.finish_reason = finish_reason;
-            summary.standardized_usage = usage.map(standardized_usage_from_canonical);
-            summary.observed_finish = true;
+        match event {
+            CanonicalStreamEvent::UnknownEvent(_) => {
+                summary.unknown_event_count = summary.unknown_event_count.saturating_add(1);
+            }
+            CanonicalStreamEvent::Finish {
+                finish_reason,
+                usage,
+            } => {
+                summary.finish_reason = finish_reason;
+                summary.standardized_usage = usage.map(standardized_usage_from_canonical);
+                summary.observed_finish = true;
+            }
+            _ => {}
         }
     }
 }
 
 enum ProviderStreamParser {
     OpenAIChat(OpenAIChatProviderState),
-    OpenAICli(OpenAICliProviderState),
+    OpenAIResponses(OpenAIResponsesProviderState),
     Claude(ClaudeProviderState),
     Gemini(GeminiProviderState),
 }
 
 impl ProviderStreamParser {
     fn for_api_format(provider_api_format: &str) -> Option<Self> {
-        Some(match provider_api_format {
-            "openai:chat" => Self::OpenAIChat(OpenAIChatProviderState::default()),
-            "openai:cli" | "openai:compact" => Self::OpenAICli(OpenAICliProviderState::default()),
-            "claude:chat" | "claude:cli" => Self::Claude(ClaudeProviderState::default()),
-            "gemini:chat" | "gemini:cli" => Self::Gemini(GeminiProviderState::default()),
-            _ => return None,
+        Some(match FormatId::parse(provider_api_format)? {
+            FormatId::OpenAiChat => Self::OpenAIChat(OpenAIChatProviderState::default()),
+            FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact => {
+                Self::OpenAIResponses(OpenAIResponsesProviderState::default())
+            }
+            FormatId::ClaudeMessages => Self::Claude(ClaudeProviderState::default()),
+            FormatId::GeminiGenerateContent => Self::Gemini(GeminiProviderState::default()),
         })
     }
 
@@ -211,7 +218,7 @@ impl ProviderStreamParser {
     ) -> Result<Vec<CanonicalStreamFrame>, PipelineFinalizeError> {
         match self {
             ProviderStreamParser::OpenAIChat(state) => state.push_line(report_context, line),
-            ProviderStreamParser::OpenAICli(state) => state.push_line(report_context, line),
+            ProviderStreamParser::OpenAIResponses(state) => state.push_line(report_context, line),
             ProviderStreamParser::Claude(state) => state.push_line(report_context, line),
             ProviderStreamParser::Gemini(state) => state.push_line(report_context, line),
         }
@@ -223,7 +230,7 @@ impl ProviderStreamParser {
     ) -> Result<Vec<CanonicalStreamFrame>, PipelineFinalizeError> {
         match self {
             ProviderStreamParser::OpenAIChat(state) => state.finish(report_context),
-            ProviderStreamParser::OpenAICli(state) => state.finish(report_context),
+            ProviderStreamParser::OpenAIResponses(state) => state.finish(report_context),
             ProviderStreamParser::Claude(state) => state.finish(report_context),
             ProviderStreamParser::Gemini(state) => state.finish(report_context),
         }
@@ -232,7 +239,7 @@ impl ProviderStreamParser {
 
 enum ClientStreamEmitter {
     OpenAIChat(OpenAIChatClientEmitter),
-    OpenAICli(OpenAICliClientEmitter),
+    OpenAIResponses(OpenAIResponsesClientEmitter),
     Claude(ClaudeClientEmitter),
     Gemini(GeminiClientEmitter),
 }
@@ -268,6 +275,7 @@ fn standardized_usage_from_canonical(usage: CanonicalUsage) -> StandardizedUsage
     standardized.cache_creation_ephemeral_1h_tokens =
         usage.cache_creation_ephemeral_1h_tokens as i64;
     standardized.cache_read_tokens = usage.cache_read_tokens as i64;
+    standardized.reasoning_tokens = usage.reasoning_tokens as i64;
     standardized.dimensions.insert(
         "total_tokens".to_string(),
         serde_json::json!(usage.total_tokens),
@@ -277,19 +285,20 @@ fn standardized_usage_from_canonical(usage: CanonicalUsage) -> StandardizedUsage
 
 impl ClientStreamEmitter {
     fn for_api_format(client_api_format: &str) -> Option<Self> {
-        Some(match client_api_format {
-            "openai:chat" => Self::OpenAIChat(OpenAIChatClientEmitter::default()),
-            "openai:cli" | "openai:compact" => Self::OpenAICli(OpenAICliClientEmitter::default()),
-            "claude:chat" | "claude:cli" => Self::Claude(ClaudeClientEmitter::default()),
-            "gemini:chat" | "gemini:cli" => Self::Gemini(GeminiClientEmitter::default()),
-            _ => return None,
+        Some(match FormatId::parse(client_api_format)? {
+            FormatId::OpenAiChat => Self::OpenAIChat(OpenAIChatClientEmitter::default()),
+            FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact => {
+                Self::OpenAIResponses(OpenAIResponsesClientEmitter::default())
+            }
+            FormatId::ClaudeMessages => Self::Claude(ClaudeClientEmitter::default()),
+            FormatId::GeminiGenerateContent => Self::Gemini(GeminiClientEmitter::default()),
         })
     }
 
     fn emit(&mut self, frame: CanonicalStreamFrame) -> Result<Vec<u8>, PipelineFinalizeError> {
         match self {
             ClientStreamEmitter::OpenAIChat(state) => state.emit(frame),
-            ClientStreamEmitter::OpenAICli(state) => state.emit(frame),
+            ClientStreamEmitter::OpenAIResponses(state) => state.emit(frame),
             ClientStreamEmitter::Claude(state) => state.emit(frame),
             ClientStreamEmitter::Gemini(state) => state.emit(frame),
         }
@@ -298,7 +307,7 @@ impl ClientStreamEmitter {
     fn finish(&mut self) -> Result<Vec<u8>, PipelineFinalizeError> {
         match self {
             ClientStreamEmitter::OpenAIChat(state) => state.finish(),
-            ClientStreamEmitter::OpenAICli(state) => state.finish(),
+            ClientStreamEmitter::OpenAIResponses(state) => state.finish(),
             ClientStreamEmitter::Claude(state) => state.finish(),
             ClientStreamEmitter::Gemini(state) => state.finish(),
         }
@@ -306,7 +315,7 @@ impl ClientStreamEmitter {
 
     fn emit_error(&mut self, error_body: Value) -> Result<Vec<u8>, PipelineFinalizeError> {
         match self {
-            ClientStreamEmitter::OpenAICli(state) => state.emit_error(error_body),
+            ClientStreamEmitter::OpenAIResponses(state) => state.emit_error(error_body),
             ClientStreamEmitter::Claude(_) => {
                 let event = error_body.get("type").and_then(Value::as_str);
                 encode_json_sse(event, &error_body)
@@ -335,11 +344,12 @@ fn parse_provider_error(
     provider_api_format: &str,
     payload: &Value,
 ) -> Option<(String, Option<String>, LocalCoreSyncErrorKind)> {
-    match provider_api_format {
-        "openai:chat" | "openai:cli" | "openai:compact" => parse_openai_error(payload),
-        "claude:chat" | "claude:cli" => parse_claude_error(payload),
-        "gemini:chat" | "gemini:cli" => parse_gemini_error(payload),
-        _ => None,
+    match FormatId::parse(provider_api_format)? {
+        FormatId::OpenAiChat | FormatId::OpenAiResponses | FormatId::OpenAiResponsesCompact => {
+            parse_openai_error(payload)
+        }
+        FormatId::ClaudeMessages => parse_claude_error(payload),
+        FormatId::GeminiGenerateContent => parse_gemini_error(payload),
     }
 }
 
@@ -630,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn transforms_provider_errors_to_openai_cli_failed_events() {
+    fn transforms_provider_errors_to_openai_responses_failed_events() {
         let cases = [
             (
                 "openai:chat",
@@ -675,7 +685,7 @@ mod tests {
         ];
 
         for (provider_api_format, line, message, err_type, code) in cases {
-            let report_context = report_context(provider_api_format, "openai:cli");
+            let report_context = report_context(provider_api_format, "openai:responses");
             let mut matrix = StreamingStandardFormatMatrix::default();
             let output = matrix
                 .transform_line(&report_context, line)
@@ -802,8 +812,8 @@ mod tests {
 
     #[test]
     fn terminal_observer_uses_explicit_provider_stream_event_api_format() {
-        let mut report_context = report_context("openai:chat", "openai:cli");
-        report_context["provider_stream_event_api_format"] = json!("openai:cli");
+        let mut report_context = report_context("openai:chat", "openai:responses");
+        report_context["provider_stream_event_api_format"] = json!("openai:responses");
         let mut observer = StreamingStandardTerminalObserver::default();
 
         observer
@@ -824,7 +834,7 @@ mod tests {
                             },
                             "output_tokens": 137,
                             "output_tokens_details": {
-                                "reasoning_tokens": 0,
+                                "reasoning_tokens": 10,
                             },
                             "total_tokens": 163,
                         },
@@ -844,12 +854,13 @@ mod tests {
 
         assert_eq!(usage.input_tokens, 26);
         assert_eq!(usage.output_tokens, 137);
+        assert_eq!(usage.reasoning_tokens, 10);
         assert_eq!(usage.cache_read_tokens, 0);
     }
 
     #[test]
     fn terminal_observer_does_not_infer_provider_stream_event_api_format() {
-        let report_context = report_context("openai:chat", "openai:cli");
+        let report_context = report_context("openai:chat", "openai:responses");
         let mut observer = StreamingStandardTerminalObserver::default();
 
         observer
@@ -872,5 +883,37 @@ mod tests {
             observer.latest_summary().is_none(),
             "provider stream parser selection must come from report context, not event sniffing"
         );
+    }
+
+    #[test]
+    fn terminal_observer_counts_unknown_provider_stream_events() {
+        let mut report_context = report_context("openai:chat", "openai:responses");
+        report_context["provider_stream_event_api_format"] = json!("openai:responses");
+        let mut observer = StreamingStandardTerminalObserver::default();
+
+        observer
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "type": "response.future.delta",
+                    "response": {
+                        "id": "resp_unknown_123",
+                        "model": "gpt-5.4",
+                    },
+                    "payload": {
+                        "kept": true,
+                    },
+                })),
+            )
+            .expect("unknown stream event should be observed");
+
+        let summary = observer
+            .latest_summary()
+            .cloned()
+            .expect("summary should exist");
+        assert_eq!(summary.response_id.as_deref(), Some("resp_unknown_123"));
+        assert_eq!(summary.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(summary.unknown_event_count, 1);
+        assert!(!summary.observed_finish);
     }
 }

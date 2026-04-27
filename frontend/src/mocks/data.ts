@@ -453,11 +453,11 @@ export const MOCK_PROVIDERS: ProviderWithEndpointsSummary[] = [
     active_models: 7,
     avg_health_score: 0.91,
     unhealthy_endpoints: 0,
-    api_formats: ['CLAUDE_CLI', 'GEMINI_CLI', 'OPENAI_CLI'],
+    api_formats: ['CLAUDE_CLI', 'GEMINI_CLI', 'OPENAI_RESPONSES'],
     endpoint_health_details: [
       { api_format: 'CLAUDE_CLI', health_score: 0.73, is_active: true, active_keys: 1 },
       { api_format: 'GEMINI_CLI', health_score: 1.0, is_active: true, active_keys: 1 },
-      { api_format: 'OPENAI_CLI', health_score: 1.0, is_active: true, active_keys: 1 }
+      { api_format: 'OPENAI_RESPONSES', health_score: 1.0, is_active: true, active_keys: 1 }
     ],
     created_at: '2024-12-09T14:10:36.446217+08:00',
     updated_at: new Date().toISOString()
@@ -504,10 +504,10 @@ export const MOCK_PROVIDERS: ProviderWithEndpointsSummary[] = [
     active_models: 5,
     avg_health_score: 1.0,
     unhealthy_endpoints: 0,
-    api_formats: ['claude:cli', 'openai:cli'],
+    api_formats: ['claude:cli', 'openai:responses'],
     endpoint_health_details: [
       { api_format: 'claude:cli', health_score: 1.0, is_active: true, active_keys: 1 },
-      { api_format: 'openai:cli', health_score: 1.0, is_active: true, active_keys: 1 }
+      { api_format: 'openai:responses', health_score: 1.0, is_active: true, active_keys: 1 }
     ],
     created_at: '2024-12-07T22:56:46.361092+08:00',
     updated_at: new Date().toISOString()
@@ -529,12 +529,12 @@ export const MOCK_PROVIDERS: ProviderWithEndpointsSummary[] = [
     active_models: 7,
     avg_health_score: 1.0,
     unhealthy_endpoints: 0,
-    api_formats: ['claude:cli', 'gemini:chat', 'gemini:cli', 'openai:cli'],
+    api_formats: ['claude:cli', 'gemini:chat', 'gemini:cli', 'openai:responses'],
     endpoint_health_details: [
       { api_format: 'claude:cli', health_score: 1.0, is_active: true, active_keys: 1 },
       { api_format: 'gemini:chat', health_score: 1.0, is_active: true, active_keys: 1 },
       { api_format: 'gemini:cli', health_score: 1.0, is_active: true, active_keys: 1 },
-      { api_format: 'openai:cli', health_score: 1.0, is_active: true, active_keys: 1 }
+      { api_format: 'openai:responses', health_score: 1.0, is_active: true, active_keys: 1 }
     ],
     created_at: '2024-12-07T15:16:55.807595+08:00',
     updated_at: new Date().toISOString()
@@ -556,14 +556,14 @@ export const MOCK_PROVIDERS: ProviderWithEndpointsSummary[] = [
     active_models: 8,
     avg_health_score: 0.863,
     unhealthy_endpoints: 1,
-    api_formats: ['claude:chat', 'claude:cli', 'gemini:chat', 'gemini:cli', 'openai:chat', 'openai:cli'],
+    api_formats: ['claude:chat', 'claude:cli', 'gemini:chat', 'gemini:cli', 'openai:chat', 'openai:responses'],
     endpoint_health_details: [
       { api_format: 'claude:chat', health_score: 1.0, is_active: true, active_keys: 2 },
       { api_format: 'claude:cli', health_score: 0.48, is_active: true, active_keys: 2 },
       { api_format: 'gemini:chat', health_score: 1.0, is_active: true, active_keys: 2 },
       { api_format: 'gemini:cli', health_score: 0.85, is_active: true, active_keys: 2 },
       { api_format: 'openai:chat', health_score: 0.85, is_active: true, active_keys: 2 },
-      { api_format: 'openai:cli', health_score: 1.0, is_active: true, active_keys: 1 }
+      { api_format: 'openai:responses', health_score: 1.0, is_active: true, active_keys: 1 }
     ],
     created_at: '2024-12-07T22:56:09.712806+08:00',
     updated_at: new Date().toISOString()
@@ -881,7 +881,8 @@ export const MOCK_API_FORMATS = {
     { value: 'claude:chat', label: 'Claude Chat', default_path: '/v1/messages', aliases: [] },
     { value: 'claude:cli', label: 'Claude CLI', default_path: '/v1/messages', aliases: [] },
     { value: 'openai:chat', label: 'OpenAI Chat', default_path: '/v1/chat/completions', aliases: [] },
-    { value: 'openai:cli', label: 'OpenAI CLI', default_path: '/v1/responses', aliases: [] },
+    { value: 'openai:responses', label: 'OpenAI Responses', default_path: '/v1/responses', aliases: ['openai:cli'] },
+    { value: 'openai:responses:compact', label: 'OpenAI Responses Compact', default_path: '/v1/responses/compact', aliases: ['openai:compact'] },
     { value: 'openai:image', label: 'OpenAI Image', default_path: '/v1/images/generations', aliases: [] },
     { value: 'openai:video', label: 'OpenAI Video', default_path: '/v1/videos', aliases: [] },
     { value: 'gemini:chat', label: 'Gemini Chat', default_path: '/v1beta/models/{model}:{action}', aliases: [] },

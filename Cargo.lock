@@ -23,6 +23,7 @@ dependencies = [
 name = "aether-admin"
 version = "0.1.0"
 dependencies = [
+ "aether-ai-formats",
  "aether-billing",
  "aether-contracts",
  "aether-data",
@@ -41,9 +42,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-ai-formats"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "aether-ai-pipeline"
 version = "0.1.0"
 dependencies = [
+ "aether-ai-formats",
  "aether-contracts",
  "aether-provider-transport",
  "aether-usage-runtime",
@@ -102,6 +114,7 @@ dependencies = [
 name = "aether-data"
 version = "0.1.0"
 dependencies = [
+ "aether-ai-formats",
  "aether-cache",
  "aether-data-contracts",
  "aether-wallet",
@@ -125,6 +138,7 @@ dependencies = [
 name = "aether-data-contracts"
 version = "0.1.0"
 dependencies = [
+ "aether-ai-formats",
  "async-trait",
  "serde",
  "serde_json",
@@ -202,6 +216,7 @@ dependencies = [
 name = "aether-model-fetch"
 version = "0.1.0"
 dependencies = [
+ "aether-ai-formats",
  "aether-contracts",
  "aether-data-contracts",
  "aether-provider-transport",
@@ -220,6 +235,7 @@ dependencies = [
 name = "aether-provider-transport"
 version = "0.1.0"
 dependencies = [
+ "aether-ai-formats",
  "aether-contracts",
  "aether-crypto",
  "aether-data",
@@ -305,6 +321,7 @@ dependencies = [
 name = "aether-scheduler-core"
 version = "0.1.0"
 dependencies = [
+ "aether-ai-formats",
  "aether-contracts",
  "aether-data-contracts",
  "aether-wallet",
@@ -340,6 +357,7 @@ dependencies = [
 name = "aether-usage-runtime"
 version = "0.1.0"
 dependencies = [
+ "aether-ai-formats",
  "aether-contracts",
  "aether-data",
  "aether-data-contracts",

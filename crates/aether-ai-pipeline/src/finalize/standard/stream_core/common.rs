@@ -1,59 +1,8 @@
 use serde_json::{json, Map, Value};
 
-#[derive(Clone, Debug, Default)]
-pub struct CanonicalUsage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub total_tokens: u64,
-    pub cache_creation_tokens: u64,
-    pub cache_creation_ephemeral_5m_tokens: u64,
-    pub cache_creation_ephemeral_1h_tokens: u64,
-    pub cache_read_tokens: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CanonicalContentPart {
-    ImageUrl(String),
-    File {
-        file_data: Option<String>,
-        reference: Option<String>,
-        mime_type: Option<String>,
-        filename: Option<String>,
-    },
-    Audio {
-        data: String,
-        format: String,
-    },
-}
-
-#[derive(Clone, Debug)]
-pub enum CanonicalStreamEvent {
-    Start,
-    TextDelta(String),
-    ReasoningDelta(String),
-    ReasoningSignature(String),
-    ContentPart(CanonicalContentPart),
-    ToolCallStart {
-        index: usize,
-        call_id: String,
-        name: String,
-    },
-    ToolCallArgumentsDelta {
-        index: usize,
-        arguments: String,
-    },
-    Finish {
-        finish_reason: Option<String>,
-        usage: Option<CanonicalUsage>,
-    },
-}
-
-#[derive(Clone, Debug)]
-pub struct CanonicalStreamFrame {
-    pub id: String,
-    pub model: String,
-    pub event: CanonicalStreamEvent,
-}
+pub use aether_ai_formats::stream::{
+    CanonicalContentPart, CanonicalStreamEvent, CanonicalStreamFrame, CanonicalUsage,
+};
 
 pub fn decode_json_data_line(line: &[u8]) -> Option<Value> {
     let text = std::str::from_utf8(line).ok()?;
@@ -123,6 +72,18 @@ pub fn canonical_usage_from_openai_usage(value: Option<&Value>) -> Option<Canoni
                 .and_then(Value::as_u64)
         })
         .unwrap_or(0);
+    let reasoning_tokens = usage
+        .get("reasoning_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            usage
+                .get("output_tokens_details")
+                .or_else(|| usage.get("completion_tokens_details"))
+                .and_then(Value::as_object)
+                .and_then(|details| details.get("reasoning_tokens"))
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(0);
     let total_tokens = usage.get("total_tokens").and_then(Value::as_u64).unwrap_or(
         input_tokens
             .saturating_add(output_tokens)
@@ -138,6 +99,7 @@ pub fn canonical_usage_from_openai_usage(value: Option<&Value>) -> Option<Canoni
         total_tokens,
         cache_creation_tokens,
         cache_read_tokens,
+        reasoning_tokens,
         ..CanonicalUsage::default()
     })
 }
@@ -174,6 +136,10 @@ pub fn canonical_usage_from_claude_usage(value: Option<&Value>) -> Option<Canoni
         .get("cache_read_input_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let reasoning_tokens = usage
+        .get("reasoning_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     Some(CanonicalUsage {
         input_tokens,
         output_tokens,
@@ -185,6 +151,7 @@ pub fn canonical_usage_from_claude_usage(value: Option<&Value>) -> Option<Canoni
         cache_creation_ephemeral_5m_tokens,
         cache_creation_ephemeral_1h_tokens,
         cache_read_tokens,
+        reasoning_tokens,
     })
 }
 
@@ -196,6 +163,10 @@ pub fn canonical_usage_from_gemini_usage(value: Option<&Value>) -> Option<Canoni
         .unwrap_or(0);
     let output_tokens = usage
         .get("candidatesTokenCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let reasoning_tokens = usage
+        .get("thoughtsTokenCount")
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let cache_read_tokens = usage
@@ -212,9 +183,10 @@ pub fn canonical_usage_from_gemini_usage(value: Option<&Value>) -> Option<Canoni
         );
     Some(CanonicalUsage {
         input_tokens,
-        output_tokens,
+        output_tokens: output_tokens.saturating_add(reasoning_tokens),
         total_tokens,
         cache_read_tokens,
+        reasoning_tokens,
         ..CanonicalUsage::default()
     })
 }
@@ -316,16 +288,26 @@ pub fn build_openai_chat_usage_chunk(
     prompt_tokens: u64,
     completion_tokens: u64,
     total_tokens: u64,
+    reasoning_tokens: u64,
 ) -> Value {
+    let mut usage = Map::new();
+    usage.insert("prompt_tokens".to_string(), Value::from(prompt_tokens));
+    usage.insert(
+        "completion_tokens".to_string(),
+        Value::from(completion_tokens),
+    );
+    usage.insert("total_tokens".to_string(), Value::from(total_tokens));
+    if reasoning_tokens > 0 {
+        usage.insert(
+            "completion_tokens_details".to_string(),
+            json!({ "reasoning_tokens": reasoning_tokens }),
+        );
+    }
     json!({
         "id": id,
         "object": "chat.completion.chunk",
         "model": model,
         "choices": [],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens,
-        }
+        "usage": usage,
     })
 }

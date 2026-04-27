@@ -8,7 +8,9 @@ use crate::ai_pipeline::planner::candidate_preparation::{
 };
 use crate::ai_pipeline::planner::common::force_upstream_streaming_for_provider;
 use crate::ai_pipeline::planner::spec_metadata::local_standard_spec_metadata;
-use crate::ai_pipeline::planner::standard::apply_codex_openai_cli_special_headers;
+use crate::ai_pipeline::planner::standard::{
+    apply_codex_openai_responses_special_headers, request_body_build_failure_extra_data,
+};
 use crate::ai_pipeline::transport::apply_local_header_rules;
 use crate::ai_pipeline::transport::auth::{
     build_claude_passthrough_headers, build_openai_passthrough_headers, ensure_upstream_auth_header,
@@ -18,10 +20,15 @@ use crate::ai_pipeline::transport::kiro::{
     KiroRequestAuth, KIRO_ENVELOPE_NAME,
 };
 use crate::ai_pipeline::transport::vertex::uses_vertex_api_key_query_auth;
-use crate::ai_pipeline::{GatewayProviderTransportSnapshot, LocalResolvedOAuthRequestAuth};
+use crate::ai_pipeline::{
+    CandidateFailureDiagnostic, GatewayProviderTransportSnapshot, LocalResolvedOAuthRequestAuth,
+};
 use crate::AppState;
 
-use super::payload::mark_skipped_local_standard_candidate;
+use super::payload::{
+    mark_skipped_local_standard_candidate, mark_skipped_local_standard_candidate_with_extra_data,
+    mark_skipped_local_standard_candidate_with_failure_diagnostic,
+};
 use super::{LocalStandardCandidateAttempt, LocalStandardDecisionInput, LocalStandardSpec};
 
 pub(crate) struct LocalStandardCandidatePayloadParts {
@@ -193,14 +200,19 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
         ) {
             Some(body) => body,
             None => {
-                mark_skipped_local_standard_candidate(
+                mark_skipped_local_standard_candidate_with_extra_data(
                     state,
                     input,
                     trace_id,
                     candidate,
                     attempt.candidate_index,
                     &attempt.candidate_id,
-                    "provider_request_body_missing",
+                    "provider_request_body_build_failed",
+                    request_body_build_failure_extra_data(
+                        body_json,
+                        spec_metadata.api_format,
+                        provider_api_format,
+                    ),
                 )
                 .await;
                 return None;
@@ -236,7 +248,7 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
     ) {
         Some(url) => url,
         None => {
-            mark_skipped_local_standard_candidate(
+            mark_skipped_local_standard_candidate_with_failure_diagnostic(
                 state,
                 input,
                 trace_id,
@@ -244,6 +256,11 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
                 attempt.candidate_index,
                 &attempt.candidate_id,
                 "upstream_url_missing",
+                CandidateFailureDiagnostic::upstream_url_missing(
+                    spec_metadata.api_format,
+                    provider_api_format,
+                    "standard_family_url",
+                ),
             )
             .await;
             return None;
@@ -280,7 +297,7 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
         &provider_request_body,
         Some(body_json),
     ) {
-        mark_skipped_local_standard_candidate(
+        mark_skipped_local_standard_candidate_with_failure_diagnostic(
             state,
             input,
             trace_id,
@@ -288,11 +305,16 @@ pub(crate) async fn resolve_local_standard_candidate_payload_parts(
             attempt.candidate_index,
             &attempt.candidate_id,
             "transport_header_rules_apply_failed",
+            CandidateFailureDiagnostic::header_rules_apply_failed(
+                spec_metadata.api_format,
+                provider_api_format,
+                "standard_family_headers",
+            ),
         )
         .await;
         return None;
     }
-    apply_codex_openai_cli_special_headers(
+    apply_codex_openai_responses_special_headers(
         &mut provider_request_headers,
         &provider_request_body,
         &parts.headers,
@@ -361,14 +383,19 @@ async fn build_kiro_cross_format_payload_parts(
     ) {
         Some(body) => body,
         None => {
-            mark_skipped_local_standard_candidate(
+            mark_skipped_local_standard_candidate_with_extra_data(
                 state,
                 input,
                 trace_id,
                 candidate,
                 attempt.candidate_index,
                 &attempt.candidate_id,
-                "provider_request_body_missing",
+                "provider_request_body_build_failed",
+                request_body_build_failure_extra_data(
+                    &claude_request_body,
+                    provider_api_format,
+                    provider_api_format,
+                ),
             )
             .await;
             return None;
@@ -384,7 +411,7 @@ async fn build_kiro_cross_format_payload_parts(
     ) {
         Some(url) => url,
         None => {
-            mark_skipped_local_standard_candidate(
+            mark_skipped_local_standard_candidate_with_failure_diagnostic(
                 state,
                 input,
                 trace_id,
@@ -392,6 +419,11 @@ async fn build_kiro_cross_format_payload_parts(
                 attempt.candidate_index,
                 &attempt.candidate_id,
                 "upstream_url_missing",
+                CandidateFailureDiagnostic::upstream_url_missing(
+                    provider_api_format,
+                    provider_api_format,
+                    "standard_family_kiro_url",
+                ),
             )
             .await;
             return None;
@@ -409,7 +441,7 @@ async fn build_kiro_cross_format_payload_parts(
     }) {
         Some(headers) => headers,
         None => {
-            mark_skipped_local_standard_candidate(
+            mark_skipped_local_standard_candidate_with_failure_diagnostic(
                 state,
                 input,
                 trace_id,
@@ -417,6 +449,11 @@ async fn build_kiro_cross_format_payload_parts(
                 attempt.candidate_index,
                 &attempt.candidate_id,
                 "transport_header_rules_apply_failed",
+                CandidateFailureDiagnostic::header_rules_apply_failed(
+                    provider_api_format,
+                    provider_api_format,
+                    "standard_family_kiro_headers",
+                ),
             )
             .await;
             return None;

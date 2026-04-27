@@ -85,13 +85,19 @@ pub fn infer_internal_finalize_signature(payload: &GatewaySyncReportRequest) -> 
         return Some("openai:chat".to_string());
     }
     if report_kind.starts_with("openai_compact_") {
-        return Some("openai:compact".to_string());
+        return Some("openai:responses:compact".to_string());
+    }
+    if report_kind.starts_with("openai_responses_compact_") {
+        return Some("openai:responses:compact".to_string());
+    }
+    if report_kind.starts_with("openai_responses_") {
+        return Some("openai:responses".to_string());
     }
     if report_kind.starts_with("openai_image_") {
         return Some("openai:image".to_string());
     }
     if report_kind.starts_with("openai_cli_") {
-        return Some("openai:cli".to_string());
+        return Some("openai:responses".to_string());
     }
     if report_kind.starts_with("openai_video_") {
         return Some("openai:video".to_string());
@@ -115,21 +121,21 @@ pub fn infer_internal_finalize_signature(payload: &GatewaySyncReportRequest) -> 
 }
 
 pub fn resolve_internal_finalize_route(signature: &str) -> Option<InternalFinalizeRoute> {
-    match signature {
+    match aether_ai_formats::normalize_legacy_openai_format_alias(signature).as_str() {
         "openai:chat" => Some(InternalFinalizeRoute {
             public_path: "/v1/chat/completions",
             route_family: "openai",
             route_kind: "chat",
         }),
-        "openai:cli" => Some(InternalFinalizeRoute {
+        "openai:responses" => Some(InternalFinalizeRoute {
             public_path: "/v1/responses",
             route_family: "openai",
-            route_kind: "cli",
+            route_kind: "responses",
         }),
-        "openai:compact" => Some(InternalFinalizeRoute {
+        "openai:responses:compact" => Some(InternalFinalizeRoute {
             public_path: "/v1/responses/compact",
             route_family: "openai",
-            route_kind: "compact",
+            route_kind: "responses:compact",
         }),
         "openai:image" => Some(InternalFinalizeRoute {
             public_path: "/v1/images/generations",
@@ -231,6 +237,10 @@ pub fn is_local_ai_sync_report_kind(report_kind: &str) -> bool {
             | "openai_chat_sync_error"
             | "claude_chat_sync_error"
             | "gemini_chat_sync_error"
+            | "openai_responses_sync_success"
+            | "openai_responses_compact_sync_success"
+            | "openai_responses_sync_error"
+            | "openai_responses_compact_sync_error"
             | "openai_cli_sync_success"
             | "openai_image_sync_success"
             | "claude_cli_sync_success"
@@ -262,6 +272,8 @@ pub fn is_local_ai_stream_report_kind(report_kind: &str) -> bool {
         "openai_chat_stream_success"
             | "claude_chat_stream_success"
             | "gemini_chat_stream_success"
+            | "openai_responses_stream_success"
+            | "openai_responses_compact_stream_success"
             | "openai_cli_stream_success"
             | "claude_cli_stream_success"
             | "gemini_cli_stream_success"
@@ -415,6 +427,12 @@ mod tests {
         assert!(is_local_ai_sync_report_kind(
             "openai_video_create_sync_success"
         ));
+        assert!(is_local_ai_sync_report_kind(
+            "openai_responses_compact_sync_success"
+        ));
+        assert!(is_local_ai_sync_report_kind(
+            "openai_responses_compact_sync_error"
+        ));
         assert!(is_local_ai_sync_report_kind("openai_image_sync_success"));
         assert!(is_local_ai_sync_report_kind("gemini_files_delete_mapping"));
         assert!(!is_local_ai_sync_report_kind("unknown_sync_kind"));
@@ -423,6 +441,9 @@ mod tests {
     #[test]
     fn classifies_local_ai_stream_report_kinds() {
         assert!(is_local_ai_stream_report_kind("openai_chat_stream_success"));
+        assert!(is_local_ai_stream_report_kind(
+            "openai_responses_compact_stream_success"
+        ));
         assert!(!is_local_ai_stream_report_kind("openai_chat_stream_error"));
     }
 
@@ -483,6 +504,13 @@ mod tests {
             Some("openai:image".to_string())
         );
 
+        let from_compact_report_kind =
+            sample_sync_report_with_context("openai_responses_compact_sync_finalize", json!({}));
+        assert_eq!(
+            infer_internal_finalize_signature(&from_compact_report_kind),
+            Some("openai:responses:compact".to_string())
+        );
+
         let unknown = sample_sync_report("unknown_sync_finalize", 200);
         assert_eq!(infer_internal_finalize_signature(&unknown), None);
     }
@@ -490,12 +518,16 @@ mod tests {
     #[test]
     fn resolves_internal_finalize_route_for_supported_signatures() {
         assert_eq!(
-            resolve_internal_finalize_route("openai:compact"),
+            resolve_internal_finalize_route("openai:responses:compact"),
             Some(InternalFinalizeRoute {
                 public_path: "/v1/responses/compact",
                 route_family: "openai",
-                route_kind: "compact",
+                route_kind: "responses:compact",
             })
+        );
+        assert_eq!(
+            resolve_internal_finalize_route("openai:compact"),
+            resolve_internal_finalize_route("openai:responses:compact")
         );
         assert_eq!(
             resolve_internal_finalize_route("gemini:video"),

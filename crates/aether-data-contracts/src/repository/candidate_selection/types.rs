@@ -48,14 +48,21 @@ impl StoredMinimalCandidateSelectionRow {
     }
 
     pub fn key_supports_api_format(&self, api_format: &str) -> bool {
-        let target = api_format.trim();
         match self.key_api_formats.as_deref() {
             None => true,
             Some(formats) => formats
                 .iter()
-                .any(|value| value.eq_ignore_ascii_case(target)),
+                .any(|value| api_format_matches(value, api_format)),
         }
     }
+}
+
+fn normalize_api_format(value: &str) -> String {
+    aether_ai_formats::normalize_legacy_openai_format_alias(value)
+}
+
+fn api_format_matches(left: &str, right: &str) -> bool {
+    normalize_api_format(left) == normalize_api_format(right)
 }
 
 #[async_trait]

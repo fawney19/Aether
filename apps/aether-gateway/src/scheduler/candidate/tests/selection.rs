@@ -483,9 +483,9 @@ async fn fixed_order_disables_same_priority_affinity_hash_tiebreaker() {
     second.endpoint_id = "endpoint-b".to_string();
     second.key_id = "key-b".to_string();
     second.key_name = "beta".to_string();
-    second.provider_priority = 0;
+    second.provider_priority = 1;
     second.key_internal_priority = 0;
-    second.key_global_priority_by_format = Some(json!({"openai:chat": 0}));
+    second.key_global_priority_by_format = Some(json!({"openai:chat": 1}));
 
     let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
         first, second,
@@ -537,9 +537,9 @@ async fn cache_affinity_promotes_cached_scheduler_affinity_candidate_when_enable
     second.endpoint_id = "endpoint-b".to_string();
     second.key_id = "key-b".to_string();
     second.key_name = "beta".to_string();
-    second.provider_priority = 1;
+    second.provider_priority = 0;
     second.key_internal_priority = 0;
-    second.key_global_priority_by_format = Some(json!({"openai:chat": 1}));
+    second.key_global_priority_by_format = Some(json!({"openai:chat": 0}));
 
     let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
         first, second,
@@ -1552,22 +1552,22 @@ async fn skips_codex_candidate_when_account_quota_is_exhausted_and_pool_flag_ena
     first.provider_name = "codex".to_string();
     first.provider_type = "codex".to_string();
     first.endpoint_id = "endpoint-codex".to_string();
-    first.endpoint_api_format = "openai:cli".to_string();
+    first.endpoint_api_format = "openai:responses".to_string();
     first.key_id = "key-codex".to_string();
     first.key_name = "codex-exhausted".to_string();
     first.key_auth_type = "oauth".to_string();
-    first.key_api_formats = Some(vec!["openai:cli".to_string()]);
-    first.key_global_priority_by_format = Some(serde_json::json!({"openai:cli": 1}));
+    first.key_api_formats = Some(vec!["openai:responses".to_string()]);
+    first.key_global_priority_by_format = Some(serde_json::json!({"openai:responses": 1}));
 
     let mut second = sample_row();
     second.provider_id = "provider-openai".to_string();
     second.provider_name = "openai".to_string();
     second.endpoint_id = "endpoint-openai".to_string();
-    second.endpoint_api_format = "openai:cli".to_string();
+    second.endpoint_api_format = "openai:responses".to_string();
     second.key_id = "key-openai".to_string();
     second.key_name = "fallback".to_string();
-    second.key_api_formats = Some(vec!["openai:cli".to_string()]);
-    second.key_global_priority_by_format = Some(serde_json::json!({"openai:cli": 2}));
+    second.key_api_formats = Some(vec!["openai:responses".to_string()]);
+    second.key_global_priority_by_format = Some(serde_json::json!({"openai:responses": 2}));
 
     let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
         first, second,
@@ -1612,7 +1612,7 @@ async fn skips_codex_candidate_when_account_quota_is_exhausted_and_pool_flag_ena
     let (selected, skipped) = collect_selectable_candidates_with_skip_reasons(
         state.data.as_ref(),
         &state,
-        "openai:cli",
+        "openai:responses",
         "gpt-4.1",
         false,
         None,
@@ -1635,22 +1635,22 @@ async fn skips_oauth_invalid_candidate_before_local_auth_resolution() {
     first.provider_name = "codex".to_string();
     first.provider_type = "codex".to_string();
     first.endpoint_id = "endpoint-codex".to_string();
-    first.endpoint_api_format = "openai:cli".to_string();
+    first.endpoint_api_format = "openai:responses".to_string();
     first.key_id = "key-codex".to_string();
     first.key_name = "codex-invalid".to_string();
     first.key_auth_type = "oauth".to_string();
-    first.key_api_formats = Some(vec!["openai:cli".to_string()]);
-    first.key_global_priority_by_format = Some(serde_json::json!({"openai:cli": 1}));
+    first.key_api_formats = Some(vec!["openai:responses".to_string()]);
+    first.key_global_priority_by_format = Some(serde_json::json!({"openai:responses": 1}));
 
     let mut second = sample_row();
     second.provider_id = "provider-openai".to_string();
     second.provider_name = "openai".to_string();
     second.endpoint_id = "endpoint-openai".to_string();
-    second.endpoint_api_format = "openai:cli".to_string();
+    second.endpoint_api_format = "openai:responses".to_string();
     second.key_id = "key-openai".to_string();
     second.key_name = "fallback".to_string();
-    second.key_api_formats = Some(vec!["openai:cli".to_string()]);
-    second.key_global_priority_by_format = Some(serde_json::json!({"openai:cli": 2}));
+    second.key_api_formats = Some(vec!["openai:responses".to_string()]);
+    second.key_global_priority_by_format = Some(serde_json::json!({"openai:responses": 2}));
 
     let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
         first, second,
@@ -1690,7 +1690,7 @@ async fn skips_oauth_invalid_candidate_before_local_auth_resolution() {
     let (selected, skipped) = collect_selectable_candidates_with_skip_reasons(
         state.data.as_ref(),
         &state,
-        "openai:cli",
+        "openai:responses",
         "gpt-4.1",
         false,
         None,
@@ -1713,11 +1713,11 @@ async fn keeps_request_failed_oauth_candidate_selectable() {
     row.provider_name = "codex".to_string();
     row.provider_type = "codex".to_string();
     row.endpoint_id = "endpoint-codex".to_string();
-    row.endpoint_api_format = "openai:cli".to_string();
+    row.endpoint_api_format = "openai:responses".to_string();
     row.key_id = "key-codex".to_string();
     row.key_name = "codex-check-failed".to_string();
     row.key_auth_type = "oauth".to_string();
-    row.key_api_formats = Some(vec!["openai:cli".to_string()]);
+    row.key_api_formats = Some(vec!["openai:responses".to_string()]);
 
     let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
         row,
@@ -1751,7 +1751,7 @@ async fn keeps_request_failed_oauth_candidate_selectable() {
     let (selected, skipped) = collect_selectable_candidates_with_skip_reasons(
         state.data.as_ref(),
         &state,
-        "openai:cli",
+        "openai:responses",
         "gpt-4.1",
         false,
         None,
@@ -1766,28 +1766,264 @@ async fn keeps_request_failed_oauth_candidate_selectable() {
 }
 
 #[tokio::test]
+async fn keeps_refreshable_kiro_candidate_selectable_with_runtime_oauth_invalid_marker() {
+    let mut row = sample_row();
+    row.provider_id = "provider-kiro".to_string();
+    row.provider_name = "kiro".to_string();
+    row.provider_type = "kiro".to_string();
+    row.endpoint_id = "endpoint-kiro".to_string();
+    row.key_id = "key-kiro".to_string();
+    row.key_name = "kiro-refreshable".to_string();
+    row.key_auth_type = "oauth".to_string();
+
+    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+        row,
+    ]));
+    let mut provider = sample_provider("provider-kiro", None);
+    provider.provider_type = "kiro".to_string();
+    let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![{
+            let mut key = sample_key("key-kiro", "provider-kiro", Some(10));
+            key.auth_type = "oauth".to_string();
+            key.encrypted_auth_config = Some("encrypted-refreshable-session".to_string());
+            key.oauth_invalid_at_unix_secs = Some(1_710_000_000);
+            key.oauth_invalid_reason = Some("Kiro Token 无效或已过期".to_string());
+            key
+        }],
+    ));
+    let quotas = Arc::new(InMemoryProviderQuotaRepository::seed(vec![]));
+    let request_candidates = Arc::new(InMemoryRequestCandidateRepository::seed(vec![]));
+    let state = AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_candidate_selection_provider_catalog_quota_and_request_candidates_for_tests(
+                candidates,
+                provider_catalog,
+                quotas,
+                request_candidates,
+            ),
+        );
+
+    let (selected, skipped) = collect_selectable_candidates_with_skip_reasons(
+        state.data.as_ref(),
+        &state,
+        "openai:chat",
+        "gpt-4.1",
+        false,
+        None,
+        1_710_000_100,
+    )
+    .await
+    .expect("selection should succeed");
+
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].provider_id, "provider-kiro");
+    assert!(skipped.is_empty());
+}
+
+#[tokio::test]
+async fn keeps_refreshable_kiro_candidate_selectable_when_oauth_token_expired() {
+    let mut row = sample_row();
+    row.provider_id = "provider-kiro".to_string();
+    row.provider_name = "kiro".to_string();
+    row.provider_type = "kiro".to_string();
+    row.endpoint_id = "endpoint-kiro".to_string();
+    row.key_id = "key-kiro".to_string();
+    row.key_name = "kiro-expired-refreshable".to_string();
+    row.key_auth_type = "oauth".to_string();
+
+    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+        row,
+    ]));
+    let mut provider = sample_provider("provider-kiro", None);
+    provider.provider_type = "kiro".to_string();
+    let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![{
+            let mut key = sample_key("key-kiro", "provider-kiro", Some(10));
+            key.auth_type = "oauth".to_string();
+            key.encrypted_auth_config = Some("encrypted-refreshable-session".to_string());
+            key.expires_at_unix_secs = Some(1_710_000_000);
+            key
+        }],
+    ));
+    let quotas = Arc::new(InMemoryProviderQuotaRepository::seed(vec![]));
+    let request_candidates = Arc::new(InMemoryRequestCandidateRepository::seed(vec![]));
+    let state = AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_candidate_selection_provider_catalog_quota_and_request_candidates_for_tests(
+                candidates,
+                provider_catalog,
+                quotas,
+                request_candidates,
+            ),
+        );
+
+    let (selected, skipped) = collect_selectable_candidates_with_skip_reasons(
+        state.data.as_ref(),
+        &state,
+        "openai:chat",
+        "gpt-4.1",
+        false,
+        None,
+        1_710_000_100,
+    )
+    .await
+    .expect("selection should succeed");
+
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].provider_id, "provider-kiro");
+    assert!(skipped.is_empty());
+}
+
+#[tokio::test]
+async fn skips_kiro_candidate_after_refresh_failure_requires_reauth() {
+    let mut row = sample_row();
+    row.provider_id = "provider-kiro".to_string();
+    row.provider_name = "kiro".to_string();
+    row.provider_type = "kiro".to_string();
+    row.endpoint_id = "endpoint-kiro".to_string();
+    row.key_id = "key-kiro".to_string();
+    row.key_name = "kiro-refresh-failed".to_string();
+    row.key_auth_type = "oauth".to_string();
+
+    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+        row,
+    ]));
+    let mut provider = sample_provider("provider-kiro", None);
+    provider.provider_type = "kiro".to_string();
+    let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![{
+            let mut key = sample_key("key-kiro", "provider-kiro", Some(10));
+            key.auth_type = "oauth".to_string();
+            key.encrypted_auth_config = Some("encrypted-refreshable-session".to_string());
+            key.oauth_invalid_at_unix_secs = Some(1_710_000_000);
+            key.oauth_invalid_reason = Some(
+                "[REFRESH_FAILED] Token 续期失败 (401): refresh_token 无效、已过期或已撤销，请重新登录授权"
+                    .to_string(),
+            );
+            key
+        }],
+    ));
+    let quotas = Arc::new(InMemoryProviderQuotaRepository::seed(vec![]));
+    let request_candidates = Arc::new(InMemoryRequestCandidateRepository::seed(vec![]));
+    let state = AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_candidate_selection_provider_catalog_quota_and_request_candidates_for_tests(
+                candidates,
+                provider_catalog,
+                quotas,
+                request_candidates,
+            ),
+        );
+
+    let (selected, skipped) = collect_selectable_candidates_with_skip_reasons(
+        state.data.as_ref(),
+        &state,
+        "openai:chat",
+        "gpt-4.1",
+        false,
+        None,
+        1_710_000_100,
+    )
+    .await
+    .expect("selection should succeed");
+
+    assert!(selected.is_empty());
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].candidate.provider_id, "provider-kiro");
+    assert_eq!(skipped[0].skip_reason, "oauth_invalid");
+}
+
+#[tokio::test]
+async fn skips_refreshable_kiro_candidate_when_oauth_marker_is_account_block() {
+    let mut row = sample_row();
+    row.provider_id = "provider-kiro".to_string();
+    row.provider_name = "kiro".to_string();
+    row.provider_type = "kiro".to_string();
+    row.endpoint_id = "endpoint-kiro".to_string();
+    row.key_id = "key-kiro".to_string();
+    row.key_name = "kiro-account-blocked".to_string();
+    row.key_auth_type = "oauth".to_string();
+
+    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+        row,
+    ]));
+    let mut provider = sample_provider("provider-kiro", None);
+    provider.provider_type = "kiro".to_string();
+    let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![{
+            let mut key = sample_key("key-kiro", "provider-kiro", Some(10));
+            key.auth_type = "oauth".to_string();
+            key.encrypted_auth_config = Some("encrypted-refreshable-session".to_string());
+            key.oauth_invalid_at_unix_secs = Some(1_710_000_000);
+            key.oauth_invalid_reason = Some("账户已封禁: account banned".to_string());
+            key
+        }],
+    ));
+    let quotas = Arc::new(InMemoryProviderQuotaRepository::seed(vec![]));
+    let request_candidates = Arc::new(InMemoryRequestCandidateRepository::seed(vec![]));
+    let state = AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_candidate_selection_provider_catalog_quota_and_request_candidates_for_tests(
+                candidates,
+                provider_catalog,
+                quotas,
+                request_candidates,
+            ),
+        );
+
+    let (selected, skipped) = collect_selectable_candidates_with_skip_reasons(
+        state.data.as_ref(),
+        &state,
+        "openai:chat",
+        "gpt-4.1",
+        false,
+        None,
+        1_710_000_100,
+    )
+    .await
+    .expect("selection should succeed");
+
+    assert!(selected.is_empty());
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].candidate.provider_id, "provider-kiro");
+    assert_eq!(skipped[0].skip_reason, "oauth_invalid");
+}
+
+#[tokio::test]
 async fn keeps_codex_candidate_selectable_when_exhausted_account_flag_is_disabled() {
     let mut first = sample_row();
     first.provider_id = "provider-codex".to_string();
     first.provider_name = "codex".to_string();
     first.provider_type = "codex".to_string();
     first.endpoint_id = "endpoint-codex".to_string();
-    first.endpoint_api_format = "openai:cli".to_string();
+    first.endpoint_api_format = "openai:responses".to_string();
     first.key_id = "key-codex".to_string();
     first.key_name = "codex-exhausted".to_string();
     first.key_auth_type = "oauth".to_string();
-    first.key_api_formats = Some(vec!["openai:cli".to_string()]);
-    first.key_global_priority_by_format = Some(serde_json::json!({"openai:cli": 1}));
+    first.key_api_formats = Some(vec!["openai:responses".to_string()]);
+    first.key_global_priority_by_format = Some(serde_json::json!({"openai:responses": 1}));
 
     let mut second = sample_row();
     second.provider_id = "provider-openai".to_string();
     second.provider_name = "openai".to_string();
     second.endpoint_id = "endpoint-openai".to_string();
-    second.endpoint_api_format = "openai:cli".to_string();
+    second.endpoint_api_format = "openai:responses".to_string();
     second.key_id = "key-openai".to_string();
     second.key_name = "fallback".to_string();
-    second.key_api_formats = Some(vec!["openai:cli".to_string()]);
-    second.key_global_priority_by_format = Some(serde_json::json!({"openai:cli": 2}));
+    second.key_api_formats = Some(vec!["openai:responses".to_string()]);
+    second.key_global_priority_by_format = Some(serde_json::json!({"openai:responses": 2}));
 
     let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
         first, second,
@@ -1830,7 +2066,7 @@ async fn keeps_codex_candidate_selectable_when_exhausted_account_flag_is_disable
     let (selected, skipped) = collect_selectable_candidates_with_skip_reasons(
         state.data.as_ref(),
         &state,
-        "openai:cli",
+        "openai:responses",
         "gpt-4.1",
         false,
         None,

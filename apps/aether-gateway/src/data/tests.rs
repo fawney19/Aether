@@ -24,8 +24,8 @@ use aether_data_contracts::repository::video_tasks::{
     UpsertVideoTask, VideoTaskLookupKey, VideoTaskStatus, VideoTaskWriteRepository,
 };
 use aether_scheduler_core::{
-    build_minimal_candidate_selection, BuildMinimalCandidateSelectionInput,
-    SchedulerAuthConstraints, SchedulerPriorityMode,
+    enumerate_minimal_candidate_selection, EnumerateMinimalCandidateSelectionInput,
+    SchedulerAuthConstraints,
 };
 use serde_json::json;
 
@@ -516,7 +516,7 @@ async fn data_state_reads_decrypted_provider_transport_snapshot() {
         .expect("endpoint transport should build");
     let key = sample_provider_catalog_key()
         .with_transport_fields(
-            Some(serde_json::json!(["openai:chat", "openai:cli"])),
+            Some(serde_json::json!(["openai:chat", "openai:responses"])),
             encrypted_api_key,
             Some(encrypted_auth_config),
             Some(serde_json::json!({"openai:chat": 0.8})),
@@ -547,7 +547,10 @@ async fn data_state_reads_decrypted_provider_transport_snapshot() {
     assert_eq!(snapshot.endpoint.base_url, "https://api.openai.com");
     assert_eq!(
         snapshot.key.api_formats,
-        Some(vec!["openai:chat".to_string(), "openai:cli".to_string()])
+        Some(vec![
+            "openai:chat".to_string(),
+            "openai:responses".to_string()
+        ])
     );
     assert_eq!(snapshot.key.decrypted_api_key, "sk-live-openai");
     assert_eq!(
@@ -619,18 +622,17 @@ async fn data_state_reads_minimal_candidate_selection_with_auth_filters() {
             .map(|items| items.to_vec()),
     };
 
-    let selection = build_minimal_candidate_selection(BuildMinimalCandidateSelectionInput {
-        rows,
-        normalized_api_format: "openai:chat",
-        requested_model_name: "gpt-4.1",
-        resolved_global_model_name: "gpt-4.1",
-        require_streaming: false,
-        required_capabilities: None,
-        auth_constraints: Some(&auth_constraints),
-        affinity_key: Some(auth_snapshot.api_key_id.as_str()),
-        priority_mode: SchedulerPriorityMode::Provider,
-    })
-    .expect("selection should read");
+    let selection =
+        enumerate_minimal_candidate_selection(EnumerateMinimalCandidateSelectionInput {
+            rows,
+            normalized_api_format: "openai:chat",
+            requested_model_name: "gpt-4.1",
+            resolved_global_model_name: "gpt-4.1",
+            require_streaming: false,
+            required_capabilities: None,
+            auth_constraints: Some(&auth_constraints),
+        })
+        .expect("selection should read");
 
     assert_eq!(selection.len(), 2);
     assert_eq!(selection[0].provider_id, "provider-1");

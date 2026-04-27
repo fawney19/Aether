@@ -132,8 +132,14 @@ pub struct ExecutionStreamTerminalSummary {
     pub model: Option<String>,
     #[serde(default)]
     pub observed_finish: bool,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub unknown_event_count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parser_error: Option<String>,
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 fn as_i64(value: &serde_json::Value, default: i64) -> i64 {
@@ -149,7 +155,7 @@ fn as_f64(value: &serde_json::Value, default: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::StandardizedUsage;
+    use super::{ExecutionStreamTerminalSummary, StandardizedUsage};
 
     #[test]
     fn standardized_usage_prefers_more_complete_candidate() {
@@ -192,5 +198,19 @@ mod tests {
             usage.get("custom_dimension"),
             Some(serde_json::json!("value"))
         );
+    }
+
+    #[test]
+    fn stream_terminal_summary_skips_zero_unknown_event_count() {
+        let default_summary =
+            serde_json::to_value(ExecutionStreamTerminalSummary::default()).expect("serialize");
+        assert!(default_summary.get("unknown_event_count").is_none());
+
+        let summary = ExecutionStreamTerminalSummary {
+            unknown_event_count: 2,
+            ..ExecutionStreamTerminalSummary::default()
+        };
+        let encoded = serde_json::to_value(summary).expect("serialize");
+        assert_eq!(encoded["unknown_event_count"], 2);
     }
 }

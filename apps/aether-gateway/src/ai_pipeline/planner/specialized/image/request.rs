@@ -11,20 +11,21 @@ use crate::ai_pipeline::planner::spec_metadata::local_openai_image_spec_metadata
 use crate::ai_pipeline::transport::auth::{
     build_passthrough_headers_with_auth, resolve_local_openai_bearer_auth,
 };
-use crate::ai_pipeline::transport::url::build_openai_cli_url;
+use crate::ai_pipeline::transport::url::build_openai_responses_url;
 use crate::ai_pipeline::transport::{
     apply_local_header_rules, local_standard_transport_unsupported_reason_with_network,
 };
 use crate::ai_pipeline::{
-    apply_codex_openai_cli_special_body_edits, apply_codex_openai_cli_special_headers,
-    GatewayProviderTransportSnapshot, PlannerAppState, CODEX_OPENAI_IMAGE_DEFAULT_MODEL,
-    CODEX_OPENAI_IMAGE_DEFAULT_VARIATION_MODEL,
+    apply_codex_openai_responses_special_body_edits, apply_codex_openai_responses_special_headers,
+    CandidateFailureDiagnostic, GatewayProviderTransportSnapshot, PlannerAppState,
+    CODEX_OPENAI_IMAGE_DEFAULT_MODEL, CODEX_OPENAI_IMAGE_DEFAULT_VARIATION_MODEL,
 };
 use crate::AppState;
 
 use super::support::{
-    mark_skipped_local_openai_image_candidate, LocalOpenAiImageCandidateAttempt,
-    LocalOpenAiImageDecisionInput,
+    mark_skipped_local_openai_image_candidate,
+    mark_skipped_local_openai_image_candidate_with_failure_diagnostic,
+    LocalOpenAiImageCandidateAttempt, LocalOpenAiImageDecisionInput,
 };
 use super::LocalOpenAiImageSpec;
 
@@ -190,7 +191,7 @@ pub(super) async fn resolve_local_openai_image_candidate_payload_parts(
 
     let Some(normalized_request) = normalize_openai_image_request(parts, body_json, body_base64)
     else {
-        mark_skipped_local_openai_image_candidate(
+        mark_skipped_local_openai_image_candidate_with_failure_diagnostic(
             state,
             input,
             trace_id,
@@ -198,14 +199,20 @@ pub(super) async fn resolve_local_openai_image_candidate_payload_parts(
             attempt.candidate_index,
             &attempt.candidate_id,
             "provider_request_body_missing",
+            CandidateFailureDiagnostic::provider_request_body_missing(
+                spec_metadata.api_format,
+                spec_metadata.api_format,
+                "openai_image_request_normalize",
+            ),
         )
         .await;
         return None;
     };
 
-    let upstream_url = build_openai_cli_url(&transport.endpoint.base_url, parts.uri.query(), false);
+    let upstream_url =
+        build_openai_responses_url(&transport.endpoint.base_url, parts.uri.query(), false);
     let mut provider_request_body = build_provider_request_body(&normalized_request);
-    apply_codex_openai_cli_special_body_edits(
+    apply_codex_openai_responses_special_body_edits(
         &mut provider_request_body,
         transport.provider.provider_type.as_str(),
         spec_metadata.api_format,
@@ -228,7 +235,7 @@ pub(super) async fn resolve_local_openai_image_candidate_payload_parts(
         &provider_request_body,
         Some(body_json),
     ) {
-        mark_skipped_local_openai_image_candidate(
+        mark_skipped_local_openai_image_candidate_with_failure_diagnostic(
             state,
             input,
             trace_id,
@@ -236,11 +243,16 @@ pub(super) async fn resolve_local_openai_image_candidate_payload_parts(
             attempt.candidate_index,
             &attempt.candidate_id,
             "transport_header_rules_apply_failed",
+            CandidateFailureDiagnostic::header_rules_apply_failed(
+                spec_metadata.api_format,
+                spec_metadata.api_format,
+                "openai_image_header_rules",
+            ),
         )
         .await;
         return None;
     }
-    apply_codex_openai_cli_special_headers(
+    apply_codex_openai_responses_special_headers(
         &mut provider_request_headers,
         &provider_request_body,
         &parts.headers,
@@ -1020,7 +1032,7 @@ mod tests {
         assert_eq!(request.images.len(), 1);
 
         let mut provider_request_body = build_provider_request_body(&request);
-        super::apply_codex_openai_cli_special_body_edits(
+        super::apply_codex_openai_responses_special_body_edits(
             &mut provider_request_body,
             "codex",
             "openai:image",
@@ -1161,7 +1173,7 @@ mod tests {
         assert!(provider_request_body.get("model").is_none());
         assert!(provider_request_body.get("tool_choice").is_none());
         assert!(provider_request_body.get("stream").is_none());
-        super::apply_codex_openai_cli_special_body_edits(
+        super::apply_codex_openai_responses_special_body_edits(
             &mut provider_request_body,
             "codex",
             "openai:image",

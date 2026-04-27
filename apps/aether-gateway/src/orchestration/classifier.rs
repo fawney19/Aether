@@ -145,6 +145,23 @@ pub(crate) enum LocalFailoverClassification {
     RetryUpstreamFailure,
 }
 
+impl LocalFailoverClassification {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::UseDefault => "use_default",
+            Self::StopStatusCode => "stop_status_code",
+            Self::StopErrorPattern => "stop_error_pattern",
+            Self::StopSemanticClientError => "stop_semantic_client_error",
+            Self::RetrySuccessPattern => "retry_success_pattern",
+            Self::RetrySemanticCompatibilityError => "retry_semantic_compatibility_error",
+            Self::RetrySemanticRateLimit => "retry_semantic_rate_limit",
+            Self::RetrySemanticThinkingError => "retry_semantic_thinking_error",
+            Self::RetryStatusCode => "retry_status_code",
+            Self::RetryUpstreamFailure => "retry_upstream_failure",
+        }
+    }
+}
+
 pub(crate) fn classify_local_failover(
     policy: &LocalFailoverPolicy,
     input: LocalFailoverInput<'_>,

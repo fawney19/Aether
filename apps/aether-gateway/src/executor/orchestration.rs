@@ -5,8 +5,8 @@ use crate::ai_pipeline_api::{
     build_local_image_sync_plan_and_reports_for_kind,
     build_local_openai_chat_stream_plan_and_reports_for_kind,
     build_local_openai_chat_sync_plan_and_reports_for_kind,
-    build_local_openai_cli_stream_plan_and_reports_for_kind,
-    build_local_openai_cli_sync_plan_and_reports_for_kind,
+    build_local_openai_responses_stream_plan_and_reports_for_kind,
+    build_local_openai_responses_sync_plan_and_reports_for_kind,
     build_local_same_format_stream_plan_and_reports, build_local_same_format_sync_plan_and_reports,
     build_local_video_sync_plan_and_reports_for_kind,
     build_standard_family_stream_plan_and_reports, build_standard_family_sync_plan_and_reports,
@@ -110,7 +110,7 @@ pub(crate) async fn maybe_execute_stream_via_local_decision(
     Ok(outcome)
 }
 
-pub(crate) async fn maybe_execute_sync_via_local_openai_cli_decision(
+pub(crate) async fn maybe_execute_sync_via_local_openai_responses_decision(
     state: &AppState,
     parts: &http::request::Parts,
     trace_id: &str,
@@ -119,7 +119,7 @@ pub(crate) async fn maybe_execute_sync_via_local_openai_cli_decision(
     plan_kind: &str,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let plan_and_reports: Vec<LocalSyncPlanAndReport> =
-        build_local_openai_cli_sync_plan_and_reports_for_kind(
+        build_local_openai_responses_sync_plan_and_reports_for_kind(
             state, parts, trace_id, decision, body_json, plan_kind,
         )
         .await?;
@@ -138,7 +138,7 @@ pub(crate) async fn maybe_execute_sync_via_local_openai_cli_decision(
     .await
 }
 
-pub(crate) async fn maybe_execute_stream_via_local_openai_cli_decision(
+pub(crate) async fn maybe_execute_stream_via_local_openai_responses_decision(
     state: &AppState,
     parts: &http::request::Parts,
     trace_id: &str,
@@ -147,7 +147,7 @@ pub(crate) async fn maybe_execute_stream_via_local_openai_cli_decision(
     plan_kind: &str,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
     let plan_and_reports: Vec<LocalStreamPlanAndReport> =
-        build_local_openai_cli_stream_plan_and_reports_for_kind(
+        build_local_openai_responses_stream_plan_and_reports_for_kind(
             state, parts, trace_id, decision, body_json, plan_kind,
         )
         .await?;

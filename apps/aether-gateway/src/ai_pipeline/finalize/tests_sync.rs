@@ -6,14 +6,15 @@ use serde_json::json;
 
 use super::{
     aggregate_claude_stream_sync_response, aggregate_gemini_stream_sync_response,
-    aggregate_openai_chat_stream_sync_response, aggregate_openai_cli_stream_sync_response,
-    convert_claude_chat_response_to_openai_chat, convert_claude_cli_response_to_openai_cli,
-    convert_gemini_chat_response_to_openai_chat, convert_gemini_cli_response_to_openai_cli,
+    aggregate_openai_chat_stream_sync_response, aggregate_openai_responses_stream_sync_response,
+    convert_claude_chat_response_to_openai_chat, convert_claude_response_to_openai_responses,
+    convert_gemini_chat_response_to_openai_chat, convert_gemini_response_to_openai_responses,
     maybe_build_local_core_sync_finalize_response,
 };
 use crate::ai_pipeline::GatewayControlDecision;
 use crate::ai_pipeline::{
-    convert_openai_chat_response_to_openai_cli, convert_openai_cli_response_to_openai_chat,
+    convert_openai_chat_response_to_openai_responses,
+    convert_openai_responses_response_to_openai_chat,
 };
 use crate::usage::GatewaySyncReportRequest;
 
@@ -24,7 +25,7 @@ fn test_decision() -> GatewayControlDecision {
         route_class: Some("ai_public".to_string()),
         route_family: Some("openai".to_string()),
         route_kind: Some("compact".to_string()),
-        auth_endpoint_signature: Some("openai:compact".to_string()),
+        auth_endpoint_signature: Some("openai:responses:compact".to_string()),
         execution_runtime_candidate: true,
         auth_context: None,
         admin_principal: None,
@@ -158,7 +159,7 @@ fn aggregates_openai_chat_stream_text_chunks_to_final_response() {
 }
 
 #[test]
-fn aggregates_openai_cli_stream_completed_event_to_final_response() {
+fn aggregates_openai_responses_stream_completed_event_to_final_response() {
     let body = concat!(
         "event: response.created\n",
         "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_123\",\"object\":\"response\",\"model\":\"gpt-5\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
@@ -168,8 +169,8 @@ fn aggregates_openai_cli_stream_completed_event_to_final_response() {
         "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_123\",\"object\":\"response\",\"model\":\"gpt-5\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
     );
 
-    let result =
-        aggregate_openai_cli_stream_sync_response(body.as_bytes()).expect("result should exist");
+    let result = aggregate_openai_responses_stream_sync_response(body.as_bytes())
+        .expect("result should exist");
 
     assert_eq!(
         result,
@@ -199,7 +200,7 @@ fn aggregates_openai_cli_stream_completed_event_to_final_response() {
 }
 
 #[test]
-fn aggregates_openai_cli_stream_tool_call_events_to_final_response() {
+fn aggregates_openai_responses_stream_tool_call_events_to_final_response() {
     let body = concat!(
         "event: response.created\n",
         "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_tool_123\",\"object\":\"response\",\"model\":\"gpt-5\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
@@ -211,8 +212,8 @@ fn aggregates_openai_cli_stream_tool_call_events_to_final_response() {
         "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tool_123\",\"object\":\"response\",\"model\":\"gpt-5\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
     );
 
-    let result =
-        aggregate_openai_cli_stream_sync_response(body.as_bytes()).expect("result should exist");
+    let result = aggregate_openai_responses_stream_sync_response(body.as_bytes())
+        .expect("result should exist");
 
     assert_eq!(
         result,
@@ -651,8 +652,8 @@ fn converts_gemini_chat_inline_data_to_openai_chat_image_part() {
 }
 
 #[test]
-fn converts_openai_cli_reasoning_item_to_openai_chat_reasoning_content() {
-    let result = convert_openai_cli_response_to_openai_chat(
+fn converts_openai_responses_reasoning_item_to_openai_chat_reasoning_content() {
+    let result = convert_openai_responses_response_to_openai_chat(
         &json!({
             "id": "resp_reason_123",
             "object": "response",
@@ -686,7 +687,7 @@ fn converts_openai_cli_reasoning_item_to_openai_chat_reasoning_content() {
         }),
         &json!({
             "client_api_format": "openai:chat",
-            "provider_api_format": "openai:cli",
+            "provider_api_format": "openai:responses",
             "model": "gpt-5"
         }),
     )
@@ -700,8 +701,8 @@ fn converts_openai_cli_reasoning_item_to_openai_chat_reasoning_content() {
 }
 
 #[test]
-fn converts_openai_cli_output_image_to_openai_chat_image_part() {
-    let result = convert_openai_cli_response_to_openai_chat(
+fn converts_openai_responses_output_image_to_openai_chat_image_part() {
+    let result = convert_openai_responses_response_to_openai_chat(
         &json!({
             "id": "resp_img_cli_123",
             "object": "response",
@@ -724,7 +725,7 @@ fn converts_openai_cli_output_image_to_openai_chat_image_part() {
         }),
         &json!({
             "client_api_format": "openai:chat",
-            "provider_api_format": "openai:cli",
+            "provider_api_format": "openai:responses",
             "model": "gpt-5"
         }),
     )
@@ -742,8 +743,8 @@ fn converts_openai_cli_output_image_to_openai_chat_image_part() {
 }
 
 #[test]
-fn converts_openai_chat_image_part_to_openai_cli_output_image() {
-    let result = convert_openai_chat_response_to_openai_cli(
+fn converts_openai_chat_image_part_to_openai_responses_output_image() {
+    let result = convert_openai_chat_response_to_openai_responses(
         &json!({
             "id": "chatcmpl_img_123",
             "object": "chat.completion",
@@ -768,7 +769,7 @@ fn converts_openai_chat_image_part_to_openai_cli_output_image() {
             }
         }),
         &json!({
-            "client_api_format": "openai:cli",
+            "client_api_format": "openai:responses",
             "provider_api_format": "openai:chat",
             "model": "gpt-5"
         }),
@@ -786,8 +787,8 @@ fn converts_openai_chat_image_part_to_openai_cli_output_image() {
 }
 
 #[test]
-fn converts_claude_cli_response_to_openai_cli_response() {
-    let result = convert_claude_cli_response_to_openai_cli(
+fn converts_claude_cli_response_to_openai_responses_response() {
+    let result = convert_claude_response_to_openai_responses(
         &json!({
             "id": "msg_cli_123",
             "type": "message",
@@ -803,7 +804,7 @@ fn converts_claude_cli_response_to_openai_cli_response() {
             }
         }),
         &json!({
-            "client_api_format": "openai:cli",
+            "client_api_format": "openai:responses",
             "provider_api_format": "claude:cli",
             "model": "gpt-5"
         }),
@@ -838,8 +839,8 @@ fn converts_claude_cli_response_to_openai_cli_response() {
 }
 
 #[test]
-fn converts_claude_cli_tool_use_to_openai_cli_function_call() {
-    let result = convert_claude_cli_response_to_openai_cli(
+fn converts_claude_cli_tool_use_to_openai_responses_function_call() {
+    let result = convert_claude_response_to_openai_responses(
         &json!({
             "id": "msg_cli_tool_123",
             "type": "message",
@@ -860,7 +861,7 @@ fn converts_claude_cli_tool_use_to_openai_cli_function_call() {
             }
         }),
         &json!({
-            "client_api_format": "openai:cli",
+            "client_api_format": "openai:responses",
             "provider_api_format": "claude:cli",
             "model": "gpt-5"
         }),
@@ -904,8 +905,8 @@ fn converts_claude_cli_tool_use_to_openai_cli_function_call() {
 }
 
 #[test]
-fn converts_gemini_cli_response_to_openai_cli_response() {
-    let result = convert_gemini_cli_response_to_openai_cli(
+fn converts_gemini_cli_response_to_openai_responses_response() {
+    let result = convert_gemini_response_to_openai_responses(
         &json!({
             "responseId": "resp_cli_123",
             "candidates": [{
@@ -925,7 +926,7 @@ fn converts_gemini_cli_response_to_openai_cli_response() {
             }
         }),
         &json!({
-            "client_api_format": "openai:cli",
+            "client_api_format": "openai:responses",
             "provider_api_format": "gemini:cli",
             "model": "gpt-5"
         }),
@@ -963,8 +964,8 @@ fn converts_gemini_cli_response_to_openai_cli_response() {
 }
 
 #[test]
-fn converts_gemini_cli_function_call_to_openai_cli_function_call() {
-    let result = convert_gemini_cli_response_to_openai_cli(
+fn converts_gemini_cli_function_call_to_openai_responses_function_call() {
+    let result = convert_gemini_response_to_openai_responses(
         &json!({
             "responseId": "resp_cli_tool_123",
             "candidates": [{
@@ -987,7 +988,7 @@ fn converts_gemini_cli_function_call_to_openai_cli_function_call() {
             }
         }),
         &json!({
-            "client_api_format": "openai:cli",
+            "client_api_format": "openai:responses",
             "provider_api_format": "gemini:cli",
             "model": "gpt-5"
         }),
@@ -1034,8 +1035,8 @@ fn converts_gemini_cli_function_call_to_openai_cli_function_call() {
 }
 
 #[test]
-fn converts_gemini_cli_inline_data_to_openai_cli_output_image() {
-    let result = convert_gemini_cli_response_to_openai_cli(
+fn converts_gemini_cli_inline_data_to_openai_responses_output_image() {
+    let result = convert_gemini_response_to_openai_responses(
         &json!({
             "responseId": "resp_cli_img_123",
             "candidates": [{
@@ -1060,7 +1061,7 @@ fn converts_gemini_cli_inline_data_to_openai_cli_output_image() {
             }
         }),
         &json!({
-            "client_api_format": "openai:cli",
+            "client_api_format": "openai:responses",
             "provider_api_format": "gemini:cli",
             "model": "gpt-5"
         }),
@@ -1077,12 +1078,12 @@ fn converts_gemini_cli_inline_data_to_openai_cli_output_image() {
 }
 
 #[test]
-fn local_finalize_handles_openai_compact_cross_format_sync_response() {
+fn local_finalize_handles_openai_responses_compact_cross_format_sync_response() {
     let payload = GatewaySyncReportRequest {
         trace_id: "trace-compact-sync-123".to_string(),
-        report_kind: "openai_compact_sync_finalize".to_string(),
+        report_kind: "openai_responses_compact_sync_finalize".to_string(),
         report_context: Some(json!({
-            "client_api_format": "openai:compact",
+            "client_api_format": "openai:responses:compact",
             "provider_api_format": "gemini:cli",
             "model": "gpt-5",
             "needs_conversion": true,
@@ -1125,7 +1126,7 @@ fn local_finalize_handles_openai_compact_cross_format_sync_response() {
     let report = outcome
         .background_report
         .expect("compact cross-format should downgrade to success report");
-    assert_eq!(report.report_kind, "openai_cli_sync_success");
+    assert_eq!(report.report_kind, "openai_responses_compact_sync_success");
     assert_eq!(
         report.client_body_json.expect("client body should exist")["object"],
         "response"
@@ -1133,12 +1134,12 @@ fn local_finalize_handles_openai_compact_cross_format_sync_response() {
 }
 
 #[test]
-fn local_finalize_handles_openai_compact_cross_format_function_call_response() {
+fn local_finalize_handles_openai_responses_compact_cross_format_function_call_response() {
     let payload = GatewaySyncReportRequest {
         trace_id: "trace-compact-tool-123".to_string(),
-        report_kind: "openai_compact_sync_finalize".to_string(),
+        report_kind: "openai_responses_compact_sync_finalize".to_string(),
         report_context: Some(json!({
-            "client_api_format": "openai:compact",
+            "client_api_format": "openai:responses:compact",
             "provider_api_format": "gemini:cli",
             "model": "gpt-5",
             "needs_conversion": true,
@@ -1189,13 +1190,14 @@ fn local_finalize_handles_openai_compact_cross_format_function_call_response() {
 }
 
 #[test]
-fn local_finalize_handles_openai_cli_openai_family_sync_response_even_when_conversion_flagged() {
+fn local_finalize_handles_openai_responses_openai_family_sync_response_even_when_conversion_flagged(
+) {
     let payload = GatewaySyncReportRequest {
-        trace_id: "trace-openai-cli-family-conversion-123".to_string(),
-        report_kind: "openai_cli_sync_finalize".to_string(),
+        trace_id: "trace-openai-responses-family-conversion-123".to_string(),
+        report_kind: "openai_responses_sync_finalize".to_string(),
         report_context: Some(json!({
-            "client_api_format": "openai:cli",
-            "provider_api_format": "openai:compact",
+            "client_api_format": "openai:responses",
+            "provider_api_format": "openai:responses:compact",
             "model": "gpt-5",
             "needs_conversion": true,
             "has_envelope": false,
@@ -1230,7 +1232,7 @@ fn local_finalize_handles_openai_cli_openai_family_sync_response_even_when_conve
     };
 
     let outcome = maybe_build_local_core_sync_finalize_response(
-        "trace-openai-cli-family-conversion-123",
+        "trace-openai-responses-family-conversion-123",
         &test_decision(),
         &payload,
     )
@@ -1241,7 +1243,7 @@ fn local_finalize_handles_openai_cli_openai_family_sync_response_even_when_conve
     let report = outcome
         .background_report
         .expect("same-family finalize should downgrade to success report");
-    assert_eq!(report.report_kind, "openai_cli_sync_success");
+    assert_eq!(report.report_kind, "openai_responses_sync_success");
     assert_eq!(
         report.body_json.expect("provider body should exist")["id"],
         "resp_cli_family_123"
@@ -1299,16 +1301,16 @@ fn local_finalize_handles_openai_chat_stream_response_from_openai_chat() {
 }
 
 #[test]
-fn local_finalize_handles_openai_cli_cross_format_stream_response_from_gemini() {
+fn local_finalize_handles_openai_responses_cross_format_stream_response_from_gemini() {
     let body = concat!(
         "data: {\"responseId\":\"resp_cli_stream_123\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello \"}],\"role\":\"model\"},\"index\":0}],\"modelVersion\":\"gemini-2.5-pro-upstream\"}\n\n",
         "data: {\"responseId\":\"resp_cli_stream_123\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello Gemini CLI\"}],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}],\"modelVersion\":\"gemini-2.5-pro-upstream\",\"usageMetadata\":{\"promptTokenCount\":2,\"candidatesTokenCount\":3,\"totalTokenCount\":5}}\n\n",
     );
     let payload = GatewaySyncReportRequest {
-        trace_id: "trace-openai-cli-xfmt-stream-123".to_string(),
-        report_kind: "openai_cli_sync_finalize".to_string(),
+        trace_id: "trace-openai-responses-xfmt-stream-123".to_string(),
+        report_kind: "openai_responses_sync_finalize".to_string(),
         report_context: Some(json!({
-            "client_api_format": "openai:cli",
+            "client_api_format": "openai:responses",
             "provider_api_format": "gemini:cli",
             "model": "gpt-5",
             "mapped_model": "gemini-2.5-pro-upstream",
@@ -1324,7 +1326,7 @@ fn local_finalize_handles_openai_cli_cross_format_stream_response_from_gemini() 
     };
 
     let outcome = maybe_build_local_core_sync_finalize_response(
-        "trace-openai-cli-xfmt-stream-123",
+        "trace-openai-responses-xfmt-stream-123",
         &test_decision(),
         &payload,
     )
@@ -1334,7 +1336,7 @@ fn local_finalize_handles_openai_cli_cross_format_stream_response_from_gemini() 
     let report = outcome
         .background_report
         .expect("cross-format stream finalize should downgrade to success report");
-    assert_eq!(report.report_kind, "openai_cli_sync_success");
+    assert_eq!(report.report_kind, "openai_responses_sync_success");
     let client_body = report.client_body_json.expect("client body should exist");
     assert_eq!(client_body["object"], "response");
     assert_eq!(
@@ -1344,7 +1346,7 @@ fn local_finalize_handles_openai_cli_cross_format_stream_response_from_gemini() 
 }
 
 #[test]
-fn local_finalize_handles_openai_compact_openai_family_stream_response_even_when_conversion_flagged(
+fn local_finalize_handles_openai_responses_compact_openai_family_stream_response_even_when_conversion_flagged(
 ) {
     let body = concat!(
         "event: response.completed\n",
@@ -1352,10 +1354,10 @@ fn local_finalize_handles_openai_compact_openai_family_stream_response_even_when
     );
     let payload = GatewaySyncReportRequest {
         trace_id: "trace-openai-compact-family-stream-123".to_string(),
-        report_kind: "openai_compact_sync_finalize".to_string(),
+        report_kind: "openai_responses_compact_sync_finalize".to_string(),
         report_context: Some(json!({
-            "client_api_format": "openai:compact",
-            "provider_api_format": "openai:cli",
+            "client_api_format": "openai:responses:compact",
+            "provider_api_format": "openai:responses",
             "model": "gpt-5",
             "mapped_model": "gpt-5",
             "needs_conversion": true,
@@ -1380,7 +1382,7 @@ fn local_finalize_handles_openai_compact_openai_family_stream_response_even_when
     let report = outcome
         .background_report
         .expect("same-family stream finalize should downgrade to success report");
-    assert_eq!(report.report_kind, "openai_cli_sync_success");
+    assert_eq!(report.report_kind, "openai_responses_compact_sync_success");
     let provider_body = report.body_json.expect("provider body should exist");
     assert_eq!(provider_body["object"], "response");
     assert_eq!(provider_body["status"], "completed");
@@ -1395,11 +1397,11 @@ fn local_finalize_preserves_provider_stream_body_for_same_format_stream_aggregat
         "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_cli_samefmt_stream_123\",\"object\":\"response\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"msg_123\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello sync\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
     );
     let payload = GatewaySyncReportRequest {
-        trace_id: "trace-openai-cli-samefmt-stream-123".to_string(),
-        report_kind: "openai_cli_sync_finalize".to_string(),
+        trace_id: "trace-openai-responses-samefmt-stream-123".to_string(),
+        report_kind: "openai_responses_sync_finalize".to_string(),
         report_context: Some(json!({
-            "client_api_format": "openai:cli",
-            "provider_api_format": "openai:cli",
+            "client_api_format": "openai:responses",
+            "provider_api_format": "openai:responses",
             "model": "gpt-5.4",
             "mapped_model": "gpt-5.4",
             "needs_conversion": false,
@@ -1415,7 +1417,7 @@ fn local_finalize_preserves_provider_stream_body_for_same_format_stream_aggregat
     };
 
     let outcome = maybe_build_local_core_sync_finalize_response(
-        "trace-openai-cli-samefmt-stream-123",
+        "trace-openai-responses-samefmt-stream-123",
         &test_decision(),
         &payload,
     )
@@ -1556,13 +1558,13 @@ fn local_finalize_handles_openai_chat_cross_format_sync_response_from_gemini() {
 }
 
 #[test]
-fn local_finalize_handles_openai_chat_cross_format_sync_response_from_openai_cli() {
+fn local_finalize_handles_openai_chat_cross_format_sync_response_from_openai_responses() {
     let payload = GatewaySyncReportRequest {
-        trace_id: "trace-openai-chat-xfmt-openai-cli-sync-123".to_string(),
+        trace_id: "trace-openai-chat-xfmt-openai-responses-sync-123".to_string(),
         report_kind: "openai_chat_sync_finalize".to_string(),
         report_context: Some(json!({
             "client_api_format": "openai:chat",
-            "provider_api_format": "openai:cli",
+            "provider_api_format": "openai:responses",
             "model": "gpt-5.4",
             "mapped_model": "gpt-5.4",
             "needs_conversion": true,
@@ -1607,7 +1609,7 @@ fn local_finalize_handles_openai_chat_cross_format_sync_response_from_openai_cli
     };
 
     let outcome = maybe_build_local_core_sync_finalize_response(
-        "trace-openai-chat-xfmt-openai-cli-sync-123",
+        "trace-openai-chat-xfmt-openai-responses-sync-123",
         &test_decision(),
         &payload,
     )

@@ -114,7 +114,7 @@ export class OpenAIParser implements ApiFormatParser {
     if (model.includes('gpt') || model.includes('o1') || model.includes('o3')) return 95
 
     // 3. 检查请求体结构
-    // OpenAI CLI (Responses API) 使用 input 字段
+    // OpenAI Responses API 使用 input 字段
     const isCliFormat = req?.input !== undefined || req?.instructions !== undefined
     // OpenAI Chat Completions 使用 messages 数组
     const isChatFormat = req?.messages && Array.isArray(req.messages)
@@ -129,7 +129,7 @@ export class OpenAIParser implements ApiFormatParser {
       : responseBody) as RawObject | null | undefined
 
     if (respBody) {
-      // OpenAI CLI 响应特征: type 字段为 response.* 格式
+      // OpenAI Responses 响应特征: type 字段为 response.* 格式
       if (this.isCliResponseEvent(respBody)) {
         return 95
       }
@@ -163,7 +163,7 @@ export class OpenAIParser implements ApiFormatParser {
   }
 
   /**
-   * 检查是否为 OpenAI CLI (Responses API) 的响应事件
+   * 检查是否为 OpenAI Responses API 的响应事件
    */
   private isCliResponseEvent(chunk: RawObject | null | undefined): boolean {
     const type = chunk?.type
@@ -231,7 +231,7 @@ export class OpenAIParser implements ApiFormatParser {
   }
 
   /**
-   * 解析 OpenAI CLI (Responses API) 请求
+   * 解析 OpenAI Responses API 请求
    *
    * CLI 格式特点：
    * - 使用 input 字段（可以是字符串、消息数组或对象）
@@ -404,7 +404,7 @@ export class OpenAIParser implements ApiFormatParser {
   }
 
   /**
-   * 解析 OpenAI CLI (Responses API) 响应
+   * 解析 OpenAI Responses API 响应
    *
    * CLI 响应格式: { output: [{ type: "message", content: [...] }] }
    */
@@ -548,7 +548,7 @@ export class OpenAIParser implements ApiFormatParser {
   }
 
   /**
-   * 解析 OpenAI CLI (Responses API) 流式响应
+   * 解析 OpenAI Responses API 流式响应
    *
    * 支持的事件类型：
    * - response.created: 响应创建
@@ -809,7 +809,7 @@ export class OpenAIParser implements ApiFormatParser {
   }
 
   /**
-   * 渲染 OpenAI CLI (Responses API) 请求
+   * 渲染 OpenAI Responses API 请求
    */
   private renderCliRequest(requestBody: RawObject): RenderResult {
     try {
@@ -985,7 +985,7 @@ export class OpenAIParser implements ApiFormatParser {
   }
 
   /**
-   * 渲染 OpenAI CLI (Responses API) 响应
+   * 渲染 OpenAI Responses API 响应
    */
   private renderCliResponse(responseBody: RawObject): RenderResult {
     try {

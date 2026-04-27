@@ -11,7 +11,7 @@ pub(crate) enum LocalCandidatePersistencePolicyKind {
     StandardDecision,
     SameFormatProviderDecision,
     OpenAiChatDecision,
-    OpenAiCliDecision,
+    OpenAiResponsesDecision,
     ImageDecision,
     GeminiFilesDecision,
     VideoDecision,
@@ -45,9 +45,9 @@ pub(crate) fn build_local_candidate_persistence_policy<'a>(
                 "gateway local openai chat decision failed to persist skipped candidate",
                 true,
             ),
-            LocalCandidatePersistencePolicyKind::OpenAiCliDecision => (
-                "gateway local openai cli decision request candidate upsert failed",
-                "gateway local openai cli decision failed to persist skipped candidate",
+            LocalCandidatePersistencePolicyKind::OpenAiResponsesDecision => (
+                "gateway local openai responses decision request candidate upsert failed",
+                "gateway local openai responses decision failed to persist skipped candidate",
                 true,
             ),
             LocalCandidatePersistencePolicyKind::ImageDecision => (

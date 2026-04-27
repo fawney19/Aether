@@ -23,12 +23,18 @@ pub(super) fn classify_ai_public_route(
             Some(classified(
                 "ai_public",
                 "openai",
-                "compact",
-                "openai:compact",
+                "responses:compact",
+                "openai:responses:compact",
                 true,
             ))
         } else {
-            Some(classified("ai_public", "openai", "cli", "openai:cli", true))
+            Some(classified(
+                "ai_public",
+                "openai",
+                "responses",
+                "openai:responses",
+                true,
+            ))
         }
     } else if method == http::Method::POST
         && matches!(

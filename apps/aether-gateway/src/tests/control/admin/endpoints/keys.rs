@@ -138,7 +138,7 @@ async fn gateway_admin_provider_keys_prefers_upstream_plan_type_over_auth_config
     let mut key = sample_key(
         "key-codex-oauth",
         "provider-codex",
-        "openai:cli",
+        "openai:responses",
         "oauth-placeholder",
     );
     key.auth_type = "oauth".to_string();

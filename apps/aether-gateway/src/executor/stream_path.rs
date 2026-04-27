@@ -15,7 +15,7 @@ use super::{
     build_direct_plan_bypass_cache_key, execute_stream_plan_and_reports,
     maybe_execute_stream_via_local_decision, maybe_execute_stream_via_local_gemini_files_decision,
     maybe_execute_stream_via_local_image_decision,
-    maybe_execute_stream_via_local_openai_cli_decision,
+    maybe_execute_stream_via_local_openai_responses_decision,
     maybe_execute_stream_via_local_same_format_provider_decision,
     maybe_execute_stream_via_local_standard_decision, maybe_execute_stream_via_plan_fallback,
     maybe_execute_stream_via_remote_decision, parse_local_request_body, should_skip_direct_plan,
@@ -90,7 +90,7 @@ pub(crate) async fn maybe_execute_via_stream_decision_path(
             LocalExecutionRequestOutcome::NoPath => {}
         }
 
-        match maybe_execute_stream_via_local_openai_cli_decision(
+        match maybe_execute_stream_via_local_openai_responses_decision(
             state, parts, trace_id, decision, &body_json, plan_kind,
         )
         .await?

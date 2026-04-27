@@ -308,7 +308,7 @@ mod tests {
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["openai:chat", "openai:cli"])),
+            Some(serde_json::json!(["openai:chat", "openai:responses"])),
             encrypted_api_key,
             Some(encrypted_auth_config),
             Some(serde_json::json!({"openai:chat": 0.8})),
@@ -382,7 +382,10 @@ mod tests {
                     name: "prod-key".to_string(),
                     auth_type: "api_key".to_string(),
                     is_active: true,
-                    api_formats: Some(vec!["openai:chat".to_string(), "openai:cli".to_string(),]),
+                    api_formats: Some(vec![
+                        "openai:chat".to_string(),
+                        "openai:responses".to_string(),
+                    ]),
                     allowed_models: Some(vec!["gpt-4.1".to_string(), "gpt-4.1-mini".to_string(),]),
                     capabilities: Some(serde_json::json!({"cache_1h": true})),
                     rate_multipliers: Some(serde_json::json!({"openai:chat": 0.8})),
@@ -672,9 +675,9 @@ mod tests {
         let endpoint = StoredProviderCatalogEndpoint::new(
             "endpoint-safe-2".to_string(),
             "provider-1".to_string(),
-            "openai:cli".to_string(),
+            "openai:responses".to_string(),
             Some("openai".to_string()),
-            Some("cli".to_string()),
+            Some("responses".to_string()),
             true,
         )
         .expect("endpoint should build")
@@ -707,7 +710,7 @@ mod tests {
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             encrypted_api_key,
             Some(encrypted_auth_config),
             None,
@@ -737,7 +740,7 @@ mod tests {
         );
         assert!(!supports_local_standard_transport_with_network(
             &snapshot,
-            "openai:cli"
+            "openai:responses"
         ));
     }
 
@@ -820,9 +823,9 @@ mod tests {
         let endpoint = StoredProviderCatalogEndpoint::new(
             "endpoint-safe-4".to_string(),
             "provider-1".to_string(),
-            "openai:cli".to_string(),
+            "openai:responses".to_string(),
             Some("openai".to_string()),
-            Some("cli".to_string()),
+            Some("responses".to_string()),
             true,
         )
         .expect("endpoint should build")
@@ -862,7 +865,7 @@ mod tests {
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["openai:cli"])),
+            Some(serde_json::json!(["openai:responses"])),
             encrypted_api_key,
             Some(encrypted_auth_config),
             None,
@@ -900,7 +903,7 @@ mod tests {
         );
         assert!(supports_local_standard_transport_with_network(
             &snapshot,
-            "openai:cli"
+            "openai:responses"
         ));
     }
 

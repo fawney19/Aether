@@ -26,8 +26,8 @@ use aether_data_contracts::repository::provider_catalog::{
 use sha2::{Digest, Sha256};
 
 #[tokio::test]
-async fn gateway_executes_openai_compact_openai_family_upstream_stream_via_local_finalize_response()
-{
+async fn gateway_executes_openai_responses_compact_openai_family_upstream_stream_via_local_finalize_response(
+) {
     use base64::Engine as _;
 
     #[derive(Debug, Clone)]
@@ -56,7 +56,7 @@ async fn gateway_executes_openai_compact_openai_family_upstream_stream_via_local
             true,
             false,
             Some(serde_json::json!(["openai"])),
-            Some(serde_json::json!(["openai:compact"])),
+            Some(serde_json::json!(["openai:responses:compact"])),
             Some(serde_json::json!(["gpt-5"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -67,7 +67,7 @@ async fn gateway_executes_openai_compact_openai_family_upstream_stream_via_local
             Some(5),
             Some(4_102_444_800_i64),
             Some(serde_json::json!(["openai"])),
-            Some(serde_json::json!(["openai:compact"])),
+            Some(serde_json::json!(["openai:responses:compact"])),
             Some(serde_json::json!(["gpt-5"])),
         )
         .expect("auth snapshot should build")
@@ -81,7 +81,7 @@ async fn gateway_executes_openai_compact_openai_family_upstream_stream_via_local
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-openai-compact-finalize-local-1".to_string(),
-            endpoint_api_format: "openai:compact".to_string(),
+            endpoint_api_format: "openai:responses:compact".to_string(),
             endpoint_api_family: Some("openai".to_string()),
             endpoint_kind: Some("compact".to_string()),
             endpoint_is_active: true,
@@ -89,11 +89,11 @@ async fn gateway_executes_openai_compact_openai_family_upstream_stream_via_local
             key_name: "prod".to_string(),
             key_auth_type: "api_key".to_string(),
             key_is_active: true,
-            key_api_formats: Some(vec!["openai:compact".to_string()]),
+            key_api_formats: Some(vec!["openai:responses:compact".to_string()]),
             key_allowed_models: None,
             key_capabilities: None,
             key_internal_priority: 5,
-            key_global_priority_by_format: Some(serde_json::json!({"openai:compact": 1})),
+            key_global_priority_by_format: Some(serde_json::json!({"openai:responses:compact": 1})),
             model_id: "model-openai-compact-finalize-local-1".to_string(),
             global_model_id: "global-model-openai-compact-finalize-local-1".to_string(),
             global_model_name: "gpt-5".to_string(),
@@ -103,7 +103,7 @@ async fn gateway_executes_openai_compact_openai_family_upstream_stream_via_local
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
                 name: "gpt-5-upstream".to_string(),
                 priority: 1,
-                api_formats: Some(vec!["openai:compact".to_string()]),
+                api_formats: Some(vec!["openai:responses:compact".to_string()]),
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -136,7 +136,7 @@ async fn gateway_executes_openai_compact_openai_family_upstream_stream_via_local
         StoredProviderCatalogEndpoint::new(
             "endpoint-openai-compact-finalize-local-1".to_string(),
             "provider-openai-compact-finalize-local-1".to_string(),
-            "openai:compact".to_string(),
+            "openai:responses:compact".to_string(),
             Some("openai".to_string()),
             Some("compact".to_string()),
             true,
@@ -168,7 +168,7 @@ async fn gateway_executes_openai_compact_openai_family_upstream_stream_via_local
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["openai:compact"])),
+            Some(serde_json::json!(["openai:responses:compact"])),
             encrypt_python_fernet_plaintext(
                 DEVELOPMENT_ENCRYPTION_KEY,
                 "sk-upstream-openai-compact-finalize",
@@ -176,7 +176,7 @@ async fn gateway_executes_openai_compact_openai_family_upstream_stream_via_local
             .expect("api key should encrypt"),
             None,
             None,
-            Some(serde_json::json!({"openai:compact": 1})),
+            Some(serde_json::json!({"openai:responses:compact": 1})),
             None,
             None,
             None,

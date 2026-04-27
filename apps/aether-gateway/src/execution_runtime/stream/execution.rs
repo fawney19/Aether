@@ -51,6 +51,8 @@ use crate::clock::current_unix_ms as current_request_candidate_unix_ms;
 use crate::constants::{CONTROL_CANDIDATE_ID_HEADER, CONTROL_REQUEST_ID_HEADER};
 use crate::control::GatewayControlDecision;
 use crate::execution_runtime::build_direct_execution_frame_stream;
+use crate::execution_runtime::kiro_web_search::maybe_execute_kiro_web_search_stream;
+use crate::execution_runtime::oauth_retry::refresh_oauth_plan_auth_for_retry;
 #[cfg(test)]
 use crate::execution_runtime::remote_compat::post_stream_plan_to_remote_execution_runtime;
 use crate::execution_runtime::submission::{
@@ -70,10 +72,10 @@ use crate::execution_runtime::{
 use crate::execution_runtime::{MAX_STREAM_PREFETCH_BYTES, MAX_STREAM_PREFETCH_FRAMES};
 use crate::log_ids::short_request_id;
 use crate::orchestration::{
-    apply_local_execution_effect, LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect,
-    LocalAttemptFailureEffect, LocalExecutionEffect, LocalExecutionEffectContext,
-    LocalHealthFailureEffect, LocalHealthSuccessEffect, LocalOAuthInvalidationEffect,
-    LocalPoolErrorEffect,
+    apply_local_execution_effect, build_local_error_flow_metadata, with_error_flow_report_context,
+    LocalAdaptiveRateLimitEffect, LocalAdaptiveSuccessEffect, LocalAttemptFailureEffect,
+    LocalExecutionEffect, LocalExecutionEffectContext, LocalHealthFailureEffect,
+    LocalHealthSuccessEffect, LocalOAuthInvalidationEffect, LocalPoolErrorEffect,
 };
 use crate::request_candidate_runtime::{
     ensure_execution_request_candidate_slot, record_local_request_candidate_status,
@@ -280,6 +282,9 @@ fn merge_stream_terminal_summary(
         current_summary.model = observed.model;
     }
     current_summary.observed_finish |= observed.observed_finish;
+    current_summary.unknown_event_count = current_summary
+        .unknown_event_count
+        .saturating_add(observed.unknown_event_count);
     if current_summary.parser_error.is_none() {
         current_summary.parser_error = observed.parser_error;
     }
@@ -310,6 +315,24 @@ async fn execute_in_process_stream(
     }
 
     DirectSyncExecutionRuntime::new().execute_stream(plan).await
+}
+
+async fn execute_in_process_stream_with_oauth_retry(
+    state: &AppState,
+    plan: &mut ExecutionPlan,
+    trace_id: &str,
+    report_context: Option<&Value>,
+) -> Result<DirectUpstreamStreamExecution, ExecutionRuntimeTransportError> {
+    let mut execution = execute_in_process_stream(state, plan).await?;
+    apply_stream_summary_report_context(&mut execution, report_context);
+    if execution.status_code >= 400
+        && refresh_oauth_plan_auth_for_retry(state, plan, execution.status_code, None, trace_id)
+            .await
+    {
+        execution = execute_in_process_stream(state, plan).await?;
+        apply_stream_summary_report_context(&mut execution, report_context);
+    }
+    Ok(execution)
 }
 
 #[allow(clippy::too_many_arguments)] // internal function, grouping would add unnecessary indirection
@@ -351,21 +374,79 @@ pub(crate) async fn execute_execution_runtime_stream(
         });
     }
     let plan_request_id_for_log = short_request_id(plan.request_id.as_str());
-    let provider_name = plan.provider_name.as_deref().unwrap_or("-");
-    let endpoint_id = plan.endpoint_id.as_str();
-    let key_id = plan.key_id.as_str();
-    let model_name = plan.model_name.as_deref().unwrap_or("-");
+    let provider_name = plan
+        .provider_name
+        .clone()
+        .unwrap_or_else(|| "-".to_string());
+    let endpoint_id = plan.endpoint_id.clone();
+    let key_id = plan.key_id.clone();
+    let model_name = plan.model_name.clone().unwrap_or_else(|| "-".to_string());
     let candidate_index = parse_request_candidate_report_context(report_context.as_ref())
         .and_then(|context| context.candidate_index)
         .map(|value| value.to_string())
         .unwrap_or_else(|| "-".to_string());
+    match maybe_execute_kiro_web_search_stream(state, &plan, report_context.as_ref()).await {
+        Ok(Some(kiro_web_search)) => {
+            return execute_stream_from_frame_stream(
+                state,
+                plan,
+                trace_id,
+                decision,
+                plan_kind,
+                report_kind,
+                kiro_web_search.report_context.or(report_context),
+                candidate_started_unix_secs,
+                stream_started_at,
+                kiro_web_search.frame_stream,
+            )
+            .await;
+        }
+        Ok(None) => {}
+        Err(err) => {
+            info!(
+                event_name = "kiro_web_search_mcp_unavailable",
+                log_type = "ops",
+                trace_id = %trace_id,
+                request_id = %plan_request_id_for_log,
+                candidate_id = ?plan.candidate_id,
+                provider_name = provider_name.as_str(),
+                endpoint_id = %endpoint_id,
+                key_id = %key_id,
+                model_name = model_name.as_str(),
+                candidate_index = candidate_index.as_str(),
+                error = %err,
+                "gateway Kiro web_search MCP execution unavailable"
+            );
+            let terminal_unix_secs = current_request_candidate_unix_ms();
+            record_local_request_candidate_status(
+                state,
+                &plan,
+                report_context.as_ref(),
+                SchedulerRequestCandidateStatusUpdate {
+                    status: RequestCandidateStatus::Failed,
+                    status_code: None,
+                    error_type: Some("kiro_web_search_mcp_unavailable".to_string()),
+                    error_message: Some(format!("{err:?}")),
+                    latency_ms: None,
+                    started_at_unix_ms: Some(candidate_started_unix_secs),
+                    finished_at_unix_ms: Some(terminal_unix_secs),
+                },
+            )
+            .await;
+            return Ok(None);
+        }
+    }
     #[cfg(not(test))]
     {
-        let execution = match execute_in_process_stream(state, &plan).await {
-            Ok(mut execution) => {
-                apply_stream_summary_report_context(&mut execution, report_context.as_ref());
-                execution
-            }
+        let execution = match execute_in_process_stream_with_oauth_retry(
+            state,
+            &mut plan,
+            trace_id,
+            report_context.as_ref(),
+        )
+        .await
+        {
+            Ok(execution) => execution,
             Err(err) => {
                 info!(
                     event_name = "stream_execution_runtime_unavailable",
@@ -421,11 +502,15 @@ pub(crate) async fn execute_execution_runtime_stream(
             .execution_runtime_override_base_url()
             .unwrap_or_default();
         if remote_execution_runtime_base_url.trim().is_empty() {
-            let execution = match execute_in_process_stream(state, &plan).await {
-                Ok(mut execution) => {
-                    apply_stream_summary_report_context(&mut execution, report_context.as_ref());
-                    execution
-                }
+            let execution = match execute_in_process_stream_with_oauth_retry(
+                state,
+                &mut plan,
+                trace_id,
+                report_context.as_ref(),
+            )
+            .await
+            {
+                Ok(execution) => execution,
                 Err(err) => {
                     info!(
                         event_name = "stream_execution_runtime_unavailable",
@@ -893,10 +978,20 @@ async fn execute_stream_from_frame_stream(
         );
         if matches!(failover_decision, LocalFailoverDecision::RetryNextCandidate) {
             let terminal_unix_secs = current_request_candidate_unix_ms();
+            let error_flow_report_context = with_error_flow_report_context(
+                report_context.as_ref(),
+                build_local_error_flow_metadata(
+                    status_code,
+                    error_response_text.as_deref(),
+                    failover_analysis,
+                ),
+            );
             record_local_request_candidate_status(
                 state,
                 &plan,
-                report_context.as_ref(),
+                error_flow_report_context
+                    .as_ref()
+                    .or(report_context.as_ref()),
                 SchedulerRequestCandidateStatusUpdate {
                     status: RequestCandidateStatus::Failed,
                     status_code: Some(status_code),
@@ -934,10 +1029,20 @@ async fn execute_stream_from_frame_stream(
             )
         {
             let terminal_unix_secs = current_request_candidate_unix_ms();
+            let error_flow_report_context = with_error_flow_report_context(
+                report_context.as_ref(),
+                build_local_error_flow_metadata(
+                    status_code,
+                    error_response_text.as_deref(),
+                    failover_analysis,
+                ),
+            );
             record_local_request_candidate_status(
                 state,
                 &plan,
-                report_context.as_ref(),
+                error_flow_report_context
+                    .as_ref()
+                    .or(report_context.as_ref()),
                 SchedulerRequestCandidateStatusUpdate {
                     status: RequestCandidateStatus::Failed,
                     status_code: Some(status_code),
@@ -970,10 +1075,20 @@ async fn execute_stream_from_frame_stream(
         );
         record_sync_terminal_usage(state, &plan, payload.report_context.as_ref(), &payload);
         let terminal_unix_secs = current_request_candidate_unix_ms();
+        let error_flow_report_context = with_error_flow_report_context(
+            payload.report_context.as_ref(),
+            build_local_error_flow_metadata(
+                status_code,
+                error_response_text.as_deref(),
+                failover_analysis,
+            ),
+        );
         record_local_request_candidate_status(
             state,
             &plan,
-            payload.report_context.as_ref(),
+            error_flow_report_context
+                .as_ref()
+                .or(payload.report_context.as_ref()),
             SchedulerRequestCandidateStatusUpdate {
                 status: RequestCandidateStatus::Failed,
                 status_code: Some(status_code),
@@ -2210,12 +2325,14 @@ mod tests {
             Some(ExecutionStreamTerminalSummary {
                 standardized_usage: Some(runtime_usage),
                 model: Some("gpt-5.5".to_string()),
+                unknown_event_count: 1,
                 ..ExecutionStreamTerminalSummary::default()
             }),
             Some(ExecutionStreamTerminalSummary {
                 standardized_usage: Some(observed_usage),
                 response_id: Some("resp_123".to_string()),
                 observed_finish: true,
+                unknown_event_count: 2,
                 ..ExecutionStreamTerminalSummary::default()
             }),
         )
@@ -2229,6 +2346,7 @@ mod tests {
         assert_eq!(merged.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(merged.response_id.as_deref(), Some("resp_123"));
         assert!(merged.observed_finish);
+        assert_eq!(merged.unknown_event_count, 3);
     }
 
     #[test]
@@ -2371,8 +2489,8 @@ mod tests {
                 "stream": true
             })),
             stream: true,
-            client_api_format: "openai:cli".into(),
-            provider_api_format: "openai:cli".into(),
+            client_api_format: "openai:responses".into(),
+            provider_api_format: "openai:responses".into(),
             model_name: Some("gpt-5.4".into()),
             proxy: None,
             tls_profile: None,
@@ -2387,7 +2505,7 @@ mod tests {
             Some("ai_public".to_string()),
             Some("openai".to_string()),
             Some("cli".to_string()),
-            Some("openai:cli".to_string()),
+            Some("openai:responses".to_string()),
         )
         .with_execution_runtime_candidate(true);
 
@@ -2396,11 +2514,11 @@ mod tests {
             plan,
             "trace-live-stream-first-data",
             &decision,
-            "openai_cli_stream",
+            "openai_responses_stream",
             None,
             Some(json!({
-                "provider_api_format": "openai:cli",
-                "client_api_format": "openai:cli",
+                "provider_api_format": "openai:responses",
+                "client_api_format": "openai:responses",
             })),
         )
         .await
@@ -2492,8 +2610,8 @@ mod tests {
                 "stream": true
             })),
             stream: true,
-            client_api_format: "openai:cli".into(),
-            provider_api_format: "openai:cli".into(),
+            client_api_format: "openai:responses".into(),
+            provider_api_format: "openai:responses".into(),
             model_name: Some("gpt-5.4".into()),
             proxy: None,
             tls_profile: None,
@@ -2508,7 +2626,7 @@ mod tests {
             Some("ai_public".to_string()),
             Some("openai".to_string()),
             Some("cli".to_string()),
-            Some("openai:cli".to_string()),
+            Some("openai:responses".to_string()),
         )
         .with_execution_runtime_candidate(true);
 
@@ -2517,11 +2635,11 @@ mod tests {
             plan,
             "trace-remote-runtime-sync-json-stream",
             &decision,
-            "openai_cli_stream",
+            "openai_responses_stream",
             None,
             Some(json!({
-                "provider_api_format": "openai:cli",
-                "client_api_format": "openai:cli",
+                "provider_api_format": "openai:responses",
+                "client_api_format": "openai:responses",
             })),
         )
         .await

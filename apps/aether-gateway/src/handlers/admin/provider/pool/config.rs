@@ -246,6 +246,8 @@ pub(crate) fn admin_provider_pool_config_from_config_value(
             rate_limit_cooldown_seconds: 300,
             overload_cooldown_seconds: 30,
             health_policy_enabled: true,
+            probing_enabled: false,
+            probing_interval_minutes: 10,
             stream_timeout_threshold: 3,
             stream_timeout_window_seconds: 1800,
             stream_timeout_cooldown_seconds: 300,
@@ -299,6 +301,16 @@ pub(crate) fn admin_provider_pool_config_from_config_value(
             .get("health_policy_enabled")
             .and_then(Value::as_bool)
             .unwrap_or(true),
+        probing_enabled: pool_advanced
+            .get("probing_enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        probing_interval_minutes: pool_advanced
+            .get("probing_interval_minutes")
+            .and_then(json_u64)
+            .filter(|value| *value > 0)
+            .map(|value| value.min(1440))
+            .unwrap_or(10),
         stream_timeout_threshold: pool_advanced
             .get("stream_timeout_threshold")
             .and_then(json_u64)
@@ -366,6 +378,8 @@ mod tests {
                 "rate_limit_cooldown_seconds": 420,
                 "overload_cooldown_seconds": 45,
                 "health_policy_enabled": false,
+                "probing_enabled": true,
+                "probing_interval_minutes": 20,
                 "stream_timeout_threshold": 4,
                 "stream_timeout_window_seconds": 900,
                 "stream_timeout_cooldown_seconds": 180
@@ -383,9 +397,32 @@ mod tests {
         assert_eq!(config.rate_limit_cooldown_seconds, 420);
         assert_eq!(config.overload_cooldown_seconds, 45);
         assert!(!config.health_policy_enabled);
+        assert!(config.probing_enabled);
+        assert_eq!(config.probing_interval_minutes, 20);
         assert_eq!(config.stream_timeout_threshold, 4);
         assert_eq!(config.stream_timeout_window_seconds, 900);
         assert_eq!(config.stream_timeout_cooldown_seconds, 180);
+    }
+
+    #[test]
+    fn clamps_pool_quota_probe_interval_to_python_range() {
+        let provider = sample_provider(json!({
+            "pool_advanced": {
+                "probing_enabled": true,
+                "probing_interval_minutes": 2000,
+            }
+        }));
+        let config = admin_provider_pool_config(&provider).expect("pool config should exist");
+        assert_eq!(config.probing_interval_minutes, 1440);
+
+        let provider = sample_provider(json!({
+            "pool_advanced": {
+                "probing_enabled": true,
+                "probing_interval_minutes": 0,
+            }
+        }));
+        let config = admin_provider_pool_config(&provider).expect("pool config should exist");
+        assert_eq!(config.probing_interval_minutes, 10);
     }
 
     #[test]

@@ -21,11 +21,8 @@ pub(crate) fn should_bypass_execution_runtime_decision(
         .as_deref()
         .map(str::trim)
         .unwrap_or_default()
-        .to_ascii_lowercase();
-    if !matches!(
-        provider_api_format.as_str(),
-        "openai:cli" | "openai:compact"
-    ) {
+        .to_string();
+    if !crate::ai_pipeline::is_openai_responses_family_format(&provider_api_format) {
         return false;
     }
 
@@ -39,11 +36,7 @@ pub(crate) fn should_bypass_execution_runtime_decision(
 }
 
 pub(crate) fn should_bypass_execution_runtime_plan(plan: &ExecutionPlan) -> bool {
-    let provider_api_format = plan.provider_api_format.trim().to_ascii_lowercase();
-    if !matches!(
-        provider_api_format.as_str(),
-        "openai:cli" | "openai:compact"
-    ) {
+    if !crate::ai_pipeline::is_openai_responses_family_format(&plan.provider_api_format) {
         return false;
     }
 

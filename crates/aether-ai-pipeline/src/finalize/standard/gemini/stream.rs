@@ -16,6 +16,12 @@ struct GeminiProviderToolState {
 }
 
 #[derive(Default)]
+struct GeminiProviderToolResultState {
+    content: String,
+    emitted: bool,
+}
+
+#[derive(Default)]
 pub struct GeminiProviderState {
     response_id: Option<String>,
     model: Option<String>,
@@ -26,6 +32,7 @@ pub struct GeminiProviderState {
     reasoning_signatures: BTreeMap<usize, String>,
     content_parts: BTreeMap<usize, CanonicalContentPart>,
     tool_calls: BTreeMap<usize, GeminiProviderToolState>,
+    tool_results: BTreeMap<usize, GeminiProviderToolResultState>,
 }
 
 impl GeminiProviderState {
@@ -49,6 +56,15 @@ impl GeminiProviderState {
             event: CanonicalStreamEvent::Start,
         });
         self.started = true;
+    }
+
+    fn unknown_frame(&self, report_context: &Value, payload: Value) -> CanonicalStreamFrame {
+        let (id, model) = self.identity(report_context);
+        CanonicalStreamFrame {
+            id,
+            model,
+            event: CanonicalStreamEvent::UnknownEvent(payload),
+        }
     }
 
     pub fn push_line(
@@ -79,6 +95,7 @@ impl GeminiProviderState {
 
         let mut out = Vec::new();
         let Some(candidates) = event_object.get("candidates").and_then(Value::as_array) else {
+            out.push(self.unknown_frame(report_context, value.clone()));
             return Ok(out);
         };
 
@@ -154,6 +171,53 @@ impl GeminiProviderState {
                     }
                     continue;
                 }
+                if let Some(function_response) = part_object
+                    .get("functionResponse")
+                    .or_else(|| part_object.get("function_response"))
+                    .and_then(Value::as_object)
+                {
+                    let tool_use_id = function_response
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned)
+                        .unwrap_or_else(|| build_generated_tool_call_id(index));
+                    let name = function_response
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned);
+                    let content = gemini_function_response_content(
+                        function_response.get("response").unwrap_or(&Value::Null),
+                    );
+                    let state = self.tool_results.entry(index).or_default();
+                    let delta = if !state.emitted {
+                        content.clone()
+                    } else if content.starts_with(&state.content) {
+                        content[state.content.len()..].to_string()
+                    } else if state.content == content {
+                        String::new()
+                    } else {
+                        content.clone()
+                    };
+                    if !delta.is_empty() || !state.emitted {
+                        state.emitted = true;
+                        state.content.push_str(&delta);
+                        out.push(CanonicalStreamFrame {
+                            id: id.clone(),
+                            model: model.clone(),
+                            event: CanonicalStreamEvent::ToolResultDelta {
+                                index,
+                                tool_use_id,
+                                name,
+                                content: delta,
+                            },
+                        });
+                    }
+                    continue;
+                }
                 let Some(function_call) =
                     part_object.get("functionCall").and_then(Value::as_object)
                 else {
@@ -172,6 +236,10 @@ impl GeminiProviderState {
                                 event: CanonicalStreamEvent::ContentPart(content_part),
                             });
                         }
+                    } else {
+                        out.push(
+                            self.unknown_frame(report_context, Value::Object(part_object.clone())),
+                        );
                     }
                     continue;
                 };
@@ -336,14 +404,27 @@ impl GeminiClientEmitter {
             Value::Array(vec![Value::Object(candidate)]),
         );
         if let Some(usage) = usage {
-            response.insert(
-                "usageMetadata".to_string(),
-                json!({
-                    "promptTokenCount": usage.input_tokens,
-                    "candidatesTokenCount": usage.output_tokens,
-                    "totalTokenCount": usage.total_tokens,
-                }),
+            let visible_output_tokens = usage.output_tokens.saturating_sub(usage.reasoning_tokens);
+            let mut usage_metadata = Map::new();
+            usage_metadata.insert(
+                "promptTokenCount".to_string(),
+                Value::from(usage.input_tokens),
             );
+            usage_metadata.insert(
+                "candidatesTokenCount".to_string(),
+                Value::from(visible_output_tokens),
+            );
+            usage_metadata.insert(
+                "totalTokenCount".to_string(),
+                Value::from(usage.total_tokens),
+            );
+            if usage.reasoning_tokens > 0 {
+                usage_metadata.insert(
+                    "thoughtsTokenCount".to_string(),
+                    Value::from(usage.reasoning_tokens),
+                );
+            }
+            response.insert("usageMetadata".to_string(), Value::Object(usage_metadata));
         }
         encode_json_sse(None, &Value::Object(response))
     }
@@ -447,6 +528,17 @@ impl GeminiClientEmitter {
                 };
                 self.emit_candidate(vec![part], None, None)
             }
+            CanonicalStreamEvent::ToolResultDelta {
+                tool_use_id,
+                name,
+                content,
+                ..
+            } => self.emit_candidate(
+                vec![gemini_function_response_part(tool_use_id, name, content)],
+                None,
+                None,
+            ),
+            CanonicalStreamEvent::UnknownEvent(_) => Ok(Vec::new()),
             CanonicalStreamEvent::Finish {
                 finish_reason,
                 usage,
@@ -469,6 +561,45 @@ impl GeminiClientEmitter {
         let out = self.flush_pending_tool_calls()?;
         self.finished = true;
         Ok(out)
+    }
+}
+
+fn gemini_function_response_part(
+    tool_use_id: String,
+    name: Option<String>,
+    content: String,
+) -> Value {
+    json!({
+        "functionResponse": {
+            "id": tool_use_id,
+            "name": name
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "unknown".to_string()),
+            "response": gemini_function_response_value(&content),
+        }
+    })
+}
+
+fn gemini_function_response_value(content: &str) -> Value {
+    if content.trim().is_empty() {
+        return Value::Object(Map::new());
+    }
+    match serde_json::from_str::<Value>(content) {
+        Ok(Value::Object(map)) => Value::Object(map),
+        Ok(value) => json!({ "output": value }),
+        Err(_) => json!({ "output": content }),
+    }
+}
+
+fn gemini_function_response_content(response: &Value) -> String {
+    match response {
+        Value::Object(object) => object
+            .get("result")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(object.clone()))
+            .to_string(),
+        Value::Null => String::new(),
+        value => value.to_string(),
     }
 }
 
@@ -695,6 +826,39 @@ mod tests {
     }
 
     #[test]
+    fn gemini_provider_state_emits_unknown_events_for_unknown_parts() {
+        let mut state = GeminiProviderState::default();
+        let report_context = json!({});
+        let frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "responseId": "resp_unknown_123",
+                    "modelVersion": "gemini-2.5-pro",
+                    "candidates": [{
+                        "index": 0,
+                        "content": {
+                            "parts": [
+                                {
+                                    "futurePart": {
+                                        "kept": true
+                                    }
+                                }
+                            ]
+                        }
+                    }]
+                })),
+            )
+            .expect("unknown part should parse");
+
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::UnknownEvent(ref payload)
+                if payload.get("futurePart").is_some()
+        )));
+    }
+
+    #[test]
     fn gemini_provider_state_parses_thoughts_code_and_content_filter_finish() {
         let mut state = GeminiProviderState::default();
         let report_context = json!({});
@@ -717,7 +881,8 @@ mod tests {
                     "usageMetadata": {
                         "promptTokenCount": 1,
                         "candidatesTokenCount": 2,
-                        "totalTokenCount": 3
+                        "thoughtsTokenCount": 4,
+                        "totalTokenCount": 7
                     }
                 })),
             )
@@ -740,6 +905,56 @@ mod tests {
             frame.event,
             CanonicalStreamEvent::Finish { ref finish_reason, .. }
                 if finish_reason.as_deref() == Some("content_filter")
+        )));
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::Finish {
+                usage: Some(CanonicalUsage {
+                    input_tokens: 1,
+                    output_tokens: 6,
+                    reasoning_tokens: 4,
+                    total_tokens: 7,
+                    ..
+                }),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn gemini_provider_state_parses_function_response_as_tool_result() {
+        let mut state = GeminiProviderState::default();
+        let report_context = json!({});
+        let frames = state
+            .push_line(
+                &report_context,
+                data_line(json!({
+                    "responseId": "resp_tool_result_123",
+                    "modelVersion": "gemini-2.5-pro",
+                    "candidates": [{
+                        "index": 0,
+                        "content": {
+                            "parts": [{
+                                "functionResponse": {
+                                    "id": "call_123",
+                                    "name": "lookup",
+                                    "response": {"ok": true}
+                                }
+                            }]
+                        }
+                    }]
+                })),
+            )
+            .expect("function response should parse");
+
+        assert!(frames.iter().any(|frame| matches!(
+            frame.event,
+            CanonicalStreamEvent::ToolResultDelta {
+                index: 0,
+                ref tool_use_id,
+                name: Some(ref name),
+                ref content,
+            } if tool_use_id == "call_123" && name == "lookup" && content == "{\"ok\":true}"
         )));
     }
 
@@ -771,8 +986,9 @@ mod tests {
                         finish_reason: Some("stop".to_string()),
                         usage: Some(CanonicalUsage {
                             input_tokens: 1,
-                            output_tokens: 2,
-                            total_tokens: 3,
+                            output_tokens: 3,
+                            reasoning_tokens: 1,
+                            total_tokens: 4,
                             ..CanonicalUsage::default()
                         }),
                     },
@@ -783,6 +999,8 @@ mod tests {
         let sse = String::from_utf8(bytes).expect("sse should be utf8");
         assert!(sse.contains("\"thought\":true"));
         assert!(sse.contains("\"thoughtSignature\":\"sig_123\""));
+        assert!(sse.contains("\"thoughtsTokenCount\":1"));
+        assert!(sse.contains("\"candidatesTokenCount\":2"));
         assert!(sse.contains("\"finishReason\":\"STOP\""));
     }
 
@@ -832,5 +1050,28 @@ mod tests {
         assert!(
             sse.contains("\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}")
         );
+    }
+
+    #[test]
+    fn gemini_client_emitter_emits_function_response_for_tool_results() {
+        let mut emitter = GeminiClientEmitter::default();
+        let bytes = emitter
+            .emit(CanonicalStreamFrame {
+                id: "resp_tool_result_123".to_string(),
+                model: "gemini-2.5-pro".to_string(),
+                event: CanonicalStreamEvent::ToolResultDelta {
+                    index: 2,
+                    tool_use_id: "call_123".to_string(),
+                    name: Some("lookup".to_string()),
+                    content: "{\"ok\":true}".to_string(),
+                },
+            })
+            .expect("tool result should encode");
+
+        let sse = String::from_utf8(bytes).expect("sse should be utf8");
+        assert!(sse.contains("\"functionResponse\""));
+        assert!(sse.contains("\"id\":\"call_123\""));
+        assert!(sse.contains("\"name\":\"lookup\""));
+        assert!(sse.contains("\"response\":{\"ok\":true}"));
     }
 }
