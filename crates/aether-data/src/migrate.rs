@@ -8,7 +8,7 @@ use tracing::{error, info, warn};
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 static BASELINE_V2_SQL: &str = include_str!("../bootstrap/20260413020000_baseline_v2.sql");
-const BASELINE_V2_CUTOFF_VERSION: i64 = 20260424000000;
+const BASELINE_V2_CUTOFF_VERSION: i64 = 20260427000000;
 const MIGRATIONS_TABLE_EXISTS_SQL: &str =
     "SELECT to_regclass('public._sqlx_migrations') IS NOT NULL";
 const PUBLIC_BASE_TABLE_COUNT_SQL: &str = r#"
@@ -664,6 +664,7 @@ SELECT EXISTS (
                 20260422120000,
                 20260423000000,
                 20260424000000,
+                20260427000000,
             ]
         );
     }
@@ -816,6 +817,7 @@ SELECT EXISTS (
                 20260422120000,
                 20260423000000,
                 20260424000000,
+                20260427000000,
             ]
         );
     }

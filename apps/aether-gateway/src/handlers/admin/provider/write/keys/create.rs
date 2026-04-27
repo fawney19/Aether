@@ -7,6 +7,7 @@ use crate::handlers::admin::shared::{
     decrypt_catalog_secret_with_fallbacks, encrypt_catalog_secret_with_fallbacks,
     normalize_json_object, normalize_string_list, parse_catalog_auth_config_json,
 };
+use crate::handlers::shared::normalize_optional_api_key_concurrent_limit;
 use aether_data_contracts::repository::provider_catalog::{
     StoredProviderCatalogKey, StoredProviderCatalogProvider,
 };
@@ -163,6 +164,7 @@ pub(crate) async fn build_admin_create_provider_key_record(
         .filter(|value| !value.is_empty());
     key.internal_priority = payload.internal_priority.unwrap_or(50);
     key.rpm_limit = payload.rpm_limit;
+    key.concurrent_limit = normalize_optional_api_key_concurrent_limit(payload.concurrent_limit)?;
     key.cache_ttl_minutes = payload.cache_ttl_minutes.unwrap_or(5);
     key.max_probe_interval_minutes = payload.max_probe_interval_minutes.unwrap_or(32);
     key.request_count = Some(0);

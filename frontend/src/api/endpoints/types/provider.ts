@@ -241,6 +241,7 @@ export interface EndpointAPIKey {
   internal_priority: number  // Key 内部优先级
   global_priority_by_format?: Record<string, number> | null  // 按 endpoint signature 的全局优先级
   rpm_limit?: number | null  // RPM 速率限制 (1-10000)，null 表示自适应模式
+  concurrent_limit?: number | null  // 并发请求上限，null/0 表示不限制
   allowed_models?: AllowedModels  // 允许使用的模型列表（null=不限制）
   capabilities?: Record<string, boolean> | null  // 能力标签配置（如 cache_1h, context_1m）
   // 缓存与熔断配置
@@ -390,6 +391,7 @@ export interface EndpointAPIKeyUpdate {
   internal_priority?: number
   global_priority_by_format?: Record<string, number> | null  // 按 API 格式的全局优先级
   rpm_limit?: number | null  // RPM 速率限制 (1-10000)，null 表示切换为自适应模式
+  concurrent_limit?: number | null  // 并发请求上限，null/0 表示不限制
   allowed_models?: AllowedModels
   capabilities?: Record<string, boolean> | null
   cache_ttl_minutes?: number

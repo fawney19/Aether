@@ -100,6 +100,18 @@ pub fn count_recent_active_requests_for_provider(
         .count()
 }
 
+pub fn count_recent_active_requests_for_provider_key(
+    recent_candidates: &[StoredRequestCandidate],
+    key_id: &str,
+    now_unix_secs: u64,
+) -> usize {
+    recent_candidates
+        .iter()
+        .filter(|candidate| candidate.key_id.as_deref() == Some(key_id))
+        .filter(|candidate| is_recently_active(candidate, now_unix_secs))
+        .count()
+}
+
 pub fn count_recent_active_requests_for_api_key(
     recent_candidates: &[StoredRequestCandidate],
     api_key_id: &str,
@@ -598,7 +610,8 @@ mod tests {
 
     use super::{
         aggregate_provider_key_health_score, count_recent_active_requests_for_api_key,
-        count_recent_active_requests_for_provider, count_recent_rpm_requests_for_provider_key,
+        count_recent_active_requests_for_provider, count_recent_active_requests_for_provider_key,
+        count_recent_rpm_requests_for_provider_key,
         count_recent_rpm_requests_for_provider_key_since, effective_provider_key_health_score,
         effective_provider_key_rpm_limit, is_candidate_in_recent_failure_cooldown,
         is_provider_key_circuit_open, provider_key_health_bucket, provider_key_health_score,
@@ -783,9 +796,210 @@ mod tests {
     }
 
     #[test]
+    fn provider_key_concurrency_counts_only_recent_active_requests() {
+        let recent_candidates = vec![
+            StoredRequestCandidate::new(
+                "pending".to_string(),
+                "req-pending".to_string(),
+                None,
+                Some("api-key-1".to_string()),
+                None,
+                None,
+                0,
+                0,
+                Some("provider-a".to_string()),
+                Some("endpoint-a".to_string()),
+                Some("key-a".to_string()),
+                RequestCandidateStatus::Pending,
+                None,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                900_000,
+                Some(900_000),
+                None,
+            )
+            .expect("candidate should build"),
+            StoredRequestCandidate::new(
+                "streaming".to_string(),
+                "req-streaming".to_string(),
+                None,
+                Some("api-key-1".to_string()),
+                None,
+                None,
+                0,
+                0,
+                Some("provider-a".to_string()),
+                Some("endpoint-a".to_string()),
+                Some("key-a".to_string()),
+                RequestCandidateStatus::Streaming,
+                None,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                950_000,
+                Some(950_000),
+                None,
+            )
+            .expect("candidate should build"),
+            StoredRequestCandidate::new(
+                "finished".to_string(),
+                "req-finished".to_string(),
+                None,
+                Some("api-key-1".to_string()),
+                None,
+                None,
+                0,
+                0,
+                Some("provider-a".to_string()),
+                Some("endpoint-a".to_string()),
+                Some("key-a".to_string()),
+                RequestCandidateStatus::Success,
+                None,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                975_000,
+                Some(975_000),
+                Some(976_000),
+            )
+            .expect("candidate should build"),
+            StoredRequestCandidate::new(
+                "failed".to_string(),
+                "req-failed".to_string(),
+                None,
+                Some("api-key-1".to_string()),
+                None,
+                None,
+                0,
+                0,
+                Some("provider-a".to_string()),
+                Some("endpoint-a".to_string()),
+                Some("key-a".to_string()),
+                RequestCandidateStatus::Failed,
+                None,
+                false,
+                Some(429),
+                None,
+                Some("upstream failure".to_string()),
+                Some(20),
+                None,
+                None,
+                None,
+                980_000,
+                Some(980_000),
+                Some(981_000),
+            )
+            .expect("candidate should build"),
+            StoredRequestCandidate::new(
+                "cancelled".to_string(),
+                "req-cancelled".to_string(),
+                None,
+                Some("api-key-1".to_string()),
+                None,
+                None,
+                0,
+                0,
+                Some("provider-a".to_string()),
+                Some("endpoint-a".to_string()),
+                Some("key-a".to_string()),
+                RequestCandidateStatus::Cancelled,
+                None,
+                false,
+                Some(499),
+                None,
+                Some("client cancelled".to_string()),
+                Some(10),
+                None,
+                None,
+                None,
+                982_000,
+                Some(982_000),
+                Some(983_000),
+            )
+            .expect("candidate should build"),
+            StoredRequestCandidate::new(
+                "stale".to_string(),
+                "req-stale".to_string(),
+                None,
+                Some("api-key-1".to_string()),
+                None,
+                None,
+                0,
+                0,
+                Some("provider-a".to_string()),
+                Some("endpoint-a".to_string()),
+                Some("key-a".to_string()),
+                RequestCandidateStatus::Pending,
+                None,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                699_000,
+                Some(699_000),
+                None,
+            )
+            .expect("candidate should build"),
+            StoredRequestCandidate::new(
+                "other-key".to_string(),
+                "req-other-key".to_string(),
+                None,
+                Some("api-key-1".to_string()),
+                None,
+                None,
+                0,
+                0,
+                Some("provider-a".to_string()),
+                Some("endpoint-a".to_string()),
+                Some("key-b".to_string()),
+                RequestCandidateStatus::Pending,
+                None,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                990_000,
+                Some(990_000),
+                None,
+            )
+            .expect("candidate should build"),
+        ];
+
+        assert_eq!(
+            count_recent_active_requests_for_provider_key(&recent_candidates, "key-a", 1_000),
+            2
+        );
+    }
+
+    #[test]
     fn fixed_provider_key_rpm_limit_takes_precedence() {
         let key = provider_catalog_key("key-a").with_rate_limit_fields(
             Some(120),
+            None,
             Some(80),
             None,
             None,
@@ -802,6 +1016,7 @@ mod tests {
     fn learned_provider_key_rpm_limit_requires_confidence() {
         let low_confidence = provider_catalog_key("key-a").with_rate_limit_fields(
             None,
+            None,
             Some(80),
             Some(0),
             Some(0),
@@ -813,6 +1028,7 @@ mod tests {
         assert_eq!(effective_provider_key_rpm_limit(&low_confidence, 100), None);
 
         let mut high_confidence = provider_catalog_key("key-a").with_rate_limit_fields(
+            None,
             None,
             Some(80),
             Some(0),
@@ -840,6 +1056,7 @@ mod tests {
     #[test]
     fn learned_provider_key_rpm_limit_uses_confirmed_observations_as_fallback_confidence() {
         let key = provider_catalog_key("key-a").with_rate_limit_fields(
+            None,
             None,
             Some(80),
             Some(0),
@@ -1005,6 +1222,7 @@ mod tests {
     fn provider_key_rpm_reserves_capacity_for_new_users() {
         let key = provider_catalog_key("key-a").with_rate_limit_fields(
             Some(10),
+            None,
             None,
             None,
             None,
