@@ -258,6 +258,77 @@ fn openai_image_stream_rewriter_reads_final_image_from_completed_response_output
 }
 
 #[test]
+fn openai_image_stream_rewriter_maps_upstream_error_to_generation_failed() {
+    let report_context = json!({
+        "provider_api_format": "openai:image",
+        "client_api_format": "openai:image",
+        "needs_conversion": false,
+        "image_request": {
+            "operation": "generate"
+        }
+    });
+    let mut rewriter =
+        maybe_build_local_stream_rewriter(Some(&report_context)).expect("rewriter should exist");
+
+    let output = rewriter
+        .push_chunk(
+            concat!(
+                "event: error\n",
+                "data: {\"type\":\"error\",\"error\":{\"type\":\"input-images\",\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit reached for gpt-image-2\",\"param\":null}}\n\n",
+                "event: response.failed\n",
+                "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit reached for gpt-image-2\"}}}\n\n"
+            )
+            .as_bytes(),
+        )
+        .expect("rewrite should succeed");
+    let output_text = utf8(output);
+    assert!(output_text.contains("event: image_generation.failed"));
+    assert_eq!(
+        output_text
+            .matches("event: image_generation.failed")
+            .count(),
+        1
+    );
+    assert!(output_text.contains("\"type\":\"image_generation.failed\""));
+    assert!(output_text.contains("\"type\":\"input-images\""));
+    assert!(output_text.contains("\"code\":\"rate_limit_exceeded\""));
+    assert!(output_text.contains("\"message\":\"Rate limit reached for gpt-image-2\""));
+    assert!(!output_text.contains("response.failed"));
+    assert!(rewriter.finish().expect("finish should succeed").is_empty());
+}
+
+#[test]
+fn openai_image_stream_rewriter_maps_response_failed_to_edit_failed() {
+    let report_context = json!({
+        "provider_api_format": "openai:image",
+        "client_api_format": "openai:image",
+        "needs_conversion": false,
+        "image_request": {
+            "operation": "edit"
+        }
+    });
+    let mut rewriter =
+        maybe_build_local_stream_rewriter(Some(&report_context)).expect("rewriter should exist");
+
+    let output = rewriter
+        .push_chunk(
+            concat!(
+                "event: response.failed\n",
+                "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"slow down\"}}}\n\n"
+            )
+            .as_bytes(),
+        )
+        .expect("rewrite should succeed");
+    let output_text = utf8(output);
+    assert!(output_text.contains("event: image_edit.failed"));
+    assert!(output_text.contains("\"type\":\"image_edit.failed\""));
+    assert!(output_text.contains("\"type\":\"rate_limit_exceeded\""));
+    assert!(output_text.contains("\"code\":\"rate_limit_exceeded\""));
+    assert!(output_text.contains("\"message\":\"slow down\""));
+    assert!(rewriter.finish().expect("finish should succeed").is_empty());
+}
+
+#[test]
 fn openai_image_stream_rewriter_emits_partial_and_completed_events_for_edit() {
     let report_context = json!({
         "provider_api_format": "openai:image",
