@@ -261,6 +261,7 @@ pub struct StoredProviderCatalogKey {
     pub proxy: Option<serde_json::Value>,
     pub fingerprint: Option<serde_json::Value>,
     pub rpm_limit: Option<u32>,
+    pub concurrent_limit: Option<i32>,
     pub learned_rpm_limit: Option<u32>,
     pub concurrent_429_count: Option<u32>,
     pub rpm_429_count: Option<u32>,
@@ -334,6 +335,7 @@ impl StoredProviderCatalogKey {
             proxy: None,
             fingerprint: None,
             rpm_limit: None,
+            concurrent_limit: None,
             learned_rpm_limit: None,
             concurrent_429_count: None,
             rpm_429_count: None,
@@ -402,6 +404,7 @@ impl StoredProviderCatalogKey {
     pub fn with_rate_limit_fields(
         mut self,
         rpm_limit: Option<u32>,
+        concurrent_limit: Option<i32>,
         learned_rpm_limit: Option<u32>,
         concurrent_429_count: Option<u32>,
         rpm_429_count: Option<u32>,
@@ -411,6 +414,7 @@ impl StoredProviderCatalogKey {
         success_count: Option<u32>,
     ) -> Self {
         self.rpm_limit = rpm_limit;
+        self.concurrent_limit = concurrent_limit;
         self.learned_rpm_limit = learned_rpm_limit;
         self.concurrent_429_count = concurrent_429_count;
         self.rpm_429_count = rpm_429_count;
@@ -449,6 +453,53 @@ impl StoredProviderCatalogKey {
         self.health_by_format = health_by_format;
         self.circuit_breaker_by_format = circuit_breaker_by_format;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StoredProviderCatalogKey;
+
+    #[test]
+    fn provider_catalog_key_defaults_concurrent_limit_to_none() {
+        let key = StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "default".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build");
+
+        assert_eq!(key.concurrent_limit, None);
+    }
+
+    #[test]
+    fn provider_catalog_key_rate_limit_builder_sets_concurrent_limit() {
+        let key = StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "default".to_string(),
+            "api_key".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+        .with_rate_limit_fields(
+            Some(120),
+            Some(3),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(key.rpm_limit, Some(120));
+        assert_eq!(key.concurrent_limit, Some(3));
     }
 }
 
