@@ -33,9 +33,8 @@ mod tests {
     use super::{
         auth_api_key_concurrency_limit_reached, candidate_is_selectable_with_runtime_state,
         candidate_runtime_skip_reason_with_state, candidate_supports_required_capability,
-        collect_global_model_names_for_required_capability,
-        CandidateRuntimeSelectabilityInput, EnumerateMinimalCandidateSelectionInput,
-        SchedulerMinimalCandidateSelectionCandidate,
+        collect_global_model_names_for_required_capability, CandidateRuntimeSelectabilityInput,
+        EnumerateMinimalCandidateSelectionInput, SchedulerMinimalCandidateSelectionCandidate,
     };
     use crate::SchedulerAuthConstraints;
 
