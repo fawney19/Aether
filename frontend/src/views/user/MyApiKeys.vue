@@ -756,8 +756,10 @@ function formatConcurrentLimitSimple(concurrentLimit?: number | null): string {
   return `${concurrentLimit} 并发`
 }
 
-function formatDate(dateString: string): string {
+function formatDate(dateString?: string | null): string {
+  if (!dateString) return '未知'
   const date = new Date(dateString)
+  if (Number.isNaN(date.getTime())) return '未知'
   return date.toLocaleDateString('zh-CN', {
     year: 'numeric',
     month: '2-digit',
@@ -767,6 +769,7 @@ function formatDate(dateString: string): string {
 
 function formatRelativeTime(dateString: string): string {
   const date = new Date(dateString)
+  if (Number.isNaN(date.getTime())) return '未知'
   const now = new Date()
   const diffMs = now.getTime() - date.getTime()
   const diffMins = Math.floor(diffMs / (1000 * 60))

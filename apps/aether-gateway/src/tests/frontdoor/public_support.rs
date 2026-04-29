@@ -5839,7 +5839,13 @@ async fn gateway_handles_users_me_api_keys_locally_without_proxying_upstream() {
             1.5,
             false,
         )
-        .expect("export record should build")]),
+        .expect("export record should build")
+        .with_activity_timestamps(
+            Some(1_711_000_102),
+            Some(1_711_000_100),
+            Some(1_711_000_101),
+        )
+        .expect("export activity timestamps should build")]),
     );
     let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![user]));
 
@@ -5881,6 +5887,8 @@ async fn gateway_handles_users_me_api_keys_locally_without_proxying_upstream() {
     assert_eq!(api_keys[0]["key_display"], "sk-user-li...ve-1");
     assert_eq!(api_keys[0]["total_requests"], 9);
     assert_eq!(api_keys[0]["total_cost_usd"], 1.5);
+    assert_eq!(api_keys[0]["created_at"], "2024-03-21T05:48:20+00:00");
+    assert_eq!(api_keys[0]["last_used_at"], "2024-03-21T05:48:22+00:00");
 
     let detail_response = client
         .get(format!(
@@ -6212,6 +6220,11 @@ async fn gateway_handles_users_me_api_key_writes_locally_without_proxying_upstre
     assert_eq!(create_payload["rate_limit"], 120);
     assert_eq!(create_payload["concurrent_limit"], serde_json::Value::Null);
     assert_eq!(create_payload["message"], "API密钥创建成功");
+    let created_at = create_payload["created_at"]
+        .as_str()
+        .expect("created_at should be string");
+    assert!(chrono::DateTime::parse_from_rfc3339(created_at).is_ok());
+    assert!(!created_at.starts_with("1970-01-01"));
     assert!(create_payload["key"]
         .as_str()
         .unwrap_or_default()
@@ -6317,6 +6330,7 @@ async fn gateway_handles_users_me_api_key_writes_locally_without_proxying_upstre
     );
     assert_eq!(detail_payload["concurrent_limit"], 4);
     assert_eq!(detail_payload["force_capabilities"], json!({}));
+    assert_eq!(detail_payload["created_at"], created_at);
 
     let delete_response = client
         .delete(format!("{gateway_url}/api/users/me/api-keys/{created_id}"))

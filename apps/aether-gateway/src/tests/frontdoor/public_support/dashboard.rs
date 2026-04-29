@@ -174,6 +174,93 @@ async fn gateway_handles_dashboard_stats_locally_without_proxying_upstream() {
 }
 
 #[tokio::test]
+async fn gateway_dashboard_stats_include_end_of_day_boundary() {
+    let now = stable_dashboard_now();
+    let user = sample_auth_user(now);
+    let access_token = build_test_auth_token(
+        "access",
+        serde_json::Map::from_iter([
+            ("user_id".to_string(), json!(user.id)),
+            ("role".to_string(), json!(user.role)),
+            (
+                "created_at".to_string(),
+                json!(user.created_at.map(|value| value.to_rfc3339())),
+            ),
+            ("session_id".to_string(), json!("session-dashboard-day-end")),
+        ]),
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    );
+    let session = sample_auth_session(
+        "user-auth-1",
+        "session-dashboard-day-end",
+        "device-dashboard-day-end",
+        "refresh-dashboard-day-end",
+        now,
+    );
+    let day = now.date_naive();
+    let end_of_day = day
+        .and_hms_opt(23, 59, 59)
+        .expect("end of day should build")
+        .and_utc();
+    let next_midnight = day
+        .checked_add_signed(chrono::Duration::days(1))
+        .expect("next day should build")
+        .and_hms_opt(0, 0, 0)
+        .expect("next midnight should build")
+        .and_utc();
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        sample_user_usage_audit(
+            "usage-dashboard-day-end",
+            "req-dashboard-day-end",
+            "user-auth-1",
+            "gpt-5",
+            "openai",
+            "completed",
+            end_of_day,
+        ),
+        sample_user_usage_audit(
+            "usage-dashboard-next-midnight",
+            "req-dashboard-next-midnight",
+            "user-auth-1",
+            "gpt-5",
+            "openai",
+            "completed",
+            next_midnight,
+        ),
+    ]));
+
+    let (gateway_url, upstream_hits, gateway_handle, upstream_handle) =
+        start_auth_gateway_with_usage_state(
+            user,
+            sample_auth_wallet("user-auth-1", now),
+            [session],
+            usage_repository,
+        )
+        .await;
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{gateway_url}/api/dashboard/stats?start_date={day}&end_date={day}"
+        ))
+        .header("authorization", format!("Bearer {access_token}"))
+        .header("x-client-device-id", "device-dashboard-day-end")
+        .header("user-agent", "AetherTest/1.0")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["today"]["requests"], 1);
+    assert_eq!(payload["monthly_cost"], json!(1.25));
+    assert_eq!(payload["stats"][1]["value"], json!("1"));
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_handles_admin_dashboard_stats_locally_without_proxying_upstream() {
     let now = stable_dashboard_now();
     let admin = StoredUserAuthRecord::new(
@@ -232,6 +319,8 @@ async fn gateway_handles_admin_dashboard_stats_locally_without_proxying_upstream
     openai_usage.cache_creation_ephemeral_5m_input_tokens = 600;
     openai_usage.cache_creation_ephemeral_1h_input_tokens = 600;
     openai_usage.cache_read_input_tokens = 800;
+    openai_usage.cache_read_cost_usd = 0.01;
+    openai_usage.output_price_per_1m = Some(100.0);
 
     let mut claude_usage = sample_user_usage_audit(
         "usage-dashboard-admin-2",
@@ -251,8 +340,10 @@ async fn gateway_handles_admin_dashboard_stats_locally_without_proxying_upstream
     claude_usage.cache_creation_ephemeral_5m_input_tokens = 20;
     claude_usage.cache_creation_ephemeral_1h_input_tokens = 30;
     claude_usage.cache_read_input_tokens = 200;
+    claude_usage.cache_read_cost_usd = 0.005;
+    claude_usage.output_price_per_1m = Some(100.0);
 
-    let streaming_usage = sample_user_usage_audit(
+    let mut streaming_usage = sample_user_usage_audit(
         "usage-dashboard-admin-3",
         "req-dashboard-admin-3",
         "user-auth-3",
@@ -261,6 +352,8 @@ async fn gateway_handles_admin_dashboard_stats_locally_without_proxying_upstream
         "streaming",
         now - chrono::Duration::minutes(1),
     );
+    streaming_usage.cache_read_input_tokens = 0;
+    streaming_usage.cache_read_cost_usd = 0.0;
 
     let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
         openai_usage,
@@ -407,6 +500,8 @@ async fn gateway_handles_admin_dashboard_stats_locally_without_proxying_upstream
     assert_eq!(payload["today"]["requests"], 2);
     assert_eq!(payload["today"]["tokens"], 17_450);
     assert_eq!(payload["today"]["cost"], json!(2.5));
+    assert_eq!(payload["cost_stats"]["cost_savings"], json!(0.085));
+    assert_eq!(payload["stats"][2]["subValue"], json!("节省 $0.09"));
     assert_eq!(payload["stats"][0]["value"], json!("2"));
     assert_eq!(payload["stats"][1]["value"], json!("17.4K"));
     assert_eq!(

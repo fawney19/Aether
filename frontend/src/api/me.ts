@@ -161,8 +161,8 @@ export interface ApiKey {
   key_display: string
   is_active: boolean
   is_locked: boolean  // 管理员锁定标志
-  last_used_at?: string
-  created_at: string
+  last_used_at?: string | null
+  created_at?: string | null
   total_requests?: number
   total_cost_usd?: number
   rate_limit?: number | null

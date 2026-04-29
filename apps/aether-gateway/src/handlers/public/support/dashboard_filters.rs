@@ -3,8 +3,9 @@ use super::{
     GatewayError, GatewayPublicRequestContext,
 };
 use aether_data_contracts::repository::usage::{
-    StoredUsageDashboardDailyBreakdownRow, StoredUsageDashboardSummary,
-    UsageAuditAggregationGroupBy, UsageAuditAggregationQuery, UsageDashboardDailyBreakdownQuery,
+    StoredUsageCostSavingsSummary, StoredUsageDashboardDailyBreakdownRow,
+    StoredUsageDashboardSummary, UsageAuditAggregationGroupBy, UsageAuditAggregationQuery,
+    UsageCostSavingsSummaryQuery, UsageDashboardDailyBreakdownQuery,
     UsageDashboardProviderCountsQuery, UsageDashboardSummaryQuery,
 };
 use axum::{
@@ -428,7 +429,10 @@ fn dashboard_parse_daily_range(query: Option<&str>) -> Result<DashboardDateRange
 fn dashboard_range_bounds_unix(range: DashboardDateRange) -> Option<(u64, u64)> {
     let offset = chrono::Duration::minutes(i64::from(range.tz_offset_minutes));
     let start_local = range.start_date.and_hms_opt(0, 0, 0)?;
-    let end_local = range.end_date.and_hms_opt(23, 59, 59)?;
+    let end_local = range
+        .end_date
+        .checked_add_signed(chrono::Duration::days(1))?
+        .and_hms_opt(0, 0, 0)?;
     let start_utc = (start_local - offset).and_utc().timestamp();
     let end_utc = (end_local - offset).and_utc().timestamp();
     Some((start_utc.max(0) as u64, end_utc.max(0) as u64))
@@ -1501,6 +1505,41 @@ async fn dashboard_load_user_counts(
     Ok((count, count))
 }
 
+fn dashboard_cache_savings_usd(summary: &StoredUsageCostSavingsSummary) -> f64 {
+    let estimated_full_cost =
+        if summary.estimated_full_cost_usd <= 0.0 && summary.cache_read_cost_usd > 0.0 {
+            summary.cache_read_cost_usd * 10.0
+        } else {
+            summary.estimated_full_cost_usd
+        };
+    dashboard_round_f64(
+        (estimated_full_cost - summary.cache_read_cost_usd).max(0.0),
+        4,
+    )
+}
+
+async fn dashboard_load_cache_savings(
+    state: &AppState,
+    range: DashboardDateRange,
+    user_id: Option<&str>,
+) -> Result<f64, GatewayError> {
+    let Some((created_from_unix_secs, created_until_unix_secs)) =
+        dashboard_range_bounds_unix(range)
+    else {
+        return Ok(0.0);
+    };
+    let summary = state
+        .summarize_usage_cost_savings(&UsageCostSavingsSummaryQuery {
+            created_from_unix_secs,
+            created_until_unix_secs,
+            user_id: user_id.map(ToOwned::to_owned),
+            provider_name: None,
+            model: None,
+        })
+        .await?;
+    Ok(dashboard_cache_savings_usd(&summary))
+}
+
 pub(super) async fn handle_dashboard_stats_get(
     state: &AppState,
     request_context: &GatewayPublicRequestContext,
@@ -1630,10 +1669,17 @@ pub(super) async fn handle_dashboard_stats_get(
                 / today_totals.requests as f64
                 * 100.0
         };
-        let cost_savings = dashboard_round_f64(
-            period_totals.total_cost_usd - period_totals.actual_total_cost_usd,
-            4,
-        );
+        let cost_savings =
+            match dashboard_load_cache_savings(state, summary_range, user_filter).await {
+                Ok(value) => value,
+                Err(err) => {
+                    return build_auth_error_response(
+                        http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("dashboard cache savings lookup failed: {err:?}"),
+                        false,
+                    );
+                }
+            };
         let stats = json!([
             {
                 "name": "今日请求",

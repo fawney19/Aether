@@ -148,8 +148,8 @@ fn build_users_me_api_key_list_payload(
         "key_display": users_me_masked_api_key_display(state, record.key_encrypted.as_deref()),
         "is_active": record.is_active,
         "is_locked": is_locked,
-        "last_used_at": serde_json::Value::Null,
-        "created_at": serde_json::Value::Null,
+        "last_used_at": format_users_me_optional_unix_secs_iso8601(record.last_used_at_unix_secs),
+        "created_at": format_users_me_optional_unix_secs_iso8601(record.created_at_unix_secs),
         "total_requests": record.total_requests,
         "total_cost_usd": record.total_cost_usd,
         "rate_limit": record.rate_limit,
@@ -174,9 +174,9 @@ fn build_users_me_api_key_detail_payload(
         "force_capabilities": record.force_capabilities,
         "rate_limit": record.rate_limit,
         "concurrent_limit": record.concurrent_limit,
-        "last_used_at": serde_json::Value::Null,
+        "last_used_at": format_users_me_optional_unix_secs_iso8601(record.last_used_at_unix_secs),
         "expires_at": format_users_me_optional_unix_secs_iso8601(record.expires_at_unix_secs),
-        "created_at": serde_json::Value::Null,
+        "created_at": format_users_me_optional_unix_secs_iso8601(record.created_at_unix_secs),
     })
 }
 
@@ -575,8 +575,14 @@ pub(super) async fn handle_users_me_api_key_create(
         "name": created.name,
         "key": plaintext_key,
         "key_display": users_me_masked_api_key_display(state, created.key_encrypted.as_deref()),
+        "is_active": created.is_active,
+        "is_locked": false,
         "rate_limit": created.rate_limit,
         "concurrent_limit": created.concurrent_limit,
+        "last_used_at": format_users_me_optional_unix_secs_iso8601(created.last_used_at_unix_secs),
+        "created_at": format_users_me_optional_unix_secs_iso8601(created.created_at_unix_secs),
+        "total_requests": created.total_requests,
+        "total_cost_usd": created.total_cost_usd,
         "message": "API密钥创建成功",
     }))
     .into_response()

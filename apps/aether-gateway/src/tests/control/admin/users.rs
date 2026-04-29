@@ -678,7 +678,13 @@ async fn gateway_handles_admin_user_api_key_routes_locally_with_trusted_admin_pr
             1.5,
             false,
         )
-        .expect("export record should build")]),
+        .expect("export record should build")
+        .with_activity_timestamps(
+            Some(1_711_000_102),
+            Some(1_711_000_100),
+            Some(1_711_000_101),
+        )
+        .expect("export activity timestamps should build")]),
     );
     let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
         sample_admin_user("user-1"),
@@ -724,6 +730,11 @@ async fn gateway_handles_admin_user_api_key_routes_locally_with_trusted_admin_pr
         create_payload["message"],
         "API Key创建成功，请妥善保存完整密钥"
     );
+    let created_at = create_payload["created_at"]
+        .as_str()
+        .expect("created_at should be string");
+    assert!(chrono::DateTime::parse_from_rfc3339(created_at).is_ok());
+    assert!(!created_at.starts_with("1970-01-01"));
     assert!(create_payload["id"]
         .as_str()
         .is_some_and(|value| !value.is_empty()));
@@ -757,6 +768,7 @@ async fn gateway_handles_admin_user_api_key_routes_locally_with_trusted_admin_pr
     assert_eq!(update_payload["is_locked"], false);
     assert_eq!(update_payload["rate_limit"], 120);
     assert_eq!(update_payload["concurrent_limit"], 9);
+    assert_eq!(update_payload["created_at"], "2024-03-21T05:48:20+00:00");
     assert_eq!(update_payload["message"], "API Key更新成功");
 
     let lock_response = client
@@ -1247,7 +1259,13 @@ async fn gateway_lists_admin_user_api_keys_locally_with_trusted_admin_principal(
             1.5,
             false,
         )
-        .expect("export record should build")]),
+        .expect("export record should build")
+        .with_activity_timestamps(
+            Some(1_711_000_102),
+            Some(1_711_000_100),
+            Some(1_711_000_101),
+        )
+        .expect("export activity timestamps should build")]),
     );
     let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![
         sample_admin_user("user-1"),
@@ -1287,6 +1305,14 @@ async fn gateway_lists_admin_user_api_keys_locally_with_trusted_admin_principal(
     assert_eq!(payload["api_keys"][0]["total_requests"], 9);
     assert_eq!(payload["api_keys"][0]["total_cost_usd"], 1.5);
     assert_eq!(payload["api_keys"][0]["rate_limit"], 60);
+    assert_eq!(
+        payload["api_keys"][0]["created_at"],
+        "2024-03-21T05:48:20+00:00"
+    );
+    assert_eq!(
+        payload["api_keys"][0]["last_used_at"],
+        "2024-03-21T05:48:22+00:00"
+    );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

@@ -45,8 +45,8 @@ pub(super) fn build_admin_user_api_key_detail_payload(
         "rate_limit": record.rate_limit,
         "concurrent_limit": record.concurrent_limit,
         "expires_at": format_optional_unix_secs_iso8601(record.expires_at_unix_secs),
-        "last_used_at": serde_json::Value::Null,
-        "created_at": serde_json::Value::Null,
+        "last_used_at": format_optional_unix_secs_iso8601(record.last_used_at_unix_secs),
+        "created_at": format_optional_unix_secs_iso8601(record.created_at_unix_secs),
     })
 }
 
