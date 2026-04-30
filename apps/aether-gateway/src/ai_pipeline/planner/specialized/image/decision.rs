@@ -87,6 +87,7 @@ pub(super) async fn maybe_build_local_openai_image_decision_payload_for_candidat
         provider_request_method: Some(serde_json::Value::String(parts.method.to_string())),
         provider_request_headers: Some(&resolved.provider_request_headers),
         original_headers: &parts.headers,
+        request_origin: Some(crate::headers::request_origin_from_parts(parts)),
         original_request_body_json: Some(body_json),
         original_request_body_base64: body_base64,
         client_requested_stream: spec_metadata.require_streaming,

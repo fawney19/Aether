@@ -1531,6 +1531,12 @@ fn build_runtime_request_metadata_seed_from_parts(
     if let Some(trace_id) = context_string(context, "trace_id") {
         metadata.insert("trace_id".to_string(), Value::String(trace_id));
     }
+    if let Some(client_ip) = context_string(context, "client_ip") {
+        metadata.insert("client_ip".to_string(), Value::String(client_ip));
+    }
+    if let Some(user_agent) = context_string(context, "user_agent") {
+        metadata.insert("user_agent".to_string(), Value::String(user_agent));
+    }
     if let Some(client_requested_stream) = context_bool(context, "client_requested_stream") {
         metadata.insert(
             "client_requested_stream".to_string(),
@@ -2531,7 +2537,9 @@ mod tests {
         let record = build_pending_usage_record(
             &plan,
             Some(&json!({
-                "api_key_is_standalone": true
+                "api_key_is_standalone": true,
+                "client_ip": "203.0.113.8",
+                "user_agent": "Claude-Code/1.0"
             })),
             1_700_000_000,
         )
@@ -2540,7 +2548,9 @@ mod tests {
         assert_eq!(
             record.request_metadata,
             Some(json!({
-                "api_key_is_standalone": true
+                "api_key_is_standalone": true,
+                "client_ip": "203.0.113.8",
+                "user_agent": "Claude-Code/1.0"
             }))
         );
     }

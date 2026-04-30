@@ -67,6 +67,8 @@ pub(crate) fn sanitize_usage_request_metadata_ref(value: Option<&Value>) -> Opti
 
 fn copy_allowed_metadata_fields(source: &Map<String, Value>, target: &mut Map<String, Value>) {
     copy_non_empty_string(source, target, "trace_id");
+    copy_non_empty_string(source, target, "client_ip");
+    copy_non_empty_string(source, target, "user_agent");
     copy_bool(source, target, "client_requested_stream");
     copy_bool(source, target, "upstream_is_stream");
     copy_bool(source, target, "api_key_is_standalone");
@@ -96,6 +98,8 @@ fn copy_allowed_metadata_fields(source: &Map<String, Value>, target: &mut Map<St
 
 fn move_allowed_metadata_fields(mut source: Map<String, Value>, target: &mut Map<String, Value>) {
     remove_non_empty_string(&mut source, target, "trace_id");
+    remove_non_empty_string(&mut source, target, "client_ip");
+    remove_non_empty_string(&mut source, target, "user_agent");
     remove_bool(&mut source, target, "client_requested_stream");
     remove_bool(&mut source, target, "upstream_is_stream");
     remove_bool(&mut source, target, "api_key_is_standalone");
@@ -384,6 +388,8 @@ mod tests {
             "model": "gpt-5",
             "candidate_index": 2,
             "trace_id": "trace-1",
+            "client_ip": "203.0.113.8",
+            "user_agent": "Claude-Code/1.0",
             "client_requested_stream": false,
             "upstream_is_stream": true,
             "api_key_is_standalone": true,
@@ -415,6 +421,8 @@ mod tests {
             metadata,
             json!({
                 "trace_id": "trace-1",
+                "client_ip": "203.0.113.8",
+                "user_agent": "Claude-Code/1.0",
                 "client_requested_stream": false,
                 "upstream_is_stream": true,
                 "api_key_is_standalone": true,
@@ -481,6 +489,8 @@ mod tests {
                     "model_id": "model-1",
                     "global_model_id": "global-model-1",
                     "global_model_name": "gpt-5",
+                    "client_ip": "203.0.113.8",
+                    "user_agent": "Claude-Code/1.0",
                     "billing_snapshot": {"status": "complete"}
                 })
                 .as_object()
@@ -498,6 +508,8 @@ mod tests {
                 "model_id": "model-1",
                 "global_model_id": "global-model-1",
                 "global_model_name": "gpt-5",
+                "client_ip": "203.0.113.8",
+                "user_agent": "Claude-Code/1.0",
                 "billing_snapshot": {"status": "complete"}
             })
         );

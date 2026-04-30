@@ -90,6 +90,7 @@ pub(super) async fn maybe_build_local_gemini_files_decision_payload_for_candidat
         provider_request_method: None,
         provider_request_headers: None,
         original_headers: &parts.headers,
+        request_origin: Some(crate::headers::request_origin_from_parts(parts)),
         original_request_body_json: Some(body_json),
         original_request_body_base64: resolved.provider_request_body_base64.as_deref(),
         client_requested_stream: spec_metadata.require_streaming,

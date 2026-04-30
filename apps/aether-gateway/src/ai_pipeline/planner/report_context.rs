@@ -5,6 +5,7 @@ use serde_json::{Map, Value};
 
 use crate::ai_pipeline::contracts::ExecutionRuntimeAuthContext;
 use crate::ai_pipeline::planner::candidate_metadata::append_ranking_metadata_to_object;
+use crate::headers::RequestOrigin;
 use crate::orchestration::ExecutionAttemptIdentity;
 
 pub(crate) struct LocalExecutionReportContextParts<'a> {
@@ -32,6 +33,7 @@ pub(crate) struct LocalExecutionReportContextParts<'a> {
     pub(crate) provider_request_method: Option<Value>,
     pub(crate) provider_request_headers: Option<&'a BTreeMap<String, String>>,
     pub(crate) original_headers: &'a http::HeaderMap,
+    pub(crate) request_origin: Option<RequestOrigin>,
     pub(crate) original_request_body_json: Option<&'a Value>,
     pub(crate) original_request_body_base64: Option<&'a str>,
     pub(crate) client_requested_stream: bool,
@@ -131,6 +133,18 @@ pub(crate) fn build_local_execution_report_context(
         )
         .unwrap_or(Value::Null),
     );
+    let RequestOrigin {
+        client_ip,
+        user_agent,
+    } = parts
+        .request_origin
+        .unwrap_or_else(|| crate::headers::request_origin_from_headers(parts.original_headers));
+    if let Some(client_ip) = client_ip {
+        object.insert("client_ip".to_string(), Value::String(client_ip));
+    }
+    if let Some(user_agent) = user_agent {
+        object.insert("user_agent".to_string(), Value::String(user_agent));
+    }
     object.insert(
         "client_requested_stream".to_string(),
         Value::Bool(parts.client_requested_stream),
@@ -237,7 +251,17 @@ pub(crate) fn insert_provider_stream_event_api_format(
 
 #[cfg(test)]
 mod tests {
-    use super::provider_stream_event_api_format_for_provider_type;
+    use std::collections::BTreeMap;
+
+    use serde_json::{json, Map, Value};
+
+    use super::{
+        build_local_execution_report_context, provider_stream_event_api_format_for_provider_type,
+        LocalExecutionReportContextParts,
+    };
+    use crate::ai_pipeline::contracts::ExecutionRuntimeAuthContext;
+    use crate::headers::RequestOrigin;
+    use crate::orchestration::ExecutionAttemptIdentity;
 
     #[test]
     fn codex_provider_uses_openai_responses_stream_event_format() {
@@ -260,6 +284,69 @@ mod tests {
         assert_eq!(
             provider_stream_event_api_format_for_provider_type("anthropic"),
             None
+        );
+    }
+
+    #[test]
+    fn local_execution_report_context_records_request_origin() {
+        let auth_context = ExecutionRuntimeAuthContext {
+            user_id: "user-1".to_string(),
+            api_key_id: "api-key-1".to_string(),
+            username: None,
+            api_key_name: None,
+            balance_remaining: None,
+            access_allowed: true,
+            api_key_is_standalone: false,
+        };
+        let original_headers = http::HeaderMap::new();
+        let provider_request_headers = BTreeMap::new();
+
+        let report_context =
+            build_local_execution_report_context(LocalExecutionReportContextParts {
+                auth_context: &auth_context,
+                request_id: "trace-1",
+                candidate_id: "candidate-1",
+                attempt_identity: ExecutionAttemptIdentity::new(0, 0),
+                model: "gpt-5",
+                provider_name: "OpenAI",
+                provider_id: "provider-1",
+                endpoint_id: "endpoint-1",
+                key_id: "key-1",
+                key_name: None,
+                model_id: None,
+                global_model_id: None,
+                global_model_name: None,
+                provider_api_format: "openai:chat",
+                client_api_format: "openai:chat",
+                mapped_model: None,
+                candidate_group_id: None,
+                ranking: None,
+                upstream_url: None,
+                header_rules: None,
+                body_rules: None,
+                provider_request_method: None,
+                provider_request_headers: Some(&provider_request_headers),
+                original_headers: &original_headers,
+                request_origin: Some(RequestOrigin {
+                    client_ip: Some("203.0.113.8".to_string()),
+                    user_agent: Some("Claude-Code/1.0".to_string()),
+                }),
+                original_request_body_json: Some(&json!({"model": "gpt-5"})),
+                original_request_body_base64: None,
+                client_requested_stream: false,
+                upstream_is_stream: false,
+                has_envelope: false,
+                needs_conversion: false,
+                extra_fields: Map::new(),
+            });
+
+        assert_eq!(
+            report_context["client_ip"],
+            Value::String("203.0.113.8".to_string())
+        );
+        assert_eq!(
+            report_context["user_agent"],
+            Value::String("Claude-Code/1.0".to_string())
         );
     }
 }
