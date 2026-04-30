@@ -626,8 +626,9 @@ fn build_codex_quota_status_snapshot(
         .filter_map(admin_provider_quota_pure::coerce_json_u64)
         .min();
     let reset_at = quota_windows_min_reset_at(&windows);
-    let exhausted_by_credits =
-        credits_unlimited != Some(true) && credits_has_credits == Some(false);
+    let exhausted_by_credits = windows.is_empty()
+        && credits_unlimited != Some(true)
+        && credits_has_credits == Some(false);
     let exhausted_by_window = usage_ratio.is_some_and(|value| value >= 1.0 - 1e-6);
     let exhausted = exhausted_by_credits || exhausted_by_window;
 

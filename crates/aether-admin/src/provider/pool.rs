@@ -184,7 +184,27 @@ pub fn admin_pool_key_account_quota_exhausted(
     provider_type: &str,
 ) -> bool {
     if let Some(exhausted) = admin_pool_key_quota_snapshot(key, provider_type)
-        .and_then(|quota_snapshot| admin_pool_json_bool(quota_snapshot.get("exhausted")))
+        .and_then(|quota_snapshot| {
+            let exhausted = admin_pool_json_bool(quota_snapshot.get("exhausted"))?;
+            if exhausted {
+                let windows_max_ratio = quota_snapshot
+                    .get("windows")
+                    .and_then(Value::as_array)
+                    .filter(|w| !w.is_empty())
+                    .and_then(|windows| {
+                        windows
+                            .iter()
+                            .filter_map(Value::as_object)
+                            .filter_map(|w| w.get("used_ratio"))
+                            .filter_map(Value::as_f64)
+                            .max_by(f64::total_cmp)
+                    });
+                if windows_max_ratio.is_some_and(|ratio| ratio < 1.0 - 1e-6) {
+                    return Some(false);
+                }
+            }
+            Some(exhausted)
+        })
     {
         return exhausted;
     }
@@ -200,7 +220,12 @@ pub fn admin_pool_key_account_quota_exhausted(
             if admin_pool_json_bool(bucket.get("credits_unlimited")) == Some(true) {
                 return false;
             }
-            if admin_pool_json_bool(bucket.get("has_credits")) == Some(false) {
+            let has_window_data =
+                admin_pool_json_f64(bucket.get("primary_used_percent")).is_some()
+                    || admin_pool_json_f64(bucket.get("secondary_used_percent")).is_some();
+            if !has_window_data
+                && admin_pool_json_bool(bucket.get("has_credits")) == Some(false)
+            {
                 return true;
             }
             admin_pool_json_f64(bucket.get("primary_used_percent"))
