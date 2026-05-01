@@ -60,6 +60,96 @@ def test_process_line_updates_openai_usage_from_usage_only_chunk() -> None:
     assert ctx.output_tokens == 5
 
 
+def test_process_line_preserves_claude_1h_cache_ttl_from_message_start() -> None:
+    ctx = StreamContext(model="claude-opus-4-7", api_format="claude:chat")
+    ctx.provider_api_format = "claude:chat"
+    processor = StreamProcessor(request_id="test-request", default_parser=DummyParser())
+    sse_parser = SSEEventParser()
+
+    message_start = {
+        "type": "message_start",
+        "message": {
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-7",
+            "usage": {
+                "input_tokens": 6,
+                "output_tokens": 1,
+                "cache_creation_input_tokens": 62226,
+                "cache_read_input_tokens": 0,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 0,
+                    "ephemeral_1h_input_tokens": 62226,
+                },
+            },
+        },
+    }
+
+    processor._process_line(ctx, sse_parser, f"data: {json.dumps(message_start)}\n")
+    processor._process_line(ctx, sse_parser, "\n")
+
+    assert ctx.input_tokens == 6
+    assert ctx.cache_creation_tokens == 62226
+    assert ctx.cache_ttl_minutes == 60
+
+
+def test_process_line_preserves_claude_5m_cache_ttl_from_message_start() -> None:
+    ctx = StreamContext(model="claude-opus-4-7", api_format="claude:chat")
+    ctx.provider_api_format = "claude:chat"
+    processor = StreamProcessor(request_id="test-request", default_parser=DummyParser())
+    sse_parser = SSEEventParser()
+
+    message_start = {
+        "type": "message_start",
+        "message": {
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-7",
+            "usage": {
+                "input_tokens": 6,
+                "output_tokens": 1,
+                "cache_creation_input_tokens": 258,
+                "cache_read_input_tokens": 0,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 258,
+                    "ephemeral_1h_input_tokens": 0,
+                },
+            },
+        },
+    }
+
+    processor._process_line(ctx, sse_parser, f"data: {json.dumps(message_start)}\n")
+    processor._process_line(ctx, sse_parser, "\n")
+
+    assert ctx.cache_creation_tokens == 258
+    assert ctx.cache_ttl_minutes == 5
+
+
+def test_process_line_does_not_infer_1h_from_old_cache_creation_total() -> None:
+    ctx = StreamContext(model="claude-opus-4-7", api_format="claude:chat")
+    ctx.provider_api_format = "claude:chat"
+    processor = StreamProcessor(request_id="test-request", default_parser=DummyParser())
+    sse_parser = SSEEventParser()
+
+    message_delta = {
+        "type": "message_delta",
+        "usage": {
+            "input_tokens": 6,
+            "output_tokens": 150,
+            "cache_creation_input_tokens": 258,
+            "cache_read_input_tokens": 0,
+        },
+    }
+
+    processor._process_line(ctx, sse_parser, f"data: {json.dumps(message_delta)}\n")
+    processor._process_line(ctx, sse_parser, "\n")
+
+    assert ctx.cache_creation_tokens == 258
+    assert ctx.cache_ttl_minutes is None
+
+
 def test_process_line_handles_openai_usage_chunk_followed_by_done_without_blank_line() -> None:
     ctx = StreamContext(model="test-model", api_format="openai:chat")
     ctx.provider_api_format = "openai:chat"

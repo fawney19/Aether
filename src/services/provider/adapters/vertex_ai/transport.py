@@ -177,9 +177,11 @@ def _build_api_key_url(
     if not model:
         raise InvalidRequestException("Vertex AI 请求缺少 model 参数")
 
+    from src.utils.url_utils import join_url
+
     action = "streamGenerateContent" if is_stream else "generateContent"
     path = f"/v1/publishers/google/models/{model}:{action}"
-    url = f"{API_KEY_BASE_URL}{path}"
+    url = join_url(API_KEY_BASE_URL, path)
 
     # 构建查询参数
     params = dict(query_params) if query_params else {}
@@ -266,13 +268,15 @@ def _build_service_account_url(
         publisher = "google"
         action = "streamGenerateContent" if is_stream else "generateContent"
 
+    from src.utils.url_utils import join_url
+
     # 构建 URL（global region 使用不同的 URL 格式）
     if region == "global":
         base_url = "https://aiplatform.googleapis.com"
     else:
         base_url = f"https://{region}-aiplatform.googleapis.com"
     path = f"/v1/projects/{project_id}/locations/{region}/publishers/{publisher}/models/{model}:{action}"
-    url = f"{base_url}{path}"
+    url = join_url(base_url, path)
 
     # 添加查询参数
     effective_query_params = dict(query_params) if query_params else {}

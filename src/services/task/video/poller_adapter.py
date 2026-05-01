@@ -560,16 +560,17 @@ class VideoTaskPollerAdapter:
         return self._gemini_normalizer.video_poll_to_internal(payload)
 
     def _build_openai_url(self, base_url: str | None, task_id: str) -> str:
-        base = (base_url or "https://api.openai.com").rstrip("/")
-        if base.endswith("/v1"):
-            return f"{base}/videos/{task_id}"
-        return f"{base}/v1/videos/{task_id}"
+        from src.utils.url_utils import join_url
+
+        return join_url(base_url or "https://api.openai.com", f"/v1/videos/{task_id}")
 
     def _build_gemini_url(self, base_url: str | None, operation_name: str) -> str:
-        base = (base_url or "https://generativelanguage.googleapis.com").rstrip("/")
-        if base.endswith("/v1beta"):
-            base = base[: -len("/v1beta")]
-        return f"{base}/v1beta/{operation_name}"
+        from src.utils.url_utils import join_url
+
+        return join_url(
+            base_url or "https://generativelanguage.googleapis.com",
+            f"/v1beta/{operation_name}",
+        )
 
     def _build_headers(
         self,

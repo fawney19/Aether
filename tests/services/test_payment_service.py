@@ -54,6 +54,90 @@ def test_create_recharge_order_creates_pending_order(monkeypatch: pytest.MonkeyP
     assert Decimal(order.refundable_amount_usd) == Decimal("0")
 
 
+def test_create_recharge_order_with_manual_review_starts_pending_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = MagicMock()
+    user = SimpleNamespace(id="u1")
+    wallet = SimpleNamespace(id="w1", status="active")
+
+    monkeypatch.setattr(
+        "src.services.payment.service.WalletService.get_or_create_wallet",
+        lambda _db, user: wallet,
+    )
+
+    order = PaymentService.create_recharge_order(
+        db,
+        user=user,
+        amount_usd="25",
+        payment_method="manual_review",
+    )
+
+    assert order.status == "pending_approval"
+    assert order.expires_at is None
+    assert order.order_type == "topup"
+    assert isinstance(order.gateway_response, dict)
+    assert order.gateway_response["gateway"] == "manual_review"
+    assert "instructions" in order.gateway_response
+
+
+def test_create_subscription_order_with_manual_review_starts_pending_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = MagicMock()
+    user = SimpleNamespace(id="u1")
+    wallet = SimpleNamespace(id="w1", status="active")
+
+    monkeypatch.setattr(
+        "src.services.payment.service.WalletService.get_or_create_wallet",
+        lambda _db, user: wallet,
+    )
+
+    order = PaymentService.create_subscription_order(
+        db,
+        user=user,
+        subscription_id="sub-1",
+        amount_usd="18",
+        payment_method="manual_review",
+        order_type="subscription_initial",
+    )
+
+    assert order.status == "pending_approval"
+    assert order.expires_at is None
+    assert isinstance(order.gateway_response, dict)
+    assert order.gateway_response["gateway"] == "manual_review"
+    assert "instructions" in order.gateway_response
+
+
+def test_create_settled_subscription_order_supports_zero_amount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = MagicMock()
+    user = SimpleNamespace(id="u1")
+    wallet = SimpleNamespace(id="w1", status="active")
+
+    monkeypatch.setattr(
+        "src.services.payment.service.WalletService.get_or_create_wallet",
+        lambda _db, user: wallet,
+    )
+
+    order = PaymentService.create_settled_subscription_order(
+        db,
+        user=user,
+        subscription_id="sub-1",
+        amount_usd="0",
+        payment_method="system",
+        order_type="subscription_renewal",
+    )
+
+    assert order.status == "credited"
+    assert order.payment_method == "system"
+    assert order.order_type == "subscription_renewal"
+    assert Decimal(order.amount_usd) == Decimal("0")
+    assert order.paid_at is not None
+    assert order.credited_at is not None
+
+
 def test_refresh_order_status_marks_expired_pending_order() -> None:
     order = PaymentOrder(
         id="po-expired",
@@ -228,6 +312,74 @@ def test_credit_order_applies_wallet_recharge_once(monkeypatch: pytest.MonkeyPat
     create_tx.assert_called_once()
 
 
+def test_credit_order_uses_manual_recharge_reason_for_manual_review_topup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order = PaymentOrder(
+        id="po-manual-1",
+        order_no="order-manual-1",
+        wallet_id="w1",
+        user_id="u1",
+        amount_usd=Decimal("6.00000000"),
+        refunded_amount_usd=Decimal("0"),
+        refundable_amount_usd=Decimal("0"),
+        payment_method="manual_review",
+        order_type="topup",
+        status="pending_approval",
+    )
+    wallet = Wallet(
+        id="w1",
+        user_id="u1",
+        balance=Decimal("1.00000000"),
+        status="active",
+        total_recharged=Decimal("1.00000000"),
+        total_consumed=Decimal("0"),
+        total_refunded=Decimal("0"),
+        total_adjusted=Decimal("0"),
+        currency="USD",
+    )
+
+    class DummyOrderQuery:
+        def filter(self, *args: object, **kwargs: object) -> "DummyOrderQuery":
+            return self
+
+        def with_for_update(self) -> "DummyOrderQuery":
+            return self
+
+        def one_or_none(self) -> PaymentOrder:
+            return order
+
+    class DummyWalletQuery:
+        def filter(self, *args: object, **kwargs: object) -> "DummyWalletQuery":
+            return self
+
+        def first(self) -> Wallet:
+            return wallet
+
+    db = MagicMock()
+    db.query.side_effect = [DummyOrderQuery(), DummyWalletQuery()]
+    create_tx = MagicMock()
+    monkeypatch.setattr(
+        "src.services.payment.service.WalletService.create_wallet_transaction",
+        create_tx,
+    )
+
+    updated, credited = PaymentService.credit_order(
+        db,
+        order=order,
+        gateway_order_id="gw-manual-1",
+        operator_id="admin-1",
+    )
+
+    assert credited is True
+    assert updated.status == "credited"
+    assert updated.credited_at is not None
+    create_tx.assert_called_once()
+    assert create_tx.call_args.kwargs["reason_code"] == "topup_admin_manual"
+    assert create_tx.call_args.kwargs["description"] == "充值到账(人工充值)"
+    assert create_tx.call_args.kwargs["operator_id"] == "admin-1"
+
+
 def test_expire_order_marks_pending_order_expired() -> None:
     order = PaymentOrder(
         id="po2",
@@ -263,6 +415,40 @@ def test_expire_order_marks_pending_order_expired() -> None:
     assert "expired_at" in updated.gateway_response
 
 
+def test_expire_order_allows_pending_approval_order() -> None:
+    order = PaymentOrder(
+        id="po2-manual",
+        order_no="order-2-manual",
+        wallet_id="w1",
+        user_id="u1",
+        amount_usd=Decimal("3.00000000"),
+        refunded_amount_usd=Decimal("0"),
+        refundable_amount_usd=Decimal("3.00000000"),
+        payment_method="manual_review",
+        status="pending_approval",
+    )
+
+    class DummyOrderQuery:
+        def filter(self, *args: object, **kwargs: object) -> "DummyOrderQuery":
+            return self
+
+        def with_for_update(self) -> "DummyOrderQuery":
+            return self
+
+        def one_or_none(self) -> PaymentOrder:
+            return order
+
+    db = MagicMock()
+    db.query.return_value = DummyOrderQuery()
+
+    updated, changed = PaymentService.expire_order(db, order=order, reason="user_cancelled")
+
+    assert changed is True
+    assert updated.status == "expired"
+    assert updated.gateway_response["expire_reason"] == "user_cancelled"
+    assert "expired_at" in updated.gateway_response
+
+
 def test_expire_order_is_idempotent_for_existing_expired_order() -> None:
     order = PaymentOrder(
         id="po3",
@@ -295,11 +481,7 @@ def test_expire_order_is_idempotent_for_existing_expired_order() -> None:
     assert updated.status == "expired"
 
 
-def test_list_orders_expires_overdue_pending_before_filtered_count() -> None:
-    expiry_query = MagicMock()
-    expiry_query.filter.return_value = expiry_query
-    expiry_query.update.return_value = 2
-
+def test_list_orders_expires_overdue_pending_before_filtered_count(monkeypatch: pytest.MonkeyPatch) -> None:
     list_query = MagicMock()
     list_query.filter.return_value = list_query
     list_query.count.return_value = 1
@@ -310,7 +492,11 @@ def test_list_orders_expires_overdue_pending_before_filtered_count() -> None:
     ordered_query.all.return_value = ["order-1"]
 
     db = MagicMock()
-    db.query.side_effect = [expiry_query, list_query]
+    db.query.return_value = list_query
+    monkeypatch.setattr(
+        "src.services.payment.service.PaymentService.expire_overdue_pending_orders",
+        lambda *_a, **_k: 2,
+    )
 
     items, total, changed = PaymentService.list_orders(
         db,
@@ -323,6 +509,147 @@ def test_list_orders_expires_overdue_pending_before_filtered_count() -> None:
     assert items == ["order-1"]
     assert total == 1
     assert changed is True
-    expiry_query.update.assert_called_once()
     ordered_query.offset.assert_called_once_with(10)
     ordered_query.limit.assert_called_once_with(5)
+
+
+def test_credit_order_activates_pending_subscription_for_subscription_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order = PaymentOrder(
+        id="po-sub-1",
+        order_no="sub-order-1",
+        wallet_id="w1",
+        user_id="u1",
+        subscription_id="sub-pending-1",
+        amount_usd=Decimal("18.00000000"),
+        refunded_amount_usd=Decimal("0"),
+        refundable_amount_usd=Decimal("0"),
+        payment_method="alipay",
+        order_type="subscription_initial",
+        status="pending",
+    )
+
+    class DummyOrderQuery:
+        def filter(self, *args: object, **kwargs: object) -> "DummyOrderQuery":
+            return self
+
+        def with_for_update(self) -> "DummyOrderQuery":
+            return self
+
+        def one_or_none(self) -> PaymentOrder:
+            return order
+
+    db = MagicMock()
+    db.query.return_value = DummyOrderQuery()
+    activate_pending = MagicMock()
+    monkeypatch.setattr(
+        "src.services.subscription.SubscriptionService.activate_pending_subscription",
+        activate_pending,
+    )
+
+    updated, credited = PaymentService.credit_order(
+        db,
+        order=order,
+        gateway_order_id="gw-sub-1",
+    )
+
+    assert credited is True
+    assert updated.status == "credited"
+    assert updated.credited_at is not None
+    activate_pending.assert_called_once_with(db, "sub-pending-1", commit=False)
+
+
+def test_expire_order_cancels_pending_subscription_for_subscription_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order = PaymentOrder(
+        id="po-sub-2",
+        order_no="sub-order-2",
+        wallet_id="w1",
+        user_id="u1",
+        subscription_id="sub-pending-2",
+        amount_usd=Decimal("18.00000000"),
+        refunded_amount_usd=Decimal("0"),
+        refundable_amount_usd=Decimal("0"),
+        payment_method="wechat",
+        order_type="subscription_upgrade",
+        status="pending",
+    )
+    order.expires_at = datetime.now(timezone.utc) + timedelta(minutes=20)
+
+    class DummyOrderQuery:
+        def filter(self, *args: object, **kwargs: object) -> "DummyOrderQuery":
+            return self
+
+        def with_for_update(self) -> "DummyOrderQuery":
+            return self
+
+        def one_or_none(self) -> PaymentOrder:
+            return order
+
+    db = MagicMock()
+    db.query.return_value = DummyOrderQuery()
+    cancel_pending = MagicMock()
+    monkeypatch.setattr(
+        "src.services.subscription.SubscriptionService.cancel_pending_subscription",
+        cancel_pending,
+    )
+
+    updated, changed = PaymentService.expire_order(db, order=order, reason="timeout")
+
+    assert changed is True
+    assert updated.status == "expired"
+    cancel_pending.assert_called_once_with(
+        db,
+        "sub-pending-2",
+        reason="payment_failed",
+        commit=False,
+    )
+
+
+def test_expire_order_propagates_user_cancelled_for_subscription_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order = PaymentOrder(
+        id="po-sub-3",
+        order_no="sub-order-3",
+        wallet_id="w1",
+        user_id="u1",
+        subscription_id="sub-pending-3",
+        amount_usd=Decimal("18.00000000"),
+        refunded_amount_usd=Decimal("0"),
+        refundable_amount_usd=Decimal("0"),
+        payment_method="manual_review",
+        order_type="subscription_renewal",
+        status="pending_approval",
+    )
+
+    class DummyOrderQuery:
+        def filter(self, *args: object, **kwargs: object) -> "DummyOrderQuery":
+            return self
+
+        def with_for_update(self) -> "DummyOrderQuery":
+            return self
+
+        def one_or_none(self) -> PaymentOrder:
+            return order
+
+    db = MagicMock()
+    db.query.return_value = DummyOrderQuery()
+    cancel_pending = MagicMock()
+    monkeypatch.setattr(
+        "src.services.subscription.SubscriptionService.cancel_pending_subscription",
+        cancel_pending,
+    )
+
+    updated, changed = PaymentService.expire_order(db, order=order, reason="user_cancelled")
+
+    assert changed is True
+    assert updated.status == "expired"
+    cancel_pending.assert_called_once_with(
+        db,
+        "sub-pending-3",
+        reason="user_cancelled",
+        commit=False,
+    )

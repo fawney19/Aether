@@ -82,6 +82,25 @@ export const adminPaymentsApi = {
     return response.data
   },
 
+  async approveOrder(
+    orderId: string,
+    payload: AdminPaymentCreditRequest
+  ): Promise<{ order: PaymentOrder }> {
+    const response = await apiClient.post<{ order: PaymentOrder }>(
+      `/api/admin/payments/orders/${orderId}/approve`,
+      payload
+    )
+    return response.data
+  },
+
+  async rejectOrder(orderId: string): Promise<{ order: PaymentOrder }> {
+    const response = await apiClient.post<{ order: PaymentOrder }>(
+      `/api/admin/payments/orders/${orderId}/reject`,
+      {}
+    )
+    return response.data
+  },
+
   async listCallbacks(params?: {
     payment_method?: string
     limit?: number

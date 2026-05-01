@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, selectinload
@@ -265,20 +265,10 @@ class CandidateBuilder:
         Returns:
             (is_supported, skip_reason, supported_capabilities, provider_model_names)
         """
-        # 确保 global_model 附加到当前 Session
-        # 注意：从缓存重建的对象是 transient 状态，不能使用 load=False
-        # 使用 load=True（默认）允许 SQLAlchemy 正确处理 transient 对象
-        from sqlalchemy import inspect
-
-        insp = inspect(global_model)
-        if insp.transient or insp.detached:
-            # transient/detached 对象：使用默认 merge（会查询 DB 检查是否存在）
-            global_model = db.merge(global_model)
-        else:
-            # persistent 对象：已经附加到 session，无需 merge
-            pass
-
-        # 获取模型支持的能力列表
+        # 本函数只读取 global_model 的标量字段（id / is_active / supported_capabilities），
+        # 不需要把对象附加到 session。早期这里用 db.merge 把缓存/detached 对象拉进 session，
+        # 副作用是 SQLAlchemy 会把缓存里的字段值盖回 DB 行，一旦后续同 session commit
+        # 就会覆盖 admin 刚改的 GlobalModel 配置，参见记账路径的同类修复。
         model_supported_capabilities: list[str] = list(global_model.supported_capabilities or [])
 
         # 查询该 Provider 是否有实现这个 GlobalModel
@@ -446,6 +436,11 @@ class CandidateBuilder:
         capability_requirements: dict[str, bool] | None = None,
         global_conversion_enabled: bool = True,
         request_body: dict | None = None,
+        model_group_id: str | None = None,
+        model_group_name: str | None = None,
+        model_group_routes_by_provider: dict[str, list[dict[str, Any]]] | None = None,
+        default_user_billing_multiplier: float = 1.0,
+        user_group_binding_priority: int | None = None,
     ) -> "list[ProviderCandidate]":
         """
         构建候选列表
@@ -494,6 +489,33 @@ class CandidateBuilder:
             allowed_kinds = {client_kind}
 
         for provider in providers:
+            provider_route_entries = (
+                list(model_group_routes_by_provider.get(str(provider.id), []))
+                if model_group_routes_by_provider is not None
+                else []
+            )
+
+            def _match_model_group_route(
+                *,
+                key_id: str | None = None,
+            ) -> dict[str, Any] | None:
+                if not provider_route_entries:
+                    return None
+
+                normalized_key_id = str(key_id or "").strip()
+                key_match: dict[str, Any] | None = None
+                provider_wide_match: dict[str, Any] | None = None
+                for entry in provider_route_entries:
+                    route_key_id = str(entry.get("provider_api_key_id") or "").strip()
+                    if route_key_id:
+                        if normalized_key_id and route_key_id == normalized_key_id:
+                            key_match = entry
+                            break
+                        continue
+
+                    provider_wide_match = entry
+                return key_match or provider_wide_match
+
             # 按端点格式分别判断兼容性与模型/Key 可用性：
             # - 同格式端点优先（needs_conversion=False）
             # - 跨格式端点次之（needs_conversion=True）
@@ -603,6 +625,18 @@ class CandidateBuilder:
                     if key.is_active
                     and (key.api_formats is None or endpoint_format_str in key.api_formats)
                 ]
+                key_route_matches: dict[str, dict[str, Any] | None] = {}
+                if model_group_routes_by_provider is not None:
+                    filtered_active_keys: list[ProviderAPIKey] = []
+                    for key in active_keys:
+                        matched_route = _match_model_group_route(
+                            key_id=str(getattr(key, "id", "") or ""),
+                        )
+                        if matched_route is None:
+                            continue
+                        filtered_active_keys.append(key)
+                        key_route_matches[str(getattr(key, "id", "") or "")] = matched_route
+                    active_keys = filtered_active_keys
                 if not active_keys:
                     continue
 
@@ -659,45 +693,89 @@ class CandidateBuilder:
                         )
                     except Exception:
                         provider_priority = 999999
-                    try:
-                        pool_priority = (
-                            int(pool_cfg.global_priority)
-                            if pool_cfg.global_priority is not None
-                            else provider_priority
+                    pool_priority = provider_priority
+
+                    pool_keys_by_route: dict[str, tuple[dict[str, Any] | None, list[ProviderAPIKey]]] = {}
+                    for pool_key in pool_keys:
+                        matched_model_group_route = (
+                            key_route_matches.get(str(getattr(pool_key, "id", "") or ""))
+                            if model_group_routes_by_provider is not None
+                            else None
                         )
-                    except Exception:
-                        pool_priority = provider_priority
+                        route_bucket = (
+                            str(matched_model_group_route.get("id"))
+                            if matched_model_group_route is not None
+                            and matched_model_group_route.get("id") is not None
+                            else "__provider_default__"
+                        )
+                        route_entry, route_keys = pool_keys_by_route.get(
+                            route_bucket, (matched_model_group_route, [])
+                        )
+                        route_keys.append(pool_key)
+                        pool_keys_by_route[route_bucket] = (route_entry, route_keys)
 
-                    pool_candidate = PoolCandidate(
-                        provider=provider,
-                        endpoint=endpoint,
-                        key=pool_keys[0],
-                        pool_keys=pool_keys,
-                        pool_config=pool_cfg,
-                        pool_priority=pool_priority,
-                        needs_conversion=needs_conversion,
-                        provider_api_format=str(endpoint_format_str or ""),
-                        output_limit=output_limit,
-                        capability_miss_count=0,
-                    )
+                    for matched_model_group_route, grouped_pool_keys in pool_keys_by_route.values():
+                        pool_candidate = PoolCandidate(
+                            provider=provider,
+                            endpoint=endpoint,
+                            key=grouped_pool_keys[0],
+                            pool_keys=grouped_pool_keys,
+                            pool_config=pool_cfg,
+                            pool_priority=pool_priority,
+                            needs_conversion=needs_conversion,
+                            provider_api_format=str(endpoint_format_str or ""),
+                            output_limit=output_limit,
+                            capability_miss_count=0,
+                            effective_provider_priority=(
+                                int(matched_model_group_route.get("priority", 50))
+                                if matched_model_group_route is not None
+                                else getattr(provider, "provider_priority", None)
+                            ),
+                            model_group_id=model_group_id,
+                            model_group_name=model_group_name,
+                            model_group_route_id=(
+                                str(matched_model_group_route.get("id"))
+                                if matched_model_group_route is not None
+                                and matched_model_group_route.get("id") is not None
+                                else None
+                            ),
+                            user_billing_multiplier=(
+                                float(
+                                    matched_model_group_route.get(
+                                        "user_billing_multiplier_override",
+                                        default_user_billing_multiplier,
+                                    )
+                                )
+                                if matched_model_group_route is not None
+                                and matched_model_group_route.get("user_billing_multiplier_override")
+                                is not None
+                                else float(default_user_billing_multiplier)
+                            ),
+                            user_group_binding_priority=user_group_binding_priority,
+                        )
 
-                    # 打包延迟检查参数，供 PoolManager 排序后分页调用
-                    pool_candidate._deferred_check_params = {
-                        "endpoint_format": endpoint_format_str,
-                        "model_name": model_name,
-                        "capability_requirements": capability_requirements,
-                        "model_mappings": model_mappings,
-                        "candidate_models": provider_model_names,
-                        "provider_type": getattr(provider, "provider_type", None),
-                    }
+                        # 打包延迟检查参数，供 PoolManager 排序后分页调用
+                        pool_candidate._deferred_check_params = {
+                            "endpoint_format": endpoint_format_str,
+                            "model_name": model_name,
+                            "capability_requirements": capability_requirements,
+                            "model_mappings": model_mappings,
+                            "candidate_models": provider_model_names,
+                            "provider_type": getattr(provider, "provider_type", None),
+                        }
 
-                    if needs_conversion:
-                        convertible_candidates.append(pool_candidate)
-                    else:
-                        exact_candidates.append(pool_candidate)
+                        if needs_conversion:
+                            convertible_candidates.append(pool_candidate)
+                        else:
+                            exact_candidates.append(pool_candidate)
                     break
 
                 for key in keys_to_check:
+                    matched_model_group_route = (
+                        key_route_matches.get(str(getattr(key, "id", "") or ""))
+                        if model_group_routes_by_provider is not None
+                        else None
+                    )
                     # Key 级别检查（健康度/熔断按 provider_format bucket）
                     # 传入 provider_model_names 作为 candidate_models，
                     # 用于检查 Key 的 allowed_models 是否支持 Provider 定义的模型名称
@@ -732,6 +810,32 @@ class CandidateBuilder:
                             if is_available
                             else 0
                         ),
+                        effective_provider_priority=(
+                            int(matched_model_group_route.get("priority", 50))
+                            if matched_model_group_route is not None
+                            else getattr(provider, "provider_priority", None)
+                        ),
+                        model_group_id=model_group_id,
+                        model_group_name=model_group_name,
+                        model_group_route_id=(
+                            str(matched_model_group_route.get("id"))
+                            if matched_model_group_route is not None
+                            and matched_model_group_route.get("id") is not None
+                            else None
+                        ),
+                        user_billing_multiplier=(
+                            float(
+                                matched_model_group_route.get(
+                                    "user_billing_multiplier_override",
+                                    default_user_billing_multiplier,
+                                )
+                            )
+                            if matched_model_group_route is not None
+                            and matched_model_group_route.get("user_billing_multiplier_override")
+                            is not None
+                            else float(default_user_billing_multiplier)
+                        ),
+                        user_group_binding_priority=user_group_binding_priority,
                     )
 
                     if needs_conversion:

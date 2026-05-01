@@ -80,6 +80,8 @@ def _detect_data_format(
     # OpenAI family
     if normalized.startswith("/v1/videos"):
         return EndpointSignature(api_family=ApiFamily.OPENAI, endpoint_kind=EndpointKind.VIDEO)
+    if normalized.startswith("/v1/images"):
+        return EndpointSignature(api_family=ApiFamily.OPENAI, endpoint_kind=EndpointKind.IMAGE)
     if normalized.startswith("/v1/chat/completions"):
         return EndpointSignature(api_family=ApiFamily.OPENAI, endpoint_kind=EndpointKind.CHAT)
 

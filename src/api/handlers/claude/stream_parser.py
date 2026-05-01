@@ -7,7 +7,7 @@ Claude SSE 流解析器
 import json
 from typing import Any
 
-from src.core.usage_tokens import extract_cache_creation_tokens
+from src.core.usage_tokens import extract_cache_creation_tokens, extract_cache_ttl_minutes
 
 
 class ClaudeStreamParser:
@@ -195,6 +195,11 @@ class ClaudeStreamParser:
                     "output_tokens": usage.get("output_tokens", 0),
                     "cache_creation_tokens": extract_cache_creation_tokens(usage),
                     "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
+                    **(
+                        {"cache_ttl_minutes": ttl}
+                        if (ttl := extract_cache_ttl_minutes(usage)) is not None
+                        else {}
+                    ),
                 }
 
         # message_delta 事件包含最终 usage
@@ -206,6 +211,11 @@ class ClaudeStreamParser:
                     "output_tokens": usage.get("output_tokens", 0),
                     "cache_creation_tokens": extract_cache_creation_tokens(usage),
                     "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
+                    **(
+                        {"cache_ttl_minutes": ttl}
+                        if (ttl := extract_cache_ttl_minutes(usage)) is not None
+                        else {}
+                    ),
                 }
 
         return None

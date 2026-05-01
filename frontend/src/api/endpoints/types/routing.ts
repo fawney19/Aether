@@ -90,6 +90,5 @@ export interface ModelRoutingPreviewResponse {
   total_providers: number
   active_providers: number
   scheduling_mode: string
-  priority_mode: string
   all_keys_whitelist: GlobalKeyWhitelistItem[]
 }

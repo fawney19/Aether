@@ -25,7 +25,6 @@ from src.database import get_db
 from src.models.database import ApiKey, User
 from src.services.scheduling.affinity_manager import get_affinity_manager
 from src.services.scheduling.aware_scheduler import CacheAwareScheduler, get_cache_aware_scheduler
-from src.services.system.config import SystemConfigService
 
 router = APIRouter(prefix="/api/admin/monitoring/cache", tags=["Admin - Monitoring: Cache"])
 pipeline = get_pipeline()
@@ -429,21 +428,9 @@ class AdminCacheStatsAdapter(AdminApiAdapter):
     async def handle(self, context: ApiRequestContext) -> dict[str, Any]:  # type: ignore[override]
         try:
             redis_client = get_redis_client_sync()
-            # 读取系统配置，确保监控接口与编排器使用一致的模式
-            priority_mode = SystemConfigService.get_config(
-                context.db,
-                "provider_priority_mode",
-                CacheAwareScheduler.PRIORITY_MODE_PROVIDER,
-            )
-            scheduling_mode = SystemConfigService.get_config(
-                context.db,
-                "scheduling_mode",
-                CacheAwareScheduler.SCHEDULING_MODE_CACHE_AFFINITY,
-            )
             scheduler = await get_cache_aware_scheduler(
                 redis_client,
-                priority_mode=priority_mode,
-                scheduling_mode=scheduling_mode,
+                scheduling_mode=CacheAwareScheduler.SCHEDULING_MODE_CACHE_AFFINITY,
             )
             stats = await scheduler.get_stats()
             logger.info("缓存统计信息查询成功")
@@ -464,21 +451,9 @@ class AdminCacheMetricsAdapter(AdminApiAdapter):
     async def handle(self, context: ApiRequestContext) -> PlainTextResponse:
         try:
             redis_client = get_redis_client_sync()
-            # 读取系统配置，确保监控接口与编排器使用一致的模式
-            priority_mode = SystemConfigService.get_config(
-                context.db,
-                "provider_priority_mode",
-                CacheAwareScheduler.PRIORITY_MODE_PROVIDER,
-            )
-            scheduling_mode = SystemConfigService.get_config(
-                context.db,
-                "scheduling_mode",
-                CacheAwareScheduler.SCHEDULING_MODE_CACHE_AFFINITY,
-            )
             scheduler = await get_cache_aware_scheduler(
                 redis_client,
-                priority_mode=priority_mode,
-                scheduling_mode=scheduling_mode,
+                scheduling_mode=CacheAwareScheduler.SCHEDULING_MODE_CACHE_AFFINITY,
             )
             stats = await scheduler.get_stats()
             payload = self._format_prometheus(stats)

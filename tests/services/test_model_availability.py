@@ -9,6 +9,7 @@ ModelAvailabilityQuery 单元测试
 
 import inspect
 from io import StringIO
+from types import SimpleNamespace
 from typing import Any
 
 from loguru import logger
@@ -529,9 +530,11 @@ class TestAccessRestrictionsFromApiKeyAndUser:
         api_key.allowed_api_formats = ["openai:chat"]
 
         user = MagicMock()
-        user.allowed_providers = ["provider-b"]
-        user.allowed_models = ["model-b"]
-        user.allowed_api_formats = ["claude:chat"]
+        user.group = SimpleNamespace(
+            allowed_providers=["provider-b"],
+            allowed_models=["model-b"],
+            allowed_api_formats=["claude:chat"],
+        )
 
         result = AccessRestrictions.from_api_key_and_user(api_key, user)
 
@@ -551,9 +554,11 @@ class TestAccessRestrictionsFromApiKeyAndUser:
         api_key.allowed_api_formats = None
 
         user = MagicMock()
-        user.allowed_providers = ["provider-b"]
-        user.allowed_models = ["model-b"]
-        user.allowed_api_formats = ["claude:chat"]
+        user.group = SimpleNamespace(
+            allowed_providers=["provider-b"],
+            allowed_models=["model-b"],
+            allowed_api_formats=["claude:chat"],
+        )
 
         result = AccessRestrictions.from_api_key_and_user(api_key, user)
 
@@ -573,9 +578,11 @@ class TestAccessRestrictionsFromApiKeyAndUser:
         api_key.allowed_api_formats = None  # 无限制
 
         user = MagicMock()
-        user.allowed_providers = ["provider-b"]
-        user.allowed_models = ["model-b"]
-        user.allowed_api_formats = ["claude:chat"]
+        user.group = SimpleNamespace(
+            allowed_providers=["provider-b"],
+            allowed_models=["model-b"],
+            allowed_api_formats=["claude:chat"],
+        )
 
         result = AccessRestrictions.from_api_key_and_user(api_key, user)
 
@@ -607,15 +614,35 @@ class TestAccessRestrictionsFromApiKeyAndUser:
         from src.api.base.models_service import AccessRestrictions
 
         user = MagicMock()
-        user.allowed_providers = ["provider-b"]
-        user.allowed_models = ["model-b"]
-        user.allowed_api_formats = ["claude:chat"]
+        user.group = SimpleNamespace(
+            allowed_providers=["provider-b"],
+            allowed_models=["model-b"],
+            allowed_api_formats=["claude:chat"],
+        )
 
         result = AccessRestrictions.from_api_key_and_user(None, user)
 
         assert result.allowed_providers == ["provider-b"]
         assert result.allowed_models == ["model-b"]
         assert result.allowed_api_formats == ["claude:chat"]
+
+    def test_user_group_defaults_are_used(self) -> None:
+        """用户限制统一从分组默认值读取。"""
+        from src.api.base.models_service import AccessRestrictions
+
+        user = SimpleNamespace(
+            group=SimpleNamespace(
+                allowed_providers=["provider-group"],
+                allowed_models=["model-group"],
+                allowed_api_formats=["openai:chat"],
+            ),
+        )
+
+        result = AccessRestrictions.from_api_key_and_user(None, user)
+
+        assert result.allowed_providers == ["provider-group"]
+        assert result.allowed_models == ["model-group"]
+        assert result.allowed_api_formats == ["openai:chat"]
 
 
 class TestAccessRestrictionsIsApiFormatAllowed:

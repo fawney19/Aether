@@ -85,6 +85,9 @@ async def test_queue_writer_publishes_event(monkeypatch: Any) -> None:
             output_tokens=2,
             response_time_ms=10,
             status_code=200,
+            model_group_id="group-1",
+            model_group_route_id="route-1",
+            user_billing_multiplier=1.25,
         )
     finally:
         config.usage_queue_stream_key = old_stream_key
@@ -96,6 +99,9 @@ async def test_queue_writer_publishes_event(monkeypatch: Any) -> None:
     event = UsageEvent.from_stream_fields(fields)
     assert event.data["user_id"] == "user-1"
     assert event.data["api_key_id"] == "key-1"
+    assert event.data["model_group_id"] == "group-1"
+    assert event.data["model_group_route_id"] == "route-1"
+    assert event.data["user_billing_multiplier"] == 1.25
 
 
 # ============ events.py 测试 ============
@@ -429,6 +435,9 @@ async def test_event_to_record_body_passthrough() -> None:
             "api_key_id": "key-1",
             "provider": "test",
             "model": "gpt-4",
+            "model_group_id": "group-body",
+            "model_group_route_id": "route-body",
+            "user_billing_multiplier": 1.5,
             # body 是 JSON 字符串（QueueTelemetryWriter._truncate_body 的输出）
             "request_body": '{"messages": [{"role": "user", "content": "hello"}]}',
             "response_body": '{"choices": [{"message": {"content": "hi"}}]}',
@@ -440,6 +449,9 @@ async def test_event_to_record_body_passthrough() -> None:
     # 消费阶段不做 json.loads，保留原字符串
     assert record["request_body"] == event.data["request_body"]
     assert record["response_body"] == event.data["response_body"]
+    assert record["model_group_id"] == "group-body"
+    assert record["model_group_route_id"] == "route-body"
+    assert record["user_billing_multiplier"] == 1.5
     assert record["finalized_at"] is not None
 
 

@@ -199,6 +199,8 @@ class ProviderNotAvailableException(ProviderException):
         request_metadata: Any | None = None,
         upstream_status: int | None = None,
         upstream_response: str | None = None,
+        client_error_passthrough: bool = False,
+        matched_passthrough_pattern: str | None = None,
     ):
         super().__init__(
             message=message,
@@ -207,6 +209,8 @@ class ProviderNotAvailableException(ProviderException):
         )
         self.upstream_status = upstream_status
         self.upstream_response = upstream_response
+        self.client_error_passthrough = client_error_passthrough
+        self.matched_passthrough_pattern = matched_passthrough_pattern
 
 
 class ProxyNodeUnavailableError(ProviderException):

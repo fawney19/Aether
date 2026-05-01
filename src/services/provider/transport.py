@@ -26,7 +26,7 @@ from src.services.provider.request_context import (
     get_selected_base_url,
     set_selected_base_url,
 )
-from src.utils.url_utils import is_codex_url
+from src.utils.url_utils import join_url
 
 if TYPE_CHECKING:
     from src.models.database import ProviderAPIKey, ProviderEndpoint
@@ -102,27 +102,14 @@ def looks_like_vertex_ai_host(
 
 
 def _normalize_base_url(base_url: str, path: str) -> str:
-    """
-    规范化 base_url，去除末尾的斜杠和可能与 path 重复的版本前缀。
+    """规范化 base_url：仅 strip 前后空白并去除末尾 "/"。
 
-    只有当 path 以版本前缀开头时，才从 base_url 中移除该前缀，
-    避免拼接出 /v1/v1/messages 这样的重复路径。
-
-    兼容用户填写的各种格式：
-    - https://api.example.com
-    - https://api.example.com/
-    - https://api.example.com/v1
-    - https://api.example.com/v1/
+    不再做版本前缀嗅探——由调用方保证 base_url 和 path 的语义边界
+    （base_url 只含协议+域名+反代前缀，path 含完整业务路径）。
+    path 参数保留以兼容旧调用签名，但在此不再使用。
     """
-    base = base_url.rstrip("/")
-    # 只在 path 以版本前缀开头时才去除 base_url 中的该前缀
-    # 例如：base="/v1", path="/v1/messages" -> 去除 /v1
-    # 例如：base="/v1", path="/chat/completions" -> 不去除（用户可能期望保留）
-    for suffix in ("/v1beta", "/v1", "/v2", "/v3"):
-        if base.endswith(suffix) and path.startswith(suffix):
-            base = base[: -len(suffix)]
-            break
-    return base
+    _ = path
+    return (base_url or "").strip().rstrip("/")
 
 
 def get_antigravity_base_url() -> str | None:
@@ -262,8 +249,8 @@ def build_provider_url(
         # 使用 API 格式的默认路径
         path = _resolve_default_path(endpoint_sig)
         # Codex OAuth 端点（chatgpt.com/backend-api/codex）使用 /responses 而非 /v1/responses
-        base_url = getattr(endpoint, "base_url", "") or ""
-        if endpoint_sig in {"openai:cli", "openai:compact"} and is_codex_url(base_url):
+        # 仅按 provider_type 判定，不再嗅探 URL
+        if endpoint_sig in {"openai:cli", "openai:compact"} and provider_type == ProviderType.CODEX:
             path = "/responses/compact" if endpoint_sig == "openai:compact" else "/responses"
         if effective_path_params:
             try:
@@ -272,13 +259,9 @@ def build_provider_url(
                 # 如果模板变量不匹配，保持原路径
                 pass
 
-    if not path.startswith("/"):
-        path = f"/{path}"
-
-    # 先确定 path，再根据 path 规范化 base_url
+    # 统一走 join_url：仅处理边界斜杠，不做版本嗅探
     # base_url 在数据库中是 NOT NULL，类型标注为 Optional 是 SQLAlchemy 限制
-    base = _normalize_base_url(endpoint.base_url, path)  # type: ignore[arg-type]
-    url = f"{base}{path}"
+    url = join_url(endpoint.base_url, path)  # type: ignore[arg-type]
 
     # Gemini streamGenerateContent 官方支持 `?alt=sse` 返回 SSE（data: {...}）。
     # 网关侧统一使用 SSE 输出，优先向上游请求 SSE 以减少解析分支；同时保留 JSON-array 兜底解析。

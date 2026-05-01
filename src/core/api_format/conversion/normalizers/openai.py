@@ -891,33 +891,45 @@ class OpenAINormalizer(FormatNormalizer):
         # 图片内容块（来自 Gemini 图像生成等多模态输出）
         if isinstance(event, ContentBlockStartEvent) and event.block_type == ContentType.IMAGE:
             image_data = event.extra.get("image_data")
+            image_url = event.extra.get("image_url")
             image_media_type = event.extra.get("image_media_type")
-            # 确保图片数据有效（base64 数据至少有一定长度）
+            url: str | None = None
             if (
                 image_data
                 and image_media_type
                 and isinstance(image_data, str)
                 and len(image_data) > 10
             ):
-                # 构造 data URL 格式的图片
-                data_url = f"data:{image_media_type};base64,{image_data}"
-                # 存储图片数据，在 ContentBlockStopEvent 时输出
+                # base64 inlineData -> data URL
+                url = f"data:{image_media_type};base64,{image_data}"
+            elif isinstance(image_url, str) and image_url:
+                # fileData URI 引用直接透传
+                url = image_url
+            if url:
                 image_blocks = self._ss_dict(ss, "image_blocks")
                 image_blocks[int(event.block_index)] = {
-                    "url": data_url,
-                    "media_type": image_media_type,
+                    "url": url,
+                    "media_type": image_media_type or "",
                 }
             return out
 
-        # 图片内容块结束时输出
+        # 文件内容块（fileData URI 引用，非图片）：流式以 markdown 链接形式输出，避免静默丢失
+        if isinstance(event, ContentBlockStartEvent) and event.block_type == ContentType.FILE:
+            file_url = event.extra.get("file_url")
+            if isinstance(file_url, str) and file_url:
+                file_blocks = self._ss_dict(ss, "file_blocks")
+                file_blocks[int(event.block_index)] = {"url": file_url}
+            return out
+
+        # 图片/文件内容块结束时输出
         if isinstance(event, ContentBlockStopEvent):
             image_blocks = ss.get("image_blocks")
             if isinstance(image_blocks, dict):
                 entry = image_blocks.get(int(event.block_index))
                 if isinstance(entry, dict):
                     url = entry.get("url")
-                    # 确保 URL 有效（data URL 至少包含 "data:" 前缀 + 一些数据）
-                    if url and isinstance(url, str) and len(url) > 20:
+                    # 确保 URL 有效（data URL 至少包含 "data:" 前缀 + 一些数据，普通 URL 也至少有 schema 长度）
+                    if url and isinstance(url, str) and len(url) > 8:
                         # OpenAI 流式响应中 delta.content 必须是字符串
                         # 使用 markdown 图片格式，兼容各种客户端渲染
                         # 注意：base64 data URL 可能很长（几百KB~几MB），客户端需支持长内容
@@ -930,6 +942,17 @@ class OpenAINormalizer(FormatNormalizer):
                         out.append(base_chunk({"content": f"![image]({url})"}))
                     # 清理已处理的图片
                     del image_blocks[int(event.block_index)]
+                    return out
+
+            file_blocks = ss.get("file_blocks")
+            if isinstance(file_blocks, dict):
+                entry = file_blocks.get(int(event.block_index))
+                if isinstance(entry, dict):
+                    url = entry.get("url")
+                    if url and isinstance(url, str):
+                        # 非图片 fileData：以 markdown 链接形式透传 URL，避免数据丢失
+                        out.append(base_chunk({"content": f"[file]({url})"}))
+                    del file_blocks[int(event.block_index)]
                     return out
             # 其他 ContentBlockStopEvent 不处理
             return out

@@ -14,7 +14,6 @@ export function buildDefaultModelTestRequestBody(modelName: string): string {
       },
     ],
     max_tokens: 30,
-    temperature: 0.7,
     stream: true,
   }, null, 2)
 }

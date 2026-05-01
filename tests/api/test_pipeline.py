@@ -542,7 +542,7 @@ class TestPipelineUserRateLimit:
         request = MagicMock()
         request.state = MagicMock()
         db = MagicMock()
-        user = MagicMock(id="user-1", rate_limit=None)
+        user = SimpleNamespace(id="user-1", group=None)
         api_key = MagicMock(id="key-1", is_standalone=False, rate_limit=0)
 
         limiter = MagicMock()
@@ -575,7 +575,7 @@ class TestPipelineUserRateLimit:
         request = MagicMock()
         request.state = MagicMock()
         db = MagicMock()
-        user = MagicMock(id="user-1", rate_limit=100)
+        user = SimpleNamespace(id="user-1", group=SimpleNamespace(rate_limit=100))
         api_key = MagicMock(id="key-1", is_standalone=False, rate_limit=10)
 
         limiter = MagicMock()
@@ -619,7 +619,7 @@ class TestPipelineUserRateLimit:
         request = MagicMock()
         request.state = MagicMock()
         db = MagicMock()
-        user = MagicMock(id="user-1", rate_limit=999)
+        user = SimpleNamespace(id="user-1", group=None)
         api_key = MagicMock(id="standalone-1", is_standalone=True, rate_limit=None)
 
         limiter = MagicMock()
@@ -652,7 +652,7 @@ class TestPipelineUserRateLimit:
         request = MagicMock()
         request.state = MagicMock()
         db = MagicMock()
-        user = MagicMock(id="user-1", rate_limit=3)
+        user = SimpleNamespace(id="user-1", group=SimpleNamespace(rate_limit=3))
         api_key = MagicMock(id="key-1", is_standalone=False, rate_limit=10)
 
         limiter = MagicMock()
@@ -688,6 +688,42 @@ class TestPipelineUserRateLimit:
             "X-RateLimit-Remaining": "0",
             "X-RateLimit-Scope": "user",
         }
+
+    @pytest.mark.asyncio
+    async def test_check_user_rate_limit_uses_group_default_when_user_inherits(
+        self, pipeline: ApiRequestPipeline, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        request = MagicMock()
+        request.state = MagicMock()
+        db = MagicMock()
+        user = SimpleNamespace(
+            id="user-1",
+            group=SimpleNamespace(rate_limit=25),
+        )
+        api_key = MagicMock(id="key-1", is_standalone=False, rate_limit=0)
+
+        limiter = MagicMock()
+        limiter.get_user_rpm_key.return_value = "rpm:user:user-1:1"
+        limiter.get_key_rpm_key.return_value = "rpm:key:key-1:1"
+        limiter.check_and_consume = AsyncMock(return_value=RpmCheckResult(allowed=True))
+
+        monkeypatch.setattr(
+            "src.api.base.pipeline.get_user_rpm_limiter",
+            AsyncMock(return_value=limiter),
+        )
+        monkeypatch.setattr(
+            "src.api.base.pipeline.SystemConfigService.get_config",
+            lambda *_a, **_k: 60,
+        )
+
+        await pipeline._check_user_rate_limit(request, db, user, api_key)
+
+        limiter.check_and_consume.assert_awaited_once_with(
+            user_rpm_key="rpm:user:user-1:1",
+            user_rpm_limit=25,
+            key_rpm_key="rpm:key:key-1:1",
+            key_rpm_limit=0,
+        )
 
 
 class TestPipelineTokenPrefixAuth:

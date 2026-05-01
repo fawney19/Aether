@@ -182,23 +182,18 @@ def build_codex_url(
 
     Codex upstream (chatgpt.com/backend-api/codex) 使用 /responses
     而非标准 OpenAI 的 /v1/responses。compact 模式使用 /responses/compact。
+    base_url 应只填到 codex namespace（不含 /responses），由本函数补齐 path。
     """
     _ = is_stream  # Codex 不需要根据 stream 切换路径
 
-    endpoint_sig = str(getattr(endpoint, "api_format", "") or "").strip().lower()
     from src.services.provider.adapters.codex.context import is_codex_compact_request
+    from src.utils.url_utils import join_url
 
+    endpoint_sig = str(getattr(endpoint, "api_format", "") or "").strip().lower()
     is_compact = is_codex_compact_request(endpoint_sig=endpoint_sig)
 
-    base = str(endpoint.base_url).rstrip("/")
-    # 如果用户已在 base_url 中包含了 /responses，不要重复追加
-    if base.endswith("/responses"):
-        url = f"{base}/compact" if is_compact else base
-    elif base.endswith("/responses/compact"):
-        url = base if is_compact else base.removesuffix("/compact")
-    else:
-        suffix = "/responses/compact" if is_compact else "/responses"
-        url = f"{base}{suffix}"
+    suffix = "/responses/compact" if is_compact else "/responses"
+    url = join_url(endpoint.base_url, suffix)
     if effective_query_params:
         query_string = urlencode(effective_query_params, doseq=True)
         if query_string:
@@ -341,17 +336,31 @@ async def enrich_codex(
 
 def register_all() -> None:
     """一次性注册 Codex 的所有 hooks 到各通用 registry。"""
-    from src.core.api_format.capabilities import register_provider_default_body_rules
+    from src.core.api_format.capabilities import register_provider_format_capability
     from src.core.provider_oauth_utils import register_auth_enricher
     from src.services.model.upstream_fetcher import UpstreamModelsFetcherRegistry
+    from src.services.provider.body_transformer import register_body_transformer
     from src.services.provider.transport import register_transport_hook
     from src.services.provider.upstream_headers import register_upstream_headers_hook
+
+    from src.services.provider.adapters.codex.image_transform import (
+        transform_image_request_to_responses,
+    )
 
     # Transport
     register_transport_hook("codex", "openai:cli", build_codex_url)
     register_transport_hook("codex", "openai:compact", build_codex_url)
+    register_transport_hook("codex", "openai:image", build_codex_url)
     register_upstream_headers_hook("codex", "openai:cli", build_codex_cli_headers)
     register_upstream_headers_hook("codex", "openai:compact", build_codex_compact_headers)
+    register_upstream_headers_hook("codex", "openai:image", build_codex_cli_headers)
+
+    # Body transformer: Codex image reverse proxy rewrites the full request body
+    register_body_transformer(
+        "codex",
+        "openai:image",
+        transform_image_request_to_responses,
+    )
 
     # Auth
     register_auth_enricher("codex", enrich_codex)
@@ -359,7 +368,28 @@ def register_all() -> None:
     # Provider Format Capability：默认 body_rules
     from src.core.api_format.metadata import CODEX_DEFAULT_BODY_RULES
 
-    register_provider_default_body_rules("codex", "openai:cli", CODEX_DEFAULT_BODY_RULES)
+    register_provider_format_capability(
+        "codex",
+        "openai:cli",
+        same_format_variant="codex",
+        cross_format_variant="codex",
+        default_body_rules=CODEX_DEFAULT_BODY_RULES,
+    )
+    register_provider_format_capability(
+        "codex",
+        "openai:compact",
+        same_format_variant="codex",
+        cross_format_variant="codex",
+        default_body_rules=CODEX_DEFAULT_BODY_RULES,
+    )
+    # Codex image 走 responses payload，不复用 CLI 的 body_rules
+    register_provider_format_capability(
+        "codex",
+        "openai:image",
+        same_format_variant="codex",
+        cross_format_variant="codex",
+        default_body_rules=(),
+    )
 
     # Export: Codex uses the default export builder (strip null + temp fields)
     # No need to register a custom one — the default in export.py suffices.

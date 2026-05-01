@@ -147,6 +147,18 @@
                 @update:model-value="(v) => setConfigField('description', v || undefined)"
               />
             </div>
+            <div class="space-y-1.5">
+              <Label class="text-xs">模型分组</Label>
+              <MultiSelect
+                v-model="form.model_group_ids"
+                :options="modelGroupOptions"
+                :search-threshold="0"
+                placeholder="选择所属模型分组"
+                empty-text="暂无模型分组选项"
+                no-results-text="未找到匹配的模型分组"
+                search-placeholder="搜索模型分组..."
+              />
+            </div>
             <div class="grid grid-cols-2 gap-3">
               <div class="space-y-1.5">
                 <Label
@@ -334,6 +346,7 @@ import {
   Search, ChevronRight, Plus, Trash2
 } from 'lucide-vue-next'
 import { Dialog, Button, Input, Label } from '@/components/ui'
+import { MultiSelect } from '@/components/common'
 import { useToast } from '@/composables/useToast'
 import { useFormDialog } from '@/composables/useFormDialog'
 import { parseNumberInput, sortResolutionEntries } from '@/utils/form'
@@ -352,6 +365,7 @@ import {
   type GlobalModelCreate,
   type GlobalModelUpdate,
 } from '@/api/global-models'
+import { modelGroupsApi, type ModelGroupSummary } from '@/api/model-groups'
 import type { TieredPricingConfig } from '@/api/endpoints/types'
 
 const props = defineProps<{
@@ -374,6 +388,7 @@ const searchQuery = ref('')
 const allModelsCache = ref<ModelsDevModelItem[]>([]) // 全部模型（缓存）
 const selectedModel = ref<ModelsDevModelItem | null>(null)
 const expandedProvider = ref<string | null>(null)
+const modelGroups = ref<ModelGroupSummary[]>([])
 
 // 当前显示的模型列表：有搜索词时用全部，否则只用官方
 const allModels = computed(() => {
@@ -436,6 +451,13 @@ const groupedModels = computed(() => {
   return result
 })
 
+const modelGroupOptions = computed(() =>
+  modelGroups.value.map((group) => ({
+    value: group.id,
+    label: group.display_name,
+  })),
+)
+
 // 搜索时如果只有一个提供商，自动展开
 watch(groupedModels, (groups) => {
   if (searchQuery.value && groups.length === 1) {
@@ -483,6 +505,7 @@ interface FormData {
   supported_capabilities?: string[]
   config?: Record<string, unknown>
   is_active?: boolean
+  model_group_ids: string[]
 }
 
 const defaultForm = (): FormData => ({
@@ -492,6 +515,7 @@ const defaultForm = (): FormData => ({
   supported_capabilities: [],
   config: { streaming: true },
   is_active: true,
+  model_group_ids: [],
 })
 
 const form = ref<FormData>(defaultForm())
@@ -654,10 +678,22 @@ async function loadModels() {
   }
 }
 
+async function loadModelGroups() {
+  try {
+    modelGroups.value = await modelGroupsApi.list()
+  } catch (err) {
+    log.error('Failed to load model groups:', err)
+    modelGroups.value = []
+  }
+}
+
 // 打开对话框时加载数据
 watch(() => props.open, (isOpen) => {
-  if (isOpen && !props.model) {
-    loadModels()
+  if (isOpen) {
+    void loadModelGroups()
+    if (!props.model) {
+      void loadModels()
+    }
   }
 })
 
@@ -740,6 +776,7 @@ function loadModelData() {
     supported_capabilities: [...(props.model.supported_capabilities || [])],
     config: props.model.config ? { ...props.model.config } : { streaming: true },
     is_active: props.model.is_active,
+    model_group_ids: [...(props.model.model_group_ids || [])],
   }
   // 确保 tieredPricing 也被正确设置或重置
   tieredPricing.value = props.model.default_tiered_pricing
@@ -803,6 +840,7 @@ async function handleSubmit() {
         default_tiered_pricing: finalTieredPricing,
         supported_capabilities: form.value.supported_capabilities?.length ? form.value.supported_capabilities : null,
         is_active: form.value.is_active,
+        model_group_ids: [...form.value.model_group_ids],
       }
       await updateGlobalModel(props.model.id, updateData)
       success('模型更新成功')
@@ -815,6 +853,7 @@ async function handleSubmit() {
         default_tiered_pricing: finalTieredPricing,
         supported_capabilities: form.value.supported_capabilities?.length ? form.value.supported_capabilities : undefined,
         is_active: form.value.is_active,
+        model_group_ids: [...form.value.model_group_ids],
       }
       await createGlobalModel(createData)
       success('模型创建成功')

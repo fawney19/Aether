@@ -153,7 +153,7 @@
                     <div class="flex items-center">
                       <span class="text-xs text-muted-foreground w-[56px]">总费用</span>
                       <span class="text-lg font-bold text-green-600 dark:text-green-400">
-                        ${{ ((typeof detail.cost === 'object' ? detail.cost?.total : detail.cost) || detail.total_cost || 0).toFixed(6) }}
+                        ${{ (detail.cost?.total || 0).toFixed(6) }}
                       </span>
                     </div>
                     <Separator
@@ -193,7 +193,7 @@
                     <!-- 阶梯标题 -->
                     <div class="text-xs text-muted-foreground flex items-center gap-2 flex-wrap">
                       <span class="font-medium text-foreground">Token 计费</span>
-                      <span class="text-muted-foreground/60">(输入 {{ formatNumber(detail.tokens?.input || detail.input_tokens || 0) }} + 缓存创建 {{ cacheCreationSummaryText }} + 缓存读取 {{ formatNumber(detail.cache_read_input_tokens || 0) }})</span>
+                      <span class="text-muted-foreground/60">(输入 {{ formatNumber(detail.tokens?.input || 0) }} + 缓存创建 {{ cacheCreationSummaryText }} + 缓存读取 {{ formatNumber(detail.cache?.read_input_tokens || detail.tokens?.cache_read || 0) }})</span>
                       <Badge
                         v-if="displayTiers.length > 1"
                         variant="outline"
@@ -259,8 +259,8 @@
                         <div class="flex items-center">
                           <div class="flex items-center flex-1">
                             <span class="text-xs text-muted-foreground w-[56px]">输入</span>
-                            <span class="text-sm font-semibold font-mono flex-1 text-center">{{ detail.tokens?.input || detail.input_tokens || 0 }}</span>
-                            <span class="text-xs font-mono">${{ (detail.cost?.input || detail.input_cost || 0).toFixed(6) }}</span>
+                            <span class="text-sm font-semibold font-mono flex-1 text-center">{{ detail.tokens?.input || 0 }}</span>
+                            <span class="text-xs font-mono">${{ (detail.cost?.input || 0).toFixed(6) }}</span>
                           </div>
                           <Separator
                             orientation="vertical"
@@ -268,16 +268,35 @@
                           />
                           <div class="flex items-center flex-1">
                             <span class="text-xs text-muted-foreground w-[56px]">输出</span>
-                            <span class="text-sm font-semibold font-mono flex-1 text-center">{{ detail.tokens?.output || detail.output_tokens || 0 }}</span>
-                            <span class="text-xs font-mono">${{ (detail.cost?.output || detail.output_cost || 0).toFixed(6) }}</span>
+                            <span class="text-sm font-semibold font-mono flex-1 text-center">{{ detail.tokens?.output || 0 }}</span>
+                            <span class="text-xs font-mono">${{ (detail.cost?.output || 0).toFixed(6) }}</span>
                           </div>
                         </div>
                         <!-- 缓存创建 缓存读取 -->
                         <div class="flex items-center">
-                          <div class="flex items-center flex-1">
-                            <span class="text-xs text-muted-foreground w-[56px]">{{ cacheCreationSplitRows.length > 0 ? '创建合计' : '缓存创建' }}</span>
-                            <span class="text-sm font-semibold font-mono flex-1 text-center">{{ detail.cache_creation_input_tokens || 0 }}</span>
-                            <span class="text-xs font-mono">${{ (detail.cache_creation_cost || 0).toFixed(6) }}</span>
+                          <div class="flex items-center flex-1 min-w-0">
+                            <span class="inline-flex items-center gap-1 text-xs text-muted-foreground w-[88px] shrink-0 whitespace-nowrap">
+                              <span class="whitespace-nowrap">缓存创建</span>
+                              <Badge
+                                v-if="cacheCreationBadgeText"
+                                variant="outline"
+                                class="h-4 rounded-full px-1.5 py-0 text-[10px] leading-none text-muted-foreground/80 border-border/60 shrink-0"
+                              >
+                                {{ cacheCreationBadgeText }}
+                              </Badge>
+                            </span>
+                            <span
+                              class="text-sm font-semibold font-mono flex-1 text-center min-w-0 truncate px-2"
+                              :title="cacheCreationInlineTokenText"
+                            >
+                              {{ cacheCreationInlineTokenText }}
+                            </span>
+                            <span
+                              class="text-xs font-mono shrink-0 whitespace-nowrap"
+                              :title="cacheCreationInlineCostText"
+                            >
+                              {{ cacheCreationInlineCostText }}
+                            </span>
                           </div>
                           <Separator
                             orientation="vertical"
@@ -285,27 +304,8 @@
                           />
                           <div class="flex items-center flex-1">
                             <span class="text-xs text-muted-foreground w-[56px]">缓存读取</span>
-                            <span class="text-sm font-semibold font-mono flex-1 text-center">{{ detail.cache_read_input_tokens || 0 }}</span>
-                            <span class="text-xs font-mono">${{ (detail.cache_read_cost || 0).toFixed(6) }}</span>
-                          </div>
-                        </div>
-                        <!-- 缓存创建 5m/1h 细分 -->
-                        <div
-                          v-if="cacheCreationSplitRows.length > 0"
-                          class="space-y-1 pl-[56px]"
-                        >
-                          <div
-                            v-for="row in cacheCreationSplitRows"
-                            :key="row.key"
-                            class="flex items-center gap-4 text-xs text-muted-foreground/70"
-                          >
-                            <span class="w-[72px]">{{ row.label }}</span>
-                            <span class="font-mono text-foreground/90">{{ formatNumber(row.tokens) }}</span>
-                            <span v-if="row.pricePer1M !== null">${{ formatPrice(row.pricePer1M) }}/M</span>
-                            <span
-                              v-if="row.cost !== null"
-                              class="font-mono"
-                            >${{ row.cost.toFixed(6) }}</span>
+                            <span class="text-sm font-semibold font-mono flex-1 text-center">{{ detail.cache?.read_input_tokens || detail.tokens?.cache_read || 0 }}</span>
+                            <span class="text-xs font-mono">${{ ((detail.cache?.read_cost || detail.cost?.cache_read || 0)).toFixed(6) }}</span>
                           </div>
                         </div>
                       </template>
@@ -322,10 +322,10 @@
                     </div>
                     <div class="rounded-lg p-3 bg-primary/5 border border-primary/30 space-y-2">
                       <div
-                        v-if="detail.price_per_request"
+                        v-if="detail.pricing?.price_per_request"
                         class="flex items-center justify-end text-xs"
                       >
-                        <span class="text-muted-foreground">${{ detail.price_per_request.toFixed(6) }}/次</span>
+                        <span class="text-muted-foreground">${{ detail.pricing.price_per_request.toFixed(6) }}/次</span>
                       </div>
                       <div class="flex items-center">
                         <div class="flex items-center flex-1">
@@ -754,6 +754,13 @@ type PricingTierLike = {
   cache_read_price_per_1m?: number | null
   cache_ttl_pricing?: CacheTTLPriceEntry[] | null
 }
+
+type CacheCreationRow = {
+  ttlLabel: string
+  tokens: number
+  pricePer1M: number | null
+  cost: number | null
+}
 const autoRefreshTimer = ref<ReturnType<typeof setInterval> | null>(null)
 const autoRefreshing = ref(false)
 const isPageVisible = ref(typeof document === 'undefined' ? true : !document.hidden)
@@ -1019,10 +1026,10 @@ const displayTiers = computed(() => {
   // 否则用历史价格构建单阶梯（无上限）
   return [{
     up_to: null,
-    input_price_per_1m: detail.value.input_price_per_1m || 0,
-    output_price_per_1m: detail.value.output_price_per_1m || 0,
-    cache_creation_price_per_1m: detail.value.cache_creation_price_per_1m,
-    cache_read_price_per_1m: detail.value.cache_read_price_per_1m
+    input_price_per_1m: detail.value.pricing?.input_price_per_1m || 0,
+    output_price_per_1m: detail.value.pricing?.output_price_per_1m || 0,
+    cache_creation_price_per_1m: detail.value.pricing?.cache_creation_price_per_1m,
+    cache_read_price_per_1m: detail.value.pricing?.cache_read_price_per_1m
   }]
 })
 
@@ -1047,60 +1054,46 @@ const currentTier = computed<PricingTierLike | null>(() => {
 
 const cacheCreationSummaryText = computed(() => {
   if (!detail.value) return '0'
-
-  const total = detail.value.cache_creation_input_tokens || 0
-  const cache5m = detail.value.cache_creation_input_tokens_5m || 0
-  const cache1h = detail.value.cache_creation_input_tokens_1h || 0
-
-  if (cache5m <= 0 && cache1h <= 0) {
-    return formatNumber(total)
-  }
-
-  const parts: string[] = []
-  if (cache5m > 0) parts.push(`5min ${formatNumber(cache5m)}`)
-  if (cache1h > 0) parts.push(`1h ${formatNumber(cache1h)}`)
-  const remaining = Math.max(0, total - cache5m - cache1h)
-  if (remaining > 0) parts.push(`其他 ${formatNumber(remaining)}`)
-  return parts.join(' + ')
+  return formatNumber(detail.value.cache?.creation_input_tokens || detail.value.tokens?.cache_creation || 0)
 })
 
-const cacheCreationSplitRows = computed(() => {
-  if (!detail.value) return []
+const cacheCreationRow = computed<CacheCreationRow | null>(() => {
+  if (!detail.value) return null
 
-  const rows: Array<{
-    key: string
-    label: string
-    tokens: number
-    pricePer1M: number | null
-    cost: number | null
-  }> = []
+  const tokens = detail.value.cache?.creation_input_tokens || detail.value.tokens?.cache_creation || 0
+  if (tokens <= 0) return null
 
-  const cache5m = detail.value.cache_creation_input_tokens_5m || 0
-  const cache1h = detail.value.cache_creation_input_tokens_1h || 0
+  const ttlMinutes = detail.value.cache?.ttl_minutes ?? 5
+  const ttlLabel = ttlMinutes >= 60 ? '1h' : '5min'
+  const pricePer1M = toFiniteNumber(detail.value.cache?.creation_price_per_1m)
+    ?? getActiveCachePriceForTTL(ttlMinutes, 'cache_creation_price_per_1m')
+  const cost = toFiniteNumber(detail.value.cache?.creation_cost)
+    ?? (pricePer1M !== null ? (tokens * pricePer1M) / 1_000_000 : null)
 
-  if (cache5m > 0) {
-    const pricePer1M = getActiveCachePriceForTTL(5, 'cache_creation_price_per_1m')
-    rows.push({
-      key: '5m',
-      label: '5min 创建',
-      tokens: cache5m,
-      pricePer1M,
-      cost: pricePer1M !== null ? (cache5m * pricePer1M) / 1_000_000 : null,
-    })
+  return {
+    ttlLabel,
+    tokens,
+    pricePer1M,
+    cost,
   }
+})
 
-  if (cache1h > 0) {
-    const pricePer1M = getActiveCachePriceForTTL(60, 'cache_creation_price_per_1m')
-    rows.push({
-      key: '1h',
-      label: '1h 创建',
-      tokens: cache1h,
-      pricePer1M,
-      cost: pricePer1M !== null ? (cache1h * pricePer1M) / 1_000_000 : null,
-    })
-  }
+const cacheCreationBadgeText = computed(() => {
+  return cacheCreationRow.value?.ttlLabel ?? null
+})
 
-  return rows
+const cacheCreationInlineTokenText = computed(() => {
+  if (!detail.value) return '0'
+
+  return formatNumber(cacheCreationRow.value?.tokens ?? (detail.value.cache?.creation_input_tokens || detail.value.tokens?.cache_creation || 0))
+})
+
+const cacheCreationInlineCostText = computed(() => {
+  if (!detail.value) return '$0.000000'
+
+  const cost = cacheCreationRow.value?.cost
+    ?? (detail.value.cache?.creation_cost || detail.value.cost?.cache_creation || 0)
+  return cost !== null ? `$${cost.toFixed(6)}` : 'N/A'
 })
 
 // 总输入上下文（输入 + 缓存创建 + 缓存读取）
@@ -1113,19 +1106,19 @@ const _totalInputContext = computed(() => {
   }
 
   // 否则手动计算
-  const input = detail.value.tokens?.input || detail.value.input_tokens || 0
-  const cacheCreation = detail.value.cache_creation_input_tokens || 0
-  const cacheRead = detail.value.cache_read_input_tokens || 0
+  const input = detail.value.tokens?.input || 0
+  const cacheCreation = detail.value.cache?.creation_input_tokens || detail.value.tokens?.cache_creation || 0
+  const cacheRead = detail.value.cache?.read_input_tokens || detail.value.tokens?.cache_read || 0
   return input + cacheCreation + cacheRead
 })
 
 // Token 费用总计
 const tokenCostTotal = computed(() => {
   if (!detail.value) return 0
-  const inputCost = detail.value.cost?.input || detail.value.input_cost || 0
-  const outputCost = detail.value.cost?.output || detail.value.output_cost || 0
-  const cacheCreationCost = detail.value.cache_creation_cost || 0
-  const cacheReadCost = detail.value.cache_read_cost || 0
+  const inputCost = detail.value.cost?.input || 0
+  const outputCost = detail.value.cost?.output || 0
+  const cacheCreationCost = detail.value.cost?.cache_creation || detail.value.cache?.creation_cost || 0
+  const cacheReadCost = detail.value.cost?.cache_read || detail.value.cache?.read_cost || 0
   return inputCost + outputCost + cacheCreationCost + cacheReadCost
 })
 
@@ -1134,7 +1127,7 @@ const perRequestCost = computed(() => {
   if (!detail.value) return 0
   // 视频任务的 request_cost 实际上是视频费用，不算按次
   if (detail.value.video_billing) return 0
-  return detail.value.request_cost || 0
+  return detail.value.cost?.request || 0
 })
 
 // 视频/图像/音频费用
@@ -1142,17 +1135,17 @@ const videoCostTotal = computed(() => {
   if (!detail.value?.video_billing) return 0
   return detail.value.video_billing.video_cost
     || detail.value.video_billing.cost
-    || detail.value.request_cost
+    || detail.value.cost?.request
     || 0
 })
 
 // 是否有 Token 费用（用于决定是否显示 Token 计费区块）
 const hasTokenCost = computed(() => {
   if (!detail.value) return false
-  const inputTokens = detail.value.tokens?.input || detail.value.input_tokens || 0
-  const outputTokens = detail.value.tokens?.output || detail.value.output_tokens || 0
-  const cacheCreation = detail.value.cache_creation_input_tokens || 0
-  const cacheRead = detail.value.cache_read_input_tokens || 0
+  const inputTokens = detail.value.tokens?.input || 0
+  const outputTokens = detail.value.tokens?.output || 0
+  const cacheCreation = detail.value.cache?.creation_input_tokens || detail.value.tokens?.cache_creation || 0
+  const cacheRead = detail.value.cache?.read_input_tokens || detail.value.tokens?.cache_read || 0
   return (inputTokens + outputTokens + cacheCreation + cacheRead) > 0 || tokenCostTotal.value > 0
 })
 
@@ -1174,6 +1167,7 @@ function hasContent(data: unknown): boolean {
 }
 
 function toFiniteNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null
   const num = Number(value)
   return Number.isFinite(num) ? num : null
 }
@@ -1192,8 +1186,20 @@ function getTierCachePriceForTTL(
 
   if (ttlPricing.length === 0) return fallback
 
-  const matched = ttlPricing.find((entry) => Number(entry.ttl_minutes || 0) >= ttlMinutes)
-    || ttlPricing[ttlPricing.length - 1]
+  const exactMatch = ttlPricing.find((entry) => Number(entry.ttl_minutes || 0) === ttlMinutes)
+  if (exactMatch) {
+    const exactPrice = toFiniteNumber(exactMatch?.[priceKey])
+    return exactPrice ?? fallback
+  }
+
+  let matched: CacheTTLPriceEntry | null = null
+  for (const entry of ttlPricing) {
+    if (Number(entry.ttl_minutes || 0) <= ttlMinutes) {
+      matched = entry
+    }
+  }
+
+  if (!matched) return fallback
   const price = toFiniteNumber(matched?.[priceKey])
   return price ?? fallback
 }
@@ -1214,9 +1220,9 @@ function getActiveCachePriceForTTL(
   if (tierPrice !== null) return tierPrice
 
   if (priceKey === 'cache_creation_price_per_1m') {
-    return toFiniteNumber(detail.value?.cache_creation_price_per_1m)
+    return toFiniteNumber(detail.value?.pricing?.cache_creation_price_per_1m)
   }
-  return toFiniteNumber(detail.value?.cache_read_price_per_1m)
+  return toFiniteNumber(detail.value?.pricing?.cache_read_price_per_1m)
 }
 
 function getDefaultDataSourceForTab(tab: string): 'client' | 'provider' {
@@ -1398,13 +1404,13 @@ async function loadDetail(id: string, silent = false) {
     dataSource.value = getDefaultDataSourceForTab(activeTab.value)
 
     // 使用请求记录中保存的历史价格
-    if (detail.value.input_price_per_1m || detail.value.output_price_per_1m || detail.value.price_per_request) {
+    if (detail.value.pricing?.input_price_per_1m || detail.value.pricing?.output_price_per_1m || detail.value.pricing?.price_per_request) {
       historicalPricing.value = {
-        input_price: detail.value.input_price_per_1m ? detail.value.input_price_per_1m.toFixed(4) : 'N/A',
-        output_price: detail.value.output_price_per_1m ? detail.value.output_price_per_1m.toFixed(4) : 'N/A',
-        cache_creation_price: detail.value.cache_creation_price_per_1m ? detail.value.cache_creation_price_per_1m.toFixed(4) : 'N/A',
-        cache_read_price: detail.value.cache_read_price_per_1m ? detail.value.cache_read_price_per_1m.toFixed(4) : 'N/A',
-        request_price: detail.value.price_per_request ? detail.value.price_per_request.toFixed(4) : 'N/A'
+        input_price: detail.value.pricing?.input_price_per_1m ? detail.value.pricing.input_price_per_1m.toFixed(4) : 'N/A',
+        output_price: detail.value.pricing?.output_price_per_1m ? detail.value.pricing.output_price_per_1m.toFixed(4) : 'N/A',
+        cache_creation_price: detail.value.pricing?.cache_creation_price_per_1m ? detail.value.pricing.cache_creation_price_per_1m.toFixed(4) : 'N/A',
+        cache_read_price: detail.value.pricing?.cache_read_price_per_1m ? detail.value.pricing.cache_read_price_per_1m.toFixed(4) : 'N/A',
+        request_price: detail.value.pricing?.price_per_request ? detail.value.pricing.price_per_request.toFixed(4) : 'N/A'
       }
     }
 

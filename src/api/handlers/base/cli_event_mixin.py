@@ -11,7 +11,11 @@ from src.api.handlers.base.parsers import get_parser_for_format
 from src.api.handlers.base.stream_context import StreamContext
 from src.api.handlers.base.utils import get_format_converter_registry
 from src.core.logger import logger
-from src.core.usage_tokens import extract_cache_creation_tokens, extract_cache_read_tokens
+from src.core.usage_tokens import (
+    extract_cache_creation_tokens,
+    extract_cache_read_tokens,
+    extract_cache_ttl_minutes,
+)
 from src.services.provider.behavior import get_provider_behavior
 from src.utils.sse_parser import SSEEventParser
 
@@ -139,6 +143,7 @@ class CliEventMixin:
             new_output = usage.get("output_tokens", 0)
             new_cached = usage.get("cache_read_tokens", 0)
             new_cache_creation = usage.get("cache_creation_tokens", 0)
+            cache_ttl_minutes = usage.get("cache_ttl_minutes")
 
             # 取最大值更新
             if new_input > ctx.input_tokens:
@@ -149,6 +154,8 @@ class CliEventMixin:
                 ctx.cached_tokens = new_cached
             if new_cache_creation > ctx.cache_creation_tokens:
                 ctx.cache_creation_tokens = new_cache_creation
+            if cache_ttl_minutes is not None:
+                ctx.cache_ttl_minutes = int(cache_ttl_minutes)
 
             # 保存最后一个非空 usage 作为 final_usage
             if any([new_input, new_output, new_cached, new_cache_creation]):
@@ -266,6 +273,7 @@ class CliEventMixin:
             new_output = usage.get("output_tokens") or usage.get("completion_tokens") or 0
             new_cached = extract_cache_read_tokens(usage)
             new_cache_creation = extract_cache_creation_tokens(usage)
+            cache_ttl_minutes = extract_cache_ttl_minutes(usage)
 
             # 取最大值更新（与 _process_event_data 相同的策略）
             if new_input > ctx.input_tokens:
@@ -278,6 +286,8 @@ class CliEventMixin:
                 ctx.cached_tokens = new_cached
             if new_cache_creation > ctx.cache_creation_tokens:
                 ctx.cache_creation_tokens = new_cache_creation
+            if cache_ttl_minutes is not None:
+                ctx.cache_ttl_minutes = cache_ttl_minutes
 
             # 保存最后一个非空 usage
             if any([new_input, new_output, new_cached, new_cache_creation]):

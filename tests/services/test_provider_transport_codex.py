@@ -63,7 +63,11 @@ def test_codex_openai_cli_uses_responses_path_without_v1_prefix() -> None:
     assert url == "https://chatgpt.com/backend-api/codex/responses"
 
 
-def test_codex_openai_cli_does_not_duplicate_responses_suffix() -> None:
+def test_codex_openai_cli_bad_input_is_not_deduped() -> None:
+    """用户把 /responses 塞进 base_url 是坏输入，按新规则直接拼，不再去重。
+
+    validator 会拦截这种保存；运行时如实拼接，让用户看到问题。
+    """
     endpoint = _DummyEndpoint(
         base_url="https://chatgpt.com/backend-api/codex/responses",
         api_format="openai:cli",
@@ -76,7 +80,7 @@ def test_codex_openai_cli_does_not_duplicate_responses_suffix() -> None:
         is_stream=False,
     )
 
-    assert url == "https://chatgpt.com/backend-api/codex/responses"
+    assert url == "https://chatgpt.com/backend-api/codex/responses/responses"
 
 
 def test_codex_openai_cli_uses_compact_suffix_when_context_marked_compact() -> None:

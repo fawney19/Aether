@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import tuple_
 from sqlalchemy.orm import Session
 
 from src.core.exceptions import ProviderNotAvailableException
@@ -75,10 +76,6 @@ class CandidateResolver:
         Raises:
             ProviderNotAvailableException: 没有找到任何可用候选时
         """
-        all_candidates: list[ProviderCandidate] = []
-        provider_offset = 0
-        provider_batch_size = 20
-        global_model_id: str | None = None
         api_format_norm = normalize_endpoint_signature(api_format)
 
         logger.debug(
@@ -87,40 +84,20 @@ class CandidateResolver:
             api_format_norm,
         )
 
-        while True:
-            candidates, resolved_global_model_id, provider_batch_count = (
-                await self.cache_scheduler.list_all_candidates(
-                    db=self.db,
-                    api_format=api_format_norm,
-                    model_name=model_name,
-                    affinity_key=affinity_key,
-                    user_api_key=user_api_key,
-                    provider_offset=provider_offset,
-                    provider_limit=provider_batch_size,
-                    is_stream=is_stream,
-                    capability_requirements=capability_requirements,
-                    request_body=request_body,
-                )
-            )
-
-            logger.debug(
-                "[CandidateResolver] list_all_candidates batch: offset={}, providers={}, returned={} candidates",
-                provider_offset,
-                provider_batch_count,
-                len(candidates),
-            )
-
-            if resolved_global_model_id and global_model_id is None:
-                global_model_id = resolved_global_model_id
-
-            if provider_batch_count == 0:
-                break
-
-            all_candidates.extend(candidates)
-            provider_offset += provider_batch_size
-
-            if provider_batch_count < provider_batch_size:
-                break
+        # 一次性全量获取：分页后仍要走 reorder_candidates 全局重排，
+        # 分页不会降低工作量，只会让 DB 查询翻倍（Provider × UserGroup 每页都查）。
+        all_candidates, global_model_id, _ = await self.cache_scheduler.list_all_candidates(
+            db=self.db,
+            api_format=api_format_norm,
+            model_name=model_name,
+            affinity_key=affinity_key,
+            user_api_key=user_api_key,
+            provider_offset=0,
+            provider_limit=None,
+            is_stream=is_stream,
+            capability_requirements=capability_requirements,
+            request_body=request_body,
+        )
 
         logger.debug(
             "[CandidateResolver] fetch_candidates completed: total={} candidates",
@@ -136,7 +113,7 @@ class CandidateResolver:
 
         logger.debug(f"  [{request_id}] 获取到 {len(all_candidates)} 个候选组合")
 
-        # Provider 分页会导致候选在全局维度上排序失真（尤其是 global_key / 降级分组 / cache_affinity）。
+        # Provider 分页会导致候选在全局维度上排序失真（尤其是路由降级分组 / cache_affinity）。
         # 这里在汇总后再次应用全局排序规则，保证遍历顺序符合当前调度配置。
         try:
             all_candidates = await self.cache_scheduler.reorder_candidates(
@@ -359,6 +336,7 @@ class CandidateResolver:
                             "endpoint_id": endpoint.id,
                             "key_id": key.id,
                             "status": "available",
+                            "skip_reason": None,
                             "is_cached": candidate.is_cached,
                             "extra_data": base_extra,
                             "required_capabilities": active_capabilities,
@@ -368,10 +346,60 @@ class CandidateResolver:
                     candidate_record_map[(candidate_index, retry_index)] = record_id
 
         if candidate_records_to_insert:
-            self.db.bulk_insert_mappings(
-                RequestCandidate, candidate_records_to_insert  # type: ignore
-            )
-            self.db.flush()
+            bind = self.db.get_bind()
+            dialect_name = getattr(bind.dialect, "name", "")
+
+            if request_id and dialect_name in {"postgresql", "sqlite"}:
+                if dialect_name == "postgresql":
+                    from sqlalchemy.dialects.postgresql import insert as dialect_insert
+
+                    stmt = dialect_insert(RequestCandidate).values(candidate_records_to_insert)
+                    stmt = stmt.on_conflict_do_nothing(
+                        constraint="uq_request_candidate_with_retry"
+                    )
+                else:
+                    from sqlalchemy.dialects.sqlite import insert as dialect_insert
+
+                    stmt = dialect_insert(RequestCandidate).values(candidate_records_to_insert)
+                    stmt = stmt.on_conflict_do_nothing(
+                        index_elements=["request_id", "candidate_index", "retry_index"]
+                    )
+
+                self.db.execute(stmt)
+                self.db.flush()
+
+                expected_slots = sorted(candidate_record_map.keys())
+                actual_rows = (
+                    self.db.query(
+                        RequestCandidate.id,
+                        RequestCandidate.candidate_index,
+                        RequestCandidate.retry_index,
+                    )
+                    .filter(RequestCandidate.request_id == request_id)
+                    .filter(
+                        tuple_(
+                            RequestCandidate.candidate_index,
+                            RequestCandidate.retry_index,
+                        ).in_(expected_slots)
+                    )
+                    .all()
+                )
+                candidate_record_map = {
+                    (int(row.candidate_index), int(row.retry_index)): str(row.id)
+                    for row in actual_rows
+                }
+
+                if len(candidate_record_map) != len(expected_slots):
+                    raise RuntimeError(
+                        "candidate records incomplete after idempotent insert: "
+                        f"expected={len(expected_slots)}, actual={len(candidate_record_map)}, "
+                        f"request_id={request_id}"
+                    )
+            else:
+                self.db.bulk_insert_mappings(
+                    RequestCandidate, candidate_records_to_insert  # type: ignore
+                )
+                self.db.flush()
 
             logger.debug(
                 f"  [{request_id}] 批量插入完成: {len(candidate_records_to_insert)} 条记录"

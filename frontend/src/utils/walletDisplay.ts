@@ -71,7 +71,11 @@ export function paymentMethodLabel(method: string | null | undefined): string {
   const labels: Record<string, string> = {
     alipay: '支付宝',
     wechat: '微信支付',
+    manual_review: '人工充值',
+    manual: '人工充值',
     admin_manual: '人工充值',
+    admin_subscription: '后台开通',
+    system: '系统处理',
     card_code: '充值卡',
     gift_code: '礼品卡',
     card_recharge: '卡密充值',
@@ -85,6 +89,8 @@ export function paymentMethodLabel(method: string | null | undefined): string {
 export function paymentStatusLabel(status: string | null | undefined): string {
   const labels: Record<string, string> = {
     pending: '待支付',
+    pending_approval: '待审核',
+    approved: '已审核',
     paid: '已支付',
     credited: '已到账',
     failed: '支付失败',
@@ -112,7 +118,7 @@ export function walletLinkTypeLabel(type: string | null | undefined): string {
 export function paymentStatusBadge(status: string | null | undefined): string {
   if (status === 'credited' || status === 'refunded') return 'success'
   if (status === 'paid' || status === 'refunding') return 'outline'
-  if (status === 'pending') return 'secondary'
+  if (status === 'pending' || status === 'pending_approval' || status === 'approved') return 'secondary'
   if (status === 'expired') return 'warning'
   if (status === 'failed') return 'destructive'
   return 'secondary'

@@ -151,3 +151,26 @@ class OpenAIStreamResponse(BaseModelWithExtras):
     model: str
     choices: list[OpenAIStreamChoice]
     system_fingerprint: str | None = None
+
+
+class OpenAIImageRequest(BaseModelWithExtras):
+    """OpenAI Images Generations 请求（/v1/images/generations）
+
+    覆盖 OpenAI 官方规范；`extra="allow"` 允许上游扩展字段透传。
+    只做必要校验，尽量宽松以兼容各种"OpenAI 兼容"上游。
+    """
+
+    model: str
+    prompt: str
+    n: int | None = None
+    size: str | None = None
+    quality: str | None = None
+    style: str | None = None
+    response_format: str | None = None
+    background: str | None = None
+    output_format: str | None = None
+    output_compression: int | None = None
+    moderation: str | None = None
+    user: str | None = None
+    stream: bool | None = False
+    partial_images: int | None = None

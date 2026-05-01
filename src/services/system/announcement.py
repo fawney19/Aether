@@ -68,40 +68,53 @@ class AnnouncementService:
         offset: int = 0,
     ) -> dict:
         """获取公告列表"""
-        query = db.query(Announcement)
+        filtered_query = db.query(Announcement)
 
         # 筛选条件
         if active_only:
             now = datetime.now(timezone.utc)
-            query = query.filter(
+            filtered_query = filtered_query.filter(
                 Announcement.is_active == True,
                 or_(Announcement.start_time == None, Announcement.start_time <= now),
                 or_(Announcement.end_time == None, Announcement.end_time >= now),
             )
 
         # 分页
-        total = int(query.with_entities(func.count(Announcement.id)).scalar() or 0)
+        total = int(filtered_query.with_entities(func.count(Announcement.id)).scalar() or 0)
 
         # 排序：置顶优先，然后按优先级和创建时间
-        query = query.order_by(
+        ordered_query = filtered_query.order_by(
             Announcement.is_pinned.desc(),
             Announcement.priority.desc(),
             Announcement.created_at.desc(),
         )
-        announcements = query.offset(offset).limit(limit).all()
+        announcements = ordered_query.offset(offset).limit(limit).all()
 
         # 获取已读状态
         read_announcement_ids = set()
         unread_count = 0
 
         if user_id and include_read_status:
-            read_records = (
-                db.query(AnnouncementRead.announcement_id)
-                .filter(AnnouncementRead.user_id == user_id)
-                .all()
+            current_page_ids = [announcement.id for announcement in announcements]
+            if current_page_ids:
+                read_records = (
+                    db.query(AnnouncementRead.announcement_id)
+                    .filter(
+                        AnnouncementRead.user_id == user_id,
+                        AnnouncementRead.announcement_id.in_(current_page_ids),
+                    )
+                    .all()
+                )
+                read_announcement_ids = {record[0] for record in read_records}
+
+            unread_query = filtered_query.filter(
+                ~Announcement.id.in_(
+                    db.query(AnnouncementRead.announcement_id).filter(
+                        AnnouncementRead.user_id == user_id
+                    )
+                )
             )
-            read_announcement_ids = {r[0] for r in read_records}
-            unread_count = total - len(read_announcement_ids)
+            unread_count = int(unread_query.with_entities(func.count(Announcement.id)).scalar() or 0)
 
         # 构建返回数据
         items = []
@@ -228,6 +241,52 @@ class AnnouncementService:
             db.commit()
 
             logger.info(f"User {user_id} marked announcement {announcement_id} as read")
+
+    @staticmethod
+    def mark_all_as_read(db: Session, user_id: str, active_only: bool = True) -> int:
+        """将当前可见公告全部标记为已读。"""
+        query = db.query(Announcement.id)
+
+        if active_only:
+            now = datetime.now(timezone.utc)
+            query = query.filter(
+                Announcement.is_active == True,
+                or_(Announcement.start_time == None, Announcement.start_time <= now),
+                or_(Announcement.end_time == None, Announcement.end_time >= now),
+            )
+
+        announcement_ids = [row[0] for row in query.all()]
+        if not announcement_ids:
+            return 0
+
+        existing_ids = {
+            row[0]
+            for row in (
+                db.query(AnnouncementRead.announcement_id)
+                .filter(
+                    AnnouncementRead.user_id == user_id,
+                    AnnouncementRead.announcement_id.in_(announcement_ids),
+                )
+                .all()
+            )
+        }
+        pending_ids = [announcement_id for announcement_id in announcement_ids if announcement_id not in existing_ids]
+        if not pending_ids:
+            return 0
+
+        now = datetime.now(timezone.utc)
+        db.add_all(
+            AnnouncementRead(
+                user_id=user_id,
+                announcement_id=announcement_id,
+                read_at=now,
+            )
+            for announcement_id in pending_ids
+        )
+        db.commit()
+
+        logger.info(f"User {user_id} marked {len(pending_ids)} announcements as read")
+        return len(pending_ids)
 
     @staticmethod
     def get_active_announcements(db: Session, user_id: str | None = None) -> dict:  # UUID

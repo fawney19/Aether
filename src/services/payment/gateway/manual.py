@@ -6,8 +6,14 @@ from src.services.payment.gateway.base import PaymentGateway
 
 
 class ManualGateway(PaymentGateway):
-    payment_method = "manual"
-    display_name = "人工打款"
+    def __init__(
+        self,
+        *,
+        payment_method: str = "manual_review",
+        display_name: str = "人工充值",
+    ) -> None:
+        self.payment_method = payment_method
+        self.display_name = display_name
 
     def create_checkout_payload(self, *, order: Any) -> dict[str, Any]:
         gateway_order_id = getattr(order, "gateway_order_id", None) or f"manual_{order.order_no}"

@@ -23,6 +23,7 @@ from .internal import (
     InternalResponse,
     StopReason,
     TextBlock,
+    ThinkingBlock,
     ToolUseBlock,
     UsageInfo,
 )
@@ -52,6 +53,14 @@ class _BlockBuilder:
     def finalize(self) -> Any:
         if self.block_type == ContentType.TEXT:
             return TextBlock(text=self.text, extra=self.extra)
+
+        if self.block_type == ContentType.THINKING:
+            signature = self.extra.get("signature") or self.extra.get("thought_signature")
+            return ThinkingBlock(
+                thinking=self.text,
+                signature=str(signature) if signature is not None else None,
+                extra=self.extra,
+            )
 
         if self.block_type == ContentType.TOOL_USE:
             tool_input: dict[str, Any] = {}
@@ -137,6 +146,8 @@ class InternalStreamAggregator:
                     self._open[idx] = b
                 if ev.text_delta:
                     b.text += ev.text_delta
+                if ev.extra:
+                    b.extra.update(ev.extra)
                 continue
 
             if isinstance(ev, ToolCallDeltaEvent):
@@ -220,6 +231,35 @@ def iter_internal_response_as_stream_events(
 
     block_index = 0
     for block in internal.content or []:
+        # Thinking / reasoning
+        if isinstance(block, ThinkingBlock):
+            block_extra = dict(block.extra or {})
+            yield ContentBlockStartEvent(
+                block_index=block_index,
+                block_type=ContentType.THINKING,
+                extra=block_extra,
+            )
+            thinking = str(block.thinking or "")
+            if not chunk_text or text_chunk_size <= 0:
+                if thinking:
+                    yield ContentDeltaEvent(block_index=block_index, text_delta=thinking)
+            else:
+                for i in range(0, len(thinking), text_chunk_size):
+                    part = thinking[i : i + text_chunk_size]
+                    if part:
+                        yield ContentDeltaEvent(block_index=block_index, text_delta=part)
+            signature = block.signature or block_extra.get("thought_signature") or block_extra.get(
+                "signature"
+            )
+            if signature:
+                yield ContentDeltaEvent(
+                    block_index=block_index,
+                    extra={"thought_signature": str(signature)},
+                )
+            yield ContentBlockStopEvent(block_index=block_index)
+            block_index += 1
+            continue
+
         # Text
         if isinstance(block, TextBlock):
             yield ContentBlockStartEvent(block_index=block_index, block_type=ContentType.TEXT)

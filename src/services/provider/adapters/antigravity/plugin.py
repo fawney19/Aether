@@ -56,7 +56,9 @@ def build_antigravity_url(
     # 移除 v1internal 不支持的查询参数
     query_params.pop("beta", None)
 
-    url = f"{str(base_url).rstrip('/')}{path}"
+    from src.utils.url_utils import join_url
+
+    url = join_url(str(base_url) if base_url is not None else "", path)
     if query_params:
         query_string = urlencode(query_params, doseq=True)
         if query_string:

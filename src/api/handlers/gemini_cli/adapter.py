@@ -127,16 +127,13 @@ class GeminiCliAdapter(CliAdapterBase):
         provider_type: str | None = None,
     ) -> str:
         """构建Gemini CLI API端点URL"""
+        from src.utils.url_utils import join_url
+
         effective_model_name = model_name or request_data.get("model", "")
         if not effective_model_name:
             raise ValueError("Model name is required for Gemini API")
 
-        base_url = base_url.rstrip("/")
-        if base_url.endswith("/v1beta"):
-            prefix = base_url
-        else:
-            prefix = f"{base_url}/v1beta"
-        return f"{prefix}/models/{effective_model_name}:generateContent"
+        return join_url(base_url, f"/v1beta/models/{effective_model_name}:generateContent")
 
     # build_request_body 使用基类实现，通过 format_conversion_registry 自动转换 OPENAI -> GEMINI_CLI
 

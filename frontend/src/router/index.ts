@@ -133,6 +133,11 @@ const routes: RouteRecordRaw[] = [
         component: () => importWithRetry(() => import('@/views/user/WalletCenter.vue'))
       },
       {
+        path: 'subscriptions',
+        name: 'SubscriptionsCenter',
+        component: () => importWithRetry(() => import('@/views/user/SubscriptionsCenter.vue'))
+      },
+      {
         path: 'models',
         name: 'ModelCatalog',
         component: () => importWithRetry(() => import('@/views/user/ModelCatalog.vue'))
@@ -160,6 +165,11 @@ const routes: RouteRecordRaw[] = [
         component: () => importWithRetry(() => import('@/views/admin/Users.vue'))
       },
       {
+        path: 'user-groups',
+        name: 'UserGroups',
+        component: () => importWithRetry(() => import('@/views/admin/UserGroups.vue'))
+      },
+      {
         path: 'keys',
         name: 'ApiKeys',
         component: () => importWithRetry(() => import('@/views/admin/ApiKeys.vue'))
@@ -168,6 +178,11 @@ const routes: RouteRecordRaw[] = [
         path: 'wallets',
         name: 'WalletsManagement',
         component: () => importWithRetry(() => import('@/views/admin/WalletsManagement.vue'))
+      },
+      {
+        path: 'subscriptions',
+        name: 'Subscriptions',
+        component: () => importWithRetry(() => import('@/views/admin/Subscriptions.vue'))
       },
       {
         path: 'management-tokens',
@@ -189,6 +204,11 @@ const routes: RouteRecordRaw[] = [
         path: 'models',
         name: 'ModelManagement',
         component: () => importWithRetry(() => import('@/views/admin/ModelManagement.vue'))
+      },
+      {
+        path: 'model-groups',
+        name: 'ModelGroups',
+        component: () => importWithRetry(() => import('@/views/admin/ModelGroups.vue'))
       },
       {
         path: 'health-monitor',

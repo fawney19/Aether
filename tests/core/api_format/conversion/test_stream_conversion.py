@@ -9,9 +9,28 @@ from __future__ import annotations
 
 import pytest
 
+from src.core.api_format.conversion.internal import (
+    ContentType,
+    InternalResponse,
+    StopReason,
+    TextBlock,
+    ThinkingBlock,
+)
+from src.core.api_format.conversion.normalizers.openai import OpenAINormalizer
 from src.core.api_format.conversion.registry import (
     format_conversion_registry,
     register_default_normalizers,
+)
+from src.core.api_format.conversion.stream_bridge import (
+    InternalStreamAggregator,
+    iter_internal_response_as_stream_events,
+)
+from src.core.api_format.conversion.stream_events import (
+    ContentBlockStartEvent,
+    ContentBlockStopEvent,
+    ContentDeltaEvent,
+    MessageStartEvent,
+    MessageStopEvent,
 )
 from src.core.api_format.conversion.stream_state import StreamState
 
@@ -108,3 +127,61 @@ class TestStreamFromInternalSchema:
         ), f"Stream schema validation failed for {format_id} ({fixture_id}):\n" + "\n".join(
             f"  - {e}" for e in all_errors
         )
+
+
+def test_sync_response_stream_bridge_preserves_openai_reasoning_content() -> None:
+    internal = InternalResponse(
+        id="resp_reasoning",
+        model="reasoner",
+        content=[
+            ThinkingBlock(thinking="hidden reasoning"),
+            TextBlock(text="visible answer"),
+        ],
+        stop_reason=StopReason.END_TURN,
+    )
+    normalizer = OpenAINormalizer()
+    state = StreamState(model="reasoner", message_id="resp_reasoning")
+
+    chunks = []
+    for event in iter_internal_response_as_stream_events(internal):
+        chunks.extend(normalizer.stream_event_from_internal(event, state))
+
+    reasoning = ""
+    content = ""
+    for chunk in chunks:
+        choices = chunk.get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta") or {}
+        reasoning += delta.get("reasoning_content") or ""
+        content += delta.get("content") or ""
+
+    assert reasoning == "hidden reasoning"
+    assert content == "visible answer"
+
+
+def test_internal_stream_aggregator_preserves_thinking_block() -> None:
+    aggregator = InternalStreamAggregator(fallback_id="resp_reasoning", fallback_model="reasoner")
+
+    aggregator.feed(
+        [
+            MessageStartEvent(message_id="resp_reasoning", model="reasoner"),
+            ContentBlockStartEvent(block_index=0, block_type=ContentType.THINKING),
+            ContentDeltaEvent(block_index=0, text_delta="hidden reasoning"),
+            ContentDeltaEvent(block_index=0, extra={"thought_signature": "sig_reasoning"}),
+            ContentBlockStopEvent(block_index=0),
+            ContentBlockStartEvent(block_index=1, block_type=ContentType.TEXT),
+            ContentDeltaEvent(block_index=1, text_delta="visible answer"),
+            ContentBlockStopEvent(block_index=1),
+            MessageStopEvent(stop_reason=StopReason.END_TURN),
+        ]
+    )
+
+    internal = aggregator.build()
+
+    assert len(internal.content) == 2
+    assert isinstance(internal.content[0], ThinkingBlock)
+    assert internal.content[0].thinking == "hidden reasoning"
+    assert internal.content[0].signature == "sig_reasoning"
+    assert isinstance(internal.content[1], TextBlock)
+    assert internal.content[1].text == "visible answer"

@@ -95,6 +95,7 @@ export interface PaymentOrder {
   order_no: string
   wallet_id: string
   user_id: string | null
+  subscription_id?: string | null
   amount_usd: number
   pay_amount: number | null
   pay_currency: string | null
@@ -102,6 +103,7 @@ export interface PaymentOrder {
   refunded_amount_usd: number
   refundable_amount_usd: number
   payment_method: string
+  order_type?: string | null
   gateway_order_id: string | null
   gateway_response: Record<string, unknown> | null
   status: string
@@ -191,6 +193,11 @@ export const walletApi = {
 
   async getRechargeOrder(orderId: string): Promise<{ order: PaymentOrder }> {
     const response = await apiClient.get(`/api/wallet/recharge/${orderId}`)
+    return response.data
+  },
+
+  async cancelRechargeOrder(orderId: string): Promise<{ order: PaymentOrder }> {
+    const response = await apiClient.post<{ order: PaymentOrder }>(`/api/wallet/recharge/${orderId}/cancel`, {})
     return response.data
   },
 

@@ -12,7 +12,7 @@ from src.api.handlers.base.utils import (
     resolve_client_accept_encoding,
     resolve_client_content_encoding,
 )
-from src.core.usage_tokens import extract_cache_creation_tokens
+from src.core.usage_tokens import extract_cache_creation_tokens, extract_cache_ttl_minutes
 
 
 class TestExtractCacheCreationTokens:
@@ -100,6 +100,35 @@ class TestExtractCacheCreationTokens:
             "claude_cache_creation_1_h_tokens": 75,
         }
         assert extract_cache_creation_tokens(usage) == 125
+
+
+class TestExtractCacheTTLMinutes:
+    def test_nested_5m_cache_returns_5(self) -> None:
+        usage = {
+            "cache_creation_input_tokens": 32760,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 32760,
+                "ephemeral_1h_input_tokens": 0,
+            },
+        }
+
+        assert extract_cache_ttl_minutes(usage) == 5
+
+    def test_nested_1h_cache_returns_60(self) -> None:
+        usage = {
+            "cache_creation_input_tokens": 62226,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 0,
+                "ephemeral_1h_input_tokens": 62226,
+            },
+        }
+
+        assert extract_cache_ttl_minutes(usage) == 60
+
+    def test_total_only_cache_creation_has_no_explicit_ttl(self) -> None:
+        usage = {"cache_creation_input_tokens": 62226}
+
+        assert extract_cache_ttl_minutes(usage) is None
 
 
 class TestBuildSSEHeaders:

@@ -33,6 +33,7 @@ from src.clients.http_client import HTTPClientPool
 from src.core.api_format import get_auth_handler, get_default_auth_method_for_endpoint
 from src.core.crypto import crypto_service
 from src.core.logger import logger
+from src.core.user_access import resolve_user_allowed_models
 from src.database import create_session
 from src.models.database import ApiKey, GlobalModel, Model, Provider, ProviderEndpoint, User
 from src.services.auth.service import AuthService
@@ -146,20 +147,15 @@ def _build_upstream_url(
     Returns:
         完整的上游 URL
     """
+    from src.utils.url_utils import join_url
+
     # 移除 key 参数（认证通过 header）
     effective_params = dict(query_params) if query_params else {}
     effective_params.pop("key", None)
 
-    # 处理 base_url 可能包含 /v1beta 的情况，避免重复
-    normalized_base_url = base_url.rstrip("/")
-    if normalized_base_url.endswith("/v1beta"):
-        normalized_base_url = normalized_base_url[: -len("/v1beta")]
-
-    # 上传端点使用不同的路径前缀
-    if is_upload:
-        url = f"{normalized_base_url}/upload{path}"
-    else:
-        url = f"{normalized_base_url}{path}"
+    # 上传端点统一加 /upload 前缀
+    effective_path = f"/upload{path if path.startswith('/') else '/' + path}" if is_upload else path
+    url = join_url(base_url, effective_path)
 
     if effective_params:
         query_string = urlencode(effective_params, doseq=True)
@@ -184,7 +180,7 @@ def _resolve_files_model_name(
 
     allowed_models = merge_allowed_models(
         user_api_key.allowed_models,
-        user.allowed_models if user else None,
+        resolve_user_allowed_models(user) if user else None,
     )
     if allowed_models is not None:
         if not allowed_models:

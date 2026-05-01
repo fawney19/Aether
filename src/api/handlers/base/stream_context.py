@@ -93,6 +93,9 @@ class StreamContext:
     selected_base_url: str | None = None
     endpoint_id: str | None = None
     key_id: str | None = None
+    model_group_id: str | None = None
+    model_group_route_id: str | None = None
+    user_billing_multiplier: float = 1.0
     attempt_id: str | None = None
     attempt_synced: bool = False
     provider_api_format: str | None = None  # Provider 的响应格式
@@ -105,8 +108,7 @@ class StreamContext:
     output_tokens: int = 0
     cached_tokens: int = 0
     cache_creation_tokens: int = 0
-    cache_creation_tokens_5m: int = 0  # 5min TTL 缓存创建
-    cache_creation_tokens_1h: int = 0  # 1h TTL 缓存创建
+    cache_ttl_minutes: int | None = None
 
     # 响应内容
     _collected_text_parts: list[str] = field(default_factory=list, repr=False)
@@ -155,6 +157,9 @@ class StreamContext:
     perf_sampled: bool = False
     perf_metrics: dict[str, Any] = field(default_factory=dict)
 
+    # Provider behavior 请求级缓存（同一流生命周期内 provider_type/api_format 不变，避免每 chunk 重复查询）
+    _cached_behavior: Any = field(default=None, repr=False, compare=False)
+
     # 代理信息（用于 usage 记录和日志，含 ttfb_ms）
     proxy_info: dict[str, Any] | None = None
 
@@ -187,8 +192,7 @@ class StreamContext:
         self.output_tokens = 0
         self.cached_tokens = 0
         self.cache_creation_tokens = 0
-        self.cache_creation_tokens_5m = 0
-        self.cache_creation_tokens_1h = 0
+        self.cache_ttl_minutes = None
         self.error_message = None
         self.upstream_response = None
         self.status_code = 200
@@ -208,6 +212,9 @@ class StreamContext:
         self.stream_conversion_event_count = 0
         self.needs_conversion = False
         self.selected_base_url = None
+        self.model_group_id = None
+        self.model_group_route_id = None
+        self.user_billing_multiplier = 1.0
 
     def release_recorded_chunks(self) -> None:
         """释放 telemetry/usage 已消费完的 chunk 列表，避免后台任务继续持有大对象。"""
@@ -272,6 +279,9 @@ class StreamContext:
         endpoint_id: str,
         key_id: str,
         provider_api_format: str | None = None,
+        model_group_id: str | None = None,
+        model_group_route_id: str | None = None,
+        user_billing_multiplier: float = 1.0,
     ) -> None:
         """更新 Provider 信息"""
         self.provider_name = provider_name
@@ -279,6 +289,9 @@ class StreamContext:
         self.endpoint_id = endpoint_id
         self.key_id = key_id
         self.provider_api_format = provider_api_format
+        self.model_group_id = model_group_id
+        self.model_group_route_id = model_group_route_id
+        self.user_billing_multiplier = float(user_billing_multiplier or 1.0)
 
     def update_usage(
         self,
@@ -286,6 +299,7 @@ class StreamContext:
         output_tokens: int | None = None,
         cached_tokens: int | None = None,
         cache_creation_tokens: int | None = None,
+        cache_ttl_minutes: int | None = None,
     ) -> None:
         """
         更新 Token 使用统计
@@ -311,6 +325,7 @@ class StreamContext:
             output_tokens: 输出 tokens 数量
             cached_tokens: 缓存命中 tokens 数量
             cache_creation_tokens: 缓存创建 tokens 数量
+            cache_ttl_minutes: 缓存 TTL 分钟数
         """
         if input_tokens is not None and (input_tokens > 0 or self.input_tokens == 0):
             self.input_tokens = input_tokens
@@ -322,6 +337,8 @@ class StreamContext:
             cache_creation_tokens > 0 or self.cache_creation_tokens == 0
         ):
             self.cache_creation_tokens = cache_creation_tokens
+        if cache_ttl_minutes is not None:
+            self.cache_ttl_minutes = cache_ttl_minutes
 
     def mark_failed(
         self,

@@ -11,8 +11,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  GHCR_IMAGE: fawney19/aether-proxy
-  DOCKERHUB_IMAGE: fawney19/aether-proxy
+  GHCR_IMAGE: nyadoo/aether-proxy
 
 jobs:
   build:
@@ -153,19 +152,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.GHCR_IMAGE }}
-            docker.io/${{ env.DOCKERHUB_IMAGE }}
           tags: |
             type=match,pattern=proxy-v(.*),group=1
             type=match,pattern=proxy-v(\d+\.\d+),group=1
@@ -189,14 +181,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: master
+          ref: python-update
 
       - name: Update README download links
         env:
           TAG: ${{ github.ref_name }}
         run: |
           VERSION="${TAG#proxy-v}"
-          BASE="https://github.com/fawney19/Aether/releases/download/${TAG}"
+          BASE="https://github.com/NyaDoo/Aether/releases/download/${TAG}"
           cd aether-proxy
 
           TABLE="| Platform | Download |\n|----------|----------|\n"

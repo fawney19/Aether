@@ -44,6 +44,8 @@ class WalletAccessResult:
     message: str
     wallet: Wallet | None = None
     balance_snapshot: Decimal | None = None
+    subscription_id: str | None = None
+    subscription_remaining: Decimal | None = None
 
 
 class WalletService:
@@ -316,6 +318,30 @@ class WalletService:
         return cls.get_spendable_balance_value(wallet)
 
     @classmethod
+    def _check_wallet_only_access(cls, wallet: Wallet | None) -> WalletAccessResult:
+        balance_snapshot = cls._get_balance_snapshot_from_wallet(wallet)
+        if wallet is None:
+            return WalletAccessResult(False, Decimal("0"), "钱包不存在", None, None)
+
+        remaining = cls.get_spendable_balance_value(wallet)
+        recharge_balance = cls.get_recharge_balance_value(wallet)
+        if wallet.status != "active":
+            return WalletAccessResult(False, remaining, "钱包不可用", wallet, balance_snapshot)
+        if recharge_balance < Decimal("0"):
+            return WalletAccessResult(
+                False,
+                recharge_balance,
+                "钱包欠费，请先充值",
+                wallet,
+                balance_snapshot,
+            )
+        if cls.is_unlimited_wallet(wallet):
+            return WalletAccessResult(True, None, "OK", wallet, balance_snapshot)
+        if remaining <= Decimal("0"):
+            return WalletAccessResult(False, remaining, "钱包余额不足", wallet, balance_snapshot)
+        return WalletAccessResult(True, remaining, "OK", wallet, balance_snapshot)
+
+    @classmethod
     def check_request_allowed(
         cls,
         db: Session,
@@ -329,23 +355,84 @@ class WalletService:
         if user and user.role == UserRole.ADMIN:
             return WalletAccessResult(True, None, "OK", wallet, balance_snapshot)
 
-        if wallet is None:
-            return WalletAccessResult(False, Decimal("0"), "钱包不存在", None, None)
-
-        remaining = cls.get_spendable_balance_value(wallet)
-        recharge_balance = cls.get_recharge_balance_value(wallet)
-        if wallet.status != "active":
-            return WalletAccessResult(False, remaining, "钱包不可用", wallet, balance_snapshot)
-        # Negative recharge balance means overdue; block further spending.
-        if recharge_balance < Decimal("0"):
-            return WalletAccessResult(
-                False, recharge_balance, "钱包欠费，请先充值", wallet, balance_snapshot
+        if user is not None and not (api_key and api_key.is_standalone):
+            from src.services.subscription import (
+                SUBSCRIPTION_OVERAGE_POLICY_USE_WALLET,
+                SubscriptionService,
             )
-        if cls.is_unlimited_wallet(wallet):
-            return WalletAccessResult(True, None, "OK", wallet, balance_snapshot)
-        if remaining <= Decimal("0"):
-            return WalletAccessResult(False, remaining, "钱包余额不足", wallet, balance_snapshot)
-        return WalletAccessResult(True, remaining, "OK", wallet, balance_snapshot)
+
+            subscription = SubscriptionService.get_active_subscription(db, user_id=str(user.id))
+            if subscription is not None and subscription.plan is not None:
+                remaining_quota = SubscriptionService.get_remaining_quota_value(subscription)
+                subscription_id = str(subscription.id)
+
+                if (
+                    str(subscription.plan.overage_policy)
+                    != SUBSCRIPTION_OVERAGE_POLICY_USE_WALLET
+                ):
+                    return WalletAccessResult(
+                        remaining_quota > Decimal("0"),
+                        remaining_quota,
+                        "OK" if remaining_quota > Decimal("0") else "订阅额度已用尽",
+                        wallet,
+                        remaining_quota,
+                        subscription_id,
+                        remaining_quota,
+                    )
+
+                if remaining_quota > Decimal("0"):
+                    combined_snapshot: Decimal | None
+                    if (
+                        wallet is not None
+                        and wallet.status == "active"
+                        and cls.get_recharge_balance_value(wallet) >= Decimal("0")
+                        and cls.is_unlimited_wallet(wallet)
+                    ):
+                        combined_snapshot = None
+                    elif wallet is not None and wallet.status == "active":
+                        combined_snapshot = remaining_quota + cls.get_spendable_balance_value(wallet)
+                    else:
+                        combined_snapshot = remaining_quota
+
+                    return WalletAccessResult(
+                        True,
+                        combined_snapshot,
+                        "OK",
+                        wallet,
+                        combined_snapshot,
+                        subscription_id,
+                        remaining_quota,
+                    )
+
+                wallet_access = cls._check_wallet_only_access(wallet)
+                if wallet_access.allowed:
+                    return WalletAccessResult(
+                        True,
+                        wallet_access.remaining,
+                        "OK",
+                        wallet_access.wallet,
+                        wallet_access.balance_snapshot,
+                        subscription_id,
+                        Decimal("0"),
+                    )
+
+                message_map = {
+                    "钱包不存在": "订阅额度已用尽，且钱包不存在",
+                    "钱包不可用": "订阅额度已用尽，且钱包不可用",
+                    "钱包欠费，请先充值": "订阅额度已用尽，且钱包欠费，请先充值",
+                    "钱包余额不足": "订阅额度已用尽，且钱包余额不足",
+                }
+                return WalletAccessResult(
+                    False,
+                    wallet_access.remaining,
+                    message_map.get(wallet_access.message, "订阅额度已用尽"),
+                    wallet_access.wallet,
+                    wallet_access.balance_snapshot,
+                    subscription_id,
+                    Decimal("0"),
+                )
+
+        return cls._check_wallet_only_access(wallet)
 
     @classmethod
     def get_balance_snapshot(
@@ -355,8 +442,8 @@ class WalletService:
         user: User | None,
         api_key: ApiKey | None = None,
     ) -> Decimal | None:
-        wallet = cls.get_or_create_wallet(db, user=user, api_key=api_key)
-        return cls._get_balance_snapshot_from_wallet(wallet)
+        access = cls.check_request_allowed(db, user=user, api_key=api_key)
+        return access.balance_snapshot if access.balance_snapshot is not None else access.remaining
 
     @classmethod
     def _resolve_wallet_for_usage(
@@ -398,8 +485,34 @@ class WalletService:
         if amount <= Decimal("0"):
             return None, None
 
+        from src.services.subscription import SubscriptionService
+
+        subscription_charge = SubscriptionService.apply_usage_charge(
+            db,
+            user_id=usage.user_id,
+            amount_usd=amount,
+        )
+        wallet_charge_amount = amount
+        consumed_from_subscription = Decimal("0")
+
+        if subscription_charge.subscription is not None:
+            usage.subscription_id = subscription_charge.subscription.id
+            usage.subscription_quota_before_usd = subscription_charge.quota_before
+            usage.subscription_quota_after_usd = subscription_charge.quota_after
+            wallet_charge_amount = subscription_charge.wallet_charge_amount
+            consumed_from_subscription = subscription_charge.consumed_from_quota
+            if wallet_charge_amount <= Decimal("0"):
+                usage.billing_source = "subscription"
+                return None, None
+        else:
+            usage.subscription_id = None
+            usage.subscription_quota_before_usd = None
+            usage.subscription_quota_after_usd = None
+
         locked_wallet = cls._resolve_wallet_for_usage(db, usage, for_update=True)
         if locked_wallet is None:
+            if consumed_from_subscription > Decimal("0"):
+                usage.billing_source = "subscription"
             return None, None
 
         before_recharge = cls.get_recharge_balance_value(locked_wallet)
@@ -407,8 +520,11 @@ class WalletService:
         before_total = before_recharge + before_gift
 
         if cls.is_unlimited_wallet(locked_wallet):
-            locked_wallet.total_consumed = to_money_decimal(locked_wallet.total_consumed) + amount
+            locked_wallet.total_consumed = (
+                to_money_decimal(locked_wallet.total_consumed) + wallet_charge_amount
+            )
             locked_wallet.updated_at = datetime.now(timezone.utc)
+            db.flush()
 
             usage.wallet_id = locked_wallet.id
             usage.wallet_balance_before = before_total
@@ -417,11 +533,14 @@ class WalletService:
             usage.wallet_recharge_balance_after = before_recharge
             usage.wallet_gift_balance_before = before_gift
             usage.wallet_gift_balance_after = before_gift
+            usage.billing_source = (
+                "mixed" if consumed_from_subscription > Decimal("0") else "unlimited_wallet"
+            )
             return before_total, before_total
 
         # 赠款优先扣减：赠款不可退款，优先消耗可避免与充值余额混淆。
-        gift_deduction = min(max(before_gift, Decimal("0")), amount)
-        recharge_deduction = amount - gift_deduction
+        gift_deduction = min(max(before_gift, Decimal("0")), wallet_charge_amount)
+        recharge_deduction = wallet_charge_amount - gift_deduction
 
         after_gift = before_gift - gift_deduction
         after_recharge = before_recharge - recharge_deduction
@@ -429,8 +548,11 @@ class WalletService:
 
         locked_wallet.balance = after_recharge
         locked_wallet.gift_balance = after_gift
-        locked_wallet.total_consumed = to_money_decimal(locked_wallet.total_consumed) + amount
+        locked_wallet.total_consumed = (
+            to_money_decimal(locked_wallet.total_consumed) + wallet_charge_amount
+        )
         locked_wallet.updated_at = datetime.now(timezone.utc)
+        db.flush()
         usage.wallet_id = locked_wallet.id
         usage.wallet_balance_before = before_total
         usage.wallet_balance_after = after_total
@@ -438,6 +560,99 @@ class WalletService:
         usage.wallet_recharge_balance_after = after_recharge
         usage.wallet_gift_balance_before = before_gift
         usage.wallet_gift_balance_after = after_gift
+        usage.billing_source = "mixed" if consumed_from_subscription > Decimal("0") else "wallet"
+        return before_total, after_total
+
+    @classmethod
+    def reconcile_usage_charge_delta(
+        cls,
+        db: Session,
+        *,
+        usage: Usage,
+        previous_amount_usd: Decimal | float | int | str,
+        next_amount_usd: Decimal | float | int | str,
+    ) -> tuple[Decimal | None, Decimal | None]:
+        """按差额修正已结算 Usage 对钱包的影响。
+
+        设计目标：
+        - 只做短事务、短锁，适合在线后台维护任务增量修正历史账单
+        - 正向差额（新费用更高）沿用当前钱包的 gift -> recharge 扣减规则
+        - 负向差额（新费用更低）优先按原始扣减的反向顺序返还：recharge -> gift
+        - 若该 Usage 历史上按 unlimited 语义结算，则仅修正 total_consumed，不改余额
+        """
+
+        previous_amount = to_money_decimal(previous_amount_usd)
+        next_amount = to_money_decimal(next_amount_usd)
+        delta = next_amount - previous_amount
+        if delta == Decimal("0"):
+            return None, None
+
+        locked_wallet = cls._resolve_wallet_for_usage(db, usage, for_update=True)
+        if locked_wallet is None:
+            return None, None
+
+        before_recharge = cls.get_recharge_balance_value(locked_wallet)
+        before_gift = cls.get_gift_balance_value(locked_wallet)
+        before_total = before_recharge + before_gift
+
+        usage_before_total = to_money_decimal(getattr(usage, "wallet_balance_before", None))
+        usage_after_total = to_money_decimal(getattr(usage, "wallet_balance_after", None))
+        usage_before_recharge = to_money_decimal(
+            getattr(usage, "wallet_recharge_balance_before", None)
+        )
+        usage_after_recharge = to_money_decimal(getattr(usage, "wallet_recharge_balance_after", None))
+        usage_before_gift = to_money_decimal(getattr(usage, "wallet_gift_balance_before", None))
+        usage_after_gift = to_money_decimal(getattr(usage, "wallet_gift_balance_after", None))
+
+        historical_unlimited = (
+            previous_amount > Decimal("0")
+            and usage.wallet_balance_before is not None
+            and usage.wallet_balance_after is not None
+            and usage_before_total == usage_after_total
+            and usage.wallet_recharge_balance_before is not None
+            and usage.wallet_recharge_balance_after is not None
+            and usage_before_recharge == usage_after_recharge
+            and usage.wallet_gift_balance_before is not None
+            and usage.wallet_gift_balance_after is not None
+            and usage_before_gift == usage_after_gift
+        )
+
+        if historical_unlimited:
+            locked_wallet.total_consumed = to_money_decimal(locked_wallet.total_consumed) + delta
+            locked_wallet.updated_at = datetime.now(timezone.utc)
+            return before_total, before_total
+
+        if delta > Decimal("0"):
+            additional = delta
+            gift_deduction = min(max(before_gift, Decimal("0")), additional)
+            recharge_deduction = additional - gift_deduction
+
+            after_gift = before_gift - gift_deduction
+            after_recharge = before_recharge - recharge_deduction
+        else:
+            refund = -delta
+
+            original_recharge_deduction = max(usage_before_recharge - usage_after_recharge, Decimal("0"))
+            original_gift_deduction = max(usage_before_gift - usage_after_gift, Decimal("0"))
+
+            recharge_refund = min(refund, original_recharge_deduction)
+            remaining_refund = refund - recharge_refund
+            gift_refund = min(remaining_refund, original_gift_deduction)
+            residual_refund = remaining_refund - gift_refund
+
+            # 历史快照缺失时兜底返还到 recharge，避免吞掉差额。
+            recharge_refund += residual_refund
+
+            after_recharge = before_recharge + recharge_refund
+            after_gift = before_gift + gift_refund
+
+        after_total = after_recharge + after_gift
+
+        locked_wallet.balance = after_recharge
+        locked_wallet.gift_balance = after_gift
+        locked_wallet.total_consumed = to_money_decimal(locked_wallet.total_consumed) + delta
+        locked_wallet.updated_at = datetime.now(timezone.utc)
+
         return before_total, after_total
 
     @classmethod
@@ -572,6 +787,7 @@ class WalletService:
             order_no=cls._build_order_no("po"),
             wallet_id=wallet.id,
             user_id=wallet.user_id,
+            order_type="topup",
             amount_usd=amount,
             refunded_amount_usd=Decimal("0"),
             refundable_amount_usd=amount,

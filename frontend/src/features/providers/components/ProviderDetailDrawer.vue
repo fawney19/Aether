@@ -60,6 +60,16 @@
                       <GitBranch class="w-4 h-4" />
                     </Button>
                   </span>
+                  <span :title="hasErrorPassthroughRules ? '已配置错误透传规则（点击编辑）' : '配置错误透传规则'">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      :class="hasErrorPassthroughRules ? 'text-amber-600 dark:text-amber-400' : ''"
+                      @click="errorPassthroughRulesDialogOpen = true"
+                    >
+                      <AlertTriangle class="w-4 h-4" />
+                    </Button>
+                  </span>
                   <Popover
                     :open="providerProxyPopoverOpen"
                     @update:open="handleProviderProxyPopoverToggle"
@@ -254,16 +264,16 @@
                     :key="key.id"
                     class="px-4 py-2.5 hover:bg-muted/30 transition-colors group/item"
                     :class="{
-                      'opacity-50': keyDragState.isDragging && keyDragState.draggedIndex === getGlobalKeyIndex(localIdx),
-                      'bg-primary/5 border-l-2 border-l-primary': keyDragState.targetIndex === getGlobalKeyIndex(localIdx) && keyDragState.isDragging,
+                      'opacity-50': keyDragState.isDragging && keyDragState.draggedIndex === getKeyListIndex(localIdx),
+                      'bg-primary/5 border-l-2 border-l-primary': keyDragState.targetIndex === getKeyListIndex(localIdx) && keyDragState.isDragging,
                       'opacity-40 bg-muted/20': !key.is_active
                     }"
                     draggable="true"
-                    @dragstart="handleKeyDragStart($event, getGlobalKeyIndex(localIdx))"
+                    @dragstart="handleKeyDragStart($event, getKeyListIndex(localIdx))"
                     @dragend="handleKeyDragEnd"
-                    @dragover="handleKeyDragOver($event, getGlobalKeyIndex(localIdx))"
+                    @dragover="handleKeyDragOver($event, getKeyListIndex(localIdx))"
                     @dragleave="handleKeyDragLeave"
-                    @drop="handleKeyDrop($event, getGlobalKeyIndex(localIdx))"
+                    @drop="handleKeyDrop($event, getKeyListIndex(localIdx))"
                   >
                     <!-- 第一行：名称 + 状态 + 操作按钮 -->
                     <div class="flex items-center justify-between gap-2">
@@ -553,12 +563,12 @@
                             v-if="refreshingQuota"
                             class="w-3 h-3 text-muted-foreground/70 animate-spin"
                           />
-                            <span
-                              v-if="key.upstream_metadata.codex?.updated_at"
-                              class="text-[9px] text-muted-foreground/70"
-                            >
-                              {{ formatUpdatedAt(key.upstream_metadata.codex.updated_at) }}
-                            </span>
+                          <span
+                            v-if="key.upstream_metadata.codex?.updated_at"
+                            class="text-[9px] text-muted-foreground/70"
+                          >
+                            {{ formatUpdatedAt(key.upstream_metadata.codex.updated_at) }}
+                          </span>
                         </div>
                       </div>
                       <!-- 限额并排显示：Team/Plus/Enterprise 账号 2列, Free 账号 1列 -->
@@ -1066,6 +1076,13 @@
     @update:open="failoverRulesDialogOpen = $event"
     @saved="loadProvider()"
   />
+
+  <ErrorPassthroughRulesDialog
+    :open="errorPassthroughRulesDialogOpen"
+    :provider="provider ?? null"
+    @update:open="errorPassthroughRulesDialogOpen = $event"
+    @saved="loadProvider()"
+  />
 </template>
 
 <script setup lang="ts">
@@ -1088,6 +1105,7 @@ import {
   ShieldX,
   Globe,
   GitBranch,
+  AlertTriangle,
 } from 'lucide-vue-next'
 import { parseApiError } from '@/utils/errorParser'
 import { useEscapeKey } from '@/composables/useEscapeKey'
@@ -1122,6 +1140,7 @@ import EndpointFormDialog from '@/features/providers/components/EndpointFormDial
 import ProviderModelFormDialog from '@/features/providers/components/ProviderModelFormDialog.vue'
 import AlertDialog from '@/components/common/AlertDialog.vue'
 import AntigravityQuotaDialog from '@/features/providers/components/AntigravityQuotaDialog.vue'
+import ErrorPassthroughRulesDialog from '@/features/providers/components/ErrorPassthroughRulesDialog.vue'
 import FailoverRulesDialog from '@/features/providers/components/FailoverRulesDialog.vue'
 import ProxyNodeSelect from '@/features/providers/components/ProxyNodeSelect.vue'
 import { useProxyNodesStore } from '@/stores/proxy-nodes'
@@ -1248,6 +1267,13 @@ const hasFailoverRules = computed(() => {
   if (!rules) return false
   return (rules.success_failover_patterns?.length || 0) > 0
     || (rules.error_stop_patterns?.length || 0) > 0
+})
+
+// 错误透传规则
+const errorPassthroughRulesDialogOpen = ref(false)
+const hasErrorPassthroughRules = computed(() => {
+  const rules = provider.value?.error_passthrough_rules
+  return (rules?.patterns?.length || 0) > 0
 })
 
 // Provider 级别代理配置状态
@@ -1377,7 +1403,7 @@ const {
   shouldPaginate: shouldPaginateKeys,
   paginatedItems: paginatedKeys,
   fixedHeight: keysFixedHeight,
-  getGlobalIndex: getGlobalKeyIndex,
+  getGlobalIndex: getKeyListIndex,
   reset: resetKeysPagination,
 } = useSmartPagination(allKeys, keysListRef)
 

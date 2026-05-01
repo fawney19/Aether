@@ -92,19 +92,6 @@
 
         <div class="hidden sm:block h-4 w-px bg-border" />
 
-        <!-- 调度策略 -->
-        <button
-          class="group inline-flex items-center gap-1.5 px-2.5 h-8 rounded-md border border-border/50 bg-muted/20 hover:bg-muted/40 hover:border-primary/40 transition-all duration-200 text-xs"
-          title="点击调整调度策略"
-          @click="$emit('openPriorityDialog')"
-        >
-          <span class="text-muted-foreground/80 hidden sm:inline">调度:</span>
-          <span class="font-medium text-foreground/90">{{ priorityModeLabel }}</span>
-          <ChevronDown class="w-3 h-3 text-muted-foreground/70 group-hover:text-foreground transition-colors" />
-        </button>
-
-        <div class="hidden sm:block h-4 w-px bg-border" />
-
         <!-- 操作按钮 -->
         <Button
           variant="ghost"
@@ -125,7 +112,7 @@
 </template>
 
 <script setup lang="ts">
-import { Search, Plus, ChevronDown, FilterX } from 'lucide-vue-next'
+import { Search, Plus, FilterX } from 'lucide-vue-next'
 import Button from '@/components/ui/button.vue'
 import Input from '@/components/ui/input.vue'
 import Select from '@/components/ui/select.vue'
@@ -145,7 +132,6 @@ defineProps<{
   apiFormatFilters: FilterOption[]
   modelFilters: FilterOption[]
   hasActiveFilters: boolean
-  priorityModeLabel: string
   loading: boolean
 }>()
 
@@ -155,7 +141,6 @@ defineEmits<{
   'update:filterApiFormat': [value: string]
   'update:filterModel': [value: string]
   'resetFilters': []
-  'openPriorityDialog': []
   'addProvider': []
   'refresh': []
 }>()

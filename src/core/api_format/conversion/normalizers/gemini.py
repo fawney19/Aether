@@ -961,9 +961,10 @@ class GeminiNormalizer(FormatNormalizer):
                 # text（兼容：delta 或累积）
                 # 对齐 AM：检查 thought 标记，分流 thinking 和 regular text
                 text = part.get("text")
-                if isinstance(text, str) and text:
-                    is_thought = part.get("thought") is True
+                is_thought = part.get("thought") is True
+                has_text = isinstance(text, str) and bool(text)
 
+                if has_text:
                     if is_thought:
                         # Thinking content
                         prev = str(ss.get("accumulated_thinking") or "")
@@ -1026,9 +1027,25 @@ class GeminiNormalizer(FormatNormalizer):
                                 )
                             )
 
-                    sig = part.get("thoughtSignature") or part.get("thought_signature")
-                    if isinstance(sig, str) and sig and ss.get("thinking_block_started"):
-                        # 仅在 thinking block 已开启时发射 signature delta
+                # signature 独立处理：Gemini 可能在没有 text 的 thought part 里单发 thoughtSignature
+                # （聚合末尾的 signature-only 事件）。之前嵌在 `if text:` 里会导致这类 part 被丢弃。
+                sig = part.get("thoughtSignature") or part.get("thought_signature")
+                if isinstance(sig, str) and sig:
+                    # 纯 signature part（is_thought=True 且没有 text）可能在 thinking block 还未启动时到达；
+                    # 这种情况先开启 thinking block 再承载 signature，避免整条 signature 丢失。
+                    if (
+                        is_thought
+                        and not ss.get("thinking_block_started")
+                        and not has_text
+                    ):
+                        ss["thinking_block_started"] = True
+                        events.append(
+                            ContentBlockStartEvent(
+                                block_index=_reserve_block_index("thinking_block_index"),
+                                block_type=ContentType.THINKING,
+                            )
+                        )
+                    if ss.get("thinking_block_started"):
                         events.append(
                             ContentDeltaEvent(
                                 block_index=_reserve_block_index("thinking_block_index"),
@@ -1036,6 +1053,8 @@ class GeminiNormalizer(FormatNormalizer):
                                 extra={"thought_signature": sig},
                             )
                         )
+
+                if has_text or (isinstance(sig, str) and sig):
                     continue
 
                 # functionCall（stream response 常见 camelCase）
@@ -1119,6 +1138,51 @@ class GeminiNormalizer(FormatNormalizer):
                                 },
                             )
                         )
+                        events.append(ContentBlockStopEvent(block_index=block_index))
+                    continue
+
+                # fileData（文件 URI 引用，如 Gemini Files API 或图像生成返回的 fileUri）
+                # 与 sync 分支 _parts_to_blocks 的处理对齐：image/* → IMAGE 事件，其余 → FILE 事件。
+                file_data = part.get("fileData")
+                if file_data is None:
+                    file_data = part.get("file_data")
+
+                if isinstance(file_data, dict):
+                    file_uri = str(
+                        file_data.get("fileUri") or file_data.get("file_uri") or ""
+                    ).strip()
+                    file_mime = str(
+                        file_data.get("mimeType") or file_data.get("mime_type") or ""
+                    ).strip()
+
+                    if file_uri:
+                        block_index = int(ss.get("next_block_index") or 0)
+                        ss["next_block_index"] = block_index + 1
+
+                        if file_mime.startswith("image/"):
+                            events.append(
+                                ContentBlockStartEvent(
+                                    block_index=block_index,
+                                    block_type=ContentType.IMAGE,
+                                    extra={
+                                        "image_url": file_uri,
+                                        "image_media_type": file_mime,
+                                    },
+                                )
+                            )
+                        else:
+                            events.append(
+                                ContentBlockStartEvent(
+                                    block_index=block_index,
+                                    block_type=ContentType.FILE,
+                                    extra={
+                                        "file_url": file_uri,
+                                        "file_media_type": (
+                                            file_mime or "application/octet-stream"
+                                        ),
+                                    },
+                                )
+                            )
                         events.append(ContentBlockStopEvent(block_index=block_index))
                     continue
 
@@ -1209,6 +1273,7 @@ class GeminiNormalizer(FormatNormalizer):
         # 图片内容块（来自其他格式的图像生成输出）
         if isinstance(event, ContentBlockStartEvent) and event.block_type == ContentType.IMAGE:
             image_data = event.extra.get("image_data")
+            image_url = event.extra.get("image_url")
             image_media_type = event.extra.get("image_media_type")
             if image_data and image_media_type:
                 out.append(
@@ -1218,6 +1283,38 @@ class GeminiNormalizer(FormatNormalizer):
                                 "inlineData": {
                                     "mimeType": image_media_type,
                                     "data": image_data,
+                                }
+                            }
+                        ]
+                    )
+                )
+            elif isinstance(image_url, str) and image_url:
+                out.append(
+                    base_chunk(
+                        [
+                            {
+                                "fileData": {
+                                    "fileUri": image_url,
+                                    "mimeType": image_media_type or "image/jpeg",
+                                }
+                            }
+                        ]
+                    )
+                )
+            return out
+
+        # 文件内容块（来自 fileData URI 引用）
+        if isinstance(event, ContentBlockStartEvent) and event.block_type == ContentType.FILE:
+            file_url = event.extra.get("file_url")
+            file_media_type = event.extra.get("file_media_type")
+            if isinstance(file_url, str) and file_url:
+                out.append(
+                    base_chunk(
+                        [
+                            {
+                                "fileData": {
+                                    "fileUri": file_url,
+                                    "mimeType": file_media_type or "application/octet-stream",
                                 }
                             }
                         ]

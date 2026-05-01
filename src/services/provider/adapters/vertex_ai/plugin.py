@@ -118,15 +118,10 @@ def _parse_models_payload(
 
 
 def _build_google_publisher_list_url(base_url: str) -> str:
-    base = str(base_url or "").rstrip("/")
-    if not base:
-        base = _VERTEX_API_BASE
+    from src.utils.url_utils import join_url
 
-    if base.endswith("/v1"):
-        return f"{base}/publishers/google/models"
-    if base.endswith("/v1beta"):
-        return f"{base}/publishers/google/models"
-    return f"{base}/v1/publishers/google/models"
+    base = (base_url or "").strip().rstrip("/") or _VERTEX_API_BASE
+    return join_url(base, "/v1/publishers/google/models")
 
 
 def _iter_endpoint_base_urls(ctx: Any) -> list[str]:

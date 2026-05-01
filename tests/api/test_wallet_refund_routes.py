@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -10,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from src.api.wallet.routes import router as wallet_router
 from src.database import get_db
+from src.models.database import PaymentOrder
 
 
 def _build_wallet_app(
@@ -23,6 +26,10 @@ def _build_wallet_app(
     app.include_router(wallet_router)
     app.dependency_overrides[get_db] = lambda: db
 
+    @contextmanager
+    def _fake_get_db_context() -> MagicMock:
+        yield db
+
     async def _fake_pipeline_run(*, adapter: object, http_request: object, db: MagicMock, mode: object) -> object:
         _ = http_request, mode
         context = SimpleNamespace(
@@ -33,6 +40,7 @@ def _build_wallet_app(
         )
         return await adapter.handle(context)
 
+    monkeypatch.setattr("src.api.wallet.routes.get_db_context", _fake_get_db_context)
     monkeypatch.setattr("src.api.wallet.routes.pipeline.run", _fake_pipeline_run)
     return TestClient(app)
 
@@ -158,7 +166,7 @@ def test_create_refund_route_uses_offline_payout_for_manual_recharge(
     payload = {"amount_usd": 2.0, "payment_order_id": "order-2"}
     client = _build_wallet_app(db, monkeypatch, payload=payload)
     wallet = SimpleNamespace(id="wallet-1")
-    payment_order = SimpleNamespace(id="order-2", wallet_id="wallet-1", payment_method="admin_manual")
+    payment_order = SimpleNamespace(id="order-2", wallet_id="wallet-1", payment_method="manual_review")
     refund = SimpleNamespace(
         id="refund-2",
         refund_no="rf-2",
@@ -200,3 +208,104 @@ def test_create_refund_route_uses_offline_payout_for_manual_recharge(
 
     assert response.status_code == 200
     assert captured["refund_mode"] == "offline_payout"
+
+
+def test_create_recharge_route_supports_manual_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = MagicMock()
+    payload = {"amount_usd": 20.0, "payment_method": "manual_review"}
+    client = _build_wallet_app(db, monkeypatch, payload=payload)
+    user = SimpleNamespace(id="user-1")
+    order = PaymentOrder(
+        id="order-manual-1",
+        order_no="po-order-manual-1",
+        wallet_id="wallet-1",
+        user_id="user-1",
+        amount_usd=Decimal("20.00000000"),
+        refunded_amount_usd=Decimal("0"),
+        refundable_amount_usd=Decimal("0"),
+        payment_method="manual_review",
+        order_type="topup",
+        gateway_response={"gateway": "manual_review", "instructions": "请联系管理员审核充值"},
+        status="pending_approval",
+        created_at=datetime.now(timezone.utc),
+        paid_at=None,
+        credited_at=None,
+        expires_at=None,
+    )
+    captured: dict[str, object] = {}
+
+    @contextmanager
+    def _fake_get_db_context() -> MagicMock:
+        yield db
+
+    def _create_recharge_order(_db: MagicMock, **kwargs: object) -> PaymentOrder:
+        captured.update(kwargs)
+        return order
+
+    db.query.return_value.filter.return_value.first.return_value = user
+    monkeypatch.setattr("src.api.wallet.routes.get_db_context", _fake_get_db_context)
+    monkeypatch.setattr("src.api.wallet.routes.PaymentService.create_recharge_order", _create_recharge_order)
+
+    response = client.post("/api/wallet/recharge", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["order"]["status"] == "pending_approval"
+    assert body["order"]["payment_method"] == "manual_review"
+    assert body["payment_instructions"]["gateway"] == "manual_review"
+    assert "instructions" in body["payment_instructions"]
+    assert captured["payment_method"] == "manual_review"
+    db.commit.assert_called_once()
+    db.refresh.assert_called_once_with(order)
+
+
+def test_cancel_recharge_route_expires_pending_approval_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = MagicMock()
+    client = _build_wallet_app(db, monkeypatch, payload={})
+    now = datetime.now(timezone.utc)
+    order = PaymentOrder(
+        id="order-manual-2",
+        order_no="po-order-manual-2",
+        wallet_id="wallet-1",
+        user_id="user-1",
+        amount_usd=Decimal("20.00000000"),
+        refunded_amount_usd=Decimal("0"),
+        refundable_amount_usd=Decimal("0"),
+        payment_method="manual_review",
+        order_type="topup",
+        gateway_response={"gateway": "manual_review"},
+        status="pending_approval",
+        created_at=now,
+        paid_at=None,
+        credited_at=None,
+        expires_at=None,
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "src.api.wallet.routes.PaymentService.get_user_order",
+        lambda _db, *, user_id, order_id: order,
+    )
+
+    def _expire_order(_db: MagicMock, *, order: PaymentOrder, reason: str | None = None) -> tuple[PaymentOrder, bool]:
+        captured["order"] = order
+        captured["reason"] = reason
+        order.status = "expired"
+        order.gateway_response = {"expire_reason": reason}
+        return order, True
+
+    monkeypatch.setattr("src.api.wallet.routes.PaymentService.expire_order", _expire_order)
+
+    response = client.post("/api/wallet/recharge/order-manual-2/cancel")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["order"]["status"] == "expired"
+    assert captured["order"] is order
+    assert captured["reason"] == "user_cancelled"
+    db.commit.assert_called_once()
+    db.refresh.assert_called_once_with(order)

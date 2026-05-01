@@ -118,7 +118,57 @@ class RegisterResponse(BaseModel):
     user_id: str
     email: str | None = None
     username: str
-    message: str
+
+
+def normalize_allowed_api_formats(v: list[str] | None) -> list[str] | None:
+    """校验并规范化 allowed_api_formats（endpoint signature: family:kind）。"""
+    if v is None:
+        return None
+    from src.core.api_format import list_endpoint_definitions, resolve_endpoint_definition
+    from src.core.api_format.signature import normalize_signature_key
+
+    allowed = [d.signature_key for d in list_endpoint_definitions()]
+    out: list[str] = []
+    seen: set[str] = set()
+    for fmt in v:
+        if not fmt:
+            continue
+        norm = normalize_signature_key(fmt)
+        if resolve_endpoint_definition(norm) is None:
+            raise ValueError(f"allowed_api_formats 必须是以下之一: {allowed}，当前值: {fmt}")
+        if norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
+    return out
+
+
+def normalize_term_discounts(v: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """规范化订阅时长折扣配置。"""
+    items = v or []
+    normalized: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            months = int(item.get("months") or 0)
+            discount_factor = float(item.get("discount_factor") or 0)
+        except (TypeError, ValueError):
+            continue
+        if months <= 0 or discount_factor <= 0 or months in seen:
+            continue
+        seen.add(months)
+        normalized.append(
+            {
+                "months": months,
+                "discount_factor": round(discount_factor, 4),
+            }
+        )
+    if 1 not in seen:
+        normalized.append({"months": 1, "discount_factor": 1.0})
+    normalized.sort(key=lambda item: int(item["months"]))
+    return normalized
 
 
 class LogoutResponse(BaseModel):
@@ -234,21 +284,7 @@ class CreateUserRequest(BaseModel):
         default=None, description="初始赠款（USD），null 表示使用系统默认初始赠款"
     )
     unlimited: bool = Field(default=False, description="是否无限制")
-    # 访问限制字段
-    allowed_providers: list[str] | None = Field(
-        default=None, description="允许使用的提供商ID列表，null表示无限制"
-    )
-    allowed_api_formats: list[str] | None = Field(
-        default=None, description="允许使用的API格式列表，null表示无限制"
-    )
-    allowed_models: list[str] | None = Field(
-        default=None, description="允许使用的模型名称列表，null表示无限制"
-    )
-    rate_limit: int | None = Field(
-        default=None,
-        ge=0,
-        description="每分钟请求限制；null 表示继承系统默认，0 表示不限制",
-    )
+    group_id: str | None = Field(default=None, description="所属用户分组 ID")
 
     @field_validator("initial_gift_usd", mode="before")
     @classmethod
@@ -287,29 +323,13 @@ class CreateUserRequest(BaseModel):
             raise ValueError("用户名只能包含字母、数字、下划线、连字符和点号")
         return v
 
-    @field_validator("allowed_api_formats")
+    @field_validator("group_id")
     @classmethod
-    def validate_allowed_api_formats(cls, v: list[str] | None) -> list[str] | None:
-        """校验并规范化 allowed_api_formats（endpoint signature: family:kind）。"""
+    def validate_group_id(cls, v: str | None) -> str | None:
         if v is None:
             return None
-        from src.core.api_format import list_endpoint_definitions, resolve_endpoint_definition
-        from src.core.api_format.signature import normalize_signature_key
-
-        allowed = [d.signature_key for d in list_endpoint_definitions()]
-        out: list[str] = []
-        seen: set[str] = set()
-        for fmt in v:
-            if not fmt:
-                continue
-            norm = normalize_signature_key(fmt)
-            if resolve_endpoint_definition(norm) is None:
-                raise ValueError(f"allowed_api_formats 必须是以下之一: {allowed}，当前值: {fmt}")
-            if norm in seen:
-                continue
-            seen.add(norm)
-            out.append(norm)
-        return out
+        v = v.strip()
+        return v or None
 
     @field_validator("password")
     @classmethod
@@ -329,21 +349,16 @@ class UpdateUserRequest(BaseModel):
     password: str | None = Field(None, description="新密码（留空保持不变）")
     role: UserRole | None = None
     unlimited: bool | None = None
-    allowed_providers: list[str] | None = None  # 允许使用的提供商 ID 列表
-    allowed_api_formats: list[str] | None = None  # 允许使用的 API 格式列表
-    allowed_models: list[str] | None = None  # 允许使用的模型名称列表
-    rate_limit: int | None = Field(
-        default=None,
-        ge=0,
-        description="每分钟请求限制；null 表示继承系统默认，0 表示不限制",
-    )
+    group_id: str | None = Field(default=None, description="所属用户分组 ID；null 表示回到默认分组")
     is_active: bool | None = None
 
-    @field_validator("allowed_api_formats")
+    @field_validator("group_id")
     @classmethod
-    def validate_allowed_api_formats(cls, v: list[str] | None) -> list[str] | None:
-        # 与 CreateUserRequest 保持一致
-        return CreateUserRequest.validate_allowed_api_formats(v)
+    def validate_group_id(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
 
     @field_validator("password")
     @classmethod
@@ -381,8 +396,7 @@ class CreateApiKeyRequest(BaseModel):
     @field_validator("allowed_api_formats")
     @classmethod
     def validate_allowed_api_formats(cls, v: list[str] | None) -> list[str] | None:
-        # 与 CreateUserRequest 保持一致
-        return CreateUserRequest.validate_allowed_api_formats(v)
+        return normalize_allowed_api_formats(v)
 
 
 class UserResponse(BaseModel):
@@ -392,15 +406,767 @@ class UserResponse(BaseModel):
     email: str | None = None
     username: str
     role: UserRole
-    allowed_providers: list[str] | None = None  # 允许使用的提供商 ID 列表
-    allowed_api_formats: list[str] | None = None  # 允许使用的 API 格式列表
-    allowed_models: list[str] | None = None  # 允许使用的模型名称列表
-    rate_limit: int | None = None
+    group_id: str | None = None
+    group_name: str | None = None
+    effective_group_id: str | None = None
+    effective_group_name: str | None = None
+    effective_allowed_providers: list[str] | None = None
+    effective_allowed_api_formats: list[str] | None = None
+    effective_allowed_models: list[str] | None = None
+    effective_rate_limit: int | None = None
+    active_subscription_id: str | None = None
+    active_subscription_product_id: str | None = None
+    active_subscription_product_name: str | None = None
+    active_subscription_plan_id: str | None = None
+    active_subscription_plan_name: str | None = None
+    active_subscription_status: str | None = None
+    active_subscription_remaining_quota_usd: float | None = None
+    active_subscription_overage_policy: str | None = None
+    active_subscription_started_at: datetime | None = None
+    active_subscription_ends_at: datetime | None = None
     unlimited: bool = False
     is_active: bool
     created_at: datetime
     updated_at: datetime
     last_login_at: datetime | None
+
+
+class SubscriptionTermDiscount(BaseModel):
+    """订阅购买时长折扣。"""
+
+    months: int = Field(..., ge=1, description="折扣生效阈值（月）")
+    discount_factor: float = Field(..., gt=0, description="达到该月数后适用的折扣系数，如 0.75")
+
+
+class SubscriptionPlanBase(BaseModel):
+    """订阅计划基础字段。"""
+
+    code: str = Field(..., min_length=1, max_length=100, description="订阅计划编码")
+    name: str = Field(..., min_length=1, max_length=100, description="订阅计划名称")
+    description: str | None = Field(None, max_length=500, description="订阅计划描述")
+    user_group_id: str = Field(..., min_length=1, description="绑定的用户分组 ID")
+    plan_level: int = Field(..., ge=0, description="订阅等级，越大等级越高")
+    monthly_price_usd: float = Field(..., ge=0, description="月价格（美元）")
+    monthly_quota_usd: float = Field(..., ge=0, description="每月额度（美元）")
+    overage_policy: Literal["block", "use_wallet_balance"] = Field(
+        default="block",
+        description="额度用尽后的处理策略",
+    )
+    term_discounts_json: list[SubscriptionTermDiscount] = Field(
+        default_factory=lambda: [SubscriptionTermDiscount(months=1, discount_factor=1.0)],
+        description="购买月数阈值与折扣系数列表，会按不超过购买月数的最大阈值匹配",
+    )
+    is_active: bool = Field(default=True, description="是否启用")
+
+    @field_validator("code", "name", "user_group_id")
+    @classmethod
+    def validate_subscription_strings(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("字段不能为空")
+        return v
+
+    @field_validator("description")
+    @classmethod
+    def validate_subscription_description(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+    @field_validator("term_discounts_json")
+    @classmethod
+    def validate_term_discounts(
+        cls, v: list[SubscriptionTermDiscount]
+    ) -> list[SubscriptionTermDiscount]:
+        normalized = normalize_term_discounts([item.model_dump() for item in v])
+        return [SubscriptionTermDiscount.model_validate(item) for item in normalized]
+
+
+class CreateSubscriptionPlanRequest(SubscriptionPlanBase):
+    """创建订阅计划请求。"""
+
+
+class UpdateSubscriptionPlanRequest(BaseModel):
+    """更新订阅计划请求。"""
+
+    code: str | None = Field(None, min_length=1, max_length=100)
+    name: str | None = Field(None, min_length=1, max_length=100)
+    description: str | None = Field(None, max_length=500)
+    user_group_id: str | None = Field(None, min_length=1)
+    plan_level: int | None = Field(None, ge=0)
+    monthly_price_usd: float | None = Field(None, ge=0)
+    monthly_quota_usd: float | None = Field(None, ge=0)
+    overage_policy: Literal["block", "use_wallet_balance"] | None = None
+    term_discounts_json: list[SubscriptionTermDiscount] | None = None
+    is_active: bool | None = None
+
+    @field_validator("code", "name", "user_group_id")
+    @classmethod
+    def validate_optional_subscription_strings(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            raise ValueError("字段不能为空")
+        return v
+
+    @field_validator("description")
+    @classmethod
+    def validate_optional_subscription_description(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+    @field_validator("term_discounts_json")
+    @classmethod
+    def validate_optional_term_discounts(
+        cls, v: list[SubscriptionTermDiscount] | None
+    ) -> list[SubscriptionTermDiscount] | None:
+        if v is None:
+            return None
+        normalized = normalize_term_discounts([item.model_dump() for item in v])
+        return [SubscriptionTermDiscount.model_validate(item) for item in normalized]
+
+
+class SubscriptionPlanResponse(BaseModel):
+    """订阅计划响应。"""
+
+    id: str
+    code: str
+    name: str
+    description: str | None = None
+    user_group_id: str
+    user_group_name: str | None = None
+    plan_level: int
+    monthly_price_usd: float
+    monthly_quota_usd: float
+    overage_policy: str
+    term_discounts_json: list[SubscriptionTermDiscount] = Field(default_factory=list)
+    is_active: bool
+    active_subscription_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class SubscriptionVariantBase(BaseModel):
+    """订阅版本基础字段。"""
+
+    code: str = Field(..., min_length=1, max_length=100, description="订阅版本编码")
+    name: str = Field(..., min_length=1, max_length=100, description="订阅版本名称")
+    description: str | None = Field(None, max_length=500, description="订阅版本描述")
+    monthly_price_usd: float = Field(..., ge=0, description="月价格（美元）")
+    monthly_quota_usd: float = Field(..., ge=0, description="每月额度（美元）")
+    variant_rank: int = Field(default=100, ge=0, description="同产品内版本等级，越大越高")
+    term_discounts_json: list[SubscriptionTermDiscount] = Field(
+        default_factory=lambda: [SubscriptionTermDiscount(months=1, discount_factor=1.0)],
+        description="购买月数阈值与折扣系数列表，会按不超过购买月数的最大阈值匹配",
+    )
+    is_active: bool = Field(default=True, description="是否启用该版本")
+    is_default_variant: bool = Field(default=False, description="是否为默认版本")
+
+    @field_validator("code", "name")
+    @classmethod
+    def validate_variant_strings(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("字段不能为空")
+        return v
+
+    @field_validator("description")
+    @classmethod
+    def validate_variant_description(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+    @field_validator("term_discounts_json")
+    @classmethod
+    def validate_variant_term_discounts(
+        cls, v: list[SubscriptionTermDiscount]
+    ) -> list[SubscriptionTermDiscount]:
+        normalized = normalize_term_discounts([item.model_dump() for item in v])
+        return [SubscriptionTermDiscount.model_validate(item) for item in normalized]
+
+
+class SubscriptionVariantUpsertRequest(SubscriptionVariantBase):
+    """创建/更新订阅版本请求。"""
+
+    id: str | None = Field(default=None, description="已有版本 ID；为空表示新增版本")
+
+    @field_validator("id")
+    @classmethod
+    def validate_variant_id(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            raise ValueError("版本 ID 不能为空")
+        return v
+
+
+class SubscriptionVariantResponse(SubscriptionVariantBase):
+    """订阅版本响应。"""
+
+    id: str
+    product_id: str
+    active_subscription_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class SubscriptionProductBase(BaseModel):
+    """订阅产品基础字段。"""
+
+    code: str = Field(..., min_length=1, max_length=100, description="订阅产品编码")
+    name: str = Field(..., min_length=1, max_length=100, description="订阅产品名称")
+    description: str | None = Field(None, max_length=500, description="订阅产品描述")
+    user_group_id: str = Field(..., min_length=1, description="绑定的用户分组 ID")
+    plan_level: int = Field(..., ge=0, description="权限等级，越大等级越高")
+    overage_policy: Literal["block", "use_wallet_balance"] = Field(
+        default="block",
+        description="额度用尽后的处理策略",
+    )
+    is_active: bool = Field(default=True, description="是否启用产品")
+    variants: list[SubscriptionVariantUpsertRequest] = Field(
+        default_factory=list,
+        description="该产品下的订阅版本列表",
+    )
+
+    @field_validator("code", "name", "user_group_id")
+    @classmethod
+    def validate_product_strings(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("字段不能为空")
+        return v
+
+    @field_validator("description")
+    @classmethod
+    def validate_product_description(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+    @field_validator("variants")
+    @classmethod
+    def validate_product_variants(
+        cls, v: list[SubscriptionVariantUpsertRequest]
+    ) -> list[SubscriptionVariantUpsertRequest]:
+        if not v:
+            raise ValueError("至少需要一个订阅版本")
+        return v
+
+
+class CreateSubscriptionProductRequest(SubscriptionProductBase):
+    """创建订阅产品请求。"""
+
+
+class UpdateSubscriptionProductRequest(BaseModel):
+    """更新订阅产品请求。"""
+
+    code: str | None = Field(None, min_length=1, max_length=100)
+    name: str | None = Field(None, min_length=1, max_length=100)
+    description: str | None = Field(None, max_length=500)
+    user_group_id: str | None = Field(None, min_length=1)
+    plan_level: int | None = Field(None, ge=0)
+    overage_policy: Literal["block", "use_wallet_balance"] | None = None
+    is_active: bool | None = None
+    variants: list[SubscriptionVariantUpsertRequest] | None = None
+
+    @field_validator("code", "name", "user_group_id")
+    @classmethod
+    def validate_optional_product_strings(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            raise ValueError("字段不能为空")
+        return v
+
+    @field_validator("description")
+    @classmethod
+    def validate_optional_product_description(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+    @field_validator("variants")
+    @classmethod
+    def validate_optional_product_variants(
+        cls, v: list[SubscriptionVariantUpsertRequest] | None
+    ) -> list[SubscriptionVariantUpsertRequest] | None:
+        if v is None:
+            return None
+        if not v:
+            raise ValueError("至少需要一个订阅版本")
+        return v
+
+
+class SubscriptionProductResponse(BaseModel):
+    """订阅产品响应。"""
+
+    id: str
+    code: str
+    name: str
+    description: str | None = None
+    user_group_id: str
+    user_group_name: str | None = None
+    plan_level: int
+    overage_policy: str
+    is_active: bool
+    active_subscription_count: int = 0
+    variant_count: int = 0
+    variants: list[SubscriptionVariantResponse] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class SubscriptionPlanPublicResponse(BaseModel):
+    """用户端可见的订阅计划响应。"""
+
+    id: str
+    code: str
+    name: str
+    description: str | None = None
+    plan_level: int
+    monthly_price_usd: float
+    monthly_quota_usd: float
+    overage_policy: str
+    term_discounts_json: list[SubscriptionTermDiscount] = Field(default_factory=list)
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class SubscriptionVariantPublicResponse(SubscriptionVariantBase):
+    """用户端可见的订阅版本响应。"""
+
+    id: str
+    product_id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class SubscriptionProductPublicResponse(BaseModel):
+    """用户端可见的订阅产品响应。"""
+
+    id: str
+    code: str
+    name: str
+    description: str | None = None
+    plan_level: int
+    overage_policy: str
+    is_active: bool
+    variant_count: int = 0
+    available_model_names: list[str] = Field(default_factory=list)
+    variants: list[SubscriptionVariantPublicResponse] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class SubscriptionProductPublicListResponse(BaseModel):
+    """用户端可见的订阅产品列表响应。"""
+
+    products: list[SubscriptionProductPublicResponse] = Field(default_factory=list)
+    total: int = 0
+
+
+class CreateUserSubscriptionRequest(BaseModel):
+    """创建用户订阅请求。"""
+
+    plan_id: str = Field(..., min_length=1, description="订阅计划 ID")
+    purchased_months: int = Field(..., ge=1, description="购买月数")
+    started_at: datetime | None = Field(None, description="开始时间；为空表示立即生效")
+
+    @field_validator("plan_id")
+    @classmethod
+    def validate_plan_id(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("plan_id 不能为空")
+        return v
+
+
+class CancelUserSubscriptionRequest(BaseModel):
+    """取消用户订阅请求。"""
+
+    immediate: bool = Field(default=False, description="是否立即取消")
+
+
+class UpgradeUserSubscriptionRequest(BaseModel):
+    """升级用户订阅请求。"""
+
+    new_plan_id: str = Field(..., min_length=1, description="目标订阅计划 ID")
+    purchased_months: int = Field(..., ge=1, description="升级后购买月数")
+
+    @field_validator("new_plan_id")
+    @classmethod
+    def validate_new_plan_id(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("new_plan_id 不能为空")
+        return v
+
+
+class UserSubscriptionResponse(BaseModel):
+    """用户订阅响应。"""
+
+    id: str
+    user_id: str
+    username: str | None = None
+    email: str | None = None
+    product_id: str | None = None
+    product_code: str | None = None
+    product_name: str | None = None
+    plan_id: str
+    plan_code: str | None = None
+    plan_name: str | None = None
+    variant_id: str | None = None
+    variant_code: str | None = None
+    variant_name: str | None = None
+    variant_rank: int | None = None
+    user_group_id: str | None = None
+    user_group_name: str | None = None
+    status: str
+    end_reason: str | None = None
+    purchased_months: int
+    discount_factor: float
+    monthly_price_usd_snapshot: float
+    total_price_usd: float
+    started_at: datetime
+    ends_at: datetime
+    current_cycle_start: datetime
+    current_cycle_end: datetime
+    cycle_quota_usd: float
+    cycle_used_usd: float
+    remaining_quota_usd: float
+    cancel_at_period_end: bool
+    canceled_at: datetime | None = None
+    ended_at: datetime | None = None
+    upgraded_from_subscription_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class UserSubscriptionPublicResponse(BaseModel):
+    """用户端可见的用户订阅响应。"""
+
+    id: str
+    product_id: str | None = None
+    product_code: str | None = None
+    product_name: str | None = None
+    plan_id: str
+    plan_code: str | None = None
+    plan_name: str | None = None
+    variant_id: str | None = None
+    variant_code: str | None = None
+    variant_name: str | None = None
+    variant_rank: int | None = None
+    status: str
+    end_reason: str | None = None
+    purchased_months: int
+    discount_factor: float
+    monthly_price_usd_snapshot: float
+    total_price_usd: float
+    started_at: datetime
+    ends_at: datetime
+    current_cycle_start: datetime
+    current_cycle_end: datetime
+    cycle_quota_usd: float
+    cycle_used_usd: float
+    remaining_quota_usd: float
+    cancel_at_period_end: bool
+    canceled_at: datetime | None = None
+    ended_at: datetime | None = None
+    upgraded_from_subscription_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class UserSubscriptionDashboardResponse(BaseModel):
+    """用户订阅中心概览响应。"""
+
+    current_subscription: UserSubscriptionResponse | None = None
+    effective_user_group_id: str | None = None
+    effective_user_group_name: str | None = None
+    base_user_group_id: str | None = None
+    base_user_group_name: str | None = None
+
+
+class UserSubscriptionDashboardPublicResponse(BaseModel):
+    """用户端订阅中心概览响应。"""
+
+    current_subscription: UserSubscriptionPublicResponse | None = None
+
+
+class CreateSubscriptionCheckoutRequest(BaseModel):
+    """用户端购买订阅请求。"""
+
+    plan_id: str = Field(..., min_length=1, description="订阅计划 ID")
+    purchased_months: int = Field(..., ge=1, description="购买月数")
+    payment_method: str = Field(..., min_length=1, max_length=30, description="支付方式")
+
+    @field_validator("plan_id", "payment_method")
+    @classmethod
+    def validate_checkout_strings(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("字段不能为空")
+        return v
+
+
+class UpgradeSubscriptionCheckoutRequest(BaseModel):
+    """用户端升级订阅请求。"""
+
+    new_plan_id: str = Field(..., min_length=1, description="目标订阅计划 ID")
+    purchased_months: int = Field(..., ge=1, description="购买月数")
+    payment_method: str = Field(..., min_length=1, max_length=30, description="支付方式")
+
+    @field_validator("new_plan_id", "payment_method")
+    @classmethod
+    def validate_upgrade_checkout_strings(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("字段不能为空")
+        return v
+
+
+class SubscriptionCheckoutResponse(BaseModel):
+    """用户端订阅下单响应。"""
+
+    subscription: UserSubscriptionResponse
+    payable_amount_usd: float
+    order: dict[str, Any] | None = None
+    payment_instructions: dict[str, Any] = Field(default_factory=dict)
+
+
+class SubscriptionCheckoutPublicResponse(BaseModel):
+    """用户端可见的订阅下单响应。"""
+
+    subscription: UserSubscriptionPublicResponse
+    payable_amount_usd: float
+    order: dict[str, Any] | None = None
+    payment_instructions: dict[str, Any] = Field(default_factory=dict)
+
+
+class UserGroupModelGroupBinding(BaseModel):
+    """用户分组绑定的模型分组。"""
+
+    model_group_id: str = Field(..., min_length=1, description="模型分组 ID")
+    priority: int = Field(default=100, ge=0, le=999999, description="尝试顺序，数字越小越优先")
+    is_active: bool = Field(default=True, description="是否启用该绑定")
+
+    @field_validator("model_group_id")
+    @classmethod
+    def validate_model_group_id(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("model_group_id 不能为空")
+        return v
+
+
+class UserGroupModelGroupBindingResponse(UserGroupModelGroupBinding):
+    """用户分组绑定的模型分组响应。"""
+
+    model_group_name: str | None = None
+    model_group_display_name: str | None = None
+    model_group_is_default: bool = False
+
+
+class UserGroupBase(BaseModel):
+    """用户分组基础字段。"""
+
+    name: str = Field(..., min_length=1, max_length=100, description="分组名称")
+    description: str | None = Field(None, max_length=500, description="分组描述")
+    allowed_api_formats: list[str] | None = Field(
+        default=None, description="分组默认允许的 API 格式列表，null 表示不限制"
+    )
+    model_group_bindings: list[UserGroupModelGroupBinding] | None = Field(
+        default=None,
+        description="按顺序绑定的模型分组列表；为空时自动绑定默认模型分组",
+    )
+    rate_limit: int | None = Field(
+        default=None,
+        ge=0,
+        description="分组默认 RPM 限制；null 表示继承系统默认，0 表示不限制",
+    )
+    scheduling_mode: Literal["cache_affinity", "load_balance", "fixed_order"] = Field(
+        default="cache_affinity",
+        description="分组调度模式",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("分组名称不能为空")
+        return v
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+    @field_validator("allowed_api_formats")
+    @classmethod
+    def validate_group_allowed_api_formats(cls, v: list[str] | None) -> list[str] | None:
+        return normalize_allowed_api_formats(v)
+
+    @field_validator("model_group_bindings")
+    @classmethod
+    def validate_model_group_bindings(
+        cls, v: list[UserGroupModelGroupBinding] | None
+    ) -> list[UserGroupModelGroupBinding] | None:
+        if v is None:
+            return None
+        normalized: list[UserGroupModelGroupBinding] = []
+        seen: set[str] = set()
+        for binding in v:
+            if binding.model_group_id in seen:
+                continue
+            seen.add(binding.model_group_id)
+            normalized.append(binding)
+        return normalized
+
+
+class CreateUserGroupRequest(UserGroupBase):
+    """创建用户分组请求。"""
+
+
+class UpdateUserGroupRequest(BaseModel):
+    """更新用户分组请求。"""
+
+    name: str | None = Field(None, min_length=1, max_length=100)
+    description: str | None = Field(None, max_length=500)
+    allowed_api_formats: list[str] | None = None
+    model_group_bindings: list[UserGroupModelGroupBinding] | None = None
+    rate_limit: int | None = Field(
+        default=None,
+        ge=0,
+        description="分组默认 RPM 限制；null 表示继承系统默认，0 表示不限制",
+    )
+    scheduling_mode: Literal["cache_affinity", "load_balance", "fixed_order"] | None = Field(
+        default=None,
+        description="分组调度模式",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            raise ValueError("分组名称不能为空")
+        return v
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+    @field_validator("allowed_api_formats")
+    @classmethod
+    def validate_group_allowed_api_formats(cls, v: list[str] | None) -> list[str] | None:
+        return normalize_allowed_api_formats(v)
+
+    @field_validator("model_group_bindings")
+    @classmethod
+    def validate_update_model_group_bindings(
+        cls, v: list[UserGroupModelGroupBinding] | None
+    ) -> list[UserGroupModelGroupBinding] | None:
+        if v is None:
+            return None
+        normalized: list[UserGroupModelGroupBinding] = []
+        seen: set[str] = set()
+        for binding in v:
+            if binding.model_group_id in seen:
+                continue
+            seen.add(binding.model_group_id)
+            normalized.append(binding)
+        return normalized
+
+
+class UserGroupResponse(BaseModel):
+    """用户分组响应。"""
+
+    id: str
+    name: str
+    description: str | None = None
+    is_default: bool = False
+    allowed_api_formats: list[str] | None = None
+    model_group_bindings: list[UserGroupModelGroupBindingResponse] = Field(default_factory=list)
+    rate_limit: int | None = None
+    scheduling_mode: Literal["cache_affinity", "load_balance", "fixed_order"] = "cache_affinity"
+    user_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class BatchUserGroupBindingRequest(BaseModel):
+    """批量绑定/取消绑定用户分组请求。"""
+
+    action: Literal["bind", "unbind"] = Field(description="操作类型：bind / unbind")
+    user_ids: list[str] = Field(..., min_length=1, max_length=500, description="用户 ID 列表")
+    group_id: str | None = Field(default=None, description="目标用户分组 ID（bind 时必填）")
+    source_group_id: str | None = Field(
+        default=None,
+        description="取消绑定时的来源分组过滤（可选，仅移除该分组成员）",
+    )
+
+    @field_validator("user_ids")
+    @classmethod
+    def validate_user_ids(cls, v: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for user_id in v:
+            item = str(user_id or "").strip()
+            if not item:
+                continue
+            if item in seen:
+                continue
+            seen.add(item)
+            normalized.append(item)
+        if not normalized:
+            raise ValueError("至少需要提供一个用户 ID")
+        return normalized
+
+    @field_validator("group_id", "source_group_id")
+    @classmethod
+    def validate_group_id_fields(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+    @model_validator(mode="after")
+    def validate_action_fields(self) -> "BatchUserGroupBindingRequest":
+        if self.action == "bind" and not self.group_id:
+            raise ValueError("绑定用户到分组时必须提供 group_id")
+        return self
+
+
+class BatchUserGroupBindingResponse(BaseModel):
+    """批量绑定/取消绑定用户分组响应。"""
+
+    action: Literal["bind", "unbind"]
+    group_id: str | None = None
+    source_group_id: str | None = None
+    updated_count: int
+    skipped_count: int
+    users: list[UserResponse]
 
 
 class ApiKeyResponse(BaseModel):

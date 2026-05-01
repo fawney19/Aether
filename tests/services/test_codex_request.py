@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -10,12 +11,12 @@ from src.api.handlers.base.request_builder import PassthroughRequestBuilder
 from src.services.provider.behavior import get_provider_behavior
 
 
-def test_codex_provider_behavior_has_no_runtime_envelope_or_variants() -> None:
+def test_codex_provider_behavior_uses_codex_runtime_variants() -> None:
     behavior = get_provider_behavior(provider_type="codex", endpoint_sig="openai:cli")
 
     assert behavior.envelope is None
-    assert behavior.same_format_variant is None
-    assert behavior.cross_format_variant is None
+    assert behavior.same_format_variant == "codex"
+    assert behavior.cross_format_variant == "codex"
 
 
 def test_openai_cli_normalizer_request_from_internal_codex_variant_preserves_store() -> (
@@ -86,6 +87,49 @@ def test_openai_cli_normalizer_patch_for_codex_is_noop() -> None:
     )
 
     assert out is None
+
+
+def test_openai_cli_normalizer_request_from_internal_codex_variant_repairs_orphan_outputs() -> (
+    None
+):
+    from src.core.api_format.conversion.normalizers.openai_cli import (
+        OpenAICliNormalizer,
+    )
+
+    normalizer = OpenAICliNormalizer()
+    internal = normalizer.request_to_internal(
+        {
+            "model": "gpt-test",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_auto_1",
+                    "output": "File not found: /tmp/demo.txt",
+                }
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "read",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"filePath": {"type": "string"}},
+                    },
+                }
+            ],
+        }
+    )
+    out = normalizer.request_from_internal(internal, target_variant="codex")
+
+    assert out["input"][0]["type"] == "function_call"
+    assert out["input"][0]["call_id"] == "call_auto_1"
+    assert out["input"][0]["name"] == "read"
+    assert json.loads(out["input"][0]["arguments"]) == {"filePath": "/tmp/demo.txt"}
+    assert out["input"][1] == {
+        "type": "function_call_output",
+        "call_id": "call_auto_1",
+        "output": "File not found: /tmp/demo.txt",
+    }
 
 
 def test_codex_passthrough_builder_preserves_real_codex_headers() -> None:

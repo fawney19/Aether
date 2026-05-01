@@ -31,11 +31,11 @@ class RequestRecordLevel(str, Enum):
 _CONFIG_CACHE_TTL = 60  # 1 分钟
 
 # 调度相关配置使用更短的缓存 TTL，确保多 Worker 部署时快速收敛
-# 当管理员切换调度模式时，其他 Worker 最多延迟 5 秒即可感知变更
+# 当前仅保留空集合，兼容通用缓存逻辑。
 _SCHEDULING_CONFIG_CACHE_TTL = 5  # 5 秒
 
 # 需要跨 Worker 快速同步的调度相关配置 key
-SCHEDULING_CONFIG_KEYS = frozenset({"scheduling_mode", "provider_priority_mode"})
+SCHEDULING_CONFIG_KEYS = frozenset()
 
 # 进程内缓存存储: {key: (value, expire_time)}
 _config_cache: dict[str, tuple[Any, float]] = {}
@@ -159,14 +159,6 @@ class SystemConfigService:
         "provider_checkin_time": {
             "value": "01:05",
             "description": "Provider 自动签到执行时间（HH:MM 格式，24小时制）",
-        },
-        "provider_priority_mode": {
-            "value": "provider",
-            "description": "优先级策略：provider(提供商优先模式) 或 global_key(全局Key优先模式)",
-        },
-        "scheduling_mode": {
-            "value": "cache_affinity",
-            "description": "调度模式：fixed_order(固定顺序模式，严格按优先级顺序) 或 cache_affinity(缓存亲和模式，优先使用已缓存的Provider)",
         },
         "auto_delete_expired_keys": {
             "value": False,
@@ -298,7 +290,11 @@ class SystemConfigService:
         result = {}
 
         # 一次查询获取所有配置
-        configs = db.query(SystemConfig).filter(SystemConfig.key.in_(keys)).all()
+        configs = (
+            db.query(SystemConfig).filter(SystemConfig.key.in_(keys)).all()
+            if keys
+            else []
+        )
         config_map = {c.key: c.value for c in configs}
 
         # 填充结果，不存在的使用默认值

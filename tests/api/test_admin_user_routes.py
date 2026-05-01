@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -9,8 +10,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from src.api.admin.users.routes import AdminBatchUserGroupBindingAdapter
 from src.api.admin.users.routes import AdminCreateUserAdapter
 from src.api.admin.users.routes import router as admin_users_router
+from src.core.exceptions import InvalidRequestException
 from src.database import get_db
 
 
@@ -22,12 +25,14 @@ def _build_admin_users_app(db: MagicMock, monkeypatch: pytest.MonkeyPatch) -> Te
     async def _fake_pipeline_run(
         *, adapter: Any, http_request: object, db: MagicMock, mode: object
     ) -> Any:
-        _ = http_request, mode
+        _ = mode
+        request_body = await http_request.body()
+        payload = json.loads(request_body) if request_body else {}
         context = SimpleNamespace(
             db=db,
             request=SimpleNamespace(state=SimpleNamespace()),
             user=SimpleNamespace(id="admin-1"),
-            ensure_json_body=lambda: {},
+            ensure_json_body=lambda: payload,
             add_audit_metadata=lambda **_: None,
         )
         return await adapter.handle(context)
@@ -46,10 +51,8 @@ def test_list_users_uses_wallet_batch_lookup(monkeypatch: pytest.MonkeyPatch) ->
             email="u1@example.com",
             username="user1",
             role=SimpleNamespace(value="user"),
-            allowed_providers=None,
-            allowed_api_formats=None,
-            allowed_models=None,
-            rate_limit=None,
+            group_id=None,
+            group=None,
             is_active=True,
             created_at=now,
             updated_at=now,
@@ -60,10 +63,8 @@ def test_list_users_uses_wallet_batch_lookup(monkeypatch: pytest.MonkeyPatch) ->
             email="u2@example.com",
             username="user2",
             role=SimpleNamespace(value="admin"),
-            allowed_providers=None,
-            allowed_api_formats=None,
-            allowed_models=None,
-            rate_limit=None,
+            group_id=None,
+            group=None,
             is_active=True,
             created_at=now,
             updated_at=None,
@@ -159,8 +160,67 @@ def test_revoke_all_user_sessions_route_returns_count(monkeypatch: pytest.Monkey
     assert response.json() == {"message": "done", "revoked_count": 2}
 
 
+def test_batch_user_group_binding_route_forwards_validated_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = MagicMock()
+    client = _build_admin_users_app(db, monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def _fake_batch_update(request: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        captured["request"] = request
+        return (
+            {
+                "action": request.action,
+                "group_id": request.group_id,
+                "source_group_id": request.source_group_id,
+                "updated_count": 2,
+                "skipped_count": 0,
+                "users": [],
+            },
+            {"action": "batch_user_group_binding"},
+        )
+
+    monkeypatch.setattr(
+        "src.api.admin.users.routes._batch_update_user_group_binding_sync",
+        _fake_batch_update,
+    )
+
+    response = client.post(
+        "/api/admin/users/groups/bindings/batch",
+        json={
+            "action": "bind",
+            "user_ids": ["user-1", "user-2", "user-1"],
+            "group_id": "group-1",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["action"] == "bind"
+    assert response.json()["updated_count"] == 2
+    assert captured["request"].action == "bind"
+    assert captured["request"].user_ids == ["user-1", "user-2"]
+    assert captured["request"].group_id == "group-1"
+
+
 @pytest.mark.asyncio
-async def test_create_user_adapter_preserves_empty_restriction_lists(
+async def test_batch_user_group_binding_adapter_requires_group_id() -> None:
+    context = SimpleNamespace(
+        db=MagicMock(),
+        request=SimpleNamespace(state=SimpleNamespace()),
+        ensure_json_body=lambda: {
+            "action": "bind",
+            "user_ids": ["user-1"],
+        },
+        add_audit_metadata=lambda **_: None,
+    )
+
+    with pytest.raises(InvalidRequestException, match="group_id"):
+        await AdminBatchUserGroupBindingAdapter().handle(context)
+
+
+@pytest.mark.asyncio
+async def test_create_user_adapter_accepts_group_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db = MagicMock()
@@ -182,9 +242,7 @@ async def test_create_user_adapter_preserves_empty_restriction_lists(
             "email": "u3@example.com",
             "role": "user",
             "initial_gift_usd": 10,
-            "allowed_providers": [],
-            "allowed_api_formats": [],
-            "allowed_models": [],
+            "group_id": "group-1",
         },
         add_audit_metadata=lambda **_: None,
     )
@@ -192,6 +250,4 @@ async def test_create_user_adapter_preserves_empty_restriction_lists(
     result = await AdminCreateUserAdapter().handle(context)
 
     assert result == {"id": "user-3"}
-    assert captured["request"].allowed_providers == []
-    assert captured["request"].allowed_api_formats == []
-    assert captured["request"].allowed_models == []
+    assert captured["request"].group_id == "group-1"

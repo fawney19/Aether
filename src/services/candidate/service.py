@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from src.models.database import ApiKey
 from src.services.orchestration.error_classifier import ErrorClassifier
 from src.services.scheduling.aware_scheduler import ProviderCandidate, get_cache_aware_scheduler
-from src.services.system.config import SystemConfigService
+from src.services.user.group_service import UserGroupService
 
 from .recorder import CandidateRecorder
 from .resolver import CandidateResolver
@@ -34,19 +34,9 @@ class CandidateService:
         if self._cache_scheduler is not None:
             return
 
-        priority_mode = SystemConfigService.get_config(
-            self.db,
-            "provider_priority_mode",
-            "provider",
-        )
-        scheduling_mode = SystemConfigService.get_config(
-            self.db,
-            "scheduling_mode",
-            "cache_affinity",
-        )
+        scheduling_mode = UserGroupService.resolve_effective_scheduling_mode(self.db, None)
         self._cache_scheduler = await get_cache_aware_scheduler(
             self.redis,
-            priority_mode=priority_mode,
             scheduling_mode=scheduling_mode,
         )
         self._resolver = CandidateResolver(db=self.db, cache_scheduler=self._cache_scheduler)
@@ -65,6 +55,13 @@ class CandidateService:
         preferred_key_ids: list[str] | None = None,
     ) -> tuple[list[ProviderCandidate], str]:
         await self._ensure_initialized()
+        user = getattr(user_api_key, "user", None) if user_api_key is not None else None
+        self._cache_scheduler = await get_cache_aware_scheduler(
+            self.redis,
+            scheduling_mode=UserGroupService.resolve_effective_scheduling_mode(self.db, user),
+        )
+        self._resolver = CandidateResolver(db=self.db, cache_scheduler=self._cache_scheduler)
+        self._error_classifier = ErrorClassifier(db=self.db, cache_scheduler=self._cache_scheduler)
         assert self._resolver is not None
         return await self._resolver.fetch_candidates(
             api_format=api_format,

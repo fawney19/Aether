@@ -10,12 +10,13 @@ from typing import cast
 
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func
-from sqlalchemy.orm import Session, joinedload, load_only
+from sqlalchemy.orm import Session, joinedload, load_only, selectinload
 
 from src.core.exceptions import InvalidRequestException, NotFoundException
 from src.core.logger import logger
-from src.models.database import GlobalModel, Model
+from src.models.database import GlobalModel, Model, ModelGroupModel
 from src.models.pydantic_models import GlobalModelUpdate
+from src.services.model.group_service import ModelGroupService
 
 
 async def on_key_allowed_models_changed(
@@ -76,11 +77,27 @@ class GlobalModelService:
             global_model_id: GlobalModel 的 UUID 或 name
         """
         # 先尝试通过 ID 查找
-        global_model = db.query(GlobalModel).filter(GlobalModel.id == global_model_id).first()
+        global_model = (
+            db.query(GlobalModel)
+            .options(
+                selectinload(GlobalModel.model_group_links).selectinload(ModelGroupModel.model_group)
+            )
+            .filter(GlobalModel.id == global_model_id)
+            .first()
+        )
 
         # 如果没找到，尝试通过 name 查找
         if not global_model:
-            global_model = db.query(GlobalModel).filter(GlobalModel.name == global_model_id).first()
+            global_model = (
+                db.query(GlobalModel)
+                .options(
+                    selectinload(GlobalModel.model_group_links).selectinload(
+                        ModelGroupModel.model_group
+                    )
+                )
+                .filter(GlobalModel.name == global_model_id)
+                .first()
+            )
 
         if not global_model:
             raise NotFoundException(f"GlobalModel {global_model_id} not found")
@@ -89,7 +106,14 @@ class GlobalModelService:
     @staticmethod
     def get_global_model_by_name(db: Session, name: str) -> GlobalModel | None:
         """通过名称获取 GlobalModel"""
-        return db.query(GlobalModel).filter(GlobalModel.name == name).first()
+        return (
+            db.query(GlobalModel)
+            .options(
+                selectinload(GlobalModel.model_group_links).selectinload(ModelGroupModel.model_group)
+            )
+            .filter(GlobalModel.name == name)
+            .first()
+        )
 
     @staticmethod
     def list_global_models(
@@ -100,7 +124,9 @@ class GlobalModelService:
         search: str | None = None,
     ) -> list[GlobalModel]:
         """列出 GlobalModel"""
-        query = db.query(GlobalModel)
+        query = db.query(GlobalModel).options(
+            selectinload(GlobalModel.model_group_links).selectinload(ModelGroupModel.model_group)
+        )
 
         if is_active is not None:
             query = query.filter(GlobalModel.is_active == is_active)
@@ -131,6 +157,7 @@ class GlobalModelService:
         supported_capabilities: list[str] | None = None,
         # 模型配置（JSON）
         config: dict | None = None,
+        model_group_ids: list[str] | None = None,
     ) -> GlobalModel:
         """创建 GlobalModel"""
         # 检查名称是否已存在
@@ -153,6 +180,16 @@ class GlobalModelService:
         )
 
         db.add(global_model)
+        db.flush()
+
+        if model_group_ids is not None:
+            ModelGroupService.replace_global_model_memberships(
+                db,
+                global_model.id,
+                model_group_ids,
+                commit=False,
+            )
+
         db.commit()
         db.refresh(global_model)
 
@@ -175,6 +212,7 @@ class GlobalModelService:
 
         # 只更新显式设置的字段（包括显式设置为 None 的情况）
         data_dict = update_data.model_dump(exclude_unset=True)
+        model_group_ids = data_dict.pop("model_group_ids", None)
 
         # 处理阶梯计费配置：如果是 TieredPricingConfig 对象，转换为 dict
         if "default_tiered_pricing" in data_dict:
@@ -184,6 +222,14 @@ class GlobalModelService:
 
         for field, value in data_dict.items():
             setattr(global_model, field, value)
+
+        if model_group_ids is not None:
+            ModelGroupService.replace_global_model_memberships(
+                db,
+                global_model.id,
+                model_group_ids,
+                commit=False,
+            )
 
         db.commit()
         db.refresh(global_model)
@@ -381,7 +427,7 @@ class GlobalModelService:
         }
 
         # 获取所有活跃的 GlobalModel（带映射规则）
-        global_models = db.query(GlobalModel).filter(GlobalModel.is_active == True).all()
+        global_models = db.query(GlobalModel).filter(GlobalModel.is_active.is_(True)).all()
 
         allowed_models_set = set(allowed_models)
 
@@ -509,7 +555,7 @@ class GlobalModelService:
             db.query(ProviderAPIKey.id)
             .filter(
                 ProviderAPIKey.provider_id == provider_id,
-                ProviderAPIKey.is_active == True,
+                ProviderAPIKey.is_active.is_(True),
                 ProviderAPIKey.allowed_models.is_(None),
                 non_oauth_filter,
             )
@@ -525,7 +571,7 @@ class GlobalModelService:
             db.query(ProviderAPIKey.allowed_models)
             .filter(
                 ProviderAPIKey.provider_id == provider_id,
-                ProviderAPIKey.is_active == True,
+                ProviderAPIKey.is_active.is_(True),
                 non_oauth_filter,
             )
             .all()

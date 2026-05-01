@@ -2,6 +2,7 @@ import client from '../client'
 import { dedupedRequest } from '@/utils/cache'
 import type {
   ClaudeCodeAdvancedConfig,
+  ErrorPassthroughRulesConfig,
   FailoverRulesConfig,
   PoolAdvancedConfig,
   ProviderWithEndpointsSummary,
@@ -75,6 +76,7 @@ export async function updateProvider(
     claude_code_advanced: ClaudeCodeAdvancedConfig | null
     pool_advanced: PoolAdvancedConfig | null
     failover_rules: FailoverRulesConfig | null
+    error_passthrough_rules: ErrorPassthroughRulesConfig | null
   }>
 ): Promise<ProviderWithEndpointsSummary> {
   const response = await client.patch(`/api/admin/providers/${providerId}`, data)
@@ -105,6 +107,7 @@ export async function createProvider(
     claude_code_advanced?: ClaudeCodeAdvancedConfig | null
     pool_advanced?: PoolAdvancedConfig | null
     failover_rules?: FailoverRulesConfig | null
+    error_passthrough_rules?: ErrorPassthroughRulesConfig | null
   }
 ): Promise<{ id: string; name: string; message?: string }> {
   const response = await client.post('/api/admin/providers/', data)

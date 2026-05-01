@@ -113,12 +113,12 @@ class VideoTaskCancelService:
             ):
                 operation_name = f"operations/{operation_name}"
 
-            base = (
-                getattr(endpoint, "base_url", None) or "https://generativelanguage.googleapis.com"
-            ).rstrip("/")
-            if base.endswith("/v1beta"):
-                base = base[: -len("/v1beta")]
-            upstream_url = f"{base}/v1beta/{operation_name}:cancel"
+            from src.utils.url_utils import join_url
+
+            upstream_url = join_url(
+                getattr(endpoint, "base_url", None) or "https://generativelanguage.googleapis.com",
+                f"/v1beta/{operation_name}:cancel",
+            )
 
             auth_info = await get_provider_auth(endpoint, key)
             if auth_info:

@@ -28,7 +28,6 @@ from src.models.database import (
     ProviderEndpoint,
     RequestCandidate,
     Usage,
-    User,
     UserPreference,
     VideoTask,
 )
@@ -285,10 +284,6 @@ def _sync_delete_provider(
                 )
 
         _apply_statement_timeouts(db)
-        updated_users = prune_allowed_provider_refs(
-            db.query(User).filter(User.allowed_providers.isnot(None)).all(),
-            provider_id,
-        )
         updated_api_keys = prune_allowed_provider_refs(
             db.query(ApiKey).filter(ApiKey.allowed_providers.isnot(None)).all(),
             provider_id,
@@ -298,7 +293,10 @@ def _sync_delete_provider(
             progress_callback(
                 {
                     "stage": "cleaning_restrictions",
-                    "message": f"cleaned access restrictions (users={updated_users}, api_keys={updated_api_keys})",
+                    "message": (
+                        "cleaned access restrictions "
+                        f"(api_keys={updated_api_keys})"
+                    ),
                 }
             )
 

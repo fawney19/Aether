@@ -15,6 +15,7 @@ from src.api.handlers.base.chat_handler_base import ChatHandlerBase
 from src.core.api_format import ApiFamily
 from src.core.logger import logger
 from src.models.openai import OpenAIRequest
+from src.utils.url_utils import join_url
 
 
 @register_adapter
@@ -113,11 +114,7 @@ class OpenAIChatAdapter(ChatAdapterBase):
         provider_type: str | None = None,
     ) -> str:
         """构建OpenAI API端点URL"""
-        base_url = base_url.rstrip("/")
-        if base_url.endswith("/v1"):
-            return f"{base_url}/chat/completions"
-        else:
-            return f"{base_url}/v1/chat/completions"
+        return join_url(base_url, "/v1/chat/completions")
 
 
 __all__ = ["OpenAIChatAdapter"]

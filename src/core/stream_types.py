@@ -33,6 +33,7 @@ class ParsedChunk:
     output_tokens: int = 0
     cache_creation_tokens: int = 0
     cache_read_tokens: int = 0
+    cache_ttl_minutes: int | None = None
 
     # 响应 ID
     response_id: str | None = None
@@ -51,6 +52,7 @@ class StreamStats:
     output_tokens: int = 0
     cache_creation_tokens: int = 0
     cache_read_tokens: int = 0
+    cache_ttl_minutes: int | None = None
 
     # 内容
     collected_text: str = ""
@@ -88,6 +90,7 @@ class ParsedResponse:
     output_tokens: int = 0
     cache_creation_tokens: int = 0
     cache_read_tokens: int = 0
+    cache_ttl_minutes: int | None = None
 
     # 错误信息
     is_error: bool = False

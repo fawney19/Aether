@@ -40,6 +40,15 @@
                 variant="ghost"
                 size="icon"
                 class="h-8 w-8"
+                title="模型分组"
+                @click="goToModelGroupsPage"
+              >
+                <Box class="w-3.5 h-3.5" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-8 w-8"
                 title="创建模型"
                 @click="openCreateModelDialog"
               >
@@ -115,6 +124,26 @@
                       >
                         <Copy class="w-3 h-3" />
                       </button>
+                    </div>
+                    <div
+                      v-if="model.model_groups?.length"
+                      class="mt-1 flex flex-wrap gap-1"
+                    >
+                      <Badge
+                        v-for="group in model.model_groups.slice(0, 2)"
+                        :key="group.id"
+                        variant="outline"
+                        class="h-5 px-1.5 py-0 text-[10px]"
+                      >
+                        {{ group.display_name }}
+                      </Badge>
+                      <Badge
+                        v-if="model.model_groups.length > 2"
+                        variant="outline"
+                        class="h-5 px-1.5 py-0 text-[10px] text-muted-foreground"
+                      >
+                        +{{ model.model_groups.length - 2 }}
+                      </Badge>
                     </div>
                   </div>
                 </TableCell>
@@ -612,7 +641,9 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import {
+  Box,
   Plus,
   Edit,
   Trash2,
@@ -688,6 +719,7 @@ interface ModelProviderDisplay {
 }
 
 const { success, error: showError } = useToast()
+const router = useRouter()
 const { copyToClipboard } = useClipboard()
 
 // 状态
@@ -1433,6 +1465,10 @@ async function confirmDeleteProviderImplementation(provider: ModelProviderDispla
 function openCreateModelDialog() {
   editingModel.value = null
   createModelDialogOpen.value = true
+}
+
+function goToModelGroupsPage() {
+  void router.push('/admin/model-groups')
 }
 
 // 处理模型对话框关闭事件

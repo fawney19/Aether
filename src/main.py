@@ -26,6 +26,7 @@ from src.api.internal import router as internal_router
 from src.api.monitoring import router as monitoring_router
 from src.api.payment import router as payment_router
 from src.api.public import router as public_router
+from src.api.subscription import router as subscription_router
 from src.api.user_me import router as me_router
 from src.api.wallet import router as wallet_router
 from src.clients.http_client import close_http_clients
@@ -799,6 +800,7 @@ else:
 app.include_router(auth_router)  # 认证相关
 app.include_router(admin_router)  # 管理员端点
 app.include_router(me_router)  # 用户个人端点
+app.include_router(subscription_router)  # 用户订阅端点
 app.include_router(wallet_router)  # 钱包端点
 app.include_router(payment_router)  # 支付回调端点
 app.include_router(announcement_router)  # 公告系统

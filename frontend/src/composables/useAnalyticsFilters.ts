@@ -89,7 +89,7 @@ export interface AnalyticsFiltersOptions {
  * - URL query 双向同步
  */
 export function useAnalyticsFilters(options: AnalyticsFiltersOptions = {}) {
-  const { defaultPreset = 'last30days', syncToUrl = true } = options
+  const { defaultPreset = 'today', syncToUrl = true } = options
   const route = useRoute()
   const router = useRouter()
 

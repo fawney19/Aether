@@ -18,16 +18,15 @@ def build_claude_code_url(
     effective_query_params: dict[str, Any],
     **_kwargs: Any,
 ) -> str:
-    """Build Claude Code upstream URL and avoid duplicate /v1/messages suffix."""
+    """Build Claude Code upstream URL.
+
+    base_url 应只填到协议+域名（+反代前缀），由本函数补齐 /v1/messages。
+    """
     _ = is_stream
 
-    base = str(getattr(endpoint, "base_url", "") or "").rstrip("/")
-    if base.endswith(CLAUDE_MESSAGES_PATH) or base.endswith("/messages"):
-        url = base
-    elif base.endswith("/v1"):
-        url = f"{base}/messages"
-    else:
-        url = f"{base}{CLAUDE_MESSAGES_PATH}"
+    from src.utils.url_utils import join_url
+
+    url = join_url(getattr(endpoint, "base_url", ""), CLAUDE_MESSAGES_PATH)
 
     if effective_query_params:
         query_string = urlencode(effective_query_params, doseq=True)

@@ -88,11 +88,9 @@ class ClaudeCliAdapter(CliAdapterBase):
         provider_type: str | None = None,
     ) -> str:
         """构建Claude CLI API端点URL"""
-        base_url = base_url.rstrip("/")
-        if base_url.endswith("/v1"):
-            return f"{base_url}/messages"
-        else:
-            return f"{base_url}/v1/messages"
+        from src.utils.url_utils import join_url
+
+        return join_url(base_url, "/v1/messages")
 
     # build_request_body 使用基类实现，通过 format_conversion_registry 自动转换 OPENAI -> CLAUDE_CLI
 

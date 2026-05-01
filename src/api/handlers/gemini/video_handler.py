@@ -537,16 +537,20 @@ class GeminiVeoHandler(VideoHandlerBase):
         return upstream_key, candidate.endpoint, candidate.key, auth_info
 
     def _build_upstream_url(self, base_url: str | None, model: str) -> str:
-        base = (base_url or self.DEFAULT_BASE_URL).rstrip("/")
-        if base.endswith("/v1beta"):
-            base = base[: -len("/v1beta")]
-        return f"{base}/v1beta/models/{model}:predictLongRunning"
+        from src.utils.url_utils import join_url
+
+        return join_url(
+            base_url or self.DEFAULT_BASE_URL,
+            f"/v1beta/models/{model}:predictLongRunning",
+        )
 
     def _build_cancel_url(self, base_url: str | None, operation_name: str) -> str:
-        base = (base_url or self.DEFAULT_BASE_URL).rstrip("/")
-        if base.endswith("/v1beta"):
-            base = base[: -len("/v1beta")]
-        return f"{base}/v1beta/{operation_name}:cancel"
+        from src.utils.url_utils import join_url
+
+        return join_url(
+            base_url or self.DEFAULT_BASE_URL,
+            f"/v1beta/{operation_name}:cancel",
+        )
 
     def _build_upstream_headers(
         self,
@@ -593,10 +597,9 @@ class GeminiVeoHandler(VideoHandlerBase):
 
     def _build_openai_upstream_url(self, base_url: str | None) -> str:
         """构建 OpenAI Sora API 的上游 URL"""
-        base = (base_url or "https://api.openai.com").rstrip("/")
-        if base.endswith("/v1"):
-            return f"{base}/videos"
-        return f"{base}/v1/videos"
+        from src.utils.url_utils import join_url
+
+        return join_url(base_url or "https://api.openai.com", "/v1/videos")
 
     def _build_openai_upstream_headers(
         self,

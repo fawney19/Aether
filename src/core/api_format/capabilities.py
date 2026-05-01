@@ -302,10 +302,9 @@ def compute_total_input_context_for_api_format(
 
 
 def _build_v1_models_url(base_url: str) -> str:
-    base_url = str(base_url or "").rstrip("/")
-    if base_url.endswith("/v1"):
-        return f"{base_url}/models"
-    return f"{base_url}/v1/models"
+    from src.utils.url_utils import join_url
+
+    return join_url(base_url, "/v1/models")
 
 
 async def _fetch_openai_models(
@@ -484,11 +483,9 @@ async def _fetch_gemini_models(
     api_format: str,
     extra_headers: dict[str, str] | None,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    base_url_clean = str(base_url or "").rstrip("/")
-    if base_url_clean.endswith("/v1beta"):
-        models_url = f"{base_url_clean}/models?key={api_key}"
-    else:
-        models_url = f"{base_url_clean}/v1beta/models?key={api_key}"
+    from src.utils.url_utils import join_url
+
+    models_url = f"{join_url(base_url, '/v1beta/models')}?key={api_key}"
 
     headers: dict[str, str] = {**BROWSER_FINGERPRINT_HEADERS}
     if extra_headers:

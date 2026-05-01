@@ -60,12 +60,14 @@ def build_gemini_cli_url(
     **_kwargs: Any,
 ) -> str:
     """Build GeminiCLI v1internal URL."""
-    base_url = str(getattr(endpoint, "base_url", "") or "").rstrip("/")
+    from src.utils.url_utils import join_url
+
+    base_url = (getattr(endpoint, "base_url", "") or "").strip().rstrip("/")
     set_selected_base_url(base_url)
 
     action = "streamGenerateContent" if is_stream else "generateContent"
     path = V1INTERNAL_PATH_TEMPLATE.format(action=action)
-    url = f"{base_url}{path}"
+    url = join_url(base_url, path)
     if is_stream:
         effective_query_params.setdefault("alt", "sse")
     if effective_query_params:

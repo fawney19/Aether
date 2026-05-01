@@ -128,6 +128,15 @@ class FailoverRulesConfig(BaseModel):
     )
 
 
+class ErrorPassthroughRulesConfig(BaseModel):
+    """错误透传规则配置。"""
+
+    patterns: list[FailoverRuleItem] = Field(
+        default_factory=list,
+        description="错误透传规则: HTTP 非 2xx 且响应体匹配正则时，向客户端返回上游原始错误信息",
+    )
+
+
 class ScoringWeightsConfig(BaseModel):
     """多维评分权重配置。"""
 
@@ -204,13 +213,6 @@ class SchedulingPresetItem(BaseModel):
 
 class PoolAdvancedConfig(BaseModel):
     """通用号池配置（适用于所有 Provider 类型）。"""
-
-    global_priority: int | None = Field(
-        None,
-        ge=0,
-        le=999999,
-        description="global_key 模式下号池整体优先级（数字越小越优先）",
-    )
     sticky_session_ttl_seconds: int | None = Field(
         None,
         ge=60,
@@ -422,6 +424,9 @@ class CreateProviderRequest(BaseModel):
         None, description="Claude Code 特有配置"
     )
     failover_rules: FailoverRulesConfig | None = Field(None, description="故障转移规则配置")
+    error_passthrough_rules: ErrorPassthroughRulesConfig | None = Field(
+        None, description="错误透传规则配置"
+    )
     config: dict[str, Any] | None = Field(None, description="其他配置")
 
     @field_validator("provider_type")
@@ -536,6 +541,9 @@ class UpdateProviderRequest(BaseModel):
         None, description="Claude Code 特有配置"
     )
     failover_rules: FailoverRulesConfig | None = Field(None, description="故障转移规则配置")
+    error_passthrough_rules: ErrorPassthroughRulesConfig | None = Field(
+        None, description="错误透传规则配置"
+    )
     enable_format_conversion: bool | None = Field(
         None, description="是否允许格式转换（提供商级别开关）"
     )
@@ -590,11 +598,65 @@ class CreateEndpointRequest(BaseModel):
     @field_validator("base_url")
     @classmethod
     def validate_base_url(cls, v: str) -> str:
-        """验证 API URL"""
-        if not re.match(r"^https?://", v, re.IGNORECASE):
+        """验证并规范化 base_url。
+
+        规则：
+        - 去除前后空白
+        - 必须以 http:// 或 https:// 开头
+        - 不允许 query（?）、fragment（#）
+        - 不允许包含业务路径关键字（/chat/completions 等）——应填到 custom_path
+        - scheme 与 host 小写化，path 保留大小写
+        - 去除尾部斜杠
+        """
+        from urllib.parse import urlparse, urlunparse
+
+        value = (v or "").strip()
+        if not value:
+            raise ValueError("URL 不能为空")
+        if not re.match(r"^https?://", value, re.IGNORECASE):
             raise ValueError("URL 必须以 http:// 或 https:// 开头")
 
-        return v.rstrip("/")  # 移除末尾斜杠
+        parsed = urlparse(value)
+        if parsed.query:
+            raise ValueError("base_url 不能包含查询参数（?xxx），请在对应位置单独配置")
+        if parsed.fragment:
+            raise ValueError("base_url 不能包含片段（#xxx）")
+
+        # 业务路径关键字：出现在 path 中即视为用户把完整端点塞进了 base_url
+        # Gemini 场景的路径是 `.../models/xxx:generateContent`（冒号分隔），
+        # 因此这里用包含匹配而不要求前导 "/"。
+        _BUSINESS_PATHS = (
+            "/chat/completions",
+            "/messages",
+            "/responses",
+            "/images/generations",
+            "/images/edits",
+            "/videos",
+            "generatecontent",
+            "streamgeneratecontent",
+            "predictlongrunning",
+        )
+        path_lower = (parsed.path or "").lower()
+        for biz in _BUSINESS_PATHS:
+            if biz in path_lower:
+                raise ValueError(
+                    f"base_url 不应包含业务路径（{biz}）。请把协议+域名（+反代前缀）"
+                    "填到 base_url，把完整端点路径填到自定义路径。"
+                )
+
+        scheme = (parsed.scheme or "").lower()
+        host = (parsed.hostname or "").lower()
+        netloc = host
+        if parsed.port is not None:
+            netloc = f"{host}:{parsed.port}"
+        if parsed.username or parsed.password:
+            userinfo = parsed.username or ""
+            if parsed.password:
+                userinfo = f"{userinfo}:{parsed.password}"
+            netloc = f"{userinfo}@{netloc}"
+
+        normalized = urlunparse((scheme, netloc, parsed.path or "", "", "", ""))
+        return normalized.rstrip("/")
 
     @field_validator("api_format")
     @classmethod
@@ -612,15 +674,27 @@ class CreateEndpointRequest(BaseModel):
     @field_validator("custom_path")
     @classmethod
     def validate_custom_path(cls, v: str | None) -> str | None:
-        """验证自定义路径"""
+        """验证自定义路径。
+
+        放开字符集以支持 Gemini 的 `:`、模板变量 `{model}` 等。
+        - 必须以 `/` 开头
+        - 允许字母、数字、斜杠、下划线、连字符、点、冒号、花括号
+        - 不允许 query/fragment/空白（由 transport hook 追加）
+        """
         if v is None:
             return v
 
-        # 确保路径不包含危险字符
-        if not re.match(r"^[/a-zA-Z0-9_-]+$", v):
-            raise ValueError("路径只能包含字母、数字、斜杠、下划线和连字符")
+        value = v.strip()
+        if not value:
+            return None
+        if not value.startswith("/"):
+            raise ValueError("自定义路径必须以 / 开头")
+        if not re.match(r"^/[A-Za-z0-9/_\-.:{}]+$", value):
+            raise ValueError(
+                "路径只能包含字母、数字、/、_、-、.、:、{、}（query/fragment 不允许）"
+            )
 
-        return v
+        return value
 
 
 class UpdateEndpointRequest(BaseModel):
@@ -693,14 +767,7 @@ class UpdateUserRequest(BaseModel):
     unlimited: bool | None = Field(None, description="是否无限制（true=无限制，false=有限制）")
     is_active: bool | None = None
     role: str | None = None
-    allowed_providers: list[str] | None = Field(None, description="允许使用的提供商 ID 列表")
-    allowed_api_formats: list[str] | None = Field(None, description="允许使用的 API 格式列表")
-    allowed_models: list[str] | None = Field(None, description="允许使用的模型名称列表")
-    rate_limit: int | None = Field(
-        None,
-        ge=0,
-        description="每分钟请求限制；null 表示继承系统默认，0 表示不限制",
-    )
+    group_id: str | None = Field(None, description="所属用户分组 ID；null 表示不分组")
 
     @field_validator("username")
     @classmethod
@@ -727,6 +794,14 @@ class UpdateUserRequest(BaseModel):
             raise ValueError("邮箱格式不正确")
 
         return v.lower()
+
+    @field_validator("group_id")
+    @classmethod
+    def validate_group_id(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
 
     @field_validator("password")
     @classmethod

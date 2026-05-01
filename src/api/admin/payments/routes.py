@@ -20,6 +20,7 @@ from src.services.payment import PaymentService
 
 router = APIRouter(prefix="/api/admin/payments", tags=["Admin - Payments"])
 pipeline = get_pipeline()
+RECHARGE_ORDER_TYPE = "topup"
 
 
 class AdminPaymentOrderCreditPayload(BaseModel):
@@ -51,6 +52,7 @@ def _list_payment_orders_sync(
             db,
             status=status,
             payment_method=payment_method,
+            order_types=RECHARGE_ORDER_TYPE,
             limit=limit,
             offset=offset,
         )
@@ -62,20 +64,23 @@ def _list_payment_orders_sync(
         }
 
 
+def _get_recharge_payment_order_or_raise(db: Session, order_id: str) -> Any:
+    order = PaymentService.get_order(db, order_id=order_id)
+    if order is None or str(getattr(order, "order_type", "")) != RECHARGE_ORDER_TYPE:
+        raise NotFoundException("充值订单不存在", "payment_order")
+    return order
+
+
 def _get_payment_order_sync(order_id: str) -> dict[str, Any]:
     with get_db_context() as db:
-        order = PaymentService.get_order(db, order_id=order_id)
-        if order is None:
-            raise NotFoundException("Payment order not found")
+        order = _get_recharge_payment_order_or_raise(db, order_id)
         PaymentService.refresh_order_status(order)
         return {"order": serialize_payment_order(order)}
 
 
 def _expire_payment_order_sync(order_id: str) -> dict[str, Any]:
     with get_db_context() as db:
-        order = PaymentService.get_order(db, order_id=order_id)
-        if order is None:
-            raise NotFoundException("Payment order not found")
+        order = _get_recharge_payment_order_or_raise(db, order_id)
         try:
             updated, expired = PaymentService.expire_order(
                 db,
@@ -93,9 +98,7 @@ def _credit_payment_order_sync(
     operator_id: str | None,
 ) -> dict[str, Any]:
     with get_db_context() as db:
-        order = PaymentService.get_order(db, order_id=order_id)
-        if order is None:
-            raise NotFoundException("Payment order not found")
+        order = _get_recharge_payment_order_or_raise(db, order_id)
 
         gateway_response = dict(order.gateway_response or {})
         if payload.gateway_response:
@@ -112,17 +115,51 @@ def _credit_payment_order_sync(
                 pay_amount=payload.pay_amount,
                 pay_currency=payload.pay_currency,
                 exchange_rate=payload.exchange_rate,
+                operator_id=operator_id,
             )
         except ValueError as exc:
             raise InvalidRequestException(str(exc)) from exc
         return {"order": serialize_payment_order(updated), "credited": credited}
 
 
+def _approve_payment_order_sync(
+    order_id: str,
+    payload: AdminPaymentOrderCreditPayload,
+    operator_id: str | None,
+) -> dict[str, Any]:
+    with get_db_context() as db:
+        order = _get_recharge_payment_order_or_raise(db, order_id)
+        if str(order.payment_method or "") not in {"manual", "manual_review"}:
+            raise InvalidRequestException("仅人工充值订单支持审批")
+        if str(order.status or "") != "pending_approval":
+            raise InvalidRequestException("当前订单不处于待审核状态")
+
+        gateway_response = dict(order.gateway_response or {})
+        if payload.gateway_response:
+            gateway_response.update(payload.gateway_response)
+        gateway_response["manual_credit"] = True
+        gateway_response["credited_by"] = operator_id
+        gateway_response["approved_by"] = operator_id
+
+        try:
+            updated, _credited = PaymentService.credit_order(
+                db,
+                order=order,
+                gateway_order_id=payload.gateway_order_id,
+                gateway_response=gateway_response,
+                pay_amount=payload.pay_amount,
+                pay_currency=payload.pay_currency,
+                exchange_rate=payload.exchange_rate,
+                operator_id=operator_id,
+            )
+        except ValueError as exc:
+            raise InvalidRequestException(str(exc)) from exc
+        return {"order": serialize_payment_order(updated)}
+
+
 def _fail_payment_order_sync(order_id: str) -> dict[str, Any]:
     with get_db_context() as db:
-        order = PaymentService.get_order(db, order_id=order_id)
-        if order is None:
-            raise NotFoundException("Payment order not found")
+        order = _get_recharge_payment_order_or_raise(db, order_id)
         try:
             updated = PaymentService.fail_order(
                 db,
@@ -131,6 +168,29 @@ def _fail_payment_order_sync(order_id: str) -> dict[str, Any]:
             )
         except ValueError as exc:
             raise InvalidRequestException(str(exc)) from exc
+        return {"order": serialize_payment_order(updated)}
+
+
+def _reject_payment_order_sync(order_id: str, operator_id: str | None) -> dict[str, Any]:
+    with get_db_context() as db:
+        order = _get_recharge_payment_order_or_raise(db, order_id)
+        if str(order.payment_method or "") not in {"manual", "manual_review"}:
+            raise InvalidRequestException("仅人工充值订单支持审批")
+        if str(order.status or "") != "pending_approval":
+            raise InvalidRequestException("当前订单不处于待审核状态")
+
+        try:
+            updated = PaymentService.fail_order(
+                db,
+                order=order,
+                reason="admin_rejected",
+            )
+        except ValueError as exc:
+            raise InvalidRequestException(str(exc)) from exc
+
+        gateway_response = dict(updated.gateway_response or {})
+        gateway_response["rejected_by"] = operator_id
+        updated.gateway_response = gateway_response
         return {"order": serialize_payment_order(updated)}
 
 
@@ -182,6 +242,16 @@ async def credit_payment_order(
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
+@router.post("/orders/{order_id}/approve")
+async def approve_payment_order(
+    order_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    adapter = AdminPaymentOrderApproveAdapter(order_id=order_id)
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
 @router.post("/orders/{order_id}/fail")
 async def fail_payment_order(
     order_id: str,
@@ -189,6 +259,16 @@ async def fail_payment_order(
     db: Session = Depends(get_db),
 ) -> Any:
     adapter = AdminPaymentOrderFailAdapter(order_id=order_id)
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.post("/orders/{order_id}/reject")
+async def reject_payment_order(
+    order_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    adapter = AdminPaymentOrderRejectAdapter(order_id=order_id)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
@@ -258,11 +338,39 @@ class AdminPaymentOrderCreditAdapter(AdminApiAdapter):
 
 
 @dataclass
+class AdminPaymentOrderApproveAdapter(AdminApiAdapter):
+    order_id: str
+
+    async def handle(self, context: ApiRequestContext) -> dict[str, Any]:
+        raw_payload = context.ensure_json_body() if context.raw_body else {}
+        req = _parse_payload(AdminPaymentOrderCreditPayload, raw_payload)
+
+        return await run_in_threadpool(
+            _approve_payment_order_sync,
+            self.order_id,
+            req,
+            context.user.id if context.user else None,
+        )
+
+
+@dataclass
 class AdminPaymentOrderFailAdapter(AdminApiAdapter):
     order_id: str
 
     async def handle(self, context: ApiRequestContext) -> dict[str, Any]:
         return await run_in_threadpool(_fail_payment_order_sync, self.order_id)
+
+
+@dataclass
+class AdminPaymentOrderRejectAdapter(AdminApiAdapter):
+    order_id: str
+
+    async def handle(self, context: ApiRequestContext) -> dict[str, Any]:
+        return await run_in_threadpool(
+            _reject_payment_order_sync,
+            self.order_id,
+            context.user.id if context.user else None,
+        )
 
 
 @dataclass
@@ -275,6 +383,7 @@ class AdminPaymentCallbackListAdapter(AdminApiAdapter):
         items, total = PaymentService.list_callbacks(
             context.db,
             payment_method=self.payment_method,
+            order_types=RECHARGE_ORDER_TYPE,
             limit=self.limit,
             offset=self.offset,
         )

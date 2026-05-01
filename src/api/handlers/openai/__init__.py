@@ -10,6 +10,8 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "OpenAIChatHandler": (".handler", "OpenAIChatHandler"),
     "OpenAIVideoAdapter": (".video_adapter", "OpenAIVideoAdapter"),
     "OpenAIVideoHandler": (".video_handler", "OpenAIVideoHandler"),
+    "OpenAIImageAdapter": (".image_adapter", "OpenAIImageAdapter"),
+    "OpenAIImageHandler": (".image_handler", "OpenAIImageHandler"),
 }
 
 __all__ = list(_LAZY_EXPORTS.keys())

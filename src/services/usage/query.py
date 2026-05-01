@@ -202,6 +202,9 @@ class UsageQueryMixin:
                 return RequestBalanceCheckResult(False, "Key欠费，请先调账或充值", remaining)
             return RequestBalanceCheckResult(False, "账户欠费，请先充值", remaining)
 
+        if wallet_access.message.startswith("订阅额度已用尽"):
+            return RequestBalanceCheckResult(False, wallet_access.message, remaining)
+
         if wallet_access.message == "钱包不可用":
             if api_key and api_key.is_standalone:
                 return RequestBalanceCheckResult(False, "Key钱包不可用", remaining)

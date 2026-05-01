@@ -101,10 +101,12 @@ SENSITIVE_HEADERS: frozenset[str] = UPSTREAM_DROP_HEADERS
 
 # 标准测试请求体（OpenAI 格式）
 # 用于 check_endpoint 等测试场景，使用简单安全的消息内容避免触发安全过滤
+# 注意：不包含 temperature 等采样参数——部分模型（o 系列、DeepSeek-R1、QwQ 等）
+# 会拒绝显式 temperature，返回 "temperature is deprecated for this model"。
+# 探测请求只验证连通性，不需要控制随机性。
 DEFAULT_TEST_REQUEST: dict[str, Any] = {
     "messages": [{"role": "user", "content": "Hi"}],
     "max_tokens": 5,
-    "temperature": 0,
 }
 
 

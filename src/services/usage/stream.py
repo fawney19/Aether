@@ -112,8 +112,7 @@ class StreamUsageTracker:
         self.output_tokens = 0
         self.cache_creation_input_tokens = 0
         self.cache_read_input_tokens = 0
-        self.cache_creation_input_tokens_5m = 0
-        self.cache_creation_input_tokens_1h = 0
+        self.cache_ttl_minutes = None
         self._accumulated_content_len = 0  # 仅记录长度，不存储实际文本
 
         # 完整响应跟踪（仅用于内部统计，不记录到数据库）
@@ -387,6 +386,7 @@ class StreamUsageTracker:
             or chunk.output_tokens
             or chunk.cache_creation_tokens
             or chunk.cache_read_tokens
+            or chunk.cache_ttl_minutes is not None
         ):
             usage = {
                 "input_tokens": chunk.input_tokens or self.stream_stats.input_tokens,
@@ -396,6 +396,9 @@ class StreamUsageTracker:
                 "cache_read_input_tokens": chunk.cache_read_tokens
                 or self.stream_stats.cache_read_tokens,
             }
+            cache_ttl_minutes = chunk.cache_ttl_minutes or self.stream_stats.cache_ttl_minutes
+            if cache_ttl_minutes is not None:
+                usage["cache_ttl_minutes"] = cache_ttl_minutes
 
         # 更新响应 ID
         if chunk.response_id and not self.complete_response.get("id"):
@@ -580,9 +583,12 @@ class StreamUsageTracker:
                     total, t5m, t1h = extract_cache_creation_tokens_detail(usage)
                     if total:
                         self.cache_creation_input_tokens = total
-                    if t5m or t1h:
-                        self.cache_creation_input_tokens_5m = t5m
-                        self.cache_creation_input_tokens_1h = t1h
+                        if usage.get("cache_ttl_minutes") is not None:
+                            self.cache_ttl_minutes = int(usage["cache_ttl_minutes"])
+                        elif t1h > 0:
+                            self.cache_ttl_minutes = 60
+                        elif t5m > 0:
+                            self.cache_ttl_minutes = 5
 
         finally:
             # 流结束后记录使用量
@@ -791,8 +797,6 @@ class StreamUsageTracker:
                 output_tokens=self.output_tokens,
                 cache_creation_input_tokens=self.cache_creation_input_tokens,
                 cache_read_input_tokens=self.cache_read_input_tokens,
-                cache_creation_input_tokens_5m=self.cache_creation_input_tokens_5m,
-                cache_creation_input_tokens_1h=self.cache_creation_input_tokens_1h,
                 request_type="chat",
                 api_format=self.api_format,
                 api_family=self.api_family,
@@ -816,6 +820,7 @@ class StreamUsageTracker:
                 provider_api_key_id=self.provider_api_key_id,
                 # 请求状态
                 status=final_status,
+                cache_ttl_minutes=self.cache_ttl_minutes,
             )
 
             # 立即获取 total_cost_usd 的值，避免后续访问时对象已脱离会话
@@ -1084,6 +1089,8 @@ class EnhancedStreamUsageTracker(StreamUsageTracker):
                         self.cache_creation_input_tokens = usage["cache_creation_input_tokens"]
                     if "cache_read_input_tokens" in usage:
                         self.cache_read_input_tokens = usage["cache_read_input_tokens"]
+                    if usage.get("cache_ttl_minutes") is not None:
+                        self.cache_ttl_minutes = int(usage["cache_ttl_minutes"])
 
         finally:
             # 流结束后记录使用量

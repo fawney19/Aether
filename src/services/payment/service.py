@@ -38,6 +38,11 @@ class PaymentService:
         )
         return hashlib.sha256(encoded).hexdigest()
 
+    @staticmethod
+    def _is_manual_review_method(payment_method: str | None) -> bool:
+        normalized = str(payment_method or "").strip().lower()
+        return normalized in {"manual", "manual_review"}
+
     @classmethod
     def create_recharge_order(
         cls,
@@ -69,10 +74,12 @@ class PaymentService:
             raise ValueError("wallet is not active")
 
         now = datetime.now(timezone.utc)
+        is_manual_review = cls._is_manual_review_method(payment_method)
         order = PaymentOrder(
             order_no=cls._build_order_no(),
             wallet_id=wallet.id,
             user_id=user.id,
+            order_type="topup",
             amount_usd=amount,
             pay_amount=to_money_decimal(pay_amount) if pay_amount is not None else None,
             pay_currency=pay_currency,
@@ -82,14 +89,146 @@ class PaymentService:
             payment_method=payment_method,
             gateway_order_id=gateway_order_id,
             gateway_response=gateway_response,
-            status="pending",
-            expires_at=now + timedelta(minutes=max(expires_in_minutes, 1)),
+            status="pending_approval" if is_manual_review else "pending",
+            expires_at=(
+                None
+                if is_manual_review
+                else now + timedelta(minutes=max(expires_in_minutes, 1))
+            ),
         )
         db.add(order)
         db.flush()
         checkout = gateway.create_checkout_payload(order=order)
         order.gateway_order_id = order.gateway_order_id or checkout.get("gateway_order_id")
         order.gateway_response = gateway_response if gateway_response is not None else checkout
+        return order
+
+    @classmethod
+    def create_subscription_order(
+        cls,
+        db: Session,
+        *,
+        user: User,
+        subscription_id: str,
+        amount_usd: Decimal | float | int | str,
+        payment_method: str,
+        order_type: str,
+        pay_amount: Decimal | float | int | str | None = None,
+        pay_currency: str | None = None,
+        exchange_rate: Decimal | float | int | str | None = None,
+        expires_in_minutes: int = 30,
+        gateway_order_id: str | None = None,
+        gateway_response: dict[str, Any] | None = None,
+    ) -> PaymentOrder:
+        amount = to_money_decimal(amount_usd)
+        if amount <= Decimal("0"):
+            raise ValueError("subscription amount must be positive")
+        if not subscription_id:
+            raise ValueError("subscription_id is required")
+        if order_type not in {
+            "subscription_initial",
+            "subscription_upgrade",
+            "subscription_renewal",
+        }:
+            raise ValueError("unsupported subscription order type")
+        if not payment_method:
+            raise ValueError("payment_method is required")
+        if payment_method == "admin_manual":
+            raise ValueError("admin_manual is reserved for admin recharge")
+        gateway = get_payment_gateway(payment_method)
+
+        wallet = WalletService.get_or_create_wallet(db, user=user)
+        if wallet is None:
+            raise ValueError("wallet not available")
+        if wallet.status != "active":
+            raise ValueError("wallet is not active")
+
+        now = datetime.now(timezone.utc)
+        is_manual_review = cls._is_manual_review_method(payment_method)
+        order = PaymentOrder(
+            order_no=cls._build_order_no(),
+            wallet_id=wallet.id,
+            user_id=user.id,
+            subscription_id=subscription_id,
+            order_type=order_type,
+            amount_usd=amount,
+            pay_amount=to_money_decimal(pay_amount) if pay_amount is not None else None,
+            pay_currency=pay_currency,
+            exchange_rate=to_money_decimal(exchange_rate) if exchange_rate is not None else None,
+            refunded_amount_usd=Decimal("0"),
+            refundable_amount_usd=Decimal("0"),
+            payment_method=payment_method,
+            gateway_order_id=gateway_order_id,
+            gateway_response=gateway_response,
+            status="pending_approval" if is_manual_review else "pending",
+            expires_at=(
+                None
+                if is_manual_review
+                else now + timedelta(minutes=max(expires_in_minutes, 1))
+            ),
+        )
+        db.add(order)
+        db.flush()
+        checkout = gateway.create_checkout_payload(order=order)
+        order.gateway_order_id = order.gateway_order_id or checkout.get("gateway_order_id")
+        order.gateway_response = gateway_response if gateway_response is not None else checkout
+        return order
+
+    @classmethod
+    def create_settled_subscription_order(
+        cls,
+        db: Session,
+        *,
+        user: User,
+        subscription_id: str,
+        amount_usd: Decimal | float | int | str,
+        payment_method: str,
+        order_type: str,
+        gateway_response: dict[str, Any] | None = None,
+    ) -> PaymentOrder:
+        amount = to_money_decimal(amount_usd)
+        if amount < Decimal("0"):
+            raise ValueError("subscription amount cannot be negative")
+        if not subscription_id:
+            raise ValueError("subscription_id is required")
+        if order_type not in {
+            "subscription_initial",
+            "subscription_upgrade",
+            "subscription_renewal",
+        }:
+            raise ValueError("unsupported subscription order type")
+        if not payment_method:
+            raise ValueError("payment_method is required")
+
+        wallet = WalletService.get_or_create_wallet(db, user=user)
+        if wallet is None:
+            raise ValueError("wallet not available")
+        if wallet.status != "active":
+            raise ValueError("wallet is not active")
+
+        now = datetime.now(timezone.utc)
+        order = PaymentOrder(
+            order_no=cls._build_order_no(),
+            wallet_id=wallet.id,
+            user_id=user.id,
+            subscription_id=subscription_id,
+            order_type=order_type,
+            amount_usd=amount,
+            refunded_amount_usd=Decimal("0"),
+            refundable_amount_usd=amount,
+            payment_method=payment_method,
+            gateway_response=(
+                gateway_response
+                if gateway_response is not None
+                else {"gateway": payment_method, "manual_credit": True}
+            ),
+            status="credited",
+            paid_at=now,
+            credited_at=now,
+            expires_at=None,
+        )
+        db.add(order)
+        db.flush()
         return order
 
     @classmethod
@@ -132,9 +271,15 @@ class PaymentService:
         user_id: str,
         limit: int,
         offset: int,
+        order_types: str | list[str] | tuple[str, ...] | None = None,
     ) -> tuple[list[PaymentOrder], int, bool]:
         expired_count = cls.expire_overdue_pending_orders(db, user_id=user_id)
         q = db.query(PaymentOrder).filter(PaymentOrder.user_id == user_id)
+        if order_types:
+            if isinstance(order_types, str):
+                q = q.filter(PaymentOrder.order_type == order_types)
+            else:
+                q = q.filter(PaymentOrder.order_type.in_(list(order_types)))
         total = q.count()
         items = q.order_by(PaymentOrder.created_at.desc()).offset(offset).limit(limit).all()
         return items, total, expired_count > 0
@@ -146,6 +291,7 @@ class PaymentService:
         *,
         status: str | None = None,
         payment_method: str | None = None,
+        order_types: str | list[str] | tuple[str, ...] | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[PaymentOrder], int, bool]:
@@ -154,6 +300,7 @@ class PaymentService:
             expired_count = cls.expire_overdue_pending_orders(
                 db,
                 payment_method=payment_method,
+                order_types=order_types,
             )
 
         q = db.query(PaymentOrder)
@@ -161,6 +308,11 @@ class PaymentService:
             q = q.filter(PaymentOrder.status == status)
         if payment_method:
             q = q.filter(PaymentOrder.payment_method == payment_method)
+        if order_types:
+            if isinstance(order_types, str):
+                q = q.filter(PaymentOrder.order_type == order_types)
+            else:
+                q = q.filter(PaymentOrder.order_type.in_(list(order_types)))
         total = q.count()
         items = q.order_by(PaymentOrder.created_at.desc()).offset(offset).limit(limit).all()
         return items, total, expired_count > 0
@@ -171,6 +323,7 @@ class PaymentService:
         *,
         user_id: str | None = None,
         payment_method: str | None = None,
+        order_types: str | list[str] | tuple[str, ...] | None = None,
     ) -> int:
         now = datetime.now(timezone.utc)
         q = db.query(PaymentOrder).filter(
@@ -182,21 +335,48 @@ class PaymentService:
             q = q.filter(PaymentOrder.user_id == user_id)
         if payment_method:
             q = q.filter(PaymentOrder.payment_method == payment_method)
-        return int(q.update({PaymentOrder.status: "expired"}, synchronize_session=False) or 0)
+        if order_types:
+            if isinstance(order_types, str):
+                q = q.filter(PaymentOrder.order_type == order_types)
+            else:
+                q = q.filter(PaymentOrder.order_type.in_(list(order_types)))
+        orders = q.all()
+        count = 0
+        for order in orders:
+            _updated, changed = PaymentService.expire_order(
+                db,
+                order=order,
+                reason="payment order expired",
+            )
+            if changed:
+                count += 1
+        return count
 
     @staticmethod
     def list_callbacks(
         db: Session,
         *,
         payment_method: str | None = None,
+        order_types: str | list[str] | tuple[str, ...] | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[PaymentCallback], int]:
         q = db.query(PaymentCallback)
+        if order_types:
+            q = q.join(PaymentOrder, PaymentCallback.payment_order_id == PaymentOrder.id)
+            if isinstance(order_types, str):
+                q = q.filter(PaymentOrder.order_type == order_types)
+            else:
+                q = q.filter(PaymentOrder.order_type.in_(list(order_types)))
         if payment_method:
             q = q.filter(PaymentCallback.payment_method == payment_method)
         total = q.count()
-        items = q.order_by(PaymentCallback.created_at.desc()).offset(offset).limit(limit).all()
+        items = (
+            q.order_by(PaymentCallback.created_at.desc(), PaymentCallback.id.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
         return items, total
 
     @staticmethod
@@ -228,14 +408,33 @@ class PaymentService:
         )
         if locked_order is None:
             raise ValueError("payment order not found")
+        if locked_order.status == "failed":
+            return locked_order
         if locked_order.status == "credited":
             raise ValueError("credited order cannot be failed")
+        if locked_order.status in {"expired", "refunded"}:
+            raise ValueError(f"payment order cannot be marked failed: {locked_order.status}")
+        if locked_order.status not in {"pending", "pending_approval", "paid"}:
+            raise ValueError(f"payment order is not fail-markable: {locked_order.status}")
         locked_order.status = "failed"
         payload = dict(locked_order.gateway_response or {})
         if reason:
             payload["failure_reason"] = reason
         payload["failed_at"] = datetime.now(timezone.utc).isoformat()
         locked_order.gateway_response = payload
+        if locked_order.subscription_id and locked_order.order_type in {
+            "subscription_initial",
+            "subscription_upgrade",
+            "subscription_renewal",
+        }:
+            from src.services.subscription import SubscriptionService
+
+            SubscriptionService.cancel_pending_subscription(
+                db,
+                locked_order.subscription_id,
+                reason="payment_failed",
+                commit=False,
+            )
         return locked_order
 
     @classmethod
@@ -258,7 +457,7 @@ class PaymentService:
             raise ValueError("credited order cannot be expired")
         if locked_order.status == "expired":
             return locked_order, False
-        if locked_order.status != "pending":
+        if locked_order.status not in {"pending", "pending_approval"}:
             raise ValueError(f"only pending order can be expired: {locked_order.status}")
 
         locked_order.status = "expired"
@@ -267,6 +466,19 @@ class PaymentService:
             payload["expire_reason"] = reason
         payload["expired_at"] = datetime.now(timezone.utc).isoformat()
         locked_order.gateway_response = payload
+        if locked_order.subscription_id and locked_order.order_type in {
+            "subscription_initial",
+            "subscription_upgrade",
+            "subscription_renewal",
+        }:
+            from src.services.subscription import SubscriptionService
+
+            SubscriptionService.cancel_pending_subscription(
+                db,
+                locked_order.subscription_id,
+                reason="user_cancelled" if reason == "user_cancelled" else "payment_failed",
+                commit=False,
+            )
         return locked_order, True
 
     @classmethod
@@ -317,6 +529,7 @@ class PaymentService:
         pay_amount: Decimal | float | int | str | None = None,
         pay_currency: str | None = None,
         exchange_rate: Decimal | float | int | str | None = None,
+        operator_id: str | None = None,
     ) -> tuple[PaymentOrder, bool]:
         locked_order = (
             db.query(PaymentOrder)
@@ -337,12 +550,6 @@ class PaymentService:
             locked_order.status = "expired"
             raise ValueError("payment order expired")
 
-        wallet = db.query(Wallet).filter(Wallet.id == locked_order.wallet_id).first()
-        if wallet is None:
-            raise ValueError("wallet not found")
-        if wallet.status != "active":
-            raise ValueError("wallet is not active")
-
         if gateway_order_id:
             locked_order.gateway_order_id = gateway_order_id
         if gateway_response is not None:
@@ -356,19 +563,50 @@ class PaymentService:
 
         locked_order.status = "paid"
         locked_order.paid_at = locked_order.paid_at or now
-        locked_order.refundable_amount_usd = to_money_decimal(locked_order.amount_usd)
 
-        WalletService.create_wallet_transaction(
-            db,
-            wallet=wallet,
-            category="recharge",
-            reason_code="topup_gateway",
-            amount=locked_order.amount_usd,
-            balance_type="recharge",
-            link_type="payment_order",
-            link_id=locked_order.id,
-            description=f"充值到账({locked_order.payment_method})",
-        )
+        order_type = str(locked_order.order_type or "topup")
+
+        if order_type == "topup":
+            wallet = db.query(Wallet).filter(Wallet.id == locked_order.wallet_id).first()
+            if wallet is None:
+                raise ValueError("wallet not found")
+            if wallet.status != "active":
+                raise ValueError("wallet is not active")
+
+            is_manual_topup = str(locked_order.payment_method or "") in {"manual", "manual_review"}
+            locked_order.refundable_amount_usd = to_money_decimal(locked_order.amount_usd)
+            WalletService.create_wallet_transaction(
+                db,
+                wallet=wallet,
+                category="recharge",
+                reason_code="topup_admin_manual" if is_manual_topup else "topup_gateway",
+                amount=locked_order.amount_usd,
+                balance_type="recharge",
+                link_type="payment_order",
+                link_id=locked_order.id,
+                operator_id=operator_id,
+                description=(
+                    "充值到账(人工充值)"
+                    if is_manual_topup
+                    else f"充值到账({locked_order.payment_method})"
+                ),
+            )
+        elif order_type in {
+            "subscription_initial",
+            "subscription_upgrade",
+            "subscription_renewal",
+        }:
+            if not locked_order.subscription_id:
+                raise ValueError("subscription order missing subscription_id")
+            from src.services.subscription import SubscriptionService
+
+            SubscriptionService.activate_pending_subscription(
+                db,
+                locked_order.subscription_id,
+                commit=False,
+            )
+        else:
+            raise ValueError(f"unsupported payment order type: {locked_order.order_type}")
 
         locked_order.status = "credited"
         locked_order.credited_at = now

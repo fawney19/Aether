@@ -34,7 +34,11 @@ def test_claude_code_claude_cli_uses_messages_path() -> None:
     assert url == "https://api.anthropic.com/v1/messages"
 
 
-def test_claude_code_claude_cli_does_not_duplicate_messages_suffix() -> None:
+def test_claude_code_claude_cli_bad_input_is_not_deduped() -> None:
+    """用户把完整业务路径塞进 base_url 是坏输入，按新规则直接拼，不再去重。
+
+    validator 会拦截这种保存，但历史数据可能残留；运行时如实拼接，让用户看到问题。
+    """
     endpoint = _DummyEndpoint(
         base_url="https://api.anthropic.com/v1/messages",
         api_format="claude:cli",
@@ -47,12 +51,13 @@ def test_claude_code_claude_cli_does_not_duplicate_messages_suffix() -> None:
         is_stream=False,
     )
 
-    assert url == "https://api.anthropic.com/v1/messages"
+    assert url == "https://api.anthropic.com/v1/messages/v1/messages"
 
 
 def test_claude_code_claude_cli_appends_query_params() -> None:
+    """干净 base_url 场景：不嗅探 /v1 后缀，直接拼接。"""
     endpoint = _DummyEndpoint(
-        base_url="https://api.anthropic.com/v1",
+        base_url="https://api.anthropic.com",
         api_format="claude:cli",
         provider=SimpleNamespace(provider_type="claude_code"),
     )

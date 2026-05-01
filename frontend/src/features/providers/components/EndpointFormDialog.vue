@@ -138,6 +138,13 @@
                   </Button>
                 </div>
               </div>
+              <!-- URL 预览 -->
+              <div
+                v-if="getEndpointPreviewUrl(endpoint)"
+                class="text-xs text-muted-foreground font-mono break-all"
+              >
+                上游请求 URL：<span class="text-foreground">{{ getEndpointPreviewUrl(endpoint) }}</span>
+              </div>
 
               <!-- 请求规则（合并请求头和请求体规则） -->
               <Collapsible v-model:open="endpointRulesExpanded[endpoint.id]">
@@ -713,7 +720,7 @@
           </Button>
         </div>
         <!-- 卡片内容：URL 配置 -->
-        <div class="p-4">
+        <div class="p-4 space-y-2">
           <div class="flex items-end gap-3">
             <div class="flex-1 min-w-0 grid grid-cols-3 gap-3">
               <div class="col-span-2 space-y-1.5">
@@ -733,6 +740,13 @@
                 />
               </div>
             </div>
+          </div>
+          <!-- URL 预览 -->
+          <div
+            v-if="newEndpointPreviewUrl"
+            class="text-xs text-muted-foreground font-mono break-all"
+          >
+            上游请求 URL：<span class="text-foreground">{{ newEndpointPreviewUrl }}</span>
           </div>
         </div>
       </div>
@@ -794,6 +808,7 @@ import { Settings, Trash2, Check, X, Power, ChevronRight, Plus, Shuffle, RotateC
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
+import { joinUrl } from '@/utils/url'
 import AlertDialog from '@/components/common/AlertDialog.vue'
 import EndpointConditionEditor from './EndpointConditionEditor.vue'
 import {
@@ -1275,7 +1290,8 @@ async function preloadDefaultBodyRules(endpoints: ProviderEndpoint[]): Promise<v
 }
 
 // 获取指定 API 格式的默认路径
-function getDefaultPath(apiFormat: string, baseUrl?: string): string {
+function getDefaultPath(apiFormat: string, _baseUrl?: string): string {
+  void _baseUrl
   const providerType = (props.provider?.provider_type || '').toLowerCase()
   if (providerType === 'vertex_ai') {
     if (apiFormat === 'gemini:chat') {
@@ -1288,11 +1304,8 @@ function getDefaultPath(apiFormat: string, baseUrl?: string): string {
 
   const format = apiFormats.value.find(f => f.value === apiFormat)
   const defaultPath = format?.default_path || ''
-  // Codex 端点使用 /responses 而非 /v1/responses
-  const isCodex = providerType
-    ? providerType === 'codex'
-    : (!!baseUrl && isCodexUrl(baseUrl))
-  if (apiFormat === 'openai:cli' && isCodex) {
+  // Codex 端点使用 /responses 而非 /v1/responses（仅按 provider_type 判定）
+  if (apiFormat === 'openai:cli' && providerType === 'codex') {
     return '/responses'
   }
   return defaultPath
@@ -1305,10 +1318,13 @@ function getDisplayedPath(endpoint: ProviderEndpoint): string {
   return getEndpointEditState(endpoint.id)?.path ?? (endpoint.custom_path || '')
 }
 
-// 判断是否是 Codex OAuth 端点
-function isCodexUrl(baseUrl: string): boolean {
-  const url = baseUrl.replace(/\/+$/, '')
-  return url.includes('/backend-api/codex') || url.endsWith('/codex')
+// 预览：把 base_url + (custom_path 或 default_path) 拼出完整 URL
+function getEndpointPreviewUrl(endpoint: ProviderEndpoint): string {
+  const state = getEndpointEditState(endpoint.id)
+  const base = state?.url ?? endpoint.base_url ?? ''
+  const rawPath = state?.path ?? endpoint.custom_path ?? ''
+  const path = rawPath.trim() || getDefaultPath(endpoint.api_format, base)
+  return joinUrl(base, path)
 }
 
 // 读取端点的上游流式策略（endpoint.config.upstream_stream_policy）
@@ -2168,6 +2184,15 @@ const newEndpointDefaultPath = computed(() => {
   // 使用填写的 base_url 或 provider 的 website 来判断是否是 Codex 端点
   const baseUrl = newEndpoint.value.base_url || props.provider?.website || ''
   return getDefaultPath(newEndpoint.value.api_format, baseUrl)
+})
+
+// 新端点的 URL 预览
+const newEndpointPreviewUrl = computed(() => {
+  const base = newEndpoint.value.base_url?.trim() || props.provider?.website?.trim() || ''
+  const rawPath = newEndpoint.value.custom_path?.trim() || ''
+  const path = rawPath || newEndpointDefaultPath.value
+  if (!base && !path) return ''
+  return joinUrl(base, path)
 })
 
 // 加载 API 格式列表

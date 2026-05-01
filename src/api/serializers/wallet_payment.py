@@ -24,6 +24,7 @@ def safe_gateway_response(raw: dict[str, Any] | None) -> dict[str, Any]:
         "qr_code",
         "expires_at",
         "manual_credit",
+        "instructions",
     }
     return {key: raw[key] for key in allowed_keys if key in raw}
 
@@ -38,6 +39,7 @@ def serialize_payment_order(
         "order_no": order.order_no,
         "wallet_id": order.wallet_id,
         "user_id": order.user_id,
+        "subscription_id": order.subscription_id,
         "amount_usd": float(order.amount_usd or 0),
         "pay_amount": float(order.pay_amount or 0) if order.pay_amount is not None else None,
         "pay_currency": order.pay_currency,
@@ -47,6 +49,7 @@ def serialize_payment_order(
         "refunded_amount_usd": float(order.refunded_amount_usd or 0),
         "refundable_amount_usd": float(order.refundable_amount_usd or 0),
         "payment_method": order.payment_method,
+        "order_type": order.order_type,
         "gateway_order_id": order.gateway_order_id,
         "gateway_response": (
             safe_gateway_response(order.gateway_response)
@@ -169,24 +172,26 @@ def serialize_wallet_refund(refund: RefundRequest) -> dict[str, Any]:
     }
 
 
-def _wallet_owner(wallet: Wallet | None) -> tuple[str, str | None]:
+def _wallet_owner(wallet: Wallet | None) -> tuple[str, str | None, str | None]:
     if wallet is None:
-        return "unknown", None
+        return "unknown", None, None
     owner_name: str | None = None
+    owner_email: str | None = None
     if wallet.user_id:
         owner_name = wallet.user.username if wallet.user else None
-        return "user", owner_name
+        owner_email = wallet.user.email if wallet.user else None
+        return "user", owner_name, owner_email
     if wallet.api_key_id:
         if wallet.api_key:
             owner_name = wallet.api_key.name or f"Key-{wallet.api_key.id[:8]}"
         else:
             owner_name = f"Key-{wallet.api_key_id[:8]}"
-        return "api_key", owner_name
-    return "orphaned", None
+        return "api_key", owner_name, None
+    return "orphaned", None, None
 
 
 def serialize_admin_wallet(wallet: Wallet) -> dict[str, Any]:
-    owner_type, owner_name = _wallet_owner(wallet)
+    owner_type, owner_name, owner_email = _wallet_owner(wallet)
     summary = WalletService.serialize_wallet_summary(wallet)
     return {
         "id": wallet.id,
@@ -194,6 +199,7 @@ def serialize_admin_wallet(wallet: Wallet) -> dict[str, Any]:
         "api_key_id": wallet.api_key_id,
         "owner_type": owner_type,
         "owner_name": owner_name,
+        "owner_email": owner_email,
         "balance": summary["balance"],
         "recharge_balance": summary["recharge_balance"],
         "gift_balance": summary["gift_balance"],
@@ -212,13 +218,14 @@ def serialize_admin_wallet(wallet: Wallet) -> dict[str, Any]:
 
 
 def serialize_admin_wallet_transaction(tx: WalletTransaction) -> dict[str, Any]:
-    owner_type, owner_name = _wallet_owner(tx.wallet)
+    owner_type, owner_name, owner_email = _wallet_owner(tx.wallet)
     wallet_status = tx.wallet.status if tx.wallet is not None else None
     return {
         "id": tx.id,
         "wallet_id": tx.wallet_id,
         "owner_type": owner_type,
         "owner_name": owner_name,
+        "owner_email": owner_email,
         "wallet_status": wallet_status,
         "category": tx.category,
         "reason_code": tx.reason_code,
@@ -240,7 +247,7 @@ def serialize_admin_wallet_transaction(tx: WalletTransaction) -> dict[str, Any]:
 
 
 def serialize_admin_wallet_refund(refund: RefundRequest) -> dict[str, Any]:
-    owner_type, owner_name = _wallet_owner(refund.wallet)
+    owner_type, owner_name, owner_email = _wallet_owner(refund.wallet)
     wallet_status = refund.wallet.status if refund.wallet is not None else None
     return {
         "id": refund.id,
@@ -248,6 +255,7 @@ def serialize_admin_wallet_refund(refund: RefundRequest) -> dict[str, Any]:
         "wallet_id": refund.wallet_id,
         "owner_type": owner_type,
         "owner_name": owner_name,
+        "owner_email": owner_email,
         "wallet_status": wallet_status,
         "user_id": refund.user_id,
         "payment_order_id": refund.payment_order_id,

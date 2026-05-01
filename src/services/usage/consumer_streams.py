@@ -22,6 +22,7 @@ from src.clients.redis_client import get_usage_queue_redis_client as get_redis_c
 from src.config.settings import config
 from src.core.logger import logger
 from src.database.database import create_session
+from src.services.usage._db_retry import run_async_db_retry
 from src.services.usage.events import UsageEvent, UsageEventType
 from src.services.usage.service import UsageService
 
@@ -59,8 +60,7 @@ def _event_to_record(event: UsageEvent) -> dict[str, Any]:
         "output_tokens": data.get("output_tokens") or 0,
         "cache_creation_input_tokens": data.get("cache_creation_input_tokens") or 0,
         "cache_read_input_tokens": data.get("cache_read_input_tokens") or 0,
-        "cache_creation_input_tokens_5m": data.get("cache_creation_input_tokens_5m") or 0,
-        "cache_creation_input_tokens_1h": data.get("cache_creation_input_tokens_1h") or 0,
+        "cache_ttl_minutes": data.get("cache_ttl_minutes"),
         "request_type": data.get("request_type") or "chat",
         "api_format": data.get("api_format"),
         "api_family": data.get("api_family"),
@@ -84,6 +84,9 @@ def _event_to_record(event: UsageEvent) -> dict[str, Any]:
         "provider_id": data.get("provider_id"),
         "provider_endpoint_id": data.get("provider_endpoint_id"),
         "provider_api_key_id": data.get("provider_api_key_id"),
+        "model_group_id": data.get("model_group_id"),
+        "model_group_route_id": data.get("model_group_route_id"),
+        "user_billing_multiplier": data.get("user_billing_multiplier"),
         "status": status,
         "target_model": data.get("target_model"),
         "finalized_at": finalized_at,
@@ -152,11 +155,20 @@ class UsageQueueConsumer:
         否则会导致 Redis 连接泄漏（每次 asyncio.run 都会在 _redis_by_loop 中
         注册一个短命循环的连接，且永远不会被清理）。
         """
-        db = create_session()
-        try:
-            await UsageService.record_usage_batch(db, records)
-        finally:
-            db.close()
+        async def _write() -> None:
+            db = create_session()
+            try:
+                await UsageService.record_usage_batch(db, records)
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
+        await run_async_db_retry(
+            _write,
+            context=f"usage_queue.batch:{len(records)}",
+        )
 
     async def start(self) -> None:
         if self._running:

@@ -107,6 +107,49 @@ def extract_cache_creation_tokens_detail(usage: dict[str, Any]) -> tuple[int, in
     return old, 0, 0
 
 
+def extract_cache_ttl_minutes(usage: dict[str, Any]) -> int | None:
+    """
+    提取 Claude 缓存创建 TTL。
+
+    返回值只基于明确携带 TTL 语义的字段：
+    - usage.cache_ttl_minutes
+    - usage.cache_creation.ephemeral_5m_input_tokens / ephemeral_1h_input_tokens
+    - usage.claude_cache_creation_5_m_tokens / claude_cache_creation_1_h_tokens
+
+    旧字段 cache_creation_input_tokens 只有合计值，无法区分 5m/1h，因此返回 None。
+    记录/计费层可在没有更明确信号时再默认回落到 5m。
+    """
+    explicit_ttl = usage.get("cache_ttl_minutes")
+    if explicit_ttl is not None:
+        try:
+            return int(explicit_ttl)
+        except (TypeError, ValueError):
+            return None
+
+    cache_creation = usage.get("cache_creation")
+    if isinstance(cache_creation, dict) and (
+        "ephemeral_5m_input_tokens" in cache_creation
+        or "ephemeral_1h_input_tokens" in cache_creation
+    ):
+        t5m = int(cache_creation.get("ephemeral_5m_input_tokens", 0) or 0)
+        t1h = int(cache_creation.get("ephemeral_1h_input_tokens", 0) or 0)
+        if t1h > 0:
+            return 60
+        if t5m > 0:
+            return 5
+        return None
+
+    if "claude_cache_creation_5_m_tokens" in usage or "claude_cache_creation_1_h_tokens" in usage:
+        t5m = int(usage.get("claude_cache_creation_5_m_tokens", 0) or 0)
+        t1h = int(usage.get("claude_cache_creation_1_h_tokens", 0) or 0)
+        if t1h > 0:
+            return 60
+        if t5m > 0:
+            return 5
+
+    return None
+
+
 def extract_cache_read_tokens(usage: dict[str, Any]) -> int:
     """
     提取缓存读取 tokens（兼容多种 OpenAI / Claude / Gemini 字段命名）。
@@ -141,5 +184,6 @@ def extract_cache_read_tokens(usage: dict[str, Any]) -> int:
 __all__ = [
     "extract_cache_creation_tokens",
     "extract_cache_creation_tokens_detail",
+    "extract_cache_ttl_minutes",
     "extract_cache_read_tokens",
 ]

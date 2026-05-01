@@ -754,6 +754,14 @@ class HttpRequestExecutor:
         self, client: httpx.AsyncClient, request: EndpointCheckRequest
     ) -> dict[str, Any]:
         """执行流式请求并收集响应"""
+        # Image 端点的 Codex 反代走 /responses + image_generation tool，事件
+        # 结构与 chat 的 Responses SSE 不同；统一用共用 parser 以防两处 bug。
+        is_codex_image = (
+            str(request.api_format or "").lower() == "openai:image"
+            and "/responses" in (request.url or "")
+        )
+        if is_codex_image:
+            return await self._execute_codex_image_stream(client, request)
         try:
             async with client.stream(
                 "POST", request.url, json=request.json_body, headers=request.headers
@@ -862,6 +870,88 @@ class HttpRequestExecutor:
 
         except Exception as e:
             logger.warning("[{}] check_endpoint | stream error | {}", request.api_format, e)
+            return {"error": str(e), "status_code": 500, "headers": {}, "response_body": None}
+
+    async def _execute_codex_image_stream(
+        self, client: httpx.AsyncClient, request: EndpointCheckRequest
+    ) -> dict[str, Any]:
+        """Codex image 端点的流式 check：用共用 sse_events parser 识别事件。
+
+        识别 ``response.output_item.done`` + ``image_generation_call`` 作为成功信号，
+        ``response.failed/error/incomplete/content_filter.*`` 立即判失败。
+        """
+        from src.services.provider.adapters.codex.sse_events import (
+            CodexImageStreamState,
+            CodexStreamError,
+            iter_sse_data_lines,
+            parse_codex_sse_payload,
+        )
+
+        try:
+            async with client.stream(
+                "POST", request.url, json=request.json_body, headers=request.headers
+            ) as response:
+                headers = dict(response.headers)
+
+                if response.status_code != 200:
+                    error_body = ""
+                    async for chunk in response.aiter_text():
+                        error_body += chunk
+                        if len(error_body) > 16384:
+                            break
+                    return {
+                        "error": f"HTTP {response.status_code}: {error_body[:500]}",
+                        "status_code": response.status_code,
+                        "headers": headers,
+                        "response_body": error_body,
+                    }
+
+                state = CodexImageStreamState()
+                try:
+                    buffer = b""
+                    async for chunk in response.aiter_bytes():
+                        if not chunk:
+                            continue
+                        buffer += chunk
+                        while b"\n\n" in buffer:
+                            event_bytes, buffer = buffer.split(b"\n\n", 1)
+                            for payload in iter_sse_data_lines(event_bytes):
+                                parse_codex_sse_payload(payload, state)
+                    if buffer.strip():
+                        for payload in iter_sse_data_lines(buffer):
+                            parse_codex_sse_payload(payload, state)
+                except CodexStreamError as exc:
+                    return {
+                        "error": f"Codex stream error: {exc} (event={exc.event_type})",
+                        "status_code": 502,
+                        "headers": headers,
+                        "response_body": None,
+                    }
+
+                if not state.images:
+                    return {
+                        "error": "Codex image stream returned 0 images",
+                        "status_code": 502,
+                        "headers": headers,
+                        "response_body": None,
+                    }
+
+                final_response = {
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "image_generation_call",
+                            "result": state.images[0].get("b64_json", "")[:32] + "...",
+                        }
+                    ],
+                    "usage": (state.completed_response or {}).get("usage"),
+                }
+                return {"final_response": final_response, "headers": headers}
+
+        except Exception as e:
+            logger.warning(
+                "[{}] codex image check | stream error | {}", request.api_format, e
+            )
             return {"error": str(e), "status_code": 500, "headers": {}, "response_body": None}
 
 

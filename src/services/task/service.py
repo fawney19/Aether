@@ -239,8 +239,6 @@ class TaskService:
                 request_candidate_id=None,
             )
 
-        _ = task_type  # reserved for future routing (chat/cli/video/image)
-
         return await self._sync_ops.execute_sync_unified(
             api_format=api_format,
             model_name=model_name,
@@ -254,6 +252,7 @@ class TaskService:
             request_headers=request_headers,
             request_body=request_body,
             create_pending_usage=create_pending_usage,
+            request_type=task_type,
         )
 
     async def execute_sync_candidates(
@@ -290,11 +289,7 @@ class TaskService:
         from src.services.rate_limit.concurrency_manager import get_concurrency_manager
         from src.services.request.candidate import RequestCandidateService
         from src.services.request.executor import RequestExecutor
-        from src.services.scheduling.aware_scheduler import (
-            CacheAwareScheduler,
-            get_cache_aware_scheduler,
-        )
-        from src.services.system.config import SystemConfigService
+        from src.services.scheduling.aware_scheduler import get_cache_aware_scheduler
         from src.services.task.execute.exception_classification import (
             CandidateErrorAction,
             classify_candidate_error_action,
@@ -303,6 +298,7 @@ class TaskService:
             SyncExecutionState,
             resolve_execution_error_transition,
         )
+        from src.services.user.group_service import UserGroupService
         from src.services.usage.service import UsageService
 
         if not request_id:
@@ -310,19 +306,20 @@ class TaskService:
 
         api_format_norm = normalize_endpoint_signature(api_format)
 
-        priority_mode = SystemConfigService.get_config(
-            self.db,
-            "provider_priority_mode",
-            CacheAwareScheduler.PRIORITY_MODE_PROVIDER,
-        )
-        scheduling_mode = SystemConfigService.get_config(
-            self.db,
-            "scheduling_mode",
-            CacheAwareScheduler.SCHEDULING_MODE_CACHE_AFFINITY,
+        resolved_user = current_user
+        if resolved_user is None and user_api_key is not None:
+            try:
+                resolved_user = user_api_key.user if hasattr(user_api_key, "user") else None
+            except Exception:
+                resolved_user = None
+            if resolved_user is None and getattr(user_api_key, "user_id", None):
+                resolved_user = self.db.query(User).filter(User.id == user_api_key.user_id).first()
+
+        scheduling_mode = UserGroupService.resolve_effective_scheduling_mode(
+            self.db, resolved_user
         )
         cache_scheduler = await get_cache_aware_scheduler(
             self.redis,
-            priority_mode=priority_mode,
             scheduling_mode=scheduling_mode,
         )
         await cache_scheduler._ensure_initialized()
@@ -352,15 +349,6 @@ class TaskService:
         pool_ops = self._sync_ops._pool_ops
         error_ops = self._sync_ops._error_ops
         failure_ops = self._sync_ops._failure_ops
-
-        resolved_user = current_user
-        if resolved_user is None and user_api_key is not None:
-            try:
-                resolved_user = user_api_key.user if hasattr(user_api_key, "user") else None
-            except Exception:
-                resolved_user = None
-            if resolved_user is None and getattr(user_api_key, "user_id", None):
-                resolved_user = self.db.query(User).filter(User.id == user_api_key.user_id).first()
 
         user_id: str | None = None
         if resolved_user is not None and getattr(resolved_user, "id", None):

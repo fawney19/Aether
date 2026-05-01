@@ -81,14 +81,12 @@
         :api-format-filters="apiFormatFilters"
         :model-filters="modelFilters"
         :has-active-filters="hasActiveFilters"
-        :priority-mode-label="priorityModeConfig.label"
         :loading="loading"
         @update:search-query="searchQuery = $event"
         @update:filter-status="filterStatus = $event"
         @update:filter-api-format="filterApiFormat = $event"
         @update:filter-model="filterModel = $event"
         @reset-filters="resetFilters"
-        @open-priority-dialog="openPriorityDialog"
         @add-provider="openAddProviderDialog"
         @refresh="loadProviders"
       />
@@ -233,11 +231,6 @@
     @provider-updated="handleProviderUpdated"
   />
 
-  <PriorityManagementDialog
-    v-model="priorityDialogOpen"
-    @saved="handlePrioritySaved"
-  />
-
   <ProviderDetailDrawer
     :open="providerDrawerOpen"
     :provider-id="selectedProviderId"
@@ -265,7 +258,7 @@ import TableBody from '@/components/ui/table-body.vue'
 import TableRow from '@/components/ui/table-row.vue'
 import TableHead from '@/components/ui/table-head.vue'
 import Pagination from '@/components/ui/pagination.vue'
-import { ProviderFormDialog, PriorityManagementDialog, ProviderAuthDialog } from '@/features/providers/components'
+import { ProviderFormDialog, ProviderAuthDialog } from '@/features/providers/components'
 import ProviderDetailDrawer from '@/features/providers/components/ProviderDetailDrawer.vue'
 import ProviderTableHeader from '@/features/providers/components/ProviderTableHeader.vue'
 import ProviderTableRow from '@/features/providers/components/ProviderTableRow.vue'
@@ -284,7 +277,6 @@ import {
   getGlobalModels,
   type ProviderWithEndpointsSummary,
 } from '@/api/endpoints'
-import { adminApi } from '@/api/admin'
 import { parseApiError } from '@/utils/errorParser'
 import { useRouteQuery } from '@/composables/useRouteQuery'
 
@@ -311,8 +303,6 @@ const providers = ref<ProviderWithEndpointsSummary[]>([])
 let providersRequestId = 0
 const providerDialogOpen = ref(false)
 const providerToEdit = ref<ProviderWithEndpointsSummary | null>(null)
-const priorityDialogOpen = ref(false)
-const priorityMode = ref<'provider' | 'global_key'>('provider')
 const providerDrawerOpen = ref(false)
 const selectedProviderId = ref<string | null>(null)
 const providerDeleteProgress = ref<ProviderDeleteProgressState | null>(null)
@@ -553,13 +543,6 @@ async function saveDescription(_event: Event, provider: ProviderWithEndpointsSum
   }
 }
 
-// 优先级模式配置
-const priorityModeConfig = computed(() => {
-  return {
-    label: priorityMode.value === 'global_key' ? '全局 Key 优先' : '提供商优先',
-  }
-})
-
 // 当前已有提供商的最大优先级
 const maxProviderPriority = computed(() => {
   if (providers.value.length === 0) return undefined
@@ -568,18 +551,6 @@ const maxProviderPriority = computed(() => {
     .filter(v => typeof v === 'number' && Number.isFinite(v))
   return priorities.length > 0 ? Math.max(...priorities) : undefined
 })
-
-// 加载优先级模式
-async function loadPriorityMode() {
-  try {
-    const response = await adminApi.getSystemConfig('provider_priority_mode')
-    if (response.value) {
-      priorityMode.value = response.value as 'provider' | 'global_key'
-    }
-  } catch {
-    priorityMode.value = 'provider'
-  }
-}
 
 // 加载全局模型列表（用于模型筛选下拉）
 async function loadGlobalModelList() {
@@ -645,11 +616,6 @@ function openAddProviderDialog() {
   providerDialogOpen.value = true
 }
 
-// 打开优先级管理对话框
-function openPriorityDialog() {
-  priorityDialogOpen.value = true
-}
-
 // 打开提供商详情抽屉
 function openProviderDrawer(providerId: string) {
   selectedProviderId.value = providerId
@@ -698,12 +664,6 @@ async function handleDrawerRefresh() {
   } catch (err) {
     showError(parseApiError(err, '刷新提供商数据失败'), '错误')
   }
-}
-
-// 优先级保存成功回调
-async function handlePrioritySaved() {
-  await loadProviders()
-  await loadPriorityMode()
 }
 
 // 处理提供商添加
@@ -782,7 +742,6 @@ function handleGlobalClick(event: MouseEvent) {
 
 onMounted(() => {
   loadProviders()
-  loadPriorityMode()
   loadGlobalModelList()
   loadArchitectureSchemas()
   document.addEventListener('click', handleGlobalClick, true)

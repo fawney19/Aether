@@ -13,9 +13,9 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  BASE_IMAGE_NAME: fawney19/aether-base
-  APP_IMAGE_NAME: fawney19/aether
-  GITHUB_REPO: fawney19/Aether
+  BASE_IMAGE_NAME: nyadoo/aether-base
+  APP_IMAGE_NAME: nyadoo/aether
+  GITHUB_REPO: NyaDoo/Aether
   # Base image hash inputs:
   # - Dockerfile.base
   # - pyproject.toml (dependency fingerprint only; ignores tool/optional deps)
@@ -216,19 +216,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Extract metadata for app image
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.APP_IMAGE_NAME }}
-            docker.io/fawney19/aether
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -283,7 +276,7 @@ jobs:
             HUB_RELEASE_REPO=${{ env.GITHUB_REPO }}
             HUB_TAG=${{ needs.download-hub.outputs.hub_tag }}
           platforms: linux/amd64
-          outputs: type=image,"name=${{ env.REGISTRY }}/${{ env.APP_IMAGE_NAME }},docker.io/fawney19/aether",push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.APP_IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Build and push app image (arm64)
         id: build-arm64
@@ -299,7 +292,7 @@ jobs:
             HUB_RELEASE_REPO=${{ env.GITHUB_REPO }}
             HUB_TAG=${{ needs.download-hub.outputs.hub_tag }}
           platforms: linux/arm64
-          outputs: type=image,"name=${{ env.REGISTRY }}/${{ env.APP_IMAGE_NAME }},docker.io/fawney19/aether",push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.APP_IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Create multi-arch manifest and push
         run: |
@@ -309,17 +302,9 @@ jobs:
           echo "amd64 digest: $AMD64_DIGEST"
           echo "arm64 digest: $ARM64_DIGEST"
 
-          # For each tag, create multi-arch manifest on each registry
+          REPO="${{ env.REGISTRY }}/${{ env.APP_IMAGE_NAME }}"
           TAGS=$(echo "${{ steps.meta.outputs.tags }}" | tr '\n' ' ')
           for FULL_TAG in $TAGS; do
-            # Determine which registry this tag belongs to
-            if [[ "$FULL_TAG" == ghcr.io/* ]]; then
-              REPO="${{ env.REGISTRY }}/${{ env.APP_IMAGE_NAME }}"
-            elif [[ "$FULL_TAG" == docker.io/* ]]; then
-              REPO="docker.io/fawney19/aether"
-            else
-              continue
-            fi
             echo "Creating manifest for $FULL_TAG"
             docker buildx imagetools create -t "$FULL_TAG" \
               "$REPO@$AMD64_DIGEST" \

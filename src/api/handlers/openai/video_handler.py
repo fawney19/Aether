@@ -812,14 +812,12 @@ class OpenAIVideoHandler(VideoHandlerBase):
         )
 
     def _build_upstream_url(self, base_url: str | None, suffix: str | None = None) -> str:
-        base = (base_url or self.DEFAULT_BASE_URL).rstrip("/")
-        if base.endswith("/v1"):
-            url = f"{base}/videos"
-        else:
-            url = f"{base}/v1/videos"
+        from src.utils.url_utils import join_url
+
+        path = "/v1/videos"
         if suffix:
-            return f"{url}/{suffix}"
-        return url
+            path = f"{path}/{suffix.lstrip('/')}"
+        return join_url(base_url or self.DEFAULT_BASE_URL, path)
 
     def _build_upstream_headers(
         self,
@@ -852,10 +850,12 @@ class OpenAIVideoHandler(VideoHandlerBase):
 
     def _build_gemini_upstream_url(self, base_url: str | None, model: str) -> str:
         """构建 Gemini Veo API 的上游 URL"""
-        base = (base_url or "https://generativelanguage.googleapis.com").rstrip("/")
-        if base.endswith("/v1beta"):
-            base = base[: -len("/v1beta")]
-        return f"{base}/v1beta/models/{model}:predictLongRunning"
+        from src.utils.url_utils import join_url
+
+        return join_url(
+            base_url or "https://generativelanguage.googleapis.com",
+            f"/v1beta/models/{model}:predictLongRunning",
+        )
 
     def _build_gemini_upstream_headers(
         self,

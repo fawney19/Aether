@@ -97,35 +97,19 @@
             />
           </div>
         </div>
-        <div class="grid grid-cols-2 gap-4">
-          <div class="space-y-1.5">
-            <Label>
-              粘性会话 TTL
-              <span class="text-xs text-muted-foreground">(秒)</span>
-            </Label>
-            <Input
-              :model-value="form.sticky_session_ttl_seconds ?? ''"
-              type="number"
-              min="60"
-              max="86400"
-              placeholder="3600 (留空禁用)"
-              @update:model-value="(v) => form.sticky_session_ttl_seconds = parseNum(v)"
-            />
-          </div>
-          <div class="space-y-1.5">
-            <Label>
-              全局优先级
-              <span class="text-xs text-muted-foreground">(global_key)</span>
-            </Label>
-            <Input
-              :model-value="form.global_priority ?? ''"
-              type="number"
-              min="0"
-              max="999999"
-              placeholder="留空回退 provider_priority"
-              @update:model-value="(v) => form.global_priority = parseNum(v)"
-            />
-          </div>
+        <div class="space-y-1.5">
+          <Label>
+            粘性会话 TTL
+            <span class="text-xs text-muted-foreground">(秒)</span>
+          </Label>
+          <Input
+            :model-value="form.sticky_session_ttl_seconds ?? ''"
+            type="number"
+            min="60"
+            max="86400"
+            placeholder="3600 (留空禁用)"
+            @update:model-value="(v) => form.sticky_session_ttl_seconds = parseNum(v)"
+          />
         </div>
       </div>
 
@@ -370,7 +354,6 @@ const isClaudeCode = computed(() => {
 })
 
 const form = ref({
-  global_priority: null as number | null | undefined,
   sticky_session_ttl_seconds: null as number | null | undefined,
   health_policy_enabled: true,
   rate_limit_cooldown_seconds: null as number | null | undefined,
@@ -415,7 +398,6 @@ watch(() => props.modelValue, (open) => {
 
   const cfg = props.currentConfig
   form.value = {
-    global_priority: cfg?.global_priority ?? null,
     sticky_session_ttl_seconds: cfg?.sticky_session_ttl_seconds ?? null,
     health_policy_enabled: cfg?.health_policy_enabled !== false,
     rate_limit_cooldown_seconds: cfg?.rate_limit_cooldown_seconds ?? null,
@@ -447,7 +429,6 @@ async function handleSave() {
     // 合并已有配置（保留 scheduling_presets 等不在此对话框编辑的字段）
     const poolAdvanced: Record<string, unknown> = {
       ...(props.currentConfig ?? {}),
-      global_priority: form.value.global_priority ?? undefined,
       sticky_session_ttl_seconds: form.value.sticky_session_ttl_seconds ?? undefined,
       cost_window_seconds: form.value.cost_window_seconds ?? undefined,
       cost_limit_per_key_tokens: form.value.cost_limit_per_key_tokens ?? undefined,

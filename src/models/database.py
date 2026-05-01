@@ -7,7 +7,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 import uuid
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from enum import Enum as PyEnum
 from typing import Any, ClassVar
 
@@ -70,6 +70,55 @@ class ExportMixin:
         )
 
 
+class UserGroup(Base):
+    """用户分组模型。"""
+
+    __tablename__ = "user_groups"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(100), unique=True, index=True, nullable=False)
+    description = Column(String(500), nullable=True)
+    is_default = Column(Boolean, default=False, nullable=False)
+
+    # 分组默认访问限制（NULL 表示不限制 / 跟随系统默认）
+    allowed_api_formats = Column(JSON, nullable=True)
+    rate_limit = Column(
+        Integer, nullable=True, default=None
+    )  # NULL=继承系统默认，0=不限制，N=N RPM
+    scheduling_mode = Column(String(32), nullable=False, default="cache_affinity")
+
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    users = relationship("User", back_populates="group", passive_deletes=True)
+    model_group_links = relationship(
+        "UserGroupModelGroup",
+        back_populates="user_group",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="UserGroupModelGroup.priority.asc()",
+    )
+    subscription_plans = relationship(
+        "SubscriptionPlan",
+        back_populates="user_group",
+        passive_deletes=True,
+        order_by="SubscriptionPlan.plan_level.asc(), SubscriptionPlan.created_at.asc()",
+    )
+    subscription_products = relationship(
+        "SubscriptionProduct",
+        back_populates="user_group",
+        passive_deletes=True,
+        order_by="SubscriptionProduct.plan_level.asc(), SubscriptionProduct.created_at.asc()",
+    )
+
+
 class User(Base):
     """用户模型"""
 
@@ -108,13 +157,10 @@ class User(Base):
     ldap_dn = Column(String(512), nullable=True, index=True)
     ldap_username = Column(String(255), nullable=True, index=True)
 
-    # 访问限制（NULL 表示不限制，允许访问所有资源）
-    allowed_providers = Column(JSON, nullable=True)  # 允许使用的提供商 ID 列表
-    allowed_api_formats = Column(JSON, nullable=True)  # 允许使用的 API 格式列表
-    allowed_models = Column(JSON, nullable=True)  # 允许使用的模型名称列表
-    rate_limit = Column(
-        Integer, nullable=True, default=None
-    )  # 每分钟请求限制，NULL=继承系统默认，0=不限制，N=N RPM
+    # 用户分组（可选）
+    group_id = Column(
+        String(36), ForeignKey("user_groups.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     # Key 能力配置
     model_capability_settings = Column(JSON, nullable=True)  # 用户针对特定模型的能力配置
@@ -151,11 +197,18 @@ class User(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    group = relationship("UserGroup", back_populates="users")
 
     # 关系 - SET NULL: 保留历史记录，让数据库处理 SET NULL
     usage_records = relationship("Usage", back_populates="user", passive_deletes=True)
     wallet = relationship("Wallet", back_populates="user", uselist=False, passive_deletes=True)
     payment_orders = relationship("PaymentOrder", back_populates="user", passive_deletes=True)
+    subscriptions = relationship(
+        "UserSubscription",
+        back_populates="user",
+        passive_deletes=True,
+        order_by="UserSubscription.created_at.desc()",
+    )
     refund_requests = relationship(
         "RefundRequest",
         back_populates="user",
@@ -187,6 +240,198 @@ class User(Base):
             return bcrypt.checkpw(password.encode("utf-8"), self.password_hash.encode("utf-8"))
         except ValueError:
             return False
+
+
+class UserGroupModelGroup(Base):
+    """用户分组与模型分组的绑定关系。"""
+
+    __tablename__ = "user_group_model_groups"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_group_id = Column(
+        String(36),
+        ForeignKey("user_groups.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    model_group_id = Column(
+        String(36),
+        ForeignKey("model_groups.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    priority = Column(Integer, default=100, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    user_group = relationship("UserGroup", back_populates="model_group_links")
+    model_group = relationship("ModelGroup", back_populates="user_group_links")
+
+    __table_args__ = (
+        UniqueConstraint("user_group_id", "model_group_id", name="uq_user_group_model_group"),
+        Index("idx_user_group_model_group_priority", "user_group_id", "priority"),
+    )
+
+
+class SubscriptionPlan(Base):
+    """订阅计划。"""
+
+    __tablename__ = "subscription_plans"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    product_id = Column(
+        String(36),
+        ForeignKey("subscription_products.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    code = Column(String(100), unique=True, nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    description = Column(String(500), nullable=True)
+    user_group_id = Column(
+        String(36),
+        ForeignKey("user_groups.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    plan_level = Column(Integer, nullable=False, default=0)
+    monthly_price_usd = Column(Numeric(20, 8), nullable=False, default=0)
+    monthly_quota_usd = Column(Numeric(20, 8), nullable=False, default=0)
+    variant_rank = Column(Integer, nullable=False, default=100)
+    is_default_variant = Column(Boolean, nullable=False, default=False)
+    overage_policy = Column(String(30), nullable=False, default="block")
+    term_discounts_json = Column(JSON, nullable=False, default=list)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    product = relationship("SubscriptionProduct", back_populates="variants")
+    user_group = relationship("UserGroup", back_populates="subscription_plans")
+    subscriptions = relationship(
+        "UserSubscription",
+        back_populates="plan",
+        passive_deletes=True,
+        order_by="UserSubscription.created_at.desc()",
+    )
+
+
+class SubscriptionProduct(Base):
+    """订阅产品，共享权限档位与超额策略。"""
+
+    __tablename__ = "subscription_products"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    code = Column(String(100), unique=True, nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    description = Column(String(500), nullable=True)
+    user_group_id = Column(
+        String(36),
+        ForeignKey("user_groups.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    plan_level = Column(Integer, nullable=False, default=0)
+    overage_policy = Column(String(30), nullable=False, default="block")
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    user_group = relationship("UserGroup", back_populates="subscription_products")
+    variants = relationship(
+        "SubscriptionPlan",
+        back_populates="product",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="SubscriptionPlan.variant_rank.asc(), SubscriptionPlan.created_at.asc()",
+    )
+
+
+class UserSubscription(Base):
+    """用户订阅。"""
+
+    __tablename__ = "user_subscriptions"
+    __table_args__ = (
+        Index("idx_user_subscriptions_user_status", "user_id", "status"),
+        Index("idx_user_subscriptions_plan_status", "plan_id", "status"),
+        Index("idx_user_subscriptions_ends_at", "ends_at"),
+        Index("idx_user_subscriptions_current_cycle", "current_cycle_end"),
+        Index(
+            "uq_user_subscriptions_single_pending",
+            "user_id",
+            unique=True,
+            postgresql_where=text("status = 'pending_payment'"),
+            sqlite_where=text("status = 'pending_payment'"),
+        ),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    plan_id = Column(
+        String(36),
+        ForeignKey("subscription_plans.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    status = Column(String(20), nullable=False, default="pending_payment")
+    end_reason = Column(String(40), nullable=True)
+    purchased_months = Column(Integer, nullable=False)
+    discount_factor = Column(Numeric(10, 4), nullable=False, default=1.0)
+    monthly_price_usd_snapshot = Column(Numeric(20, 8), nullable=False, default=0)
+    total_price_usd = Column(Numeric(20, 8), nullable=False, default=0)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    ends_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    current_cycle_start = Column(DateTime(timezone=True), nullable=False)
+    current_cycle_end = Column(DateTime(timezone=True), nullable=False, index=True)
+    cycle_quota_usd = Column(Numeric(20, 8), nullable=False, default=0)
+    cycle_used_usd = Column(Numeric(20, 8), nullable=False, default=0)
+    cancel_at_period_end = Column(Boolean, nullable=False, default=False)
+    canceled_at = Column(DateTime(timezone=True), nullable=True)
+    ended_at = Column(DateTime(timezone=True), nullable=True)
+    upgraded_from_subscription_id = Column(
+        String(36),
+        ForeignKey("user_subscriptions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    user = relationship("User", back_populates="subscriptions")
+    plan = relationship("SubscriptionPlan", back_populates="subscriptions")
+    upgraded_from = relationship("UserSubscription", remote_side=[id], uselist=False)
+    usage_records = relationship("Usage", back_populates="subscription", passive_deletes=True)
+    payment_orders = relationship("PaymentOrder", back_populates="subscription", passive_deletes=True)
 
 
 class UserSession(Base):
@@ -477,27 +722,44 @@ class Usage(Base):
         nullable=True,
         index=True,
     )
+    model_group_id = Column(
+        String(36),
+        ForeignKey("model_groups.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    model_group_route_id = Column(
+        String(36),
+        ForeignKey("model_group_routes.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    subscription_id = Column(
+        String(36),
+        ForeignKey("user_subscriptions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     # Token统计
     input_tokens = Column(Integer, default=0)
     output_tokens = Column(Integer, default=0)
     input_output_total_tokens = Column(Integer, default=0)  # 输入 + 输出（旧 total_tokens 语义）
     input_context_tokens = Column(Integer, default=0)  # 输入上下文（input + cache_read）
-    total_tokens = Column(Integer, default=0)  # 真正总计 tokens（输入 + 输出 + 缓存创建 + 缓存读取）
+    total_tokens = Column(
+        Integer, default=0
+    )  # 真正总计 tokens（输入 + 输出 + 缓存创建 + 缓存读取）
 
-    # 缓存相关 tokens (for Claude models)
+    # 缓存相关 tokens
     cache_creation_input_tokens = Column(Integer, default=0)
     cache_read_input_tokens = Column(Integer, default=0)
-    cache_creation_input_tokens_5m = Column(Integer, default=0)  # 5min TTL 缓存创建
-    cache_creation_input_tokens_1h = Column(Integer, default=0)  # 1h TTL 缓存创建
+    cache_ttl_minutes = Column(Integer, nullable=False, default=5)  # 请求级缓存 TTL（默认 5min）
 
     # 成本计算
     input_cost_usd = Column(Numeric(20, 8), default=0.0)
     output_cost_usd = Column(Numeric(20, 8), default=0.0)
     cache_cost_usd = Column(Numeric(20, 8), default=0.0)  # 总缓存成本
     cache_creation_cost_usd = Column(Numeric(20, 8), default=0.0)  # 缓存创建成本
-    cache_creation_cost_usd_5m = Column(Numeric(20, 8), default=0.0)  # 5min TTL 缓存创建成本
-    cache_creation_cost_usd_1h = Column(Numeric(20, 8), default=0.0)  # 1h TTL 缓存创建成本
     cache_read_cost_usd = Column(Numeric(20, 8), default=0.0)  # 缓存读取成本
     request_cost_usd = Column(Numeric(20, 8), default=0.0)  # 按次计费成本
     total_cost_usd = Column(Numeric(20, 8), default=0.0)
@@ -506,28 +768,17 @@ class Usage(Base):
     actual_input_cost_usd = Column(Numeric(20, 8), default=0.0)  # 真实输入成本
     actual_output_cost_usd = Column(Numeric(20, 8), default=0.0)  # 真实输出成本
     actual_cache_creation_cost_usd = Column(Numeric(20, 8), default=0.0)  # 真实缓存创建成本
-    actual_cache_creation_cost_usd_5m = Column(
-        Numeric(20, 8), default=0.0
-    )  # 真实 5min TTL 缓存创建成本
-    actual_cache_creation_cost_usd_1h = Column(
-        Numeric(20, 8), default=0.0
-    )  # 真实 1h TTL 缓存创建成本
     actual_cache_read_cost_usd = Column(Numeric(20, 8), default=0.0)  # 真实缓存读取成本
     actual_cache_cost_usd = Column(Numeric(20, 8), default=0.0)  # 真实缓存总成本
     actual_request_cost_usd = Column(Numeric(20, 8), default=0.0)  # 真实按次计费成本
     actual_total_cost_usd = Column(Numeric(20, 8), default=0.0)  # 真实总成本
     rate_multiplier = Column(Numeric(10, 6), default=1.0)  # 使用的倍率（来自 ProviderAPIKey）
+    user_billing_multiplier = Column(Numeric(10, 4), default=1.0)  # 用户计费倍率（来自 ModelGroup）
 
     # 历史价格记录（每1M tokens的美元价格，记录请求时的实际价格）
     input_price_per_1m = Column(Numeric(20, 8), nullable=True)  # 输入单价
     output_price_per_1m = Column(Numeric(20, 8), nullable=True)  # 输出单价
     cache_creation_price_per_1m = Column(Numeric(20, 8), nullable=True)  # 缓存创建单价
-    cache_creation_price_per_1m_5m = Column(
-        Numeric(20, 8), nullable=True
-    )  # 5min TTL 缓存创建单价
-    cache_creation_price_per_1m_1h = Column(
-        Numeric(20, 8), nullable=True
-    )  # 1h TTL 缓存创建单价
     cache_read_price_per_1m = Column(Numeric(20, 8), nullable=True)  # 缓存读取单价
     price_per_request = Column(Numeric(20, 8), nullable=True)  # 按次计费单价（历史记录）
 
@@ -567,6 +818,9 @@ class Usage(Base):
     wallet_recharge_balance_after = Column(Numeric(20, 8), nullable=True)  # 结算后充值余额
     wallet_gift_balance_before = Column(Numeric(20, 8), nullable=True)  # 结算前赠款余额
     wallet_gift_balance_after = Column(Numeric(20, 8), nullable=True)  # 结算后赠款余额
+    subscription_quota_before_usd = Column(Numeric(20, 8), nullable=True)  # 结算前订阅剩余额度
+    subscription_quota_after_usd = Column(Numeric(20, 8), nullable=True)  # 结算后订阅剩余额度
+    billing_source = Column(String(30), nullable=True)  # subscription / wallet / mixed / unlimited_wallet
 
     # 完整请求和响应记录
     request_headers = Column(JSON, nullable=True)  # 客户端请求头
@@ -602,6 +856,9 @@ class Usage(Base):
     provider_obj = relationship("Provider")  # 使用 provider_obj 避免与 provider 字段名冲突
     provider_endpoint = relationship("ProviderEndpoint")
     provider_api_key = relationship("ProviderAPIKey")
+    model_group = relationship("ModelGroup")
+    model_group_route = relationship("ModelGroupRoute")
+    subscription = relationship("UserSubscription", back_populates="usage_records")
 
     def get_request_body(self) -> Any:
         """获取客户端原始请求体（自动解压）"""
@@ -815,6 +1072,12 @@ class PaymentOrder(Base):
     order_no = Column(String(64), nullable=False)
     wallet_id = Column(String(36), ForeignKey("wallets.id", ondelete="RESTRICT"), nullable=False)
     user_id = Column(String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    subscription_id = Column(
+        String(36),
+        ForeignKey("user_subscriptions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     amount_usd = Column(Numeric(20, 8), nullable=False)
     pay_amount = Column(Numeric(20, 2), nullable=True)
@@ -824,6 +1087,7 @@ class PaymentOrder(Base):
     refundable_amount_usd = Column(Numeric(20, 8), nullable=False, default=0)
 
     payment_method = Column(String(30), nullable=False)
+    order_type = Column(String(30), nullable=False, default="topup")
     gateway_order_id = Column(String(128), nullable=True)
     gateway_response = Column(JSONB, nullable=True)
 
@@ -837,6 +1101,7 @@ class PaymentOrder(Base):
 
     wallet = relationship("Wallet", back_populates="payment_orders")
     user = relationship("User", back_populates="payment_orders")
+    subscription = relationship("UserSubscription", back_populates="payment_orders")
     callbacks = relationship("PaymentCallback", back_populates="payment_order")
     refund_requests = relationship("RefundRequest", back_populates="payment_order")
 
@@ -1220,6 +1485,12 @@ class Provider(ExportMixin, Base):
     usage_tracking = relationship(
         "ProviderUsageTracking", back_populates="provider", cascade="all, delete-orphan"
     )
+    model_group_routes = relationship(
+        "ModelGroupRoute",
+        back_populates="provider",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 class ProviderEndpoint(ExportMixin, Base):
@@ -1518,6 +1789,149 @@ class GlobalModel(ExportMixin, Base):
 
     # 关系
     models = relationship("Model", back_populates="global_model")
+    model_group_links = relationship(
+        "ModelGroupModel",
+        back_populates="global_model",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class ModelGroup(ExportMixin, Base):
+    """模型分组：定义模型可见性、路由策略和用户计费倍率。"""
+
+    __tablename__ = "model_groups"
+
+    _export_exclude = frozenset({"id", "created_at", "updated_at"})
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(100), unique=True, nullable=False, index=True)
+    display_name = Column(String(100), nullable=False)
+    description = Column(String(500), nullable=True)
+    default_user_billing_multiplier = Column(Numeric(10, 4), nullable=False, default=1.0)
+    is_default = Column(Boolean, default=False, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    sort_order = Column(Integer, default=100, nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    model_links = relationship(
+        "ModelGroupModel",
+        back_populates="model_group",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    route_links = relationship(
+        "ModelGroupRoute",
+        back_populates="model_group",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="ModelGroupRoute.priority.asc()",
+    )
+    user_group_links = relationship(
+        "UserGroupModelGroup",
+        back_populates="model_group",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="UserGroupModelGroup.priority.asc()",
+    )
+
+
+class ModelGroupModel(Base):
+    """模型分组与 GlobalModel 的多对多关系。"""
+
+    __tablename__ = "model_group_models"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    model_group_id = Column(
+        String(36),
+        ForeignKey("model_groups.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    global_model_id = Column(
+        String(36),
+        ForeignKey("global_models.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    model_group = relationship("ModelGroup", back_populates="model_links")
+    global_model = relationship("GlobalModel", back_populates="model_group_links")
+
+    __table_args__ = (
+        UniqueConstraint("model_group_id", "global_model_id", name="uq_model_group_model"),
+        Index("idx_model_group_models_global_model", "global_model_id"),
+    )
+
+
+class ModelGroupRoute(Base):
+    """模型分组路由策略。"""
+
+    __tablename__ = "model_group_routes"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    model_group_id = Column(
+        String(36),
+        ForeignKey("model_groups.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    provider_id = Column(
+        String(36),
+        ForeignKey("providers.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    provider_api_key_id = Column(
+        String(36),
+        ForeignKey("provider_api_keys.id", ondelete="CASCADE"),
+        nullable=True,
+        default=None,
+        index=True,
+    )
+    priority = Column(Integer, default=50, nullable=False)
+    user_billing_multiplier_override = Column(Numeric(10, 4), nullable=True, default=None)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    model_group = relationship("ModelGroup", back_populates="route_links")
+    provider = relationship("Provider", back_populates="model_group_routes")
+    provider_api_key = relationship("ProviderAPIKey", back_populates="model_group_routes")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "model_group_id",
+            "provider_id",
+            "provider_api_key_id",
+            name="uq_model_group_route",
+        ),
+        Index("idx_model_group_routes_priority", "model_group_id", "priority"),
+    )
 
 
 class Model(ExportMixin, Base):
@@ -2110,6 +2524,11 @@ class ProviderAPIKey(ExportMixin, Base):
 
     # 关系
     provider = relationship("Provider", back_populates="api_keys")
+    model_group_routes = relationship(
+        "ModelGroupRoute",
+        back_populates="provider_api_key",
+        passive_deletes=True,
+    )
 
 
 _PROVIDER_API_KEY_STATUS_SNAPSHOT_FIELDS: tuple[str, ...] = (
@@ -3268,4 +3687,4 @@ class UserModelUsageCount(Base):
 
 
 # 导入扩展的数据库模型
-from .database_extensions import ApiKeyProviderMapping, ProviderUsageTracking
+from .database_extensions import ApiKeyProviderMapping, ProviderUsageTracking  # noqa: E402,F401

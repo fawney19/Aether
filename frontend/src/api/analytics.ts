@@ -54,8 +54,6 @@ export interface AnalyticsSummary {
   output_tokens: number
   input_output_total_tokens: number
   cache_creation_input_tokens: number
-  cache_creation_input_tokens_5m: number
-  cache_creation_input_tokens_1h: number
   cache_read_input_tokens: number
   input_context_tokens: number
   total_tokens: number
@@ -63,8 +61,6 @@ export interface AnalyticsSummary {
   input_cost_usd: number
   output_cost_usd: number
   cache_creation_cost_usd: number
-  cache_creation_cost_usd_5m: number
-  cache_creation_cost_usd_1h: number
   cache_read_cost_usd: number
   cache_cost_usd: number
   request_cost_usd: number
@@ -163,16 +159,13 @@ export interface AnalyticsRecord {
   output_tokens: number
   input_output_total_tokens: number
   cache_creation_input_tokens: number
-  cache_creation_input_tokens_5m: number
-  cache_creation_input_tokens_1h: number
+  cache_ttl_minutes: number | null
   cache_read_input_tokens: number
   input_context_tokens: number
   total_tokens: number
   input_cost_usd: number
   output_cost_usd: number
   cache_creation_cost_usd: number
-  cache_creation_cost_usd_5m: number
-  cache_creation_cost_usd_1h: number
   cache_read_cost_usd: number
   cache_cost_usd: number
   request_cost_usd: number

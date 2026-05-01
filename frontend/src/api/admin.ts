@@ -1,5 +1,4 @@
 import apiClient from './client'
-import { cachedRequest, buildCacheKey } from '@/utils/cache'
 import type { BillingSummary } from './auth'
 
 // LDAP 配置导出结构
@@ -73,8 +72,19 @@ export interface ProxyNodeExport {
 export interface UsersExportData {
   version: string
   exported_at: string
+  user_groups?: UserGroupExport[]
   users: UserExport[]
   standalone_keys?: StandaloneKeyExport[]
+}
+
+export interface UserGroupExport {
+  name: string
+  description?: string | null
+  allowed_providers?: string[] | null
+  allowed_api_formats?: string[] | null
+  allowed_models?: string[] | null
+  rate_limit?: number | null
+  user_count?: number
 }
 
 export interface UserExport {
@@ -83,10 +93,7 @@ export interface UserExport {
   username: string
   password_hash: string
   role: string
-  allowed_providers?: string[] | null
-  allowed_api_formats?: string[] | null
-  allowed_models?: string[] | null
-  rate_limit?: number | null  // null = 跟随系统默认，0 = 不限制
+  group_name?: string | null
   model_capability_settings?: Record<string, Record<string, boolean>>
   unlimited?: boolean
   wallet?: BillingSummary | null
@@ -392,6 +399,25 @@ export interface ApiKeyLockResponse {
   message: string
 }
 
+// 清空请求体：异步任务返回与状态
+export type PurgeRequestBodiesTaskStatus = {
+  task_id: string
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  total_cleaned: number
+  started_at: string | null
+  finished_at: string | null
+  error: string | null
+  params: { cutoff_days: number | null; cutoff: string | null }
+  heartbeat_at?: number
+}
+
+export interface PurgeRequestBodiesTaskResponse {
+  task_id: string
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  reused: boolean
+  total_cleaned: number
+}
+
 async function purge<T>(target: string): Promise<T> {
   const response = await apiClient.post<T>(`/api/admin/system/purge/${target}`)
   return response.data
@@ -662,7 +688,22 @@ export const adminApi = {
   purgeUsers: () => purge<{ message: string; deleted: Record<string, number> }>('users'),
   purgeUsage: () => purge<{ message: string; deleted: Record<string, number> }>('usage'),
   purgeAuditLogs: () => purge<{ message: string; deleted: Record<string, number> }>('audit-logs'),
-  purgeRequestBodies: () => purge<{ message: string; cleaned: Record<string, number> }>('request-bodies'),
+
+  // 清空请求体：异步任务模式
+  async purgeRequestBodies(payload: { cutoff_days?: number | null } = {}): Promise<PurgeRequestBodiesTaskResponse> {
+    const response = await apiClient.post<PurgeRequestBodiesTaskResponse>(
+      '/api/admin/system/purge/request-bodies',
+      payload,
+    )
+    return response.data
+  },
+  async getPurgeRequestBodiesStatus(taskId: string): Promise<PurgeRequestBodiesTaskStatus> {
+    const response = await apiClient.get<PurgeRequestBodiesTaskStatus>(
+      `/api/admin/system/purge/request-bodies/status/${encodeURIComponent(taskId)}`,
+    )
+    return response.data
+  },
+
   purgeStats: () => purge<{ message: string }>('stats'),
 
 }

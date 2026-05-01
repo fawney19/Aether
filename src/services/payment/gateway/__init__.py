@@ -8,7 +8,8 @@ from src.services.payment.gateway.wechat import WeChatGateway
 _GATEWAYS: dict[str, PaymentGateway] = {
     "alipay": AlipayGateway(),
     "wechat": WeChatGateway(),
-    "manual": ManualGateway(),
+    "manual": ManualGateway(payment_method="manual", display_name="人工充值"),
+    "manual_review": ManualGateway(payment_method="manual_review", display_name="人工充值"),
 }
 
 

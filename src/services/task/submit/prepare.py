@@ -11,8 +11,8 @@ from src.models.database import ApiKey
 from src.services.candidate.resolver import CandidateResolver
 from src.services.candidate.submit import AllCandidatesFailedError
 from src.services.scheduling.aware_scheduler import get_cache_aware_scheduler
-from src.services.system.config import SystemConfigService
 from src.services.task.submit import ApplyPoolReorderFn, ExpandPoolCandidatesFn
+from src.services.user.group_service import UserGroupService
 
 
 @dataclass(slots=True)
@@ -51,19 +51,10 @@ class AsyncSubmitPreparationService:
         apply_pool_reorder: ApplyPoolReorderFn,
         expand_pool_candidates_for_async_submit: ExpandPoolCandidatesFn,
     ) -> PreparedSubmitCandidates:
-        priority_mode = SystemConfigService.get_config(
-            self.db,
-            "provider_priority_mode",
-            "provider",
-        )
-        scheduling_mode = SystemConfigService.get_config(
-            self.db,
-            "scheduling_mode",
-            "cache_affinity",
-        )
+        user = getattr(user_api_key, "user", None)
+        scheduling_mode = UserGroupService.resolve_effective_scheduling_mode(self.db, user)
         cache_scheduler = await get_cache_aware_scheduler(
             self.redis,
-            priority_mode=priority_mode,
             scheduling_mode=scheduling_mode,
         )
         resolver = CandidateResolver(db=self.db, cache_scheduler=cache_scheduler)

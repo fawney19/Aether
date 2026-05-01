@@ -210,11 +210,9 @@ class GeminiChatAdapter(ChatAdapterBase):
         provider_type: str | None = None,
     ) -> str:
         """构建Gemini API端点URL"""
-        base_url = base_url.rstrip("/")
-        if base_url.endswith("/v1beta"):
-            return base_url  # 子类需要处理model参数
-        else:
-            return f"{base_url}/v1beta"
+        from src.utils.url_utils import join_url
+
+        return join_url(base_url, "/v1beta")
 
     # build_request_body 使用基类实现，通过 format_conversion_registry 自动转换 OPENAI -> GEMINI
 

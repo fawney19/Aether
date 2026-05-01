@@ -13,11 +13,8 @@ from src.services.orchestration.error_classifier import ErrorClassifier
 from src.services.orchestration.request_dispatcher import RequestDispatcher
 from src.services.provider.format import normalize_endpoint_signature
 from src.services.request.candidate import RequestCandidateService
-from src.services.scheduling.aware_scheduler import (
-    CacheAwareScheduler,
-    get_cache_aware_scheduler,
-)
-from src.services.system.config import SystemConfigService
+from src.services.scheduling.aware_scheduler import get_cache_aware_scheduler
+from src.services.user.group_service import UserGroupService
 from src.services.task.core.protocol import AttemptKind, AttemptResult
 from src.services.task.core.schema import ExecutionResult
 from src.services.task.execute.error_handler import TaskErrorOperationsService
@@ -70,6 +67,7 @@ class SyncTaskExecutionService:
         request_headers: dict[str, Any] | None,
         request_body: dict[str, Any] | None,
         create_pending_usage: bool = True,
+        request_type: str = "chat",
     ) -> ExecutionResult:
         """
         Unified candidate traversal loop for SYNC.
@@ -101,19 +99,18 @@ class SyncTaskExecutionService:
         try:
 
             # Build execution components (mirrors pre-Phase-3 initialization)
-            priority_mode = SystemConfigService.get_config(
-                self.db,
-                "provider_priority_mode",
-                CacheAwareScheduler.PRIORITY_MODE_PROVIDER,
-            )
-            scheduling_mode = SystemConfigService.get_config(
-                self.db,
-                "scheduling_mode",
-                CacheAwareScheduler.SCHEDULING_MODE_CACHE_AFFINITY,
-            )
+            user: User | None = None
+            username_snapshot = None
+            api_key_name_snapshot = getattr(user_api_key, "name", None)
+            try:
+                user = self.db.query(User).filter(User.id == user_api_key.user_id).first()
+                username_snapshot = getattr(user, "username", None) if user else None
+            except Exception as exc:
+                logger.warning("查询用户快照失败: {}", str(exc))
+
+            scheduling_mode = UserGroupService.resolve_effective_scheduling_mode(self.db, user)
             cache_scheduler = await get_cache_aware_scheduler(
                 self.redis,
-                priority_mode=priority_mode,
                 scheduling_mode=scheduling_mode,
             )
             # Ensure cache_scheduler inner state is ready
@@ -144,15 +141,6 @@ class SyncTaskExecutionService:
             affinity_key = str(user_api_key.id)
             user_id = str(user_api_key.user_id)
             api_format_norm = normalize_endpoint_signature(api_format)
-            user: User | None = None
-            username_snapshot = None
-            api_key_name_snapshot = getattr(user_api_key, "name", None)
-            try:
-                user = self.db.query(User).filter(User.id == user_api_key.user_id).first()
-                username_snapshot = getattr(user, "username", None) if user else None
-            except Exception as exc:
-                # username 仅用于审计快照，不应阻塞主请求链路。
-                logger.warning("查询用户快照失败: {}", str(exc))
 
             # 默认由 TaskService 创建 pending 使用记录；已预创建的调用方可关闭。
             if create_pending_usage:
@@ -164,6 +152,7 @@ class SyncTaskExecutionService:
                         api_key=user_api_key,
                         model=model_name,
                         is_stream=is_stream,
+                        request_type=request_type,
                         api_format=api_format_norm,
                         request_headers=request_headers,
                         request_body=request_body,

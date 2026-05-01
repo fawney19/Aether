@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from src.core.api_format.signature import normalize_signature_key
 from src.core.logger import logger
+from src.core.user_access import resolve_user_access_config
 
 if TYPE_CHECKING:
     from src.models.database import ApiKey, User
@@ -60,12 +61,13 @@ class AccessRestrictions:
 
         # 如果 API Key 没有限制，检查 User 的限制
         if user:
-            if allowed_providers is None and user.allowed_providers is not None:
-                allowed_providers = user.allowed_providers
-            if allowed_models is None and user.allowed_models is not None:
-                allowed_models = user.allowed_models
-            if allowed_api_formats is None and user.allowed_api_formats is not None:
-                allowed_api_formats = user.allowed_api_formats
+            user_access = resolve_user_access_config(user)
+            if allowed_providers is None and user_access.allowed_providers is not None:
+                allowed_providers = user_access.allowed_providers
+            if allowed_models is None and user_access.allowed_models is not None:
+                allowed_models = user_access.allowed_models
+            if allowed_api_formats is None and user_access.allowed_api_formats is not None:
+                allowed_api_formats = user_access.allowed_api_formats
 
         return cls(
             allowed_providers=allowed_providers,

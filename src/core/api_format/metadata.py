@@ -167,6 +167,19 @@ _ENDPOINT_DEFINITIONS: dict[tuple[ApiFamily, EndpointKind], EndpointDefinition] 
         stream_in_body=False,
         data_format_id="openai_video",
     ),
+    (ApiFamily.OPENAI, EndpointKind.IMAGE): EndpointDefinition(
+        api_family=ApiFamily.OPENAI,
+        endpoint_kind=EndpointKind.IMAGE,
+        aliases=("openai_image", "gpt_image", "dalle"),
+        default_path="/v1/images/generations",
+        auth_method=AuthMethod.BEARER,
+        auth_header="Authorization",
+        auth_type="bearer",
+        protected_keys=frozenset({"authorization", "content-type"}),
+        model_in_body=True,
+        stream_in_body=True,
+        data_format_id="openai_image",
+    ),
     # Gemini
     (ApiFamily.GEMINI, EndpointKind.CHAT): EndpointDefinition(
         api_family=ApiFamily.GEMINI,

@@ -185,6 +185,7 @@ export interface GlobalModelCreate {
   // 模型配置（JSON格式）- 包含能力、规格、元信息等
   config?: Record<string, unknown>
   is_active?: boolean
+  model_group_ids?: string[] | null
 }
 
 export interface GlobalModelUpdate {
@@ -198,6 +199,14 @@ export interface GlobalModelUpdate {
   supported_capabilities?: string[] | null
   // 模型配置（JSON格式）- 包含能力、规格、元信息等
   config?: Record<string, unknown> | null
+  model_group_ids?: string[] | null
+}
+
+export interface GlobalModelGroupRef {
+  id: string
+  name: string
+  display_name: string
+  is_default: boolean
 }
 
 export interface GlobalModelResponse {
@@ -217,6 +226,8 @@ export interface GlobalModelResponse {
   provider_count?: number
   active_provider_count?: number
   usage_count?: number
+  model_group_ids: string[]
+  model_groups: GlobalModelGroupRef[]
   created_at: string
   updated_at?: string
 }

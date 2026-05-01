@@ -197,17 +197,27 @@ class BillingCalculator:
         if not ttl_pricing:
             return None
 
-        # 找到匹配或最接近的 TTL 价格
-        for ttl_config in ttl_pricing:
-            ttl_limit = ttl_config.get("ttl_minutes", 0)
-            if cache_ttl_minutes <= ttl_limit:
+        sorted_pricing = sorted(
+            (item for item in ttl_pricing if isinstance(item, dict)),
+            key=lambda item: float(item.get("ttl_minutes", 0) or 0),
+        )
+        if not sorted_pricing:
+            return None
+
+        for ttl_config in sorted_pricing:
+            ttl_value = int(ttl_config.get("ttl_minutes", 0) or 0)
+            if cache_ttl_minutes == ttl_value:
                 price = ttl_config.get("cache_read_price_per_1m")
                 return float(price) if price is not None else None
 
-        # 超过所有配置的 TTL，使用最后一个
-        if ttl_pricing:
-            price = ttl_pricing[-1].get("cache_read_price_per_1m")
-            return float(price) if price is not None else None
+        matched_price = None
+        for ttl_config in sorted_pricing:
+            ttl_value = int(ttl_config.get("ttl_minutes", 0) or 0)
+            if ttl_value <= cache_ttl_minutes:
+                matched_price = ttl_config.get("cache_read_price_per_1m")
+
+        if matched_price is not None:
+            return float(matched_price)
 
         return None
 

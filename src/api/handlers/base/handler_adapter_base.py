@@ -166,16 +166,9 @@ class HandlerAdapterBase(ApiAdapter):
         )
         await recorder.record_failure(result, original_headers, original_request_body)
 
-        if isinstance(e, UpstreamClientException):
-            error_type = "invalid_request_error"
-        elif result.status_code == 503:
-            error_type = "internal_server_error"
-        else:
-            error_type = "rate_limit_exceeded"
-
         return self._error_response(
             status_code=result.status_code,
-            error_type=error_type,
+            error_type=self._resolve_client_error_type(result.status_code, e),
             message=result.error_message or str(e),
         )
 
@@ -243,6 +236,17 @@ class HandlerAdapterBase(ApiAdapter):
                 }
             },
         )
+
+    @staticmethod
+    def _resolve_client_error_type(status_code: int, exception: Exception) -> str:
+        """根据最终返回状态码推导客户端 error.type。"""
+        if isinstance(exception, ProviderRateLimitException) or status_code == 429:
+            return "rate_limit_exceeded"
+        if isinstance(exception, UpstreamClientException) or 400 <= status_code < 500:
+            return "invalid_request_error"
+        if status_code == 504:
+            return "timeout_error"
+        return "internal_server_error"
 
     # =========================================================================
     # 计费能力委托

@@ -10,6 +10,10 @@ from src.services.usage._recording_helpers import (
     sanitize_request_metadata,
 )
 from src.services.usage._types import UsageCostInfo, UsageRecordParams
+from src.services.usage.upstream_usage_snapshot import (
+    build_upstream_usage_snapshot,
+    infer_cache_ttl_minutes,
+)
 
 
 class UsageBillingIntegrationMixin:
@@ -60,6 +64,11 @@ class UsageBillingIntegrationMixin:
         metadata = dict(params.metadata or {})
         is_failed_request = params.status_code >= 400 or params.error_message is not None
 
+        request_body = deserialize_body_if_json(params.request_body)
+        provider_request_body = deserialize_body_if_json(params.provider_request_body)
+        response_body = deserialize_body_if_json(params.response_body)
+        client_response_body = deserialize_body_if_json(params.client_response_body)
+
         # Helper: compute billing task_type (billing domain)
         billing_task_type = (params.request_type or "").lower()
         if billing_task_type not in {"chat", "cli", "video", "image", "audio"}:
@@ -72,60 +81,80 @@ class UsageBillingIntegrationMixin:
         has_cache_tokens = bool(
             params.cache_creation_input_tokens > 0 or params.cache_read_input_tokens > 0
         )
-        effective_cache_ttl_minutes = params.cache_ttl_minutes
-
-        # 主链路很多场景不会显式传 cache_ttl_minutes，这里补全以确保 1h/5m TTL 差异化计价生效。
-        if effective_cache_ttl_minutes is None and has_cache_tokens and params.provider_api_key_id:
-            try:
-                from src.models.database import ProviderAPIKey
-
-                key_ttl = (
-                    params.db.query(ProviderAPIKey.cache_ttl_minutes)
-                    .filter(ProviderAPIKey.id == params.provider_api_key_id)
-                    .scalar()
-                )
-                if key_ttl is not None:
-                    key_ttl_int = int(key_ttl)
-                    if key_ttl_int >= 0:
-                        effective_cache_ttl_minutes = key_ttl_int
-            except Exception:
-                # Best-effort fallback below.
-                pass
-
-        # 无法从 key 获取时，尽量从 5m/1h 细分回推（主要覆盖 Claude cache_creation）。
-        if effective_cache_ttl_minutes is None and has_cache_tokens:
-            t5m = int(params.cache_creation_input_tokens_5m or 0)
-            t1h = int(params.cache_creation_input_tokens_1h or 0)
-            if t1h > 0 and t5m == 0:
-                effective_cache_ttl_minutes = 60
-            elif t5m > 0 and t1h == 0:
-                effective_cache_ttl_minutes = 5
-            elif t1h > 0:
-                # 混合场景优先按长 TTL 计，避免 1h 缓存被按 5m 误计。
-                effective_cache_ttl_minutes = 60
-
-        dims: dict[str, Any] = {
-            "input_tokens": input_tokens_for_billing,
-            "output_tokens": params.output_tokens,
-            "cache_creation_input_tokens": params.cache_creation_input_tokens,
-            "cache_read_input_tokens": params.cache_read_input_tokens,
-            "request_count": request_count,
-        }
-        if effective_cache_ttl_minutes is not None:
-            dims["cache_ttl_minutes"] = effective_cache_ttl_minutes
-        # If tiered pricing is disabled, force first tier by using tier-key=0.
-        if not params.use_tiered_pricing:
-            dims["total_input_context"] = 0
+        usage_snapshot = build_upstream_usage_snapshot(
+            response_body,
+            api_family=params.api_family,
+            is_stream=params.is_stream,
+        )
+        effective_cache_ttl_minutes = infer_cache_ttl_minutes(
+            snapshot=usage_snapshot,
+            has_cache_tokens=has_cache_tokens,
+            explicit_cache_ttl_minutes=params.cache_ttl_minutes,
+        )
 
         billing = BillingService(params.db)
-        result = billing.calculate(
-            task_type=billing_task_type,
-            model=params.model,
-            provider_id=params.provider_id or "",
-            dimensions=dims,
-            strict_mode=None,
+        total_input_context = (
+            0
+            if not params.use_tiered_pricing
+            else input_tokens_for_billing
+            + int(params.cache_creation_input_tokens or 0)
+            + int(params.cache_read_input_tokens or 0)
         )
-        snap = result.snapshot
+
+        def _as_float(v: Any, d: float | None) -> float | None:
+            try:
+                if v is None:
+                    return d
+                return float(v)
+            except Exception:
+                return d
+
+        def _make_billing_dims(
+            *,
+            input_tokens: int,
+            output_tokens: int,
+            cache_creation_tokens: int,
+            cache_read_tokens: int,
+            request_count_value: int,
+            cache_ttl_minutes: int | None,
+        ) -> dict[str, Any]:
+            dims: dict[str, Any] = {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_creation_input_tokens": cache_creation_tokens,
+                "cache_read_input_tokens": cache_read_tokens,
+                "request_count": request_count_value,
+                "total_input_context": total_input_context,
+            }
+            if cache_ttl_minutes is not None:
+                dims["cache_ttl_minutes"] = cache_ttl_minutes
+            return dims
+
+        def _run_billing(dimensions: dict[str, Any]) -> Any:
+            return billing.calculate(
+                task_type=billing_task_type,
+                model=params.model,
+                provider_id=params.provider_id or "",
+                dimensions=dimensions,
+                strict_mode=None,
+            ).snapshot
+
+        def _snapshot_dict(snapshot: Any) -> dict[str, Any]:
+            try:
+                data = snapshot.to_dict()
+            except Exception:
+                return {}
+            return data if isinstance(data, dict) else {}
+
+        dims = _make_billing_dims(
+            input_tokens=input_tokens_for_billing,
+            output_tokens=params.output_tokens,
+            cache_creation_tokens=params.cache_creation_input_tokens,
+            cache_read_tokens=params.cache_read_input_tokens,
+            request_count_value=request_count,
+            cache_ttl_minutes=effective_cache_ttl_minutes,
+        )
+        snap = _run_billing(dims)
 
         breakdown = snap.cost_breakdown or {}
         input_cost = float(breakdown.get("input_cost", 0.0))
@@ -138,31 +167,96 @@ class UsageBillingIntegrationMixin:
 
         rv = snap.resolved_variables or {}
 
-        def _as_float(v: Any, d: float | None) -> float | None:
-            try:
-                if v is None:
-                    return d
-                return float(v)
-            except Exception:
-                return d
-
         input_price = _as_float(rv.get("input_price_per_1m"), 0.0) or 0.0
         output_price = _as_float(rv.get("output_price_per_1m"), 0.0) or 0.0
         cache_creation_price = _as_float(rv.get("cache_creation_price_per_1m"), None)
         cache_read_price = _as_float(rv.get("cache_read_price_per_1m"), None)
         request_price = _as_float(rv.get("price_per_request"), None)
 
+        billing_snapshot_payload = _snapshot_dict(snap)
+
+        billable_multiplier = max(float(params.user_billing_multiplier or 1.0), 0.0)
+
+        base_input_cost = input_cost
+        base_output_cost = output_cost
+        base_cache_creation_cost = cache_creation_cost
+        base_cache_read_cost = cache_read_cost
+        base_request_cost = request_cost
+        base_total_cost = total_cost
+
+        base_input_price = input_price
+        base_output_price = output_price
+        base_cache_creation_price = cache_creation_price
+        base_cache_read_price = cache_read_price
+        base_request_price = request_price
+
+        input_cost = base_input_cost * billable_multiplier
+        output_cost = base_output_cost * billable_multiplier
+        cache_creation_cost = base_cache_creation_cost * billable_multiplier
+        cache_read_cost = base_cache_read_cost * billable_multiplier
+        cache_cost = cache_creation_cost + cache_read_cost
+        request_cost = base_request_cost * billable_multiplier
+        total_cost = base_total_cost * billable_multiplier
+
+        input_price = (base_input_price * billable_multiplier) if base_input_price is not None else None
+        output_price = (base_output_price * billable_multiplier) if base_output_price is not None else None
+        cache_creation_price = (
+            base_cache_creation_price * billable_multiplier
+            if base_cache_creation_price is not None
+            else None
+        )
+        cache_read_price = (
+            base_cache_read_price * billable_multiplier if base_cache_read_price is not None else None
+        )
+        request_price = (base_request_price * billable_multiplier) if base_request_price is not None else None
+
+        if is_free_tier:
+            actual_input_cost = 0.0
+            actual_output_cost = 0.0
+            actual_cache_creation_cost = 0.0
+            actual_cache_read_cost = 0.0
+            actual_cache_cost = 0.0
+            actual_request_cost = 0.0
+            actual_total_cost = 0.0
+        else:
+            actual_input_cost = base_input_cost * actual_rate_multiplier
+            actual_output_cost = base_output_cost * actual_rate_multiplier
+            actual_cache_creation_cost = base_cache_creation_cost * actual_rate_multiplier
+            actual_cache_read_cost = base_cache_read_cost * actual_rate_multiplier
+            actual_cache_cost = actual_cache_creation_cost + actual_cache_read_cost
+            actual_request_cost = base_request_cost * actual_rate_multiplier
+            actual_total_cost = base_total_cost * actual_rate_multiplier
+
+        billing_snapshot_payload["base_cost_breakdown"] = {
+            "input_cost": base_input_cost,
+            "output_cost": base_output_cost,
+            "cache_creation_cost": base_cache_creation_cost,
+            "cache_read_cost": base_cache_read_cost,
+            "request_cost": base_request_cost,
+            "total_cost": base_total_cost,
+        }
+        billing_snapshot_payload["billing_multiplier"] = billable_multiplier
+        billing_snapshot_payload["actual_rate_multiplier"] = actual_rate_multiplier
+        billing_snapshot_payload["billable_cost_breakdown"] = {
+            "input_cost": input_cost,
+            "output_cost": output_cost,
+            "cache_creation_cost": cache_creation_cost,
+            "cache_read_cost": cache_read_cost,
+            "request_cost": request_cost,
+            "total_cost": total_cost,
+        }
+        if params.model_group_id:
+            billing_snapshot_payload["model_group_id"] = params.model_group_id
+        if params.model_group_route_id:
+            billing_snapshot_payload["model_group_route_id"] = params.model_group_route_id
+
         # Audit snapshot (pruned later by sanitize_request_metadata)
-        metadata["billing_snapshot"] = snap.to_dict()
+        metadata["billing_snapshot"] = billing_snapshot_payload
 
         # Best-effort prune metadata to reduce DB/memory pressure.
         metadata = sanitize_request_metadata(metadata)
 
         # 构建 Usage 参数
-        request_body = deserialize_body_if_json(params.request_body)
-        provider_request_body = deserialize_body_if_json(params.provider_request_body)
-        response_body = deserialize_body_if_json(params.response_body)
-        client_response_body = deserialize_body_if_json(params.client_response_body)
         usage_params = build_usage_params(
             db=params.db,
             user=params.user,
@@ -173,8 +267,6 @@ class UsageBillingIntegrationMixin:
             output_tokens=params.output_tokens,
             cache_creation_input_tokens=params.cache_creation_input_tokens,
             cache_read_input_tokens=params.cache_read_input_tokens,
-            cache_creation_input_tokens_5m=params.cache_creation_input_tokens_5m,
-            cache_creation_input_tokens_1h=params.cache_creation_input_tokens_1h,
             request_type=params.request_type,
             api_format=params.api_format,
             api_family=params.api_family,
@@ -199,6 +291,8 @@ class UsageBillingIntegrationMixin:
             provider_id=params.provider_id,
             provider_endpoint_id=params.provider_endpoint_id,
             provider_api_key_id=params.provider_api_key_id,
+            model_group_id=params.model_group_id,
+            model_group_route_id=params.model_group_route_id,
             status=params.status,
             cache_ttl_minutes=effective_cache_ttl_minutes,
             target_model=params.target_model,
@@ -217,6 +311,14 @@ class UsageBillingIntegrationMixin:
                 request_price=request_price,
                 actual_rate_multiplier=actual_rate_multiplier,
                 is_free_tier=is_free_tier,
+                user_billing_multiplier=billable_multiplier,
+                actual_input_cost=actual_input_cost,
+                actual_output_cost=actual_output_cost,
+                actual_cache_creation_cost=actual_cache_creation_cost,
+                actual_cache_read_cost=actual_cache_read_cost,
+                actual_cache_cost=actual_cache_cost,
+                actual_request_cost=actual_request_cost,
+                actual_total_cost=actual_total_cost,
             ),
         )
 

@@ -17,7 +17,11 @@ from src.api.handlers.base.response_parser import (
 
 # is_cli_format 权威定义在 core 层
 from src.core.api_format import is_cli_format
-from src.core.usage_tokens import extract_cache_creation_tokens, extract_cache_read_tokens
+from src.core.usage_tokens import (
+    extract_cache_creation_tokens,
+    extract_cache_read_tokens,
+    extract_cache_ttl_minutes,
+)
 
 
 def _check_nested_error(response: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
@@ -434,6 +438,7 @@ class ClaudeResponseParser(ResponseParser):
             chunk.output_tokens = usage.get("output_tokens", 0)
             chunk.cache_creation_tokens = usage.get("cache_creation_tokens", 0)
             chunk.cache_read_tokens = usage.get("cache_read_tokens", 0)
+            chunk.cache_ttl_minutes = usage.get("cache_ttl_minutes")
 
             # 取最大值更新 stats
             if chunk.input_tokens > stats.input_tokens:
@@ -444,6 +449,8 @@ class ClaudeResponseParser(ResponseParser):
                 stats.cache_creation_tokens = chunk.cache_creation_tokens
             if chunk.cache_read_tokens > stats.cache_read_tokens:
                 stats.cache_read_tokens = chunk.cache_read_tokens
+            if chunk.cache_ttl_minutes is not None:
+                stats.cache_ttl_minutes = chunk.cache_ttl_minutes
 
         # 检查错误
         if self._parser.is_error_event(parsed):
@@ -482,6 +489,7 @@ class ClaudeResponseParser(ResponseParser):
         result.output_tokens = usage.get("output_tokens", 0)
         result.cache_creation_tokens = extract_cache_creation_tokens(usage)
         result.cache_read_tokens = usage.get("cache_read_input_tokens", 0)
+        result.cache_ttl_minutes = extract_cache_ttl_minutes(usage)
 
         # 检查错误（支持嵌套错误格式）
         is_error, error_info = _check_nested_error(response)
@@ -500,12 +508,16 @@ class ClaudeResponseParser(ResponseParser):
         if not usage and "message" in response:
             usage = (response.get("message") or {}).get("usage") or {}
 
-        return {
+        result = {
             "input_tokens": usage.get("input_tokens", 0),
             "output_tokens": usage.get("output_tokens", 0),
             "cache_creation_tokens": extract_cache_creation_tokens(usage),
             "cache_read_tokens": usage.get("cache_read_input_tokens", 0),
         }
+        ttl_minutes = extract_cache_ttl_minutes(usage)
+        if ttl_minutes is not None:
+            result["cache_ttl_minutes"] = ttl_minutes
+        return result
 
     def extract_text_content(self, response: dict[str, Any]) -> str:
         content = response.get("content", [])

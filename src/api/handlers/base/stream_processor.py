@@ -44,7 +44,11 @@ from src.core.exceptions import (
     ProviderTimeoutException,
 )
 from src.core.logger import logger
-from src.core.usage_tokens import extract_cache_creation_tokens, extract_cache_read_tokens
+from src.core.usage_tokens import (
+    extract_cache_creation_tokens,
+    extract_cache_read_tokens,
+    extract_cache_ttl_minutes,
+)
 from src.models.database import Provider, ProviderEndpoint
 from src.services.provider.behavior import get_provider_behavior
 from src.utils.perf import PerfRecorder
@@ -96,6 +100,8 @@ class StreamProcessor:
 
         # 内容提取器缓存
         self._extractors: dict[str, ContentExtractor] = {}
+        # 命中格式后锁定提取器（同一流内格式不变，避免每 chunk 重复扫描）
+        self._active_extractor: ContentExtractor | None = None
 
     def get_parser_for_provider(self, ctx: StreamContext) -> ResponseParser:
         """
@@ -113,6 +119,8 @@ class StreamProcessor:
     @staticmethod
     def _maybe_mark_gemini_completion(ctx: StreamContext, data: dict[str, Any]) -> None:
         """Gemini: mark completion based on candidates[].finishReason."""
+        if ctx.has_completion:
+            return
         candidates = data.get("candidates")
         if not isinstance(candidates, list) or not candidates:
             return
@@ -154,10 +162,13 @@ class StreamProcessor:
         }
 
     def _unwrap_provider_envelope(self, ctx: StreamContext, data: dict[str, Any]) -> dict[str, Any]:
-        behavior = get_provider_behavior(
-            provider_type=str(getattr(ctx, "provider_type", "") or ""),
-            endpoint_sig=str(getattr(ctx, "provider_api_format", "") or ""),
-        )
+        behavior = ctx._cached_behavior
+        if behavior is None:
+            behavior = get_provider_behavior(
+                provider_type=str(getattr(ctx, "provider_type", "") or ""),
+                endpoint_sig=str(getattr(ctx, "provider_api_format", "") or ""),
+            )
+            ctx._cached_behavior = behavior
         envelope = behavior.envelope
         if not envelope:
             return data
@@ -204,6 +215,7 @@ class StreamProcessor:
                 output_tokens=usage.get("output_tokens"),
                 cached_tokens=usage.get("cache_read_tokens"),
                 cache_creation_tokens=usage.get("cache_creation_tokens"),
+                cache_ttl_minutes=usage.get("cache_ttl_minutes"),
             )
 
         # Provider completion detection (Gemini doesn't emit response.completed).
@@ -332,6 +344,7 @@ class StreamProcessor:
             new_output = usage.get("output_tokens") or usage.get("completion_tokens") or 0
             new_cached = extract_cache_read_tokens(usage)
             new_cache_creation = extract_cache_creation_tokens(usage)
+            cache_ttl_minutes = extract_cache_ttl_minutes(usage)
 
             if new_input > ctx.input_tokens:
                 ctx.input_tokens = new_input
@@ -343,6 +356,8 @@ class StreamProcessor:
                 ctx.cached_tokens = new_cached
             if new_cache_creation > ctx.cache_creation_tokens:
                 ctx.cache_creation_tokens = new_cache_creation
+            if cache_ttl_minutes is not None:
+                ctx.cache_ttl_minutes = cache_ttl_minutes
 
             if any([new_input, new_output, new_cached, new_cache_creation]):
                 ctx.final_usage = usage
@@ -1395,15 +1410,24 @@ class StreamProcessor:
         检测数据格式并提取内容
 
         依次尝试各格式的提取器，返回第一个成功提取内容的结果。
+        一旦命中格式，锁定该提取器；后续 chunk 直接复用，miss 才回退全量扫。
 
         Returns:
             (content, extractor): 提取的内容和对应的提取器
         """
+        if self._active_extractor is not None:
+            content = self._active_extractor.extract_content(data)
+            if content is not None:
+                return content, self._active_extractor
+            # 锁定的提取器对本 chunk 无内容（heartbeat 等），不解锁，直接返回
+            return None, None
+
         for format_name in get_extractor_formats():
             extractor = self._get_extractor(format_name)
             if extractor:
                 content = extractor.extract_content(data)
                 if content is not None:
+                    self._active_extractor = extractor
                     return content, extractor
 
         return None, None
@@ -1489,6 +1513,8 @@ class _LightweightSmoother:
         self.request_id = request_id
         self.provider_name = provider_name
         self._extractors: dict[str, ContentExtractor] = {}
+        # 命中格式后锁定，避免每 chunk 重复扫描所有格式
+        self._active_extractor: ContentExtractor | None = None
 
     def _get_extractor(self, format_name: str) -> ContentExtractor | None:
         if format_name not in self._extractors:
@@ -1498,11 +1524,17 @@ class _LightweightSmoother:
         return self._extractors.get(format_name)
 
     def _detect_format_and_extract(self, data: dict) -> tuple[str | None, ContentExtractor | None]:
+        if self._active_extractor is not None:
+            content = self._active_extractor.extract_content(data)
+            if content is not None:
+                return content, self._active_extractor
+            return None, None
         for format_name in get_extractor_formats():
             extractor = self._get_extractor(format_name)
             if extractor:
                 content = extractor.extract_content(data)
                 if content is not None:
+                    self._active_extractor = extractor
                     return content, extractor
         return None, None
 

@@ -6,6 +6,7 @@ export interface AdminWallet extends WalletSummary {
   api_key_id: string | null
   owner_type: 'user' | 'api_key'
   owner_name: string | null
+  owner_email?: string | null
   created_at: string
 }
 
@@ -40,6 +41,7 @@ export interface AdminLedgerTransaction extends WalletTransaction {
   wallet_id: string
   owner_type: 'user' | 'api_key'
   owner_name: string | null
+  owner_email?: string | null
   wallet_status?: string | null
 }
 
@@ -47,6 +49,7 @@ export interface AdminGlobalRefund extends RefundRequest {
   wallet_id: string
   owner_type: 'user' | 'api_key'
   owner_name: string | null
+  owner_email?: string | null
   wallet_status?: string | null
 }
 

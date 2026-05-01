@@ -130,7 +130,14 @@ class RequestDispatcher:
         # 流式请求的 success 状态会在流完成后由 _record_stream_stats 方法标记
 
         # 设置缓存亲和性
-        if provider_supports_caching and self.cache_scheduler is not None:
+        should_refresh_cache_affinity = not bool(
+            getattr(candidate, "cache_affinity_degraded", False)
+        )
+        if (
+            provider_supports_caching
+            and self.cache_scheduler is not None
+            and should_refresh_cache_affinity
+        ):
             try:
                 await self.cache_scheduler.set_cache_affinity(
                     affinity_key=affinity_key,
@@ -143,6 +150,14 @@ class RequestDispatcher:
                 )
             except Exception as cache_exc:
                 logger.warning(f"  [{request_id}] 设置缓存亲和性失败: {cache_exc}")
+        elif provider_supports_caching and not should_refresh_cache_affinity:
+            logger.debug(
+                "  [{}] 跳过降级缓存亲和续期: Provider={}, Endpoint={}..., Key={}...",
+                request_id,
+                provider_name,
+                endpoint_id[:8],
+                key_id[:8],
+            )
 
         logger.debug(f"  [{request_id}] 请求成功: Provider={provider_name}, 耗时={elapsed_ms}ms")
 

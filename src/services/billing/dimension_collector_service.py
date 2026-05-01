@@ -435,6 +435,29 @@ class DimensionCollectorService:
                     result.append(c)
             return result
 
+        if task == "image":
+            # image 走 token 计费时可直接复用 chat 的 input/output_tokens 采集器。
+            # 用户只配 chat 的 model 定价，image 也能算出成本。
+            from src.core.api_format.signature import parse_signature_key
+
+            base_api = api
+            try:
+                sig = parse_signature_key(api)
+                if sig.endpoint_kind.value == "image":
+                    base_api = f"{sig.api_family.value}:chat"
+            except Exception:
+                base_api = api
+            base_variants = list({base_api, base_api.lower()})
+
+            image_collectors = _preset_query(api_variants, "image")
+            base_collectors = _preset_query(base_variants, "chat")
+            image_dims: set[str] = {c.dimension_name for c in image_collectors}
+            result = list(image_collectors)
+            for c in base_collectors:
+                if c.dimension_name not in image_dims:
+                    result.append(c)
+            return result
+
         return _preset_query(api_variants, task)
 
     def collect_dimensions(

@@ -13,26 +13,33 @@ from sqlalchemy.orm import Session
 from src.api.base.admin_adapter import AdminApiAdapter
 from src.api.base.context import ApiRequestContext
 from src.api.base.pipeline import get_pipeline
-from src.config.constants import CacheTTL
 from src.core.exceptions import InvalidRequestException, NotFoundException, translate_pydantic_error
 from src.core.logger import logger
+from src.core.user_access import resolve_user_access_config
 from src.database import get_db, get_db_context
 from src.models.admin_requests import UpdateUserRequest
 from src.models.api import (
+    BatchUserGroupBindingRequest,
     CreateApiKeyRequest,
     CreateUserRequest,
+    CreateUserGroupRequest,
+    BatchUserGroupBindingResponse,
     UpdateMyApiKeyRequest,
+    UpdateUserGroupRequest,
     UserSessionResponse,
 )
-from src.models.database import ApiKey, User, UserRole, Wallet
+from src.models.database import ApiKey, User, UserGroup, UserRole, Wallet
 from src.services.auth.session_service import SessionService
 from src.services.cache.user_cache import UserCacheService
 from src.services.system.config import SystemConfigService
+from src.services.model.group_service import ModelGroupBindingPayload
+from src.services.subscription import SubscriptionService
 from src.services.user.apikey import ApiKeyService
 from src.services.user.bulk_cleanup import pre_clean_api_key
+from src.services.user.group_service import UserGroupService
 from src.services.user.service import UserService
 from src.services.wallet import WalletService
-from src.utils.cache_decorator import cache_result
+from src.services.scheduling.scheduling_config import SchedulingConfig
 
 router = APIRouter(prefix="/api/admin/users", tags=["Admin - Users"])
 pipeline = get_pipeline()
@@ -50,25 +57,101 @@ def _serialize_user(
     user: User,
     wallet: Wallet | None | _WalletSentinelType = _WALLET_SENTINEL,
 ) -> dict[str, Any]:
+    effective_access = resolve_user_access_config(user)
+    active_subscription = SubscriptionService._load_active_subscription_from_user(user)
+    effective_group = SubscriptionService.resolve_effective_user_group_from_user(user)
+    if isinstance(user, User):
+        if active_subscription is None:
+            active_subscription = SubscriptionService.get_active_subscription(db, user_id=str(user.id))
+        if effective_group is None:
+            effective_group = SubscriptionService.resolve_effective_user_group(db, user)
     resolved_wallet: Wallet | None
     if wallet is _WALLET_SENTINEL:
         resolved_wallet = WalletService.get_wallet(db, user_id=user.id)
     else:
         resolved_wallet = wallet
+    active_subscription_ends_at = SubscriptionService.get_subscription_display_end(db, active_subscription)
     return {
         "id": user.id,
         "email": user.email,
         "username": user.username,
         "role": user.role.value,
-        "allowed_providers": user.allowed_providers,
-        "allowed_api_formats": user.allowed_api_formats,
-        "allowed_models": user.allowed_models,
-        "rate_limit": user.rate_limit,
+        "group_id": user.group_id,
+        "group_name": user.group.name if user.group else None,
+        "effective_group_id": getattr(effective_group, "id", None),
+        "effective_group_name": getattr(effective_group, "name", None),
+        "effective_allowed_providers": effective_access.allowed_providers,
+        "effective_allowed_api_formats": effective_access.allowed_api_formats,
+        "effective_allowed_models": effective_access.allowed_models,
+        "effective_rate_limit": effective_access.rate_limit,
+        "active_subscription_id": getattr(active_subscription, "id", None),
+        "active_subscription_product_id": (
+            getattr(getattr(getattr(active_subscription, "plan", None), "product", None), "id", None)
+            if active_subscription is not None
+            else None
+        ),
+        "active_subscription_product_name": (
+            getattr(getattr(getattr(active_subscription, "plan", None), "product", None), "name", None)
+            if active_subscription is not None
+            else None
+        ),
+        "active_subscription_plan_id": getattr(active_subscription, "plan_id", None),
+        "active_subscription_plan_name": (
+            getattr(getattr(active_subscription, "plan", None), "name", None)
+            if active_subscription is not None
+            else None
+        ),
+        "active_subscription_status": getattr(active_subscription, "status", None),
+        "active_subscription_remaining_quota_usd": (
+            float(SubscriptionService.get_remaining_quota_value(active_subscription))
+            if active_subscription is not None
+            else None
+        ),
+        "active_subscription_overage_policy": (
+            getattr(getattr(active_subscription, "plan", None), "overage_policy", None)
+            if active_subscription is not None
+            else None
+        ),
+        "active_subscription_started_at": getattr(active_subscription, "started_at", None),
+        "active_subscription_ends_at": active_subscription_ends_at,
         "unlimited": WalletService.is_unlimited_wallet(resolved_wallet),
         "is_active": user.is_active,
         "created_at": user.created_at.isoformat(),
         "updated_at": user.updated_at.isoformat() if user.updated_at else None,
         "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
+    }
+
+
+def _serialize_user_group(group: UserGroup, user_count: int = 0) -> dict[str, Any]:
+    model_group_bindings = []
+    for link in list(getattr(group, "model_group_links", None) or []):
+        model_group = getattr(link, "model_group", None)
+        model_group_bindings.append(
+            {
+                "model_group_id": str(getattr(link, "model_group_id", "") or ""),
+                "model_group_name": getattr(model_group, "name", None),
+                "model_group_display_name": getattr(model_group, "display_name", None),
+                "model_group_is_default": bool(getattr(model_group, "is_default", False)),
+                "priority": int(getattr(link, "priority", 100) or 100),
+                "is_active": bool(getattr(link, "is_active", True)),
+            }
+        )
+    model_group_bindings.sort(key=lambda item: (item["priority"], item["model_group_name"] or ""))
+
+    return {
+        "id": group.id,
+        "name": group.name,
+        "description": group.description,
+        "is_default": bool(group.is_default),
+        "allowed_api_formats": group.allowed_api_formats,
+        "model_group_bindings": model_group_bindings,
+        "rate_limit": group.rate_limit,
+        "scheduling_mode": SchedulingConfig.normalize_scheduling_mode(
+            getattr(group, "scheduling_mode", None)
+        ),
+        "user_count": int(user_count),
+        "created_at": group.created_at.isoformat(),
+        "updated_at": group.updated_at.isoformat() if group.updated_at else None,
     }
 
 
@@ -93,10 +176,7 @@ def _create_user_sync(
             role=role,
             initial_gift_usd=initial_gift_usd,
             unlimited=request.unlimited,
-            allowed_providers=request.allowed_providers,
-            allowed_api_formats=request.allowed_api_formats,
-            allowed_models=request.allowed_models,
-            rate_limit=request.rate_limit,
+            group_id=request.group_id,
         )
         return _serialize_user(db, user), {
             "action": "create_user",
@@ -104,6 +184,7 @@ def _create_user_sync(
             "target_email": user.email,
             "target_username": user.username,
             "target_role": user.role.value,
+            "group_id": user.group_id,
             "initial_gift_usd": initial_gift_usd,
             "unlimited": request.unlimited,
             "is_active": user.is_active,
@@ -155,6 +236,7 @@ def _update_user_sync(
                 "updated_fields": changed_fields,
                 "role_before": old_role.value if old_role else None,
                 "role_after": user.role.value,
+                "group_id": user.group_id,
                 "unlimited_before": unlimited_before,
                 "unlimited_after": (
                     requested_unlimited if requested_unlimited is not None else unlimited_before
@@ -196,6 +278,137 @@ def _delete_user_sync(user_id: str) -> tuple[dict[str, Any], dict[str, Any], str
             },
             user.email,
         )
+
+
+def _list_user_groups_sync() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    with get_db_context() as db:
+        groups = UserGroupService.list_groups(db)
+        return (
+            [_serialize_user_group(group, user_count) for group, user_count in groups],
+            {
+                "action": "list_user_groups",
+                "group_count": len(groups),
+            },
+        )
+
+
+def _create_user_group_sync(
+    request: CreateUserGroupRequest,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    with get_db_context() as db:
+        model_group_bindings = (
+            [
+                ModelGroupBindingPayload(
+                    model_group_id=item.model_group_id,
+                    priority=item.priority,
+                    is_active=item.is_active,
+                )
+                for item in request.model_group_bindings
+            ]
+            if request.model_group_bindings is not None
+            else None
+        )
+        group = UserGroupService.create_group(
+            db,
+            name=request.name,
+            description=request.description,
+            allowed_api_formats=request.allowed_api_formats,
+            rate_limit=request.rate_limit,
+            scheduling_mode=request.scheduling_mode,
+            model_group_bindings=model_group_bindings,
+        )
+        return _serialize_user_group(group, 0), {
+            "action": "create_user_group",
+            "group_id": group.id,
+            "group_name": group.name,
+            "scheduling_mode": getattr(group, "scheduling_mode", None),
+        }
+
+
+def _update_user_group_sync(
+    group_id: str,
+    request: UpdateUserGroupRequest,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    with get_db_context() as db:
+        update_data = request.model_dump(exclude_unset=True)
+        if "model_group_bindings" in update_data and update_data["model_group_bindings"] is not None:
+            update_data["model_group_bindings"] = [
+                ModelGroupBindingPayload(
+                    model_group_id=item["model_group_id"],
+                    priority=int(item.get("priority", 100)),
+                    is_active=bool(item.get("is_active", True)),
+                )
+                for item in update_data["model_group_bindings"]
+            ]
+        group = UserGroupService.update_group(db, group_id, **update_data)
+        if not group:
+            raise NotFoundException("用户分组不存在", "user_group")
+
+        user_count = int(
+            db.query(func.count(User.id)).filter(User.group_id == group.id).scalar() or 0
+        )
+        return _serialize_user_group(group, user_count), {
+            "action": "update_user_group",
+            "group_id": group.id,
+            "group_name": group.name,
+            "updated_fields": list(update_data.keys()),
+        }
+
+
+def _delete_user_group_sync(group_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    with get_db_context() as db:
+        group = UserGroupService.get_group(db, group_id)
+        if not group:
+            raise NotFoundException("用户分组不存在", "user_group")
+
+        try:
+            deleted = UserGroupService.delete_group(db, group_id)
+        except ValueError as exc:
+            raise InvalidRequestException(str(exc)) from exc
+
+        if not deleted:
+            raise NotFoundException("用户分组不存在", "user_group")
+
+        return {"message": "用户分组删除成功"}, {
+            "action": "delete_user_group",
+            "group_id": group.id,
+            "group_name": group.name,
+        }
+
+
+def _batch_update_user_group_binding_sync(
+    request: BatchUserGroupBindingRequest,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    with get_db_context() as db:
+        updated_users, skipped_count = UserService.batch_update_user_group_binding(
+            db,
+            user_ids=request.user_ids,
+            action=request.action,
+            group_id=request.group_id,
+            source_group_id=request.source_group_id,
+        )
+        default_group = UserGroupService.get_default_group(db)
+        wallets_by_user_id = WalletService.get_wallets_by_user_ids(
+            db, [user.id for user in updated_users]
+        )
+        response = BatchUserGroupBindingResponse(
+            action=request.action,
+            group_id=request.group_id if request.action == "bind" else default_group.id if default_group else None,
+            source_group_id=request.source_group_id,
+            updated_count=len(updated_users),
+            skipped_count=skipped_count,
+            users=[
+                _serialize_user(db, user, wallets_by_user_id.get(user.id)) for user in updated_users
+            ],
+        )
+        return response.model_dump(mode="json"), {
+            "action": "batch_user_group_binding",
+            "binding_action": request.action,
+            "group_id": request.group_id,
+            "source_group_id": request.source_group_id,
+            "updated_count": len(updated_users),
+            "skipped_count": skipped_count,
+        }
 
 
 def _list_user_sessions_sync(user_id: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -312,7 +525,7 @@ def _delete_user_key_sync(user_id: str, key_id: str) -> tuple[dict[str, Any], di
             .filter(
                 ApiKey.id == key_id,
                 ApiKey.user_id == user_id,
-                ApiKey.is_standalone == False,
+                ApiKey.is_standalone.is_(False),
             )
             .first()
         )
@@ -341,7 +554,7 @@ def _update_user_key_sync(
             .filter(
                 ApiKey.id == key_id,
                 ApiKey.user_id == user_id,
-                ApiKey.is_standalone == False,
+                ApiKey.is_standalone.is_(False),
             )
             .first()
         )
@@ -395,7 +608,7 @@ def _toggle_user_key_lock_sync(
             .filter(
                 ApiKey.id == key_id,
                 ApiKey.user_id == user_id,
-                ApiKey.is_standalone == False,
+                ApiKey.is_standalone.is_(False),
             )
             .first()
         )
@@ -458,6 +671,49 @@ async def list_users(
     **返回字段**: id, email, username, role, unlimited, is_active, created_at 等
     """
     adapter = AdminListUsersAdapter(skip=skip, limit=limit, role=role, is_active=is_active)
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.get("/groups")
+async def list_user_groups(request: Request, db: Session = Depends(get_db)) -> Any:
+    """获取用户分组列表。"""
+    adapter = AdminListUserGroupsAdapter()
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.post("/groups")
+async def create_user_group(request: Request, db: Session = Depends(get_db)) -> Any:
+    """创建用户分组。"""
+    adapter = AdminCreateUserGroupAdapter()
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.put("/groups/{group_id}")
+async def update_user_group(
+    group_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    """更新用户分组。"""
+    adapter = AdminUpdateUserGroupAdapter(group_id=group_id)
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.delete("/groups/{group_id}")
+async def delete_user_group(
+    group_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    """删除用户分组。"""
+    adapter = AdminDeleteUserGroupAdapter(group_id=group_id)
+    return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.post("/groups/bindings/batch")
+async def batch_update_user_group_binding(request: Request, db: Session = Depends(get_db)) -> Any:
+    """批量绑定/取消绑定用户分组。"""
+    adapter = AdminBatchUserGroupBindingAdapter()
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
 
 
@@ -707,12 +963,6 @@ class AdminListUsersAdapter(AdminApiAdapter):
         self.role = role
         self.is_active = is_active
 
-    @cache_result(
-        key_prefix="admin:users:list",
-        ttl=CacheTTL.USER,
-        user_specific=False,
-        vary_by=["skip", "limit", "role", "is_active"],
-    )
     async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
         db = context.db
         try:
@@ -722,6 +972,93 @@ class AdminListUsersAdapter(AdminApiAdapter):
         users = UserService.list_users(db, self.skip, self.limit, role_enum, self.is_active)
         wallets_by_user_id = WalletService.get_wallets_by_user_ids(db, [user.id for user in users])
         return [_serialize_user(db, user, wallets_by_user_id.get(user.id)) for user in users]
+
+
+class AdminListUserGroupsAdapter(AdminApiAdapter):
+    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
+        response, audit_meta = await run_in_threadpool(_list_user_groups_sync)
+        context.add_audit_metadata(**audit_meta)
+        return response
+
+
+class AdminCreateUserGroupAdapter(AdminApiAdapter):
+    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
+        payload = context.ensure_json_body()
+        try:
+            request = CreateUserGroupRequest.model_validate(payload)
+        except ValidationError as e:
+            errors = e.errors()
+            if errors:
+                raise InvalidRequestException(translate_pydantic_error(errors[0]))
+            raise InvalidRequestException("请求数据验证失败")
+
+        try:
+            response, audit_meta = await run_in_threadpool(_create_user_group_sync, request)
+        except ValueError as exc:
+            raise InvalidRequestException(str(exc)) from exc
+
+        context.add_audit_metadata(**audit_meta)
+        return response
+
+
+class AdminUpdateUserGroupAdapter(AdminApiAdapter):
+    def __init__(self, group_id: str):
+        self.group_id = group_id
+
+    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
+        payload = context.ensure_json_body()
+        try:
+            request = UpdateUserGroupRequest.model_validate(payload)
+        except ValidationError as e:
+            errors = e.errors()
+            if errors:
+                raise InvalidRequestException(translate_pydantic_error(errors[0]))
+            raise InvalidRequestException("请求数据验证失败")
+
+        try:
+            response, audit_meta = await run_in_threadpool(
+                _update_user_group_sync,
+                self.group_id,
+                request,
+            )
+        except ValueError as exc:
+            raise InvalidRequestException(str(exc)) from exc
+
+        context.add_audit_metadata(**audit_meta)
+        return response
+
+
+class AdminDeleteUserGroupAdapter(AdminApiAdapter):
+    def __init__(self, group_id: str):
+        self.group_id = group_id
+
+    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
+        response, audit_meta = await run_in_threadpool(_delete_user_group_sync, self.group_id)
+        context.add_audit_metadata(**audit_meta)
+        return response
+
+
+class AdminBatchUserGroupBindingAdapter(AdminApiAdapter):
+    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
+        payload = context.ensure_json_body()
+        try:
+            request = BatchUserGroupBindingRequest.model_validate(payload)
+        except ValidationError as e:
+            errors = e.errors()
+            if errors:
+                raise InvalidRequestException(translate_pydantic_error(errors[0]))
+            raise InvalidRequestException("请求数据验证失败")
+
+        try:
+            response, audit_meta = await run_in_threadpool(
+                _batch_update_user_group_binding_sync,
+                request,
+            )
+        except ValueError as exc:
+            raise InvalidRequestException(str(exc)) from exc
+
+        context.add_audit_metadata(**audit_meta)
+        return response
 
 
 class AdminGetUserAdapter(AdminApiAdapter):
@@ -978,7 +1315,7 @@ class AdminGetUserKeyFullKeyAdapter(AdminApiAdapter):
             .filter(
                 ApiKey.id == self.key_id,
                 ApiKey.user_id == self.user_id,
-                ApiKey.is_standalone == False,  # 仅普通用户Key
+                ApiKey.is_standalone.is_(False),  # 仅普通用户Key
             )
             .first()
         )

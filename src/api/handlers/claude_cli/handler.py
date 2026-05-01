@@ -117,8 +117,7 @@ class ClaudeCliMessageHandler(CliMessageHandlerBase):
                 total, t5m, t1h = extract_cache_creation_tokens_detail(usage)
                 if total:
                     ctx.cache_creation_tokens = total
-                    ctx.cache_creation_tokens_5m = t5m
-                    ctx.cache_creation_tokens_1h = t1h
+                    ctx.cache_ttl_minutes = 60 if t1h > 0 else 5
 
         # 处理文本增量
         elif event_type == "content_block_delta":
@@ -145,8 +144,7 @@ class ClaudeCliMessageHandler(CliMessageHandlerBase):
                 total, t5m, t1h = extract_cache_creation_tokens_detail(usage)
                 if total > 0:
                     ctx.cache_creation_tokens = total
-                    ctx.cache_creation_tokens_5m = t5m
-                    ctx.cache_creation_tokens_1h = t1h
+                    ctx.cache_ttl_minutes = 60 if t1h > 0 else 5
 
             # 检查是否结束
             delta = data.get("delta", {})

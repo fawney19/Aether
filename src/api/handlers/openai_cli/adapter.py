@@ -14,7 +14,7 @@ from src.api.handlers.base.cli_handler_base import CliMessageHandlerBase
 from src.config.settings import config
 from src.core.api_format import ApiFamily, EndpointKind
 from src.core.provider_types import ProviderType
-from src.utils.url_utils import is_codex_url
+from src.utils.url_utils import join_url
 
 
 @register_cli_adapter
@@ -74,28 +74,15 @@ class OpenAICliAdapter(CliAdapterBase):
     ) -> str:
         """构建OpenAI CLI API端点URL（使用 Responses API）
 
-        对于 Codex OAuth 端点（如 chatgpt.com/backend-api/codex），直接追加 /responses；
-        对于标准 OpenAI API，使用 /v1/responses。
-        compact=True 时追加 /compact 后缀。
-
-        provider_type 优先：仅当 provider_type 为 codex 时才使用 Codex 路由规则；
-        未传入 provider_type 时回退到 URL 模式匹配（兼容旧调用方）。
+        - provider_type=codex → 直接追加 /responses（或 /responses/compact）
+        - 其他情况 → 使用 /v1/responses（或 /v1/responses/compact）
         """
-        suffix = "/responses/compact" if compact else "/responses"
-        base_url = base_url.rstrip("/")
-        # 判断是否按 Codex 规则构建 URL
-        is_codex = (
-            (provider_type or "").lower() == ProviderType.CODEX
-            if provider_type
-            else is_codex_url(base_url)
-        )
+        is_codex = (provider_type or "").lower() == ProviderType.CODEX
         if is_codex:
-            return f"{base_url}{suffix}"
-        # 标准 OpenAI API
-        if base_url.endswith("/v1"):
-            return f"{base_url}{suffix}"
+            path = "/responses/compact" if compact else "/responses"
         else:
-            return f"{base_url}/v1{suffix}"
+            path = "/v1/responses/compact" if compact else "/v1/responses"
+        return join_url(base_url, path)
 
     # build_request_body 使用基类实现
     # OpenAI CLI normalizer 会自动添加 instructions 字段

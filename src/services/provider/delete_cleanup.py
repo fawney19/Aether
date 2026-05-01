@@ -14,7 +14,6 @@ from src.models.database import (
     ProviderEndpoint,
     RequestCandidate,
     Usage,
-    User,
     UserPreference,
     VideoTask,
 )
@@ -26,7 +25,6 @@ _BATCH_SIZE = 2000
 
 def _empty_cleanup_stats() -> dict[str, int]:
     return {
-        "users": 0,
         "api_keys": 0,
         "user_preferences": 0,
         "usage_provider": 0,
@@ -120,10 +118,6 @@ def cleanup_deleted_provider_references(
         endpoint_ids = list(endpoint_ids)
         key_ids = list(key_ids)
 
-    updated_users = prune_allowed_provider_refs(
-        db.query(User).filter(User.allowed_providers.isnot(None)).all(),
-        provider_id,
-    )
     updated_api_keys = prune_allowed_provider_refs(
         db.query(ApiKey).filter(ApiKey.allowed_providers.isnot(None)).all(),
         provider_id,
@@ -182,7 +176,6 @@ def cleanup_deleted_provider_references(
     )
 
     stats = {
-        "users": updated_users,
         "api_keys": updated_api_keys,
         "user_preferences": cleared_preferences,
         "usage_provider": cleared_usage_providers,
@@ -195,13 +188,12 @@ def cleanup_deleted_provider_references(
 
     if any(stats.values()) or key_ids:
         logger.info(
-            "Provider 删除引用清理: provider_id={}, key_refs={}, users={}, api_keys={}, "
+            "Provider 删除引用清理: provider_id={}, key_refs={}, api_keys={}, "
             "user_preferences={}, usage_provider={}, usage_endpoint={}, "
             "video_tasks_provider={}, video_tasks_endpoint={}, "
             "request_candidates_provider={}, request_candidates_endpoint={}",
             provider_id,
             len(key_ids),
-            stats["users"],
             stats["api_keys"],
             stats["user_preferences"],
             stats["usage_provider"],

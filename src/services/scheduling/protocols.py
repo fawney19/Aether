@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 
 class CandidateSorterProtocol(Protocol):
-    def _apply_priority_mode_sort(
+    def _sort_by_route_priority(
         self,
         candidates: list[ProviderCandidate],
         db: Session,

@@ -88,8 +88,14 @@ _ANTIGRAVITY_TIER_PRIORITY: dict[str, int] = {"ultra": 3, "pro": 2, "free": 1}
 
 
 def _get_adapter_for_format(api_format: str) -> Any:
-    """按 api_format 获取 Chat/CLI adapter 类。"""
-    return get_adapter_class(api_format) or get_cli_adapter_class(api_format)
+    """按 api_format 获取 Chat/CLI/Image adapter 类。"""
+    from src.api.handlers.base.image_adapter_base import get_image_adapter_class
+
+    return (
+        get_adapter_class(api_format)
+        or get_cli_adapter_class(api_format)
+        or get_image_adapter_class(api_format)
+    )
 
 
 def _require_test_endpoint_base_url(endpoint: Any) -> str:
@@ -311,7 +317,6 @@ def _build_test_request_payload(request: TestModelFailoverRequest) -> dict[str, 
         "model": request.model_name,
         "messages": [{"role": "user", "content": _resolve_test_message(request.message)}],
         "max_tokens": 30,
-        "temperature": 0.7,
         "stream": True,
     }
 
@@ -1067,7 +1072,6 @@ async def test_model(
             "model": request.model_name,
             "messages": [{"role": "user", "content": _resolve_test_message(request.message)}],
             "max_tokens": 30,
-            "temperature": 0.7,
             "stream": True,
         }
 

@@ -10,6 +10,23 @@
       </RouterLink>
     </div>
 
+    <UsageBreakdownTable
+      v-if="isAdminPage"
+      :title="activeBreakdownMeta.title"
+      :description="activeBreakdownMeta.description"
+      :entity-label="activeBreakdownMeta.entityLabel"
+      :rows="activeBreakdownRows"
+      :tabs="breakdownTabs"
+      :active-tab="breakdownTab"
+      :open="breakdownOpen"
+      :loading="isLoadingBreakdown"
+      :has-loaded="breakdownHasLoaded"
+      :error="breakdownError"
+      :show-actual-cost="authStore.isAdmin"
+      @update:open="handleBreakdownOpenChange"
+      @update:active-tab="handleBreakdownTabChange"
+    />
+
     <!-- 使用记录 -->
     <UsageRecordsTable
       :records="displayRecords"
@@ -61,12 +78,18 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 // useLocalStorage no longer needed (analytics panel removed)
 import { useAuthStore } from '@/stores/auth'
-import { analyticsApi, type AnalyticsFilterOption } from '@/api/analytics'
 import {
+  analyticsApi,
+  type AnalyticsBreakdownRow,
+  type AnalyticsFilterOption,
+} from '@/api/analytics'
+import { buildTimeRangeParams } from '@/composables/useAnalyticsFilters'
+import {
+  UsageBreakdownTable,
   UsageRecordsTable,
   RequestDetailDrawer,
 } from '@/features/usage/components'
@@ -85,6 +108,26 @@ const authStore = useAuthStore()
 
 // 判断是否是管理员页面
 const isAdminPage = computed(() => route.path.startsWith('/admin'))
+type BreakdownTab = 'provider' | 'model'
+const breakdownTab = ref<BreakdownTab>('provider')
+const breakdownOpen = ref(false)
+const breakdownTabs = [
+  { value: 'provider', label: '供应商统计' },
+  { value: 'model', label: '模型统计' },
+] as const
+const activeBreakdownMeta = computed(() => (
+  breakdownTab.value === 'provider'
+    ? {
+        title: '按供应商统计',
+        description: '在同一张统计卡片里查看供应商维度下的成功率、缓存、费用与延迟表现。',
+        entityLabel: '供应商',
+      }
+    : {
+        title: '按模型统计',
+        description: '在同一张统计卡片里查看模型维度下的请求量、缓存命中率、费用与耗时表现。',
+        entityLabel: '模型',
+      }
+))
 
 // 时间范围选择
 const timeRange = ref<DateRangeParams>(getDateRangeFromPeriod('today'))
@@ -119,6 +162,32 @@ const {
 } = useUsageData({ isAdminPage })
 
 // 热力图已移至数据分析页
+const providerBreakdownRows = ref<AnalyticsBreakdownRow[]>([])
+const modelBreakdownRows = ref<AnalyticsBreakdownRow[]>([])
+const breakdownLoadingMap = reactive<Record<BreakdownTab, boolean>>({
+  provider: false,
+  model: false,
+})
+const breakdownLoadedMap = reactive<Record<BreakdownTab, boolean>>({
+  provider: false,
+  model: false,
+})
+const breakdownErrorMap = reactive<Record<BreakdownTab, boolean>>({
+  provider: false,
+  model: false,
+})
+const breakdownRequestIds: Record<BreakdownTab, number> = {
+  provider: 0,
+  model: 0,
+}
+const activeBreakdownRows = computed(() => (
+  breakdownTab.value === 'provider'
+    ? providerBreakdownRows.value
+    : modelBreakdownRows.value
+))
+const isLoadingBreakdown = computed(() => breakdownLoadingMap[breakdownTab.value])
+const breakdownHasLoaded = computed(() => breakdownLoadedMap[breakdownTab.value])
+const breakdownError = computed(() => breakdownErrorMap[breakdownTab.value])
 
 // 获取活跃请求的 ID 列表
 const activeRequestIds = computed(() => {
@@ -357,14 +426,114 @@ function normalizeFilterSelections() {
   return changed
 }
 
-async function syncFilterOptions() {
-  await loadStats(timeRange.value, getCurrentFilters())
+function buildBreakdownFilters() {
+  return {
+    user_ids: filterUser.value !== '__all__' ? [filterUser.value] : [],
+    provider_names: filterProvider.value !== '__all__' ? [filterProvider.value] : [],
+    models: filterModel.value !== '__all__' ? [filterModel.value] : [],
+    api_key_ids: filterApiKey.value !== '__all__' ? [filterApiKey.value] : [],
+    api_formats: filterApiFormat.value !== '__all__' ? [filterApiFormat.value] : [],
+    statuses: filterStatus.value !== '__all__' ? [filterStatus.value] : [],
+  }
+}
 
-  if (!normalizeFilterSelections()) {
+function handleBreakdownTabChange(value: string) {
+  if (value === 'provider' || value === 'model') {
+    breakdownTab.value = value
+    if (breakdownOpen.value) {
+      void ensureBreakdownLoaded(value)
+    }
+  }
+}
+
+function resetAdminBreakdowns() {
+  breakdownRequestIds.provider += 1
+  breakdownRequestIds.model += 1
+  providerBreakdownRows.value = []
+  modelBreakdownRows.value = []
+  breakdownLoadingMap.provider = false
+  breakdownLoadingMap.model = false
+  breakdownLoadedMap.provider = false
+  breakdownLoadedMap.model = false
+  breakdownErrorMap.provider = false
+  breakdownErrorMap.model = false
+}
+
+async function loadAdminBreakdown(tab: BreakdownTab) {
+  if (!isAdminPage.value || !breakdownOpen.value) {
+    return
+  }
+  if (breakdownLoadingMap[tab] || breakdownLoadedMap[tab]) {
     return
   }
 
+  const requestId = ++breakdownRequestIds[tab]
+  breakdownLoadingMap[tab] = true
+  breakdownErrorMap[tab] = false
+
+  try {
+    const response = await analyticsApi.getBreakdown({
+      scope: { kind: 'global' },
+      time_range: buildTimeRangeParams(timeRange.value),
+      filters: buildBreakdownFilters(),
+      metric: 'requests_total',
+      limit: 12,
+      dimension: tab,
+    })
+
+    if (requestId !== breakdownRequestIds[tab]) {
+      return
+    }
+
+    if (tab === 'provider') {
+      providerBreakdownRows.value = response.rows
+    } else {
+      modelBreakdownRows.value = response.rows
+    }
+    breakdownLoadedMap[tab] = true
+  } catch (error) {
+    if (requestId !== breakdownRequestIds[tab]) {
+      return
+    }
+
+    log.error(`加载管理员${tab === 'provider' ? '供应商' : '模型'}统计卡片失败:`, error)
+    if (tab === 'provider') {
+      providerBreakdownRows.value = []
+    } else {
+      modelBreakdownRows.value = []
+    }
+    breakdownLoadedMap[tab] = false
+    breakdownErrorMap[tab] = true
+  } finally {
+    if (requestId === breakdownRequestIds[tab]) {
+      breakdownLoadingMap[tab] = false
+    }
+  }
+}
+
+async function ensureBreakdownLoaded(tab: BreakdownTab = breakdownTab.value) {
+  await loadAdminBreakdown(tab)
+}
+
+async function handleBreakdownOpenChange(value: boolean) {
+  breakdownOpen.value = value
+  if (value) {
+    await ensureBreakdownLoaded()
+  }
+}
+
+async function syncFilterOptions() {
   await loadStats(timeRange.value, getCurrentFilters())
+
+  if (normalizeFilterSelections()) {
+    await loadStats(timeRange.value, getCurrentFilters())
+  }
+
+  resetAdminBreakdowns()
+
+  if (breakdownOpen.value) {
+    await ensureBreakdownLoaded()
+  }
 }
 
 // 初始化加载

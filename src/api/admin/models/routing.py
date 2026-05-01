@@ -3,7 +3,7 @@ GlobalModel 请求链路预览 API
 
 提供模型的请求链路信息，包括：
 - 请求会流向哪些提供商
-- 每个提供商的优先级和负载均衡配置
+- 每个提供商链路下的路由顺序和负载情况
 - 模型名称映射关系
 - Key 的并发配置和健康状态
 """
@@ -32,8 +32,6 @@ from src.models.database import (
     ProviderAPIKey,
     ProviderEndpoint,
 )
-from src.services.scheduling.aware_scheduler import CacheAwareScheduler
-from src.services.system.config import SystemConfigService
 
 router = APIRouter(prefix="/global", tags=["Admin - Global Models"])
 pipeline = get_pipeline()
@@ -150,8 +148,7 @@ class ModelRoutingPreviewResponse(BaseModel):
     total_providers: int = 0
     active_providers: int = 0
     # 调度配置
-    scheduling_mode: str = Field("cache_affinity", description="调度模式")
-    priority_mode: str = Field("provider", description="优先级模式")
+    scheduling_mode: str = Field("per_user_group", description="调度模式")
     # 全局 Key 白名单数据（供前端实时匹配，包含所有 Provider 的 Key）
     all_keys_whitelist: list[GlobalKeyWhitelistItem] = Field(
         default_factory=list, description="所有 Provider 的 Key 白名单数据"
@@ -173,10 +170,10 @@ async def get_model_routing_preview(
     获取模型请求链路预览
 
     查看指定 GlobalModel 的完整请求链路信息，包括：
-    - 关联的所有提供商及其优先级
+    - 关联的所有提供商及其路由顺序
     - 每个提供商的模型名称映射配置
     - Endpoint 和 Key 的详细配置
-    - 负载均衡和调度策略
+    - 按用户分组生效的调度策略
 
     **路径参数**:
     - `global_model_id`: GlobalModel ID
@@ -193,8 +190,7 @@ async def get_model_routing_preview(
       - `provider_model_name`: 提供商侧的模型名称
       - `model_mappings`: 模型名称映射列表
       - `endpoints`: Endpoint 列表，每个包含 Key 信息
-    - `scheduling_mode`: 调度模式（cache_affinity, fixed_order, load_balance）
-    - `priority_mode`: 优先级模式（provider, global_key）
+    - `scheduling_mode`: 调度模式（按用户分组生效）
     """
     adapter = AdminGetModelRoutingPreviewAdapter(global_model_id=global_model_id)
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
@@ -424,6 +420,7 @@ class AdminGetModelRoutingPreviewAdapter(AdminApiAdapter):
                 "openai:cli",
                 "openai:compact",
                 "openai:video",
+                "openai:image",
                 "claude:chat",
                 "claude:cli",
                 "gemini:chat",
@@ -460,23 +457,9 @@ class AdminGetModelRoutingPreviewAdapter(AdminApiAdapter):
 
         active_providers = sum(1 for p in provider_infos if p.is_active and p.model_is_active)
 
-        # 从数据库获取当前调度配置
-        scheduling_mode = (
-            SystemConfigService.get_config(
-                db,
-                "scheduling_mode",
-                CacheAwareScheduler.SCHEDULING_MODE_CACHE_AFFINITY,
-            )
-            or CacheAwareScheduler.SCHEDULING_MODE_CACHE_AFFINITY
-        )
-        priority_mode = (
-            SystemConfigService.get_config(
-                db,
-                "provider_priority_mode",
-                CacheAwareScheduler.PRIORITY_MODE_PROVIDER,
-            )
-            or CacheAwareScheduler.PRIORITY_MODE_PROVIDER
-        )
+        # 预览接口只展示当前链路结构。
+        # 实际调度模式在请求时按用户分组解析；实际优先级由用户组 -> 模型分组 -> 路由顺序决定。
+        scheduling_mode = "per_user_group"
 
         # 获取所有活跃 Provider 的 Key 白名单数据（供前端实时匹配）
         all_keys_whitelist: list[GlobalKeyWhitelistItem] = []
@@ -536,6 +519,5 @@ class AdminGetModelRoutingPreviewAdapter(AdminApiAdapter):
             total_providers=len(provider_infos),
             active_providers=active_providers,
             scheduling_mode=scheduling_mode,
-            priority_mode=priority_mode,
             all_keys_whitelist=all_keys_whitelist,
         )

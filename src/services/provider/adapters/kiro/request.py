@@ -63,10 +63,10 @@ def resolve_kiro_base_url(base_url: str, *, cfg: KiroAuthConfig) -> str:
 
 
 def build_kiro_generate_assistant_url(base_url: str, *, cfg: KiroAuthConfig) -> str:
+    from src.utils.url_utils import join_url
+
     resolved = resolve_kiro_base_url(base_url, cfg=cfg)
-    if resolved.endswith(KIRO_GENERATE_ASSISTANT_PATH):
-        return resolved
-    return f"{resolved}{KIRO_GENERATE_ASSISTANT_PATH}"
+    return join_url(resolved, KIRO_GENERATE_ASSISTANT_PATH)
 
 
 def build_kiro_inference_config(request_body: dict[str, Any]) -> dict[str, Any] | None:

@@ -559,9 +559,28 @@ async def purge_audit_logs(request: Request, db: Session = Depends(get_db)) -> A
 
 @router.post("/purge/request-bodies")
 async def purge_request_bodies(request: Request, db: Session = Depends(get_db)) -> Any:
-    """清空全部请求体（管理员）"""
+    """提交"清空请求体"异步任务（管理员）。
+
+    请求体可选 `{ "cutoff_days": 7 | 30 | 90 | null }`。不传或 null 表示全部清空。
+    响应 `{ task_id, status, reused, total_cleaned }`，前端需轮询 status 端点查进度。
+    """
     adapter = AdminPurgeRequestBodiesAdapter()
     return await pipeline.run(adapter=adapter, http_request=request, db=db, mode=adapter.mode)
+
+
+@router.get("/purge/request-bodies/status/{task_id}")
+async def purge_request_bodies_status(
+    task_id: str, request: Request, db: Session = Depends(get_db)
+) -> Any:
+    """查询"清空请求体"任务状态（管理员）。"""
+    adapter = AdminPurgeRequestBodiesStatusAdapter()
+    return await pipeline.run(
+        adapter=adapter,
+        http_request=request,
+        db=db,
+        mode=adapter.mode,
+        path_params={"task_id": task_id},
+    )
 
 
 @router.post("/purge/stats")
@@ -708,38 +727,6 @@ class AdminSetSystemConfigAdapter(AdminApiAdapter):
             except Exception as e:
                 logger.warning(f"更新签到任务时间失败: {e}")
 
-        # 如果更新的是调度模式或优先级模式，立即更新当前 Worker 的 Scheduler 单例
-        if self.key in ("scheduling_mode", "provider_priority_mode"):
-            try:
-                from src.clients.redis_client import get_redis_client_sync
-                from src.services.scheduling.aware_scheduler import get_cache_aware_scheduler
-
-                redis_client = get_redis_client_sync()
-                # 从数据库读取两个调度配置的最新值，确保一致性
-                priority_mode = _system_config_service().get_config(
-                    context.db,
-                    "provider_priority_mode",
-                    "provider",
-                )
-                scheduling_mode = _system_config_service().get_config(
-                    context.db,
-                    "scheduling_mode",
-                    "cache_affinity",
-                )
-                await get_cache_aware_scheduler(
-                    redis_client,
-                    priority_mode=priority_mode,
-                    scheduling_mode=scheduling_mode,
-                )
-                logger.info(
-                    "[AdminSetSystemConfig] 已同步更新 Scheduler: "
-                    "priority_mode={}, scheduling_mode={}",
-                    priority_mode,
-                    scheduling_mode,
-                )
-            except Exception as e:
-                logger.warning("同步更新 Scheduler 失败: {}", e)
-
         # 返回时不暴露加密后的值
         display_value = "********" if self.key in self.ENCRYPTED_KEYS else config.value
 
@@ -884,6 +871,7 @@ class AdminGetApiFormatsAdapter(AdminApiAdapter):
             "openai:cli",
             "openai:compact",
             "openai:video",
+            "openai:image",
             "claude:chat",
             "claude:cli",
             "gemini:chat",
@@ -2141,8 +2129,6 @@ class AdminImportConfigAdapter(AdminApiAdapter):
                     f"[AUTO_FETCH] 导入了 {len(keys_to_fetch)} 个开启自动获取模型的 Key，触发模型获取"
                 )
                 try:
-                    import asyncio
-
                     from src.services.model.fetch_scheduler import get_model_fetch_scheduler
                     from src.utils.async_utils import safe_create_task
 
@@ -2218,16 +2204,125 @@ class AdminExportUsersAdapter(AdminApiAdapter):
         from datetime import datetime, timezone
 
         from src.core.enums import UserRole
-        from src.models.database import ApiKey, User
+        from src.models.database import (
+            ApiKey,
+            ModelGroup,
+            ModelGroupModel,
+            ModelGroupRoute,
+            User,
+            UserGroup,
+            UserGroupModelGroup,
+        )
 
         db = context.db
 
         wallet_service = _wallet_service()
 
+        model_groups = (
+            db.query(ModelGroup)
+            .options(
+                selectinload(ModelGroup.model_links).selectinload(ModelGroupModel.global_model),
+                selectinload(ModelGroup.route_links).selectinload(ModelGroupRoute.provider),
+                selectinload(ModelGroup.route_links).selectinload(ModelGroupRoute.provider_api_key),
+            )
+            .order_by(ModelGroup.is_default.desc(), ModelGroup.sort_order.asc(), ModelGroup.name.asc())
+            .all()
+        )
+        model_groups_data = [
+            {
+                "name": group.name,
+                "display_name": group.display_name,
+                "description": group.description,
+                "is_default": bool(group.is_default),
+                "is_active": bool(group.is_active),
+                "sort_order": int(group.sort_order or 0),
+                "default_user_billing_multiplier": float(
+                    group.default_user_billing_multiplier or 1.0
+                ),
+                "models": sorted(
+                    {
+                        str(link.global_model.name)
+                        for link in list(getattr(group, "model_links", None) or [])
+                        if getattr(link, "global_model", None) is not None
+                    }
+                ),
+                "routes": [
+                    {
+                        "provider_name": str(link.provider.name)
+                        if getattr(link, "provider", None) is not None
+                        else None,
+                        "provider_api_key_name": str(link.provider_api_key.name)
+                        if getattr(link, "provider_api_key", None) is not None
+                        else None,
+                        "provider_api_key_id": str(link.provider_api_key_id)
+                        if getattr(link, "provider_api_key_id", None)
+                        else None,
+                        "priority": int(link.priority or 0),
+                        "user_billing_multiplier_override": (
+                            float(link.user_billing_multiplier_override)
+                            if link.user_billing_multiplier_override is not None
+                            else None
+                        ),
+                        "is_active": bool(link.is_active),
+                    }
+                    for link in sorted(
+                        list(getattr(group, "route_links", None) or []),
+                        key=lambda item: (
+                            int(item.priority or 0),
+                            str(getattr(getattr(item, "provider", None), "name", "") or ""),
+                            str(getattr(getattr(item, "provider_api_key", None), "name", "") or ""),
+                            str(item.provider_api_key_id or ""),
+                        ),
+                    )
+                ],
+            }
+            for group in model_groups
+        ]
+
+        user_groups = (
+            db.query(UserGroup, func.count(User.id).label("user_count"))
+            .options(
+                selectinload(UserGroup.model_group_links).selectinload(UserGroupModelGroup.model_group)
+            )
+            .outerjoin(User, User.group_id == UserGroup.id)
+            .group_by(UserGroup.id)
+            .order_by(UserGroup.name.asc())
+            .all()
+        )
+        user_groups_data = [
+            {
+                "name": group.name,
+                "description": group.description,
+                "is_default": bool(getattr(group, "is_default", False)),
+                "allowed_api_formats": group.allowed_api_formats,
+                "model_group_bindings": [
+                    {
+                        "model_group_name": str(link.model_group.name)
+                        if getattr(link, "model_group", None) is not None
+                        else None,
+                        "priority": int(link.priority or 0),
+                        "is_active": bool(link.is_active),
+                    }
+                    for link in sorted(
+                        list(getattr(group, "model_group_links", None) or []),
+                        key=lambda item: (
+                            int(item.priority or 0),
+                            str(getattr(getattr(item, "model_group", None), "name", "") or ""),
+                        ),
+                    )
+                    if getattr(link, "model_group", None) is not None
+                ],
+                "rate_limit": group.rate_limit,
+                "scheduling_mode": getattr(group, "scheduling_mode", "cache_affinity"),
+                "user_count": int(user_count),
+            }
+            for group, user_count in user_groups
+        ]
+
         # 导出 Users（排除管理员），预加载非独立余额 Key，避免 N+1
         users = (
             db.query(User)
-            .options(selectinload(User.api_keys))
+            .options(selectinload(User.api_keys), selectinload(User.group))
             .filter(User.is_deleted.is_(False), User.role != UserRole.ADMIN)
             .all()
         )
@@ -2249,10 +2344,7 @@ class AdminExportUsersAdapter(AdminApiAdapter):
                     "username": user.username,
                     "password_hash": user.password_hash,
                     "role": user.role.value if user.role else "user",
-                    "allowed_providers": user.allowed_providers,
-                    "allowed_api_formats": user.allowed_api_formats,
-                    "allowed_models": user.allowed_models,
-                    "rate_limit": user.rate_limit,
+                    "group_name": user.group.name if user.group else None,
                     "model_capability_settings": user.model_capability_settings,
                     "unlimited": wallet_service.is_unlimited_wallet(wallet),
                     "wallet": (wallet_service.serialize_wallet_summary(wallet) if wallet else None),
@@ -2266,8 +2358,10 @@ class AdminExportUsersAdapter(AdminApiAdapter):
         standalone_keys_data = [self._serialize_api_key(key, db=db) for key in standalone_keys]
 
         return {
-            "version": "1.3",
+            "version": "1.6",
             "exported_at": datetime.now(timezone.utc).isoformat(),
+            "model_groups": model_groups_data,
+            "user_groups": user_groups_data,
             "users": users_data,
             "standalone_keys": standalone_keys_data,
         }
@@ -2302,11 +2396,19 @@ class AdminImportUsersAdapter(AdminApiAdapter):
         return key_hash, key_encrypted
 
     @staticmethod
-    def _normalize_imported_user_rate_limit(user_data: dict[str, Any]) -> int | None:
-        if "rate_limit" not in user_data:
+    def _normalize_imported_group_name(user_data: dict[str, Any]) -> str | None:
+        value = user_data.get("group_name")
+        if value is None:
             return None
+        normalized = str(value).strip()
+        return normalized or None
+
+    @staticmethod
+    def _normalize_imported_user_rate_limit(user_data: dict[str, Any]) -> int | None:
         value = user_data.get("rate_limit")
-        return int(value) if value is not None else None
+        if value is None:
+            return None
+        return int(value)
 
     @staticmethod
     def _normalize_imported_api_key_rate_limit(
@@ -2331,7 +2433,22 @@ class AdminImportUsersAdapter(AdminApiAdapter):
         from datetime import datetime, timezone
 
         from src.core.enums import UserRole
-        from src.models.database import ApiKey, User
+        from src.models.database import (
+            ApiKey,
+            GlobalModel,
+            ModelGroup,
+            Provider,
+            ProviderAPIKey,
+            User,
+            UserGroup,
+        )
+        from src.services.model.group_service import (
+            ModelGroupBindingPayload,
+            ModelGroupRoutePayload,
+            ModelGroupService,
+        )
+        from src.services.scheduling.scheduling_config import SchedulingConfig
+        from src.services.user.group_service import UserGroupService
 
         # 检查请求体大小
         if context.raw_body and len(context.raw_body) > MAX_IMPORT_SIZE:
@@ -2343,15 +2460,164 @@ class AdminImportUsersAdapter(AdminApiAdapter):
         # 获取导入选项
         merge_mode = payload.get("merge_mode", "skip")  # skip, overwrite, error
         legacy_export = self._is_legacy_users_export(payload.get("version"))
+        model_groups_data = payload.get("model_groups", [])
+        user_groups_data = payload.get("user_groups", [])
         users_data = payload.get("users", [])
         standalone_keys_data = payload.get("standalone_keys", [])
 
         stats = {
+            "model_groups": {"created": 0, "updated": 0, "skipped": 0},
+            "user_groups": {"created": 0, "updated": 0, "skipped": 0},
             "users": {"created": 0, "updated": 0, "skipped": 0},
             "api_keys": {"created": 0, "skipped": 0},
             "standalone_keys": {"created": 0, "skipped": 0},
             "errors": [],
         }
+
+        group_name_to_id: dict[str, str] = {}
+        existing_group_names: set[str] = set()
+        model_group_name_to_id: dict[str, str] = {}
+        existing_model_group_names: set[str] = set()
+
+        provider_rows = db.query(Provider.id, Provider.name, Provider.provider_priority).all()
+        provider_lookup_by_id = {
+            str(provider_id): {"id": str(provider_id), "name": str(name), "priority": int(priority or 100)}
+            for provider_id, name, priority in provider_rows
+        }
+        provider_lookup_by_name = {
+            str(name): {"id": str(provider_id), "name": str(name), "priority": int(priority or 100)}
+            for provider_id, name, priority in provider_rows
+        }
+        provider_key_rows = db.query(ProviderAPIKey.id, ProviderAPIKey.provider_id, ProviderAPIKey.name).all()
+        provider_key_lookup_by_id = {
+            str(key_id): {
+                "id": str(key_id),
+                "provider_id": str(provider_id),
+                "name": str(name),
+            }
+            for key_id, provider_id, name in provider_key_rows
+        }
+        provider_key_lookup_by_provider_and_name = {
+            (str(provider_id), str(name)): {
+                "id": str(key_id),
+                "provider_id": str(provider_id),
+                "name": str(name),
+            }
+            for key_id, provider_id, name in provider_key_rows
+        }
+        global_model_name_to_id = {
+            str(name): str(model_id)
+            for model_id, name in db.query(GlobalModel.id, GlobalModel.name)
+            .filter(GlobalModel.is_active.is_(True))
+            .all()
+        }
+        default_model_group = ModelGroupService.get_required_default_group(db)
+        default_user_group = UserGroupService.get_required_default_group(db)
+        model_group_name_to_id[default_model_group.name] = default_model_group.id
+        existing_model_group_names.add(default_model_group.name)
+        group_name_to_id[default_user_group.name] = default_user_group.id
+        existing_group_names.add(default_user_group.name)
+
+        def _mark_model_group_as_default(group: ModelGroup) -> None:
+            db.query(ModelGroup).filter(
+                ModelGroup.id != group.id,
+                ModelGroup.is_default.is_(True),
+            ).update({ModelGroup.is_default: False}, synchronize_session=False)
+            group.is_default = True
+            group.sort_order = 0
+            group.updated_at = datetime.now(timezone.utc)
+
+        def _mark_user_group_as_default(group: UserGroup) -> None:
+            db.query(UserGroup).filter(
+                UserGroup.id != group.id,
+                UserGroup.is_default.is_(True),
+            ).update({UserGroup.is_default: False}, synchronize_session=False)
+            group.is_default = True
+            group.updated_at = datetime.now(timezone.utc)
+
+        def _resolve_provider_ref(
+            *,
+            provider_name: Any = None,
+            provider_id: Any = None,
+        ) -> dict[str, Any] | None:
+            normalized_name = str(provider_name or "").strip()
+            if normalized_name and normalized_name in provider_lookup_by_name:
+                return provider_lookup_by_name[normalized_name]
+            normalized_id = str(provider_id or "").strip()
+            if normalized_id and normalized_id in provider_lookup_by_id:
+                return provider_lookup_by_id[normalized_id]
+            return None
+
+        def _resolve_provider_api_key_ref(
+            *,
+            provider_id: str,
+            provider_api_key_name: Any = None,
+            provider_api_key_id: Any = None,
+        ) -> dict[str, Any] | None:
+            normalized_key_id = str(provider_api_key_id or "").strip()
+            if normalized_key_id:
+                ref = provider_key_lookup_by_id.get(normalized_key_id)
+                if ref is not None and ref["provider_id"] == provider_id:
+                    return ref
+
+            normalized_key_name = str(provider_api_key_name or "").strip()
+            if normalized_key_name:
+                return provider_key_lookup_by_provider_and_name.get((provider_id, normalized_key_name))
+
+            return None
+
+        def _resolve_model_group_bindings_from_names(
+            bindings_data: list[dict[str, Any]],
+            *,
+            label: str,
+        ) -> list[ModelGroupBindingPayload]:
+            resolved: list[ModelGroupBindingPayload] = []
+            seen: set[str] = set()
+            for binding_data in bindings_data:
+                model_group_name = str(binding_data.get("model_group_name") or "").strip()
+                model_group_id = str(binding_data.get("model_group_id") or "").strip()
+                resolved_model_group_id = (
+                    model_group_name_to_id.get(model_group_name)
+                    if model_group_name
+                    else None
+                ) or (model_group_id if model_group_id in model_group_name_to_id.values() else None)
+                if resolved_model_group_id is None:
+                    missing_name = model_group_name or model_group_id or "未知模型分组"
+                    stats["errors"].append(f"{label} 引用了不存在的模型分组: {missing_name}")
+                    continue
+                if resolved_model_group_id in seen:
+                    continue
+                seen.add(resolved_model_group_id)
+                resolved.append(
+                    ModelGroupBindingPayload(
+                        model_group_id=resolved_model_group_id,
+                        priority=int(binding_data.get("priority", 100) or 100),
+                        is_active=bool(binding_data.get("is_active", True)),
+                    )
+                )
+            return resolved
+
+        def _resolve_group_bindings_from_import_data(
+            group_data: dict[str, Any],
+            *,
+            label: str,
+        ) -> list[ModelGroupBindingPayload]:
+            bindings_data = group_data.get("model_group_bindings")
+            if isinstance(bindings_data, list):
+                return _resolve_model_group_bindings_from_names(bindings_data, label=label)
+
+            stats["errors"].append(
+                f"{label} 缺少 model_group_bindings，当前版本不再兼容旧的 allowed_providers/allowed_models 导入格式"
+            )
+            return []
+
+        for existing_model_group in db.query(ModelGroup).all():
+            model_group_name_to_id.setdefault(existing_model_group.name, existing_model_group.id)
+            existing_model_group_names.add(existing_model_group.name)
+
+        for existing_group in db.query(UserGroup).all():
+            existing_group_names.add(existing_group.name)
+            group_name_to_id.setdefault(existing_group.name, existing_group.id)
 
         def _create_api_key_from_data(
             key_data: dict,
@@ -2412,6 +2678,212 @@ class AdminImportUsersAdapter(AdminApiAdapter):
             )
 
         try:
+            for model_group_data in model_groups_data:
+                model_group_name = str(model_group_data.get("name") or "").strip()
+                if not model_group_name:
+                    stats["errors"].append("跳过未命名模型分组")
+                    stats["model_groups"]["skipped"] += 1
+                    continue
+
+                display_name = (
+                    str(model_group_data.get("display_name") or "").strip() or model_group_name
+                )
+                description = model_group_data.get("description")
+                is_active = bool(model_group_data.get("is_active", True))
+                is_default = bool(model_group_data.get("is_default", False))
+                sort_order = int(model_group_data.get("sort_order", 100) or 100)
+                default_user_billing_multiplier = float(
+                    model_group_data.get("default_user_billing_multiplier", 1.0) or 1.0
+                )
+
+                model_ids: list[str] = []
+                for model_name in (
+                    model_group_data.get("models")
+                    if isinstance(model_group_data.get("models"), list)
+                    else []
+                ):
+                    normalized_name = str(model_name or "").strip()
+                    model_id = global_model_name_to_id.get(normalized_name)
+                    if model_id is None:
+                        stats["errors"].append(
+                            f"模型分组 '{model_group_name}' 引用了不存在的模型: {normalized_name}"
+                        )
+                        continue
+                    model_ids.append(model_id)
+
+                route_payloads: list[ModelGroupRoutePayload] = []
+                for route_data in (
+                    model_group_data.get("routes")
+                    if isinstance(model_group_data.get("routes"), list)
+                    else []
+                ):
+                    provider_ref = _resolve_provider_ref(
+                        provider_name=route_data.get("provider_name"),
+                        provider_id=route_data.get("provider_id"),
+                    )
+                    if provider_ref is None:
+                        stats["errors"].append(
+                            f"模型分组 '{model_group_name}' 引用了不存在的 Provider: "
+                            f"{route_data.get('provider_name') or route_data.get('provider_id') or '未知'}"
+                        )
+                        continue
+                    provider_key_ref = _resolve_provider_api_key_ref(
+                        provider_id=provider_ref["id"],
+                        provider_api_key_name=route_data.get("provider_api_key_name"),
+                        provider_api_key_id=route_data.get("provider_api_key_id"),
+                    )
+                    route_payloads.append(
+                        ModelGroupRoutePayload(
+                            provider_id=provider_ref["id"],
+                            provider_api_key_id=(
+                                provider_key_ref["id"] if provider_key_ref is not None else None
+                            ),
+                            priority=int(route_data.get("priority", provider_ref["priority"]) or 0),
+                            user_billing_multiplier_override=route_data.get(
+                                "user_billing_multiplier_override"
+                            ),
+                            is_active=bool(route_data.get("is_active", True)),
+                        )
+                    )
+
+                existing_model_group = (
+                    db.query(ModelGroup).filter(ModelGroup.name == model_group_name).first()
+                )
+                if existing_model_group:
+                    model_group_name_to_id[model_group_name] = existing_model_group.id
+                    existing_model_group_names.add(existing_model_group.name)
+                    if merge_mode == "skip":
+                        stats["model_groups"]["skipped"] += 1
+                        continue
+                    if merge_mode == "error":
+                        raise InvalidRequestException(f"模型分组 '{model_group_name}' 已存在")
+
+                    ModelGroupService.update_group(
+                        db,
+                        existing_model_group.id,
+                        name=model_group_name,
+                        display_name=display_name,
+                        description=description,
+                        default_user_billing_multiplier=default_user_billing_multiplier,
+                        is_active=is_active,
+                        sort_order=sort_order,
+                        commit=False,
+                    )
+                    ModelGroupService.replace_group_models(
+                        db,
+                        existing_model_group.id,
+                        model_ids,
+                        commit=False,
+                    )
+                    ModelGroupService.replace_group_routes(
+                        db,
+                        existing_model_group.id,
+                        route_payloads,
+                        commit=False,
+                    )
+                    if is_default:
+                        _mark_model_group_as_default(existing_model_group)
+                    stats["model_groups"]["updated"] += 1
+                    continue
+
+                created_model_group = ModelGroupService.create_group(
+                    db,
+                    name=model_group_name,
+                    display_name=display_name,
+                    description=description,
+                    default_user_billing_multiplier=default_user_billing_multiplier,
+                    is_active=is_active,
+                    sort_order=sort_order,
+                    commit=False,
+                )
+                ModelGroupService.replace_group_models(
+                    db,
+                    created_model_group.id,
+                    model_ids,
+                    commit=False,
+                )
+                ModelGroupService.replace_group_routes(
+                    db,
+                    created_model_group.id,
+                    route_payloads,
+                    commit=False,
+                )
+                if is_default:
+                    _mark_model_group_as_default(created_model_group)
+                model_group_name_to_id[model_group_name] = created_model_group.id
+                existing_model_group_names.add(created_model_group.name)
+                stats["model_groups"]["created"] += 1
+
+            for group_data in user_groups_data:
+                group_name = str(group_data.get("name") or "").strip()
+                if not group_name:
+                    stats["errors"].append("跳过未命名用户分组")
+                    stats["user_groups"]["skipped"] += 1
+                    continue
+
+                if not isinstance(group_data.get("model_group_bindings"), list):
+                    stats["errors"].append(
+                        f"用户分组 '{group_name}' 缺少 model_group_bindings，已跳过"
+                    )
+                    stats["user_groups"]["skipped"] += 1
+                    continue
+
+                resolved_bindings = _resolve_group_bindings_from_import_data(
+                    group_data,
+                    label=f"用户分组 '{group_name}'",
+                )
+                normalized_rate_limit = self._normalize_imported_user_rate_limit(group_data)
+                scheduling_mode = SchedulingConfig.normalize_scheduling_mode(
+                    group_data.get("scheduling_mode")
+                )
+
+                existing_group = db.query(UserGroup).filter(UserGroup.name == group_name).first()
+                if existing_group:
+                    group_name_to_id[group_name] = existing_group.id
+                    existing_group_names.add(existing_group.name)
+                    if merge_mode == "skip":
+                        stats["user_groups"]["skipped"] += 1
+                    elif merge_mode == "error":
+                        raise InvalidRequestException(f"用户分组 '{group_name}' 已存在")
+                    elif merge_mode == "overwrite":
+                        existing_group.description = group_data.get("description")
+                        existing_group.allowed_api_formats = group_data.get("allowed_api_formats")
+                        existing_group.rate_limit = normalized_rate_limit
+                        existing_group.scheduling_mode = scheduling_mode
+                        existing_group.updated_at = datetime.now(timezone.utc)
+                        ModelGroupService.replace_user_group_bindings(
+                            db,
+                            existing_group.id,
+                            resolved_bindings,
+                            commit=False,
+                        )
+                        if bool(group_data.get("is_default", False)):
+                            _mark_user_group_as_default(existing_group)
+                        stats["user_groups"]["updated"] += 1
+                    continue
+
+                new_group = UserGroup(
+                    id=str(uuid.uuid4()),
+                    name=group_name,
+                    description=group_data.get("description"),
+                    allowed_api_formats=group_data.get("allowed_api_formats"),
+                    rate_limit=normalized_rate_limit,
+                    scheduling_mode=scheduling_mode,
+                )
+                db.add(new_group)
+                db.flush()
+                ModelGroupService.replace_user_group_bindings(
+                    db,
+                    new_group.id,
+                    resolved_bindings,
+                    commit=False,
+                )
+                if bool(group_data.get("is_default", False)):
+                    _mark_user_group_as_default(new_group)
+                group_name_to_id[group_name] = new_group.id
+                existing_group_names.add(new_group.name)
+                stats["user_groups"]["created"] += 1
+
             for user_data in users_data:
                 # 跳过管理员角色的导入（不区分大小写）
                 role_str = str(user_data.get("role", "")).lower()
@@ -2437,7 +2909,40 @@ class AdminImportUsersAdapter(AdminApiAdapter):
                     and wallet_payload.get("limit_mode") in {"finite", "unlimited"}
                     else ("unlimited" if user_data.get("unlimited") else "finite")
                 )
-                imported_user_rate_limit = self._normalize_imported_user_rate_limit(user_data)
+                imported_group_name = self._normalize_imported_group_name(user_data)
+                imported_group_id = (
+                    group_name_to_id.get(imported_group_name) if imported_group_name else None
+                )
+                if imported_group_name and imported_group_id is None:
+                    existing_group = (
+                        db.query(UserGroup).filter(UserGroup.name == imported_group_name).first()
+                    )
+                    if existing_group:
+                        imported_group_id = existing_group.id
+                        group_name_to_id[imported_group_name] = existing_group.id
+                        existing_group_names.add(existing_group.name)
+                    else:
+                        stats["errors"].append(
+                            f"用户 '{import_email}' 引用了不存在的用户分组: {imported_group_name}"
+                        )
+                if any(
+                    field_name in user_data
+                    for field_name in (
+                        "allowed_providers",
+                        "allowed_api_formats",
+                        "allowed_models",
+                        "rate_limit",
+                        "inherit_group_allowed_providers",
+                        "inherit_group_allowed_api_formats",
+                        "inherit_group_allowed_models",
+                        "inherit_group_rate_limit",
+                    )
+                ):
+                    stats["errors"].append(
+                        f"用户 '{import_email}' 包含旧版用户级访问限制字段，当前版本已忽略"
+                    )
+                if imported_group_id is None:
+                    imported_group_id = UserGroupService.get_required_default_group(db).id
 
                 if existing_user:
                     user_id = existing_user.id
@@ -2452,10 +2957,7 @@ class AdminImportUsersAdapter(AdminApiAdapter):
                             existing_user.password_hash = user_data["password_hash"]
                         if user_data.get("role"):
                             existing_user.role = UserRole(user_data["role"])
-                        existing_user.allowed_providers = user_data.get("allowed_providers")
-                        existing_user.allowed_api_formats = user_data.get("allowed_api_formats")
-                        existing_user.allowed_models = user_data.get("allowed_models")
-                        existing_user.rate_limit = imported_user_rate_limit
+                        existing_user.group_id = imported_group_id
                         existing_user.model_capability_settings = user_data.get(
                             "model_capability_settings"
                         )
@@ -2489,10 +2991,7 @@ class AdminImportUsersAdapter(AdminApiAdapter):
                         username=user_data.get("username") or import_email.split("@")[0],
                         password_hash=user_data.get("password_hash", ""),
                         role=role,
-                        allowed_providers=user_data.get("allowed_providers"),
-                        allowed_api_formats=user_data.get("allowed_api_formats"),
-                        allowed_models=user_data.get("allowed_models"),
-                        rate_limit=imported_user_rate_limit,
+                        group_id=imported_group_id,
                         model_capability_settings=user_data.get("model_capability_settings"),
                         is_active=user_data.get("is_active", True),
                     )
@@ -2982,47 +3481,24 @@ def _purge_audit_logs_sync() -> dict[str, Any]:
 
 
 def _purge_request_bodies_sync() -> dict[str, Any]:
-    with get_db_context() as db:
-        with_body = int(
-            db.query(func.count(Usage.id))
-            .filter(
-                (Usage.request_body.isnot(None))
-                | (Usage.response_body.isnot(None))
-                | (Usage.provider_request_body.isnot(None))
-                | (Usage.client_response_body.isnot(None))
-                | (Usage.request_body_compressed.isnot(None))
-                | (Usage.response_body_compressed.isnot(None))
-                | (Usage.provider_request_body_compressed.isnot(None))
-                | (Usage.client_response_body_compressed.isnot(None))
-            )
-            .scalar()
-            or 0
-        )
+    """保留仅用于单元测试/命令行工具的同步全量清理入口。
 
-        db.query(Usage).update(
-            {
-                Usage.request_body: None,
-                Usage.response_body: None,
-                Usage.provider_request_body: None,
-                Usage.client_response_body: None,
-                Usage.request_body_compressed: None,
-                Usage.response_body_compressed: None,
-                Usage.provider_request_body_compressed: None,
-                Usage.client_response_body_compressed: None,
-                Usage.request_headers: None,
-                Usage.response_headers: None,
-                Usage.provider_request_headers: None,
-                Usage.client_response_headers: None,
-            },
-            synchronize_session=False,
-        )
+    生产环境的"清空请求体"按钮走
+    `src.services.system.purge_task.start_purge_request_bodies` 异步路径，
+    因此这里不再由 HTTP adapter 调用。
+    """
+    from src.services.system.purge_task import _run_purge_sync  # type: ignore
 
-        return {
-            "message": "请求体已清空",
-            "cleaned": {
-                "records_with_body": with_body,
-            },
-        }
+    def _noop(_: int) -> None:
+        return None
+
+    total = _run_purge_sync(cutoff=None, batch_size=2000, progress_cb=_noop)
+    return {
+        "message": "请求体已清空",
+        "cleaned": {
+            "records_with_body": total,
+        },
+    }
 
 
 def _purge_stats_sync() -> dict[str, Any]:
@@ -3120,8 +3596,40 @@ class AdminPurgeAuditLogsAdapter(AdminApiAdapter):
 
 class AdminPurgeRequestBodiesAdapter(AdminApiAdapter):
     async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
-        """清空全部请求体/响应体（保留使用记录的统计信息）"""
-        return await run_in_threadpool(_purge_request_bodies_sync)
+        """启动异步清空请求体任务，立即返回 task_id。"""
+        from src.services.system.purge_task import start_purge_request_bodies
+
+        cutoff_days: int | None = None
+        try:
+            raw = await context.ensure_raw_body_async()
+            if raw:
+                payload = json.loads(raw.decode("utf-8"))
+                if isinstance(payload, dict):
+                    value = payload.get("cutoff_days")
+                    if value is not None:
+                        cutoff_days = int(value)
+                        if cutoff_days <= 0:
+                            cutoff_days = None
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError) as exc:
+            raise HTTPException(
+                status_code=400, detail="请求体必须是 {cutoff_days: int|null} 的合法 JSON"
+            ) from exc
+
+        return await start_purge_request_bodies(cutoff_days)
+
+
+class AdminPurgeRequestBodiesStatusAdapter(AdminApiAdapter):
+    async def handle(self, context: ApiRequestContext) -> Any:  # type: ignore[override]
+        """查询清空请求体任务状态。"""
+        from src.services.system.purge_task import get_purge_task_status
+
+        task_id = context.path_params.get("task_id")
+        if not task_id:
+            raise HTTPException(status_code=400, detail="缺少 task_id")
+        status = await get_purge_task_status(str(task_id))
+        if not status:
+            raise HTTPException(status_code=404, detail="任务不存在或已过期")
+        return status
 
 
 class AdminPurgeStatsAdapter(AdminApiAdapter):

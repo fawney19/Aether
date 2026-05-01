@@ -18,7 +18,7 @@ import jwt
 from fastapi import HTTPException, status
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from src.config import config
 from src.core.enums import AuthSource
@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 from src.models.database import ApiKey, User, UserRole
 from src.services.auth.jwt_blacklist import JWTBlacklistService
 from src.services.cache.user_cache import UserCacheService
+from src.services.user.group_service import UserGroupService
 
 
 @dataclass
@@ -275,7 +276,22 @@ class AuthService:
 
     @staticmethod
     def _load_user_for_token_sync(db: Session, user_id: str) -> User | None:
-        user = db.query(User).filter(User.id == user_id).first()
+        from src.models.database import SubscriptionPlan, UserSubscription
+
+        user = (
+            db.query(User)
+            .options(
+                joinedload(User.group),
+                selectinload(User.subscriptions)
+                .joinedload(UserSubscription.plan)
+                .joinedload(SubscriptionPlan.user_group),
+                selectinload(User.subscriptions)
+                .joinedload(UserSubscription.plan)
+                .joinedload(SubscriptionPlan.product),
+            )
+            .filter(User.id == user_id)
+            .first()
+        )
         if not user or not user.is_active or user.is_deleted:
             return None
         return user
@@ -525,6 +541,7 @@ class AuthService:
             default_initial_gift = SystemConfigService.get_config(
                 db, "default_user_initial_gift_usd", default=None
             )
+            default_group = UserGroupService.get_required_default_group(db)
 
             # 创建新用户
             user = User(
@@ -537,6 +554,8 @@ class AuthService:
                 ldap_username=ldap_username,
                 role=UserRole.USER,
                 is_active=True,
+                group_id=default_group.id,
+                group=default_group,
                 last_login_at=None,
             )
 
@@ -585,9 +604,21 @@ class AuthService:
         """API密钥认证"""
         # 对API密钥进行哈希查找，预加载 user 关系以支持后续访问限制检查
         key_hash = ApiKey.hash_key(api_key)
+        from src.models.database import SubscriptionPlan, UserSubscription
+
         key_record = (
             db.query(ApiKey)
-            .options(joinedload(ApiKey.user))
+            .options(
+                joinedload(ApiKey.user).joinedload(User.group),
+                joinedload(ApiKey.user)
+                .selectinload(User.subscriptions)
+                .joinedload(UserSubscription.plan)
+                .joinedload(SubscriptionPlan.user_group),
+                joinedload(ApiKey.user)
+                .selectinload(User.subscriptions)
+                .joinedload(UserSubscription.plan)
+                .joinedload(SubscriptionPlan.product),
+            )
             .filter(ApiKey.key_hash == key_hash)
             .first()
         )
@@ -657,14 +688,15 @@ class AuthService:
         if user.role == UserRole.ADMIN:
             return True
 
-        wallet = getattr(user, "wallet", None)
-        if wallet is None:
-            return False
-        if wallet.status != "active":
-            return False
-        if WalletService.is_unlimited_wallet(wallet):
-            return True
-        return WalletService.get_spendable_balance_value(wallet) > 0
+        thread_db = create_session()
+        try:
+            db_user = AuthService._load_user_for_token_sync(thread_db, str(user.id))
+            if db_user is None:
+                return False
+            access = WalletService.check_request_allowed(thread_db, user=db_user, api_key=None)
+            return bool(access.allowed)
+        finally:
+            thread_db.close()
 
     @staticmethod
     def check_permission(user: User, required_role: UserRole = UserRole.USER) -> bool:
