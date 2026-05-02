@@ -552,6 +552,32 @@ impl ProxyNodeWriteRepository for InMemoryProxyNodeRepository {
         node.updated_at_unix_secs = Self::now_unix_secs();
         Ok(Some(node.clone()))
     }
+
+    async fn increment_manual_node_requests(
+        &self,
+        node_id: &str,
+        total_delta: i64,
+        failed_delta: i64,
+        latency_ms: Option<i64>,
+    ) -> Result<(), DataLayerError> {
+        let mut nodes = self.nodes.write().expect("proxy node repository lock");
+        let Some(node) = nodes.get_mut(node_id) else {
+            return Ok(());
+        };
+        if !node.is_manual {
+            return Ok(());
+        }
+        if total_delta > 0 {
+            node.total_requests += total_delta;
+        }
+        if failed_delta > 0 {
+            node.failed_requests += failed_delta;
+        }
+        if let Some(ms) = latency_ms {
+            node.avg_latency_ms = Some(ms as f64);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

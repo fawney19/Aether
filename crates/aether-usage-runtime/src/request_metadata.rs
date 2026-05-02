@@ -94,6 +94,7 @@ fn copy_allowed_metadata_fields(source: &Map<String, Value>, target: &mut Map<St
     copy_number(source, target, "cache_creation_price_per_1m");
     copy_number(source, target, "cache_read_price_per_1m");
     copy_number(source, target, "price_per_request");
+    copy_non_null_value(source, target, "proxy");
 }
 
 fn move_allowed_metadata_fields(mut source: Map<String, Value>, target: &mut Map<String, Value>) {
@@ -125,6 +126,7 @@ fn move_allowed_metadata_fields(mut source: Map<String, Value>, target: &mut Map
     remove_number(&mut source, target, "cache_creation_price_per_1m");
     remove_number(&mut source, target, "cache_read_price_per_1m");
     remove_number(&mut source, target, "price_per_request");
+    remove_non_null_value(&mut source, target, "proxy");
 }
 
 fn copy_non_empty_string(source: &Map<String, Value>, target: &mut Map<String, Value>, key: &str) {

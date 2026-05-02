@@ -357,6 +357,18 @@ WHERE is_manual = FALSE
   AND tunnel_connected = TRUE
 "#;
 
+const INCREMENT_MANUAL_PROXY_NODE_REQUESTS_SQL: &str = r#"
+UPDATE proxy_nodes
+SET
+  total_requests = total_requests + GREATEST($1::bigint, 0),
+  failed_requests = failed_requests + GREATEST($2::bigint, 0),
+  avg_latency_ms = COALESCE($3, avg_latency_ms),
+  last_heartbeat_at = NOW(),
+  updated_at = NOW()
+WHERE id = $4
+  AND is_manual = TRUE
+"#;
+
 #[derive(Debug, Clone)]
 pub struct SqlxProxyNodeRepository {
     pool: PgPool,
@@ -985,6 +997,24 @@ VALUES (
             .map_postgres_err()?;
 
         self.find_proxy_node(&mutation.node_id).await
+    }
+
+    async fn increment_manual_node_requests(
+        &self,
+        node_id: &str,
+        total_delta: i64,
+        failed_delta: i64,
+        latency_ms: Option<i64>,
+    ) -> Result<(), DataLayerError> {
+        sqlx::query(INCREMENT_MANUAL_PROXY_NODE_REQUESTS_SQL)
+            .bind(total_delta)
+            .bind(failed_delta)
+            .bind(latency_ms)
+            .bind(node_id)
+            .execute(&self.pool)
+            .await
+            .map_postgres_err()?;
+        Ok(())
     }
 }
 

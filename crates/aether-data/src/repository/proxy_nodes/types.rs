@@ -411,6 +411,14 @@ pub trait ProxyNodeWriteRepository: Send + Sync {
         &self,
         mutation: &ProxyNodeRemoteConfigMutation,
     ) -> Result<Option<StoredProxyNode>, crate::DataLayerError>;
+
+    async fn increment_manual_node_requests(
+        &self,
+        node_id: &str,
+        total_delta: i64,
+        failed_delta: i64,
+        latency_ms: Option<i64>,
+    ) -> Result<(), crate::DataLayerError>;
 }
 
 #[cfg(test)]

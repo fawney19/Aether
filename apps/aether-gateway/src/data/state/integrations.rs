@@ -249,6 +249,26 @@ impl UsageRuntimeAccess for GatewayDataState {
 }
 
 #[async_trait]
+impl aether_usage_runtime::ManualProxyNodeCounter for GatewayDataState {
+    async fn increment_manual_proxy_node_requests(
+        &self,
+        node_id: &str,
+        total_delta: i64,
+        failed_delta: i64,
+        latency_ms: Option<i64>,
+    ) -> Result<(), DataLayerError> {
+        match &self.proxy_node_writer {
+            Some(repository) => {
+                repository
+                    .increment_manual_node_requests(node_id, total_delta, failed_delta, latency_ms)
+                    .await
+            }
+            None => Ok(()),
+        }
+    }
+}
+
+#[async_trait]
 impl UsageRecordWriter for GatewayDataState {
     async fn upsert_usage_record(
         &self,

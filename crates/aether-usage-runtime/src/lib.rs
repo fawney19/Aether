@@ -44,8 +44,8 @@ pub use settlement::{settle_usage_if_needed, UsageSettlementWriter};
 pub use standardized_usage::StandardizedUsage;
 pub use usage_mapper::{map_usage, map_usage_from_response, UsageMapper};
 pub use worker::{
-    build_usage_queue_worker, write_event_record, UsageDataEventRecorder, UsageEventRecorder,
-    UsageQueueWorker, UsageRecordWriter,
+    build_usage_queue_worker, write_event_record, ManualProxyNodeCounter, UsageDataEventRecorder,
+    UsageEventRecorder, UsageQueueWorker, UsageRecordWriter,
 };
 pub use write::{
     build_lifecycle_usage_seed, build_pending_usage_record, build_pending_usage_record_from_seed,

@@ -1509,14 +1509,29 @@ fn build_runtime_request_metadata_seed(
     let provider_request_has_inline_body =
         context_has_inline_body(context, "provider_request_body")
             || plan_has_inline_json_body_for_usage(plan);
-    build_runtime_request_metadata_seed_from_parts(
+    let mut metadata = build_runtime_request_metadata_seed_from_parts(
         context,
         request_has_inline_body,
         request_body_ref.as_deref(),
         provider_request_has_inline_body,
         provider_request_body_ref.as_deref(),
         plan.body.body_bytes_b64.as_deref(),
-    )
+    );
+    if let Some(proxy) = plan.proxy.as_ref() {
+        if let Some(node_id) = proxy.node_id.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            let mode = proxy.mode.as_deref().unwrap_or("").trim();
+            let mut proxy_obj = serde_json::Map::new();
+            proxy_obj.insert("node_id".to_string(), Value::String(node_id.to_string()));
+            if !mode.is_empty() {
+                proxy_obj.insert("mode".to_string(), Value::String(mode.to_string()));
+            }
+            let obj = metadata.get_or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if let Value::Object(map) = obj {
+                map.insert("proxy".to_string(), Value::Object(proxy_obj));
+            }
+        }
+    }
+    metadata
 }
 
 fn build_runtime_request_metadata_seed_from_parts(

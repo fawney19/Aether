@@ -19,6 +19,17 @@ pub trait UsageEventRecorder: Send + Sync {
 }
 
 #[async_trait]
+pub trait ManualProxyNodeCounter: Send + Sync {
+    async fn increment_manual_proxy_node_requests(
+        &self,
+        node_id: &str,
+        total_delta: i64,
+        failed_delta: i64,
+        latency_ms: Option<i64>,
+    ) -> Result<(), DataLayerError>;
+}
+
+#[async_trait]
 pub trait UsageRecordWriter: Send + Sync {
     async fn upsert_usage_record(
         &self,
@@ -39,7 +50,7 @@ impl<T> UsageDataEventRecorder<T> {
 #[async_trait]
 impl<T> UsageEventRecorder for UsageDataEventRecorder<T>
 where
-    T: UsageRecordWriter + UsageSettlementWriter + Send + Sync,
+    T: UsageRecordWriter + UsageSettlementWriter + ManualProxyNodeCounter + Send + Sync,
 {
     async fn record_usage_event(&self, event: &UsageEvent) -> Result<(), DataLayerError> {
         write_event_record(self.data.as_ref(), event).await
@@ -198,20 +209,71 @@ pub fn build_usage_queue_worker<T>(
     config: UsageRuntimeConfig,
 ) -> Result<UsageQueueWorker, DataLayerError>
 where
-    T: UsageRecordWriter + UsageSettlementWriter + Send + Sync + 'static,
+    T: UsageRecordWriter + UsageSettlementWriter + ManualProxyNodeCounter + Send + Sync + 'static,
 {
     UsageQueueWorker::new(runner, Arc::new(UsageDataEventRecorder::new(data)), config)
 }
 
 pub async fn write_event_record<T>(data: &T, event: &UsageEvent) -> Result<(), DataLayerError>
 where
-    T: UsageRecordWriter + UsageSettlementWriter + Send + Sync,
+    T: UsageRecordWriter + UsageSettlementWriter + ManualProxyNodeCounter + Send + Sync,
 {
     let record = build_upsert_usage_record_from_event(event)?;
     if let Some(stored) = data.upsert_usage_record(record).await? {
         settle_usage_if_needed(data, &stored).await?;
     }
+    increment_manual_proxy_node_from_event(data, event).await;
     Ok(())
+}
+
+async fn increment_manual_proxy_node_from_event<T>(data: &T, event: &UsageEvent)
+where
+    T: ManualProxyNodeCounter + Send + Sync,
+{
+    let is_terminal = matches!(
+        event.event_type,
+        crate::UsageEventType::Completed | crate::UsageEventType::Failed
+    );
+    if !is_terminal {
+        return;
+    }
+    let Some(node_id) = extract_manual_proxy_node_id(event) else {
+        return;
+    };
+    let failed = matches!(event.event_type, crate::UsageEventType::Failed);
+    let failed_delta = if failed { 1i64 } else { 0i64 };
+    let latency_ms = event.data.response_time_ms.map(|v| v as i64);
+    if let Err(err) = data
+        .increment_manual_proxy_node_requests(&node_id, 1, failed_delta, latency_ms)
+        .await
+    {
+        warn!(
+            event_name = "manual_proxy_node_increment_failed",
+            log_type = "ops",
+            node_id = %node_id,
+            error = ?err,
+            "failed to increment manual proxy node request count"
+        );
+    }
+}
+
+fn extract_manual_proxy_node_id(event: &UsageEvent) -> Option<String> {
+    let metadata = event.data.request_metadata.as_ref()?;
+    let proxy = metadata.get("proxy")?.as_object()?;
+    let mode = proxy
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if mode == "tunnel" {
+        return None;
+    }
+    proxy
+        .get("node_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(String::from)
 }
 
 fn consumer_name() -> String {
@@ -233,7 +295,7 @@ mod tests {
     use aether_data_contracts::repository::usage::{StoredRequestUsageAudit, UpsertUsageRecord};
     use async_trait::async_trait;
 
-    use super::{write_event_record, UsageRecordWriter};
+    use super::{write_event_record, ManualProxyNodeCounter, UsageRecordWriter};
     use crate::{UsageEvent, UsageEventData, UsageEventType, UsageSettlementWriter};
 
     #[derive(Default)]
@@ -314,6 +376,19 @@ mod tests {
                 .expect("settlements lock")
                 .push(input);
             Ok(None)
+        }
+    }
+
+    #[async_trait]
+    impl ManualProxyNodeCounter for TestUsageStore {
+        async fn increment_manual_proxy_node_requests(
+            &self,
+            _node_id: &str,
+            _total_delta: i64,
+            _failed_delta: i64,
+            _latency_ms: Option<i64>,
+        ) -> Result<(), aether_data_contracts::DataLayerError> {
+            Ok(())
         }
     }
 
