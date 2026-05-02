@@ -465,7 +465,7 @@ impl StoredProviderCatalogKey {
 }
 
 #[cfg(test)]
-mod tests {
+mod transport_tests {
     use super::StoredProviderCatalogKey;
 
     #[test]

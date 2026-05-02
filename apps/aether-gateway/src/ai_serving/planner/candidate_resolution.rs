@@ -253,18 +253,7 @@ async fn resolve_and_rank_local_execution_candidates_with_mode(
     };
 
     match run_ai_candidate_resolution(&port, candidates, request).await {
-        Ok(mut outcome) => {
-            if outcome.eligible_candidates.is_empty()
-                && !outcome.skipped_candidates.is_empty()
-                && outcome
-                    .skipped_candidates
-                    .iter()
-                    .all(|candidate| candidate.skip_reason == "format_conversion_disabled")
-            {
-                outcome.skipped_candidates.clear();
-            }
-            (outcome.eligible_candidates, outcome.skipped_candidates)
-        }
+        Ok(outcome) => (outcome.eligible_candidates, outcome.skipped_candidates),
         Err(error) => match error {},
     }
 }
