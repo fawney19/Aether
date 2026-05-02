@@ -1518,7 +1518,12 @@ fn build_runtime_request_metadata_seed(
         plan.body.body_bytes_b64.as_deref(),
     );
     if let Some(proxy) = plan.proxy.as_ref() {
-        if let Some(node_id) = proxy.node_id.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        if let Some(node_id) = proxy
+            .node_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
             let mode = proxy.mode.as_deref().unwrap_or("").trim();
             let mut proxy_obj = serde_json::Map::new();
             proxy_obj.insert("node_id".to_string(), Value::String(node_id.to_string()));

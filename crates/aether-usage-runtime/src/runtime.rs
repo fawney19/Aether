@@ -53,7 +53,12 @@ impl Default for UsageBodyCapturePolicy {
 
 #[async_trait]
 pub trait UsageRuntimeAccess:
-    UsageRecordWriter + UsageSettlementWriter + UsageBillingEventEnricher + crate::worker::ManualProxyNodeCounter + Send + Sync
+    UsageRecordWriter
+    + UsageSettlementWriter
+    + UsageBillingEventEnricher
+    + crate::worker::ManualProxyNodeCounter
+    + Send
+    + Sync
 {
     fn has_usage_writer(&self) -> bool;
     fn has_usage_worker_runner(&self) -> bool;
