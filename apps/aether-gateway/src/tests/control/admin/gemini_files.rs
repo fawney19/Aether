@@ -53,7 +53,7 @@ fn sample_admin_gemini_endpoint() -> StoredProviderCatalogEndpoint {
     StoredProviderCatalogEndpoint::new(
         "endpoint-gemini-admin-1".to_string(),
         "provider-gemini-admin-1".to_string(),
-        "gemini:chat".to_string(),
+        "gemini:generate_content".to_string(),
         Some("gemini".to_string()),
         Some("chat".to_string()),
         true,
@@ -83,12 +83,12 @@ fn sample_admin_gemini_key(id: &str, name: &str, secret: &str) -> StoredProvider
     )
     .expect("key should build")
     .with_transport_fields(
-        Some(json!(["gemini:chat"])),
+        Some(json!(["gemini:generate_content"])),
         encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, secret)
             .expect("api key should encrypt"),
         None,
         None,
-        Some(json!({"gemini:chat": 1})),
+        Some(json!({"gemini:generate_content": 1})),
         None,
         None,
         None,

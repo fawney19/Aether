@@ -1531,6 +1531,12 @@ fn build_runtime_request_metadata_seed_from_parts(
     if let Some(trace_id) = context_string(context, "trace_id") {
         metadata.insert("trace_id".to_string(), Value::String(trace_id));
     }
+    if let Some(client_ip) = context_string(context, "client_ip") {
+        metadata.insert("client_ip".to_string(), Value::String(client_ip));
+    }
+    if let Some(user_agent) = context_string(context, "user_agent") {
+        metadata.insert("user_agent".to_string(), Value::String(user_agent));
+    }
     if let Some(client_requested_stream) = context_bool(context, "client_requested_stream") {
         metadata.insert(
             "client_requested_stream".to_string(),
@@ -2453,7 +2459,7 @@ mod tests {
                 "messages": [{"role": "user", "content": "hello"}]
             })),
             stream: false,
-            client_api_format: "claude:cli".to_string(),
+            client_api_format: "claude:messages".to_string(),
             provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.4".to_string()),
             proxy: None,
@@ -2531,7 +2537,9 @@ mod tests {
         let record = build_pending_usage_record(
             &plan,
             Some(&json!({
-                "api_key_is_standalone": true
+                "api_key_is_standalone": true,
+                "client_ip": "203.0.113.8",
+                "user_agent": "Claude-Code/1.0"
             })),
             1_700_000_000,
         )
@@ -2540,7 +2548,9 @@ mod tests {
         assert_eq!(
             record.request_metadata,
             Some(json!({
-                "api_key_is_standalone": true
+                "api_key_is_standalone": true,
+                "client_ip": "203.0.113.8",
+                "user_agent": "Claude-Code/1.0"
             }))
         );
     }
@@ -2561,7 +2571,7 @@ mod tests {
             content_encoding: None,
             body: RequestBody::from_json(json!({"model": "gpt-5.4"})),
             stream: true,
-            client_api_format: "claude:cli".to_string(),
+            client_api_format: "claude:messages".to_string(),
             provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.4".to_string()),
             proxy: None,
@@ -2618,7 +2628,7 @@ mod tests {
             content_encoding: None,
             body: RequestBody::from_json(json!({"model": "gpt-5.4"})),
             stream: false,
-            client_api_format: "claude:cli".to_string(),
+            client_api_format: "claude:messages".to_string(),
             provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.4".to_string()),
             proxy: None,
@@ -2629,7 +2639,7 @@ mod tests {
             trace_id: "trace-sync-usage-deep-1".to_string(),
             report_kind: "claude_cli_sync_success".to_string(),
             report_context: Some(json!({
-                "client_api_format": "claude:cli",
+                "client_api_format": "claude:messages",
                 "provider_api_format": "openai:responses",
                 "needs_conversion": true,
                 "original_request_body": nested,
@@ -3078,7 +3088,7 @@ mod tests {
             },
             stream: false,
             client_api_format: "openai:chat".to_string(),
-            provider_api_format: "gemini:chat".to_string(),
+            provider_api_format: "gemini:generate_content".to_string(),
             model_name: Some("gpt-5".to_string()),
             proxy: None,
             tls_profile: None,
@@ -3089,7 +3099,7 @@ mod tests {
             report_kind: "openai_chat_sync_success".to_string(),
             report_context: Some(json!({
                 "client_api_format": "openai:chat",
-                "provider_api_format": "gemini:chat",
+                "provider_api_format": "gemini:generate_content",
                 "needs_conversion": true
             })),
             status_code: 200,
@@ -3293,7 +3303,7 @@ mod tests {
             },
             stream: false,
             client_api_format: "openai:chat".to_string(),
-            provider_api_format: "gemini:chat".to_string(),
+            provider_api_format: "gemini:generate_content".to_string(),
             model_name: Some("gpt-5".to_string()),
             proxy: None,
             tls_profile: None,
@@ -3304,7 +3314,7 @@ mod tests {
             report_kind: "openai_chat_sync_success".to_string(),
             report_context: Some(json!({
                 "client_api_format": "openai:chat",
-                "provider_api_format": "gemini:chat",
+                "provider_api_format": "gemini:generate_content",
                 "needs_conversion": true
             })),
             status_code: 200,
@@ -3579,7 +3589,7 @@ mod tests {
                 "input": [{"role": "user", "content": "provider-side compiled body"}],
             })),
             stream: false,
-            client_api_format: "claude:cli".to_string(),
+            client_api_format: "claude:messages".to_string(),
             provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.4".to_string()),
             proxy: None,
@@ -3590,7 +3600,7 @@ mod tests {
             trace_id: "trace-sync-no-client-echo-1".to_string(),
             report_kind: "claude_cli_sync_success".to_string(),
             report_context: Some(json!({
-                "client_api_format": "claude:cli",
+                "client_api_format": "claude:messages",
                 "provider_api_format": "openai:responses",
                 "needs_conversion": true,
                 "original_request_body": null,
@@ -3633,7 +3643,7 @@ mod tests {
             content_encoding: None,
             body: RequestBody::from_json(json!({"model": "gpt-5.4"})),
             stream: false,
-            client_api_format: "claude:cli".to_string(),
+            client_api_format: "claude:messages".to_string(),
             provider_api_format: "openai:responses".to_string(),
             model_name: Some("gpt-5.4".to_string()),
             proxy: None,
@@ -3644,7 +3654,7 @@ mod tests {
             trace_id: "trace-sync-null-error-1".to_string(),
             report_kind: "claude_cli_sync_success".to_string(),
             report_context: Some(json!({
-                "client_api_format": "claude:cli",
+                "client_api_format": "claude:messages",
                 "provider_api_format": "openai:responses",
                 "needs_conversion": true,
             })),

@@ -27,6 +27,7 @@ mod kiro;
 mod refresh;
 mod start;
 mod tasks;
+mod token_import;
 
 pub(crate) async fn maybe_build_local_admin_provider_oauth_response(
     state: &AdminAppState<'_>,

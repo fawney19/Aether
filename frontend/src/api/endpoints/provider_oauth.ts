@@ -17,6 +17,7 @@ export interface ProviderOAuthCompleteResponse {
   provider_type: string
   expires_at?: number | null
   has_refresh_token: boolean
+  temporary?: boolean
   email?: string | null
   account_state_recheck_attempted?: boolean
   account_state_recheck_error?: string | null
@@ -27,6 +28,7 @@ export interface ProviderOAuthCompleteResponseWithKey {
   provider_type: string
   expires_at?: number | null
   has_refresh_token: boolean
+  temporary?: boolean
   email?: string | null
   replaced?: boolean
 }
@@ -99,7 +101,7 @@ export async function completeProviderLevelOAuth(
 
 export async function importProviderRefreshToken(
   providerId: string,
-  data: { refresh_token: string; name?: string; proxy_node_id?: string }
+  data: { refresh_token?: string; access_token?: string; name?: string; proxy_node_id?: string }
 ): Promise<ProviderOAuthCompleteResponseWithKey> {
   const resp = await client.post(`/api/admin/provider-oauth/providers/${providerId}/import-refresh-token`, data)
   return resp.data

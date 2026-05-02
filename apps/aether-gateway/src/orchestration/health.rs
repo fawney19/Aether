@@ -83,16 +83,12 @@ fn local_candidate_failure_should_project_health(
 
     match classification {
         LocalFailoverClassification::RetrySuccessPattern
-        | LocalFailoverClassification::RetrySemanticCompatibilityError
-        | LocalFailoverClassification::RetrySemanticRateLimit
-        | LocalFailoverClassification::RetrySemanticThinkingError
         | LocalFailoverClassification::RetryStatusCode
         | LocalFailoverClassification::RetryUpstreamFailure => true,
         LocalFailoverClassification::UseDefault | LocalFailoverClassification::StopStatusCode => {
             status_code >= 500
         }
-        LocalFailoverClassification::StopErrorPattern
-        | LocalFailoverClassification::StopSemanticClientError => false,
+        LocalFailoverClassification::StopErrorPattern => false,
     }
 }
 
@@ -102,9 +98,6 @@ fn projected_failure_health_score(
     consecutive_failures: u64,
 ) -> f64 {
     let base_score = match classification {
-        LocalFailoverClassification::RetrySemanticRateLimit => 0.7,
-        LocalFailoverClassification::RetrySemanticCompatibilityError
-        | LocalFailoverClassification::RetrySemanticThinkingError => 0.8,
         LocalFailoverClassification::RetrySuccessPattern => 0.75,
         _ if status_code >= 500 => 0.6,
         _ => 0.7,
@@ -145,11 +138,11 @@ mod tests {
     }
 
     #[test]
-    fn failure_projection_ignores_semantic_client_error() {
+    fn failure_projection_ignores_configured_stop_pattern() {
         assert!(project_local_failure_health(
             None,
             "openai:chat",
-            LocalFailoverClassification::StopSemanticClientError,
+            LocalFailoverClassification::StopErrorPattern,
             400,
             1_760_000_000,
         )

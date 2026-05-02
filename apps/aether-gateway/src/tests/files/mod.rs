@@ -42,7 +42,7 @@ fn sample_auth_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnap
         true,
         false,
         Some(serde_json::json!(["gemini"])),
-        Some(serde_json::json!(["gemini:chat"])),
+        Some(serde_json::json!(["gemini:files"])),
         Some(serde_json::json!(["gemini-2.5-pro"])),
         api_key_id.to_string(),
         Some("default".to_string()),
@@ -53,7 +53,7 @@ fn sample_auth_snapshot(api_key_id: &str, user_id: &str) -> StoredAuthApiKeySnap
         Some(5),
         Some(4_102_444_800_i64),
         Some(serde_json::json!(["gemini"])),
-        Some(serde_json::json!(["gemini:chat"])),
+        Some(serde_json::json!(["gemini:files"])),
         Some(serde_json::json!(["gemini-2.5-pro"])),
     )
     .expect("auth snapshot should build")
@@ -67,19 +67,19 @@ fn sample_files_candidate_row() -> StoredMinimalCandidateSelectionRow {
         provider_priority: 10,
         provider_is_active: true,
         endpoint_id: "endpoint-gemini-files-local-1".to_string(),
-        endpoint_api_format: "gemini:chat".to_string(),
+        endpoint_api_format: "gemini:files".to_string(),
         endpoint_api_family: Some("gemini".to_string()),
-        endpoint_kind: Some("chat".to_string()),
+        endpoint_kind: Some("files".to_string()),
         endpoint_is_active: true,
         key_id: "key-gemini-files-local-1".to_string(),
         key_name: "prod".to_string(),
         key_auth_type: "api_key".to_string(),
         key_is_active: true,
-        key_api_formats: Some(vec!["gemini:chat".to_string()]),
+        key_api_formats: Some(vec!["gemini:files".to_string()]),
         key_allowed_models: None,
         key_capabilities: Some(serde_json::json!({"gemini_files": true})),
         key_internal_priority: 5,
-        key_global_priority_by_format: Some(serde_json::json!({"gemini:chat": 1})),
+        key_global_priority_by_format: Some(serde_json::json!({"gemini:files": 1})),
         model_id: "model-gemini-files-local-1".to_string(),
         global_model_id: "global-model-gemini-files-local-1".to_string(),
         global_model_name: "gemini-2.5-pro".to_string(),
@@ -89,7 +89,7 @@ fn sample_files_candidate_row() -> StoredMinimalCandidateSelectionRow {
         model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
             name: "gemini-2.5-pro-upstream".to_string(),
             priority: 1,
-            api_formats: Some(vec!["gemini:chat".to_string()]),
+            api_formats: Some(vec!["gemini:files".to_string()]),
         }]),
         model_supports_streaming: Some(true),
         model_is_active: true,
@@ -122,9 +122,9 @@ fn sample_files_provider_catalog_endpoint() -> StoredProviderCatalogEndpoint {
     StoredProviderCatalogEndpoint::new(
         "endpoint-gemini-files-local-1".to_string(),
         "provider-gemini-files-local-1".to_string(),
-        "gemini:chat".to_string(),
+        "gemini:files".to_string(),
         Some("gemini".to_string()),
-        Some("chat".to_string()),
+        Some("files".to_string()),
         true,
     )
     .expect("endpoint should build")
@@ -152,12 +152,12 @@ fn sample_files_provider_catalog_key() -> StoredProviderCatalogKey {
     )
     .expect("key should build")
     .with_transport_fields(
-        Some(serde_json::json!(["gemini:chat"])),
+        Some(serde_json::json!(["gemini:files"])),
         encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "sk-upstream-gemini-files")
             .expect("api key should encrypt"),
         None,
         Some(serde_json::json!({"gemini_files": true})),
-        Some(serde_json::json!({"gemini:chat": 1})),
+        Some(serde_json::json!({"gemini:files": 1})),
         None,
         None,
         None,
@@ -416,7 +416,7 @@ async fn gateway_executes_gemini_files_get_via_local_decision_gate_with_local_pl
                     "route_class": "ai_public",
                     "route_family": "gemini",
                     "route_kind": "files",
-                    "auth_endpoint_signature": "gemini:chat",
+                    "auth_endpoint_signature": "gemini:generate_content",
                     "execution_runtime_candidate": true,
                     "auth_context": {
                         "user_id": "user-files-local-123",

@@ -47,7 +47,16 @@ pub fn auth_constraints_allow_api_format(
 
     allowed
         .iter()
-        .any(|value| crate::normalize_api_format(value) == api_format)
+        .any(|value| api_format_matches_allowed_value(value, api_format))
+}
+
+pub fn api_format_matches_allowed_value(allowed_value: &str, api_format: &str) -> bool {
+    let allowed_value = allowed_value.trim();
+    let api_format = api_format.trim();
+    if allowed_value.is_empty() || api_format.is_empty() {
+        return false;
+    }
+    crate::normalize_api_format(allowed_value) == crate::normalize_api_format(api_format)
 }
 
 pub fn auth_constraints_allow_model(
@@ -68,8 +77,9 @@ pub fn auth_constraints_allow_model(
 #[cfg(test)]
 mod tests {
     use super::{
-        auth_constraints_allow_api_format, auth_constraints_allow_model,
-        auth_constraints_allow_provider, provider_matches_allowed_value, SchedulerAuthConstraints,
+        api_format_matches_allowed_value, auth_constraints_allow_api_format,
+        auth_constraints_allow_model, auth_constraints_allow_provider,
+        provider_matches_allowed_value, SchedulerAuthConstraints,
     };
 
     fn sample_constraints() -> SchedulerAuthConstraints {
@@ -126,6 +136,52 @@ mod tests {
     }
 
     #[test]
+    fn provider_allowed_value_matches_exact_identifiers_only() {
+        assert!(provider_matches_allowed_value(
+            "claude",
+            "provider-1",
+            "Claude",
+            "custom",
+        ));
+        assert!(provider_matches_allowed_value(
+            "CLAUDE",
+            "provider-1",
+            "Claude",
+            "custom",
+        ));
+        assert!(provider_matches_allowed_value(
+            "provider-1",
+            "provider-1",
+            "Other",
+            "claude",
+        ));
+        assert!(!provider_matches_allowed_value(
+            "vendor-x",
+            "provider-1",
+            "Other",
+            "claude",
+        ));
+        assert!(!provider_matches_allowed_value(
+            "claude",
+            "provider-1",
+            "OtherVendor",
+            "custom",
+        ));
+        assert!(!provider_matches_allowed_value(
+            "provider-1:extra",
+            "provider-1",
+            "Other",
+            "claude",
+        ));
+        assert!(!provider_matches_allowed_value(
+            "openai:responses",
+            "provider-1",
+            "Other",
+            "claude",
+        ));
+    }
+
+    #[test]
     fn constraints_normalize_api_formats_and_models() {
         let constraints = sample_constraints();
         assert!(auth_constraints_allow_api_format(
@@ -141,6 +197,26 @@ mod tests {
             Some(&constraints),
             "gpt-4.1",
             "gpt-4.1"
+        ));
+    }
+
+    #[test]
+    fn api_format_allowed_value_matches_current_signatures_only() {
+        assert!(api_format_matches_allowed_value(
+            "CLAUDE:MESSAGES",
+            "claude:messages"
+        ));
+        assert!(api_format_matches_allowed_value(
+            "openai:responses",
+            "openai:responses"
+        ));
+        assert!(!api_format_matches_allowed_value(
+            "openai:responses",
+            "claude:messages"
+        ));
+        assert!(!api_format_matches_allowed_value(
+            "claude:messages:extra",
+            "claude:messages"
         ));
     }
 }

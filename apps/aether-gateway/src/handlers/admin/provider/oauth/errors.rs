@@ -9,6 +9,17 @@ use axum::{
 };
 use serde_json::json;
 
+fn oauth_invalid_reason_is_account_level_block(reason: Option<&str>) -> bool {
+    let Some(reason) = reason.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    if reason.starts_with(OAUTH_ACCOUNT_BLOCK_PREFIX) {
+        return true;
+    }
+    aether_admin::provider::status::resolve_account_status_snapshot(None, None, Some(reason))
+        .blocked
+}
+
 pub(crate) fn build_internal_control_error_response(
     status: http::StatusCode,
     message: impl Into<String>,
@@ -98,6 +109,8 @@ pub(crate) fn normalize_provider_oauth_refresh_error_message(
     }
     if error_code == "invalid_grant"
         || error_code == "invalid_refresh_token"
+        || error_code == "refresh_token_expired"
+        || lowered.contains("could not validate your refresh token")
         || (lowered.contains("refresh token")
             && ["expired", "revoked", "invalid"]
                 .iter()
@@ -131,15 +144,43 @@ pub(crate) fn merge_provider_oauth_refresh_failure_reason(
     if current_reason.starts_with(OAUTH_EXPIRED_PREFIX) {
         return None;
     }
-    if current_reason.starts_with(OAUTH_ACCOUNT_BLOCK_PREFIX) {
-        if let Some((head, _)) = current_reason.split_once("[REFRESH_FAILED]") {
-            return Some(
-                format!("{}\n{}", head.trim_end(), refresh_reason)
-                    .trim()
-                    .to_string(),
-            );
-        }
-        return Some(format!("{current_reason}\n{refresh_reason}"));
+    if oauth_invalid_reason_is_account_level_block(Some(current_reason)) {
+        return None;
     }
     Some(refresh_reason.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        merge_provider_oauth_refresh_failure_reason, normalize_provider_oauth_refresh_error_message,
+    };
+
+    #[test]
+    fn normalizes_openai_refresh_token_expired_response() {
+        let body = r#"{"error":{"message":"Could not validate your refresh token. Please try signing in again.","type":"invalid_request_error","param":null,"code":"refresh_token_expired"}}"#;
+
+        assert_eq!(
+            normalize_provider_oauth_refresh_error_message(Some(401), Some(body)),
+            "refresh_token 无效、已过期或已撤销，请重新登录授权"
+        );
+    }
+
+    #[test]
+    fn refresh_failure_does_not_replace_account_level_block() {
+        assert_eq!(
+            merge_provider_oauth_refresh_failure_reason(
+                Some("[ACCOUNT_BLOCK] account has been deactivated"),
+                "[REFRESH_FAILED] Token 续期失败 (401): refresh_token 无效",
+            ),
+            None,
+        );
+        assert_eq!(
+            merge_provider_oauth_refresh_failure_reason(
+                Some("account_banned"),
+                "[REFRESH_FAILED] Token 续期失败 (401): refresh_token 无效",
+            ),
+            None,
+        );
+    }
 }

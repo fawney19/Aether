@@ -74,4 +74,29 @@ mod tests {
         assert_eq!(auth_config.get("plan_type"), Some(&json!("plus")));
         assert_eq!(auth_config.get("user_id"), Some(&json!("user-2")));
     }
+
+    #[test]
+    fn codex_enrichment_extracts_profile_email_from_claims() {
+        let access_token = sample_unsigned_jwt(json!({
+            "https://api.openai.com/profile": {
+                "email": "profile@example.com",
+                "email_verified": true,
+            },
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acc-profile",
+            },
+        }));
+        let token_payload = json!({
+            "access_token": access_token,
+        });
+        let mut auth_config = serde_json::Map::new();
+
+        enrich_admin_provider_oauth_auth_config("codex", &mut auth_config, &token_payload);
+
+        assert_eq!(
+            auth_config.get("email"),
+            Some(&json!("profile@example.com"))
+        );
+        assert_eq!(auth_config.get("account_id"), Some(&json!("acc-profile")));
+    }
 }

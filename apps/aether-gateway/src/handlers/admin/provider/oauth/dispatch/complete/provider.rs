@@ -2,7 +2,8 @@ use super::super::super::duplicates::find_duplicate_provider_oauth_key;
 use super::super::super::errors::build_internal_control_error_response;
 use super::super::super::provisioning::{
     build_provider_oauth_auth_config_from_token_payload, create_provider_oauth_catalog_key,
-    provider_oauth_active_api_formats, update_existing_provider_oauth_catalog_key,
+    provider_oauth_active_api_formats, provider_oauth_key_proxy_value,
+    update_existing_provider_oauth_catalog_key,
 };
 use super::super::super::runtime::{
     provider_oauth_runtime_endpoint_for_provider,
@@ -131,6 +132,7 @@ pub(super) async fn handle_admin_provider_oauth_complete_provider(
             ],
         )
         .await;
+    let key_proxy = provider_oauth_key_proxy_value(payload.proxy_node_id.as_deref());
 
     let token_payload = match state
         .exchange_admin_provider_oauth_code(
@@ -178,7 +180,7 @@ pub(super) async fn handle_admin_provider_oauth_complete_provider(
                 &access_token,
                 &auth_config,
                 &api_formats,
-                None,
+                key_proxy.clone(),
                 expires_at,
             )
             .await?
@@ -220,7 +222,7 @@ pub(super) async fn handle_admin_provider_oauth_complete_provider(
                 &access_token,
                 &auth_config,
                 &api_formats,
-                None,
+                key_proxy.clone(),
                 expires_at,
             )
             .await?

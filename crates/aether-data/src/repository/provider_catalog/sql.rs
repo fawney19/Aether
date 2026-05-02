@@ -140,6 +140,8 @@ SELECT
   capabilities,
   is_active,
   api_formats,
+  auth_type_by_format,
+  allow_auth_channel_mismatch_formats,
   api_key,
   auth_config,
   note,
@@ -197,6 +199,8 @@ SELECT
   capabilities,
   is_active,
   api_formats,
+  auth_type_by_format,
+  allow_auth_channel_mismatch_formats,
   api_key,
   auth_config,
   note,
@@ -254,6 +258,7 @@ SELECT
   NULL::jsonb AS capabilities,
   is_active,
   api_formats,
+  NULL::jsonb AS auth_type_by_format,
   'summary' AS api_key,
   CASE
     WHEN auth_config IS NULL THEN NULL
@@ -595,6 +600,7 @@ SELECT
   capabilities,
   is_active,
   api_formats,
+  auth_type_by_format,
   api_key,
   auth_config,
   note,
@@ -1187,6 +1193,7 @@ INSERT INTO provider_api_keys (
   id,
   provider_id,
   api_formats,
+  auth_type_by_format,
   auth_type,
   api_key,
   auth_config,
@@ -1234,7 +1241,8 @@ INSERT INTO provider_api_keys (
   circuit_breaker_by_format,
   is_active,
   created_at,
-  updated_at
+  updated_at,
+  allow_auth_channel_mismatch_formats
 ) VALUES (
   $1,
   $2,
@@ -1310,13 +1318,15 @@ INSERT INTO provider_api_keys (
   CASE
     WHEN $51::double precision IS NULL THEN NOW()
     ELSE TO_TIMESTAMP($51::double precision)
-  END
+  END,
+  $52
 )
 "#,
         )
         .bind(&key.id)
         .bind(&key.provider_id)
         .bind(&key.api_formats)
+        .bind(&key.auth_type_by_format)
         .bind(&key.auth_type)
         .bind(&key.encrypted_api_key)
         .bind(&key.encrypted_auth_config)
@@ -1373,6 +1383,7 @@ INSERT INTO provider_api_keys (
         .bind(key.is_active)
         .bind(key.created_at_unix_ms.map(|value| value as f64))
         .bind(key.updated_at_unix_secs.map(|value| value as f64))
+        .bind(&key.allow_auth_channel_mismatch_formats)
         .execute(&self.pool)
         .await
         .map_postgres_err()?;
@@ -1721,6 +1732,8 @@ UPDATE provider_api_keys
 SET
   provider_id = $2,
   api_formats = $3,
+  auth_type_by_format = $40,
+  allow_auth_channel_mismatch_formats = $41,
   auth_type = $4,
   api_key = $5,
   auth_config = $6,
@@ -1817,6 +1830,8 @@ WHERE id = $1
         .bind(key.is_active)
         .bind(key.updated_at_unix_secs.map(|value| value as f64))
         .bind(key.expires_at_unix_secs.map(|value| value as f64))
+        .bind(&key.auth_type_by_format)
+        .bind(&key.allow_auth_channel_mismatch_formats)
         .execute(&self.pool)
         .await
         .map_postgres_err()?
@@ -2446,7 +2461,7 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
     )?
     .with_transport_fields(
         row_get(row, "api_formats")?,
-        row_get(row, "api_key")?,
+        row_get::<Option<String>>(row, "api_key")?,
         row_get(row, "auth_config")?,
         row_get(row, "rate_multipliers")?,
         row_get(row, "global_priority_by_format")?,
@@ -2479,6 +2494,9 @@ fn map_key_row(row: &PgRow) -> Result<StoredProviderCatalogKey, DataLayerError> 
                 row.try_get("circuit_breaker_by_format").ok(),
             );
         key.note = row.try_get("note").ok();
+        key.auth_type_by_format = row.try_get("auth_type_by_format").ok();
+        key.allow_auth_channel_mismatch_formats =
+            row.try_get("allow_auth_channel_mismatch_formats").ok();
         key.internal_priority = row.try_get("internal_priority").unwrap_or(50);
         key.cache_ttl_minutes = row.try_get("cache_ttl_minutes").unwrap_or(5);
         key.max_probe_interval_minutes = row.try_get("max_probe_interval_minutes").unwrap_or(32);
@@ -2558,20 +2576,20 @@ mod tests {
     #[test]
     fn provider_api_keys_concurrent_limit_schema_is_nullable_without_default() {
         let migration = include_str!(
-            "../../../migrations/20260427000000_add_provider_api_key_concurrent_limit.sql"
+            "../../../migrations/20260502000000_add_provider_key_auth_channel_mismatch_formats.sql"
         );
-        assert!(migration
-            .contains("provider_api_keys ADD COLUMN IF NOT EXISTS concurrent_limit integer"));
-        let normalized_migration = migration.to_ascii_lowercase();
-        assert!(!normalized_migration.contains("not null"));
-        assert!(!normalized_migration.contains("default"));
+        let concurrent_limit_line = migration
+            .lines()
+            .find(|line| line.contains("ADD COLUMN IF NOT EXISTS concurrent_limit"))
+            .expect("concurrent_limit migration line should exist")
+            .to_ascii_lowercase();
+        assert_eq!(
+            concurrent_limit_line.trim(),
+            "add column if not exists concurrent_limit integer;"
+        );
 
-        for baseline in [
-            include_str!("../../../migrations/20260403000000_baseline.sql"),
-            include_str!("../../../bootstrap/20260413020000_baseline_v2.sql"),
-        ] {
-            assert!(baseline.contains("CREATE TABLE IF NOT EXISTS public.provider_api_keys"));
-            assert!(baseline.contains("concurrent_limit integer,"));
-        }
+        let baseline = include_str!("../../../bootstrap/20260413020000_baseline_v2.sql");
+        assert!(baseline.contains("CREATE TABLE IF NOT EXISTS public.provider_api_keys"));
+        assert!(baseline.contains("concurrent_limit integer,"));
     }
 }

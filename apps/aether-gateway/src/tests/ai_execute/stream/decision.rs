@@ -339,9 +339,10 @@ async fn gateway_executes_openai_chat_stream_via_local_decision_gate_without_exe
     backup_key.id = "key-openai-local-stream-2".to_string();
     backup_key.provider_id = "provider-openai-local-stream-2".to_string();
     backup_key.name = "backup".to_string();
-    backup_key.encrypted_api_key =
+    backup_key.encrypted_api_key = Some(
         encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "sk-upstream-openai-backup")
-            .expect("api key should encrypt");
+            .expect("api key should encrypt"),
+    );
     let (upstream_url, upstream_handle) = start_server(upstream).await;
     let (provider_url, provider_handle) = start_server(provider).await;
     let mut primary_endpoint = sample_provider_catalog_endpoint();
@@ -505,7 +506,7 @@ async fn gateway_executes_openai_chat_stream_via_local_openai_responses_cross_fo
             endpoint_is_active: true,
             key_id: "key-openai-chat-cli-local-1".to_string(),
             key_name: "prod".to_string(),
-            key_auth_type: "api_key".to_string(),
+            key_auth_type: "oauth".to_string(),
             key_is_active: true,
             key_api_formats: Some(vec!["openai:responses".to_string()]),
             key_allowed_models: None,
@@ -578,7 +579,7 @@ async fn gateway_executes_openai_chat_stream_via_local_openai_responses_cross_fo
             "key-openai-chat-cli-local-1".to_string(),
             "provider-openai-chat-cli-local-1".to_string(),
             "prod".to_string(),
-            "api_key".to_string(),
+            "oauth".to_string(),
             None,
             true,
         )

@@ -212,6 +212,10 @@ pub struct AdminSystemConfigProviderKey {
     #[serde(default)]
     pub global_priority_by_format: Option<Value>,
     #[serde(default)]
+    pub auth_type_by_format: Option<Value>,
+    #[serde(default)]
+    pub allow_auth_channel_mismatch_formats: Option<Vec<String>>,
+    #[serde(default)]
     pub rpm_limit: Option<u32>,
     #[serde(default)]
     pub allowed_models: Option<Vec<String>>,
@@ -533,13 +537,13 @@ const ADMIN_API_FORMAT_DEFINITIONS: &[AdminApiFormatDefinition] = &[
         value: "openai:responses",
         label: "OpenAI Responses",
         default_path: "/v1/responses",
-        aliases: &["openai_cli", "openai:cli", "responses"],
+        aliases: &["responses"],
     },
     AdminApiFormatDefinition {
         value: "openai:responses:compact",
         label: "OpenAI Responses Compact",
         default_path: "/v1/responses/compact",
-        aliases: &["openai_compact", "openai:compact", "responses_compact"],
+        aliases: &["responses_compact"],
     },
     AdminApiFormatDefinition {
         value: "openai:image",
@@ -554,28 +558,16 @@ const ADMIN_API_FORMAT_DEFINITIONS: &[AdminApiFormatDefinition] = &[
         aliases: &["openai_video", "sora"],
     },
     AdminApiFormatDefinition {
-        value: "claude:chat",
-        label: "Claude Chat",
+        value: "claude:messages",
+        label: "Claude Messages",
         default_path: "/v1/messages",
-        aliases: &["claude", "anthropic", "claude_compatible"],
+        aliases: &["claude", "claude_compatible"],
     },
     AdminApiFormatDefinition {
-        value: "claude:cli",
-        label: "Claude CLI",
-        default_path: "/v1/messages",
-        aliases: &["claude_cli", "claude-cli"],
-    },
-    AdminApiFormatDefinition {
-        value: "gemini:chat",
-        label: "Gemini Chat",
+        value: "gemini:generate_content",
+        label: "Gemini Generate Content",
         default_path: "/v1beta/models/{model}:{action}",
         aliases: &["gemini", "google", "vertex"],
-    },
-    AdminApiFormatDefinition {
-        value: "gemini:cli",
-        label: "Gemini CLI",
-        default_path: "/v1beta/models/{model}:{action}",
-        aliases: &["gemini_cli", "gemini-cli"],
     },
     AdminApiFormatDefinition {
         value: "gemini:video",
@@ -1994,7 +1986,7 @@ mod tests {
 
     #[test]
     fn resolve_admin_system_export_key_api_formats_uses_endpoint_fallback() {
-        let provider_formats = vec!["openai:chat".to_string(), "claude:chat".to_string()];
+        let provider_formats = vec!["openai:chat".to_string(), "claude:messages".to_string()];
         let resolved =
             resolve_admin_system_export_key_api_formats(None, &provider_formats, |value| {
                 Some(value.to_string())

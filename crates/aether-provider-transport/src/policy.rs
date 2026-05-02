@@ -200,5 +200,5 @@ fn local_same_format_transport_unsupported_reason(
 }
 
 fn same_api_format(left: &str, right: &str) -> bool {
-    aether_ai_formats::legacy_openai_format_alias_matches(left, right)
+    aether_ai_formats::api_format_alias_matches(left, right)
 }

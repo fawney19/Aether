@@ -17,6 +17,7 @@ pub(super) struct RefreshRequestContext {
     pub(super) key: StoredProviderCatalogKey,
     pub(super) provider: StoredProviderCatalogProvider,
     pub(super) provider_type: String,
+    pub(super) trace_id: String,
     pub(super) transport: AdminGatewayProviderTransportSnapshot,
 }
 

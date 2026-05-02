@@ -3,16 +3,17 @@ use axum::http::Request;
 use base64::Engine as _;
 use serde_json::json;
 
-use crate::ai_pipeline_api::{
+use crate::ai_serving::api::{
     build_gemini_stream_plan_from_decision, build_gemini_sync_plan_from_decision,
     build_openai_responses_stream_plan_from_decision,
     build_openai_responses_sync_plan_from_decision, build_passthrough_sync_plan_from_decision,
     build_standard_stream_plan_from_decision, build_standard_sync_plan_from_decision,
-    GatewayControlSyncDecisionResponse,
+    AiExecutionDecision,
 };
 use crate::execution_runtime::submission::{
-    build_best_effort_local_core_error_body, resolve_core_error_background_report_kind,
-    resolve_core_success_background_report_kind, resolve_local_core_error_response_body_json,
+    build_best_effort_local_core_error_body, has_nested_error,
+    resolve_core_error_background_report_kind, resolve_core_success_background_report_kind,
+    resolve_local_core_error_response_body_json,
 };
 use crate::execution_runtime::{
     resolve_local_sync_error_background_report_kind,
@@ -33,10 +34,8 @@ fn test_parts() -> http::request::Parts {
     parts
 }
 
-fn missing_exact_provider_request_payload(
-    decision_kind: &str,
-) -> GatewayControlSyncDecisionResponse {
-    GatewayControlSyncDecisionResponse {
+fn missing_exact_provider_request_payload(decision_kind: &str) -> AiExecutionDecision {
+    AiExecutionDecision {
         action: "execution_runtime".to_string(),
         decision_kind: Some(decision_kind.to_string()),
         execution_strategy: Some("local_same_format".to_string()),
@@ -187,7 +186,7 @@ fn build_best_effort_local_core_error_body_converts_gemini_chat_error_to_openai_
     let payload = core_finalize_payload(
         "openai_chat_sync_finalize",
         "openai:chat",
-        "gemini:chat",
+        "gemini:generate_content",
         429,
         json!({
             "error": {
@@ -222,7 +221,7 @@ fn build_best_effort_local_core_error_body_converts_claude_cli_error_to_openai_r
     let payload = core_finalize_payload(
         "openai_responses_sync_finalize",
         "openai:responses",
-        "claude:cli",
+        "claude:messages",
         401,
         json!({
             "type": "error",
@@ -252,6 +251,23 @@ fn build_best_effort_local_core_error_body_converts_claude_cli_error_to_openai_r
 }
 
 #[test]
+fn has_nested_error_ignores_null_error_fields() {
+    assert!(!has_nested_error(&json!({
+        "id": "resp_completed_123",
+        "object": "response",
+        "status": "completed",
+        "error": null,
+        "output": []
+    })));
+    assert!(has_nested_error(&json!({
+        "id": "resp_failed_123",
+        "object": "response",
+        "status": "failed",
+        "error": {"message": "quota reached"}
+    })));
+}
+
+#[test]
 fn build_best_effort_local_core_error_body_converts_sync_errors_across_standard_families() {
     let cases = vec![
         (
@@ -259,7 +275,7 @@ fn build_best_effort_local_core_error_body_converts_sync_errors_across_standard_
             core_finalize_payload(
                 "openai_chat_sync_finalize",
                 "openai:chat",
-                "claude:chat",
+                "claude:messages",
                 429,
                 json!({
                     "type": "error",
@@ -280,7 +296,7 @@ fn build_best_effort_local_core_error_body_converts_sync_errors_across_standard_
             "openai chat -> claude chat",
             core_finalize_payload(
                 "claude_chat_sync_finalize",
-                "claude:chat",
+                "claude:messages",
                 "openai:chat",
                 404,
                 json!({
@@ -304,7 +320,7 @@ fn build_best_effort_local_core_error_body_converts_sync_errors_across_standard_
             "openai chat -> gemini chat",
             core_finalize_payload(
                 "gemini_chat_sync_finalize",
-                "gemini:chat",
+                "gemini:generate_content",
                 "openai:chat",
                 401,
                 json!({
@@ -327,7 +343,7 @@ fn build_best_effort_local_core_error_body_converts_sync_errors_across_standard_
             core_finalize_payload(
                 "openai_responses_sync_finalize",
                 "openai:responses",
-                "gemini:cli",
+                "gemini:generate_content",
                 429,
                 json!({
                     "error": {
@@ -349,8 +365,8 @@ fn build_best_effort_local_core_error_body_converts_sync_errors_across_standard_
             "gemini cli -> claude cli",
             core_finalize_payload(
                 "claude_cli_sync_finalize",
-                "claude:cli",
-                "gemini:cli",
+                "claude:messages",
+                "gemini:generate_content",
                 503,
                 json!({
                     "error": {
@@ -372,8 +388,8 @@ fn build_best_effort_local_core_error_body_converts_sync_errors_across_standard_
             "claude cli -> gemini cli",
             core_finalize_payload(
                 "gemini_cli_sync_finalize",
-                "gemini:cli",
-                "claude:cli",
+                "gemini:generate_content",
+                "claude:messages",
                 404,
                 json!({
                     "type": "error",
@@ -410,7 +426,7 @@ fn resolve_local_core_error_response_body_json_parses_body_base64_json_for_cross
 {
     let mut payload = core_finalize_payload(
         "claude_cli_sync_finalize",
-        "claude:cli",
+        "claude:messages",
         "openai:responses",
         401,
         json!({}),
@@ -441,7 +457,7 @@ fn resolve_local_core_error_response_body_json_parses_body_base64_json_for_cross
 fn resolve_local_core_error_response_body_json_builds_client_error_from_plain_text_body() {
     let mut payload = core_finalize_payload(
         "claude_cli_sync_finalize",
-        "claude:cli",
+        "claude:messages",
         "openai:responses",
         400,
         json!({}),

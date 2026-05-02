@@ -370,14 +370,18 @@ fn scheduler_candidate_runtime_paths_depend_on_scheduler_core_and_state_trait() 
     }
 
     let affinity = read_workspace_file("apps/aether-gateway/src/scheduler/candidate/affinity.rs");
+    let ranking = read_workspace_file("apps/aether-gateway/src/scheduler/candidate/ranking.rs");
+    let resolution =
+        read_workspace_file("apps/aether-gateway/src/scheduler/candidate/resolution.rs");
+    let candidate_runtime_path_source = format!("{affinity}\n{ranking}\n{resolution}");
     assert!(
         affinity.contains("SchedulerRuntimeState"),
         "candidate/affinity.rs should depend on SchedulerRuntimeState"
     );
     assert!(
-        affinity.contains("aether_scheduler_core::{")
-            && affinity.contains("SchedulerAffinityTarget"),
-        "candidate/affinity.rs should depend on core SchedulerAffinityTarget"
+        candidate_runtime_path_source.contains("aether_scheduler_core::{")
+            && candidate_runtime_path_source.contains("SchedulerAffinityTarget"),
+        "scheduler candidate runtime path should depend on core SchedulerAffinityTarget"
     );
     for pattern in [
         "candidate_affinity_hash",
@@ -385,21 +389,21 @@ fn scheduler_candidate_runtime_paths_depend_on_scheduler_core_and_state_trait() 
         "candidate_key",
     ] {
         assert!(
-            affinity.contains(pattern),
-            "candidate/affinity.rs should depend on core affinity helper {pattern}"
+            candidate_runtime_path_source.contains(pattern),
+            "scheduler candidate runtime path should depend on core affinity helper {pattern}"
         );
     }
     assert!(
-        !affinity.contains("use crate::AppState"),
-        "candidate/affinity.rs should not depend on AppState directly"
+        !candidate_runtime_path_source.contains("use crate::AppState"),
+        "scheduler candidate runtime path should not depend on AppState directly"
     );
     assert!(
-        !affinity.contains("crate::cache::SchedulerAffinityTarget"),
-        "candidate/affinity.rs should not depend on gateway-local SchedulerAffinityTarget"
+        !candidate_runtime_path_source.contains("crate::cache::SchedulerAffinityTarget"),
+        "scheduler candidate runtime path should not depend on gateway-local SchedulerAffinityTarget"
     );
     assert!(
-        !affinity.contains("use sha2::{Digest, Sha256};"),
-        "candidate/affinity.rs should not own affinity hashing implementation anymore"
+        !candidate_runtime_path_source.contains("use sha2::{Digest, Sha256};"),
+        "scheduler candidate runtime path should not own affinity hashing implementation anymore"
     );
     for pattern in [
         "fn compare_affinity_order(",
@@ -604,7 +608,7 @@ fn scheduler_candidate_runtime_paths_depend_on_scheduler_core_and_state_trait() 
     }
 
     let planner_candidate_ranking =
-        read_workspace_file("apps/aether-gateway/src/ai_pipeline/planner/candidate_ranking.rs");
+        read_workspace_file("apps/aether-gateway/src/ai_serving/planner/candidate_ranking.rs");
     assert!(
         planner_candidate_ranking.contains("use aether_scheduler_core::{")
             && planner_candidate_ranking.contains("SchedulerMinimalCandidateSelectionCandidate"),
@@ -1298,7 +1302,7 @@ fn hotspot_modules_do_not_log_sensitive_payload_like_fields() {
     ];
 
     for root in [
-        "src/ai_pipeline",
+        "src/ai_serving",
         "src/execution_runtime",
         "src/usage",
         "src/async_task",
@@ -1368,36 +1372,36 @@ fn execution_runtime_video_finalize_paths_depend_on_shared_video_task_core() {
 }
 
 #[test]
-fn ai_pipeline_runtime_kiro_wrapper_is_facade_only() {
+fn ai_serving_runtime_kiro_wrapper_is_facade_only() {
     for path in [
-        "apps/aether-gateway/src/ai_pipeline/runtime/mod.rs",
-        "apps/aether-gateway/src/ai_pipeline/runtime/provider_types.rs",
-        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/mod.rs",
-        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/antigravity/mod.rs",
-        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/claude/mod.rs",
-        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/claude_code/mod.rs",
-        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/gemini/mod.rs",
-        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/generic_oauth.rs",
-        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/kiro/mod.rs",
-        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/openai/mod.rs",
-        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/vertex/mod.rs",
-        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/kiro/auth.rs",
-        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/kiro/converter.rs",
-        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/kiro/credentials.rs",
-        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/kiro/headers.rs",
-        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/kiro/policy.rs",
-        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/kiro/refresh.rs",
-        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/kiro/request.rs",
-        "apps/aether-gateway/src/ai_pipeline/runtime/adapters/kiro/url.rs",
+        "apps/aether-gateway/src/ai_serving/runtime/mod.rs",
+        "apps/aether-gateway/src/ai_serving/runtime/provider_types.rs",
+        "apps/aether-gateway/src/ai_serving/runtime/adapters/mod.rs",
+        "apps/aether-gateway/src/ai_serving/runtime/adapters/antigravity/mod.rs",
+        "apps/aether-gateway/src/ai_serving/runtime/adapters/claude/mod.rs",
+        "apps/aether-gateway/src/ai_serving/runtime/adapters/claude_code/mod.rs",
+        "apps/aether-gateway/src/ai_serving/runtime/adapters/gemini/mod.rs",
+        "apps/aether-gateway/src/ai_serving/runtime/adapters/generic_oauth.rs",
+        "apps/aether-gateway/src/ai_serving/runtime/adapters/kiro/mod.rs",
+        "apps/aether-gateway/src/ai_serving/runtime/adapters/openai/mod.rs",
+        "apps/aether-gateway/src/ai_serving/runtime/adapters/vertex/mod.rs",
+        "apps/aether-gateway/src/ai_serving/runtime/adapters/kiro/auth.rs",
+        "apps/aether-gateway/src/ai_serving/runtime/adapters/kiro/converter.rs",
+        "apps/aether-gateway/src/ai_serving/runtime/adapters/kiro/credentials.rs",
+        "apps/aether-gateway/src/ai_serving/runtime/adapters/kiro/headers.rs",
+        "apps/aether-gateway/src/ai_serving/runtime/adapters/kiro/policy.rs",
+        "apps/aether-gateway/src/ai_serving/runtime/adapters/kiro/refresh.rs",
+        "apps/aether-gateway/src/ai_serving/runtime/adapters/kiro/request.rs",
+        "apps/aether-gateway/src/ai_serving/runtime/adapters/kiro/url.rs",
     ] {
         assert!(
             !workspace_file_exists(path),
-            "{path} should be removed once gateway ai_pipeline runtime adapter ownership is flattened into adaptation/provider_transport facades"
+            "{path} should be removed once gateway ai_serving runtime adapter ownership is flattened into adaptation/provider_transport facades"
         );
     }
 
     let adaptation_mod =
-        read_workspace_file("apps/aether-gateway/src/ai_pipeline/adaptation/mod.rs");
+        read_workspace_file("apps/aether-gateway/src/ai_serving/adaptation/mod.rs");
     assert!(
         adaptation_mod.contains("pub(crate) use kiro::KiroToClaudeCliStreamState;"),
         "adaptation/mod.rs should own KiroToClaudeCliStreamState export after runtime facade removal"

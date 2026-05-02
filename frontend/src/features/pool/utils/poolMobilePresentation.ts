@@ -32,6 +32,7 @@ export type PoolMobileActionId =
 export interface PoolMobileActionInput {
   canDownloadOrCopy?: boolean
   canRefreshToken?: boolean
+  showRefreshToken?: boolean
   canClearCooldown?: boolean
   canRecoverHealth?: boolean
   hasProxy?: boolean
@@ -62,9 +63,11 @@ export function splitPoolMobileActions(input: PoolMobileActionInput): {
   primary: PoolMobileActionId[]
   overflow: PoolMobileActionId[]
 } {
+  const showRefreshToken = input.showRefreshToken ?? input.canRefreshToken
+
   if (input.canDownloadOrCopy) {
     const primary: PoolMobileActionId[] = ['copy_or_download']
-    if (input.canRefreshToken) {
+    if (showRefreshToken) {
       primary.push('refresh_token')
     }
     if (input.canClearCooldown) {
@@ -86,7 +89,7 @@ export function splitPoolMobileActions(input: PoolMobileActionInput): {
   }
 
   const primary: PoolMobileActionId[] = []
-  if (input.canRefreshToken) {
+  if (showRefreshToken) {
     primary.push('refresh_token')
   }
   if (input.canClearCooldown) {

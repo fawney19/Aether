@@ -171,7 +171,9 @@ pub(crate) fn incoming_usage_can_recover_terminal_failure(
     incoming_billing_status: &str,
 ) -> bool {
     incoming_billing_status == "pending"
-        && matches!(incoming_status, "pending" | "streaming" | "completed")
+        // Late pending placeholders are not authoritative enough to reopen a void terminal row;
+        // they can otherwise regress a real failure back to pending when background writes race.
+        && matches!(incoming_status, "streaming" | "completed")
 }
 
 pub(crate) fn usage_can_recover_terminal_failure(
@@ -374,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn incoming_usage_recovery_only_applies_to_pending_lifecycle_states() {
+    fn incoming_usage_recovery_requires_streaming_or_completed_state() {
         assert!(incoming_usage_can_recover_terminal_failure(
             "completed",
             "pending"
@@ -382,6 +384,9 @@ mod tests {
         assert!(incoming_usage_can_recover_terminal_failure(
             "streaming",
             "pending"
+        ));
+        assert!(!incoming_usage_can_recover_terminal_failure(
+            "pending", "pending"
         ));
         assert!(!incoming_usage_can_recover_terminal_failure(
             "failed", "void"
@@ -393,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_recovery_requires_void_failure_to_be_followed_by_pending_lifecycle_state() {
+    fn usage_recovery_requires_void_failure_to_be_followed_by_streaming_or_completed_state() {
         assert!(usage_can_recover_terminal_failure(
             "failed",
             "void",
@@ -405,6 +410,9 @@ mod tests {
             "void",
             "streaming",
             "pending"
+        ));
+        assert!(!usage_can_recover_terminal_failure(
+            "failed", "void", "pending", "pending"
         ));
         assert!(!usage_can_recover_terminal_failure(
             "completed",

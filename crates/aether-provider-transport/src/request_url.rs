@@ -4,7 +4,10 @@ use std::sync::OnceLock;
 use regex::Regex;
 use url::form_urlencoded;
 
-use crate::antigravity::{build_antigravity_v1internal_url, AntigravityRequestUrlAction};
+use crate::antigravity::{
+    build_antigravity_v1internal_url, is_antigravity_provider_transport,
+    AntigravityRequestUrlAction,
+};
 use crate::claude_code::build_claude_code_messages_url;
 use crate::snapshot::GatewayProviderTransportSnapshot;
 use crate::url::{
@@ -60,9 +63,7 @@ pub fn build_transport_request_url(
         ));
     }
 
-    let url = match aether_ai_formats::normalize_legacy_openai_format_alias(&provider_api_format)
-        .as_str()
-    {
+    let url = match aether_ai_formats::normalize_api_format_alias(&provider_api_format).as_str() {
         "openai:chat" => Some(build_openai_chat_url(
             &transport.endpoint.base_url,
             params.request_query,
@@ -77,11 +78,11 @@ pub fn build_transport_request_url(
             params.request_query,
             true,
         )),
-        "claude:chat" | "claude:cli" => Some(build_claude_messages_url(
+        "claude:messages" => Some(build_claude_messages_url(
             &transport.endpoint.base_url,
             params.request_query,
         )),
-        "gemini:chat" | "gemini:cli" => build_gemini_content_url(
+        "gemini:generate_content" => build_gemini_content_url(
             &transport.endpoint.base_url,
             params.mapped_model?,
             params.upstream_is_stream,
@@ -95,6 +96,105 @@ pub fn build_transport_request_url(
         &provider_api_format,
         params.upstream_is_stream,
     ))
+}
+
+pub fn build_local_openai_chat_upstream_url(
+    transport: &GatewayProviderTransportSnapshot,
+    request_query: Option<&str>,
+) -> Option<String> {
+    build_transport_request_url(
+        transport,
+        TransportRequestUrlParams {
+            provider_api_format: "openai:chat",
+            mapped_model: None,
+            upstream_is_stream: false,
+            request_query,
+            kiro_api_region: None,
+        },
+    )
+}
+
+pub fn build_cross_format_openai_chat_upstream_url(
+    transport: &GatewayProviderTransportSnapshot,
+    mapped_model: &str,
+    provider_api_format: &str,
+    upstream_is_stream: bool,
+    request_query: Option<&str>,
+) -> Option<String> {
+    aether_ai_formats::request_conversion_kind("openai:chat", provider_api_format)?;
+    build_transport_request_url(
+        transport,
+        TransportRequestUrlParams {
+            provider_api_format,
+            mapped_model: Some(mapped_model),
+            upstream_is_stream,
+            request_query,
+            kiro_api_region: None,
+        },
+    )
+}
+
+pub fn build_local_openai_responses_upstream_url(
+    transport: &GatewayProviderTransportSnapshot,
+    compact: bool,
+    request_query: Option<&str>,
+) -> Option<String> {
+    let provider_api_format = if compact {
+        "openai:responses:compact"
+    } else {
+        "openai:responses"
+    };
+    build_transport_request_url(
+        transport,
+        TransportRequestUrlParams {
+            provider_api_format,
+            mapped_model: None,
+            upstream_is_stream: false,
+            request_query,
+            kiro_api_region: None,
+        },
+    )
+}
+
+pub fn build_cross_format_openai_responses_upstream_url(
+    transport: &GatewayProviderTransportSnapshot,
+    mapped_model: &str,
+    client_api_format: &str,
+    provider_api_format: &str,
+    upstream_is_stream: bool,
+    request_query: Option<&str>,
+) -> Option<String> {
+    aether_ai_formats::request_conversion_kind(client_api_format, provider_api_format)?;
+    build_transport_request_url(
+        transport,
+        TransportRequestUrlParams {
+            provider_api_format,
+            mapped_model: Some(mapped_model),
+            upstream_is_stream,
+            request_query,
+            kiro_api_region: None,
+        },
+    )
+}
+
+pub fn build_kiro_cross_format_upstream_url(
+    transport: &GatewayProviderTransportSnapshot,
+    mapped_model: &str,
+    provider_api_format: &str,
+    upstream_is_stream: bool,
+    request_query: Option<&str>,
+    api_region: &str,
+) -> Option<String> {
+    build_transport_request_url(
+        transport,
+        TransportRequestUrlParams {
+            provider_api_format,
+            mapped_model: Some(mapped_model),
+            upstream_is_stream,
+            request_query,
+            kiro_api_region: Some(api_region),
+        },
+    )
 }
 
 fn build_transport_hook_url(
@@ -137,12 +237,7 @@ fn build_transport_hook_url(
         }
     }
 
-    if transport
-        .provider
-        .provider_type
-        .trim()
-        .eq_ignore_ascii_case("antigravity")
-    {
+    if is_antigravity_provider_transport(transport) {
         let query = params.request_query.map(|raw| {
             form_urlencoded::parse(raw.as_bytes())
                 .into_owned()
@@ -257,7 +352,10 @@ fn custom_path_template_regex() -> &'static Regex {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_transport_request_url, TransportRequestUrlParams};
+    use super::{
+        build_kiro_cross_format_upstream_url, build_transport_request_url,
+        TransportRequestUrlParams,
+    };
     use crate::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
         GatewayProviderTransportProvider, GatewayProviderTransportSnapshot,
@@ -308,6 +406,9 @@ mod tests {
                 auth_type: "api_key".to_string(),
                 is_active: true,
                 api_formats: None,
+                auth_type_by_format: None,
+                allow_auth_channel_mismatch_formats: None,
+
                 allowed_models: None,
                 capabilities: None,
                 rate_multipliers: None,
@@ -325,7 +426,7 @@ mod tests {
     fn uses_vertex_hook_before_custom_path_for_custom_aiplatform_transport() {
         let transport = sample_transport(
             "custom",
-            "gemini:cli",
+            "gemini:generate_content",
             "https://aiplatform.googleapis.com",
             Some("/custom/{model}:{action}"),
         );
@@ -333,7 +434,7 @@ mod tests {
         let url = build_transport_request_url(
             &transport,
             TransportRequestUrlParams {
-                provider_api_format: "gemini:cli",
+                provider_api_format: "gemini:generate_content",
                 mapped_model: Some("gemini-3.1-pro-preview"),
                 upstream_is_stream: true,
                 request_query: Some("foo=bar"),
@@ -376,7 +477,7 @@ mod tests {
     fn expands_custom_path_templates_when_hook_does_not_apply() {
         let transport = sample_transport(
             "custom",
-            "gemini:chat",
+            "gemini:generate_content",
             "https://generativelanguage.googleapis.com",
             Some("/v1beta/models/{model}:{action}"),
         );
@@ -384,7 +485,7 @@ mod tests {
         let url = build_transport_request_url(
             &transport,
             TransportRequestUrlParams {
-                provider_api_format: "gemini:chat",
+                provider_api_format: "gemini:generate_content",
                 mapped_model: Some("gemini-2.5-pro"),
                 upstream_is_stream: false,
                 request_query: Some("key=client-key&foo=bar"),
@@ -403,7 +504,7 @@ mod tests {
     fn keeps_original_custom_path_when_template_params_are_missing() {
         let transport = sample_transport(
             "custom",
-            "claude:chat",
+            "claude:messages",
             "https://api.example.com",
             Some("/v1/messages/{model}"),
         );
@@ -411,7 +512,7 @@ mod tests {
         let url = build_transport_request_url(
             &transport,
             TransportRequestUrlParams {
-                provider_api_format: "claude:chat",
+                provider_api_format: "claude:messages",
                 mapped_model: None,
                 upstream_is_stream: false,
                 request_query: None,
@@ -421,5 +522,30 @@ mod tests {
         .expect("fallback custom path url");
 
         assert_eq!(url, "https://api.example.com/v1/messages/{model}");
+    }
+
+    #[test]
+    fn kiro_cross_format_helper_uses_region_specific_generate_assistant_url() {
+        let transport = sample_transport(
+            "kiro",
+            "claude:messages",
+            "https://codewhisperer.{region}.amazonaws.com/",
+            None,
+        );
+
+        let url = build_kiro_cross_format_upstream_url(
+            &transport,
+            "claude-sonnet-4",
+            "claude:messages",
+            true,
+            Some("conversationId=abc"),
+            "us-west-2",
+        )
+        .expect("kiro url");
+
+        assert!(url.starts_with(
+            "https://codewhisperer.us-west-2.amazonaws.com/generateAssistantResponse"
+        ));
+        assert!(url.contains("conversationId=abc"));
     }
 }

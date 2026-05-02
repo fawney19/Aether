@@ -9,11 +9,15 @@ use crate::provider_transport::LocalOAuthHttpExecutor;
 use super::super::provider_transport;
 use crate::provider_key_auth::provider_key_is_oauth_managed;
 use aether_admin::provider::quota as admin_provider_quota_pure;
-use aether_contracts::{ExecutionPlan, ExecutionTimeouts, RequestBody};
+use aether_contracts::{
+    ExecutionPlan, ExecutionTimeouts, ProxySnapshot, RequestBody,
+    EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER, EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
+};
 use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use flate2::read::{DeflateDecoder, GzDecoder};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -49,10 +53,106 @@ fn tagged_reason(reason: Option<&str>, prefix: &str) -> Option<String> {
     })
 }
 
-fn oauth_invalid_reason_is_account_block(reason: Option<&str>) -> bool {
-    reason
+fn oauth_auth_config_refresh_token_fingerprint(auth_config: Option<&str>) -> Option<String> {
+    let parsed = auth_config
         .map(str::trim)
-        .is_some_and(|value| value.starts_with(OAUTH_ACCOUNT_BLOCK_PREFIX))
+        .filter(|value| !value.is_empty())
+        .and_then(|value| serde_json::from_str::<Value>(value).ok())?;
+    oauth_metadata_refresh_token_fingerprint(Some(&parsed))
+}
+
+fn oauth_metadata_refresh_token_fingerprint(metadata: Option<&Value>) -> Option<String> {
+    metadata
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("refresh_token"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(secret_fingerprint)
+}
+
+fn local_oauth_request_refresh_token_fingerprint(
+    request: &provider_transport::LocalOAuthHttpRequest,
+) -> (Option<String>, Option<usize>) {
+    if let Some(json_body) = request.json_body.as_ref() {
+        return json_body
+            .as_object()
+            .and_then(|object| object.get("refresh_token"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| (Some(secret_fingerprint(value)), Some(value.len())))
+            .unwrap_or((None, None));
+    }
+
+    let Some(body_bytes) = request.body_bytes.as_ref() else {
+        return (None, None);
+    };
+    for (key, value) in url::form_urlencoded::parse(body_bytes) {
+        if key == "refresh_token" {
+            let value = value.trim();
+            if !value.is_empty() {
+                return (Some(secret_fingerprint(value)), Some(value.len()));
+            }
+        }
+    }
+    (None, None)
+}
+
+fn local_oauth_log_excerpt(body: &str) -> String {
+    let body = body.trim();
+    if body.is_empty() {
+        return "-".to_string();
+    }
+    body.chars().take(300).collect()
+}
+
+fn local_oauth_proxy_is_tunnel(proxy: Option<&ProxySnapshot>) -> bool {
+    let Some(proxy) = proxy else {
+        return false;
+    };
+    if proxy.enabled == Some(false) {
+        return false;
+    }
+    proxy
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|mode| mode.eq_ignore_ascii_case("tunnel"))
+}
+
+fn local_oauth_proxy_extra_string<'a>(
+    proxy: Option<&'a ProxySnapshot>,
+    key: &str,
+) -> Option<&'a str> {
+    proxy?
+        .extra
+        .as_ref()
+        .and_then(|extra| extra.get(key))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn secret_fingerprint(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    let mut fingerprint = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        use std::fmt::Write as _;
+        let _ = write!(&mut fingerprint, "{byte:02x}");
+    }
+    fingerprint
+}
+
+fn oauth_invalid_reason_is_account_block(reason: Option<&str>) -> bool {
+    let Some(reason) = reason.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    if reason.starts_with(OAUTH_ACCOUNT_BLOCK_PREFIX) {
+        return true;
+    }
+    aether_admin::provider::status::resolve_account_status_snapshot(None, None, Some(reason))
+        .blocked
 }
 
 fn normalize_local_oauth_refresh_error_message(
@@ -137,6 +237,8 @@ fn normalize_local_oauth_refresh_error_message(
     }
     if error_code == "invalid_grant"
         || error_code == "invalid_refresh_token"
+        || error_code == "refresh_token_expired"
+        || lowered.contains("could not validate your refresh token")
         || (lowered.contains("refresh token")
             && ["expired", "revoked", "invalid"]
                 .iter()
@@ -170,15 +272,8 @@ fn merge_local_oauth_refresh_failure_reason(
     if current_reason.starts_with(OAUTH_EXPIRED_PREFIX) {
         return None;
     }
-    if current_reason.starts_with(OAUTH_ACCOUNT_BLOCK_PREFIX) {
-        if let Some((head, _)) = current_reason.split_once("[REFRESH_FAILED]") {
-            return Some(
-                format!("{}\n{}", head.trim_end(), refresh_reason)
-                    .trim()
-                    .to_string(),
-            );
-        }
-        return Some(format!("{current_reason}\n{refresh_reason}"));
+    if oauth_invalid_reason_is_account_block(Some(current_reason)) {
+        return None;
     }
     Some(refresh_reason.to_string())
 }
@@ -396,7 +491,7 @@ impl AppState {
         );
     }
 
-    async fn read_provider_transport_snapshot_uncached(
+    pub(crate) async fn read_provider_transport_snapshot_uncached(
         &self,
         provider_id: &str,
         endpoint_id: &str,
@@ -797,6 +892,16 @@ impl AppState {
                         error = ?err,
                         "gateway local oauth refresh persistence failed"
                     );
+                    let _ = self
+                        .invalidate_local_oauth_refresh_entry(&current_transport.key.id)
+                        .await;
+                } else {
+                    self.oauth_refresh
+                        .store_cached_entry(
+                            current_transport.key.id.trim(),
+                            refreshed_entry.clone(),
+                        )
+                        .await;
                 }
             }
 
@@ -818,6 +923,23 @@ impl AppState {
         let mut current_transport = transport.clone();
         current_transport.key.decrypted_api_key = "__placeholder__".to_string();
         let executor = GatewayLocalOAuthHttpExecutor { state: self };
+        let transport_refresh_token_fingerprint = oauth_auth_config_refresh_token_fingerprint(
+            current_transport.key.decrypted_auth_config.as_deref(),
+        )
+        .unwrap_or_else(|| "-".to_string());
+        tracing::info!(
+            key_id = %current_transport.key.id,
+            provider_id = %current_transport.provider.id,
+            provider_type = %current_transport.provider.provider_type,
+            transport_refresh_token_fingerprint = %transport_refresh_token_fingerprint,
+            has_transport_auth_config = current_transport
+                .key
+                .decrypted_auth_config
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty()),
+            "gateway manual oauth refresh starting"
+        );
 
         for _ in 0..2 {
             let resolution = self
@@ -865,7 +987,19 @@ impl AppState {
                         error = ?err,
                         "gateway manual oauth refresh persistence failed"
                     );
+                    let _ = self
+                        .invalidate_local_oauth_refresh_entry(&current_transport.key.id)
+                        .await;
+                    return Err(
+                        provider_transport::LocalOAuthRefreshError::InvalidResponse {
+                            provider_type: "gateway",
+                            message: format!("local oauth refresh persistence failed: {err:?}"),
+                        },
+                    );
                 }
+                self.oauth_refresh
+                    .store_cached_entry(current_transport.key.id.trim(), refreshed_entry.clone())
+                    .await;
                 return Ok(Some(refreshed_entry.clone()));
             }
 
@@ -933,6 +1067,7 @@ impl AppState {
             .await?
             .is_some();
         if updated {
+            self.clear_provider_transport_snapshot_cache();
             let _ = self.invalidate_local_oauth_refresh_entry(key_id).await;
         }
         Ok(updated)
@@ -987,7 +1122,7 @@ impl AppState {
             return Ok(());
         };
 
-        latest_key.encrypted_api_key = encrypted_api_key;
+        latest_key.encrypted_api_key = Some(encrypted_api_key);
         latest_key.encrypted_auth_config = encrypted_auth_config;
         latest_key.is_active = true;
         latest_key.expires_at_unix_secs = entry.expires_at_unix_secs;
@@ -1005,7 +1140,34 @@ impl AppState {
         let current_status_snapshot = latest_key.status_snapshot.take();
         latest_key.status_snapshot =
             sync_provider_key_oauth_status_snapshot(current_status_snapshot, &latest_key);
-        self.update_provider_catalog_key(&latest_key).await?;
+        let updated = self
+            .update_provider_catalog_key(&latest_key)
+            .await?
+            .is_some();
+        if updated {
+            self.clear_provider_transport_snapshot_cache();
+        }
+        let metadata_refresh_token_fingerprint =
+            oauth_metadata_refresh_token_fingerprint(entry.metadata.as_ref())
+                .unwrap_or_else(|| "-".to_string());
+        tracing::info!(
+            key_id = %key_id,
+            provider_id = %transport.provider.id,
+            provider_type = %transport.provider.provider_type,
+            updated,
+            metadata_has_refresh_token = entry
+                .metadata
+                .as_ref()
+                .and_then(|value| value.as_object())
+                .and_then(|object| object.get("refresh_token"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty()),
+            metadata_refresh_token_fingerprint = %metadata_refresh_token_fingerprint,
+            expires_at_unix_secs = ?entry.expires_at_unix_secs,
+            cleared_provider_transport_snapshot_cache = updated,
+            "gateway local oauth refresh entry persisted"
+        );
         Ok(())
     }
 
@@ -1070,8 +1232,18 @@ impl AppState {
             .await?
             .is_some();
         if updated {
+            self.clear_provider_transport_snapshot_cache();
             let _ = self.invalidate_local_oauth_refresh_entry(key_id).await;
         }
+        tracing::info!(
+            key_id = %key_id,
+            provider_id = %transport.provider.id,
+            provider_type = %transport.provider.provider_type,
+            status_code,
+            updated,
+            cleared_provider_transport_snapshot_cache = updated,
+            "gateway local oauth refresh failure state persisted"
+        );
         Ok(updated)
     }
 
@@ -1102,6 +1274,21 @@ impl AppState {
                 body_ref: None,
             }
         };
+        let proxy_snapshot = self
+            .resolve_transport_proxy_snapshot_with_tunnel_affinity(transport)
+            .await;
+        let proxy_is_tunnel = local_oauth_proxy_is_tunnel(proxy_snapshot.as_ref());
+        let mut headers = request.headers.clone();
+        headers.insert(
+            EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER.to_string(),
+            "true".to_string(),
+        );
+        if proxy_is_tunnel {
+            headers.insert(
+                EXECUTION_REQUEST_HTTP1_ONLY_HEADER.to_string(),
+                "true".to_string(),
+            );
+        }
         let plan = ExecutionPlan {
             request_id: request.request_id.to_string(),
             candidate_id: None,
@@ -1111,7 +1298,7 @@ impl AppState {
             key_id: transport.key.id.clone(),
             method: request.method.as_str().to_string(),
             url: request.url.clone(),
-            headers: request.headers.clone(),
+            headers,
             content_type: request
                 .headers
                 .get("content-type")
@@ -1125,9 +1312,7 @@ impl AppState {
             client_api_format: "provider_oauth:local_refresh".to_string(),
             provider_api_format: "provider_oauth:local_refresh".to_string(),
             model_name: Some(provider_type.to_string()),
-            proxy: self
-                .resolve_transport_proxy_snapshot_with_tunnel_affinity(transport)
-                .await,
+            proxy: proxy_snapshot,
             tls_profile: None,
             timeouts: Some(ExecutionTimeouts {
                 connect_ms: Some(LOCAL_OAUTH_HTTP_TIMEOUT_MS),
@@ -1138,6 +1323,55 @@ impl AppState {
                 ..ExecutionTimeouts::default()
             }),
         };
+        let (request_refresh_token_fingerprint, request_refresh_token_len) =
+            local_oauth_request_refresh_token_fingerprint(request);
+        tracing::info!(
+            key_id = %transport.key.id,
+            provider_id = %transport.provider.id,
+            endpoint_id = %transport.endpoint.id,
+            provider_type,
+            request_id = %request.request_id,
+            method = %plan.method,
+            token_url = %plan.url,
+            content_type = plan.content_type.as_deref().unwrap_or("-"),
+            body_bytes_len = ?request.body_bytes.as_ref().map(Vec::len),
+            json_body_present = request.json_body.is_some(),
+            request_refresh_token_fingerprint = request_refresh_token_fingerprint
+                .as_deref()
+                .unwrap_or("-"),
+            request_refresh_token_len = ?request_refresh_token_len,
+            proxy_node_id = ?plan.proxy.as_ref().and_then(|proxy| proxy.node_id.as_deref()),
+            proxy_mode = plan.proxy.as_ref().and_then(|proxy| proxy.mode.as_deref()).unwrap_or("-"),
+            proxy_enabled = ?plan.proxy.as_ref().and_then(|proxy| proxy.enabled),
+            proxy_url_present = plan
+                .proxy
+                .as_ref()
+                .and_then(|proxy| proxy.url.as_deref())
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty()),
+            proxy_is_tunnel,
+            tunnel_base_url_present = local_oauth_proxy_extra_string(
+                plan.proxy.as_ref(),
+                "tunnel_base_url"
+            )
+            .is_some(),
+            tunnel_owner_instance_id = local_oauth_proxy_extra_string(
+                plan.proxy.as_ref(),
+                "tunnel_owner_instance_id"
+            )
+            .unwrap_or("-"),
+            follow_redirects = plan
+                .headers
+                .get(EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER)
+                .map(String::as_str)
+                .unwrap_or("-"),
+            http1_only = plan
+                .headers
+                .get(EXECUTION_REQUEST_HTTP1_ONLY_HEADER)
+                .map(String::as_str)
+                .unwrap_or("-"),
+            "gateway local oauth execution request prepared"
+        );
         let result =
             crate::execution_runtime::execute_execution_runtime_sync_plan(self, None, &plan)
                 .await
@@ -1151,9 +1385,38 @@ impl AppState {
                         },
                     },
                 )?;
+        let response_body_text = local_oauth_execution_body_text(&result);
+        if (200..300).contains(&result.status_code) {
+            tracing::info!(
+                key_id = %transport.key.id,
+                provider_id = %transport.provider.id,
+                endpoint_id = %transport.endpoint.id,
+                provider_type,
+                request_id = %request.request_id,
+                status_code = result.status_code,
+                request_refresh_token_fingerprint = request_refresh_token_fingerprint
+                    .as_deref()
+                    .unwrap_or("-"),
+                "gateway local oauth execution response received"
+            );
+        } else {
+            tracing::warn!(
+                key_id = %transport.key.id,
+                provider_id = %transport.provider.id,
+                endpoint_id = %transport.endpoint.id,
+                provider_type,
+                request_id = %request.request_id,
+                status_code = result.status_code,
+                request_refresh_token_fingerprint = request_refresh_token_fingerprint
+                    .as_deref()
+                    .unwrap_or("-"),
+                body_excerpt = %local_oauth_log_excerpt(response_body_text.as_str()),
+                "gateway local oauth execution response returned error"
+            );
+        }
         Ok(provider_transport::LocalOAuthHttpResponse {
             status_code: result.status_code,
-            body_text: local_oauth_execution_body_text(&result),
+            body_text: response_body_text,
         })
     }
 
@@ -1407,5 +1670,15 @@ mod tests {
             .expect("snapshot read should succeed")
             .expect("snapshot should exist");
         assert!(!snapshot.provider.enable_format_conversion);
+    }
+
+    #[test]
+    fn normalizes_local_openai_refresh_token_expired_response() {
+        let body = r#"{"error":{"message":"Could not validate your refresh token. Please try signing in again.","type":"invalid_request_error","param":null,"code":"refresh_token_expired"}}"#;
+
+        assert_eq!(
+            super::normalize_local_oauth_refresh_error_message(Some(401), Some(body)),
+            "refresh_token 无效、已过期或已撤销，请重新登录授权"
+        );
     }
 }

@@ -23,13 +23,11 @@ export function useProviderFilters(
 
   const apiFormatFilters: FilterOption[] = [
     { value: 'all', label: '全部格式' },
-    { value: 'claude:chat', label: 'Claude Chat' },
-    { value: 'claude:cli', label: 'Claude CLI' },
+    { value: 'claude:messages', label: 'Claude Messages' },
     { value: 'openai:chat', label: 'OpenAI Chat' },
     { value: 'openai:responses', label: 'OpenAI Responses' },
     { value: 'openai:responses:compact', label: 'OpenAI Responses Compact' },
-    { value: 'gemini:chat', label: 'Gemini Chat' },
-    { value: 'gemini:cli', label: 'Gemini CLI' },
+    { value: 'gemini:generate_content', label: 'Gemini Generate Content' },
   ]
 
   const modelFilters = computed<FilterOption[]>(() => {

@@ -549,7 +549,7 @@ async fn gateway_locally_denies_claude_messages_after_execution_runtime_miss_wit
         "/v1/messages",
         "claude",
         "chat",
-        "claude:chat",
+        "claude:messages",
         "{\"model\":\"claude-sonnet-4-5\",\"messages\":[]}",
         "请求缺少本地执行所需的认证、模型或配置上下文，无法选择上游提供商",
     )
@@ -577,7 +577,7 @@ async fn gateway_locally_denies_claude_messages_stream_after_execution_runtime_m
         "/v1/messages",
         "claude",
         "chat",
-        "claude:chat",
+        "claude:messages",
         "{\"model\":\"claude-sonnet-4-5\",\"messages\":[],\"stream\":true}",
         "请求缺少本地执行所需的认证、模型或配置上下文，无法选择上游提供商",
     )
@@ -619,7 +619,7 @@ async fn gateway_locally_denies_gemini_generate_after_execution_runtime_miss_wit
         "/v1beta/models/gemini-2.5-pro:generateContent",
         "gemini",
         "chat",
-        "gemini:chat",
+        "gemini:generate_content",
         "{\"contents\":[]}",
         "请求缺少本地执行所需的认证、模型或配置上下文，无法选择上游提供商",
     )
@@ -633,7 +633,7 @@ async fn gateway_locally_denies_gemini_v1_generate_after_execution_runtime_miss_
         "/v1/models/gemini-2.5-pro:generateContent",
         "gemini",
         "chat",
-        "gemini:chat",
+        "gemini:generate_content",
         "{\"contents\":[]}",
         "请求缺少本地执行所需的认证、模型或配置上下文，无法选择上游提供商",
     )
@@ -647,7 +647,7 @@ async fn gateway_locally_denies_gemini_stream_after_execution_runtime_miss_witho
         "/v1beta/models/gemini-2.5-pro:streamGenerateContent",
         "gemini",
         "chat",
-        "gemini:chat",
+        "gemini:generate_content",
         "{\"contents\":[]}",
         "请求缺少本地执行所需的认证、模型或配置上下文，无法选择上游提供商",
     )
@@ -691,7 +691,7 @@ async fn gateway_locally_denies_gemini_files_root_after_execution_runtime_miss_w
         "/v1beta/files?view=BASIC",
         "gemini",
         "files",
-        "gemini:chat",
+        "gemini:generate_content",
         None,
         "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径",
     )
@@ -707,7 +707,7 @@ async fn gateway_locally_denies_gemini_files_download_after_execution_runtime_mi
         "/v1beta/files/file-123:download?alt=media",
         "gemini",
         "files",
-        "gemini:chat",
+        "gemini:generate_content",
         None,
         "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径",
     )
@@ -723,7 +723,7 @@ async fn gateway_locally_denies_gemini_files_upload_after_execution_runtime_miss
         "/upload/v1beta/files?uploadType=resumable",
         "gemini",
         "files",
-        "gemini:chat",
+        "gemini:generate_content",
         Some("{\"file\":{}}"),
         "当前 Gemini Files 请求无法在本地执行：没有匹配到可用的执行路径",
     )

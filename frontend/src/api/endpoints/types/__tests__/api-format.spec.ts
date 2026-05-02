@@ -9,47 +9,51 @@ import {
   sortApiFormats,
 } from '@/api/endpoints/types'
 
-const openaiAlias = (kind: string) => ['openai', kind].join(':')
-const legacyEnumAlias = (kind: string) => ['OPENAI', kind].join('_')
-
 describe('api format display helpers', () => {
-  it('maps historical OpenAI response aliases to current display names', () => {
-    expect(normalizeApiFormatAlias(openaiAlias('cli'))).toBe(API_FORMATS.OPENAI_RESPONSES)
-    expect(formatApiFormat(openaiAlias('cli'))).toBe('OpenAI Responses')
-    expect(formatApiFormatShort(openaiAlias('cli'))).toBe('OR')
-
-    expect(normalizeApiFormatAlias(openaiAlias('compact'))).toBe(API_FORMATS.OPENAI_RESPONSES_COMPACT)
-    expect(formatApiFormat(openaiAlias('compact'))).toBe('OpenAI Responses Compact')
-    expect(formatApiFormatShort(openaiAlias('compact'))).toBe('ORC')
+  it('normalizes current enum-style names to canonical api format ids', () => {
+    expect(normalizeApiFormatAlias('CLAUDE_MESSAGES')).toBe(API_FORMATS.CLAUDE_MESSAGES)
+    expect(normalizeApiFormatAlias('OPENAI_RESPONSES')).toBe(API_FORMATS.OPENAI_RESPONSES)
+    expect(normalizeApiFormatAlias('OPENAI_RESPONSES_COMPACT')).toBe(API_FORMATS.OPENAI_RESPONSES_COMPACT)
+    expect(normalizeApiFormatAlias('GEMINI_GENERATE_CONTENT')).toBe(API_FORMATS.GEMINI_GENERATE_CONTENT)
   })
 
-  it('maps historical uppercase enum aliases to current display names', () => {
-    expect(normalizeApiFormatAlias(legacyEnumAlias('CLI'))).toBe(API_FORMATS.OPENAI_RESPONSES)
-    expect(formatApiFormat(legacyEnumAlias('CLI'))).toBe('OpenAI Responses')
-    expect(formatApiFormatShort(legacyEnumAlias('CLI'))).toBe('OR')
+  it('does not remap retired api format ids', () => {
+    expect(normalizeApiFormatAlias('openai:cli')).toBe('openai:cli')
+    expect(formatApiFormat('openai:cli')).toBe('openai:cli')
+    expect(formatApiFormatShort('openai:cli')).toBe('op')
 
-    expect(normalizeApiFormatAlias(legacyEnumAlias('COMPACT'))).toBe(API_FORMATS.OPENAI_RESPONSES_COMPACT)
-    expect(formatApiFormat(legacyEnumAlias('COMPACT'))).toBe('OpenAI Responses Compact')
-    expect(formatApiFormatShort(legacyEnumAlias('COMPACT'))).toBe('ORC')
+    expect(normalizeApiFormatAlias('openai:compact')).toBe('openai:compact')
+    expect(formatApiFormat('openai:compact')).toBe('openai:compact')
+    expect(formatApiFormatShort('openai:compact')).toBe('op')
   })
 
-  it('sorts historical aliases in the same slot as their current formats', () => {
+  it('does not remap retired enum-style aliases', () => {
+    expect(normalizeApiFormatAlias('OPENAI_CLI')).toBe('openai_cli')
+    expect(formatApiFormat('OPENAI_CLI')).toBe('openai_cli')
+    expect(formatApiFormatShort('OPENAI_CLI')).toBe('op')
+
+    expect(normalizeApiFormatAlias('OPENAI_COMPACT')).toBe('openai_compact')
+    expect(formatApiFormat('OPENAI_COMPACT')).toBe('openai_compact')
+    expect(formatApiFormatShort('OPENAI_COMPACT')).toBe('op')
+  })
+
+  it('sorts only current canonical formats into known slots', () => {
     expect(sortApiFormats([
-      openaiAlias('compact'),
+      'openai:compact',
       API_FORMATS.OPENAI,
-      openaiAlias('cli'),
+      API_FORMATS.OPENAI_RESPONSES,
     ])).toEqual([
       API_FORMATS.OPENAI,
-      openaiAlias('cli'),
-      openaiAlias('compact'),
+      API_FORMATS.OPENAI_RESPONSES,
+      'openai:compact',
     ])
   })
 
-  it('groups uppercase historical aliases under OpenAI', () => {
-    expect(groupApiFormats([legacyEnumAlias('CLI')])).toEqual([{
-      family: 'openai',
-      label: 'OpenAI',
-      formats: [legacyEnumAlias('CLI')],
+  it('groups retired enum-style aliases as unknown raw families', () => {
+    expect(groupApiFormats(['OPENAI_CLI'])).toEqual([{
+      family: 'openai_cli',
+      label: 'openai_cli',
+      formats: ['OPENAI_CLI'],
     }])
   })
 })

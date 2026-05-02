@@ -33,6 +33,7 @@ pub(crate) use self::fallback::{
 pub(crate) use crate::orchestration::{
     append_local_failover_policy_to_value, LocalFailoverAnalysis, LocalFailoverDecision,
 };
+pub(crate) use aether_ai_serving::{ConversionMode, ExecutionStrategy};
 pub use server::{
     build_execution_runtime_router, build_execution_runtime_router_with_request_concurrency_limit,
     build_execution_runtime_router_with_request_gates, serve_execution_runtime_tcp,
@@ -51,46 +52,6 @@ pub(crate) use transport::{
     execute_sync_plan as execute_execution_runtime_sync_plan, DirectSyncExecutionRuntime,
     DirectUpstreamStreamExecution, ExecutionRuntimeTransportError,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ExecutionStrategy {
-    GatewayAffinityForward,
-    RawPublicProxy,
-    LocalSameFormat,
-    LocalCrossFormat,
-}
-
-impl ExecutionStrategy {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::GatewayAffinityForward => "gateway_affinity_forward",
-            Self::RawPublicProxy => "raw_public_proxy",
-            Self::LocalSameFormat => "local_same_format",
-            Self::LocalCrossFormat => "local_cross_format",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ConversionMode {
-    None,
-    RequestOnly,
-    ResponseOnly,
-    Bidirectional,
-}
-
-impl ConversionMode {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::RequestOnly => "request_only",
-            Self::ResponseOnly => "response_only",
-            Self::Bidirectional => "bidirectional",
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ClientIntent {
@@ -272,17 +233,17 @@ mod tests {
     #[test]
     fn execution_contract_helper_appends_unified_fields() {
         let value = append_execution_contract_fields_to_value(
-            json!({"provider_api_format": "gemini:chat"}),
+            json!({"provider_api_format": "gemini:generate_content"}),
             ExecutionStrategy::LocalCrossFormat,
             ConversionMode::Bidirectional,
             "openai:chat",
-            "gemini:chat",
+            "gemini:generate_content",
         );
 
         assert_eq!(value["execution_strategy"], "local_cross_format");
         assert_eq!(value["conversion_mode"], "bidirectional");
         assert_eq!(value["client_contract"], "openai:chat");
-        assert_eq!(value["provider_contract"], "gemini:chat");
-        assert_eq!(value["provider_api_format"], "gemini:chat");
+        assert_eq!(value["provider_contract"], "gemini:generate_content");
+        assert_eq!(value["provider_api_format"], "gemini:generate_content");
     }
 }

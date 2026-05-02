@@ -25,7 +25,7 @@ describe('usage token normalization', () => {
       cache_creation_input_tokens: 1530,
       cache_read_input_tokens: 104026,
       output_tokens: 591,
-      api_format: 'claude:chat',
+      api_format: 'claude:messages',
     }
 
     expect(getEffectiveInputTokens(usage)).toBe(1)
@@ -47,7 +47,7 @@ describe('usage token normalization', () => {
       cache_creation_input_tokens: 687,
       cache_read_input_tokens: 52873,
       output_tokens: 973,
-      api_format: 'claude:chat',
+      api_format: 'claude:messages',
     })).toBe(4941)
   })
 })

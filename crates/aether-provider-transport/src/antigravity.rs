@@ -9,8 +9,9 @@ pub use auth::{
     ANTIGRAVITY_PROVIDER_TYPE, ANTIGRAVITY_REQUEST_USER_AGENT,
 };
 pub use policy::{
-    classify_local_antigravity_request_support, AntigravityRequestSideSpec,
-    AntigravityRequestSideSupport, AntigravityRequestSideUnsupportedReason,
+    classify_local_antigravity_request_support, is_antigravity_provider_transport,
+    AntigravityRequestSideSpec, AntigravityRequestSideSupport,
+    AntigravityRequestSideUnsupportedReason,
 };
 pub use request::{
     build_antigravity_safe_v1internal_request, classify_antigravity_safe_request_body,

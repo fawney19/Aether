@@ -51,6 +51,8 @@ export { default as TableHead } from './table-head.vue'
 export { default as TableHeader } from './table-header.vue'
 export { default as TableRow } from './table-row.vue'
 export { default as TableCard } from './table-card.vue'
+export { default as SortableTableHead } from './sortable-table-head.vue'
+export { default as TableFilterMenu } from './table-filter-menu.vue'
 
 // Avatar 头像系列
 export { default as Avatar } from './avatar.vue'

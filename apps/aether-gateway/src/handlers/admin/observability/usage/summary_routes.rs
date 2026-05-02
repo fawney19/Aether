@@ -8,15 +8,25 @@ use aether_admin::observability::usage::{
     admin_usage_bad_request_response, admin_usage_data_unavailable_response,
     admin_usage_has_fallback, admin_usage_is_failed, admin_usage_matches_search,
     admin_usage_matches_username, admin_usage_parse_ids, admin_usage_parse_limit,
-    admin_usage_parse_offset, build_admin_usage_active_requests_response,
-    build_admin_usage_records_response, build_admin_usage_summary_stats_response_from_summary,
-    ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL,
+    admin_usage_parse_offset, admin_usage_provider_key_name, admin_usage_record_json,
+    build_admin_usage_active_requests_response, build_admin_usage_records_response,
+    build_admin_usage_summary_stats_response_from_summary, ADMIN_USAGE_DATA_UNAVAILABLE_DETAIL,
 };
-use aether_data_contracts::repository::usage::{
-    StoredRequestUsageAudit, UsageAuditKeywordSearchQuery, UsageAuditListQuery,
-    UsageAuditSummaryQuery,
+use aether_data::repository::users::StoredUserSummary;
+use aether_data_contracts::repository::{
+    candidates::{RequestCandidateStatus, StoredRequestCandidate},
+    usage::{
+        StoredRequestUsageAudit, UsageAuditKeywordSearchQuery, UsageAuditListQuery,
+        UsageAuditSummaryQuery,
+    },
 };
-use axum::{body::Body, http, response::Response};
+use axum::{
+    body::Body,
+    http,
+    response::{IntoResponse, Response},
+    Json,
+};
+use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
 const ADMIN_USAGE_ACTIVE_LIMIT: usize = 50;
@@ -56,9 +66,196 @@ fn apply_admin_usage_status_filter(query: &mut UsageAuditListQuery, status: Opti
         "pending" | "streaming" | "completed" | "cancelled" => {
             query.statuses = Some(vec![status.to_string()]);
         }
-        "has_fallback" => {}
+        "has_fallback" | "has_retry" => {}
         _ => {}
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct AdminUsageAttemptFlags {
+    has_fallback: bool,
+    has_retry: bool,
+}
+
+fn admin_usage_attempt_status_filter(status: Option<&str>) -> Option<&'static str> {
+    match status?.trim().to_ascii_lowercase().as_str() {
+        "has_fallback" => Some("has_fallback"),
+        "has_retry" => Some("has_retry"),
+        _ => None,
+    }
+}
+
+fn admin_usage_candidate_failed_before_fallback(candidate: &StoredRequestCandidate) -> bool {
+    candidate.status.is_attempted(candidate.started_at_unix_ms)
+        && (matches!(
+            candidate.status,
+            RequestCandidateStatus::Failed | RequestCandidateStatus::Cancelled
+        ) || candidate.status_code.is_some_and(|code| code >= 400))
+}
+
+fn admin_usage_candidate_was_retried(candidate: &StoredRequestCandidate) -> bool {
+    candidate.retry_index > 0 && candidate.status.is_attempted(candidate.started_at_unix_ms)
+}
+
+fn admin_usage_final_candidate_index(
+    item: &StoredRequestUsageAudit,
+    candidates: &[StoredRequestCandidate],
+) -> Option<u64> {
+    if let Some(candidate_id) = item.routing_candidate_id() {
+        if let Some(candidate) = candidates
+            .iter()
+            .find(|candidate| candidate.id == candidate_id)
+        {
+            return Some(u64::from(candidate.candidate_index));
+        }
+    }
+
+    item.routing_candidate_index().or_else(|| {
+        candidates
+            .iter()
+            .filter(|candidate| candidate.status.is_attempted(candidate.started_at_unix_ms))
+            .max_by(|left, right| {
+                left.candidate_index
+                    .cmp(&right.candidate_index)
+                    .then(left.retry_index.cmp(&right.retry_index))
+            })
+            .map(|candidate| u64::from(candidate.candidate_index))
+    })
+}
+
+fn admin_usage_attempt_flags_from_candidates(
+    item: &StoredRequestUsageAudit,
+    candidates: &[StoredRequestCandidate],
+) -> AdminUsageAttemptFlags {
+    let final_candidate_index = admin_usage_final_candidate_index(item, candidates);
+    let has_fallback = final_candidate_index.is_some_and(|final_index| {
+        candidates.iter().any(|candidate| {
+            u64::from(candidate.candidate_index) < final_index
+                && admin_usage_candidate_failed_before_fallback(candidate)
+        })
+    });
+    let has_retry = candidates.iter().any(admin_usage_candidate_was_retried);
+
+    AdminUsageAttemptFlags {
+        has_fallback,
+        has_retry,
+    }
+}
+
+fn admin_usage_attempt_flags_for_item(
+    item: &StoredRequestUsageAudit,
+    flags_by_usage_id: &BTreeMap<String, AdminUsageAttemptFlags>,
+    request_candidate_reader_available: bool,
+) -> AdminUsageAttemptFlags {
+    flags_by_usage_id.get(&item.id).copied().unwrap_or_else(|| {
+        if request_candidate_reader_available {
+            AdminUsageAttemptFlags::default()
+        } else {
+            AdminUsageAttemptFlags {
+                has_fallback: admin_usage_has_fallback(item),
+                has_retry: false,
+            }
+        }
+    })
+}
+
+async fn resolve_admin_usage_attempt_flags_by_usage_id(
+    state: &AdminAppState<'_>,
+    items: &[StoredRequestUsageAudit],
+) -> Result<BTreeMap<String, AdminUsageAttemptFlags>, GatewayError> {
+    if !state.has_request_candidate_data_reader() || items.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let request_ids = items
+        .iter()
+        .map(|item| item.request_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut candidates_by_request_id = BTreeMap::new();
+    for request_id in request_ids {
+        candidates_by_request_id.insert(
+            request_id.clone(),
+            state
+                .app()
+                .read_request_candidates_by_request_id(&request_id)
+                .await?,
+        );
+    }
+
+    Ok(items
+        .iter()
+        .filter_map(|item| {
+            let candidates = candidates_by_request_id.get(&item.request_id)?;
+            Some((
+                item.id.clone(),
+                admin_usage_attempt_flags_from_candidates(item, candidates),
+            ))
+        })
+        .collect())
+}
+
+fn admin_usage_matches_attempt_status(
+    item: &StoredRequestUsageAudit,
+    status: &str,
+    flags_by_usage_id: &BTreeMap<String, AdminUsageAttemptFlags>,
+    request_candidate_reader_available: bool,
+) -> bool {
+    let flags = admin_usage_attempt_flags_for_item(
+        item,
+        flags_by_usage_id,
+        request_candidate_reader_available,
+    );
+    match status {
+        "has_fallback" => flags.has_fallback,
+        "has_retry" => flags.has_retry,
+        _ => true,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_admin_usage_records_response_with_attempt_flags(
+    items: &[StoredRequestUsageAudit],
+    users_by_id: &BTreeMap<String, StoredUserSummary>,
+    api_key_names: &BTreeMap<String, String>,
+    auth_user_reader_available: bool,
+    auth_api_key_reader_available: bool,
+    provider_key_names: &BTreeMap<String, String>,
+    attempt_flags_by_usage_id: &BTreeMap<String, AdminUsageAttemptFlags>,
+    request_candidate_reader_available: bool,
+    total: usize,
+    limit: usize,
+    offset: usize,
+) -> Response<Body> {
+    let records: Vec<_> = items
+        .iter()
+        .map(|item| {
+            let provider_key_name = admin_usage_provider_key_name(item, provider_key_names);
+            let mut record = admin_usage_record_json(
+                item,
+                users_by_id,
+                api_key_names,
+                auth_user_reader_available,
+                auth_api_key_reader_available,
+                provider_key_name.as_deref(),
+            );
+            let flags = admin_usage_attempt_flags_for_item(
+                item,
+                attempt_flags_by_usage_id,
+                request_candidate_reader_available,
+            );
+            record["has_fallback"] = json!(flags.has_fallback);
+            record["has_retry"] = json!(flags.has_retry);
+            record
+        })
+        .collect();
+
+    Json(json!({
+        "records": records,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }))
+    .into_response()
 }
 
 fn build_admin_usage_records_query(
@@ -342,9 +539,8 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                 Ok(value) => value,
                 Err(detail) => return Ok(Some(admin_usage_bad_request_response(detail))),
             };
-            let has_fallback_only = query_param_value(query, "status")
-                .as_deref()
-                .is_some_and(|value| value.trim().eq_ignore_ascii_case("has_fallback"));
+            let attempt_status_filter =
+                admin_usage_attempt_status_filter(query_param_value(query, "status").as_deref());
             let search = query_param_value(query, "search");
             let username_filter = query_param_value(query, "username");
             let limit = match admin_usage_parse_limit(query) {
@@ -381,7 +577,7 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
             let active_username_filter = username_filter
                 .as_deref()
                 .filter(|value| !value.trim().is_empty());
-            let (usage, total) = if has_fallback_only {
+            let (usage, total) = if let Some(attempt_status) = attempt_status_filter {
                 let mut usage = state.list_usage_audits(&base_query).await?;
                 let user_ids: Vec<String> = usage
                     .iter()
@@ -394,6 +590,9 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                     aether_data::repository::users::StoredUserSummary,
                 > = state.resolve_auth_user_summaries_by_ids(&user_ids).await?;
                 let api_key_names = admin_usage_api_key_names(state, &usage).await?;
+                let attempt_flags_by_usage_id =
+                    resolve_admin_usage_attempt_flags_by_usage_id(state, &usage).await?;
+                let request_candidate_reader_available = state.has_request_candidate_data_reader();
 
                 usage.retain(|item| {
                     admin_usage_matches_search(
@@ -408,7 +607,12 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                         active_username_filter,
                         &users_by_id,
                         state.has_auth_user_data_reader(),
-                    ) && admin_usage_has_fallback(item)
+                    ) && admin_usage_matches_attempt_status(
+                        item,
+                        attempt_status,
+                        &attempt_flags_by_usage_id,
+                        request_candidate_reader_available,
+                    )
                 });
                 sort_usage_newest_first(&mut usage);
                 let total = usage.len();
@@ -473,14 +677,18 @@ pub(super) async fn maybe_build_local_admin_usage_summary_response(
                 state.resolve_auth_user_summaries_by_ids(&user_ids).await?;
             let api_key_names = admin_usage_api_key_names(state, &usage).await?;
             let provider_key_names = admin_usage_provider_key_names(state, &usage).await?;
+            let attempt_flags_by_usage_id =
+                resolve_admin_usage_attempt_flags_by_usage_id(state, &usage).await?;
 
-            return Ok(Some(build_admin_usage_records_response(
+            return Ok(Some(build_admin_usage_records_response_with_attempt_flags(
                 &usage,
                 &users_by_id,
                 &api_key_names,
                 state.has_auth_user_data_reader(),
                 state.has_auth_api_key_data_reader(),
                 &provider_key_names,
+                &attempt_flags_by_usage_id,
+                state.has_request_candidate_data_reader(),
                 total,
                 limit,
                 offset,

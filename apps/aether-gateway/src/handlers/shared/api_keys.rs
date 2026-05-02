@@ -26,7 +26,7 @@ fn api_key_placeholder_display_with_prefix(prefix: &str) -> String {
     format!("{prefix}-****")
 }
 
-fn generate_gateway_api_key_plaintext_with_prefix(prefix: &str) -> String {
+fn generate_gateway_secret_random_part() -> String {
     let mut random = String::with_capacity(API_KEY_RANDOM_LEN);
     while random.len() < API_KEY_RANDOM_LEN {
         for byte in uuid::Uuid::new_v4().as_bytes() {
@@ -37,7 +37,18 @@ fn generate_gateway_api_key_plaintext_with_prefix(prefix: &str) -> String {
             }
         }
     }
-    format!("{prefix}-{random}")
+    random
+}
+
+pub(crate) fn generate_gateway_secret_plaintext(prefix: &str, separator: &str) -> String {
+    format!(
+        "{prefix}{separator}{}",
+        generate_gateway_secret_random_part()
+    )
+}
+
+fn generate_gateway_api_key_plaintext_with_prefix(prefix: &str) -> String {
+    generate_gateway_secret_plaintext(prefix, "-")
 }
 
 pub(crate) fn configured_api_key_prefix() -> String {
@@ -84,7 +95,8 @@ pub(crate) fn normalize_optional_api_key_concurrent_limit(
 mod tests {
     use super::{
         api_key_placeholder_display_with_prefix, configured_api_key_prefix_from_lookup,
-        generate_gateway_api_key_plaintext_with_prefix, masked_gateway_api_key_display,
+        generate_gateway_api_key_plaintext_with_prefix, generate_gateway_secret_plaintext,
+        masked_gateway_api_key_display,
     };
 
     #[test]
@@ -110,6 +122,17 @@ mod tests {
         assert_eq!(value.len(), 3 + 32);
         assert!(value
             .trim_start_matches("ak-")
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn generates_plaintext_secret_with_custom_separator() {
+        let value = generate_gateway_secret_plaintext("ae", "-");
+        assert!(value.starts_with("ae-"));
+        assert_eq!(value.len(), 3 + 32);
+        assert!(value
+            .trim_start_matches("ae-")
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric()));
     }

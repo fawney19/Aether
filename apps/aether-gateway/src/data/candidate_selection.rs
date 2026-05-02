@@ -48,7 +48,12 @@ pub(crate) async fn read_requested_model_rows(
         return Ok(None);
     };
 
-    Ok(Some((resolved_global_model_name, rows)))
+    let resolved_rows = rows
+        .into_iter()
+        .filter(|row| row.global_model_name == resolved_global_model_name)
+        .collect();
+
+    Ok(Some((resolved_global_model_name, resolved_rows)))
 }
 
 pub(crate) async fn enumerate_minimal_candidate_selection_with_required_capabilities(

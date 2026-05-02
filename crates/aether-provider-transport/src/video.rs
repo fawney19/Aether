@@ -1,13 +1,41 @@
+use std::collections::BTreeMap;
+
 use aether_data_contracts::repository::video_tasks::StoredVideoTask;
 use aether_video_tasks_core::{
     LocalVideoTaskSnapshot, LocalVideoTaskTransport, LocalVideoTaskTransportBridgeInput,
 };
 use async_trait::async_trait;
+use serde_json::Value;
 
-use super::auth::{resolve_local_gemini_auth, resolve_local_openai_bearer_auth};
+use super::auth::{
+    build_passthrough_headers_with_auth, resolve_local_gemini_auth,
+    resolve_local_openai_bearer_auth,
+};
 use super::network::resolve_transport_execution_timeouts;
-use super::policy::{supports_local_gemini_transport, supports_local_standard_transport};
+use super::policy::{
+    local_gemini_transport_unsupported_reason_with_network,
+    local_standard_transport_unsupported_reason_with_network, supports_local_gemini_transport,
+    supports_local_standard_transport,
+};
+use super::rules::{apply_local_body_rules, apply_local_header_rules};
 use super::snapshot::GatewayProviderTransportSnapshot;
+use super::url::{build_gemini_video_predict_long_running_url, build_passthrough_path_url};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderVideoCreateFamily {
+    OpenAi,
+    Gemini,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProviderVideoCreateHeadersInput<'a> {
+    pub headers: &'a http::HeaderMap,
+    pub auth_header: &'a str,
+    pub auth_value: &'a str,
+    pub header_rules: Option<&'a Value>,
+    pub provider_request_body: &'a Value,
+    pub original_request_body: &'a Value,
+}
 
 #[async_trait]
 pub trait VideoTaskTransportSnapshotLookup: Send + Sync {
@@ -57,6 +85,115 @@ pub fn resolve_local_video_task_transport(
             timeouts: resolve_transport_execution_timeouts(transport),
         },
     ))
+}
+
+pub fn video_create_transport_unsupported_reason(
+    transport: &GatewayProviderTransportSnapshot,
+    family: ProviderVideoCreateFamily,
+    api_format: &str,
+) -> Option<&'static str> {
+    match family {
+        ProviderVideoCreateFamily::OpenAi => {
+            local_standard_transport_unsupported_reason_with_network(transport, api_format)
+        }
+        ProviderVideoCreateFamily::Gemini => {
+            local_gemini_transport_unsupported_reason_with_network(transport, api_format)
+        }
+    }
+}
+
+pub fn resolve_video_create_auth(
+    transport: &GatewayProviderTransportSnapshot,
+    family: ProviderVideoCreateFamily,
+) -> Option<(String, String)> {
+    match family {
+        ProviderVideoCreateFamily::OpenAi => resolve_local_openai_bearer_auth(transport),
+        ProviderVideoCreateFamily::Gemini => resolve_local_gemini_auth(transport),
+    }
+}
+
+pub fn build_video_create_request_body(
+    body_json: &Value,
+    family: ProviderVideoCreateFamily,
+    mapped_model: &str,
+    body_rules: Option<&Value>,
+) -> Option<Value> {
+    let mut provider_request_body = match family {
+        ProviderVideoCreateFamily::OpenAi => {
+            let mut provider_request_body = body_json.as_object().cloned().unwrap_or_default();
+            provider_request_body
+                .insert("model".to_string(), Value::String(mapped_model.to_string()));
+            Value::Object(provider_request_body)
+        }
+        ProviderVideoCreateFamily::Gemini => body_json.clone(),
+    };
+    if !apply_local_body_rules(&mut provider_request_body, body_rules, Some(body_json)) {
+        return None;
+    }
+    Some(provider_request_body)
+}
+
+pub fn build_video_create_upstream_url(
+    transport: &GatewayProviderTransportSnapshot,
+    request_path: &str,
+    request_query: Option<&str>,
+    mapped_model: &str,
+    family: ProviderVideoCreateFamily,
+) -> Option<String> {
+    let custom_path = transport
+        .endpoint
+        .custom_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if let Some(path) = custom_path {
+        let blocked_keys = match family {
+            ProviderVideoCreateFamily::OpenAi => &[][..],
+            ProviderVideoCreateFamily::Gemini => &["key"][..],
+        };
+        return build_passthrough_path_url(
+            &transport.endpoint.base_url,
+            path,
+            request_query,
+            blocked_keys,
+        );
+    }
+
+    match family {
+        ProviderVideoCreateFamily::OpenAi => build_passthrough_path_url(
+            &transport.endpoint.base_url,
+            request_path,
+            request_query,
+            &[],
+        ),
+        ProviderVideoCreateFamily::Gemini => build_gemini_video_predict_long_running_url(
+            &transport.endpoint.base_url,
+            mapped_model,
+            request_query,
+        ),
+    }
+}
+
+pub fn build_video_create_headers(
+    input: ProviderVideoCreateHeadersInput<'_>,
+) -> Option<BTreeMap<String, String>> {
+    let mut provider_request_headers = build_passthrough_headers_with_auth(
+        input.headers,
+        input.auth_header,
+        input.auth_value,
+        &BTreeMap::new(),
+    );
+    if !apply_local_header_rules(
+        &mut provider_request_headers,
+        input.header_rules,
+        &[input.auth_header, "content-type"],
+        input.provider_request_body,
+        Some(input.original_request_body),
+    ) {
+        return None;
+    }
+    Some(provider_request_headers)
 }
 
 pub async fn reconstruct_local_video_task_snapshot(
@@ -109,8 +246,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        reconstruct_local_video_task_snapshot, resolve_local_video_task_transport,
-        VideoTaskTransportSnapshotLookup,
+        build_video_create_headers, build_video_create_request_body,
+        build_video_create_upstream_url, reconstruct_local_video_task_snapshot,
+        resolve_local_video_task_transport, ProviderVideoCreateFamily,
+        ProviderVideoCreateHeadersInput, VideoTaskTransportSnapshotLookup,
     };
     use crate::snapshot::{
         GatewayProviderTransportEndpoint, GatewayProviderTransportKey,
@@ -157,6 +296,9 @@ mod tests {
                 auth_type: auth_type.to_string(),
                 is_active: true,
                 api_formats: None,
+                auth_type_by_format: None,
+                allow_auth_channel_mismatch_formats: None,
+
                 allowed_models: None,
                 capabilities: None,
                 rate_multipliers: None,
@@ -258,6 +400,64 @@ mod tests {
         );
         assert_eq!(transport.model_name.as_deref(), Some("veo"));
         assert_eq!(transport.endpoint_id, "endpoint-1");
+    }
+
+    #[test]
+    fn builds_openai_video_create_request_body_with_mapped_model() {
+        let body = build_video_create_request_body(
+            &json!({"prompt": "make a clip", "model": "client-model"}),
+            ProviderVideoCreateFamily::OpenAi,
+            "upstream-video-model",
+            None,
+        )
+        .expect("body should build");
+
+        assert_eq!(body.get("prompt"), Some(&json!("make a clip")));
+        assert_eq!(body.get("model"), Some(&json!("upstream-video-model")));
+    }
+
+    #[test]
+    fn builds_gemini_video_create_url_and_removes_client_key_query() {
+        let transport = sample_transport("gemini:video", "api_key");
+        let url = build_video_create_upstream_url(
+            &transport,
+            "/v1beta/models/client-model:predictLongRunning",
+            Some("key=client-key&trace=1"),
+            "veo-upstream",
+            ProviderVideoCreateFamily::Gemini,
+        )
+        .expect("url should build");
+
+        assert_eq!(
+            url,
+            "https://example.com/v1beta/models/veo-upstream:predictLongRunning?trace=1"
+        );
+    }
+
+    #[test]
+    fn builds_video_create_headers_with_auth_and_rules() {
+        let provider_request_body = json!({"prompt": "make a clip"});
+        let original_request_body = provider_request_body.clone();
+        let headers = build_video_create_headers(ProviderVideoCreateHeadersInput {
+            headers: &http::HeaderMap::new(),
+            auth_header: "authorization",
+            auth_value: "Bearer secret",
+            header_rules: Some(&json!([
+                {"action":"set","key":"x-provider-tag","value":"video"}
+            ])),
+            provider_request_body: &provider_request_body,
+            original_request_body: &original_request_body,
+        })
+        .expect("headers should build");
+
+        assert_eq!(
+            headers.get("authorization").map(String::as_str),
+            Some("Bearer secret")
+        );
+        assert_eq!(
+            headers.get("x-provider-tag").map(String::as_str),
+            Some("video")
+        );
     }
 
     #[test]

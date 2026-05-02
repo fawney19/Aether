@@ -720,13 +720,13 @@ async fn gateway_handles_public_catalog_providers_without_proxying_upstream() {
             sample_endpoint(
                 "endpoint-claude",
                 "provider-claude",
-                "claude:chat",
+                "claude:messages",
                 "https://api.anthropic.example",
             ),
             sample_endpoint(
                 "endpoint-claude-cli",
                 "provider-claude",
-                "claude:cli",
+                "claude:messages",
                 "https://api.anthropic.example",
             ),
         ],
@@ -943,7 +943,7 @@ async fn gateway_handles_public_catalog_stats_without_proxying_upstream() {
             sample_endpoint(
                 "endpoint-claude",
                 "provider-claude",
-                "claude:chat",
+                "claude:messages",
                 "https://api.anthropic.example",
             ),
         ],
@@ -956,7 +956,7 @@ async fn gateway_handles_public_catalog_stats_without_proxying_upstream() {
             sample_models_candidate_row(
                 "provider-claude",
                 "claude",
-                "claude:chat",
+                "claude:messages",
                 "claude-3-7-sonnet",
                 20,
             ),
@@ -989,7 +989,7 @@ async fn gateway_handles_public_catalog_stats_without_proxying_upstream() {
     assert_eq!(payload["active_models"], 3);
     assert_eq!(
         payload["supported_formats"],
-        json!(["claude:chat", "openai:chat"])
+        json!(["claude:messages", "openai:chat"])
     );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
@@ -1078,7 +1078,7 @@ async fn gateway_handles_public_health_api_formats_without_proxying_upstream() {
             sample_endpoint(
                 "endpoint-claude",
                 "provider-claude",
-                "claude:chat",
+                "claude:messages",
                 "https://api.anthropic.example",
             ),
         ],
@@ -1158,7 +1158,7 @@ async fn gateway_handles_public_health_api_formats_without_proxying_upstream() {
         .as_array()
         .expect("formats should be an array");
     assert_eq!(formats.len(), 2);
-    assert_eq!(formats[0]["api_format"], "claude:chat");
+    assert_eq!(formats[0]["api_format"], "claude:messages");
     assert_eq!(formats[0]["api_path"], "/v1/messages");
     assert_eq!(formats[0]["total_attempts"], 1);
     assert_eq!(formats[0]["success_rate"], 1.0);
@@ -4442,7 +4442,7 @@ async fn gateway_handles_users_me_endpoint_status_locally_without_proxying_upstr
             sample_endpoint(
                 "endpoint-claude",
                 "provider-claude",
-                "claude:chat",
+                "claude:messages",
                 "https://api.anthropic.example",
             ),
         ],
@@ -4456,7 +4456,7 @@ async fn gateway_handles_users_me_endpoint_status_locally_without_proxying_upstr
             sample_key(
                 "key-claude",
                 "provider-claude",
-                "claude:chat",
+                "claude:messages",
                 "sk-claude-endpoint-status",
             ),
         ],
@@ -4540,8 +4540,8 @@ async fn gateway_handles_users_me_endpoint_status_locally_without_proxying_upstr
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     let items = payload.as_array().expect("payload should be an array");
     assert_eq!(items.len(), 2);
-    assert_eq!(items[0]["api_format"], "claude:chat");
-    assert_eq!(items[0]["display_name"], "Claude Chat");
+    assert_eq!(items[0]["api_format"], "claude:messages");
+    assert_eq!(items[0]["display_name"], "Claude Messages");
     assert_eq!(items[0]["health_score"], 1.0);
     assert_eq!(items[0]["timeline"].as_array().map(Vec::len), Some(100));
     assert!(items[0].get("total_endpoints").is_none());
@@ -5839,7 +5839,13 @@ async fn gateway_handles_users_me_api_keys_locally_without_proxying_upstream() {
             1.5,
             false,
         )
-        .expect("export record should build")]),
+        .expect("export record should build")
+        .with_activity_timestamps(
+            Some(1_711_000_102),
+            Some(1_711_000_100),
+            Some(1_711_000_101),
+        )
+        .expect("export activity timestamps should build")]),
     );
     let user_repository = Arc::new(InMemoryUserReadRepository::seed_auth_users(vec![user]));
 
@@ -5881,6 +5887,8 @@ async fn gateway_handles_users_me_api_keys_locally_without_proxying_upstream() {
     assert_eq!(api_keys[0]["key_display"], "sk-user-li...ve-1");
     assert_eq!(api_keys[0]["total_requests"], 9);
     assert_eq!(api_keys[0]["total_cost_usd"], 1.5);
+    assert_eq!(api_keys[0]["created_at"], "2024-03-21T05:48:20+00:00");
+    assert_eq!(api_keys[0]["last_used_at"], "2024-03-21T05:48:22+00:00");
 
     let detail_response = client
         .get(format!(
@@ -6212,6 +6220,11 @@ async fn gateway_handles_users_me_api_key_writes_locally_without_proxying_upstre
     assert_eq!(create_payload["rate_limit"], 120);
     assert_eq!(create_payload["concurrent_limit"], serde_json::Value::Null);
     assert_eq!(create_payload["message"], "API密钥创建成功");
+    let created_at = create_payload["created_at"]
+        .as_str()
+        .expect("created_at should be string");
+    assert!(chrono::DateTime::parse_from_rfc3339(created_at).is_ok());
+    assert!(!created_at.starts_with("1970-01-01"));
     assert!(create_payload["key"]
         .as_str()
         .unwrap_or_default()
@@ -6317,6 +6330,7 @@ async fn gateway_handles_users_me_api_key_writes_locally_without_proxying_upstre
     );
     assert_eq!(detail_payload["concurrent_limit"], 4);
     assert_eq!(detail_payload["force_capabilities"], json!({}));
+    assert_eq!(detail_payload["created_at"], created_at);
 
     let delete_response = client
         .delete(format!("{gateway_url}/api/users/me/api-keys/{created_id}"))
@@ -6825,10 +6839,12 @@ async fn gateway_handles_users_me_management_token_writes_locally_without_proxyi
         .to_string();
     assert_eq!(create_payload["message"], "Management Token 创建成功");
     assert_eq!(create_payload["data"]["name"], "writer-token");
-    assert!(create_payload["token"]
-        .as_str()
-        .unwrap_or_default()
-        .starts_with("ae_"));
+    let created_token = create_payload["token"].as_str().unwrap_or_default();
+    let created_token_random = created_token.strip_prefix("ae-").unwrap_or_default();
+    assert_eq!(created_token_random.len(), 32);
+    assert!(created_token_random
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric()));
 
     let update_response = client
         .put(format!(
@@ -6901,10 +6917,12 @@ async fn gateway_handles_users_me_management_token_writes_locally_without_proxyi
         .await
         .expect("json body should parse");
     assert_eq!(regenerate_payload["message"], "Token 已重新生成");
-    assert!(regenerate_payload["token"]
-        .as_str()
-        .unwrap_or_default()
-        .starts_with("ae_"));
+    let regenerated_token = regenerate_payload["token"].as_str().unwrap_or_default();
+    let regenerated_token_random = regenerated_token.strip_prefix("ae-").unwrap_or_default();
+    assert_eq!(regenerated_token_random.len(), 32);
+    assert!(regenerated_token_random
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric()));
 
     let delete_response = client
         .delete(format!(
@@ -7237,7 +7255,7 @@ async fn gateway_handles_users_me_providers_locally_without_proxying_upstream() 
             sample_endpoint(
                 "endpoint-claude-1",
                 "provider-claude",
-                "anthropic:messages",
+                "claude:messages",
                 "https://api.claude.example",
             ),
         ],

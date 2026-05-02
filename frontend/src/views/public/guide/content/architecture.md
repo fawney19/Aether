@@ -21,7 +21,7 @@ graph LR
 ## 2. 核心原则
 
 1. **API格式、端点、认证方式说明**
-   提供商支持不同的格式（如 OpenAI Chat, Claude Chat），Aether在接收请求后，将统一管理路由。
+   提供商支持不同的格式（如 OpenAI Chat, Claude Messages），Aether在接收请求后，将统一管理路由。
 
 2. **统一的入口模型名称**
    在内部完成多提供商、多模型名称风格的聚合映射管理。客户端只需知道统一的模型名（例如 `claude-3-opus`），Aether将根据映射规则自动寻找真正对应的上游模型名称。

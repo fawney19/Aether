@@ -667,7 +667,7 @@ mod tests {
                 report_kind: "claude_cli_sync_success".to_string(),
                 report_context: Some(json!({
                     "request_id": "req-reporting-sync-null-1",
-                    "client_api_format": "claude:cli",
+                    "client_api_format": "claude:messages",
                     "provider_api_format": "openai:responses"
                 })),
                 status_code: 200,

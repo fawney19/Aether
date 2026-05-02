@@ -173,6 +173,7 @@ mod tests {
             route_class: Some("ai_public".to_string()),
             route_family: Some("openai".to_string()),
             route_kind: Some("chat".to_string()),
+            request_auth_channel: None,
             auth_endpoint_signature: None,
             execution_runtime_candidate: true,
             auth_context: None,

@@ -32,6 +32,8 @@ mod support_dashboard;
 mod support_models;
 #[path = "support/monitoring.rs"]
 mod support_monitoring;
+#[path = "support/oauth.rs"]
+mod support_oauth;
 #[path = "support/payment.rs"]
 mod support_payment;
 #[path = "support/test_connection.rs"]
@@ -56,13 +58,14 @@ use self::support_auth::auth_session::{
 };
 use self::support_auth::{
     build_auth_error_response, build_auth_json_response, build_auth_registration_settings_payload,
-    build_auth_settings_payload, maybe_build_local_auth_response,
+    build_auth_settings_payload, extract_client_device_id, maybe_build_local_auth_response,
 };
 use self::support_dashboard::maybe_build_local_dashboard_response;
 use self::support_models::{
     build_models_auth_error_response, maybe_build_local_models_response, models_api_format,
 };
 use self::support_monitoring::maybe_build_local_user_monitoring_response;
+use self::support_oauth::maybe_build_local_oauth_response;
 use self::support_payment::maybe_build_local_payment_callback_response;
 use self::support_test_connection::maybe_build_local_test_connection_response;
 use self::support_user_me::maybe_build_local_users_me_response;
@@ -103,6 +106,11 @@ pub(crate) async fn maybe_build_local_public_support_response(
 
     if decision.route_family.as_deref() == Some("auth") {
         return maybe_build_local_auth_response(state, request_context, headers, request_body)
+            .await;
+    }
+
+    if decision.route_family.as_deref() == Some("oauth") {
+        return maybe_build_local_oauth_response(state, request_context, headers, request_body)
             .await;
     }
 

@@ -28,6 +28,22 @@ use aether_data_contracts::repository::provider_catalog::{
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+fn merge_codex_quota_metadata(
+    header_metadata: Option<&serde_json::Value>,
+    body_metadata: &serde_json::Value,
+) -> serde_json::Value {
+    let mut merged = header_metadata
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(body_object) = body_metadata.as_object() {
+        for (key, value) in body_object {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::Value::Object(merged)
+}
+
 pub(crate) async fn refresh_codex_provider_quota_locally(
     state: &AdminAppState<'_>,
     provider: &StoredProviderCatalogProvider,
@@ -103,7 +119,9 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
             .map(|duration| duration.as_secs())
             .unwrap_or(0);
 
-        let mut metadata_update = parse_codex_usage_headers(&result.headers, now_unix_secs)
+        let header_metadata = parse_codex_usage_headers(&result.headers, now_unix_secs);
+        let mut metadata_update = header_metadata
+            .as_ref()
             .map(|metadata| json!({ "codex": metadata }));
         let (mut oauth_invalid_at_unix_secs, mut oauth_invalid_reason) = (None, None);
         let mut status = "error".to_string();
@@ -117,7 +135,13 @@ pub(crate) async fn refresh_codex_provider_quota_locally(
                 .and_then(|body| body.json_body.as_ref())
             {
                 if let Some(parsed) = parse_codex_wham_usage_response(body_json, now_unix_secs) {
-                    metadata_update = Some(json!({ "codex": parsed }));
+                    metadata_update = Some(json!({
+                        "codex": merge_codex_quota_metadata(header_metadata.as_ref(), &parsed)
+                    }));
+                    (oauth_invalid_at_unix_secs, oauth_invalid_reason) =
+                        quota_refresh_success_invalid_state(&key);
+                    status = "success".to_string();
+                } else if metadata_update.is_some() {
                     (oauth_invalid_at_unix_secs, oauth_invalid_reason) =
                         quota_refresh_success_invalid_state(&key);
                     status = "success".to_string();

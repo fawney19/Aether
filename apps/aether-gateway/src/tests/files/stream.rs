@@ -44,7 +44,7 @@ async fn gateway_executes_gemini_files_download_via_local_decision_gate_with_loc
                     "route_class": "ai_public",
                     "route_family": "gemini",
                     "route_kind": "files",
-                    "auth_endpoint_signature": "gemini:chat",
+                    "auth_endpoint_signature": "gemini:generate_content",
                     "execution_runtime_candidate": true,
                     "auth_context": {
                         "user_id": "user-files-download-local-123",

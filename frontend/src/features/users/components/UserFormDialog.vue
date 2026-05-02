@@ -188,9 +188,9 @@
             <span class="text-sm font-medium">访问限制</span>
           </div>
 
-          <!-- Provider -->
+          <!-- 提供商 -->
           <div class="space-y-2">
-            <Label class="text-sm font-medium">允许的 Provider</Label>
+            <Label class="text-sm font-medium">允许的提供商</Label>
             <div class="flex items-center gap-3">
               <div class="flex-1 min-w-0">
                 <MultiSelect
@@ -199,9 +199,9 @@
                   :search-threshold="0"
                   :disabled="form.provider_unrestricted"
                   :placeholder="form.provider_unrestricted ? '不限制' : '未选择（全部禁用）'"
-                  empty-text="暂无可用 Provider"
-                  no-results-text="未找到匹配的 Provider"
-                  search-placeholder="搜索 Provider 名称..."
+                  empty-text="暂无可用提供商"
+                  no-results-text="未找到匹配的提供商"
+                  search-placeholder="搜索提供商名称..."
                 />
               </div>
               <Switch
@@ -211,9 +211,9 @@
             </div>
           </div>
 
-          <!-- API 格式 -->
+          <!-- 端点 -->
           <div class="space-y-2">
-            <Label class="text-sm font-medium">允许的 API 格式</Label>
+            <Label class="text-sm font-medium">允许的端点</Label>
             <div class="flex items-center gap-3">
               <div class="flex-1 min-w-0">
                 <MultiSelect
@@ -222,9 +222,9 @@
                   :search-threshold="0"
                   :disabled="form.api_format_unrestricted"
                   :placeholder="form.api_format_unrestricted ? '不限制' : '未选择（全部禁用）'"
-                  empty-text="暂无可用 API 格式"
-                  no-results-text="未找到匹配的 API 格式"
-                  search-placeholder="搜索 API 格式..."
+                  empty-text="暂无可用端点"
+                  no-results-text="未找到匹配的端点"
+                  search-placeholder="搜索端点..."
                 />
               </div>
               <Switch

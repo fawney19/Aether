@@ -248,7 +248,9 @@ pub struct StoredProviderCatalogKey {
     pub capabilities: Option<serde_json::Value>,
     pub is_active: bool,
     pub api_formats: Option<serde_json::Value>,
-    pub encrypted_api_key: String,
+    pub auth_type_by_format: Option<serde_json::Value>,
+    pub allow_auth_channel_mismatch_formats: Option<serde_json::Value>,
+    pub encrypted_api_key: Option<String>,
     pub encrypted_auth_config: Option<String>,
     pub note: Option<String>,
     pub internal_priority: i32,
@@ -322,7 +324,9 @@ impl StoredProviderCatalogKey {
             capabilities,
             is_active,
             api_formats: None,
-            encrypted_api_key: String::new(),
+            auth_type_by_format: None,
+            allow_auth_channel_mismatch_formats: None,
+            encrypted_api_key: None,
             encrypted_auth_config: None,
             note: None,
             internal_priority: 50,
@@ -373,7 +377,7 @@ impl StoredProviderCatalogKey {
     pub fn with_transport_fields(
         mut self,
         api_formats: Option<serde_json::Value>,
-        encrypted_api_key: String,
+        encrypted_api_key: impl Into<Option<String>>,
         encrypted_auth_config: Option<String>,
         rate_multipliers: Option<serde_json::Value>,
         global_priority_by_format: Option<serde_json::Value>,
@@ -382,7 +386,11 @@ impl StoredProviderCatalogKey {
         proxy: Option<serde_json::Value>,
         fingerprint: Option<serde_json::Value>,
     ) -> Result<Self, crate::DataLayerError> {
-        if encrypted_api_key.trim().is_empty() {
+        let encrypted_api_key = encrypted_api_key.into();
+        if encrypted_api_key
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
             return Err(crate::DataLayerError::UnexpectedValue(
                 "provider_api_keys.api_key is empty".to_string(),
             ));
@@ -679,4 +687,61 @@ pub trait ProviderCatalogWriteRepository: Send + Sync {
         health_by_format: Option<&serde_json::Value>,
         circuit_breaker_by_format: Option<&serde_json::Value>,
     ) -> Result<bool, crate::DataLayerError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StoredProviderCatalogKey;
+
+    fn sample_key() -> StoredProviderCatalogKey {
+        StoredProviderCatalogKey::new(
+            "key-1".to_string(),
+            "provider-1".to_string(),
+            "key".to_string(),
+            "service_account".to_string(),
+            None,
+            true,
+        )
+        .expect("key should build")
+    }
+
+    #[test]
+    fn transport_fields_allow_null_encrypted_api_key() {
+        let key = sample_key()
+            .with_transport_fields(
+                None,
+                None::<String>,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("null api key should be accepted");
+
+        assert_eq!(key.encrypted_api_key, None);
+    }
+
+    #[test]
+    fn transport_fields_reject_empty_encrypted_api_key_string() {
+        let err = sample_key()
+            .with_transport_fields(
+                None,
+                Some("   ".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect_err("empty api key string should be rejected");
+
+        assert!(err
+            .to_string()
+            .contains("provider_api_keys.api_key is empty"));
+    }
 }

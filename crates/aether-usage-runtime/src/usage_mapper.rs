@@ -331,7 +331,7 @@ mod tests {
                     "cache_read_input_tokens": 10
                 }
             }),
-            "claude:chat",
+            "claude:messages",
         );
 
         assert_eq!(usage.input_tokens, 0);
@@ -411,7 +411,7 @@ mod tests {
                 "cache_creation_input_tokens": 4,
                 "cache_read_input_tokens": 1
             }),
-            "claude:chat",
+            "claude:messages",
         );
 
         assert_eq!(usage.input_tokens, 10);
@@ -447,7 +447,7 @@ mod tests {
                     }
                 ]
             }),
-            "claude:chat",
+            "claude:messages",
         );
 
         assert_eq!(usage.input_tokens, 5);
@@ -474,7 +474,7 @@ mod tests {
                     }
                 ]
             }),
-            "claude:chat",
+            "claude:messages",
         );
 
         assert_eq!(usage.input_tokens, 5);
@@ -492,7 +492,7 @@ mod tests {
                 "cache_read_input_tokens": 52873,
                 "output_tokens": 973
             }),
-            "claude:chat",
+            "claude:messages",
         );
 
         assert_eq!(usage.input_tokens, 4941);
@@ -520,7 +520,7 @@ mod tests {
                 },
                 "service_tier": "standard"
             }),
-            "claude:chat",
+            "claude:messages",
         );
 
         assert_eq!(usage.input_tokens, 2095);
@@ -544,7 +544,7 @@ mod tests {
                 "cache_creation_input_tokens": 5191,
                 "cache_read_input_tokens": 97634
             }),
-            "claude:chat",
+            "claude:messages",
         );
 
         assert_eq!(usage.input_tokens, 1);
@@ -565,7 +565,7 @@ mod tests {
                     "cachedContentTokenCount": 2
                 }
             }),
-            "gemini:chat",
+            "gemini:generate_content",
         );
 
         assert_eq!(usage.input_tokens, 14);
@@ -596,7 +596,7 @@ mod tests {
                     }
                 ]
             }),
-            "gemini:chat",
+            "gemini:generate_content",
         );
 
         assert_eq!(usage.input_tokens, 14);

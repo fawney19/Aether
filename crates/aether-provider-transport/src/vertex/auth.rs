@@ -68,7 +68,7 @@ mod tests {
             endpoint: GatewayProviderTransportEndpoint {
                 id: "endpoint-1".to_string(),
                 provider_id: "provider-1".to_string(),
-                api_format: "gemini:chat".to_string(),
+                api_format: "gemini:generate_content".to_string(),
                 api_family: Some("gemini".to_string()),
                 endpoint_kind: Some("chat".to_string()),
                 is_active: true,
@@ -87,7 +87,10 @@ mod tests {
                 name: "key".to_string(),
                 auth_type: "api_key".to_string(),
                 is_active: true,
-                api_formats: Some(vec!["gemini:chat".to_string()]),
+                api_formats: Some(vec!["gemini:generate_content".to_string()]),
+                auth_type_by_format: None,
+                allow_auth_channel_mismatch_formats: None,
+
                 allowed_models: None,
                 capabilities: None,
                 rate_multipliers: None,
@@ -127,7 +130,7 @@ mod tests {
     fn resolves_query_auth_for_custom_aiplatform_transport() {
         let mut transport = sample_transport();
         transport.provider.provider_type = "custom".to_string();
-        transport.endpoint.api_format = "gemini:cli".to_string();
+        transport.endpoint.api_format = "gemini:generate_content".to_string();
 
         let auth = resolve_local_vertex_api_key_query_auth(&transport)
             .expect("custom aiplatform transport should resolve");

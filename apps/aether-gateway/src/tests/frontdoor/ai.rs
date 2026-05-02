@@ -199,7 +199,7 @@ async fn gateway_handles_public_openai_models_with_cross_format_candidates_witho
             sample_models_candidate_row(
                 "provider-claude",
                 "claude",
-                "claude:chat",
+                "claude:messages",
                 "claude-3-7-sonnet",
                 10,
             ),
@@ -277,14 +277,14 @@ async fn gateway_handles_public_claude_models_without_hitting_fallback_probe() {
             sample_models_candidate_row(
                 "provider-claude",
                 "claude",
-                "claude:chat",
+                "claude:messages",
                 "claude-3-7-sonnet",
                 10,
             ),
             sample_models_candidate_row(
                 "provider-claude",
                 "claude",
-                "claude:chat",
+                "claude:messages",
                 "claude-3-5-haiku",
                 10,
             ),
@@ -347,14 +347,14 @@ async fn gateway_handles_public_gemini_models_without_hitting_fallback_probe() {
             sample_models_candidate_row(
                 "provider-gemini",
                 "gemini",
-                "gemini:chat",
+                "gemini:generate_content",
                 "gemini-2.5-flash",
                 10,
             ),
             sample_models_candidate_row(
                 "provider-gemini",
                 "gemini",
-                "gemini:chat",
+                "gemini:generate_content",
                 "gemini-2.5-pro",
                 10,
             ),

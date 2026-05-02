@@ -44,7 +44,7 @@ async fn gateway_executes_gemini_chat_stream_via_local_decision_gate_with_local_
             true,
             false,
             Some(serde_json::json!(["gemini"])),
-            Some(serde_json::json!(["gemini:chat"])),
+            Some(serde_json::json!(["gemini:generate_content"])),
             Some(serde_json::json!(["gemini-2.5-pro"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -55,7 +55,7 @@ async fn gateway_executes_gemini_chat_stream_via_local_decision_gate_with_local_
             Some(5),
             Some(4_102_444_800),
             Some(serde_json::json!(["gemini"])),
-            Some(serde_json::json!(["gemini:chat"])),
+            Some(serde_json::json!(["gemini:generate_content"])),
             Some(serde_json::json!(["gemini-2.5-pro"])),
         )
         .expect("auth snapshot should build")
@@ -69,7 +69,7 @@ async fn gateway_executes_gemini_chat_stream_via_local_decision_gate_with_local_
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-gemini-chat-local-stream-1".to_string(),
-            endpoint_api_format: "gemini:chat".to_string(),
+            endpoint_api_format: "gemini:generate_content".to_string(),
             endpoint_api_family: Some("gemini".to_string()),
             endpoint_kind: Some("chat".to_string()),
             endpoint_is_active: true,
@@ -77,11 +77,11 @@ async fn gateway_executes_gemini_chat_stream_via_local_decision_gate_with_local_
             key_name: "prod".to_string(),
             key_auth_type: "api_key".to_string(),
             key_is_active: true,
-            key_api_formats: Some(vec!["gemini:chat".to_string()]),
+            key_api_formats: Some(vec!["gemini:generate_content".to_string()]),
             key_allowed_models: None,
             key_capabilities: None,
             key_internal_priority: 5,
-            key_global_priority_by_format: Some(serde_json::json!({"gemini:chat": 1})),
+            key_global_priority_by_format: Some(serde_json::json!({"gemini:generate_content": 1})),
             model_id: "model-gemini-chat-local-stream-1".to_string(),
             global_model_id: "global-model-gemini-chat-local-stream-1".to_string(),
             global_model_name: "gemini-2.5-pro".to_string(),
@@ -91,7 +91,7 @@ async fn gateway_executes_gemini_chat_stream_via_local_decision_gate_with_local_
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
                 name: "gemini-2.5-pro-upstream".to_string(),
                 priority: 1,
-                api_formats: Some(vec!["gemini:chat".to_string()]),
+                api_formats: Some(vec!["gemini:generate_content".to_string()]),
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -124,7 +124,7 @@ async fn gateway_executes_gemini_chat_stream_via_local_decision_gate_with_local_
         StoredProviderCatalogEndpoint::new(
             "endpoint-gemini-chat-local-stream-1".to_string(),
             "provider-gemini-chat-local-stream-1".to_string(),
-            "gemini:chat".to_string(),
+            "gemini:generate_content".to_string(),
             Some("gemini".to_string()),
             Some("chat".to_string()),
             true,
@@ -160,7 +160,7 @@ async fn gateway_executes_gemini_chat_stream_via_local_decision_gate_with_local_
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["gemini:chat"])),
+            Some(serde_json::json!(["gemini:generate_content"])),
             encrypt_python_fernet_plaintext(
                 DEVELOPMENT_ENCRYPTION_KEY,
                 "sk-upstream-gemini-chat-stream",
@@ -168,7 +168,7 @@ async fn gateway_executes_gemini_chat_stream_via_local_decision_gate_with_local_
             .expect("api key should encrypt"),
             None,
             None,
-            Some(serde_json::json!({"gemini:chat": 1})),
+            Some(serde_json::json!({"gemini:generate_content": 1})),
             None,
             None,
             Some(serde_json::json!({"enabled": true, "node_id":"proxy-node-gemini-chat-stream"})),
@@ -198,7 +198,7 @@ async fn gateway_executes_gemini_chat_stream_via_local_decision_gate_with_local_
                     "route_class": "ai_public",
                     "route_family": "gemini",
                     "route_kind": "chat",
-                    "auth_endpoint_signature": "gemini:chat",
+                    "auth_endpoint_signature": "gemini:generate_content",
                     "execution_runtime_candidate": true,
                     "auth_context": {
                         "user_id": "user-gemini-chat-local-stream-1",

@@ -537,7 +537,7 @@ impl ProviderCatalogWriteRepository for InMemoryProviderCatalogReadRepository {
             return Ok(false);
         };
 
-        key.encrypted_api_key = encrypted_api_key.to_string();
+        key.encrypted_api_key = Some(encrypted_api_key.to_string());
         key.encrypted_auth_config = encrypted_auth_config.map(ToOwned::to_owned);
         key.expires_at_unix_secs = expires_at_unix_secs;
         Ok(true)
@@ -705,7 +705,10 @@ mod tests {
             .await
             .expect("keys should read");
         assert_eq!(stored.len(), 1);
-        assert_eq!(stored[0].encrypted_api_key, "ciphertext-updated-token");
+        assert_eq!(
+            stored[0].encrypted_api_key.as_deref(),
+            Some("ciphertext-updated-token")
+        );
         assert_eq!(
             stored[0].encrypted_auth_config.as_deref(),
             Some("ciphertext-auth-2")

@@ -30,4 +30,18 @@ describe('errorParser', () => {
       'Token 刷新失败：refresh_token 已被使用并轮换，请重新登录授权',
     )
   })
+
+  it('normalizes expired refresh token errors', () => {
+    const error = {
+      response: {
+        data: {
+          detail: '{"error":{"message":"Could not validate your refresh token. Please try signing in again.","type":"invalid_request_error","code":"refresh_token_expired"}}',
+        },
+      },
+    }
+
+    expect(parseApiError(error, 'Token 刷新失败')).toBe(
+      'Token 刷新失败：refresh_token 无效、已过期或已撤销，请重新登录授权',
+    )
+  })
 })

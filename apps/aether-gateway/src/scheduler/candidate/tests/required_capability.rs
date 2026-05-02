@@ -75,9 +75,9 @@ async fn exclusive_required_capability_keeps_hard_filtering_only_matching_keys()
     incompatible.provider_id = "provider-a".to_string();
     incompatible.provider_name = "provider-a".to_string();
     incompatible.endpoint_id = "endpoint-a".to_string();
-    incompatible.endpoint_api_format = "gemini:chat".to_string();
+    incompatible.endpoint_api_format = "gemini:generate_content".to_string();
     incompatible.endpoint_api_family = Some("gemini".to_string());
-    incompatible.key_api_formats = Some(vec!["gemini:chat".to_string()]);
+    incompatible.key_api_formats = Some(vec!["gemini:generate_content".to_string()]);
     incompatible.key_id = "key-a".to_string();
     incompatible.key_name = "alpha".to_string();
     incompatible.global_model_name = "gemini-2.5-pro".to_string();
@@ -87,9 +87,9 @@ async fn exclusive_required_capability_keeps_hard_filtering_only_matching_keys()
     compatible.provider_id = "provider-b".to_string();
     compatible.provider_name = "provider-b".to_string();
     compatible.endpoint_id = "endpoint-b".to_string();
-    compatible.endpoint_api_format = "gemini:chat".to_string();
+    compatible.endpoint_api_format = "gemini:generate_content".to_string();
     compatible.endpoint_api_family = Some("gemini".to_string());
-    compatible.key_api_formats = Some(vec!["gemini:chat".to_string()]);
+    compatible.key_api_formats = Some(vec!["gemini:generate_content".to_string()]);
     compatible.key_id = "key-b".to_string();
     compatible.key_name = "beta".to_string();
     compatible.global_model_name = "gemini-2.5-pro".to_string();
@@ -109,7 +109,7 @@ async fn exclusive_required_capability_keeps_hard_filtering_only_matching_keys()
     let selection = list_selectable_candidates_for_required_capability_without_requested_model(
         state.data.as_ref(),
         &state,
-        "gemini:chat",
+        "gemini:generate_content",
         "gemini_files",
         false,
         None,

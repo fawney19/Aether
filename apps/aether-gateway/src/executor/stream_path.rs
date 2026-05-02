@@ -1,11 +1,15 @@
+use aether_ai_serving::{
+    run_ai_stream_execution_path, AiPlanFallbackReason, AiServingExecutionOutcome,
+    AiStreamExecutionPathPort, AiStreamExecutionStep,
+};
+use async_trait::async_trait;
 use axum::body::{Body, Bytes};
 use axum::http::Response;
 use std::collections::BTreeMap;
 
-use crate::ai_pipeline_api::{
+use crate::ai_serving::api::{
     is_matching_stream_request, resolve_execution_runtime_stream_plan_kind,
-    supports_stream_scheduler_decision_kind, LocalStreamPlanAndReport,
-    OPENAI_VIDEO_CONTENT_PLAN_KIND,
+    supports_stream_execution_decision_kind, AiStreamAttempt, OPENAI_VIDEO_CONTENT_PLAN_KIND,
 };
 use crate::api::response::build_client_response_from_parts;
 use crate::control::GatewayControlDecision;
@@ -47,132 +51,200 @@ pub(crate) async fn maybe_execute_via_stream_decision_path(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     }
 
-    let mut exhausted = None;
-
-    match maybe_execute_local_video_task_content_stream(state, parts, trace_id, decision, plan_kind)
-        .await?
-    {
-        LocalExecutionRequestOutcome::Responded(response) => {
-            return Ok(LocalExecutionRequestOutcome::Responded(response));
-        }
-        LocalExecutionRequestOutcome::Exhausted(outcome) => exhausted = Some(outcome),
-        LocalExecutionRequestOutcome::NoPath => {}
-    }
-
-    if supports_stream_scheduler_decision_kind(plan_kind) {
-        match maybe_execute_stream_via_local_image_decision(
-            state,
-            parts,
-            &body_json,
-            body_base64.as_deref(),
-            trace_id,
-            decision,
-            plan_kind,
-        )
-        .await?
-        {
-            LocalExecutionRequestOutcome::Responded(response) => {
-                return Ok(LocalExecutionRequestOutcome::Responded(response));
-            }
-            LocalExecutionRequestOutcome::Exhausted(outcome) => exhausted = Some(outcome),
-            LocalExecutionRequestOutcome::NoPath => {}
-        }
-
-        match maybe_execute_stream_via_local_decision(
-            state, parts, trace_id, decision, &body_json, plan_kind,
-        )
-        .await?
-        {
-            LocalExecutionRequestOutcome::Responded(response) => {
-                return Ok(LocalExecutionRequestOutcome::Responded(response));
-            }
-            LocalExecutionRequestOutcome::Exhausted(outcome) => exhausted = Some(outcome),
-            LocalExecutionRequestOutcome::NoPath => {}
-        }
-
-        match maybe_execute_stream_via_local_openai_responses_decision(
-            state, parts, trace_id, decision, &body_json, plan_kind,
-        )
-        .await?
-        {
-            LocalExecutionRequestOutcome::Responded(response) => {
-                return Ok(LocalExecutionRequestOutcome::Responded(response));
-            }
-            LocalExecutionRequestOutcome::Exhausted(outcome) => exhausted = Some(outcome),
-            LocalExecutionRequestOutcome::NoPath => {}
-        }
-
-        match maybe_execute_stream_via_local_standard_decision(
-            state, parts, trace_id, decision, &body_json, plan_kind,
-        )
-        .await?
-        {
-            LocalExecutionRequestOutcome::Responded(response) => {
-                return Ok(LocalExecutionRequestOutcome::Responded(response));
-            }
-            LocalExecutionRequestOutcome::Exhausted(outcome) => exhausted = Some(outcome),
-            LocalExecutionRequestOutcome::NoPath => {}
-        }
-
-        match maybe_execute_stream_via_local_same_format_provider_decision(
-            state, parts, trace_id, decision, &body_json, plan_kind,
-        )
-        .await?
-        {
-            LocalExecutionRequestOutcome::Responded(response) => {
-                return Ok(LocalExecutionRequestOutcome::Responded(response));
-            }
-            LocalExecutionRequestOutcome::Exhausted(outcome) => exhausted = Some(outcome),
-            LocalExecutionRequestOutcome::NoPath => {}
-        }
-
-        match maybe_execute_stream_via_local_gemini_files_decision(
-            state, parts, trace_id, decision, plan_kind,
-        )
-        .await?
-        {
-            LocalExecutionRequestOutcome::Responded(response) => {
-                return Ok(LocalExecutionRequestOutcome::Responded(response));
-            }
-            LocalExecutionRequestOutcome::Exhausted(outcome) => exhausted = Some(outcome),
-            LocalExecutionRequestOutcome::NoPath => {}
-        }
-
-        if let Some(response) = maybe_execute_stream_via_remote_decision(
-            state, parts, trace_id, decision, &body_json, plan_kind,
-        )
-        .await?
-        {
-            return Ok(LocalExecutionRequestOutcome::Responded(response));
-        }
-    }
-
-    match maybe_execute_stream_via_plan_fallback(
+    let port = GatewayStreamExecutionPathPort {
         state,
         parts,
         trace_id,
         decision,
-        &body_json,
+        body_json: &body_json,
         body_base64,
         plan_kind,
         bypass_cache_key,
-        if supports_stream_scheduler_decision_kind(plan_kind) {
-            GatewayFallbackReason::RemoteDecisionMiss
-        } else {
-            GatewayFallbackReason::SchedulerDecisionUnsupported
-        },
-    )
-    .await?
-    {
+        scheduler_supported: supports_stream_execution_decision_kind(plan_kind),
+    };
+
+    Ok(from_ai_serving_outcome(
+        run_ai_stream_execution_path(&port).await?,
+    ))
+}
+
+struct GatewayStreamExecutionPathPort<'a> {
+    state: &'a AppState,
+    parts: &'a http::request::Parts,
+    trace_id: &'a str,
+    decision: &'a GatewayControlDecision,
+    body_json: &'a serde_json::Value,
+    body_base64: Option<String>,
+    plan_kind: &'a str,
+    bypass_cache_key: String,
+    scheduler_supported: bool,
+}
+
+#[async_trait]
+impl AiStreamExecutionPathPort for GatewayStreamExecutionPathPort<'_> {
+    type Response = Response<Body>;
+    type Exhaustion = super::LocalExecutionExhaustion;
+    type Error = GatewayError;
+
+    fn scheduler_decision_supported(&self) -> bool {
+        self.scheduler_supported
+    }
+
+    async fn execute_stream_step(
+        &self,
+        step: AiStreamExecutionStep,
+    ) -> Result<AiServingExecutionOutcome<Self::Response, Self::Exhaustion>, Self::Error> {
+        let outcome = match step {
+            AiStreamExecutionStep::LocalVideoContent => {
+                maybe_execute_local_video_task_content_stream(
+                    self.state,
+                    self.parts,
+                    self.trace_id,
+                    self.decision,
+                    self.plan_kind,
+                )
+                .await?
+            }
+            AiStreamExecutionStep::LocalImage => {
+                maybe_execute_stream_via_local_image_decision(
+                    self.state,
+                    self.parts,
+                    self.body_json,
+                    self.body_base64.as_deref(),
+                    self.trace_id,
+                    self.decision,
+                    self.plan_kind,
+                )
+                .await?
+            }
+            AiStreamExecutionStep::LocalOpenAiChat => {
+                maybe_execute_stream_via_local_decision(
+                    self.state,
+                    self.parts,
+                    self.trace_id,
+                    self.decision,
+                    self.body_json,
+                    self.plan_kind,
+                )
+                .await?
+            }
+            AiStreamExecutionStep::LocalOpenAiResponses => {
+                maybe_execute_stream_via_local_openai_responses_decision(
+                    self.state,
+                    self.parts,
+                    self.trace_id,
+                    self.decision,
+                    self.body_json,
+                    self.plan_kind,
+                )
+                .await?
+            }
+            AiStreamExecutionStep::LocalStandardFamily => {
+                maybe_execute_stream_via_local_standard_decision(
+                    self.state,
+                    self.parts,
+                    self.trace_id,
+                    self.decision,
+                    self.body_json,
+                    self.plan_kind,
+                )
+                .await?
+            }
+            AiStreamExecutionStep::LocalSameFormatProvider => {
+                maybe_execute_stream_via_local_same_format_provider_decision(
+                    self.state,
+                    self.parts,
+                    self.trace_id,
+                    self.decision,
+                    self.body_json,
+                    self.plan_kind,
+                )
+                .await?
+            }
+            AiStreamExecutionStep::LocalGeminiFiles => {
+                maybe_execute_stream_via_local_gemini_files_decision(
+                    self.state,
+                    self.parts,
+                    self.trace_id,
+                    self.decision,
+                    self.plan_kind,
+                )
+                .await?
+            }
+            AiStreamExecutionStep::RemoteDecision => {
+                if let Some(response) = maybe_execute_stream_via_remote_decision(
+                    self.state,
+                    self.parts,
+                    self.trace_id,
+                    self.decision,
+                    self.body_json,
+                    self.plan_kind,
+                )
+                .await?
+                {
+                    LocalExecutionRequestOutcome::Responded(response)
+                } else {
+                    LocalExecutionRequestOutcome::NoPath
+                }
+            }
+        };
+        Ok(to_ai_serving_outcome(outcome))
+    }
+
+    async fn execute_stream_plan_fallback(
+        &self,
+        reason: AiPlanFallbackReason,
+    ) -> Result<AiServingExecutionOutcome<Self::Response, Self::Exhaustion>, Self::Error> {
+        let outcome = maybe_execute_stream_via_plan_fallback(
+            self.state,
+            self.parts,
+            self.trace_id,
+            self.decision,
+            self.body_json,
+            self.body_base64.clone(),
+            self.plan_kind,
+            self.bypass_cache_key.clone(),
+            gateway_fallback_reason(reason),
+        )
+        .await?;
+        Ok(to_ai_serving_outcome(outcome))
+    }
+}
+
+fn to_ai_serving_outcome(
+    outcome: LocalExecutionRequestOutcome,
+) -> AiServingExecutionOutcome<Response<Body>, super::LocalExecutionExhaustion> {
+    match outcome {
         LocalExecutionRequestOutcome::Responded(response) => {
-            Ok(LocalExecutionRequestOutcome::Responded(response))
+            AiServingExecutionOutcome::Responded(response)
         }
         LocalExecutionRequestOutcome::Exhausted(outcome) => {
-            Ok(LocalExecutionRequestOutcome::Exhausted(outcome))
+            AiServingExecutionOutcome::Exhausted(outcome)
         }
-        LocalExecutionRequestOutcome::NoPath => Ok(exhausted
-            .map(LocalExecutionRequestOutcome::Exhausted)
-            .unwrap_or(LocalExecutionRequestOutcome::NoPath)),
+        LocalExecutionRequestOutcome::NoPath => AiServingExecutionOutcome::NoPath,
+    }
+}
+
+fn from_ai_serving_outcome(
+    outcome: AiServingExecutionOutcome<Response<Body>, super::LocalExecutionExhaustion>,
+) -> LocalExecutionRequestOutcome {
+    match outcome {
+        AiServingExecutionOutcome::Responded(response) => {
+            LocalExecutionRequestOutcome::Responded(response)
+        }
+        AiServingExecutionOutcome::Exhausted(outcome) => {
+            LocalExecutionRequestOutcome::Exhausted(outcome)
+        }
+        AiServingExecutionOutcome::NoPath => LocalExecutionRequestOutcome::NoPath,
+    }
+}
+
+fn gateway_fallback_reason(reason: AiPlanFallbackReason) -> GatewayFallbackReason {
+    match reason {
+        AiPlanFallbackReason::RemoteDecisionMiss => GatewayFallbackReason::RemoteDecisionMiss,
+        AiPlanFallbackReason::SchedulerDecisionUnsupported => {
+            GatewayFallbackReason::SchedulerDecisionUnsupported
+        }
     }
 }
 
@@ -228,7 +300,7 @@ async fn maybe_execute_local_video_task_content_stream(
                 trace_id,
                 decision,
                 plan_kind,
-                vec![LocalStreamPlanAndReport {
+                vec![AiStreamAttempt {
                     plan,
                     report_kind: None,
                     report_context: None,

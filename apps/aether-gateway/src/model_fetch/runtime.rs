@@ -759,6 +759,8 @@ mod tests {
                 auth_type: auth_type.to_string(),
                 is_active: true,
                 api_formats: Some(vec![api_format.to_string()]),
+                auth_type_by_format: None,
+                allow_auth_channel_mismatch_formats: None,
                 allowed_models: None,
                 capabilities: None,
                 rate_multipliers: None,
@@ -847,13 +849,13 @@ mod tests {
         let endpoint = sample_endpoint(
             "endpoint-antigravity",
             "provider-antigravity",
-            "gemini:chat",
+            "gemini:generate_content",
         );
         let mut key = sample_key(
             "key-antigravity",
             "provider-antigravity",
             "oauth",
-            &["gemini:chat"],
+            &["gemini:generate_content"],
         );
         key.upstream_metadata = Some(json!({
             "antigravity": {
@@ -869,7 +871,7 @@ mod tests {
             "provider-antigravity",
             "endpoint-antigravity",
             "key-antigravity",
-            "gemini:chat",
+            "gemini:generate_content",
             "oauth",
             Some(r#"{"project_id":"project-1","client_version":"1.2.3","session_id":"sess-1"}"#),
         );

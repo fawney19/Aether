@@ -99,7 +99,7 @@ pub(super) async fn execute_kiro_quota_plan(
             body_ref: None,
         },
         stream: false,
-        client_api_format: "claude:cli".to_string(),
+        client_api_format: "claude:messages".to_string(),
         provider_api_format: "kiro:usage".to_string(),
         model_name: Some("kiro-usage-limits".to_string()),
         proxy,

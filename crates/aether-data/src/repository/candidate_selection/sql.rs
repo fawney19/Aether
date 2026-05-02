@@ -65,18 +65,26 @@ WHERE p.is_active = TRUE
   AND LOWER(pe.api_format) = LOWER($1)
   AND (
     pak.api_formats IS NULL
-    OR (
-      LOWER(BTRIM(p.provider_type)) IN (
-        'claude_code',
-        'codex',
-        'gemini_cli',
-        'vertex_ai',
-        'antigravity'
-      )
+    OR EXISTS (
+      SELECT 1
+      FROM json_array_elements_text(pak.api_formats) AS fmt(value)
+      WHERE LOWER(BTRIM(fmt.value)) = ANY($2::text[])
+    )
+  )
+  AND (
+    (
+      LOWER(BTRIM(p.provider_type)) = 'codex'
       AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+      AND LOWER($3) IN ('openai:responses', 'openai:responses:compact', 'openai:image')
+    )
+    OR (
+      LOWER(BTRIM(p.provider_type)) = 'claude_code'
+      AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+      AND LOWER($3) = 'claude:messages'
     )
     OR (
       LOWER(BTRIM(p.provider_type)) = 'kiro'
+      AND LOWER($3) = 'claude:messages'
       AND (
         LOWER(BTRIM(pak.auth_type)) = 'oauth'
         OR (
@@ -86,10 +94,34 @@ WHERE p.is_active = TRUE
         )
       )
     )
-    OR EXISTS (
-      SELECT 1
-      FROM json_array_elements_text(pak.api_formats) AS fmt(value)
-      WHERE LOWER(fmt.value) = LOWER($1)
+    OR (
+      LOWER(BTRIM(p.provider_type)) IN ('gemini_cli', 'antigravity')
+      AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+      AND LOWER($3) = 'gemini:generate_content'
+    )
+    OR (
+      LOWER(BTRIM(p.provider_type)) = 'vertex_ai'
+      AND (
+        (
+          LOWER(BTRIM(pak.auth_type)) = 'api_key'
+          AND LOWER($3) = 'gemini:generate_content'
+        )
+        OR (
+          LOWER(BTRIM(pak.auth_type)) IN ('service_account', 'vertex_ai')
+          AND LOWER($3) IN ('claude:messages', 'gemini:generate_content')
+        )
+      )
+    )
+    OR (
+      LOWER(BTRIM(p.provider_type)) NOT IN (
+        'claude_code',
+        'codex',
+        'gemini_cli',
+        'vertex_ai',
+        'antigravity',
+        'kiro'
+      )
+      AND LOWER(BTRIM(pak.auth_type)) <> 'oauth'
     )
   )
 ORDER BY
@@ -159,18 +191,26 @@ WHERE p.is_active = TRUE
   AND gm.name = $2
   AND (
     pak.api_formats IS NULL
-    OR (
-      LOWER(BTRIM(p.provider_type)) IN (
-        'claude_code',
-        'codex',
-        'gemini_cli',
-        'vertex_ai',
-        'antigravity'
-      )
+    OR EXISTS (
+      SELECT 1
+      FROM json_array_elements_text(pak.api_formats) AS fmt(value)
+      WHERE LOWER(BTRIM(fmt.value)) = ANY($3::text[])
+    )
+  )
+  AND (
+    (
+      LOWER(BTRIM(p.provider_type)) = 'codex'
       AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+      AND LOWER($4) IN ('openai:responses', 'openai:responses:compact', 'openai:image')
+    )
+    OR (
+      LOWER(BTRIM(p.provider_type)) = 'claude_code'
+      AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+      AND LOWER($4) = 'claude:messages'
     )
     OR (
       LOWER(BTRIM(p.provider_type)) = 'kiro'
+      AND LOWER($4) = 'claude:messages'
       AND (
         LOWER(BTRIM(pak.auth_type)) = 'oauth'
         OR (
@@ -180,10 +220,34 @@ WHERE p.is_active = TRUE
         )
       )
     )
-    OR EXISTS (
-      SELECT 1
-      FROM json_array_elements_text(pak.api_formats) AS fmt(value)
-      WHERE LOWER(fmt.value) = LOWER($1)
+    OR (
+      LOWER(BTRIM(p.provider_type)) IN ('gemini_cli', 'antigravity')
+      AND LOWER(BTRIM(pak.auth_type)) = 'oauth'
+      AND LOWER($4) = 'gemini:generate_content'
+    )
+    OR (
+      LOWER(BTRIM(p.provider_type)) = 'vertex_ai'
+      AND (
+        (
+          LOWER(BTRIM(pak.auth_type)) = 'api_key'
+          AND LOWER($4) = 'gemini:generate_content'
+        )
+        OR (
+          LOWER(BTRIM(pak.auth_type)) IN ('service_account', 'vertex_ai')
+          AND LOWER($4) IN ('claude:messages', 'gemini:generate_content')
+        )
+      )
+    )
+    OR (
+      LOWER(BTRIM(p.provider_type)) NOT IN (
+        'claude_code',
+        'codex',
+        'gemini_cli',
+        'vertex_ai',
+        'antigravity',
+        'kiro'
+      )
+      AND LOWER(BTRIM(pak.auth_type)) <> 'oauth'
     )
   )
 ORDER BY
@@ -228,11 +292,16 @@ impl SqlxMinimalCandidateSelectionReadRepository {
         api_format: &str,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
         let mut rows = Vec::new();
-        for api_format in api_format_aliases(api_format) {
+        let canonical_api_format = normalize_api_format(api_format);
+        let storage_aliases = api_format_aliases(&canonical_api_format);
+        let sql_match_aliases = sql_match_aliases(&storage_aliases);
+        for api_format in storage_aliases {
             rows.extend(
                 Self::collect_query_rows(
                     sqlx::query(LIST_FOR_EXACT_API_FORMAT_SQL)
                         .bind(api_format)
+                        .bind(sql_match_aliases.clone())
+                        .bind(canonical_api_format.clone())
                         .fetch(&self.pool),
                     map_candidate_selection_row,
                 )
@@ -248,12 +317,17 @@ impl SqlxMinimalCandidateSelectionReadRepository {
         global_model_name: &str,
     ) -> Result<Vec<StoredMinimalCandidateSelectionRow>, DataLayerError> {
         let mut rows = Vec::new();
-        for api_format in api_format_aliases(api_format) {
+        let canonical_api_format = normalize_api_format(api_format);
+        let storage_aliases = api_format_aliases(&canonical_api_format);
+        let sql_match_aliases = sql_match_aliases(&storage_aliases);
+        for api_format in storage_aliases {
             rows.extend(
                 Self::collect_query_rows(
                     sqlx::query(LIST_FOR_EXACT_API_FORMAT_AND_GLOBAL_MODEL_SQL)
                         .bind(api_format)
                         .bind(global_model_name)
+                        .bind(sql_match_aliases.clone())
+                        .bind(canonical_api_format.clone())
                         .fetch(&self.pool),
                     map_candidate_selection_row,
                 )
@@ -265,7 +339,18 @@ impl SqlxMinimalCandidateSelectionReadRepository {
 }
 
 fn api_format_aliases(api_format: &str) -> Vec<String> {
-    aether_ai_formats::openai_format_storage_aliases(api_format)
+    aether_ai_formats::api_format_storage_aliases(api_format)
+}
+
+fn normalize_api_format(api_format: &str) -> String {
+    aether_ai_formats::normalize_api_format_alias(api_format)
+}
+
+fn sql_match_aliases(api_formats: &[String]) -> Vec<String> {
+    api_formats
+        .iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .collect()
 }
 
 fn dedupe_candidate_selection_rows(
@@ -521,7 +606,13 @@ fn parse_provider_model_mapping_object_lenient(
     let api_formats = parse_string_list(
         object.get("api_formats").cloned(),
         "models.provider_model_mappings.api_formats",
-    )?;
+    )?
+    .map(|formats| {
+        formats
+            .into_iter()
+            .map(|value| aether_ai_formats::normalize_api_format_alias(&value))
+            .collect()
+    });
 
     Ok(Some(StoredProviderModelMapping {
         name: name.to_string(),

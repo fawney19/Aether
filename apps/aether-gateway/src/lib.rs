@@ -25,8 +25,7 @@
 )]
 
 mod admin_api;
-mod ai_pipeline;
-mod ai_pipeline_api;
+mod ai_serving;
 mod api;
 mod async_task;
 mod audit;
@@ -48,6 +47,7 @@ mod log_ids;
 mod maintenance;
 pub(crate) mod middleware;
 mod model_fetch;
+mod oauth;
 mod orchestration;
 mod provider_key_auth;
 pub(crate) use aether_provider_transport as provider_transport;
@@ -62,10 +62,13 @@ mod usage;
 mod video_tasks;
 mod wallet_runtime;
 
-pub(crate) use self::ai_pipeline_api::{
-    GatewayControlPlanRequest, GatewayControlPlanResponse, GatewayControlSyncDecisionResponse,
-    EXECUTION_RUNTIME_STREAM_DECISION_ACTION, EXECUTION_RUNTIME_SYNC_DECISION_ACTION,
-    GEMINI_FILES_DOWNLOAD_PLAN_KIND, OPENAI_VIDEO_CONTENT_PLAN_KIND,
+pub(crate) use self::ai_serving::api::{
+    AiControlPlanRequest, EXECUTION_RUNTIME_STREAM_DECISION_ACTION,
+    EXECUTION_RUNTIME_SYNC_DECISION_ACTION, GEMINI_FILES_DOWNLOAD_PLAN_KIND,
+    OPENAI_VIDEO_CONTENT_PLAN_KIND,
+};
+pub(crate) use self::ai_serving::{
+    AiExecutionDecision, AiExecutionPlanPayload, AiStreamAttempt, AiSyncAttempt,
 };
 pub use self::async_task::VideoTaskTruthSourceMode;
 pub use self::data::GatewayDataConfig;

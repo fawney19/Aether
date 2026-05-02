@@ -102,7 +102,7 @@ import { BookOpen } from 'lucide-vue-next'
     >
       <h2>3. 添加端点</h2>
       <p class="text-sm text-[#666663] dark:text-[#a3a094] mb-4">
-        添加端点是添加上游支持的端点，并非你需要使用的端点。比如 Anyrouter 只支持 Claude Code 接入，那么就应该仅添加 Claude CLI 端点。
+        添加端点是添加上游支持的端点，并非你需要使用的端点。比如 Anyrouter 只支持 Claude Code 接入，那么就应该添加 Claude Messages 端点，并在 Key 中选择对应认证方式。
       </p>
       <ul class="list-decimal pl-5 space-y-2 text-[#666663] dark:text-[#a3a094] text-sm">
         <li><strong class="text-[#262624] dark:text-[#f1ead8] font-medium">选择格式：</strong>选择上游支持的端点格式。</li>

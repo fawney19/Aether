@@ -428,6 +428,11 @@ pub(crate) async fn record_failed_usage_for_runtime_miss_request(
 pub(crate) fn beautify_local_execution_client_error_message(message: &str) -> String {
     let without_reason_code = strip_parenthesized_reason_code(message);
     let mut simplified = collapse_whitespace(without_reason_code.as_str());
+    if let Some(unavailable_message) =
+        simplify_all_candidates_skipped_client_error_message(simplified.as_str())
+    {
+        return unavailable_message;
+    }
     for marker in [
         "。请检查",
         "。请确认",
@@ -448,6 +453,35 @@ pub(crate) fn beautify_local_execution_client_error_message(message: &str) -> St
         }
     }
     trim_trailing_message_punctuation(simplified.as_str()).to_string()
+}
+
+fn simplify_all_candidates_skipped_client_error_message(message: &str) -> Option<String> {
+    if !message.contains("候选提供商")
+        || !(message.contains("全部不可用") || message.contains("都不满足本次"))
+    {
+        return None;
+    }
+
+    let request_mode = extract_local_execution_request_mode(message)?;
+    if let Some(model) = extract_candidate_supported_model(message) {
+        return Some(format!(
+            "没有可用提供商支持模型 {model} 的{request_mode}请求"
+        ));
+    }
+
+    Some(format!("没有可用提供商支持本次{request_mode}请求"))
+}
+
+fn extract_local_execution_request_mode(message: &str) -> Option<&str> {
+    let rest = message.get(message.find("本次")? + "本次".len()..)?;
+    let mode = rest.get(..rest.find("请求")?)?.trim();
+    (!mode.is_empty()).then_some(mode)
+}
+
+fn extract_candidate_supported_model(message: &str) -> Option<&str> {
+    let rest = message.get(message.find("支持模型 ")? + "支持模型 ".len()..)?;
+    let model = rest.get(..rest.find(" 的")?)?.trim();
+    (!model.is_empty()).then_some(model)
 }
 
 fn strip_parenthesized_reason_code(message: &str) -> String {
@@ -1025,6 +1059,12 @@ mod tests {
                 "请求缺少 model 字段，无法选择上游提供商（openai/chat，原因代码: missing_requested_model）",
             ),
             "请求缺少 model 字段，无法选择上游提供商"
+        );
+        assert_eq!(
+            beautify_local_execution_client_error_message(
+                "找到 1 个支持模型 gpt-5.4 的候选提供商，但本次流式请求全部不可用：provider_quota_blocked 2 次（原因代码: all_candidates_skipped）",
+            ),
+            "没有可用提供商支持模型 gpt-5.4 的流式请求"
         );
     }
 

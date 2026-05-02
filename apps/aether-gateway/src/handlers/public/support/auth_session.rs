@@ -22,7 +22,7 @@ fn base64url_decode(value: &str) -> Result<Vec<u8>, String> {
         .map_err(|_| "无效的Token".to_string())
 }
 
-pub(super) fn create_auth_token(
+pub(crate) fn create_auth_token(
     token_type: &str,
     mut payload: serde_json::Map<String, serde_json::Value>,
     expires_at: chrono::DateTime<chrono::Utc>,
@@ -54,7 +54,7 @@ pub(super) fn create_auth_token(
     ))
 }
 
-pub(super) fn decode_auth_token(
+pub(crate) fn decode_auth_token(
     token: &str,
     expected_type: &str,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
@@ -525,7 +525,7 @@ pub(super) async fn handle_auth_refresh(
     )
 }
 
-pub(super) async fn build_auth_login_success_response(
+pub(crate) async fn build_auth_login_success_response(
     state: &AppState,
     headers: &http::HeaderMap,
     client_device_id: String,

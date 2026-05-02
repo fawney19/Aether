@@ -438,6 +438,10 @@ pub fn build_report_request_candidate_status_record(
     let finished_at_unix_ms = finished_at_unix_ms
         .or(slot.finished_at_unix_ms)
         .or_else(|| is_terminal_candidate_status(status).then_some(terminal_unix_secs));
+    let created_at_unix_ms = non_epoch_unix_ms(slot.created_at_unix_ms)
+        .or_else(|| started_at_unix_ms.and_then(non_epoch_unix_ms))
+        .or_else(|| finished_at_unix_ms.and_then(non_epoch_unix_ms))
+        .unwrap_or(terminal_unix_secs);
 
     UpsertRequestCandidateRecord {
         id: slot.id,
@@ -461,10 +465,14 @@ pub fn build_report_request_candidate_status_record(
         concurrent_requests: None,
         extra_data: slot.extra_data,
         required_capabilities: None,
-        created_at_unix_ms: Some(slot.created_at_unix_ms),
+        created_at_unix_ms: Some(created_at_unix_ms),
         started_at_unix_ms,
         finished_at_unix_ms,
     }
+}
+
+fn non_epoch_unix_ms(value: u64) -> Option<u64> {
+    (value > 1000).then_some(value)
 }
 
 pub fn finalize_execution_request_candidate_report_context(
@@ -1072,7 +1080,43 @@ mod tests {
 
         assert_eq!(record.started_at_unix_ms, Some(123));
         assert_eq!(record.finished_at_unix_ms, Some(123));
-        assert_eq!(record.created_at_unix_ms, Some(10));
+        assert_eq!(record.created_at_unix_ms, Some(123));
         assert_eq!(record.status, RequestCandidateStatus::Success);
+    }
+
+    #[test]
+    fn report_request_candidate_status_record_repairs_epoch_created_at() {
+        let record =
+            build_report_request_candidate_status_record(ReportRequestCandidateStatusRecordInput {
+                slot: SchedulerResolvedReportRequestCandidateSlot {
+                    id: "cand-epoch".to_string(),
+                    request_id: "req-epoch".to_string(),
+                    user_id: None,
+                    api_key_id: None,
+                    candidate_index: 0,
+                    retry_index: 0,
+                    provider_id: Some("provider-1".to_string()),
+                    endpoint_id: Some("endpoint-1".to_string()),
+                    key_id: Some("key-1".to_string()),
+                    extra_data: None,
+                    created_at_unix_ms: 0,
+                    started_at_unix_ms: None,
+                    finished_at_unix_ms: None,
+                },
+                status_update: SchedulerRequestCandidateStatusUpdate {
+                    status: RequestCandidateStatus::Success,
+                    status_code: Some(200),
+                    error_type: None,
+                    error_message: None,
+                    latency_ms: Some(12),
+                    started_at_unix_ms: Some(2_000),
+                    finished_at_unix_ms: Some(3_000),
+                },
+                now_unix_ms: 4_000,
+            });
+
+        assert_eq!(record.created_at_unix_ms, Some(2_000));
+        assert_eq!(record.started_at_unix_ms, Some(2_000));
+        assert_eq!(record.finished_at_unix_ms, Some(3_000));
     }
 }

@@ -81,6 +81,7 @@ pub(in super::super) async fn handle_admin_provider_oauth_batch_import(
         &provider_type,
         payload.credentials.as_str(),
         payload.proxy_node_id.as_deref(),
+        None,
     )
     .await?;
     Ok(build_admin_provider_oauth_batch_import_response(&outcome).into_response())

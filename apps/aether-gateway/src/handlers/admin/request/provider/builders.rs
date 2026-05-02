@@ -313,7 +313,7 @@ impl<'a> AdminAppState<'a> {
 
         let provider_type = provider.provider_type.trim().to_ascii_lowercase();
         if provider_type == "codex"
-            && crate::ai_pipeline::is_openai_responses_format(&existing_endpoint.api_format)
+            && crate::ai_serving::is_openai_responses_format(&existing_endpoint.api_format)
         {
             let has_config_in_payload = fields.contains("config");
             let config_payload = if has_config_in_payload {

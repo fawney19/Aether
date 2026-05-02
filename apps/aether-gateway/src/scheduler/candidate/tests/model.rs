@@ -39,13 +39,13 @@ fn candidate_model_names_keep_base_and_scoped_mappings() {
 #[test]
 fn resolves_mapping_matched_model_from_key_allowed_models() {
     let mut row = sample_row();
-    row.key_allowed_models = Some(vec!["gpt-4.1-canary".to_string()]);
+    row.key_allowed_models = Some(vec!["gpt-4.1-upstream".to_string()]);
 
     let resolved = resolve_provider_model_name(&row, "gpt-4.1", "openai:chat")
         .expect("candidate should resolve");
 
     assert_eq!(resolved.0, "gpt-4.1-canary");
-    assert_eq!(resolved.1, Some("gpt-4.1-canary".to_string()));
+    assert_eq!(resolved.1, Some("gpt-4.1-upstream".to_string()));
 }
 
 #[test]
@@ -152,7 +152,7 @@ async fn enumerate_minimal_candidate_selection_resolves_provider_model_alias() {
 }
 
 #[tokio::test]
-async fn enumerate_minimal_candidate_selection_keeps_all_rows_supporting_requested_model() {
+async fn enumerate_minimal_candidate_selection_keeps_only_resolved_global_model_rows() {
     let mut exact = sample_row();
     exact.provider_id = "provider-exact".to_string();
     exact.endpoint_id = "endpoint-exact".to_string();
@@ -199,11 +199,8 @@ async fn enumerate_minimal_candidate_selection_keeps_all_rows_supporting_request
         .iter()
         .map(|candidate| candidate.provider_id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(provider_ids, vec!["provider-exact", "provider-mapped"]);
-    assert_eq!(
-        selection[1].selected_provider_model_name,
-        "claude-sonnet-upstream"
-    );
+    assert_eq!(provider_ids, vec!["provider-exact"]);
+    assert_eq!(selection[0].selected_provider_model_name, "gpt-5");
 }
 
 #[tokio::test]

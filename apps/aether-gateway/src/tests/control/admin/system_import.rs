@@ -348,8 +348,14 @@ async fn gateway_imports_admin_system_config_locally_and_persists_data() {
         .expect("keys should load");
     assert_eq!(keys.len(), 1);
     assert_eq!(
-        decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &keys[0].encrypted_api_key)
-            .expect("api key should decrypt"),
+        decrypt_python_fernet_ciphertext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            keys[0]
+                .encrypted_api_key
+                .as_deref()
+                .expect("api key should be present"),
+        )
+        .expect("api key should decrypt"),
         "sk-import-123"
     );
 
@@ -1018,8 +1024,14 @@ async fn gateway_imports_oauth_provider_key_credentials_from_admin_system_config
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].auth_type, "oauth");
     assert_eq!(
-        decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &keys[0].encrypted_api_key)
-            .expect("oauth access token should decrypt"),
+        decrypt_python_fernet_ciphertext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            keys[0]
+                .encrypted_api_key
+                .as_deref()
+                .expect("api key should be present"),
+        )
+        .expect("oauth access token should decrypt"),
         "oauth-access-token-1"
     );
     let auth_config = decrypt_python_fernet_ciphertext(
@@ -1108,8 +1120,14 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
     assert_eq!(keys.len(), 1);
     assert_eq!(keys[0].name, "oauth-primary");
     assert_eq!(
-        decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &keys[0].encrypted_api_key)
-            .expect("oauth access token should decrypt"),
+        decrypt_python_fernet_ciphertext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            keys[0]
+                .encrypted_api_key
+                .as_deref()
+                .expect("api key should be present"),
+        )
+        .expect("oauth access token should decrypt"),
         "oauth-access-token-new"
     );
     let auth_config = decrypt_python_fernet_ciphertext(
@@ -1282,8 +1300,13 @@ async fn gateway_overwrites_oauth_provider_key_credentials_from_admin_system_imp
     assert_eq!(key.oauth_invalid_reason, None);
     assert!(key.expires_at_unix_secs.is_some());
     assert_eq!(
-        decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &key.encrypted_api_key)
-            .expect("oauth access token should decrypt"),
+        decrypt_python_fernet_ciphertext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            key.encrypted_api_key
+                .as_deref()
+                .expect("api key should be present"),
+        )
+        .expect("oauth access token should decrypt"),
         "oauth-access-token-refreshed"
     );
 

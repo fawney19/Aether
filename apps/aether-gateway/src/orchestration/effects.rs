@@ -4,6 +4,7 @@ use aether_admin::provider::quota as admin_provider_quota_pure;
 use aether_contracts::{ExecutionPlan, ExecutionTelemetry};
 use aether_scheduler_core::{
     build_scheduler_affinity_cache_key_for_api_key_id, count_recent_rpm_requests_for_provider_key,
+    SchedulerAffinityTarget,
 };
 use aether_usage_runtime::{
     build_stream_terminal_usage_outcome, build_sync_terminal_usage_outcome,
@@ -17,13 +18,14 @@ use super::{
     project_local_adaptive_success, project_local_failure_health, project_local_success_health,
     LocalFailoverClassification,
 };
-use crate::ai_pipeline::extract_pool_sticky_session_token;
+use crate::ai_serving::extract_pool_sticky_session_token;
 use crate::clock::current_unix_secs;
 use crate::handlers::shared::provider_pool::admin_provider_pool_config_from_config_value;
 use crate::handlers::shared::provider_pool::{
     record_admin_provider_pool_error, record_admin_provider_pool_stream_timeout,
     record_admin_provider_pool_success, AdminProviderPoolConfig,
 };
+use crate::scheduler::affinity::SCHEDULER_AFFINITY_TTL;
 use crate::AppState;
 
 #[derive(Debug, Clone, Copy)]
@@ -96,6 +98,7 @@ struct PoolFeedbackContext {
 }
 
 const ADAPTIVE_RPM_RECENT_CANDIDATE_LIMIT: usize = 512;
+const LOCAL_EXECUTION_SCHEDULER_AFFINITY_MAX_ENTRIES: usize = 10_000;
 
 pub(crate) async fn apply_local_execution_effect(
     state: &AppState,
@@ -153,6 +156,40 @@ fn local_scheduler_affinity_cache_key(report_context: Option<&Value>) -> Option<
         report_context_string_field(report_context, "client_api_format")?,
         report_context_string_field(report_context, "model")?,
     )
+}
+
+fn local_scheduler_affinity_target(plan: &ExecutionPlan) -> Option<SchedulerAffinityTarget> {
+    let provider_id = plan.provider_id.trim();
+    let endpoint_id = plan.endpoint_id.trim();
+    let key_id = plan.key_id.trim();
+    if provider_id.is_empty() || endpoint_id.is_empty() || key_id.is_empty() {
+        return None;
+    }
+
+    Some(SchedulerAffinityTarget {
+        provider_id: provider_id.to_string(),
+        endpoint_id: endpoint_id.to_string(),
+        key_id: key_id.to_string(),
+    })
+}
+
+fn remember_successful_local_scheduler_affinity(
+    state: &AppState,
+    context: LocalExecutionEffectContext<'_>,
+) {
+    let Some(cache_key) = local_scheduler_affinity_cache_key(context.report_context) else {
+        return;
+    };
+    let Some(target) = local_scheduler_affinity_target(context.plan) else {
+        return;
+    };
+
+    state.remember_scheduler_affinity_target(
+        &cache_key,
+        target,
+        SCHEDULER_AFFINITY_TTL,
+        LOCAL_EXECUTION_SCHEDULER_AFFINITY_MAX_ENTRIES,
+    );
 }
 
 fn pool_feedback_request_body<'a>(
@@ -415,6 +452,8 @@ async fn record_health_success_effect(
     context: LocalExecutionEffectContext<'_>,
     _effect: LocalHealthSuccessEffect,
 ) {
+    remember_successful_local_scheduler_affinity(state, context);
+
     let api_format = context.plan.provider_api_format.trim();
     if api_format.is_empty() {
         return;
@@ -574,16 +613,12 @@ fn local_candidate_failure_should_invalidate_affinity(
 
     match classification {
         LocalFailoverClassification::RetrySuccessPattern
-        | LocalFailoverClassification::RetrySemanticCompatibilityError
-        | LocalFailoverClassification::RetrySemanticRateLimit
-        | LocalFailoverClassification::RetrySemanticThinkingError
         | LocalFailoverClassification::RetryStatusCode
         | LocalFailoverClassification::RetryUpstreamFailure => true,
         LocalFailoverClassification::UseDefault | LocalFailoverClassification::StopStatusCode => {
             status_code >= 500
         }
-        LocalFailoverClassification::StopErrorPattern
-        | LocalFailoverClassification::StopSemanticClientError => false,
+        LocalFailoverClassification::StopErrorPattern => false,
     }
 }
 
@@ -998,7 +1033,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn semantic_client_error_keeps_scheduler_affinity_cache() {
+    async fn configured_stop_pattern_keeps_scheduler_affinity_cache() {
         let state = AppState::new().expect("gateway state should build");
         let plan = sample_plan();
         let report_context = json!({
@@ -1029,7 +1064,7 @@ mod tests {
             },
             LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
                 status_code: 400,
-                classification: LocalFailoverClassification::StopSemanticClientError,
+                classification: LocalFailoverClassification::StopErrorPattern,
             }),
         )
         .await;
@@ -1039,14 +1074,110 @@ mod tests {
             .is_some());
     }
 
+    #[tokio::test]
+    async fn success_remembers_scheduler_affinity_cache_for_final_candidate() {
+        let state = AppState::new().expect("gateway state should build");
+        let plan = sample_plan();
+        let report_context = json!({
+            "api_key_id": "api-key-1",
+            "client_api_format": "openai:chat",
+            "model": "gpt-5",
+        });
+        let cache_key =
+            build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
+                .expect("scheduler affinity cache key should build");
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &plan,
+                report_context: Some(&report_context),
+            },
+            LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+        )
+        .await;
+
+        assert_eq!(
+            state.read_scheduler_affinity_target(cache_key.as_str(), SCHEDULER_AFFINITY_TTL),
+            Some(SchedulerAffinityTarget {
+                provider_id: "prov-1".to_string(),
+                endpoint_id: "ep-1".to_string(),
+                key_id: "key-1".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_success_rewarms_scheduler_affinity_after_failed_candidate_invalidates() {
+        let state = AppState::new().expect("gateway state should build");
+        let failed_plan = sample_plan();
+        let mut success_plan = sample_plan();
+        success_plan.provider_id = "prov-2".to_string();
+        success_plan.endpoint_id = "ep-2".to_string();
+        success_plan.key_id = "key-2".to_string();
+        let report_context = json!({
+            "api_key_id": "api-key-1",
+            "client_api_format": "openai:chat",
+            "model": "gpt-5",
+        });
+        let cache_key =
+            build_scheduler_affinity_cache_key_for_api_key_id("api-key-1", "openai:chat", "gpt-5")
+                .expect("scheduler affinity cache key should build");
+
+        state.scheduler_affinity_cache.insert(
+            cache_key.clone(),
+            SchedulerAffinityTarget {
+                provider_id: "prov-1".to_string(),
+                endpoint_id: "ep-1".to_string(),
+                key_id: "key-1".to_string(),
+            },
+            SCHEDULER_AFFINITY_TTL,
+            16,
+        );
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &failed_plan,
+                report_context: Some(&report_context),
+            },
+            LocalExecutionEffect::AttemptFailure(LocalAttemptFailureEffect {
+                status_code: 429,
+                classification: LocalFailoverClassification::RetryUpstreamFailure,
+            }),
+        )
+        .await;
+        assert!(state
+            .read_scheduler_affinity_target(cache_key.as_str(), SCHEDULER_AFFINITY_TTL)
+            .is_none());
+
+        apply_local_execution_effect(
+            &state,
+            LocalExecutionEffectContext {
+                plan: &success_plan,
+                report_context: Some(&report_context),
+            },
+            LocalExecutionEffect::HealthSuccess(LocalHealthSuccessEffect),
+        )
+        .await;
+
+        assert_eq!(
+            state.read_scheduler_affinity_target(cache_key.as_str(), SCHEDULER_AFFINITY_TTL),
+            Some(SchedulerAffinityTarget {
+                provider_id: "prov-2".to_string(),
+                endpoint_id: "ep-2".to_string(),
+                key_id: "key-2".to_string(),
+            })
+        );
+    }
+
     #[test]
-    fn semantic_client_error_does_not_penalize_pool_feedback() {
+    fn configured_stop_pattern_does_not_penalize_pool_feedback() {
         assert!(!local_candidate_failure_should_record_pool_error(
-            LocalFailoverClassification::StopSemanticClientError,
+            LocalFailoverClassification::StopErrorPattern,
             400,
         ));
         assert!(local_candidate_failure_should_record_pool_error(
-            LocalFailoverClassification::RetrySemanticRateLimit,
+            LocalFailoverClassification::RetryUpstreamFailure,
             429,
         ));
     }
@@ -1225,7 +1356,7 @@ mod tests {
             },
             LocalExecutionEffect::AdaptiveRateLimit(LocalAdaptiveRateLimitEffect {
                 status_code: 429,
-                classification: LocalFailoverClassification::RetrySemanticRateLimit,
+                classification: LocalFailoverClassification::RetryUpstreamFailure,
                 headers: Some(&BTreeMap::from([(
                     "x-ratelimit-limit-requests".to_string(),
                     "42".to_string(),
@@ -1294,7 +1425,7 @@ mod tests {
             },
             LocalExecutionEffect::AdaptiveRateLimit(LocalAdaptiveRateLimitEffect {
                 status_code: 429,
-                classification: LocalFailoverClassification::RetrySemanticRateLimit,
+                classification: LocalFailoverClassification::RetryUpstreamFailure,
                 headers: Some(&BTreeMap::from([(
                     "x-ratelimit-limit-requests".to_string(),
                     "42".to_string(),
@@ -1316,7 +1447,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adaptive_rate_limit_effect_persists_zero_rpm_count_for_unknown_429() {
+    async fn adaptive_rate_limit_effect_records_429_as_rpm_observation() {
         let mut key = sample_health_key();
         key.rpm_limit = None;
         key.learned_rpm_limit = Some(20);
@@ -1344,9 +1475,9 @@ mod tests {
             .into_iter()
             .next()
             .expect("stored key should exist");
-        assert_eq!(stored_key.rpm_429_count, Some(0));
-        assert_eq!(stored_key.learned_rpm_limit, Some(19));
-        assert_eq!(stored_key.last_429_type.as_deref(), Some("unknown"));
+        assert_eq!(stored_key.rpm_429_count, Some(1));
+        assert_eq!(stored_key.learned_rpm_limit, Some(20));
+        assert_eq!(stored_key.last_429_type.as_deref(), Some("rpm"));
     }
 
     #[tokio::test]

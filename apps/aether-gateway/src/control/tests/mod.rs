@@ -61,7 +61,14 @@ fn builds_public_request_context_from_request_parts() {
             .control_decision
             .as_ref()
             .and_then(|value| value.route_kind.as_deref()),
-        Some("cli")
+        Some("generate_content")
+    );
+    assert_eq!(
+        context
+            .control_decision
+            .as_ref()
+            .and_then(|value| value.request_auth_channel.as_deref()),
+        Some("bearer_like")
     );
 }
 

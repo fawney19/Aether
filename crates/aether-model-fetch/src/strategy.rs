@@ -291,7 +291,7 @@ async fn fetch_vertex_api_key_models(
             &url,
             auth_config,
             "google",
-            "gemini:chat",
+            "gemini:generate_content",
             None,
         )
         .await?;
@@ -362,8 +362,8 @@ async fn fetch_vertex_service_account_models(
             format!("https://{region}-aiplatform.googleapis.com")
         };
         for (publisher, transport, api_format) in [
-            ("google", gemini_transport, "gemini:chat"),
-            ("anthropic", claude_transport, "claude:chat"),
+            ("google", gemini_transport, "gemini:generate_content"),
+            ("anthropic", claude_transport, "claude:messages"),
         ] {
             let url =
                 build_vertex_service_account_list_url(&base, &project_id, &region, publisher, None);
@@ -517,7 +517,7 @@ async fn exchange_vertex_service_account_token(
             body_ref: None,
         },
         stream: false,
-        client_api_format: "gemini:chat".to_string(),
+        client_api_format: "gemini:generate_content".to_string(),
         provider_api_format: "vertex_ai:service_account_token".to_string(),
         model_name: Some("token".to_string()),
         proxy: runtime.resolve_model_fetch_proxy(transport).await,
@@ -618,7 +618,7 @@ fn parse_antigravity_models_response(body: &Value) -> Result<(Vec<Value>, Option
             "object": "model",
             "owned_by": "antigravity",
             "display_name": display_name,
-            "api_formats": ["gemini:chat"],
+            "api_formats": ["gemini:generate_content"],
         }));
 
         let quota_payload = build_antigravity_quota_payload(model_object.get("quotaInfo"));
@@ -844,7 +844,9 @@ fn vertex_effective_format(model_id: &str, auth_config: Option<&Value>) -> Strin
                     && model_id.starts_with(prefix)
                     && api_format.as_str().is_some()
                 {
-                    return normalize_api_format(api_format.as_str().unwrap_or("gemini:chat"));
+                    return normalize_api_format(
+                        api_format.as_str().unwrap_or("gemini:generate_content"),
+                    );
                 }
             }
         }
@@ -856,9 +858,9 @@ fn vertex_effective_format(model_id: &str, auth_config: Option<&Value>) -> Strin
         }
     }
     if model_id.starts_with("claude-") {
-        "claude:chat".to_string()
+        "claude:messages".to_string()
     } else {
-        "gemini:chat".to_string()
+        "gemini:generate_content".to_string()
     }
 }
 
@@ -1150,9 +1152,9 @@ mod tests {
             endpoint: GatewayProviderTransportEndpoint {
                 id: "endpoint-1".to_string(),
                 provider_id: "provider-1".to_string(),
-                api_format: "gemini:cli".to_string(),
+                api_format: "gemini:generate_content".to_string(),
                 api_family: Some("gemini".to_string()),
-                endpoint_kind: Some("cli".to_string()),
+                endpoint_kind: Some("generate_content".to_string()),
                 is_active: true,
                 base_url: "https://aiplatform.googleapis.com".to_string(),
                 header_rules: None,
@@ -1169,7 +1171,10 @@ mod tests {
                 name: "key".to_string(),
                 auth_type: "api_key".to_string(),
                 is_active: true,
-                api_formats: Some(vec!["gemini:cli".to_string()]),
+                api_formats: Some(vec!["gemini:generate_content".to_string()]),
+                auth_type_by_format: None,
+                allow_auth_channel_mismatch_formats: None,
+
                 allowed_models: None,
                 capabilities: None,
                 rate_multipliers: None,
@@ -1204,7 +1209,7 @@ mod tests {
         assert_eq!(outcome.cached_models.len(), 1);
         assert_eq!(
             outcome.cached_models[0]["api_formats"][0].as_str(),
-            Some("gemini:chat")
+            Some("gemini:generate_content")
         );
     }
 }

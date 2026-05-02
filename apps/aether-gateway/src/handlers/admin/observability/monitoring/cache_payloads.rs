@@ -30,7 +30,10 @@ pub(super) fn admin_monitoring_masked_provider_key_prefix(
         "service_account" | "vertex_ai" => Some("[Service Account]".to_string()),
         "oauth" => Some("[OAuth Token]".to_string()),
         _ => {
-            let full_key = admin_monitoring_try_decrypt_secret(state, &key.encrypted_api_key)?;
+            let full_key = key
+                .encrypted_api_key
+                .as_deref()
+                .and_then(|ciphertext| admin_monitoring_try_decrypt_secret(state, ciphertext))?;
             if full_key.len() <= 12 {
                 Some(format!("{full_key}***"))
             } else {

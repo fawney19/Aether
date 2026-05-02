@@ -7,6 +7,7 @@ import {
   isRefreshFailedReason,
 } from './accountBlock'
 import {
+  canRefreshOAuthCredential,
   isOAuthManagedCredential,
   type ProviderKeyAuthCarrier,
 } from './providerKeyAuth'
@@ -157,6 +158,19 @@ function mergeOAuthStatusDisplay(
   return snapshotStatus ?? legacyStatus
 }
 
+function isOAuthCredentialWithoutRefreshToken(input: ProviderKeyStatusCarrier): boolean {
+  return isOAuthManagedCredential(input) && !canRefreshOAuthCredential(input)
+}
+
+function getMissingRefreshTokenStatus(): OAuthStatusInfo {
+  return {
+    text: '未添加',
+    isExpired: false,
+    isExpiringSoon: false,
+    isInvalid: false,
+  }
+}
+
 export function getOAuthStatusDisplay(
   input: ProviderKeyStatusCarrier,
   tick: number,
@@ -167,12 +181,38 @@ export function getOAuthStatusDisplay(
   )
 }
 
+export function getOAuthStatusDisplayWithFallback(
+  input: ProviderKeyStatusCarrier,
+  tick: number,
+): OAuthStatusInfo | null {
+  if (isOAuthCredentialWithoutRefreshToken(input)) {
+    return getMissingRefreshTokenStatus()
+  }
+
+  const status = getOAuthStatusDisplay(input, tick)
+  if (status) return status
+  if (!isOAuthManagedCredential(input)) return null
+
+  return {
+    text: '有效期未知',
+    isExpired: false,
+    isExpiringSoon: false,
+    isInvalid: false,
+  }
+}
+
 export function getOAuthStatusTitle(
   input: ProviderKeyStatusCarrier,
   tick: number,
 ): string {
+  if (isOAuthCredentialWithoutRefreshToken(input)) {
+    return 'Refresh Token 未添加，无法自动刷新'
+  }
+
   const status = getOAuthStatusDisplay(input, tick)
-  if (!status) return ''
+  if (!status) {
+    return isOAuthManagedCredential(input) ? 'Token 有效期未知' : ''
+  }
   if (status.isInvalid) {
     const reason = normalizeText(status.invalidReason)
     return reason ? `Token 已失效: ${reason}` : 'Token 已失效'
@@ -187,6 +227,13 @@ export function getOAuthRefreshButtonTitle(
   input: ProviderKeyStatusCarrier,
   tick: number,
 ): string {
+  if (isOAuthManagedCredential(input) && !canRefreshOAuthCredential(input)) {
+    if (input.oauth_temporary === true) {
+      return '仅 Access Token 导入，无法自动刷新，到期后需要重新导入'
+    }
+    return '当前 OAuth 凭据无法自动刷新，到期后需要重新导入'
+  }
+
   const status = getOAuthStatusDisplay(input, tick)
   if (status?.isInvalid || status?.isExpired) {
     return '重新授权'

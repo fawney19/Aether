@@ -19,21 +19,17 @@ pub(crate) fn provider_oauth_runtime_endpoint_for_provider(
             .iter()
             .find(|endpoint| {
                 endpoint.is_active
-                    && crate::ai_pipeline::is_openai_responses_format(&endpoint.api_format)
+                    && crate::ai_serving::is_openai_responses_format(&endpoint.api_format)
             })
             .cloned(),
         "antigravity" => endpoints
             .iter()
             .find(|endpoint| {
                 endpoint.is_active
-                    && (endpoint
+                    && endpoint
                         .api_format
                         .trim()
-                        .eq_ignore_ascii_case("gemini:chat")
-                        || endpoint
-                            .api_format
-                            .trim()
-                            .eq_ignore_ascii_case("gemini:cli"))
+                        .eq_ignore_ascii_case("gemini:generate_content")
             })
             .cloned(),
         "kiro" => endpoints
@@ -43,7 +39,7 @@ pub(crate) fn provider_oauth_runtime_endpoint_for_provider(
                     && endpoint
                         .api_format
                         .trim()
-                        .eq_ignore_ascii_case("claude:cli")
+                        .eq_ignore_ascii_case("claude:messages")
             })
             .cloned()
             .or_else(|| {

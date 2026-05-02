@@ -37,23 +37,24 @@ impl<'a> AdminAppState<'a> {
         encrypted_auth_config: Option<&str>,
         expires_at_unix_secs: Option<u64>,
     ) -> Result<bool, GatewayError> {
-        self.app
-            .update_provider_catalog_key_oauth_credentials(
-                key_id,
-                encrypted_api_key,
-                encrypted_auth_config,
-                expires_at_unix_secs,
-            )
-            .await
+        crate::oauth::ProviderOAuthRepository::update_provider_catalog_key_oauth_credentials(
+            self,
+            key_id,
+            encrypted_api_key,
+            encrypted_auth_config,
+            expires_at_unix_secs,
+        )
+        .await
     }
 
     pub(crate) async fn clear_provider_catalog_key_oauth_invalid_marker(
         &self,
         key_id: &str,
     ) -> Result<bool, GatewayError> {
-        self.app
-            .clear_provider_catalog_key_oauth_invalid_marker(key_id)
-            .await
+        crate::oauth::ProviderOAuthRepository::clear_provider_catalog_key_oauth_invalid_marker(
+            self, key_id,
+        )
+        .await
     }
 
     pub(crate) async fn force_local_oauth_refresh_entry(
@@ -61,7 +62,8 @@ impl<'a> AdminAppState<'a> {
         transport: &AdminGatewayProviderTransportSnapshot,
     ) -> Result<Option<crate::provider_transport::CachedOAuthEntry>, AdminLocalOAuthRefreshError>
     {
-        self.app.force_local_oauth_refresh_entry(transport).await
+        crate::oauth::ProviderOAuthRepository::force_local_oauth_refresh_entry(self, transport)
+            .await
     }
 
     pub(crate) async fn save_provider_oauth_state(
@@ -425,23 +427,12 @@ impl<'a> AdminAppState<'a> {
         temporary_proxy_node_id: Option<&str>,
         configured_proxies: &[Option<&serde_json::Value>],
     ) -> Option<ProxySnapshot> {
-        if let Some(snapshot) = self
-            .resolve_admin_proxy_node_snapshot(temporary_proxy_node_id)
-            .await
-        {
-            return Some(snapshot);
-        }
-
-        for proxy in configured_proxies {
-            if let Some(snapshot) = self
-                .app
-                .resolve_configured_proxy_snapshot_with_tunnel_affinity(*proxy)
-                .await
-            {
-                return Some(snapshot);
-            }
-        }
-        self.app.resolve_system_proxy_snapshot().await
+        crate::oauth::resolve_provider_oauth_operation_proxy_snapshot(
+            self,
+            temporary_proxy_node_id,
+            configured_proxies,
+        )
+        .await
     }
 
     pub(crate) async fn find_duplicate_provider_oauth_key(
@@ -453,7 +444,7 @@ impl<'a> AdminAppState<'a> {
         Option<aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey>,
         String,
     > {
-        crate::handlers::admin::provider::oauth::duplicates::find_duplicate_provider_oauth_key(
+        crate::oauth::ProviderOAuthRepository::find_duplicate_provider_oauth_key(
             self,
             provider_id,
             auth_config,
@@ -476,7 +467,7 @@ impl<'a> AdminAppState<'a> {
         Option<aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey>,
         GatewayError,
     > {
-        crate::handlers::admin::provider::oauth::provisioning::create_provider_oauth_catalog_key(
+        crate::oauth::ProviderOAuthRepository::create_provider_oauth_catalog_key(
             self,
             provider_id,
             provider_type,
@@ -503,7 +494,7 @@ impl<'a> AdminAppState<'a> {
         Option<aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey>,
         GatewayError,
     > {
-        crate::handlers::admin::provider::oauth::provisioning::update_existing_provider_oauth_catalog_key(
+        crate::oauth::ProviderOAuthRepository::update_existing_provider_oauth_catalog_key(
             self,
             existing_key,
             provider_type,
@@ -522,7 +513,7 @@ impl<'a> AdminAppState<'a> {
         key_id: &str,
         proxy_override: Option<&ProxySnapshot>,
     ) -> Result<(bool, Option<String>), GatewayError> {
-        crate::handlers::admin::provider::oauth::runtime::refresh_provider_oauth_account_state_after_update(
+        crate::oauth::ProviderOAuthRepository::refresh_provider_oauth_account_state_after_update(
             self,
             provider,
             key_id,
@@ -618,56 +609,31 @@ impl<'a> AdminAppState<'a> {
         body_bytes: Option<Vec<u8>>,
         proxy: Option<ProxySnapshot>,
     ) -> Result<AdminProviderOAuthHttpResponse, String> {
-        let body = if let Some(json_body) = json_body {
-            RequestBody::from_json(json_body)
-        } else {
-            RequestBody {
-                json_body: None,
-                body_bytes_b64: body_bytes.map(|bytes| STANDARD.encode(bytes)),
-                body_ref: None,
-            }
-        };
-        let timeout_ms = admin_provider_oauth_timeout_ms(proxy.as_ref());
-        let plan = ExecutionPlan {
+        let network = aether_oauth::network::OAuthNetworkContext::provider_operation(proxy);
+        let request = aether_oauth::network::OAuthHttpRequest {
             request_id: request_id.to_string(),
-            candidate_id: None,
-            provider_name: Some("provider_oauth".to_string()),
-            provider_id: String::new(),
-            endpoint_id: String::new(),
-            key_id: String::new(),
-            method: method.as_str().to_string(),
+            method,
             url: url.to_string(),
             headers: admin_provider_oauth_execution_headers(headers),
             content_type: content_type
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned),
-            content_encoding: None,
-            body,
-            stream: false,
-            client_api_format: "provider_oauth:exchange".to_string(),
-            provider_api_format: "provider_oauth:exchange".to_string(),
-            model_name: Some("oauth-exchange".to_string()),
-            proxy,
-            tls_profile: None,
-            timeouts: Some(ExecutionTimeouts {
-                connect_ms: Some(timeout_ms),
-                read_ms: Some(timeout_ms),
-                write_ms: Some(timeout_ms),
-                pool_ms: Some(timeout_ms),
-                total_ms: Some(timeout_ms),
-                ..ExecutionTimeouts::default()
-            }),
+            json_body,
+            body_bytes,
+            network,
         };
-        let result = self
-            .execute_execution_runtime_sync_plan(None, &plan)
-            .await
-            .map_err(admin_provider_oauth_gateway_error_message)?;
+        let response = aether_oauth::network::OAuthHttpExecutor::execute(
+            &crate::oauth::GatewayOAuthHttpExecutor::new(*self),
+            request,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
         Ok(AdminProviderOAuthHttpResponse {
-            status: http::StatusCode::from_u16(result.status_code)
+            status: http::StatusCode::from_u16(response.status_code)
                 .unwrap_or(http::StatusCode::BAD_GATEWAY),
-            body_text: admin_provider_oauth_execution_body_text(&result),
-            json_body: admin_provider_oauth_execution_json_body(&result),
+            body_text: response.body_text,
+            json_body: response.json_body,
         })
     }
 }

@@ -305,17 +305,17 @@ fn admin_pool_quota_window_reset_seconds(
     window: &serde_json::Map<String, serde_json::Value>,
     now_unix_secs: u64,
 ) -> Option<f64> {
-    if let Some(reset_at) = admin_pool_json_to_u64(window.get("reset_at")) {
-        return Some(reset_at.saturating_sub(now_unix_secs) as f64);
+    if let Some(remaining) = admin_pool_json_to_f64(window.get("reset_seconds")) {
+        let observed_at_unix_secs = admin_pool_json_to_u64(quota_snapshot.get("observed_at"))
+            .or_else(|| admin_pool_json_to_u64(quota_snapshot.get("updated_at")));
+        let elapsed = observed_at_unix_secs
+            .map(|observed_at| now_unix_secs.saturating_sub(observed_at) as f64)
+            .unwrap_or(0.0);
+        return Some((remaining - elapsed).max(0.0));
     }
 
-    let remaining = admin_pool_json_to_f64(window.get("reset_seconds"))?;
-    let observed_at_unix_secs = admin_pool_json_to_u64(quota_snapshot.get("observed_at"))
-        .or_else(|| admin_pool_json_to_u64(quota_snapshot.get("updated_at")));
-    let elapsed = observed_at_unix_secs
-        .map(|observed_at| now_unix_secs.saturating_sub(observed_at) as f64)
-        .unwrap_or(0.0);
-    Some((remaining - elapsed).max(0.0))
+    admin_pool_json_to_u64(window.get("reset_at"))
+        .map(|reset_at| reset_at.saturating_sub(now_unix_secs) as f64)
 }
 
 fn admin_pool_codex_quota_part_from_window(
@@ -323,6 +323,7 @@ fn admin_pool_codex_quota_part_from_window(
     window_code: &str,
     label: &str,
     now_unix_secs: u64,
+    show_reset_without_consumption: bool,
 ) -> Option<String> {
     let window = admin_pool_quota_window(quota_snapshot, window_code)?;
     let used_percent = admin_pool_quota_window_used_percent(window)?;
@@ -338,7 +339,9 @@ fn admin_pool_codex_quota_part_from_window(
         "{label}剩余 {}",
         admin_pool_format_percent(100.0 - effective_used_percent)
     );
-    if admin_pool_has_quota_consumption(Some(effective_used_percent)) {
+    if show_reset_without_consumption
+        || admin_pool_has_quota_consumption(Some(effective_used_percent))
+    {
         if let Some(reset_text) = reset_seconds.and_then(admin_pool_format_reset_after) {
             part.push_str(&format!(" ({reset_text})"));
         }
@@ -351,15 +354,27 @@ fn admin_pool_build_codex_account_quota_from_snapshot(
 ) -> Option<String> {
     let now_unix_secs = chrono::Utc::now().timestamp().max(0) as u64;
     let mut parts = Vec::new();
+    let exhausted = quota_snapshot
+        .get("exhausted")
+        .and_then(admin_provider_quota_pure::coerce_json_bool)
+        .unwrap_or(false);
 
-    if let Some(part) =
-        admin_pool_codex_quota_part_from_window(quota_snapshot, "weekly", "周", now_unix_secs)
-    {
+    if let Some(part) = admin_pool_codex_quota_part_from_window(
+        quota_snapshot,
+        "weekly",
+        "周",
+        now_unix_secs,
+        exhausted,
+    ) {
         parts.push(part);
     }
-    if let Some(part) =
-        admin_pool_codex_quota_part_from_window(quota_snapshot, "5h", "5H", now_unix_secs)
-    {
+    if let Some(part) = admin_pool_codex_quota_part_from_window(
+        quota_snapshot,
+        "5h",
+        "5H",
+        now_unix_secs,
+        exhausted,
+    ) {
         parts.push(part);
     }
 
@@ -798,6 +813,12 @@ pub(super) fn build_admin_pool_key_payload(
     } else {
         Vec::new()
     };
+    let oauth_temporary = auth_semantics.can_show_oauth_metadata()
+        && auth_config
+            .as_ref()
+            .and_then(|config| config.get("access_token_import_temporary"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
     let account_status_code = admin_pool_trimmed_string_from_map(account_snapshot, "code");
     let account_status_label =
         admin_pool_trimmed_string(account_snapshot.and_then(|item| item.get("label")));
@@ -831,6 +852,14 @@ pub(super) fn build_admin_pool_key_payload(
     payload.insert("key_name".to_string(), json!(key.name));
     payload.insert("is_active".to_string(), json!(key.is_active));
     payload.insert("auth_type".to_string(), json!(key.auth_type));
+    payload.insert(
+        "auth_type_by_format".to_string(),
+        json!(key.auth_type_by_format),
+    );
+    payload.insert(
+        "allow_auth_channel_mismatch_formats".to_string(),
+        json!(key.allow_auth_channel_mismatch_formats),
+    );
     payload.insert(
         "credential_kind".to_string(),
         json!(auth_semantics.credential_kind().as_str()),
@@ -875,6 +904,7 @@ pub(super) fn build_admin_pool_key_payload(
         "oauth_organizations".to_string(),
         serde_json::Value::Array(oauth_organizations),
     );
+    payload.insert("oauth_temporary".to_string(), json!(oauth_temporary));
     payload.insert(
         "account_status_code".to_string(),
         json!(account_status_code),
@@ -1005,6 +1035,10 @@ pub(super) fn build_admin_pool_key_payload(
     );
     payload.insert(
         "created_at".to_string(),
+        json!(key.created_at_unix_ms.and_then(unix_secs_to_rfc3339)),
+    );
+    payload.insert(
+        "imported_at".to_string(),
         json!(key.created_at_unix_ms.and_then(unix_secs_to_rfc3339)),
     );
     payload.insert(

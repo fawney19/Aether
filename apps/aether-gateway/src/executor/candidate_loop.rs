@@ -1,13 +1,16 @@
+use aether_ai_serving::{
+    run_ai_attempt_loop, AiAttemptLoopOutcome, AiAttemptLoopPort, AiExecutionAttempt,
+};
 use aether_data_contracts::repository::candidates::RequestCandidateStatus;
 use aether_scheduler_core::{
     parse_request_candidate_report_context, SchedulerRequestCandidateStatusUpdate,
 };
+use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::Response;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, warn, Instrument};
 
-use crate::ai_pipeline_api::{LocalStreamPlanAndReport, LocalSyncPlanAndReport};
 use crate::clock::current_unix_ms;
 use crate::control::GatewayControlDecision;
 use crate::execution_runtime::{execute_execution_runtime_stream, execute_execution_runtime_sync};
@@ -21,42 +24,6 @@ use crate::{AppState, GatewayError};
 
 const DEFAULT_STREAM_CANDIDATE_WATCHDOG_TIMEOUT_MS: u64 = 300_000;
 
-pub(crate) trait LocalPlanAndReport {
-    fn plan(&self) -> &aether_contracts::ExecutionPlan;
-
-    fn report_kind(&self) -> Option<String>;
-
-    fn report_context(&self) -> Option<serde_json::Value>;
-}
-
-impl LocalPlanAndReport for LocalSyncPlanAndReport {
-    fn plan(&self) -> &aether_contracts::ExecutionPlan {
-        &self.plan
-    }
-
-    fn report_kind(&self) -> Option<String> {
-        self.report_kind.clone()
-    }
-
-    fn report_context(&self) -> Option<serde_json::Value> {
-        self.report_context.clone()
-    }
-}
-
-impl LocalPlanAndReport for LocalStreamPlanAndReport {
-    fn plan(&self) -> &aether_contracts::ExecutionPlan {
-        &self.plan
-    }
-
-    fn report_kind(&self) -> Option<String> {
-        self.report_kind.clone()
-    }
-
-    fn report_context(&self) -> Option<serde_json::Value> {
-        self.report_context.clone()
-    }
-}
-
 pub(crate) async fn execute_sync_plan_and_reports<T>(
     state: &AppState,
     parts: &http::request::Parts,
@@ -66,12 +33,12 @@ pub(crate) async fn execute_sync_plan_and_reports<T>(
     plan_and_reports: Vec<T>,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError>
 where
-    T: LocalPlanAndReport,
+    T: AiExecutionAttempt + Send + Sync + 'static,
 {
     let candidate_count = plan_and_reports.len();
     let first_provider = plan_and_reports
         .first()
-        .and_then(|item| item.plan().provider_name.as_deref())
+        .and_then(|item| item.execution_plan().provider_name.as_deref())
         .unwrap_or("-")
         .to_string();
     let span = tracing::debug_span!(
@@ -92,39 +59,73 @@ where
             "candidate loop started"
         );
 
-        let mut remaining = plan_and_reports.into_iter();
-        let mut last_attempted = None;
-        while let Some(plan_and_report) = remaining.next() {
-            last_attempted = Some((
-                plan_and_report.plan().clone(),
-                plan_and_report.report_context(),
-            ));
-            if let Some(response) = execute_execution_runtime_sync(
-                state,
-                parts.uri.path(),
-                plan_and_report.plan().clone(),
-                trace_id,
-                decision,
-                plan_kind,
-                plan_and_report.report_kind(),
-                plan_and_report.report_context(),
-            )
-            .await?
-            {
-                mark_unused_local_candidates(state, remaining.collect()).await;
-                return Ok(LocalExecutionRequestOutcome::responded(response));
-            }
-        }
-
-        let Some((plan, report_context)) = last_attempted else {
-            return Ok(LocalExecutionRequestOutcome::NoPath);
+        let port = SyncAttemptLoopPort {
+            state,
+            parts,
+            trace_id,
+            decision,
+            plan_kind,
         };
-        Ok(LocalExecutionRequestOutcome::Exhausted(
-            build_local_execution_exhaustion(state, &plan, report_context.as_ref()).await,
-        ))
+        match run_ai_attempt_loop(&port, plan_and_reports).await? {
+            AiAttemptLoopOutcome::Responded(response) => {
+                Ok(LocalExecutionRequestOutcome::responded(response))
+            }
+            AiAttemptLoopOutcome::Exhausted(exhaustion) => {
+                Ok(LocalExecutionRequestOutcome::Exhausted(exhaustion))
+            }
+            AiAttemptLoopOutcome::NoPath => Ok(LocalExecutionRequestOutcome::NoPath),
+        }
     }
     .instrument(span)
     .await
+}
+
+struct SyncAttemptLoopPort<'a> {
+    state: &'a AppState,
+    parts: &'a http::request::Parts,
+    trace_id: &'a str,
+    decision: &'a GatewayControlDecision,
+    plan_kind: &'a str,
+}
+
+#[async_trait]
+impl<T> AiAttemptLoopPort<T> for SyncAttemptLoopPort<'_>
+where
+    T: AiExecutionAttempt + Send + Sync + 'static,
+{
+    type Response = Response<Body>;
+    type Exhaustion = crate::executor::LocalExecutionExhaustion;
+    type Error = GatewayError;
+
+    async fn execute_attempt(&self, attempt: &T) -> Result<Option<Self::Response>, Self::Error> {
+        execute_execution_runtime_sync(
+            self.state,
+            self.parts.uri.path(),
+            attempt.execution_plan().clone(),
+            self.trace_id,
+            self.decision,
+            self.plan_kind,
+            attempt.report_kind(),
+            attempt.report_context(),
+        )
+        .await
+    }
+
+    async fn mark_unused_attempts(&self, attempts: Vec<T>) -> Result<(), Self::Error> {
+        mark_unused_local_candidates(self.state, attempts).await;
+        Ok(())
+    }
+
+    async fn build_exhaustion(
+        &self,
+        last_plan: aether_contracts::ExecutionPlan,
+        last_report_context: Option<serde_json::Value>,
+    ) -> Result<Self::Exhaustion, Self::Error> {
+        Ok(
+            build_local_execution_exhaustion(self.state, &last_plan, last_report_context.as_ref())
+                .await,
+        )
+    }
 }
 
 pub(crate) async fn execute_stream_plan_and_reports<T>(
@@ -135,12 +136,12 @@ pub(crate) async fn execute_stream_plan_and_reports<T>(
     plan_and_reports: Vec<T>,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError>
 where
-    T: LocalPlanAndReport,
+    T: AiExecutionAttempt + Send + Sync + 'static,
 {
     let candidate_count = plan_and_reports.len();
     let first_provider = plan_and_reports
         .first()
-        .and_then(|item| item.plan().provider_name.as_deref())
+        .and_then(|item| item.execution_plan().provider_name.as_deref())
         .unwrap_or("-")
         .to_string();
     let span = tracing::debug_span!(
@@ -161,90 +162,125 @@ where
             "candidate loop started"
         );
 
-        let mut remaining = plan_and_reports.into_iter();
-        let mut last_attempted = None;
-        while let Some(plan_and_report) = remaining.next() {
-            let plan = plan_and_report.plan().clone();
-            let report_context = plan_and_report.report_context();
-            let candidate_index = parse_request_candidate_report_context(report_context.as_ref())
-                .and_then(|context| context.candidate_index)
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            debug!(
-                event_name = "candidate_loop_attempt_started",
-                log_type = "debug",
-                trace_id = %trace_id,
-                plan_kind,
-                request_id = %short_request_id(plan.request_id.as_str()),
-                candidate_id = ?plan.candidate_id,
-                provider_name = plan.provider_name.as_deref().unwrap_or("-"),
-                endpoint_id = %plan.endpoint_id,
-                key_id = %plan.key_id,
-                model_name = plan.model_name.as_deref().unwrap_or("-"),
-                candidate_index = candidate_index.as_str(),
-                "candidate loop attempting stream execution candidate"
-            );
-            last_attempted = Some((plan.clone(), report_context.clone()));
-            let watchdog_plan = plan.clone();
-            let watchdog_report_context = report_context.clone();
-            let execution_state = state.clone();
-            let execution_trace_id = trace_id.to_string();
-            let execution_plan_kind = plan_kind.to_string();
-            let execution_decision = decision.clone();
-            let execution_report_kind = plan_and_report.report_kind();
-            if let Some(response) = execute_stream_candidate_with_watchdog(
-                state,
-                trace_id,
-                plan_kind,
-                &watchdog_plan,
-                watchdog_report_context.as_ref(),
-                move || async move {
-                    execute_execution_runtime_stream(
-                        &execution_state,
-                        plan,
-                        execution_trace_id.as_str(),
-                        &execution_decision,
-                        execution_plan_kind.as_str(),
-                        execution_report_kind,
-                        report_context,
-                    )
-                    .await
-                },
-            )
-            .await?
-            {
-                mark_unused_local_candidates(state, remaining.collect()).await;
-                return Ok(LocalExecutionRequestOutcome::responded(response));
-            }
-        }
-
-        let Some((plan, report_context)) = last_attempted else {
-            return Ok(LocalExecutionRequestOutcome::NoPath);
-        };
-        warn!(
-            event_name = "candidate_loop_exhausted",
-            log_type = "ops",
-            trace_id = %trace_id,
+        let port = StreamAttemptLoopPort {
+            state,
+            trace_id,
+            decision,
             plan_kind,
+        };
+        match run_ai_attempt_loop(&port, plan_and_reports).await? {
+            AiAttemptLoopOutcome::Responded(response) => {
+                Ok(LocalExecutionRequestOutcome::responded(response))
+            }
+            AiAttemptLoopOutcome::Exhausted(exhaustion) => {
+                Ok(LocalExecutionRequestOutcome::Exhausted(exhaustion))
+            }
+            AiAttemptLoopOutcome::NoPath => Ok(LocalExecutionRequestOutcome::NoPath),
+        }
+    }
+    .instrument(span)
+    .await
+}
+
+struct StreamAttemptLoopPort<'a> {
+    state: &'a AppState,
+    trace_id: &'a str,
+    decision: &'a GatewayControlDecision,
+    plan_kind: &'a str,
+}
+
+#[async_trait]
+impl<T> AiAttemptLoopPort<T> for StreamAttemptLoopPort<'_>
+where
+    T: AiExecutionAttempt + Send + Sync + 'static,
+{
+    type Response = Response<Body>;
+    type Exhaustion = crate::executor::LocalExecutionExhaustion;
+    type Error = GatewayError;
+
+    async fn execute_attempt(&self, attempt: &T) -> Result<Option<Self::Response>, Self::Error> {
+        let plan = attempt.execution_plan().clone();
+        let report_context = attempt.report_context();
+        let candidate_index = parse_request_candidate_report_context(report_context.as_ref())
+            .and_then(|context| context.candidate_index)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        debug!(
+            event_name = "candidate_loop_attempt_started",
+            log_type = "debug",
+            trace_id = %self.trace_id,
+            plan_kind = self.plan_kind,
             request_id = %short_request_id(plan.request_id.as_str()),
             candidate_id = ?plan.candidate_id,
             provider_name = plan.provider_name.as_deref().unwrap_or("-"),
             endpoint_id = %plan.endpoint_id,
             key_id = %plan.key_id,
             model_name = plan.model_name.as_deref().unwrap_or("-"),
+            candidate_index = candidate_index.as_str(),
+            "candidate loop attempting stream execution candidate"
+        );
+        let watchdog_plan = plan.clone();
+        let watchdog_report_context = report_context.clone();
+        let execution_state = self.state.clone();
+        let execution_trace_id = self.trace_id.to_string();
+        let execution_plan_kind = self.plan_kind.to_string();
+        let execution_decision = self.decision.clone();
+        let execution_report_kind = attempt.report_kind();
+        execute_stream_candidate_with_watchdog(
+            self.state,
+            self.trace_id,
+            self.plan_kind,
+            &watchdog_plan,
+            watchdog_report_context.as_ref(),
+            move || async move {
+                execute_execution_runtime_stream(
+                    &execution_state,
+                    plan,
+                    execution_trace_id.as_str(),
+                    &execution_decision,
+                    execution_plan_kind.as_str(),
+                    execution_report_kind,
+                    report_context,
+                )
+                .await
+            },
+        )
+        .await
+    }
+
+    async fn mark_unused_attempts(&self, attempts: Vec<T>) -> Result<(), Self::Error> {
+        mark_unused_local_candidates(self.state, attempts).await;
+        Ok(())
+    }
+
+    async fn build_exhaustion(
+        &self,
+        last_plan: aether_contracts::ExecutionPlan,
+        last_report_context: Option<serde_json::Value>,
+    ) -> Result<Self::Exhaustion, Self::Error> {
+        warn!(
+            event_name = "candidate_loop_exhausted",
+            log_type = "ops",
+            trace_id = %self.trace_id,
+            plan_kind = self.plan_kind,
+            request_id = %short_request_id(last_plan.request_id.as_str()),
+            candidate_id = ?last_plan.candidate_id,
+            provider_name = last_plan.provider_name.as_deref().unwrap_or("-"),
+            endpoint_id = %last_plan.endpoint_id,
+            key_id = %last_plan.key_id,
+            model_name = last_plan.model_name.as_deref().unwrap_or("-"),
             "candidate loop exhausted local stream candidates"
         );
-        Ok(LocalExecutionRequestOutcome::Exhausted(
-            build_local_execution_exhaustion(state, &plan, report_context.as_ref()).await,
-        ))
+        Ok(
+            build_local_execution_exhaustion(self.state, &last_plan, last_report_context.as_ref())
+                .await,
+        )
     }
-    .instrument(span)
-    .await
 }
 
 pub(crate) async fn mark_unused_local_candidates<T>(state: &AppState, remaining: Vec<T>)
 where
-    T: LocalPlanAndReport,
+    T: AiExecutionAttempt,
 {
     for plan_and_report in remaining {
         let report_context = plan_and_report.report_context();
@@ -253,7 +289,7 @@ where
         }
         record_local_request_candidate_status(
             state,
-            plan_and_report.plan(),
+            plan_and_report.execution_plan(),
             report_context.as_ref(),
             SchedulerRequestCandidateStatusUpdate {
                 status: RequestCandidateStatus::Unused,
@@ -439,7 +475,7 @@ mod tests {
             content_encoding: None,
             body: RequestBody::from_json(json!({"model": "gpt-test"})),
             stream: true,
-            client_api_format: "claude:cli".to_string(),
+            client_api_format: "claude:messages".to_string(),
             provider_api_format: "openai:chat".to_string(),
             model_name: Some("gpt-test".to_string()),
             proxy: None,

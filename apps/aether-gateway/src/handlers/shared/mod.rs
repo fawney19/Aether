@@ -16,7 +16,8 @@ pub(crate) use self::admin_proxy::{
 };
 pub(crate) use self::api_keys::{
     api_key_placeholder_display, configured_api_key_prefix, generate_gateway_api_key_plaintext,
-    masked_gateway_api_key_display, normalize_optional_api_key_concurrent_limit,
+    generate_gateway_secret_plaintext, masked_gateway_api_key_display,
+    normalize_optional_api_key_concurrent_limit,
 };
 pub(crate) use self::catalog::{
     build_admin_provider_key_response, decrypt_catalog_secret_with_fallbacks,

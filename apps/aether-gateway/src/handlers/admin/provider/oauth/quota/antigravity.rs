@@ -68,7 +68,7 @@ async fn execute_antigravity_quota_plan(
             body_ref: None,
         },
         stream: false,
-        client_api_format: "gemini:chat".to_string(),
+        client_api_format: "gemini:generate_content".to_string(),
         provider_api_format: "antigravity:fetch_available_models".to_string(),
         model_name: Some("fetchAvailableModels".to_string()),
         proxy,

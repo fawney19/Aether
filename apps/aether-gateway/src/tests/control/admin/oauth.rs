@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex};
 
-use aether_contracts::{ExecutionPlan, EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER};
+use aether_contracts::{
+    ExecutionPlan, EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER, EXECUTION_REQUEST_HTTP1_ONLY_HEADER,
+};
 use aether_crypto::{
     decrypt_python_fernet_ciphertext, encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY,
 };
@@ -12,7 +14,9 @@ use aether_data::repository::oauth_providers::{
 };
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::proxy_nodes::InMemoryProxyNodeRepository;
-use aether_data_contracts::repository::provider_catalog::ProviderCatalogReadRepository;
+use aether_data_contracts::repository::provider_catalog::{
+    ProviderCatalogReadRepository, ProviderCatalogWriteRepository,
+};
 use axum::body::{to_bytes, Body, Bytes};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, delete, get, patch, post, put};
@@ -108,6 +112,29 @@ fn sample_kiro_device_access_token_without_email() -> String {
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
         json!({
             "sub": "kiro-user-123",
+        })
+        .to_string(),
+    );
+    format!("{header}.{payload}.sig")
+}
+
+fn sample_codex_access_token_with_profile_email(email: &str, account_id: &str) -> String {
+    use base64::Engine as _;
+
+    let header =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"alg":"none","typ":"JWT"}"#);
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        json!({
+            "iss": "https://auth.openai.com",
+            "aud": ["https://api.openai.com/v1"],
+            "exp": 2_000_000_000u64,
+            "https://api.openai.com/profile": {
+                "email": email,
+                "email_verified": true,
+            },
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": account_id,
+            },
         })
         .to_string(),
     );
@@ -417,9 +444,14 @@ async fn gateway_handles_admin_provider_oauth_device_poll_locally_with_trusted_a
         persisted.proxy,
         Some(json!({"node_id": "proxy-node-kiro", "enabled": true}))
     );
-    let decrypted_api_key =
-        decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &persisted.encrypted_api_key)
-            .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        persisted
+            .encrypted_api_key
+            .as_deref()
+            .expect("api key should be present"),
+    )
+    .expect("api key should decrypt");
     assert_eq!(decrypted_api_key, expected_access_token);
     let decrypted_auth_config = decrypt_python_fernet_ciphertext(
         DEVELOPMENT_ENCRYPTION_KEY,
@@ -725,9 +757,14 @@ async fn gateway_revalidates_kiro_device_poll_via_idc_refresh_and_backfills_emai
         persisted.proxy,
         Some(json!({"node_id": "proxy-node-kiro", "enabled": true}))
     );
-    let decrypted_api_key =
-        decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &persisted.encrypted_api_key)
-            .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        persisted
+            .encrypted_api_key
+            .as_deref()
+            .expect("api key should be present"),
+    )
+    .expect("api key should decrypt");
     assert_eq!(decrypted_api_key, expected_refreshed_access_token);
     let decrypted_auth_config = decrypt_python_fernet_ciphertext(
         DEVELOPMENT_ENCRYPTION_KEY,
@@ -1465,10 +1502,18 @@ async fn gateway_batch_imports_admin_provider_oauth_locally_with_trusted_admin_p
         .expect("keys should load");
     let persisted = reloaded.first().expect("persisted key should exist");
     assert!(persisted.is_active);
-    assert_eq!(persisted.proxy, None);
-    let decrypted_api_key =
-        decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &persisted.encrypted_api_key)
-            .expect("api key should decrypt");
+    assert_eq!(
+        persisted.proxy,
+        Some(json!({"node_id": "proxy-node-batch-import", "enabled": true}))
+    );
+    let decrypted_api_key = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        persisted
+            .encrypted_api_key
+            .as_deref()
+            .expect("api key should be present"),
+    )
+    .expect("api key should decrypt");
     assert_eq!(decrypted_api_key, "batch-imported-codex-access-token");
 
     gateway_handle.abort();
@@ -1617,6 +1662,164 @@ async fn gateway_starts_admin_provider_oauth_batch_import_task_locally_with_trus
 }
 
 #[tokio::test]
+async fn gateway_updates_admin_provider_oauth_batch_import_task_progress() {
+    let upstream = Router::new().fallback(any(|| async {
+        (StatusCode::OK, Body::from("quota refresh body"))
+    }));
+
+    let token_hits = Arc::new(Mutex::new(0usize));
+    let token_hits_clone = Arc::clone(&token_hits);
+    let token_server = Router::new().route(
+        "/oauth/token",
+        any(move |_request: Request| {
+            let token_hits_inner = Arc::clone(&token_hits_clone);
+            async move {
+                let hit = {
+                    let mut guard = token_hits_inner.lock().expect("mutex should lock");
+                    *guard += 1;
+                    *guard
+                };
+                if hit == 2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                Json(json!({
+                    "access_token": format!("progress-codex-access-token-{hit}"),
+                    "refresh_token": format!("progress-codex-refresh-token-{hit}"),
+                    "token_type": "Bearer",
+                    "expires_in": 1800,
+                    "scope": "openid email profile offline_access",
+                    "email": format!("progress-{hit}@example.com"),
+                    "account_id": format!("acct-progress-{hit}"),
+                    "account_user_id": format!("acct-user-progress-{hit}"),
+                    "plan_type": "plus",
+                }))
+            }
+        }),
+    );
+
+    let mut provider = sample_provider("provider-codex", "codex", 10);
+    provider.provider_type = "codex".to_string();
+    let endpoint = sample_endpoint(
+        "endpoint-codex-chat",
+        "provider-codex",
+        "openai:chat",
+        "https://chatgpt.com/backend-api/codex",
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![],
+    ));
+
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let (token_url, token_handle) = start_server(token_server).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository,
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+            .with_provider_oauth_token_url_for_tests("codex", format!("{token_url}/oauth/token")),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let client = reqwest::Client::new();
+    let submit_response = client
+        .post(format!(
+            "{gateway_url}/api/admin/provider-oauth/providers/provider-codex/batch-import/tasks"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "credentials": "progress-refresh-one\nprogress-refresh-two"
+        }))
+        .send()
+        .await
+        .expect("submit request should succeed");
+
+    assert_eq!(submit_response.status(), StatusCode::OK);
+    let submit_payload: serde_json::Value = submit_response
+        .json()
+        .await
+        .expect("submit payload should parse");
+    let task_id = submit_payload["task_id"]
+        .as_str()
+        .expect("task id should exist")
+        .to_string();
+
+    let mut progress_payload = serde_json::Value::Null;
+    for _ in 0..50 {
+        let response = client
+            .get(format!(
+                "{gateway_url}/api/admin/provider-oauth/providers/provider-codex/batch-import/tasks/{task_id}"
+            ))
+            .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+            .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+            .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+            .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+            .send()
+            .await
+            .expect("status request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        progress_payload = response.json().await.expect("status payload should parse");
+        if progress_payload["status"] == "processing" && progress_payload["processed"] == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    assert_eq!(
+        progress_payload["status"], "processing",
+        "payload={progress_payload}"
+    );
+    assert_eq!(progress_payload["total"], 2);
+    assert_eq!(progress_payload["processed"], 1);
+    assert_eq!(progress_payload["success"], 1);
+    assert_eq!(progress_payload["failed"], 0);
+    assert_eq!(progress_payload["created_count"], 1);
+    assert_eq!(progress_payload["progress_percent"], 50);
+
+    let mut completed_payload = progress_payload;
+    for _ in 0..50 {
+        let response = client
+            .get(format!(
+                "{gateway_url}/api/admin/provider-oauth/providers/provider-codex/batch-import/tasks/{task_id}"
+            ))
+            .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+            .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+            .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+            .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+            .send()
+            .await
+            .expect("status request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        completed_payload = response.json().await.expect("status payload should parse");
+        if completed_payload["status"] == "completed" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    assert_eq!(
+        completed_payload["status"], "completed",
+        "payload={completed_payload}"
+    );
+    assert_eq!(completed_payload["processed"], 2);
+    assert_eq!(completed_payload["success"], 2);
+    assert_eq!(completed_payload["progress_percent"], 100);
+    assert_eq!(*token_hits.lock().expect("mutex should lock"), 2);
+
+    gateway_handle.abort();
+    token_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
 async fn gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_principal() {
     #[derive(Debug, Clone)]
     struct SeenTokenRequest {
@@ -1661,7 +1864,7 @@ async fn gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_p
                     "access_token": "new-codex-access-token",
                     "refresh_token": "new-codex-refresh-token",
                     "token_type": "Bearer",
-                    "expires_in": 3600,
+                    "expiresAt": 4_102_444_800u64,
                     "email": "alice@example.com",
                     "account_id": "acct-codex-123",
                     "plan_type": "plus",
@@ -1731,6 +1934,7 @@ async fn gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_p
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     assert_eq!(payload["provider_type"], "codex");
     assert_eq!(payload["has_refresh_token"], true);
+    assert_eq!(payload["expires_at"], 4_102_444_800u64);
     assert_eq!(payload["email"], "alice@example.com");
     assert_eq!(payload["account_state_recheck_attempted"], false);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
@@ -1754,9 +1958,15 @@ async fn gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_p
         .await
         .expect("keys should load");
     let persisted = reloaded.first().expect("persisted key should exist");
-    let decrypted_api_key =
-        decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &persisted.encrypted_api_key)
-            .expect("api key should decrypt");
+    assert_eq!(persisted.expires_at_unix_secs, Some(4_102_444_800));
+    let decrypted_api_key = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        persisted
+            .encrypted_api_key
+            .as_deref()
+            .expect("api key should be present"),
+    )
+    .expect("api key should decrypt");
     assert_eq!(decrypted_api_key, "new-codex-access-token");
     let decrypted_auth_config = decrypt_python_fernet_ciphertext(
         DEVELOPMENT_ENCRYPTION_KEY,
@@ -1770,6 +1980,7 @@ async fn gateway_completes_admin_provider_oauth_key_locally_with_trusted_admin_p
         serde_json::from_str(&decrypted_auth_config).expect("auth config json should parse");
     assert_eq!(auth_config["provider_type"], "codex");
     assert_eq!(auth_config["refresh_token"], "new-codex-refresh-token");
+    assert_eq!(auth_config["expires_at"], 4_102_444_800u64);
     assert_eq!(auth_config["email"], "alice@example.com");
     assert_eq!(auth_config["account_id"], "acct-codex-123");
     assert_eq!(auth_config["plan_type"], "plus");
@@ -1824,7 +2035,7 @@ async fn gateway_completes_admin_provider_oauth_provider_locally_with_trusted_ad
                     "access_token": "provider-codex-access-token",
                     "refresh_token": "provider-codex-refresh-token",
                     "token_type": "Bearer",
-                    "expires_in": 3600,
+                    "expires_at": 4_102_444_800u64,
                     "email": "alice@example.com",
                     "account_id": "acct-codex-123",
                     "plan_type": "plus",
@@ -1912,6 +2123,7 @@ async fn gateway_completes_admin_provider_oauth_provider_locally_with_trusted_ad
     assert_eq!(payload["key_id"], "key-codex-inactive-duplicate");
     assert_eq!(payload["provider_type"], "codex");
     assert_eq!(payload["has_refresh_token"], true);
+    assert_eq!(payload["expires_at"], 4_102_444_800u64);
     assert_eq!(payload["email"], "alice@example.com");
     assert_eq!(payload["replaced"], true);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
@@ -1935,10 +2147,19 @@ async fn gateway_completes_admin_provider_oauth_provider_locally_with_trusted_ad
         .expect("keys should load");
     let persisted = reloaded.first().expect("persisted key should exist");
     assert!(persisted.is_active);
-    assert_eq!(persisted.proxy, None);
-    let decrypted_api_key =
-        decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &persisted.encrypted_api_key)
-            .expect("api key should decrypt");
+    assert_eq!(persisted.expires_at_unix_secs, Some(4_102_444_800));
+    assert_eq!(
+        persisted.proxy,
+        Some(json!({"node_id": "proxy-node-codex-oauth", "enabled": true}))
+    );
+    let decrypted_api_key = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        persisted
+            .encrypted_api_key
+            .as_deref()
+            .expect("api key should be present"),
+    )
+    .expect("api key should decrypt");
     assert_eq!(decrypted_api_key, "provider-codex-access-token");
     let decrypted_auth_config = decrypt_python_fernet_ciphertext(
         DEVELOPMENT_ENCRYPTION_KEY,
@@ -1952,6 +2173,7 @@ async fn gateway_completes_admin_provider_oauth_provider_locally_with_trusted_ad
         serde_json::from_str(&decrypted_auth_config).expect("auth config json should parse");
     assert_eq!(auth_config["provider_type"], "codex");
     assert_eq!(auth_config["refresh_token"], "provider-codex-refresh-token");
+    assert_eq!(auth_config["expires_at"], 4_102_444_800u64);
     assert_eq!(auth_config["email"], "alice@example.com");
     assert_eq!(auth_config["account_id"], "acct-codex-123");
     assert_eq!(auth_config["plan_type"], "plus");
@@ -2103,10 +2325,18 @@ async fn gateway_imports_admin_provider_oauth_refresh_token_locally_with_trusted
         .expect("keys should load");
     let persisted = reloaded.first().expect("persisted key should exist");
     assert!(persisted.is_active);
-    assert_eq!(persisted.proxy, None);
-    let decrypted_api_key =
-        decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &persisted.encrypted_api_key)
-            .expect("api key should decrypt");
+    assert_eq!(
+        persisted.proxy,
+        Some(json!({"node_id": "proxy-node-codex-import", "enabled": true}))
+    );
+    let decrypted_api_key = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        persisted
+            .encrypted_api_key
+            .as_deref()
+            .expect("api key should be present"),
+    )
+    .expect("api key should decrypt");
     assert_eq!(decrypted_api_key, "imported-codex-access-token");
     let decrypted_auth_config = decrypt_python_fernet_ciphertext(
         DEVELOPMENT_ENCRYPTION_KEY,
@@ -2127,6 +2357,186 @@ async fn gateway_imports_admin_provider_oauth_refresh_token_locally_with_trusted
     gateway_handle.abort();
     token_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_imports_codex_access_token_without_refresh_token_as_temporary_account() {
+    let token_hits = Arc::new(Mutex::new(0usize));
+    let token_hits_clone = Arc::clone(&token_hits);
+    let token_server = Router::new().route(
+        "/oauth/token",
+        post(move || {
+            let token_hits_inner = Arc::clone(&token_hits_clone);
+            async move {
+                *token_hits_inner.lock().expect("mutex should lock") += 1;
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "unexpected refresh exchange"})),
+                )
+            }
+        }),
+    );
+
+    let mut provider = sample_provider("provider-codex", "codex", 10);
+    provider.provider_type = "codex".to_string();
+    let endpoint = sample_endpoint(
+        "endpoint-codex-chat",
+        "provider-codex",
+        "openai:chat",
+        "https://chatgpt.com/backend-api/codex",
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![],
+    ));
+
+    let (token_url, token_handle) = start_server(token_server).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+            .with_provider_oauth_token_url_for_tests("codex", format!("{token_url}/oauth/token")),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let access_token =
+        sample_codex_access_token_with_profile_email("profile@example.com", "acct-profile-123");
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-oauth/providers/provider-codex/import-refresh-token"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "access_token": access_token,
+            "name": "temporary-codex-access-token",
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    let status = response.status();
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(status, StatusCode::OK, "payload={payload}");
+    assert_eq!(payload["provider_type"], "codex");
+    assert_eq!(payload["has_refresh_token"], false);
+    assert_eq!(payload["temporary"], true);
+    assert_eq!(payload["email"], "profile@example.com");
+    assert_eq!(*token_hits.lock().expect("mutex should lock"), 0);
+
+    let reloaded = provider_catalog_repository
+        .list_keys_by_provider_ids(&["provider-codex".to_string()])
+        .await
+        .expect("keys should load");
+    let persisted = reloaded.first().expect("persisted key should exist");
+    assert_eq!(persisted.expires_at_unix_secs, Some(2_000_000_000));
+    let decrypted_api_key = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        persisted
+            .encrypted_api_key
+            .as_deref()
+            .expect("api key should be present"),
+    )
+    .expect("api key should decrypt");
+    assert_eq!(decrypted_api_key, access_token);
+    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        persisted
+            .encrypted_auth_config
+            .as_deref()
+            .expect("auth config should be stored"),
+    )
+    .expect("auth config should decrypt");
+    let auth_config: serde_json::Value =
+        serde_json::from_str(&decrypted_auth_config).expect("auth config json should parse");
+    assert_eq!(auth_config["provider_type"], "codex");
+    assert_eq!(auth_config["access_token_import_temporary"], true);
+    assert_eq!(auth_config["email"], "profile@example.com");
+    assert_eq!(auth_config["account_id"], "acct-profile-123");
+    assert!(auth_config.get("refresh_token").is_none());
+
+    gateway_handle.abort();
+    token_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_imports_codex_access_token_with_payload_expires_at_when_token_has_no_exp() {
+    let mut provider = sample_provider("provider-codex", "codex", 10);
+    provider.provider_type = "codex".to_string();
+    let endpoint = sample_endpoint(
+        "endpoint-codex-responses",
+        "provider-codex",
+        "openai:responses",
+        "https://chatgpt.com/backend-api/codex",
+    );
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![],
+    ));
+
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-oauth/providers/provider-codex/import-refresh-token"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "access_token": "opaque-codex-access-token",
+            "expiresAt": 2_100_000_000u64,
+            "name": "temporary-codex-opaque-access-token",
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    let status = response.status();
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(status, StatusCode::OK, "payload={payload}");
+    assert_eq!(payload["expires_at"], 2_100_000_000u64);
+
+    let reloaded = provider_catalog_repository
+        .list_keys_by_provider_ids(&["provider-codex".to_string()])
+        .await
+        .expect("keys should load");
+    let persisted = reloaded.first().expect("persisted key should exist");
+    assert_eq!(persisted.expires_at_unix_secs, Some(2_100_000_000));
+    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        persisted
+            .encrypted_auth_config
+            .as_deref()
+            .expect("auth config should be stored"),
+    )
+    .expect("auth config should decrypt");
+    let auth_config: serde_json::Value =
+        serde_json::from_str(&decrypted_auth_config).expect("auth config json should parse");
+    assert_eq!(auth_config["expires_at"], 2_100_000_000u64);
+    assert_eq!(auth_config["access_token_import_temporary"], true);
+
+    gateway_handle.abort();
 }
 
 #[tokio::test]
@@ -2275,12 +2685,20 @@ async fn gateway_imports_admin_provider_oauth_refresh_token_over_active_expired_
         .expect("keys should load");
     let persisted = reloaded.first().expect("persisted key should exist");
     assert!(persisted.is_active);
-    assert_eq!(persisted.proxy, None);
+    assert_eq!(
+        persisted.proxy,
+        Some(json!({"node_id": "proxy-node-codex-import", "enabled": true}))
+    );
     assert_eq!(persisted.oauth_invalid_at_unix_secs, None);
     assert_eq!(persisted.oauth_invalid_reason, None);
-    let decrypted_api_key =
-        decrypt_python_fernet_ciphertext(DEVELOPMENT_ENCRYPTION_KEY, &persisted.encrypted_api_key)
-            .expect("api key should decrypt");
+    let decrypted_api_key = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        persisted
+            .encrypted_api_key
+            .as_deref()
+            .expect("api key should be present"),
+    )
+    .expect("api key should decrypt");
     assert_eq!(decrypted_api_key, "imported-expired-codex-access-token");
     let decrypted_auth_config = decrypt_python_fernet_ciphertext(
         DEVELOPMENT_ENCRYPTION_KEY,
@@ -2304,6 +2722,178 @@ async fn gateway_imports_admin_provider_oauth_refresh_token_over_active_expired_
     gateway_handle.abort();
     token_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_import_invalidate_cached_oauth_entry_before_followup_resolution() {
+    let token_server = Router::new().route(
+        "/oauth/token",
+        post(move |body: Bytes| async move {
+            let body_text = String::from_utf8(body.to_vec()).unwrap_or_default();
+            if body_text.contains("refresh_token=old-refresh-token") {
+                Json(json!({
+                    "access_token": "cached-old-codex-access-token",
+                    "refresh_token": "cached-old-refresh-token",
+                    "token_type": "Bearer",
+                    "expires_in": 1800,
+                    "scope": "openid email profile offline_access",
+                    "email": "alice@example.com",
+                    "account_id": "acct-codex-123",
+                    "plan_type": "plus",
+                }))
+            } else {
+                assert!(
+                    body_text.contains("refresh_token=provider-import-refresh-token"),
+                    "unexpected token request body: {body_text}"
+                );
+                Json(json!({
+                    "access_token": "imported-fresh-codex-access-token",
+                    "refresh_token": "imported-fresh-refresh-token",
+                    "token_type": "Bearer",
+                    "expires_in": 1800,
+                    "scope": "openid email profile offline_access",
+                    "email": "alice@example.com",
+                    "account_id": "acct-codex-123",
+                    "plan_type": "plus",
+                }))
+            }
+        }),
+    );
+
+    let mut provider = sample_provider("provider-codex", "codex", 10);
+    provider.provider_type = "codex".to_string();
+    let endpoint = sample_endpoint(
+        "endpoint-codex-chat",
+        "provider-codex",
+        "openai:chat",
+        "https://chatgpt.com/backend-api/codex",
+    );
+
+    let mut existing_key = sample_key(
+        "key-codex-import-cache-duplicate",
+        "provider-codex",
+        "openai:chat",
+        "stale-imported-access-token",
+    );
+    existing_key.auth_type = "oauth".to_string();
+    existing_key.expires_at_unix_secs = Some(1);
+    existing_key.oauth_invalid_at_unix_secs = Some(1_700_000_000);
+    existing_key.oauth_invalid_reason = Some("[OAUTH_EXPIRED] token invalidated".to_string());
+    existing_key.encrypted_auth_config = Some(
+        encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"codex","email":"alice@example.com","account_id":"acct-codex-123","plan_type":"plus","refresh_token":"old-refresh-token","expires_at":1}"#,
+        )
+        .expect("auth config ciphertext should build"),
+    );
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![existing_key],
+    ));
+
+    let (token_url, token_handle) = start_server(token_server).await;
+    let oauth_refresh =
+        crate::provider_transport::LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![
+            Arc::new(
+                crate::provider_transport::oauth_refresh::GenericOAuthRefreshAdapter::default()
+                    .with_token_url_for_tests("codex", format!("{token_url}/oauth/token")),
+            ),
+        ]);
+    let app_state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_repository_for_tests(
+                provider_catalog_repository.clone(),
+            )
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        )
+        .with_provider_oauth_token_url_for_tests("codex", format!("{token_url}/oauth/token"))
+        .with_oauth_refresh_coordinator_for_tests(oauth_refresh);
+
+    let stale_transport = app_state
+        .read_provider_transport_snapshot(
+            "provider-codex",
+            "endpoint-codex-chat",
+            "key-codex-import-cache-duplicate",
+        )
+        .await
+        .expect("transport should load")
+        .expect("transport should exist");
+    let cached_entry = app_state
+        .force_local_oauth_refresh_entry(&stale_transport)
+        .await
+        .expect("initial refresh should succeed")
+        .expect("initial refresh should return cached entry");
+    assert_eq!(
+        cached_entry.auth_header_value,
+        "Bearer cached-old-codex-access-token"
+    );
+    let mut replaceable_key = provider_catalog_repository
+        .list_keys_by_ids(&["key-codex-import-cache-duplicate".to_string()])
+        .await
+        .expect("keys should load")
+        .into_iter()
+        .next()
+        .expect("key should exist");
+    replaceable_key.oauth_invalid_at_unix_secs = Some(1_700_000_000);
+    replaceable_key.oauth_invalid_reason = Some("[OAUTH_EXPIRED] token invalidated".to_string());
+    provider_catalog_repository
+        .update_key(&replaceable_key)
+        .await
+        .expect("key should update");
+
+    let gateway = build_router_with_state(app_state.clone());
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-oauth/providers/provider-codex/import-refresh-token"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "refresh_token": "provider-import-refresh-token",
+            "name": "should-not-override-cache-duplicate-name"
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    let status = response.status();
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(status, StatusCode::OK, "payload={payload}");
+    assert_eq!(payload["key_id"], "key-codex-import-cache-duplicate");
+    assert_eq!(payload["replaced"], true);
+
+    let fresh_transport = app_state
+        .read_provider_transport_snapshot(
+            "provider-codex",
+            "endpoint-codex-chat",
+            "key-codex-import-cache-duplicate",
+        )
+        .await
+        .expect("transport should load")
+        .expect("transport should exist");
+    let resolved = app_state
+        .resolve_local_oauth_request_auth(&fresh_transport)
+        .await
+        .expect("oauth auth should resolve")
+        .expect("oauth auth should exist");
+    match resolved {
+        crate::provider_transport::LocalResolvedOAuthRequestAuth::Header { value, .. } => {
+            assert_eq!(value, "Bearer imported-fresh-codex-access-token");
+        }
+        crate::provider_transport::LocalResolvedOAuthRequestAuth::Kiro(_) => {
+            panic!("codex should resolve to header auth")
+        }
+    }
+
+    gateway_handle.abort();
+    token_handle.abort();
 }
 
 #[tokio::test]
@@ -2473,7 +3063,10 @@ async fn gateway_imports_admin_provider_oauth_refresh_token_via_execution_runtim
         .await
         .expect("keys should load");
     assert_eq!(keys.len(), 1);
-    assert_eq!(keys[0].proxy, None);
+    assert_eq!(
+        keys[0].proxy,
+        Some(json!({"node_id": "proxy-node-codex-import", "enabled": true}))
+    );
 
     let plans = execution_plans.lock().expect("mutex should lock");
     assert_eq!(plans.len(), 1);
@@ -2907,7 +3500,10 @@ async fn gateway_batch_imports_admin_provider_oauth_kiro_locally_with_trusted_ad
         .next()
         .expect("persisted key should exist");
     assert!(stored_key.is_active);
-    assert_eq!(stored_key.proxy, None);
+    assert_eq!(
+        stored_key.proxy,
+        Some(json!({"node_id": "proxy-node-kiro-batch", "enabled": true}))
+    );
     let decrypted_auth_config = decrypt_python_fernet_ciphertext(
         DEVELOPMENT_ENCRYPTION_KEY,
         stored_key
@@ -3048,7 +3644,10 @@ async fn gateway_batch_imports_admin_provider_oauth_kiro_over_active_expired_dup
         .next()
         .expect("persisted key should exist");
     assert!(stored_key.is_active);
-    assert_eq!(stored_key.proxy, None);
+    assert_eq!(
+        stored_key.proxy,
+        Some(json!({"node_id": "proxy-node-kiro-batch", "enabled": true}))
+    );
     assert_eq!(stored_key.oauth_invalid_at_unix_secs, None);
     assert_eq!(stored_key.oauth_invalid_reason, None);
     let decrypted_auth_config = decrypt_python_fernet_ciphertext(
@@ -3244,7 +3843,10 @@ async fn gateway_batch_imports_admin_provider_oauth_kiro_via_execution_runtime_p
         .next()
         .expect("persisted key should exist");
     assert!(stored_key.is_active);
-    assert_eq!(stored_key.proxy, None);
+    assert_eq!(
+        stored_key.proxy,
+        Some(json!({"node_id": "proxy-node-kiro-batch-runtime", "enabled": true}))
+    );
     let decrypted_auth_config = decrypt_python_fernet_ciphertext(
         DEVELOPMENT_ENCRYPTION_KEY,
         stored_key
@@ -3747,7 +4349,10 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_with_trusted_admin_p
         .expect("refreshed key should exist");
     let decrypted_api_key = decrypt_python_fernet_ciphertext(
         DEVELOPMENT_ENCRYPTION_KEY,
-        stored_key.encrypted_api_key.as_str(),
+        stored_key
+            .encrypted_api_key
+            .as_deref()
+            .expect("api key should be present"),
     )
     .expect("refreshed api key should decrypt");
     assert_eq!(decrypted_api_key, "refreshed-codex-access-token");
@@ -4200,6 +4805,818 @@ async fn gateway_refreshes_admin_provider_oauth_key_locally_via_execution_runtim
             .and_then(|proxy| proxy.node_id.as_deref()),
         Some("proxy-node-provider")
     );
+    assert_eq!(
+        refresh_plan
+            .headers
+            .get(EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER)
+            .map(String::as_str),
+        Some("true")
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_refreshes_admin_provider_oauth_key_tunnel_proxy_with_direct_refresh_controls() {
+    let execution_plans = Arc::new(Mutex::new(Vec::<ExecutionPlan>::new()));
+    let execution_plans_clone = Arc::clone(&execution_plans);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| {
+            let execution_plans_inner = Arc::clone(&execution_plans_clone);
+            async move {
+                execution_plans_inner
+                    .lock()
+                    .expect("mutex should lock")
+                    .push(plan.clone());
+                if plan.request_id == "provider-oauth:local-refresh-token" {
+                    Json(json!({
+                        "request_id": plan.request_id,
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {
+                                "access_token": "refreshed-codex-access-token",
+                                "refresh_token": "refreshed-codex-refresh-token",
+                                "token_type": "Bearer",
+                                "expires_in": 1800,
+                                "scope": "openid email profile offline_access",
+                                "email": "alice@example.com",
+                                "account_id": "acct-codex-123",
+                                "plan_type": "plus"
+                            }
+                        }
+                    }))
+                } else {
+                    Json(json!({
+                        "request_id": plan.request_id,
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {}
+                        }
+                    }))
+                }
+            }
+        }),
+    );
+
+    let mut provider = sample_provider("provider-codex", "codex", 10);
+    provider.provider_type = "codex".to_string();
+    provider.proxy = Some(json!({
+        "mode": "tunnel",
+        "node_id": "proxy-node-tunnel",
+        "enabled": true,
+        "tunnel_base_url": "http://gateway-owner.internal"
+    }));
+    let endpoint = sample_endpoint(
+        "endpoint-codex-cli",
+        "provider-codex",
+        "openai:responses",
+        "https://chatgpt.com/backend-api/codex",
+    );
+
+    let mut key = sample_key(
+        "key-codex-oauth-refresh-tunnel",
+        "provider-codex",
+        "openai:responses",
+        "stale-codex-access-token",
+    );
+    key.auth_type = "oauth".to_string();
+    key.encrypted_auth_config = Some(
+        encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"codex","refresh_token":"old-codex-refresh-token","email":"alice@example.com","account_id":"acct-codex-123","plan_type":"plus","expires_at":1}"#,
+        )
+        .expect("auth config ciphertext should build"),
+    );
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![key],
+    ));
+
+    let oauth_refresh =
+        crate::provider_transport::LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![
+            Arc::new(
+                crate::provider_transport::oauth_refresh::GenericOAuthRefreshAdapter::default()
+                    .with_token_url_for_tests("codex", "https://oauth.example/oauth/token"),
+            ),
+        ]);
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository,
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+            .with_oauth_refresh_coordinator_for_tests(oauth_refresh),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-oauth/keys/key-codex-oauth-refresh-tunnel/refresh"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let plans = execution_plans.lock().expect("mutex should lock");
+    let refresh_plan = plans
+        .iter()
+        .find(|plan| plan.request_id == "provider-oauth:local-refresh-token")
+        .expect("local refresh plan should exist");
+    assert_eq!(
+        refresh_plan
+            .proxy
+            .as_ref()
+            .and_then(|proxy| proxy.mode.as_deref()),
+        Some("tunnel")
+    );
+    assert_eq!(
+        refresh_plan
+            .headers
+            .get(EXECUTION_REQUEST_FOLLOW_REDIRECTS_HEADER)
+            .map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        refresh_plan
+            .headers
+            .get(EXECUTION_REQUEST_HTTP1_ONLY_HEADER)
+            .map(String::as_str),
+        Some("true")
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_consecutive_manual_oauth_refresh_uses_rotated_refresh_token() {
+    let refresh_request_bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+    let refresh_request_bodies_clone = Arc::clone(&refresh_request_bodies);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| {
+            let refresh_request_bodies_inner = Arc::clone(&refresh_request_bodies_clone);
+            async move {
+                if plan.request_id == "provider-oauth:local-refresh-token" {
+                    use base64::Engine as _;
+
+                    let body_text = plan
+                        .body
+                        .body_bytes_b64
+                        .as_deref()
+                        .and_then(|body| {
+                            base64::engine::general_purpose::STANDARD.decode(body).ok()
+                        })
+                        .and_then(|body| String::from_utf8(body).ok())
+                        .unwrap_or_default();
+                    refresh_request_bodies_inner
+                        .lock()
+                        .expect("mutex should lock")
+                        .push(body_text.clone());
+
+                    let (access_token, refresh_token) =
+                        if body_text.contains("refresh_token=old-codex-refresh-token") {
+                            (
+                                "refreshed-codex-access-token",
+                                "rotated-codex-refresh-token",
+                            )
+                        } else if body_text.contains("refresh_token=rotated-codex-refresh-token") {
+                            (
+                                "refreshed-codex-access-token-2",
+                                "rotated-codex-refresh-token-2",
+                            )
+                        } else {
+                            return Json(json!({
+                                "request_id": plan.request_id,
+                                "status_code": 401,
+                                "headers": {
+                                    "content-type": "application/json"
+                                },
+                                "body": {
+                                    "json_body": {
+                                        "error": {
+                                            "message": "unexpected refresh token"
+                                        }
+                                    }
+                                }
+                            }));
+                        };
+
+                    Json(json!({
+                        "request_id": plan.request_id,
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {
+                                "access_token": access_token,
+                                "refresh_token": refresh_token,
+                                "token_type": "Bearer",
+                                "expires_in": 1800,
+                                "scope": "openid email profile offline_access",
+                                "email": "alice@example.com",
+                                "account_id": "acct-codex-123",
+                                "plan_type": "plus"
+                            }
+                        }
+                    }))
+                } else {
+                    Json(json!({
+                        "request_id": plan.request_id,
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {}
+                        }
+                    }))
+                }
+            }
+        }),
+    );
+
+    let mut provider = sample_provider("provider-codex", "codex", 10);
+    provider.provider_type = "codex".to_string();
+    let endpoint = sample_endpoint(
+        "endpoint-codex-cli",
+        "provider-codex",
+        "openai:responses",
+        "https://chatgpt.com/backend-api/codex",
+    );
+
+    let mut key = sample_key(
+        "key-codex-oauth-consecutive-refresh",
+        "provider-codex",
+        "openai:responses",
+        "stale-codex-access-token",
+    );
+    key.auth_type = "oauth".to_string();
+    key.encrypted_auth_config = Some(
+        encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"codex","refresh_token":"old-codex-refresh-token","email":"alice@example.com","account_id":"acct-codex-123","plan_type":"plus","expires_at":1}"#,
+        )
+        .expect("auth config ciphertext should build"),
+    );
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![key],
+    ));
+
+    let oauth_refresh =
+        crate::provider_transport::LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![
+            Arc::new(
+                crate::provider_transport::oauth_refresh::GenericOAuthRefreshAdapter::default()
+                    .with_token_url_for_tests("codex", "https://oauth.example/oauth/token"),
+            ),
+        ]);
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                )
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+            .with_oauth_refresh_coordinator_for_tests(oauth_refresh),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+
+    for _ in 0..2 {
+        let response = client
+            .post(format!(
+                "{gateway_url}/api/admin/provider-oauth/keys/key-codex-oauth-consecutive-refresh/refresh"
+            ))
+            .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+            .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+            .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+            .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let bodies = refresh_request_bodies
+        .lock()
+        .expect("mutex should lock")
+        .clone();
+    assert_eq!(bodies.len(), 2);
+    assert!(
+        bodies[0].contains("refresh_token=old-codex-refresh-token"),
+        "unexpected first refresh body: {}",
+        bodies[0]
+    );
+    assert!(
+        bodies[1].contains("refresh_token=rotated-codex-refresh-token"),
+        "unexpected second refresh body: {}",
+        bodies[1]
+    );
+
+    let stored_key = provider_catalog_repository
+        .list_keys_by_ids(&["key-codex-oauth-consecutive-refresh".to_string()])
+        .await
+        .expect("keys should list")
+        .into_iter()
+        .next()
+        .expect("refreshed key should exist");
+    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        stored_key
+            .encrypted_auth_config
+            .as_deref()
+            .expect("auth config should exist"),
+    )
+    .expect("auth config should decrypt");
+    let auth_config: serde_json::Value =
+        serde_json::from_str(&decrypted_auth_config).expect("auth config should parse");
+    assert_eq!(
+        auth_config["refresh_token"],
+        "rotated-codex-refresh-token-2"
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_concurrent_manual_oauth_refresh_uses_rotated_refresh_token_after_lock_wait() {
+    let refresh_request_bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+    let refresh_request_bodies_clone = Arc::clone(&refresh_request_bodies);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| {
+            let refresh_request_bodies_inner = Arc::clone(&refresh_request_bodies_clone);
+            async move {
+                if plan.request_id == "provider-oauth:local-refresh-token" {
+                    use base64::Engine as _;
+
+                    let body_text = plan
+                        .body
+                        .body_bytes_b64
+                        .as_deref()
+                        .and_then(|body| {
+                            base64::engine::general_purpose::STANDARD.decode(body).ok()
+                        })
+                        .and_then(|body| String::from_utf8(body).ok())
+                        .unwrap_or_default();
+                    refresh_request_bodies_inner
+                        .lock()
+                        .expect("mutex should lock")
+                        .push(body_text.clone());
+
+                    let (access_token, refresh_token, delay_ms) =
+                        if body_text.contains("refresh_token=old-codex-refresh-token") {
+                            (
+                                "refreshed-codex-access-token",
+                                "rotated-codex-refresh-token",
+                                200u64,
+                            )
+                        } else if body_text.contains("refresh_token=rotated-codex-refresh-token") {
+                            (
+                                "refreshed-codex-access-token-2",
+                                "rotated-codex-refresh-token-2",
+                                0u64,
+                            )
+                        } else {
+                            return Json(json!({
+                                "request_id": plan.request_id,
+                                "status_code": 401,
+                                "headers": {
+                                    "content-type": "application/json"
+                                },
+                                "body": {
+                                    "json_body": {
+                                        "error": {
+                                            "message": "Could not validate your refresh token. Please try signing in again."
+                                        }
+                                    }
+                                }
+                            }));
+                        };
+
+                    if delay_ms > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+
+                    Json(json!({
+                        "request_id": plan.request_id,
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {
+                                "access_token": access_token,
+                                "refresh_token": refresh_token,
+                                "token_type": "Bearer",
+                                "expires_in": 1800,
+                                "scope": "openid email profile offline_access",
+                                "email": "alice@example.com",
+                                "account_id": "acct-codex-123",
+                                "plan_type": "plus"
+                            }
+                        }
+                    }))
+                } else {
+                    Json(json!({
+                        "request_id": plan.request_id,
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {}
+                        }
+                    }))
+                }
+            }
+        }),
+    );
+
+    let mut provider = sample_provider("provider-codex", "codex", 10);
+    provider.provider_type = "codex".to_string();
+    provider.proxy = Some(json!({"node_id":"proxy-node-provider","enabled":true}));
+    let endpoint = sample_endpoint(
+        "endpoint-codex-cli",
+        "provider-codex",
+        "openai:responses",
+        "https://chatgpt.com/backend-api/codex",
+    );
+
+    let mut key = sample_key(
+        "key-codex-oauth-concurrent-refresh",
+        "provider-codex",
+        "openai:responses",
+        "stale-codex-access-token",
+    );
+    key.auth_type = "oauth".to_string();
+    key.proxy = Some(json!({"node_id":"proxy-node-key","enabled":true}));
+    key.encrypted_auth_config = Some(
+        encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"codex","refresh_token":"old-codex-refresh-token","email":"alice@example.com","account_id":"acct-codex-123","plan_type":"plus","expires_at":1}"#,
+        )
+        .expect("auth config ciphertext should build"),
+    );
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![key],
+    ));
+    let mut key_node = sample_proxy_node("proxy-node-key");
+    key_node.status = "online".to_string();
+    key_node.is_manual = true;
+    key_node.tunnel_mode = false;
+    key_node.tunnel_connected = false;
+    key_node.proxy_url = Some("http://proxy-key.example:8080".to_string());
+    let mut provider_node = sample_proxy_node("proxy-node-provider");
+    provider_node.status = "online".to_string();
+    provider_node.is_manual = true;
+    provider_node.tunnel_mode = false;
+    provider_node.tunnel_connected = false;
+    provider_node.proxy_url = Some("http://proxy-provider.example:8080".to_string());
+    let proxy_node_repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![
+        key_node,
+        provider_node,
+    ]));
+
+    let oauth_refresh =
+        crate::provider_transport::LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![
+            Arc::new(
+                crate::provider_transport::oauth_refresh::GenericOAuthRefreshAdapter::default()
+                    .with_token_url_for_tests("codex", "https://oauth.example/oauth/token"),
+            ),
+        ]);
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let gateway = build_router_with_state(
+        build_state_with_execution_runtime_override(execution_runtime_url)
+            .with_data_state_for_tests(
+                GatewayDataState::with_provider_catalog_repository_for_tests(
+                    provider_catalog_repository.clone(),
+                )
+                .attach_proxy_node_repository_for_tests(proxy_node_repository)
+                .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+            )
+            .with_oauth_refresh_coordinator_for_tests(oauth_refresh),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+    let client = reqwest::Client::new();
+    let refresh_url = format!(
+        "{gateway_url}/api/admin/provider-oauth/keys/key-codex-oauth-concurrent-refresh/refresh"
+    );
+
+    let request_a = client
+        .post(refresh_url.clone())
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send();
+    let request_b = client
+        .post(refresh_url)
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send();
+    let (response_a, response_b) = tokio::join!(request_a, request_b);
+    let response_a = response_a.expect("first request should succeed");
+    let response_b = response_b.expect("second request should succeed");
+
+    assert_eq!(response_a.status(), StatusCode::OK);
+    assert_eq!(response_b.status(), StatusCode::OK);
+
+    let bodies = refresh_request_bodies
+        .lock()
+        .expect("mutex should lock")
+        .clone();
+    assert_eq!(bodies.len(), 2);
+    assert!(
+        bodies[0].contains("refresh_token=old-codex-refresh-token"),
+        "unexpected first refresh body: {}",
+        bodies[0]
+    );
+    assert!(
+        bodies[1].contains("refresh_token=rotated-codex-refresh-token"),
+        "unexpected second refresh body: {}",
+        bodies[1]
+    );
+
+    let stored_key = provider_catalog_repository
+        .list_keys_by_ids(&["key-codex-oauth-concurrent-refresh".to_string()])
+        .await
+        .expect("keys should list")
+        .into_iter()
+        .next()
+        .expect("refreshed key should exist");
+    let decrypted_auth_config = decrypt_python_fernet_ciphertext(
+        DEVELOPMENT_ENCRYPTION_KEY,
+        stored_key
+            .encrypted_auth_config
+            .as_deref()
+            .expect("auth config should exist"),
+    )
+    .expect("auth config should decrypt");
+    let auth_config: serde_json::Value =
+        serde_json::from_str(&decrypted_auth_config).expect("auth config should parse");
+    assert_eq!(
+        auth_config["refresh_token"],
+        "rotated-codex-refresh-token-2"
+    );
+
+    gateway_handle.abort();
+    execution_runtime_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_manual_oauth_refresh_prefers_fresher_transport_auth_config_over_stale_runtime_cache(
+) {
+    let refresh_request_bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+    let refresh_request_bodies_clone = Arc::clone(&refresh_request_bodies);
+    let execution_runtime = Router::new().route(
+        "/v1/execute/sync",
+        any(move |Json(plan): Json<ExecutionPlan>| {
+            let refresh_request_bodies_inner = Arc::clone(&refresh_request_bodies_clone);
+            async move {
+                if plan.request_id == "provider-oauth:local-refresh-token" {
+                    use base64::Engine as _;
+
+                    let body_text = plan
+                        .body
+                        .body_bytes_b64
+                        .as_deref()
+                        .and_then(|body| {
+                            base64::engine::general_purpose::STANDARD.decode(body).ok()
+                        })
+                        .and_then(|body| String::from_utf8(body).ok())
+                        .unwrap_or_default();
+                    refresh_request_bodies_inner
+                        .lock()
+                        .expect("mutex should lock")
+                        .push(body_text.clone());
+
+                    if body_text.contains("refresh_token=old-codex-refresh-token") {
+                        return Json(json!({
+                            "request_id": plan.request_id,
+                            "status_code": 200,
+                            "headers": {
+                                "content-type": "application/json"
+                            },
+                            "body": {
+                                "json_body": {
+                                    "access_token": "cached-codex-access-token",
+                                    "refresh_token": "cached-codex-refresh-token",
+                                    "token_type": "Bearer",
+                                    "expires_in": 1800,
+                                    "scope": "openid email profile offline_access",
+                                    "email": "alice@example.com",
+                                    "account_id": "acct-codex-123",
+                                    "plan_type": "plus"
+                                }
+                            }
+                        }));
+                    }
+
+                    if body_text.contains("refresh_token=fresh-codex-refresh-token") {
+                        return Json(json!({
+                            "request_id": plan.request_id,
+                            "status_code": 200,
+                            "headers": {
+                                "content-type": "application/json"
+                            },
+                            "body": {
+                                "json_body": {
+                                    "access_token": "fresh-codex-access-token-2",
+                                    "refresh_token": "fresh-codex-refresh-token-2",
+                                    "token_type": "Bearer",
+                                    "expires_in": 1800,
+                                    "scope": "openid email profile offline_access",
+                                    "email": "alice@example.com",
+                                    "account_id": "acct-codex-123",
+                                    "plan_type": "plus"
+                                }
+                            }
+                        }));
+                    }
+
+                    Json(json!({
+                        "request_id": plan.request_id,
+                        "status_code": 401,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {
+                                "error": {
+                                    "message": "Could not validate your refresh token. Please try signing in again."
+                                }
+                            }
+                        }
+                    }))
+                } else {
+                    Json(json!({
+                        "request_id": plan.request_id,
+                        "status_code": 200,
+                        "headers": {
+                            "content-type": "application/json"
+                        },
+                        "body": {
+                            "json_body": {}
+                        }
+                    }))
+                }
+            }
+        }),
+    );
+
+    let mut provider = sample_provider("provider-codex", "codex", 10);
+    provider.provider_type = "codex".to_string();
+    let endpoint = sample_endpoint(
+        "endpoint-codex-cli",
+        "provider-codex",
+        "openai:responses",
+        "https://chatgpt.com/backend-api/codex",
+    );
+
+    let mut key = sample_key(
+        "key-codex-oauth-stale-cache",
+        "provider-codex",
+        "openai:responses",
+        "stale-codex-access-token",
+    );
+    key.auth_type = "oauth".to_string();
+    key.encrypted_auth_config = Some(
+        encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"codex","refresh_token":"old-codex-refresh-token","email":"alice@example.com","account_id":"acct-codex-123","plan_type":"plus","expires_at":1,"updated_at":1700000001}"#,
+        )
+        .expect("auth config ciphertext should build"),
+    );
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        vec![endpoint],
+        vec![key],
+    ));
+
+    let oauth_refresh =
+        crate::provider_transport::LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![
+            Arc::new(
+                crate::provider_transport::oauth_refresh::GenericOAuthRefreshAdapter::default()
+                    .with_token_url_for_tests("codex", "https://oauth.example/oauth/token"),
+            ),
+        ]);
+
+    let (execution_runtime_url, execution_runtime_handle) = start_server(execution_runtime).await;
+    let app_state = build_state_with_execution_runtime_override(execution_runtime_url)
+        .with_data_state_for_tests(
+            GatewayDataState::with_provider_catalog_repository_for_tests(
+                provider_catalog_repository.clone(),
+            )
+            .with_encryption_key_for_tests(DEVELOPMENT_ENCRYPTION_KEY),
+        )
+        .with_oauth_refresh_coordinator_for_tests(oauth_refresh);
+
+    let stale_transport = app_state
+        .read_provider_transport_snapshot(
+            "provider-codex",
+            "endpoint-codex-cli",
+            "key-codex-oauth-stale-cache",
+        )
+        .await
+        .expect("transport should load")
+        .expect("transport should exist");
+    let cached_entry = app_state
+        .force_local_oauth_refresh_entry(&stale_transport)
+        .await
+        .expect("initial refresh should succeed")
+        .expect("initial refresh should return cached entry");
+    assert_eq!(
+        cached_entry.auth_header_value,
+        "Bearer cached-codex-access-token"
+    );
+
+    let mut updated_key = provider_catalog_repository
+        .list_keys_by_ids(&["key-codex-oauth-stale-cache".to_string()])
+        .await
+        .expect("keys should list")
+        .into_iter()
+        .next()
+        .expect("key should exist");
+    updated_key.encrypted_auth_config = Some(
+        encrypt_python_fernet_plaintext(
+            DEVELOPMENT_ENCRYPTION_KEY,
+            r#"{"provider_type":"codex","refresh_token":"fresh-codex-refresh-token","email":"alice@example.com","account_id":"acct-codex-123","plan_type":"plus","expires_at":1,"updated_at":4102444810}"#,
+        )
+        .expect("updated auth config ciphertext should build"),
+    );
+    provider_catalog_repository
+        .update_key(&updated_key)
+        .await
+        .expect("key should update");
+
+    let gateway = build_router_with_state(app_state);
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{gateway_url}/api/admin/provider-oauth/keys/key-codex-oauth-stale-cache/refresh"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let bodies = refresh_request_bodies
+        .lock()
+        .expect("mutex should lock")
+        .clone();
+    assert_eq!(bodies.len(), 2);
+    assert!(
+        bodies[0].contains("refresh_token=old-codex-refresh-token"),
+        "unexpected first refresh body: {}",
+        bodies[0]
+    );
+    assert!(
+        bodies[1].contains("refresh_token=fresh-codex-refresh-token"),
+        "unexpected second refresh body: {}",
+        bodies[1]
+    );
 
     gateway_handle.abort();
     execution_runtime_handle.abort();
@@ -4505,9 +5922,11 @@ async fn gateway_handles_admin_oauth_supported_types_locally_with_trusted_admin_
     assert_eq!(response.status(), StatusCode::OK);
     let payload: serde_json::Value = response.json().await.expect("json body should parse");
     let items = payload.as_array().expect("items should be array");
-    assert_eq!(items.len(), 1);
+    assert_eq!(items.len(), 2);
     assert_eq!(items[0]["provider_type"], "linuxdo");
     assert_eq!(items[0]["display_name"], "Linux Do");
+    assert_eq!(items[1]["provider_type"], "custom_oidc");
+    assert_eq!(items[1]["display_name"], "Custom OIDC");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();
@@ -4626,6 +6045,152 @@ async fn gateway_upserts_admin_oauth_provider_locally_with_trusted_admin_princip
         .expect("lookup should succeed")
         .expect("provider should exist");
     assert!(stored.client_secret_encrypted.is_some());
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_rejects_custom_oidc_without_allowed_domains() {
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/api/admin/oauth/providers/custom_oidc",
+        any(move |_request: Request| {
+            let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+            async move {
+                *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("unexpected upstream hit"))
+            }
+        }),
+    );
+
+    let repository = Arc::new(InMemoryOAuthProviderRepository::default());
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_oauth_provider_repository_for_tests(
+                repository,
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .put(format!(
+            "{gateway_url}/api/admin/oauth/providers/custom_oidc"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "display_name": "Custom OIDC",
+            "client_id": "custom-client",
+            "authorization_url_override": "https://idp.example.com/oauth/authorize",
+            "token_url_override": "https://idp.example.com/oauth/token",
+            "userinfo_url_override": "https://idp.example.com/oauth/userinfo",
+            "scopes": ["openid", "profile", "email"],
+            "redirect_uri": "https://backend.example.com/oauth/callback",
+            "frontend_callback_url": "https://frontend.example.com/auth/callback",
+            "attribute_mapping": {"sub": "sub", "email": "email"},
+            "extra_config": {},
+            "is_enabled": true
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(
+        payload["error"]["message"],
+        "custom_oidc 必须在 extra_config.allowed_domains 配置域名白名单"
+    );
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_upserts_custom_oidc_with_allowed_domains() {
+    let upstream_hits = Arc::new(Mutex::new(0usize));
+    let upstream_hits_clone = Arc::clone(&upstream_hits);
+    let upstream = Router::new().route(
+        "/api/admin/oauth/providers/custom_oidc",
+        any(move |_request: Request| {
+            let upstream_hits_inner = Arc::clone(&upstream_hits_clone);
+            async move {
+                *upstream_hits_inner.lock().expect("mutex should lock") += 1;
+                (StatusCode::OK, Body::from("unexpected upstream hit"))
+            }
+        }),
+    );
+
+    let repository = Arc::new(InMemoryOAuthProviderRepository::default());
+    let (upstream_url, upstream_handle) = start_server(upstream).await;
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(GatewayDataState::with_oauth_provider_repository_for_tests(
+                repository.clone(),
+            )),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = reqwest::Client::new()
+        .put(format!(
+            "{gateway_url}/api/admin/oauth/providers/custom_oidc"
+        ))
+        .header(crate::constants::GATEWAY_HEADER, "rust-phase3b")
+        .header(TRUSTED_ADMIN_USER_ID_HEADER, "admin-user-123")
+        .header(TRUSTED_ADMIN_USER_ROLE_HEADER, "admin")
+        .header(TRUSTED_ADMIN_SESSION_ID_HEADER, "session-123")
+        .json(&json!({
+            "display_name": "Custom OIDC",
+            "client_id": "custom-client",
+            "authorization_url_override": "https://idp.example.com/oauth/authorize",
+            "token_url_override": "https://idp.example.com/oauth/token",
+            "userinfo_url_override": "https://idp.example.com/oauth/userinfo",
+            "scopes": ["openid", "profile", "email"],
+            "redirect_uri": "https://backend.example.com/oauth/callback",
+            "frontend_callback_url": "https://frontend.example.com/auth/callback",
+            "attribute_mapping": {"sub": "id", "email": "profile.email"},
+            "extra_config": {"allowed_domains": ["idp.example.com"]},
+            "is_enabled": true
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["provider_type"], "custom_oidc");
+    assert_eq!(payload["is_enabled"], true);
+
+    let stored = repository
+        .get_oauth_provider_config("custom_oidc")
+        .await
+        .expect("lookup should succeed")
+        .expect("provider should exist");
+    assert_eq!(
+        stored.authorization_url_override.as_deref(),
+        Some("https://idp.example.com/oauth/authorize")
+    );
+    assert_eq!(
+        stored
+            .extra_config
+            .as_ref()
+            .and_then(|value| {
+                value
+                    .get("allowed_domains")
+                    .and_then(serde_json::Value::as_array)
+            })
+            .map(Vec::len),
+        Some(1)
+    );
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

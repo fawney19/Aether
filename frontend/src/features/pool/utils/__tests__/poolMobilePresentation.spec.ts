@@ -54,4 +54,14 @@ describe('poolMobilePresentation', () => {
       overflow: [],
     })
   })
+
+  it('can show a disabled refresh action even when refresh is not available', () => {
+    expect(
+      splitPoolMobileActions({
+        canDownloadOrCopy: true,
+        canRefreshToken: false,
+        showRefreshToken: true,
+      }).primary,
+    ).toContain('refresh_token')
+  })
 })

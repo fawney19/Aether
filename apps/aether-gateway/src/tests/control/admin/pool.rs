@@ -495,6 +495,7 @@ async fn gateway_pool_list_ignores_usage_rows_and_uses_persisted_key_stats() {
     key.request_count = Some(7);
     key.total_tokens = 1_024;
     key.total_cost_usd = 3.5;
+    key.created_at_unix_ms = Some(1_711_000_000);
     key.last_used_at_unix_secs = Some(1_711_000_999);
 
     let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
@@ -531,6 +532,10 @@ async fn gateway_pool_list_ignores_usage_rows_and_uses_persisted_key_stats() {
     assert_eq!(
         keys[0]["last_used_at"],
         json!(crate::handlers::shared::unix_secs_to_rfc3339(1_711_000_999))
+    );
+    assert_eq!(
+        keys[0]["imported_at"],
+        json!(crate::handlers::shared::unix_secs_to_rfc3339(1_711_000_000))
     );
 }
 
@@ -690,6 +695,102 @@ async fn gateway_handles_admin_pool_list_keys_locally_with_trusted_admin_princip
 
     gateway_handle.abort();
     upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_sorts_admin_pool_keys_by_imported_and_last_used_time() {
+    let provider = sample_provider("provider-openai", "openai", 10).with_transport_fields(
+        true,
+        false,
+        true,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(json!({
+            "pool_advanced": {
+                "enabled": true
+            }
+        })),
+    );
+    let mut old_key = sample_key("key-openai-old", "provider-openai", "openai:chat", "sk-old");
+    old_key.name = "old".to_string();
+    old_key.created_at_unix_ms = Some(1_711_000_000);
+    old_key.last_used_at_unix_secs = Some(1_711_000_500);
+    let mut fresh_key = sample_key(
+        "key-openai-fresh",
+        "provider-openai",
+        "openai:chat",
+        "sk-fresh",
+    );
+    fresh_key.name = "fresh".to_string();
+    fresh_key.created_at_unix_ms = Some(1_711_002_000);
+    fresh_key.last_used_at_unix_secs = Some(1_711_000_100);
+    let mut active_key = sample_key(
+        "key-openai-active",
+        "provider-openai",
+        "openai:chat",
+        "sk-active",
+    );
+    active_key.name = "active".to_string();
+    active_key.created_at_unix_ms = Some(1_711_001_000);
+    active_key.last_used_at_unix_secs = Some(1_711_003_000);
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![old_key, fresh_key, active_key],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+            provider_catalog_repository,
+        ));
+
+    let imported_response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-openai/keys?page=1&page_size=50&status=all&sort_by=imported_at&sort_order=desc",
+        None,
+    )
+    .await;
+    assert_eq!(imported_response.status(), StatusCode::OK);
+    let imported_payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(imported_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    let imported_names = imported_payload["keys"]
+        .as_array()
+        .expect("keys should be array")
+        .iter()
+        .map(|item| item["key_name"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(imported_names, vec!["fresh", "active", "old"]);
+
+    let last_used_response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-openai/keys?page=1&page_size=50&status=all&sort_by=last_used_at&sort_order=desc",
+        None,
+    )
+    .await;
+    assert_eq!(last_used_response.status(), StatusCode::OK);
+    let last_used_payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(last_used_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    let last_used_names = last_used_payload["keys"]
+        .as_array()
+        .expect("keys should be array")
+        .iter()
+        .map(|item| item["key_name"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(last_used_names, vec!["active", "old", "fresh"]);
 }
 
 #[tokio::test]
@@ -885,7 +986,7 @@ async fn gateway_handles_admin_pool_list_keys_with_quota_compatibility_fields() 
     let mut key = sample_key(
         "key-antigravity-a",
         "provider-antigravity",
-        "gemini:chat",
+        "gemini:generate_content",
         "sk-antigravity",
     );
     key.name = "quota-key".to_string();
@@ -1008,7 +1109,7 @@ async fn gateway_includes_pool_quota_and_compat_fields_in_list_keys_response() {
     let mut key = sample_key(
         "key-antigravity-oauth",
         "provider-antigravity",
-        "gemini:chat",
+        "gemini:generate_content",
         "oauth-placeholder",
     );
     key.name = "quota key".to_string();
@@ -1133,7 +1234,7 @@ async fn gateway_prefers_status_snapshot_antigravity_quota_over_stale_metadata()
     let mut key = sample_key(
         "key-antigravity-snapshot-fresh",
         "provider-antigravity",
-        "gemini:chat",
+        "gemini:generate_content",
         "oauth-placeholder",
     );
     key.name = "antigravity snapshot fresh".to_string();
@@ -1248,7 +1349,7 @@ async fn gateway_renders_gemini_cli_account_quota_from_status_snapshot() {
     let mut key = sample_key(
         "key-gemini-cli-snapshot",
         "provider-gemini-cli",
-        "gemini:chat",
+        "gemini:generate_content",
         "oauth-placeholder",
     );
     key.name = "gemini cli snapshot".to_string();
@@ -1678,6 +1779,117 @@ async fn gateway_prefers_status_snapshot_codex_quota_over_stale_metadata() {
 }
 
 #[tokio::test]
+async fn gateway_treats_stale_codex_exhausted_snapshot_as_available_when_windows_have_capacity() {
+    let mut provider = sample_provider("provider-codex", "codex", 10).with_transport_fields(
+        true,
+        false,
+        true,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(json!({
+            "pool_advanced": {
+                "enabled": true,
+                "skip_exhausted_accounts": true
+            }
+        })),
+    );
+    provider.provider_type = "codex".to_string();
+
+    let mut key = sample_key(
+        "key-codex-no-credits",
+        "provider-codex",
+        "openai:responses",
+        "oauth-placeholder",
+    );
+    key.name = "codex no credits".to_string();
+    key.auth_type = "oauth".to_string();
+    key.status_snapshot = Some(json!({
+        "quota": {
+            "version": 2,
+            "provider_type": "codex",
+            "code": "exhausted",
+            "label": "额度耗尽",
+            "reason": "无可用积分",
+            "freshness": "fresh",
+            "source": "refresh_api",
+            "observed_at": 4_102_444_800u64,
+            "exhausted": true,
+            "usage_ratio": 0.0,
+            "updated_at": 4_102_444_800u64,
+            "reset_seconds": 18_000,
+            "plan_type": "plus",
+            "credits": {
+                "has_credits": false,
+                "balance": 0.0,
+                "unlimited": false
+            },
+            "windows": [
+                {
+                    "code": "weekly",
+                    "label": "周",
+                    "scope": "account",
+                    "unit": "percent",
+                    "used_ratio": 0.0,
+                    "remaining_ratio": 1.0,
+                    "reset_at": 4_103_049_600u64,
+                    "reset_seconds": 604_800,
+                    "window_minutes": 10_080
+                },
+                {
+                    "code": "5h",
+                    "label": "5H",
+                    "scope": "account",
+                    "unit": "percent",
+                    "used_ratio": 0.0,
+                    "remaining_ratio": 1.0,
+                    "reset_at": 4_102_462_800u64,
+                    "reset_seconds": 18_000,
+                    "window_minutes": 300
+                }
+            ]
+        }
+    }));
+
+    let provider_catalog_repository = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![key],
+    ));
+    let state = AppState::new()
+        .expect("gateway should build")
+        .with_data_state_for_tests(GatewayDataState::with_provider_catalog_reader_for_tests(
+            provider_catalog_repository,
+        ));
+
+    let response = local_admin_pool_response(
+        &state,
+        http::Method::GET,
+        "/api/admin/pool/provider-codex/keys?page=1&page_size=50&status=all",
+        None,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read"),
+    )
+    .expect("json body should parse");
+    let keys = payload["keys"].as_array().expect("keys should be array");
+
+    assert_eq!(keys[0]["scheduling_status"], json!("available"));
+    assert_eq!(keys[0]["scheduling_reason"], json!("available"));
+    assert_eq!(
+        keys[0]["account_quota"],
+        json!("周剩余 100.0% (7天0小时后重置) | 5H剩余 100.0% (5小时0分钟后重置)")
+    );
+}
+
+#[tokio::test]
 async fn gateway_marks_exhausted_kiro_pool_key_as_blocked_when_flag_enabled() {
     let mut provider = sample_provider("provider-kiro", "kiro", 10).with_transport_fields(
         true,
@@ -1700,7 +1912,7 @@ async fn gateway_marks_exhausted_kiro_pool_key_as_blocked_when_flag_enabled() {
     let mut key = sample_key(
         "key-kiro-exhausted",
         "provider-kiro",
-        "claude:cli",
+        "claude:messages",
         "oauth-placeholder",
     );
     key.name = "kiro exhausted".to_string();
@@ -1773,7 +1985,7 @@ async fn gateway_prefers_status_snapshot_kiro_quota_over_stale_metadata() {
     let mut key = sample_key(
         "key-kiro-snapshot-fresh",
         "provider-kiro",
-        "claude:cli",
+        "claude:messages",
         "oauth-placeholder",
     );
     key.name = "kiro snapshot fresh".to_string();

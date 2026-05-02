@@ -87,7 +87,7 @@ mod tests {
             80
         );
         assert_eq!(
-            normalize_input_tokens_for_billing(Some("gemini:chat"), 100, 20),
+            normalize_input_tokens_for_billing(Some("gemini:generate_content"), 100, 20),
             80
         );
     }
@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn keeps_input_tokens_for_claude() {
         assert_eq!(
-            normalize_input_tokens_for_billing(Some("claude:chat"), 100, 20),
+            normalize_input_tokens_for_billing(Some("claude:messages"), 100, 20),
             100
         );
     }
@@ -107,7 +107,12 @@ mod tests {
             120
         );
         assert_eq!(
-            normalize_total_input_context_for_cache_hit_rate(Some("gemini:chat"), 120, 10, 15),
+            normalize_total_input_context_for_cache_hit_rate(
+                Some("gemini:generate_content"),
+                120,
+                10,
+                15
+            ),
             120
         );
     }
@@ -115,7 +120,7 @@ mod tests {
     #[test]
     fn includes_cache_creation_for_claude_cache_hit_context() {
         assert_eq!(
-            normalize_total_input_context_for_cache_hit_rate(Some("claude:chat"), 60, 15, 5),
+            normalize_total_input_context_for_cache_hit_rate(Some("claude:messages"), 60, 15, 5),
             80
         );
     }

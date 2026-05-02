@@ -1,4 +1,4 @@
-use crate::ai_pipeline_api::{
+use crate::ai_serving::api::{
     build_local_gemini_files_stream_plan_and_reports_for_kind,
     build_local_gemini_files_sync_plan_and_reports_for_kind,
     build_local_image_stream_plan_and_reports_for_kind,
@@ -13,15 +13,15 @@ use crate::ai_pipeline_api::{
     parse_direct_request_body, resolve_claude_stream_spec, resolve_claude_sync_spec,
     resolve_gemini_stream_spec, resolve_gemini_sync_spec, resolve_local_same_format_stream_spec,
     resolve_local_same_format_sync_spec, set_local_openai_chat_execution_exhausted_diagnostic,
-    LocalStandardSpec, LocalStreamPlanAndReport, LocalSyncPlanAndReport,
-    EXECUTION_RUNTIME_STREAM_DECISION_ACTION, EXECUTION_RUNTIME_SYNC_DECISION_ACTION,
+    AiStreamAttempt, AiSyncAttempt, LocalStandardSpec, EXECUTION_RUNTIME_STREAM_DECISION_ACTION,
+    EXECUTION_RUNTIME_SYNC_DECISION_ACTION,
 };
 use crate::control::GatewayControlDecision;
 use crate::executor::candidate_loop::{
     execute_stream_plan_and_reports, execute_sync_plan_and_reports,
 };
 use crate::executor::LocalExecutionRequestOutcome;
-use crate::{AppState, GatewayControlSyncDecisionResponse, GatewayError};
+use crate::{AiExecutionDecision, AppState, GatewayError};
 
 pub(crate) async fn maybe_execute_sync_local_path(
     state: &AppState,
@@ -118,7 +118,7 @@ pub(crate) async fn maybe_execute_sync_via_local_openai_responses_decision(
     body_json: &serde_json::Value,
     plan_kind: &str,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
-    let plan_and_reports: Vec<LocalSyncPlanAndReport> =
+    let plan_and_reports: Vec<AiSyncAttempt> =
         build_local_openai_responses_sync_plan_and_reports_for_kind(
             state, parts, trace_id, decision, body_json, plan_kind,
         )
@@ -146,7 +146,7 @@ pub(crate) async fn maybe_execute_stream_via_local_openai_responses_decision(
     body_json: &serde_json::Value,
     plan_kind: &str,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
-    let plan_and_reports: Vec<LocalStreamPlanAndReport> =
+    let plan_and_reports: Vec<AiStreamAttempt> =
         build_local_openai_responses_stream_plan_and_reports_for_kind(
             state, parts, trace_id, decision, body_json, plan_kind,
         )
@@ -171,11 +171,10 @@ pub(crate) async fn maybe_execute_sync_via_standard_family_decision(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    let plan_and_reports: Vec<LocalSyncPlanAndReport> =
-        build_standard_family_sync_plan_and_reports(
-            state, parts, trace_id, decision, body_json, spec,
-        )
-        .await?;
+    let plan_and_reports: Vec<AiSyncAttempt> = build_standard_family_sync_plan_and_reports(
+        state, parts, trace_id, decision, body_json, spec,
+    )
+    .await?;
     if plan_and_reports.is_empty() {
         return Ok(LocalExecutionRequestOutcome::NoPath);
     }
@@ -204,11 +203,10 @@ pub(crate) async fn maybe_execute_stream_via_standard_family_decision(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    let plan_and_reports: Vec<LocalStreamPlanAndReport> =
-        build_standard_family_stream_plan_and_reports(
-            state, parts, trace_id, decision, body_json, spec,
-        )
-        .await?;
+    let plan_and_reports: Vec<AiStreamAttempt> = build_standard_family_stream_plan_and_reports(
+        state, parts, trace_id, decision, body_json, spec,
+    )
+    .await?;
     if plan_and_reports.is_empty() {
         return Ok(LocalExecutionRequestOutcome::NoPath);
     }
@@ -330,11 +328,10 @@ pub(crate) async fn maybe_execute_sync_via_local_same_format_provider_decision(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    let plan_and_reports: Vec<LocalSyncPlanAndReport> =
-        build_local_same_format_sync_plan_and_reports(
-            state, parts, trace_id, decision, body_json, spec,
-        )
-        .await?;
+    let plan_and_reports: Vec<AiSyncAttempt> = build_local_same_format_sync_plan_and_reports(
+        state, parts, trace_id, decision, body_json, spec,
+    )
+    .await?;
     if plan_and_reports.is_empty() {
         return Ok(LocalExecutionRequestOutcome::NoPath);
     }
@@ -362,11 +359,10 @@ pub(crate) async fn maybe_execute_stream_via_local_same_format_provider_decision
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    let plan_and_reports: Vec<LocalStreamPlanAndReport> =
-        build_local_same_format_stream_plan_and_reports(
-            state, parts, trace_id, decision, body_json, spec,
-        )
-        .await?;
+    let plan_and_reports: Vec<AiStreamAttempt> = build_local_same_format_stream_plan_and_reports(
+        state, parts, trace_id, decision, body_json, spec,
+    )
+    .await?;
     if plan_and_reports.is_empty() {
         return Ok(LocalExecutionRequestOutcome::NoPath);
     }
@@ -384,7 +380,7 @@ pub(crate) async fn maybe_execute_sync_via_local_gemini_files_decision(
     decision: &GatewayControlDecision,
     plan_kind: &str,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
-    let plan_and_reports: Vec<LocalSyncPlanAndReport> =
+    let plan_and_reports: Vec<AiSyncAttempt> =
         build_local_gemini_files_sync_plan_and_reports_for_kind(
             state,
             parts,
@@ -420,17 +416,16 @@ pub(crate) async fn maybe_execute_sync_via_local_image_decision(
     decision: &GatewayControlDecision,
     plan_kind: &str,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
-    let plan_and_reports: Vec<LocalSyncPlanAndReport> =
-        build_local_image_sync_plan_and_reports_for_kind(
-            state,
-            parts,
-            body_json,
-            body_base64,
-            trace_id,
-            decision,
-            plan_kind,
-        )
-        .await?;
+    let plan_and_reports: Vec<AiSyncAttempt> = build_local_image_sync_plan_and_reports_for_kind(
+        state,
+        parts,
+        body_json,
+        body_base64,
+        trace_id,
+        decision,
+        plan_kind,
+    )
+    .await?;
     if plan_and_reports.is_empty() {
         return Ok(LocalExecutionRequestOutcome::NoPath);
     }
@@ -453,7 +448,7 @@ pub(crate) async fn maybe_execute_stream_via_local_gemini_files_decision(
     decision: &GatewayControlDecision,
     plan_kind: &str,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
-    let plan_and_reports: Vec<LocalStreamPlanAndReport> =
+    let plan_and_reports: Vec<AiStreamAttempt> =
         build_local_gemini_files_stream_plan_and_reports_for_kind(
             state, parts, trace_id, decision, plan_kind,
         )
@@ -474,7 +469,7 @@ pub(crate) async fn maybe_execute_stream_via_local_image_decision(
     decision: &GatewayControlDecision,
     plan_kind: &str,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
-    let plan_and_reports: Vec<LocalStreamPlanAndReport> =
+    let plan_and_reports: Vec<AiStreamAttempt> =
         build_local_image_stream_plan_and_reports_for_kind(
             state,
             parts,
@@ -500,11 +495,10 @@ pub(crate) async fn maybe_execute_sync_via_local_video_decision(
     decision: &GatewayControlDecision,
     plan_kind: &str,
 ) -> Result<LocalExecutionRequestOutcome, GatewayError> {
-    let plan_and_reports: Vec<LocalSyncPlanAndReport> =
-        build_local_video_sync_plan_and_reports_for_kind(
-            state, parts, body_json, trace_id, decision, plan_kind,
-        )
-        .await?;
+    let plan_and_reports: Vec<AiSyncAttempt> = build_local_video_sync_plan_and_reports_for_kind(
+        state, parts, body_json, trace_id, decision, plan_kind,
+    )
+    .await?;
     if plan_and_reports.is_empty() {
         return Ok(LocalExecutionRequestOutcome::NoPath);
     }
@@ -596,8 +590,6 @@ pub(crate) fn parse_local_request_body(
     parse_direct_request_body(parts, body_bytes)
 }
 
-pub(crate) fn decision_payload_is_direct_execution(
-    payload: &GatewayControlSyncDecisionResponse,
-) -> bool {
+pub(crate) fn decision_payload_is_direct_execution(payload: &AiExecutionDecision) -> bool {
     planner_decision_action(payload.action.as_str())
 }

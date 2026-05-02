@@ -11,8 +11,39 @@ use super::{
     TRACE_ID_HEADER,
 };
 
-#[tokio::test]
-async fn gateway_executes_claude_cli_sync_via_local_decision_gate_with_local_sync_decision() {
+const CLAUDE_CLI_SYNC_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn run_claude_cli_sync_test<F, Fut>(test_name: &'static str, make_future: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(CLAUDE_CLI_SYNC_TEST_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future());
+        })
+        .expect("claude cli sync test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+#[test]
+fn gateway_executes_claude_cli_sync_via_local_decision_gate_with_local_sync_decision() {
+    run_claude_cli_sync_test(
+        "gateway_executes_claude_cli_sync_via_local_decision_gate_with_local_sync_decision",
+        gateway_executes_claude_cli_sync_via_local_decision_gate_with_local_sync_decision_impl,
+    );
+}
+
+async fn gateway_executes_claude_cli_sync_via_local_decision_gate_with_local_sync_decision_impl() {
     #[derive(Debug, Clone)]
     struct SeenExecutionRuntimeSyncRequest {
         trace_id: String,
@@ -44,7 +75,7 @@ async fn gateway_executes_claude_cli_sync_via_local_decision_gate_with_local_syn
             true,
             false,
             Some(serde_json::json!(["claude"])),
-            Some(serde_json::json!(["claude:cli"])),
+            Some(serde_json::json!(["claude:messages"])),
             Some(serde_json::json!(["claude-code"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -55,7 +86,7 @@ async fn gateway_executes_claude_cli_sync_via_local_decision_gate_with_local_syn
             Some(5),
             Some(4_102_444_800),
             Some(serde_json::json!(["claude"])),
-            Some(serde_json::json!(["claude:cli"])),
+            Some(serde_json::json!(["claude:messages"])),
             Some(serde_json::json!(["claude-code"])),
         )
         .expect("auth snapshot should build")
@@ -69,7 +100,7 @@ async fn gateway_executes_claude_cli_sync_via_local_decision_gate_with_local_syn
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-claude-cli-local-1".to_string(),
-            endpoint_api_format: "claude:cli".to_string(),
+            endpoint_api_format: "claude:messages".to_string(),
             endpoint_api_family: Some("claude".to_string()),
             endpoint_kind: Some("cli".to_string()),
             endpoint_is_active: true,
@@ -77,11 +108,11 @@ async fn gateway_executes_claude_cli_sync_via_local_decision_gate_with_local_syn
             key_name: "prod".to_string(),
             key_auth_type: "bearer".to_string(),
             key_is_active: true,
-            key_api_formats: Some(vec!["claude:cli".to_string()]),
+            key_api_formats: Some(vec!["claude:messages".to_string()]),
             key_allowed_models: None,
             key_capabilities: None,
             key_internal_priority: 5,
-            key_global_priority_by_format: Some(serde_json::json!({"claude:cli": 1})),
+            key_global_priority_by_format: Some(serde_json::json!({"claude:messages": 1})),
             model_id: "model-claude-cli-local-1".to_string(),
             global_model_id: "global-model-claude-cli-local-1".to_string(),
             global_model_name: "claude-code".to_string(),
@@ -91,7 +122,7 @@ async fn gateway_executes_claude_cli_sync_via_local_decision_gate_with_local_syn
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
                 name: "claude-code-upstream".to_string(),
                 priority: 1,
-                api_formats: Some(vec!["claude:cli".to_string()]),
+                api_formats: Some(vec!["claude:messages".to_string()]),
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -124,7 +155,7 @@ async fn gateway_executes_claude_cli_sync_via_local_decision_gate_with_local_syn
         StoredProviderCatalogEndpoint::new(
             "endpoint-claude-cli-local-1".to_string(),
             "provider-claude-cli-local-1".to_string(),
-            "claude:cli".to_string(),
+            "claude:messages".to_string(),
             Some("claude".to_string()),
             Some("cli".to_string()),
             true,
@@ -159,12 +190,12 @@ async fn gateway_executes_claude_cli_sync_via_local_decision_gate_with_local_syn
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["claude:cli"])),
+            Some(serde_json::json!(["claude:messages"])),
             encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "sk-upstream-claude-cli")
                 .expect("api key should encrypt"),
             None,
             None,
-            Some(serde_json::json!({"claude:cli": 1})),
+            Some(serde_json::json!({"claude:messages": 1})),
             None,
             None,
             Some(serde_json::json!({"enabled": true, "node_id":"proxy-node-claude-cli-local"})),
@@ -460,8 +491,15 @@ async fn gateway_executes_claude_cli_sync_via_local_decision_gate_with_local_syn
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_returns_claude_cli_error_for_local_sync_failure() {
+#[test]
+fn gateway_returns_claude_cli_error_for_local_sync_failure() {
+    run_claude_cli_sync_test(
+        "gateway_returns_claude_cli_error_for_local_sync_failure",
+        gateway_returns_claude_cli_error_for_local_sync_failure_impl,
+    );
+}
+
+async fn gateway_returns_claude_cli_error_for_local_sync_failure_impl() {
     fn hash_api_key(value: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(value.as_bytes());
@@ -478,7 +516,7 @@ async fn gateway_returns_claude_cli_error_for_local_sync_failure() {
             true,
             false,
             Some(serde_json::json!(["claude"])),
-            Some(serde_json::json!(["claude:cli"])),
+            Some(serde_json::json!(["claude:messages"])),
             Some(serde_json::json!(["claude-code"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -489,7 +527,7 @@ async fn gateway_returns_claude_cli_error_for_local_sync_failure() {
             Some(5),
             Some(4_102_444_800),
             Some(serde_json::json!(["claude"])),
-            Some(serde_json::json!(["claude:cli"])),
+            Some(serde_json::json!(["claude:messages"])),
             Some(serde_json::json!(["claude-code"])),
         )
         .expect("auth snapshot should build")
@@ -503,7 +541,7 @@ async fn gateway_returns_claude_cli_error_for_local_sync_failure() {
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-claude-cli-local-1".to_string(),
-            endpoint_api_format: "claude:cli".to_string(),
+            endpoint_api_format: "claude:messages".to_string(),
             endpoint_api_family: Some("claude".to_string()),
             endpoint_kind: Some("cli".to_string()),
             endpoint_is_active: true,
@@ -511,11 +549,11 @@ async fn gateway_returns_claude_cli_error_for_local_sync_failure() {
             key_name: "prod".to_string(),
             key_auth_type: "bearer".to_string(),
             key_is_active: true,
-            key_api_formats: Some(vec!["claude:cli".to_string()]),
+            key_api_formats: Some(vec!["claude:messages".to_string()]),
             key_allowed_models: None,
             key_capabilities: None,
             key_internal_priority: 5,
-            key_global_priority_by_format: Some(serde_json::json!({"claude:cli": 1})),
+            key_global_priority_by_format: Some(serde_json::json!({"claude:messages": 1})),
             model_id: "model-claude-cli-local-1".to_string(),
             global_model_id: "global-model-claude-cli-local-1".to_string(),
             global_model_name: "claude-code".to_string(),
@@ -525,7 +563,7 @@ async fn gateway_returns_claude_cli_error_for_local_sync_failure() {
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
                 name: "claude-code-upstream".to_string(),
                 priority: 1,
-                api_formats: Some(vec!["claude:cli".to_string()]),
+                api_formats: Some(vec!["claude:messages".to_string()]),
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -558,7 +596,7 @@ async fn gateway_returns_claude_cli_error_for_local_sync_failure() {
         StoredProviderCatalogEndpoint::new(
             "endpoint-claude-cli-local-1".to_string(),
             "provider-claude-cli-local-1".to_string(),
-            "claude:cli".to_string(),
+            "claude:messages".to_string(),
             Some("claude".to_string()),
             Some("cli".to_string()),
             true,
@@ -593,12 +631,12 @@ async fn gateway_returns_claude_cli_error_for_local_sync_failure() {
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["claude:cli"])),
+            Some(serde_json::json!(["claude:messages"])),
             encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "sk-upstream-claude-cli")
                 .expect("api key should encrypt"),
             None,
             None,
-            Some(serde_json::json!({"claude:cli": 1})),
+            Some(serde_json::json!({"claude:messages": 1})),
             None,
             None,
             Some(serde_json::json!({"enabled": true, "node_id":"proxy-node-claude-cli-local"})),
@@ -734,8 +772,16 @@ async fn gateway_returns_claude_cli_error_for_local_sync_failure() {
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_marks_claude_cli_cross_format_runtime_miss_when_format_conversion_is_disabled() {
+#[test]
+fn gateway_marks_claude_cli_cross_format_runtime_miss_when_format_conversion_is_disabled() {
+    run_claude_cli_sync_test(
+        "gateway_marks_claude_cli_cross_format_runtime_miss_when_format_conversion_is_disabled",
+        gateway_marks_claude_cli_cross_format_runtime_miss_when_format_conversion_is_disabled_impl,
+    );
+}
+
+async fn gateway_marks_claude_cli_cross_format_runtime_miss_when_format_conversion_is_disabled_impl(
+) {
     fn hash_api_key(value: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(value.as_bytes());
@@ -752,7 +798,7 @@ async fn gateway_marks_claude_cli_cross_format_runtime_miss_when_format_conversi
             true,
             false,
             None,
-            Some(serde_json::json!(["claude:cli"])),
+            Some(serde_json::json!(["claude:messages"])),
             Some(serde_json::json!(["gpt-5.4"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -763,7 +809,7 @@ async fn gateway_marks_claude_cli_cross_format_runtime_miss_when_format_conversi
             Some(5),
             Some(4_102_444_800),
             None,
-            Some(serde_json::json!(["claude:cli"])),
+            Some(serde_json::json!(["claude:messages"])),
             Some(serde_json::json!(["gpt-5.4"])),
         )
         .expect("auth snapshot should build")
@@ -952,7 +998,7 @@ async fn gateway_marks_claude_cli_cross_format_runtime_miss_when_format_conversi
             .headers()
             .get(LOCAL_EXECUTION_RUNTIME_MISS_REASON_HEADER)
             .and_then(|value| value.to_str().ok()),
-        Some("candidate_list_empty")
+        Some("all_candidates_skipped")
     );
     let response_json: serde_json::Value = response.json().await.expect("body should parse");
     assert_eq!(response_json["error"]["type"], "http_error");
@@ -965,7 +1011,12 @@ async fn gateway_marks_claude_cli_cross_format_runtime_miss_when_format_conversi
         .list_by_request_id("trace-claude-cli-openai-local-miss-123")
         .await
         .expect("request candidate trace should read");
-    assert!(stored_candidates.is_empty());
+    assert_eq!(stored_candidates.len(), 1);
+    assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Skipped);
+    assert_eq!(
+        stored_candidates[0].skip_reason.as_deref(),
+        Some("format_conversion_disabled")
+    );
     assert_eq!(*public_hits.lock().expect("mutex should lock"), 0);
 
     gateway_handle.abort();

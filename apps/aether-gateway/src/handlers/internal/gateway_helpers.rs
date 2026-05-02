@@ -74,6 +74,12 @@ pub(crate) fn build_internal_gateway_resolve_payload(
     if let Some(route_kind) = decision.route_kind {
         payload.insert("route_kind".to_string(), json!(route_kind));
     }
+    if let Some(request_auth_channel) = decision.request_auth_channel {
+        payload.insert(
+            "request_auth_channel".to_string(),
+            json!(request_auth_channel),
+        );
+    }
     if let Some(signature) = decision.auth_endpoint_signature {
         payload.insert("auth_endpoint_signature".to_string(), json!(signature));
     }

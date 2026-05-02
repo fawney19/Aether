@@ -182,19 +182,15 @@ mod tests {
     }
 
     #[test]
-    fn fixed_order_keeps_priority_before_affinity_tunnel_and_format_preference() {
-        let mut lower_priority = candidate("lower", 10, 0, Some(10));
-        lower_priority.cached_affinity_match = true;
-        lower_priority.tunnel_bucket = SchedulerTunnelAffinityBucket::LocalTunnel;
-        lower_priority.format_preference = (0, 0);
+    fn fixed_order_demotes_cross_format_before_priority() {
+        let lower_priority_same_format = candidate("same", 10, 0, Some(10));
 
-        let mut higher_priority = candidate("higher", 0, 0, Some(0));
-        higher_priority.demote_cross_format = true;
-        higher_priority.format_preference = (9, 9);
+        let mut higher_priority_cross_format = candidate("cross", 0, 0, Some(0));
+        higher_priority_cross_format.demote_cross_format = true;
 
         assert_eq!(
             ranked_ids(
-                &[lower_priority, higher_priority],
+                &[higher_priority_cross_format, lower_priority_same_format],
                 SchedulerRankingContext {
                     priority_mode: SchedulerPriorityMode::Provider,
                     ranking_mode: SchedulerRankingMode::FixedOrder,
@@ -202,7 +198,7 @@ mod tests {
                     load_balance_seed: 0,
                 },
             ),
-            vec!["provider-higher", "provider-lower"]
+            vec!["provider-same", "provider-cross"]
         );
     }
 
@@ -283,6 +279,76 @@ mod tests {
                     ranking_mode: SchedulerRankingMode::CacheAffinity,
                     include_health: false,
                     load_balance_seed: 0,
+                },
+            ),
+            vec!["provider-same", "provider-cross"]
+        );
+    }
+
+    #[test]
+    fn cache_affinity_promotes_cached_candidate_before_cross_format_demotion() {
+        let same_format = candidate("same", 10, 0, Some(10));
+        let mut cached_cross_format = candidate("cross", 0, 0, Some(0));
+        cached_cross_format.cached_affinity_match = true;
+        cached_cross_format.demote_cross_format = true;
+
+        let outcomes = scheduler_ranking_outcomes(
+            &[cached_cross_format, same_format],
+            SchedulerRankingContext {
+                priority_mode: SchedulerPriorityMode::Provider,
+                ranking_mode: SchedulerRankingMode::CacheAffinity,
+                include_health: false,
+                load_balance_seed: 0,
+            },
+        );
+
+        assert_eq!(outcomes[0].original_index, 0);
+        assert_eq!(
+            outcomes[0].promoted_by,
+            Some(RANKING_REASON_CACHED_AFFINITY)
+        );
+        assert_eq!(outcomes[0].demoted_by, Some(RANKING_REASON_CROSS_FORMAT));
+        assert_eq!(outcomes[1].original_index, 1);
+    }
+
+    #[test]
+    fn demoted_cross_format_candidates_follow_format_preference_before_priority() {
+        let mut openai_responses_high_priority = candidate("responses", 0, 0, Some(0));
+        openai_responses_high_priority.demote_cross_format = true;
+        openai_responses_high_priority.format_preference = (3, 1);
+
+        let mut openai_chat_low_priority = candidate("chat", 10, 0, Some(10));
+        openai_chat_low_priority.demote_cross_format = true;
+        openai_chat_low_priority.format_preference = (3, 0);
+
+        assert_eq!(
+            ranked_ids(
+                &[openai_responses_high_priority, openai_chat_low_priority],
+                SchedulerRankingContext {
+                    priority_mode: SchedulerPriorityMode::Provider,
+                    ranking_mode: SchedulerRankingMode::CacheAffinity,
+                    include_health: false,
+                    load_balance_seed: 0,
+                },
+            ),
+            vec!["provider-chat", "provider-responses"]
+        );
+    }
+
+    #[test]
+    fn load_balance_does_not_rotate_across_cross_format_demotion_group() {
+        let same_format = candidate("same", 0, 0, Some(0));
+        let mut cross_format = candidate("cross", 0, 0, Some(0));
+        cross_format.demote_cross_format = true;
+
+        assert_eq!(
+            ranked_ids(
+                &[same_format, cross_format],
+                SchedulerRankingContext {
+                    priority_mode: SchedulerPriorityMode::Provider,
+                    ranking_mode: SchedulerRankingMode::LoadBalance,
+                    include_health: false,
+                    load_balance_seed: 1,
                 },
             ),
             vec!["provider-same", "provider-cross"]

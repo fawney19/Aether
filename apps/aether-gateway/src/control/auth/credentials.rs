@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use url::form_urlencoded;
 
 use crate::{
-    ai_pipeline::extract_gemini_model_from_path,
+    ai_serving::extract_gemini_model_from_path,
     headers::{header_value_str, is_json_request},
 };
 
@@ -185,11 +185,8 @@ fn select_primary_credential(
     if signature.starts_with("gemini:") {
         return select_gemini_credential(bundle);
     }
-    if signature == "claude:cli" {
-        return select_claude_cli_credential(bundle);
-    }
     if signature.starts_with("claude:") {
-        return select_claude_chat_credential(bundle);
+        return select_claude_messages_credential(bundle);
     }
     if signature.starts_with("openai:") {
         return select_openai_credential(bundle);
@@ -212,29 +209,15 @@ fn select_openai_credential(bundle: &GatewayCredentialBundle) -> Option<GatewayP
     .or_else(|| select_cookie_credential(bundle))
 }
 
-fn select_claude_cli_credential(
+fn select_claude_messages_credential(
     bundle: &GatewayCredentialBundle,
 ) -> Option<GatewayPrimaryCredential> {
     first_provider_api_key(
         bundle,
         &[
+            GatewayCredentialCarrier::XApiKey,
+            GatewayCredentialCarrier::ApiKey,
             GatewayCredentialCarrier::AuthorizationBearer,
-            GatewayCredentialCarrier::XApiKey,
-            GatewayCredentialCarrier::ApiKey,
-        ],
-    )
-    .or_else(|| first_bearer_token(bundle))
-    .or_else(|| select_cookie_credential(bundle))
-}
-
-fn select_claude_chat_credential(
-    bundle: &GatewayCredentialBundle,
-) -> Option<GatewayPrimaryCredential> {
-    first_provider_api_key(
-        bundle,
-        &[
-            GatewayCredentialCarrier::XApiKey,
-            GatewayCredentialCarrier::ApiKey,
         ],
     )
     .or_else(|| first_bearer_token(bundle))
@@ -410,7 +393,8 @@ mod tests {
         );
         headers.insert("x-api-key", "claude-key".parse().unwrap());
 
-        let extracted = extract_request_credentials(&headers, &uri("/v1/messages"), "claude:chat");
+        let extracted =
+            extract_request_credentials(&headers, &uri("/v1/messages"), "claude:messages");
         assert_eq!(
             extracted.primary,
             Some(GatewayPrimaryCredential::ProviderApiKey {
@@ -428,7 +412,8 @@ mod tests {
             "Bearer cli-token".parse().unwrap(),
         );
 
-        let extracted = extract_request_credentials(&headers, &uri("/v1/messages"), "claude:cli");
+        let extracted =
+            extract_request_credentials(&headers, &uri("/v1/messages"), "claude:messages");
         assert_eq!(
             extracted.primary,
             Some(GatewayPrimaryCredential::ProviderApiKey {
@@ -446,7 +431,7 @@ mod tests {
         let extracted = extract_request_credentials(
             &headers,
             &uri("/v1beta/models?key=gemini-query"),
-            "gemini:chat",
+            "gemini:generate_content",
         );
         assert_eq!(
             extracted.primary,

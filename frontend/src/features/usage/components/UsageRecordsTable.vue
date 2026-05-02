@@ -21,131 +21,133 @@
         />
       </div>
 
-      <!-- 用户筛选（仅管理员可见） -->
-      <Select
-        v-if="isAdmin && availableUsers.length > 0"
-        :model-value="filterUser"
-        @update:model-value="$emit('update:filterUser', $event)"
-      >
-        <SelectTrigger class="flex-1 min-w-0 sm:flex-none sm:w-36 h-8 text-xs border-border/60">
-          <SelectValue placeholder="用户" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="__all__">
-            全部用户
-          </SelectItem>
-          <SelectItem
-            v-for="user in availableUsers"
-            :key="user.id"
-            :value="user.id"
-          >
-            {{ user.username || user.email }}
-          </SelectItem>
-        </SelectContent>
-      </Select>
+      <div class="contents md:hidden">
+        <!-- 用户筛选（仅管理员可见） -->
+        <Select
+          v-if="isAdmin && availableUsers.length > 0"
+          :model-value="filterUser"
+          @update:model-value="$emit('update:filterUser', $event)"
+        >
+          <SelectTrigger class="flex-1 min-w-0 sm:flex-none sm:w-36 h-8 text-xs border-border/60">
+            <SelectValue placeholder="用户" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__all__">
+              全部用户
+            </SelectItem>
+            <SelectItem
+              v-for="user in availableUsers"
+              :key="user.id"
+              :value="user.id"
+            >
+              {{ user.username || user.email }}
+            </SelectItem>
+          </SelectContent>
+        </Select>
 
-      <!-- 模型筛选 -->
-      <Select
-        :model-value="filterModel"
-        @update:model-value="$emit('update:filterModel', $event)"
-      >
-        <SelectTrigger class="flex-1 min-w-0 sm:flex-none sm:w-40 h-8 text-xs border-border/60">
-          <SelectValue placeholder="模型" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="__all__">
-            全部模型
-          </SelectItem>
-          <SelectItem
-            v-for="model in availableModels"
-            :key="model"
-            :value="model"
-          >
-            {{ model.replace('claude-', '') }}
-          </SelectItem>
-        </SelectContent>
-      </Select>
+        <!-- 模型筛选 -->
+        <Select
+          :model-value="filterModel"
+          @update:model-value="$emit('update:filterModel', $event)"
+        >
+          <SelectTrigger class="flex-1 min-w-0 sm:flex-none sm:w-40 h-8 text-xs border-border/60">
+            <SelectValue placeholder="模型" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__all__">
+              全部模型
+            </SelectItem>
+            <SelectItem
+              v-for="model in availableModels"
+              :key="model"
+              :value="model"
+            >
+              {{ model.replace('claude-', '') }}
+            </SelectItem>
+          </SelectContent>
+        </Select>
 
-      <!-- 提供商筛选（仅管理员可见） -->
-      <Select
-        v-if="isAdmin"
-        :model-value="filterProvider"
-        @update:model-value="$emit('update:filterProvider', $event)"
-      >
-        <SelectTrigger class="flex-1 min-w-0 sm:flex-none sm:w-32 h-8 text-xs border-border/60">
-          <SelectValue placeholder="提供商" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="__all__">
-            全部提供商
-          </SelectItem>
-          <SelectItem
-            v-for="provider in availableProviders"
-            :key="provider"
-            :value="provider"
-          >
-            {{ provider }}
-          </SelectItem>
-        </SelectContent>
-      </Select>
+        <!-- 提供商筛选（仅管理员可见） -->
+        <Select
+          v-if="isAdmin"
+          :model-value="filterProvider"
+          @update:model-value="$emit('update:filterProvider', $event)"
+        >
+          <SelectTrigger class="flex-1 min-w-0 sm:flex-none sm:w-32 h-8 text-xs border-border/60">
+            <SelectValue placeholder="提供商" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__all__">
+              全部提供商
+            </SelectItem>
+            <SelectItem
+              v-for="provider in availableProviders"
+              :key="provider"
+              :value="provider"
+            >
+              {{ provider }}
+            </SelectItem>
+          </SelectContent>
+        </Select>
 
-      <!-- API格式筛选 -->
-      <Select
-        :model-value="filterApiFormat"
-        @update:model-value="$emit('update:filterApiFormat', $event)"
-      >
-        <SelectTrigger class="flex-1 min-w-0 sm:flex-none sm:w-32 h-8 text-xs border-border/60">
-          <SelectValue placeholder="格式" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="__all__">
-            全部格式
-          </SelectItem>
-          <SelectItem
-            v-for="format in availableApiFormats"
-            :key="format.value"
-            :value="format.value"
-          >
-            {{ format.label }}
-          </SelectItem>
-        </SelectContent>
-      </Select>
+        <!-- API格式筛选 -->
+        <Select
+          :model-value="filterApiFormat"
+          @update:model-value="$emit('update:filterApiFormat', $event)"
+        >
+          <SelectTrigger class="flex-1 min-w-0 sm:flex-none sm:w-32 h-8 text-xs border-border/60">
+            <SelectValue placeholder="格式" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__all__">
+              全部格式
+            </SelectItem>
+            <SelectItem
+              v-for="format in availableApiFormats"
+              :key="format.value"
+              :value="format.value"
+            >
+              {{ format.label }}
+            </SelectItem>
+          </SelectContent>
+        </Select>
 
-      <!-- 状态筛选 -->
-      <Select
-        :model-value="filterStatus"
-        @update:model-value="$emit('update:filterStatus', $event)"
-      >
-        <SelectTrigger class="flex-1 min-w-0 sm:flex-none sm:w-28 h-8 text-xs border-border/60">
-          <SelectValue placeholder="状态" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="__all__">
-            全部状态
-          </SelectItem>
-          <SelectItem value="stream">
-            流式
-          </SelectItem>
-          <SelectItem value="standard">
-            标准
-          </SelectItem>
-          <SelectItem value="active">
-            活跃
-          </SelectItem>
-          <SelectItem value="failed">
-            失败
-          </SelectItem>
-          <SelectItem value="cancelled">
-            已取消
-          </SelectItem>
-          <SelectItem value="has_retry">
-            发生重试
-          </SelectItem>
-          <SelectItem value="has_fallback">
-            发生转移
-          </SelectItem>
-        </SelectContent>
-      </Select>
+        <!-- 状态筛选 -->
+        <Select
+          :model-value="filterStatus"
+          @update:model-value="$emit('update:filterStatus', $event)"
+        >
+          <SelectTrigger class="flex-1 min-w-0 sm:flex-none sm:w-28 h-8 text-xs border-border/60">
+            <SelectValue placeholder="状态" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__all__">
+              全部状态
+            </SelectItem>
+            <SelectItem value="stream">
+              流式
+            </SelectItem>
+            <SelectItem value="standard">
+              标准
+            </SelectItem>
+            <SelectItem value="active">
+              活跃
+            </SelectItem>
+            <SelectItem value="failed">
+              失败
+            </SelectItem>
+            <SelectItem value="cancelled">
+              已取消
+            </SelectItem>
+            <SelectItem value="has_retry">
+              发生重试
+            </SelectItem>
+            <SelectItem value="has_fallback">
+              发生转移
+            </SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
 
       <!-- 分隔线 -->
       <div class="hidden sm:block h-4 w-px bg-border" />
@@ -286,39 +288,132 @@
     </div>
 
     <!-- 桌面端表格视图 -->
-    <Table class="hidden md:table">
+    <Table :class="isAdmin ? 'hidden md:table table-fixed min-w-[1288px]' : 'hidden md:table table-fixed min-w-[1178px]'">
+      <colgroup v-if="isAdmin">
+        <col class="w-[88px]">
+        <col class="w-[180px]">
+        <col class="w-[190px]">
+        <col class="w-[160px]">
+        <col class="w-[190px]">
+        <col class="w-[120px]">
+        <col class="w-[150px]">
+        <col class="w-[120px]">
+        <col class="w-[90px]">
+      </colgroup>
+      <colgroup v-else>
+        <col class="w-[88px]">
+        <col class="w-[200px]">
+        <col class="w-[220px]">
+        <col class="w-[190px]">
+        <col class="w-[120px]">
+        <col class="w-[150px]">
+        <col class="w-[120px]">
+        <col class="w-[90px]">
+      </colgroup>
       <TableHeader>
         <TableRow class="border-b border-border/60 hover:bg-transparent">
           <TableHead class="h-12 font-semibold w-[70px]">
             时间
           </TableHead>
-          <TableHead
+          <SortableTableHead
             v-if="isAdmin"
             class="h-12 font-semibold w-[100px]"
+            column-key="user"
+            :sortable="false"
+            :filter-active="filterUser !== '__all__'"
+            filter-title="筛选用户"
+            filter-content-class="w-48 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
           >
             用户
-          </TableHead>
+            <template #filter="{ close }">
+              <TableFilterMenu
+                :model-value="filterUser"
+                :options="userFilterOptions"
+                @update:model-value="$emit('update:filterUser', $event)"
+                @select="close"
+              />
+            </template>
+          </SortableTableHead>
           <TableHead
             v-if="!isAdmin"
             class="h-12 font-semibold w-[100px]"
           >
             密钥
           </TableHead>
-          <TableHead class="h-12 font-semibold w-[140px]">
+          <SortableTableHead
+            class="h-12 font-semibold w-[140px]"
+            column-key="model"
+            :sortable="false"
+            :filter-active="filterModel !== '__all__'"
+            filter-title="筛选模型"
+            filter-content-class="w-64 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
+          >
             模型
-          </TableHead>
-          <TableHead
+            <template #filter="{ close }">
+              <TableFilterMenu
+                :model-value="filterModel"
+                :options="modelFilterOptions"
+                @update:model-value="$emit('update:filterModel', $event)"
+                @select="close"
+              />
+            </template>
+          </SortableTableHead>
+          <SortableTableHead
             v-if="isAdmin"
             class="h-12 font-semibold w-[100px]"
+            column-key="provider"
+            :sortable="false"
+            :filter-active="filterProvider !== '__all__'"
+            filter-title="筛选提供商"
+            filter-content-class="w-48 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
           >
             提供商
-          </TableHead>
-          <TableHead class="h-12 font-semibold w-[120px]">
+            <template #filter="{ close }">
+              <TableFilterMenu
+                :model-value="filterProvider"
+                :options="providerFilterOptions"
+                @update:model-value="$emit('update:filterProvider', $event)"
+                @select="close"
+              />
+            </template>
+          </SortableTableHead>
+          <SortableTableHead
+            class="h-12 font-semibold w-[120px]"
+            column-key="api_format"
+            :sortable="false"
+            :filter-active="filterApiFormat !== '__all__'"
+            filter-title="筛选 API 格式"
+            filter-content-class="w-72 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
+          >
             API格式
-          </TableHead>
-          <TableHead class="h-12 font-semibold w-[110px] text-center">
+            <template #filter="{ close }">
+              <TableFilterMenu
+                :model-value="filterApiFormat"
+                :options="apiFormatFilterOptions"
+                @update:model-value="$emit('update:filterApiFormat', $event)"
+                @select="close"
+              />
+            </template>
+          </SortableTableHead>
+          <SortableTableHead
+            class="h-12 font-semibold w-[110px] text-center"
+            column-key="status"
+            :sortable="false"
+            align="center"
+            :filter-active="filterStatus !== '__all__'"
+            filter-title="筛选类型"
+            filter-content-class="w-44 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
+          >
             类型
-          </TableHead>
+            <template #filter="{ close }">
+              <TableFilterMenu
+                :model-value="filterStatus"
+                :options="statusFilterOptions"
+                @update:model-value="$emit('update:filterStatus', $event)"
+                @select="close"
+              />
+            </template>
+          </SortableTableHead>
           <TableHead class="h-12 font-semibold w-[140px] text-right">
             Tokens
           </TableHead>
@@ -685,6 +780,8 @@ import {
   TableHead,
   TableCell,
   Pagination,
+  SortableTableHead,
+  TableFilterMenu,
 } from '@/components/ui'
 import { RefreshCcw, Search } from 'lucide-vue-next'
 import { formatTokens, formatCurrency } from '@/utils/format'
@@ -707,6 +804,12 @@ export interface UserOption {
   id: string
   username: string
   email: string
+}
+
+interface FilterOption {
+  value: string
+  label: string
+  disabled?: boolean
 }
 
 const props = defineProps<{
@@ -757,15 +860,57 @@ const AVAILABLE_API_FORMATS = [
   { value: 'openai:responses', label: 'OpenAI Responses' },
   { value: 'openai:responses:compact', label: 'OpenAI Responses Compact' },
   { value: 'openai:video', label: 'OpenAI Video' },
-  { value: 'claude:chat', label: 'Claude Chat' },
-  { value: 'claude:cli', label: 'Claude CLI' },
-  { value: 'gemini:chat', label: 'Gemini Chat' },
-  { value: 'gemini:cli', label: 'Gemini CLI' },
+  { value: 'claude:messages', label: 'Claude Messages' },
+  { value: 'gemini:generate_content', label: 'Gemini Generate Content' },
   { value: 'gemini:video', label: 'Gemini Video' },
+  { value: 'gemini:files', label: 'Gemini Files' },
 ] as const
 
 // 使用模块级常量
 const availableApiFormats = AVAILABLE_API_FORMATS
+
+const userFilterOptions = computed<FilterOption[]>(() => [
+  { value: '__all__', label: '全部用户' },
+  ...props.availableUsers.map((user) => ({
+    value: user.id,
+    label: user.username || user.email,
+  })),
+])
+
+const modelFilterOptions = computed<FilterOption[]>(() => [
+  { value: '__all__', label: '全部模型' },
+  ...props.availableModels.map((model) => ({
+    value: model,
+    label: model.replace('claude-', ''),
+  })),
+])
+
+const providerFilterOptions = computed<FilterOption[]>(() => [
+  { value: '__all__', label: '全部提供商' },
+  ...props.availableProviders.map((provider) => ({
+    value: provider,
+    label: provider,
+  })),
+])
+
+const apiFormatFilterOptions = computed<FilterOption[]>(() => [
+  { value: '__all__', label: '全部格式' },
+  ...availableApiFormats.map((format) => ({
+    value: format.value,
+    label: format.label,
+  })),
+])
+
+const statusFilterOptions: FilterOption[] = [
+  { value: '__all__', label: '全部状态' },
+  { value: 'stream', label: '流式' },
+  { value: 'standard', label: '标准' },
+  { value: 'active', label: '活跃' },
+  { value: 'failed', label: '失败' },
+  { value: 'cancelled', label: '已取消' },
+  { value: 'has_retry', label: '发生重试' },
+  { value: 'has_fallback', label: '发生转移' },
+]
 
 const timeRangeModel = computed({
   get: () => props.timeRange,
@@ -844,7 +989,7 @@ function formatOptionalTokens(value: number | null | undefined): string {
 // useDebounceFn 自动处理清理，无需 onUnmounted
 
 // 判断是否应该显示格式转换信息
-// 包括：1. 跨格式转换（has_format_conversion=true）2. 同族格式差异（如 CLAUDE_CLI → CLAUDE）
+// 包括：1. 跨格式转换（has_format_conversion=true）2. 同族格式差异
 function shouldShowFormatConversion(record: UsageRecord): boolean {
   if (!record.api_format || !record.endpoint_api_format) {
     return false

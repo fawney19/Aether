@@ -82,71 +82,46 @@ pub(crate) fn project_local_adaptive_rate_limit(
     let last_probe_increase_at_unix_secs = current_key.last_probe_increase_at_unix_secs;
     let utilization_samples = Some(Value::Array(Vec::new()));
 
-    let is_rpm_observation = matches!(
-        classification,
-        LocalFailoverClassification::RetrySemanticRateLimit
-    ) || upstream_limit.is_some();
-    let last_429_type = if is_rpm_observation { "rpm" } else { "unknown" }.to_string();
+    let last_429_type = "rpm".to_string();
+    rpm_429_count = rpm_429_count.saturating_add(1);
+    record_429_observation(
+        &mut history,
+        observed_at_unix_secs,
+        current_rpm,
+        upstream_limit,
+    );
 
-    if is_rpm_observation {
-        rpm_429_count = rpm_429_count.saturating_add(1);
-        record_429_observation(
-            &mut history,
-            observed_at_unix_secs,
-            current_rpm,
-            upstream_limit,
+    let (evaluated_limit, confidence) = evaluate_observations(&history);
+    if let Some(evaluated_limit) =
+        evaluated_limit.filter(|_| confidence >= ENFORCEMENT_CONFIDENCE_THRESHOLD)
+    {
+        let old_limit = learned_rpm_limit.unwrap_or_default();
+        let learning_source = if upstream_limit.is_some() {
+            "header"
+        } else {
+            "observation"
+        };
+        let mut extra = Map::new();
+        extra.insert(
+            "current_rpm".to_string(),
+            current_rpm.map_or(Value::Null, |value| json!(value)),
         );
-
-        let (evaluated_limit, confidence) = evaluate_observations(&history);
-        if let Some(evaluated_limit) =
-            evaluated_limit.filter(|_| confidence >= ENFORCEMENT_CONFIDENCE_THRESHOLD)
-        {
-            let old_limit = learned_rpm_limit.unwrap_or_default();
-            let learning_source = if upstream_limit.is_some() {
-                "header"
-            } else {
-                "observation"
-            };
-            let mut extra = Map::new();
-            extra.insert(
-                "current_rpm".to_string(),
-                current_rpm.map_or(Value::Null, |value| json!(value)),
-            );
-            extra.insert(
-                "upstream_limit".to_string(),
-                upstream_limit.map_or(Value::Null, |value| json!(value)),
-            );
-            extra.insert("confidence".to_string(), json!(round3(confidence)));
-            extra.insert("learning_source".to_string(), json!(learning_source));
-            record_adjustment(
-                &mut history,
-                observed_at_unix_secs,
-                old_limit,
-                evaluated_limit,
-                "rpm_429",
-                extra,
-            );
-            learned_rpm_limit = Some(evaluated_limit);
-            last_rpm_peak = upstream_limit.or(current_rpm).or(last_rpm_peak);
-        }
-    } else if let Some(old_limit) = learned_rpm_limit {
-        let new_limit = reduced_limit(old_limit);
+        extra.insert(
+            "upstream_limit".to_string(),
+            upstream_limit.map_or(Value::Null, |value| json!(value)),
+        );
+        extra.insert("confidence".to_string(), json!(round3(confidence)));
+        extra.insert("learning_source".to_string(), json!(learning_source));
         record_adjustment(
             &mut history,
             observed_at_unix_secs,
             old_limit,
-            new_limit,
-            "unknown_429",
-            {
-                let mut extra = Map::new();
-                extra.insert(
-                    "current_rpm".to_string(),
-                    current_rpm.map_or(Value::Null, |value| json!(value)),
-                );
-                extra
-            },
+            evaluated_limit,
+            "rpm_429",
+            extra,
         );
-        learned_rpm_limit = Some(new_limit);
+        learned_rpm_limit = Some(evaluated_limit);
+        last_rpm_peak = upstream_limit.or(current_rpm).or(last_rpm_peak);
     }
 
     let status_snapshot = project_local_adaptive_status_snapshot(
@@ -272,14 +247,10 @@ pub(crate) fn project_local_adaptive_success(
 }
 
 fn local_candidate_failure_should_record_adaptive_rate_limit(
-    classification: LocalFailoverClassification,
+    _classification: LocalFailoverClassification,
     status_code: u16,
 ) -> bool {
     status_code == 429
-        || matches!(
-            classification,
-            LocalFailoverClassification::RetrySemanticRateLimit
-        )
 }
 
 fn project_local_adaptive_status_snapshot(
@@ -713,10 +684,6 @@ fn clamp_limit(value: f64) -> u32 {
         .clamp(MIN_RPM_LIMIT as f64, MAX_RPM_LIMIT as f64) as u32
 }
 
-fn reduced_limit(value: u32) -> u32 {
-    ((value as f64) * 0.95).floor().max(MIN_RPM_LIMIT as f64) as u32
-}
-
 fn record_type(record: &Map<String, Value>) -> Option<&str> {
     record.get("type").and_then(Value::as_str)
 }
@@ -843,7 +810,7 @@ mod tests {
 
         let projection = project_local_adaptive_rate_limit(
             &key,
-            LocalFailoverClassification::RetrySemanticRateLimit,
+            LocalFailoverClassification::RetryUpstreamFailure,
             429,
             Some(19),
             None,
@@ -873,7 +840,7 @@ mod tests {
 
         assert!(project_local_adaptive_rate_limit(
             &key,
-            LocalFailoverClassification::RetrySemanticRateLimit,
+            LocalFailoverClassification::RetryUpstreamFailure,
             429,
             Some(10),
             None,
@@ -913,7 +880,7 @@ mod tests {
 
         let projection = project_local_adaptive_rate_limit(
             &key,
-            LocalFailoverClassification::RetrySemanticRateLimit,
+            LocalFailoverClassification::RetryUpstreamFailure,
             429,
             Some(45),
             Some(&headers),
@@ -971,7 +938,7 @@ mod tests {
 
         let projection = project_local_adaptive_rate_limit(
             &key,
-            LocalFailoverClassification::RetrySemanticRateLimit,
+            LocalFailoverClassification::RetryUpstreamFailure,
             429,
             Some(21),
             None,
@@ -992,7 +959,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_429_reduces_existing_learned_limit() {
+    fn rate_limit_projection_records_429_as_rpm_observation() {
         let mut key = sample_adaptive_key();
         key.learned_rpm_limit = Some(100);
 
@@ -1006,9 +973,9 @@ mod tests {
         )
         .expect("projection should exist");
 
-        assert_eq!(projection.last_429_type, "unknown");
-        assert_eq!(projection.rpm_429_count, 0);
-        assert_eq!(projection.learned_rpm_limit, Some(95));
+        assert_eq!(projection.last_429_type, "rpm");
+        assert_eq!(projection.rpm_429_count, 1);
+        assert_eq!(projection.learned_rpm_limit, Some(100));
         assert_eq!(
             projection
                 .adjustment_history

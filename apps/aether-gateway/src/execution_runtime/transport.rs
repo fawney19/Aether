@@ -345,6 +345,22 @@ async fn execute_sync_plan_via_local_tunnel(
         plan.content_encoding.as_deref(),
         plan.body.body_bytes_b64.is_some(),
     )?;
+    let timeout_secs = resolve_relay_timeout_seconds(plan);
+    tracing::info!(
+        request_id = %plan.request_id,
+        provider_id = %plan.provider_id,
+        endpoint_id = %plan.endpoint_id,
+        key_id = %plan.key_id,
+        method = %plan.method,
+        upstream_host = %execution_log_url_host(plan.url.as_str()),
+        node_id = %node_id,
+        path = "local_tunnel",
+        body_bytes_len = body_bytes.len(),
+        timeout_secs,
+        follow_redirects = ?transport_controls.follow_redirects,
+        http1_only = transport_controls.http1_only,
+        "gateway execution runtime local tunnel request prepared"
+    );
     let started_at = Instant::now();
     let mut response = state
         .tunnel
@@ -358,6 +374,7 @@ async fn execute_sync_plan_via_local_tunnel(
     let ttfb_ms = started_at.elapsed().as_millis() as u64;
     let status_code = response.status();
     let headers = collect_tunnel_response_headers(response.headers());
+    let proxy_timing = execution_header_for_log(&headers, "x-proxy-timing").unwrap_or("-");
     let mut body_bytes = Vec::new();
     while let Some(chunk) = response
         .next_chunk()
@@ -370,6 +387,39 @@ async fn execute_sync_plan_via_local_tunnel(
         decode_response_body_bytes(&headers, &body_bytes).unwrap_or_else(|| body_bytes.clone());
     let elapsed_ms = started_at.elapsed().as_millis() as u64;
     let upstream_bytes = body_bytes.len() as u64;
+    if status_code >= 400 {
+        tracing::warn!(
+            request_id = %plan.request_id,
+            provider_id = %plan.provider_id,
+            endpoint_id = %plan.endpoint_id,
+            key_id = %plan.key_id,
+            method = %plan.method,
+            upstream_host = %execution_log_url_host(plan.url.as_str()),
+            node_id = %node_id,
+            path = "local_tunnel",
+            status_code,
+            elapsed_ms,
+            upstream_bytes,
+            proxy_timing,
+            "gateway execution runtime local tunnel response returned error"
+        );
+    } else {
+        tracing::info!(
+            request_id = %plan.request_id,
+            provider_id = %plan.provider_id,
+            endpoint_id = %plan.endpoint_id,
+            key_id = %plan.key_id,
+            method = %plan.method,
+            upstream_host = %execution_log_url_host(plan.url.as_str()),
+            node_id = %node_id,
+            path = "local_tunnel",
+            status_code,
+            elapsed_ms,
+            upstream_bytes,
+            proxy_timing,
+            "gateway execution runtime local tunnel response received"
+        );
+    }
 
     let body = if body_bytes.is_empty() {
         None
@@ -483,17 +533,35 @@ async fn send_via_tunnel_relay(
 ) -> Result<reqwest::Response, ExecutionRuntimeTransportError> {
     let client = build_relay_client(plan.timeouts.as_ref())?;
     let relay_url = build_relay_url(plan.proxy.as_ref(), node_id);
+    let timeout_secs = resolve_relay_timeout_seconds(plan);
     let envelope = build_relay_envelope(
         RelayRequestMeta {
             method: method.as_str().to_string(),
             url: plan.url.clone(),
             headers: header_map_to_string_map(&headers),
-            timeout: resolve_relay_timeout_seconds(plan),
+            timeout: timeout_secs,
             follow_redirects: transport_controls.follow_redirects,
             http1_only: transport_controls.http1_only,
         },
         &body_bytes,
     )?;
+    tracing::info!(
+        request_id = %plan.request_id,
+        provider_id = %plan.provider_id,
+        endpoint_id = %plan.endpoint_id,
+        key_id = %plan.key_id,
+        method = %method,
+        upstream_host = %execution_log_url_host(plan.url.as_str()),
+        relay_host = %execution_log_url_host(relay_url.as_str()),
+        node_id,
+        path = "tunnel_relay",
+        body_bytes_len = body_bytes.len(),
+        envelope_bytes_len = envelope.len(),
+        timeout_secs,
+        follow_redirects = ?transport_controls.follow_redirects,
+        http1_only = transport_controls.http1_only,
+        "gateway execution runtime tunnel relay request prepared"
+    );
 
     let mut request = client
         .request(reqwest::Method::POST, relay_url)
@@ -503,10 +571,49 @@ async fn send_via_tunnel_relay(
         request = request.timeout(timeout);
     }
 
+    let started_at = Instant::now();
     let response = request
         .send()
         .await
         .map_err(|err| ExecutionRuntimeTransportError::RelayError(err.to_string()))?;
+    let elapsed_ms = started_at.elapsed().as_millis() as u64;
+    let status_code = response.status().as_u16();
+    let proxy_timing = response
+        .headers()
+        .get("x-proxy-timing")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("-");
+    if status_code >= 400 {
+        tracing::warn!(
+            request_id = %plan.request_id,
+            provider_id = %plan.provider_id,
+            endpoint_id = %plan.endpoint_id,
+            key_id = %plan.key_id,
+            method = %method,
+            upstream_host = %execution_log_url_host(plan.url.as_str()),
+            node_id,
+            path = "tunnel_relay",
+            status_code,
+            elapsed_ms,
+            proxy_timing,
+            "gateway execution runtime tunnel relay response returned error"
+        );
+    } else {
+        tracing::info!(
+            request_id = %plan.request_id,
+            provider_id = %plan.provider_id,
+            endpoint_id = %plan.endpoint_id,
+            key_id = %plan.key_id,
+            method = %method,
+            upstream_host = %execution_log_url_host(plan.url.as_str()),
+            node_id,
+            path = "tunnel_relay",
+            status_code,
+            elapsed_ms,
+            proxy_timing,
+            "gateway execution runtime tunnel relay response received"
+        );
+    }
 
     if let Some(kind) = response
         .headers()
@@ -514,6 +621,20 @@ async fn send_via_tunnel_relay(
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
     {
+        tracing::warn!(
+            request_id = %plan.request_id,
+            provider_id = %plan.provider_id,
+            endpoint_id = %plan.endpoint_id,
+            key_id = %plan.key_id,
+            method = %method,
+            upstream_host = %execution_log_url_host(plan.url.as_str()),
+            node_id,
+            path = "tunnel_relay",
+            status_code,
+            elapsed_ms,
+            error_kind = %kind,
+            "gateway execution runtime tunnel relay returned relay error"
+        );
         let message = response
             .text()
             .await
@@ -882,6 +1003,23 @@ fn collect_tunnel_response_headers(headers: &[(String, String)]) -> BTreeMap<Str
         .iter()
         .map(|(name, value)| (name.to_ascii_lowercase(), value.clone()))
         .collect()
+}
+
+fn execution_header_for_log<'a>(
+    headers: &'a BTreeMap<String, String>,
+    name: &str,
+) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn execution_log_url_host(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| "-".to_string())
 }
 
 fn decode_response_body_bytes(
@@ -1592,8 +1730,8 @@ mod tests {
                 content_encoding: None,
                 body: RequestBody::from_json(json!({"model": "claude-3.7-sonnet"})),
                 stream: false,
-                client_api_format: "claude:chat".into(),
-                provider_api_format: "claude:chat".into(),
+                client_api_format: "claude:messages".into(),
+                provider_api_format: "claude:messages".into(),
                 model_name: Some("claude-3.7-sonnet".into()),
                 proxy: None,
                 tls_profile: Some("claude_code_nodejs".into()),

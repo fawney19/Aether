@@ -663,7 +663,7 @@ async fn gateway_registers_and_unregisters_proxy_nodes_locally_with_management_t
         }),
     );
 
-    let raw_token = "ae_proxy_register_test";
+    let raw_token = "ae-proxy-register-test";
     let proxy_node_repository = Arc::new(InMemoryProxyNodeRepository::default());
     let state = AppState::new().expect("gateway should build");
     let admin_user = state

@@ -5,7 +5,7 @@ use self::local::{
 };
 use super::internal::resolve_local_proxy_execution_path;
 pub(crate) use super::public::matches_model_mapping_for_models;
-use crate::ai_pipeline_api::{
+use crate::ai_serving::api::{
     aggregate_claude_stream_sync_response, aggregate_gemini_stream_sync_response,
     aggregate_openai_chat_stream_sync_response, aggregate_openai_responses_stream_sync_response,
     maybe_bridge_standard_sync_json_to_stream,
@@ -49,7 +49,10 @@ use crate::handlers::shared::{
     local_proxy_route_requires_buffered_body, request_enables_control_execute,
     should_strip_forwarded_provider_credential_header, should_strip_forwarded_trusted_admin_header,
 };
-use crate::headers::{extract_or_generate_trace_id, should_skip_request_header};
+use crate::headers::{
+    extract_or_generate_trace_id, request_origin_from_headers_and_remote_addr,
+    should_skip_request_header,
+};
 use crate::router::RequestAdmissionError;
 use crate::{
     AppState, FrontdoorUserRpmOutcome, GatewayError, GatewayFallbackMetricKind,
@@ -84,6 +87,8 @@ const LOCAL_EXECUTION_LOOP_DETECTED_DETAIL: &str =
 const AUTH_API_KEY_CONCURRENCY_LIMIT_REACHED_DETAIL: &str =
     "当前 API Key 并发请求数已达上限，请稍后重试";
 const EXECUTION_PATH_TUNNEL_AFFINITY_FORWARD: &str = "tunnel_affinity_forward";
+const MANAGEMENT_TOKEN_PREFIX: &str = "ae-";
+const LEGACY_MANAGEMENT_TOKEN_PREFIX: &str = "ae_";
 
 fn local_execution_outcome_label(outcome: &LocalExecutionRequestOutcome) -> &'static str {
     match outcome {
@@ -113,7 +118,10 @@ fn extract_management_token_bearer(headers: &http::HeaderMap) -> Option<String> 
         .or_else(|| header.strip_prefix("bearer "))?
         .trim()
         .to_string();
-    (!token.is_empty() && token.starts_with("ae_")).then_some(token)
+    (!token.is_empty()
+        && (token.starts_with(MANAGEMENT_TOKEN_PREFIX)
+            || token.starts_with(LEGACY_MANAGEMENT_TOKEN_PREFIX)))
+    .then_some(token)
 }
 
 fn hash_management_token(value: &str) -> String {
@@ -458,7 +466,7 @@ fn aggregate_sync_sse_response_for_client(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    match api_format.map(crate::ai_pipeline::normalize_legacy_openai_format_alias) {
+    match api_format.map(crate::ai_serving::normalize_api_format_alias) {
         Some(value) if value.eq_ignore_ascii_case("openai:chat") => {
             aggregate_openai_chat_stream_sync_response(body)
         }
@@ -468,16 +476,10 @@ fn aggregate_sync_sse_response_for_client(
         {
             aggregate_openai_responses_stream_sync_response(body)
         }
-        Some(value)
-            if value.eq_ignore_ascii_case("claude:chat")
-                || value.eq_ignore_ascii_case("claude:cli") =>
-        {
+        Some(value) if value.eq_ignore_ascii_case("claude:messages") => {
             aggregate_claude_stream_sync_response(body)
         }
-        Some(value)
-            if value.eq_ignore_ascii_case("gemini:chat")
-                || value.eq_ignore_ascii_case("gemini:cli") =>
-        {
+        Some(value) if value.eq_ignore_ascii_case("gemini:generate_content") => {
             aggregate_gemini_stream_sync_response(body)
         }
         _ if public_path == "/v1/chat/completions" => {
@@ -529,25 +531,25 @@ fn resolve_affinity_forward_client_api_format(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    match api_format.map(crate::ai_pipeline::normalize_legacy_openai_format_alias) {
+    match api_format.map(crate::ai_serving::normalize_api_format_alias) {
         Some(value) if value.eq_ignore_ascii_case("openai:chat") => Some("openai:chat"),
         Some(value) if value.eq_ignore_ascii_case("openai:responses") => Some("openai:responses"),
         Some(value) if value.eq_ignore_ascii_case("openai:responses:compact") => {
             Some("openai:responses:compact")
         }
-        Some(value) if value.eq_ignore_ascii_case("claude:chat") => Some("claude:chat"),
-        Some(value) if value.eq_ignore_ascii_case("claude:cli") => Some("claude:cli"),
-        Some(value) if value.eq_ignore_ascii_case("gemini:chat") => Some("gemini:chat"),
-        Some(value) if value.eq_ignore_ascii_case("gemini:cli") => Some("gemini:cli"),
+        Some(value) if value.eq_ignore_ascii_case("claude:messages") => Some("claude:messages"),
+        Some(value) if value.eq_ignore_ascii_case("gemini:generate_content") => {
+            Some("gemini:generate_content")
+        }
         _ if public_path == "/v1/chat/completions" => Some("openai:chat"),
         _ if public_path == "/v1/responses" => Some("openai:responses"),
         _ if public_path == "/v1/responses/compact" => Some("openai:responses:compact"),
-        _ if public_path == "/v1/messages" => Some("claude:chat"),
+        _ if public_path == "/v1/messages" => Some("claude:messages"),
         _ if decision.route_family.as_deref() == Some("gemini")
             && (public_path.contains(":generateContent")
                 || public_path.contains(":streamGenerateContent")) =>
         {
-            Some("gemini:chat")
+            Some("gemini:generate_content")
         }
         _ => None,
     }
@@ -708,7 +710,13 @@ pub(crate) async fn proxy_request(
         )) => return Err(GatewayError::Internal(message)),
     };
     let request_admission_ms = started_at.elapsed().as_millis() as u64;
-    let (parts, body) = request.into_parts();
+    let (mut parts, body) = request.into_parts();
+    parts
+        .extensions
+        .insert(request_origin_from_headers_and_remote_addr(
+            &parts.headers,
+            &remote_addr,
+        ));
     let trace_id = extract_or_generate_trace_id(&parts.headers);
     state.clear_local_execution_runtime_miss_diagnostic(&trace_id);
     if request_hits_execution_loop_guard(&parts) {
@@ -1003,11 +1011,14 @@ pub(crate) async fn proxy_request(
 
     if let Some(buffered_body) = buffered_body.as_ref() {
         if let Some(rejection) = request_model_local_rejection(
+            &state,
             control_decision,
             &parts.uri,
             &parts.headers,
             buffered_body,
-        ) {
+        )
+        .await?
+        {
             let response =
                 build_local_auth_rejection_response(&trace_id, control_decision, &rejection)?;
             return Ok(finalize_gateway_response_with_context(
@@ -1610,6 +1621,7 @@ fn local_execution_runtime_miss_skip_reason_label(reason: &str) -> &str {
         "auth_snapshot_missing" => "API Key 本地执行配置缺失",
         "endpoint_api_format_changed" => "端点 API 格式已变更",
         "endpoint_inactive" => "端点未启用",
+        "format_conversion_disabled" => "格式转换未启用",
         "key_api_format_disabled" => "API Key 未启用该 API 格式",
         "key_inactive" => "API Key 未启用",
         "key_model_disabled" => "API Key 未允许该模型",
@@ -1754,8 +1766,8 @@ mod tests {
             "/v1/messages",
             Some("ai_public".to_string()),
             Some("claude".to_string()),
-            Some("chat".to_string()),
-            Some("claude:chat".to_string()),
+            Some("messages".to_string()),
+            Some("claude:messages".to_string()),
         );
         let diagnostic = LocalExecutionRuntimeMissDiagnostic {
             reason: "missing_auth_context".to_string(),

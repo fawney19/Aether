@@ -33,7 +33,7 @@ fn classifies_v1beta_models_as_gemini_public_support_route() {
     assert_eq!(decision.route_kind.as_deref(), Some("list"));
     assert_eq!(
         decision.auth_endpoint_signature.as_deref(),
-        Some("gemini:chat")
+        Some("gemini:generate_content")
     );
 }
 
@@ -659,45 +659,73 @@ fn classifies_auth_routes_as_public_support_route() {
 }
 
 #[test]
-fn does_not_classify_oauth_public_providers_route() {
+fn classifies_oauth_public_providers_route() {
     let headers = headers(&[]);
     let uri: Uri = "/api/oauth/providers".parse().expect("uri should parse");
-    let decision = classify_control_route(&http::Method::GET, &uri, &headers);
+    let decision =
+        classify_control_route(&http::Method::GET, &uri, &headers).expect("route should classify");
 
-    assert!(decision.is_none());
+    assert_eq!(decision.route_class.as_deref(), Some("public_support"));
+    assert_eq!(decision.route_family.as_deref(), Some("oauth"));
+    assert_eq!(decision.route_kind.as_deref(), Some("list_providers"));
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("user:oauth")
+    );
 }
 
 #[test]
-fn does_not_classify_oauth_public_authorize_route() {
+fn classifies_oauth_public_authorize_route() {
     let headers = headers(&[]);
     let uri: Uri = "/api/oauth/linuxdo/authorize?client_device_id=device-1"
         .parse()
         .expect("uri should parse");
-    let decision = classify_control_route(&http::Method::GET, &uri, &headers);
+    let decision =
+        classify_control_route(&http::Method::GET, &uri, &headers).expect("route should classify");
 
-    assert!(decision.is_none());
+    assert_eq!(decision.route_class.as_deref(), Some("public_support"));
+    assert_eq!(decision.route_family.as_deref(), Some("oauth"));
+    assert_eq!(decision.route_kind.as_deref(), Some("authorize"));
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("user:oauth")
+    );
 }
 
 #[test]
-fn does_not_classify_oauth_user_bindable_providers_route() {
+fn classifies_oauth_user_bindable_providers_route() {
     let headers = headers(&[]);
     let uri: Uri = "/api/user/oauth/bindable-providers"
         .parse()
         .expect("uri should parse");
-    let decision = classify_control_route(&http::Method::GET, &uri, &headers);
+    let decision =
+        classify_control_route(&http::Method::GET, &uri, &headers).expect("route should classify");
 
-    assert!(decision.is_none());
+    assert_eq!(decision.route_class.as_deref(), Some("public_support"));
+    assert_eq!(decision.route_family.as_deref(), Some("oauth"));
+    assert_eq!(decision.route_kind.as_deref(), Some("bindable_providers"));
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("user:oauth")
+    );
 }
 
 #[test]
-fn does_not_classify_oauth_user_bind_token_route() {
+fn classifies_oauth_user_bind_token_route() {
     let headers = headers(&[]);
     let uri: Uri = "/api/user/oauth/linuxdo/bind-token"
         .parse()
         .expect("uri should parse");
-    let decision = classify_control_route(&http::Method::POST, &uri, &headers);
+    let decision =
+        classify_control_route(&http::Method::POST, &uri, &headers).expect("route should classify");
 
-    assert!(decision.is_none());
+    assert_eq!(decision.route_class.as_deref(), Some("public_support"));
+    assert_eq!(decision.route_family.as_deref(), Some("oauth"));
+    assert_eq!(decision.route_kind.as_deref(), Some("bind_token"));
+    assert_eq!(
+        decision.auth_endpoint_signature.as_deref(),
+        Some("user:oauth")
+    );
 }
 
 #[test]

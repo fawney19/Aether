@@ -22,61 +22,67 @@
         </div>
 
         <!-- 状态筛选 -->
-        <Select
-          :model-value="filterStatus"
-          @update:model-value="$emit('update:filterStatus', $event)"
-        >
-          <SelectTrigger class="w-20 sm:w-28 h-8 text-xs border-border/60">
-            <SelectValue placeholder="全部状态" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem
-              v-for="status in statusFilters"
-              :key="status.value"
-              :value="status.value"
-            >
-              {{ status.label }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
+        <div class="xl:hidden">
+          <Select
+            :model-value="filterStatus"
+            @update:model-value="$emit('update:filterStatus', $event)"
+          >
+            <SelectTrigger class="w-20 sm:w-28 h-8 text-xs border-border/60">
+              <SelectValue placeholder="全部状态" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem
+                v-for="status in statusFilters"
+                :key="status.value"
+                :value="status.value"
+              >
+                {{ status.label }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
 
         <!-- API 格式筛选 -->
-        <Select
-          :model-value="filterApiFormat"
-          @update:model-value="$emit('update:filterApiFormat', $event)"
-        >
-          <SelectTrigger class="w-20 sm:w-28 h-8 text-xs border-border/60">
-            <SelectValue placeholder="全部格式" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem
-              v-for="fmt in apiFormatFilters"
-              :key="fmt.value"
-              :value="fmt.value"
-            >
-              {{ fmt.label }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
+        <div class="xl:hidden">
+          <Select
+            :model-value="filterApiFormat"
+            @update:model-value="$emit('update:filterApiFormat', $event)"
+          >
+            <SelectTrigger class="w-20 sm:w-28 h-8 text-xs border-border/60">
+              <SelectValue placeholder="全部格式" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem
+                v-for="fmt in apiFormatFilters"
+                :key="fmt.value"
+                :value="fmt.value"
+              >
+                {{ fmt.label }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
 
         <!-- 模型筛选 -->
-        <Select
-          :model-value="filterModel"
-          @update:model-value="$emit('update:filterModel', $event)"
-        >
-          <SelectTrigger class="w-20 sm:w-36 h-8 text-xs border-border/60">
-            <SelectValue placeholder="全部模型" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem
-              v-for="model in modelFilters"
-              :key="model.value"
-              :value="model.value"
-            >
-              {{ model.label }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
+        <div class="xl:hidden">
+          <Select
+            :model-value="filterModel"
+            @update:model-value="$emit('update:filterModel', $event)"
+          >
+            <SelectTrigger class="w-20 sm:w-36 h-8 text-xs border-border/60">
+              <SelectValue placeholder="全部模型" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem
+                v-for="model in modelFilters"
+                :key="model.value"
+                :value="model.value"
+              >
+                {{ model.label }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
 
         <!-- 重置筛选 -->
         <Button

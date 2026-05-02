@@ -1120,6 +1120,22 @@ const currentResponseBody = computed(() => {
   return detail.value.response_body
 })
 
+const currentRequestBodyApiFormat = computed(() => {
+  if (!detail.value) return undefined
+  if (dataSource.value === 'provider') {
+    return detail.value.endpoint_api_format || detail.value.api_format
+  }
+  return detail.value.api_format || detail.value.endpoint_api_format
+})
+
+const currentResponseBodyApiFormat = computed(() => {
+  if (!detail.value) return undefined
+  if (dataSource.value === 'provider') {
+    return detail.value.endpoint_api_format || detail.value.api_format
+  }
+  return detail.value.api_format || detail.value.endpoint_api_format
+})
+
 // 获取当前数据源的请求头数据
 const currentHeaderData = computed(() => {
   if (!detail.value) return null
@@ -1168,7 +1184,7 @@ const requestRenderResult = computed<RenderResult>(() => {
   if (activeTab.value !== 'request-body' || contentViewMode.value !== 'conversation') {
     return { blocks: [], isStream: false }
   }
-  return renderRequest(body, currentResponseBody.value, detail.value?.api_format)
+  return renderRequest(body, currentResponseBody.value, currentRequestBodyApiFormat.value)
 })
 
 // 响应体渲染结果
@@ -1180,7 +1196,7 @@ const responseRenderResult = computed<RenderResult>(() => {
   if (activeTab.value !== 'response-body' || contentViewMode.value !== 'conversation') {
     return { blocks: [], isStream: false }
   }
-  return renderResponse(body, currentRequestBody.value, detail.value?.api_format)
+  return renderResponse(body, currentRequestBody.value, currentResponseBodyApiFormat.value)
 })
 
 // 当前 Tab 是否支持对话视图

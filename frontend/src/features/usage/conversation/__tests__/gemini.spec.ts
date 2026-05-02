@@ -20,7 +20,7 @@ describe('Gemini conversation parser', () => {
   }
 
   it('parses normalized output payload when hint is gemini', () => {
-    const parsed = parseResponse(normalizedResponse, requestBody, 'gemini:chat')
+    const parsed = parseResponse(normalizedResponse, requestBody, 'gemini:generate_content')
     expect(parsed.apiFormat).toBe('gemini')
     expect(parsed.messages).toHaveLength(1)
     expect(parsed.messages[0]?.role).toBe('assistant')
@@ -31,7 +31,7 @@ describe('Gemini conversation parser', () => {
   })
 
   it('renders normalized output payload when hint is gemini', () => {
-    const rendered = renderResponse(normalizedResponse, requestBody, 'gemini:chat')
+    const rendered = renderResponse(normalizedResponse, requestBody, 'gemini:generate_content')
     expect(rendered.error).toBeUndefined()
     expect(rendered.blocks).toHaveLength(1)
     expect(rendered.blocks[0]).toMatchObject({

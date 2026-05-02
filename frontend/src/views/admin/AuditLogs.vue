@@ -31,72 +31,45 @@
             <!-- 分隔线 -->
             <div class="hidden sm:block h-4 w-px bg-border" />
             <!-- 事件类型筛选 -->
-            <Select
-              v-model="filters.eventType"
-              @update:model-value="handleEventTypeChange"
-            >
-              <SelectTrigger class="w-24 sm:w-40 h-8 border-border/60">
-                <SelectValue placeholder="全部类型" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__all__">
-                  全部类型
-                </SelectItem>
-                <SelectItem value="login_success">
-                  登录成功
-                </SelectItem>
-                <SelectItem value="login_failed">
-                  登录失败
-                </SelectItem>
-                <SelectItem value="logout">
-                  退出登录
-                </SelectItem>
-                <SelectItem value="api_key_created">
-                  API密钥创建
-                </SelectItem>
-                <SelectItem value="api_key_deleted">
-                  API密钥删除
-                </SelectItem>
-                <SelectItem value="request_success">
-                  请求成功
-                </SelectItem>
-                <SelectItem value="request_failed">
-                  请求失败
-                </SelectItem>
-                <SelectItem value="user_created">
-                  用户创建
-                </SelectItem>
-                <SelectItem value="user_updated">
-                  用户更新
-                </SelectItem>
-                <SelectItem value="user_deleted">
-                  用户删除
-                </SelectItem>
-              </SelectContent>
-            </Select>
+            <div class="xl:hidden">
+              <Select
+                v-model="filters.eventType"
+                @update:model-value="handleEventTypeChange"
+              >
+                <SelectTrigger class="w-24 sm:w-40 h-8 border-border/60">
+                  <SelectValue placeholder="全部类型" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem
+                    v-for="option in auditEventTypeFilterOptions"
+                    :key="option.value"
+                    :value="option.value"
+                  >
+                    {{ option.label }}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
             <!-- 时间范围筛选 -->
-            <Select
-              v-model="filtersDaysString"
-              @update:model-value="handleDaysChange"
-            >
-              <SelectTrigger class="w-20 sm:w-28 h-8 border-border/60">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="1">
-                  1天
-                </SelectItem>
-                <SelectItem value="7">
-                  7天
-                </SelectItem>
-                <SelectItem value="30">
-                  30天
-                </SelectItem>
-                <SelectItem value="90">
-                  90天
-                </SelectItem>
-              </SelectContent>
-            </Select>
+            <div class="xl:hidden">
+              <Select
+                v-model="filtersDaysString"
+                @update:model-value="handleDaysChange"
+              >
+                <SelectTrigger class="w-20 sm:w-28 h-8 border-border/60">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem
+                    v-for="option in auditDaysFilterOptions"
+                    :key="option.value"
+                    :value="option.value"
+                  >
+                    {{ option.label }}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
             <!-- 重置筛选 -->
             <Button
               v-if="hasActiveFilters"
@@ -146,15 +119,45 @@
         <Table class="hidden xl:table">
           <TableHeader>
             <TableRow class="border-b border-border/60 hover:bg-transparent">
-              <TableHead class="h-12 font-semibold">
+              <SortableTableHead
+                class="h-12 font-semibold"
+                column-key="created_at"
+                :sortable="false"
+                :filter-active="filters.days !== 7"
+                filter-title="筛选时间范围"
+                filter-content-class="w-32 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
+              >
                 时间
-              </TableHead>
+                <template #filter="{ close }">
+                  <TableFilterMenu
+                    :model-value="filtersDaysString"
+                    :options="auditDaysFilterOptions"
+                    @update:model-value="handleDaysChange"
+                    @select="close"
+                  />
+                </template>
+              </SortableTableHead>
               <TableHead class="h-12 font-semibold">
                 用户
               </TableHead>
-              <TableHead class="h-12 font-semibold">
+              <SortableTableHead
+                class="h-12 font-semibold"
+                column-key="event_type"
+                :sortable="false"
+                :filter-active="filters.eventType !== '__all__'"
+                filter-title="筛选事件类型"
+                filter-content-class="w-48 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
+              >
                 事件类型
-              </TableHead>
+                <template #filter="{ close }">
+                  <TableFilterMenu
+                    :model-value="filters.eventType"
+                    :options="auditEventTypeFilterOptions"
+                    @update:model-value="handleEventTypeChange"
+                    @select="close"
+                  />
+                </template>
+              </SortableTableHead>
               <TableHead class="h-12 font-semibold">
                 描述
               </TableHead>
@@ -423,6 +426,8 @@ import {
   TableBody,
   TableRow,
   TableHead,
+  SortableTableHead,
+  TableFilterMenu,
   TableCell,
   Input,
   Pagination,
@@ -476,6 +481,25 @@ const filters = ref({
 })
 
 const filtersDaysString = ref('7')
+const auditEventTypeFilterOptions = [
+  { value: '__all__', label: '全部类型' },
+  { value: 'login_success', label: '登录成功' },
+  { value: 'login_failed', label: '登录失败' },
+  { value: 'logout', label: '退出登录' },
+  { value: 'api_key_created', label: 'API密钥创建' },
+  { value: 'api_key_deleted', label: 'API密钥删除' },
+  { value: 'request_success', label: '请求成功' },
+  { value: 'request_failed', label: '请求失败' },
+  { value: 'user_created', label: '用户创建' },
+  { value: 'user_updated', label: '用户更新' },
+  { value: 'user_deleted', label: '用户删除' },
+]
+const auditDaysFilterOptions = [
+  { value: '1', label: '1天' },
+  { value: '7', label: '7天' },
+  { value: '30', label: '30天' },
+  { value: '90', label: '90天' },
+]
 
 const currentPage = ref(1)
 const pageSize = ref(20)

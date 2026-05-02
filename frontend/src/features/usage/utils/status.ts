@@ -27,6 +27,12 @@ export function hasUsageFallback(
   return record.has_fallback === true
 }
 
+export function hasUsageRetry(
+  record: Pick<UsageRecord, 'has_retry'>
+): boolean {
+  return record.has_retry === true
+}
+
 export function resolveUsageStreamModes(
   record: Pick<
     UsageRecord,
@@ -124,14 +130,10 @@ function normalizeUsageStreamApiFormat(value: string | null | undefined): string
   switch (normalized) {
     case 'openai':
       return 'openai:chat'
-    case 'openai:cli':
-      return 'openai:responses'
-    case 'openai:compact':
-      return 'openai:responses:compact'
     case 'claude':
-      return 'claude:chat'
+      return 'claude:messages'
     case 'gemini':
-      return 'gemini:chat'
+      return 'gemini:generate_content'
     default:
       return normalized
   }
@@ -143,8 +145,7 @@ function usageApiFormatDefaultsToNonStream(apiFormat: string): boolean {
     case 'openai:responses':
     case 'openai:responses:compact':
     case 'openai:image':
-    case 'claude:chat':
-    case 'claude:cli':
+    case 'claude:messages':
       return true
     default:
       return false

@@ -15,7 +15,7 @@ use axum::http::Response;
 use base64::Engine as _;
 use tracing::warn;
 
-use crate::ai_pipeline_api::{
+use crate::ai_serving::api::{
     implicit_sync_finalize_report_kind, maybe_build_sync_finalize_outcome,
     LocalCoreSyncFinalizeOutcome,
 };

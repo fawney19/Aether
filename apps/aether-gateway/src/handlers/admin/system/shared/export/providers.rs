@@ -106,10 +106,10 @@ pub(crate) async fn build_admin_system_export_providers_payload(
                         })
                         .map(serde_json::Value::String);
                     AdminSystemConfigProviderKey {
-                        api_key: Some(
-                            decrypt_admin_system_export_secret(state, &key.encrypted_api_key)
-                                .unwrap_or_default(),
-                        ),
+                        api_key: key.encrypted_api_key.as_deref().map(|ciphertext| {
+                            decrypt_admin_system_export_secret(state, ciphertext)
+                                .unwrap_or_default()
+                        }),
                         auth_type: Some(key.auth_type.clone()),
                         auth_config,
                         name: Some(key.name.clone()),
@@ -119,6 +119,18 @@ pub(crate) async fn build_admin_system_export_providers_payload(
                         rate_multipliers: key.rate_multipliers.clone(),
                         internal_priority: Some(key.internal_priority),
                         global_priority_by_format: key.global_priority_by_format.clone(),
+                        auth_type_by_format: key.auth_type_by_format.clone(),
+                        allow_auth_channel_mismatch_formats: key
+                            .allow_auth_channel_mismatch_formats
+                            .as_ref()
+                            .and_then(serde_json::Value::as_array)
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter_map(serde_json::Value::as_str)
+                                    .map(ToOwned::to_owned)
+                                    .collect::<Vec<_>>()
+                            }),
                         rpm_limit: key.rpm_limit,
                         allowed_models: key.allowed_models.as_ref().and_then(|value| {
                             value.as_array().map(|items| {

@@ -529,7 +529,7 @@ function handleDialogUpdate(value: boolean) {
 
 // 主 Tab 状态
 const activeMainTab = ref<'provider' | 'key'>('provider')
-const activeFormatTab = ref<string>('claude:chat')
+const activeFormatTab = ref<string>('claude:messages')
 
 // 提供商排序状态
 const sortedProviders = ref<ProviderWithEndpointsSummary[]>([])
@@ -614,17 +614,16 @@ async function loadBalances() {
 }
 
 const LEGACY_API_FORMAT_MAP: Record<string, string> = {
-  CLAUDE: 'claude:chat',
-  CLAUDE_CLI: 'claude:cli',
+  CLAUDE: 'claude:messages',
+  CLAUDE_MESSAGES: 'claude:messages',
   OPENAI: 'openai:chat',
-  OPENAI_CLI: 'openai:responses',
-  OPENAI_COMPACT: 'openai:responses:compact',
   OPENAI_RESPONSES: 'openai:responses',
   OPENAI_RESPONSES_COMPACT: 'openai:responses:compact',
   OPENAI_VIDEO: 'openai:video',
-  GEMINI: 'gemini:chat',
-  GEMINI_CLI: 'gemini:cli',
+  GEMINI: 'gemini:generate_content',
+  GEMINI_GENERATE_CONTENT: 'gemini:generate_content',
   GEMINI_VIDEO: 'gemini:video',
+  GEMINI_FILES: 'gemini:files',
 }
 
 function normalizeApiFormatKey(value: string | null | undefined): string {
@@ -635,6 +634,12 @@ function normalizeApiFormatKey(value: string | null | undefined): string {
     const [family, kind] = raw.split(':', 2)
     const familyNorm = family?.trim().toLowerCase()
     const kindNorm = kind?.trim().toLowerCase()
+    if (familyNorm === 'claude' && ['chat', 'cli', 'messages'].includes(kindNorm)) {
+      return 'claude:messages'
+    }
+    if (familyNorm === 'gemini' && ['chat', 'cli', 'generate_content'].includes(kindNorm)) {
+      return 'gemini:generate_content'
+    }
     if (familyNorm && kindNorm) return `${familyNorm}:${kindNorm}`
   }
 

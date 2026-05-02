@@ -3042,6 +3042,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_pending_update_does_not_reopen_void_failure() {
+        let repository = InMemoryUsageReadRepository::default();
+        repository
+            .upsert(UpsertUsageRecord {
+                status: "failed".to_string(),
+                billing_status: "void".to_string(),
+                status_code: Some(503),
+                error_message: Some("provider timeout".to_string()),
+                error_category: Some("provider_error".to_string()),
+                response_time_ms: Some(90),
+                finalized_at_unix_secs: Some(101),
+                created_at_unix_ms: Some(100),
+                updated_at_unix_secs: 101,
+                ..sample_upsert_usage_record("req-void-failure-1")
+            })
+            .await
+            .expect("failed usage should upsert");
+
+        repository
+            .upsert(UpsertUsageRecord {
+                created_at_unix_ms: Some(100),
+                updated_at_unix_secs: 102,
+                ..sample_upsert_usage_record("req-void-failure-1")
+            })
+            .await
+            .expect("stale pending usage should upsert");
+
+        let stored = repository
+            .find_by_request_id("req-void-failure-1")
+            .await
+            .expect("usage lookup should succeed")
+            .expect("usage should exist");
+        assert_eq!(stored.status, "failed");
+        assert_eq!(stored.billing_status, "void");
+        assert_eq!(stored.status_code, Some(503));
+        assert_eq!(stored.finalized_at_unix_secs, Some(101));
+    }
+
+    #[tokio::test]
     async fn stale_pending_update_does_not_regress_streaming_usage() {
         let repository = InMemoryUsageReadRepository::default();
         repository

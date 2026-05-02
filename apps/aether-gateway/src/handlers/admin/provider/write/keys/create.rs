@@ -1,6 +1,8 @@
 use crate::handlers::admin::provider::shared::payloads::AdminProviderKeyCreateRequest;
 use crate::handlers::admin::provider::write::normalize::{
-    normalize_auth_type, validate_vertex_api_formats,
+    normalize_allow_auth_channel_mismatch_formats, normalize_api_format_json_object_keys,
+    normalize_api_format_list, normalize_auth_type, normalize_auth_type_by_format,
+    validate_vertex_api_formats,
 };
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{
@@ -27,10 +29,21 @@ pub(crate) async fn build_admin_create_provider_key_record(
         return Err("name 为必填字段".to_string());
     }
 
-    let api_formats = normalize_string_list(payload.api_formats)
-        .ok_or_else(|| "api_formats 为必填字段".to_string())?;
+    let api_formats = normalize_api_format_list(
+        normalize_string_list(payload.api_formats)
+            .ok_or_else(|| "api_formats 为必填字段".to_string())?,
+    );
     let auth_type = normalize_auth_type(payload.auth_type.as_deref())?;
     validate_vertex_api_formats(&provider.provider_type, &auth_type, &api_formats)?;
+    let auth_type_by_format = if matches!(auth_type.as_str(), "api_key" | "bearer") {
+        normalize_auth_type_by_format(
+            payload.auth_type_by_format,
+            "auth_type_by_format",
+            &api_formats,
+        )?
+    } else {
+        None
+    };
 
     let api_key = payload.api_key.unwrap_or_default().trim().to_string();
     let auth_config = normalize_json_object(payload.auth_config, "auth_config")?;
@@ -40,9 +53,6 @@ pub(crate) async fn build_admin_create_provider_key_record(
         .cloned();
 
     match auth_type.as_str() {
-        "api_key" if api_key.is_empty() => {
-            return Err("API Key 认证模式下 api_key 为必填字段".to_string());
-        }
         "service_account" if auth_config_object.is_none() => {
             return Err("Service Account 认证模式下 auth_config 为必填字段".to_string());
         }
@@ -57,15 +67,18 @@ pub(crate) async fn build_admin_create_provider_key_record(
         .await
         .map_err(|err| format!("{err:?}"))?;
 
-    if auth_type == "api_key" {
+    if matches!(auth_type.as_str(), "api_key" | "bearer") && !api_key.is_empty() {
         for existing in existing_keys
             .iter()
-            .filter(|existing| existing.auth_type.trim().eq_ignore_ascii_case("api_key"))
+            .filter(|existing| raw_secret_auth_type(&existing.auth_type))
         {
-            let Some(decrypted) = decrypt_catalog_secret_with_fallbacks(
-                state.encryption_key(),
-                &existing.encrypted_api_key,
-            ) else {
+            let Some(decrypted) = existing
+                .encrypted_api_key
+                .as_deref()
+                .and_then(|ciphertext| {
+                    decrypt_catalog_secret_with_fallbacks(state.encryption_key(), ciphertext)
+                })
+            else {
                 continue;
             };
             if decrypted != "__placeholder__" && decrypted == api_key {
@@ -114,10 +127,12 @@ pub(crate) async fn build_admin_create_provider_key_record(
     }
 
     let encrypted_api_key = match auth_type.as_str() {
-        "api_key" => encrypt_catalog_secret_with_fallbacks(state, &api_key),
-        _ => encrypt_catalog_secret_with_fallbacks(state, "__placeholder__"),
-    }
-    .ok_or_else(|| "gateway 未配置 provider key 加密密钥".to_string())?;
+        "api_key" | "bearer" if !api_key.is_empty() => Some(
+            encrypt_catalog_secret_with_fallbacks(state, &api_key)
+                .ok_or_else(|| "gateway 未配置 provider key 加密密钥".to_string())?,
+        ),
+        _ => None,
+    };
 
     let encrypted_auth_config = auth_config
         .as_ref()
@@ -150,7 +165,7 @@ pub(crate) async fn build_admin_create_provider_key_record(
         },
         encrypted_api_key,
         encrypted_auth_config,
-        normalize_json_object(payload.rate_multipliers, "rate_multipliers")?,
+        normalize_api_format_json_object_keys(payload.rate_multipliers, "rate_multipliers")?,
         None,
         normalize_string_list(payload.allowed_models).map(|value| json!(value)),
         None,
@@ -179,7 +194,23 @@ pub(crate) async fn build_admin_create_provider_key_record(
         normalize_string_list(payload.model_exclude_patterns).map(|value| json!(value));
     key.health_by_format = Some(json!({}));
     key.circuit_breaker_by_format = Some(json!({}));
+    key.auth_type_by_format = auth_type_by_format;
+    let allow_auth_channel_mismatch_formats = payload
+        .allow_auth_channel_mismatch_formats
+        .unwrap_or_else(|| Some(api_formats.clone()));
+    key.allow_auth_channel_mismatch_formats = normalize_allow_auth_channel_mismatch_formats(
+        allow_auth_channel_mismatch_formats,
+        "allow_auth_channel_mismatch_formats",
+        &api_formats,
+    )?;
     key.created_at_unix_ms = Some(now_unix_secs);
     key.updated_at_unix_secs = Some(now_unix_secs);
     Ok(key)
+}
+
+fn raw_secret_auth_type(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "api_key" | "bearer"
+    )
 }

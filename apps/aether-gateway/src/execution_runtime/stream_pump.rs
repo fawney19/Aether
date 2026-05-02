@@ -13,7 +13,7 @@ use futures_util::{Stream, StreamExt};
 use serde_json::Value;
 use tracing::warn;
 
-use crate::ai_pipeline_api::{
+use crate::ai_serving::api::{
     maybe_bridge_standard_sync_json_to_stream, maybe_build_provider_private_stream_normalizer,
     normalize_provider_private_report_context, StreamingStandardTerminalObserver,
 };
@@ -399,7 +399,7 @@ fn should_treat_upstream_response_as_stream(
     report_context
         .get("envelope_name")
         .and_then(Value::as_str)
-        .is_some_and(|value| value.eq_ignore_ascii_case(crate::ai_pipeline::KIRO_ENVELOPE_NAME))
+        .is_some_and(|value| value.eq_ignore_ascii_case(crate::ai_serving::KIRO_ENVELOPE_NAME))
 }
 
 fn should_buffer_non_stream_response(
@@ -495,7 +495,7 @@ fn maybe_bridge_non_sse_sync_json_to_stream(
     body_bytes: &[u8],
     provider_api_format: &str,
     report_context: &Value,
-) -> Result<Option<crate::ai_pipeline::SyncToStreamBridgeOutcome>, GatewayError> {
+) -> Result<Option<crate::ai_serving::SyncToStreamBridgeOutcome>, GatewayError> {
     if !(200..300).contains(&status_code) || body_bytes.is_empty() {
         return Ok(None);
     }
@@ -584,7 +584,7 @@ fn format_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
 fn observe_stream_chunk(
     observer: &mut StreamingStandardTerminalObserver,
     report_context: &Value,
-    private_stream_normalizer: Option<&mut crate::ai_pipeline::ProviderPrivateStreamNormalizer<'_>>,
+    private_stream_normalizer: Option<&mut crate::ai_serving::ProviderPrivateStreamNormalizer<'_>>,
     observer_buffered: &mut Vec<u8>,
     chunk: &[u8],
 ) {
@@ -608,7 +608,7 @@ fn observe_stream_chunk(
 fn finalize_stream_terminal_summary(
     observer: &mut StreamingStandardTerminalObserver,
     report_context: &Value,
-    private_stream_normalizer: Option<&mut crate::ai_pipeline::ProviderPrivateStreamNormalizer<'_>>,
+    private_stream_normalizer: Option<&mut crate::ai_serving::ProviderPrivateStreamNormalizer<'_>>,
     observer_buffered: &mut Vec<u8>,
 ) -> Option<ExecutionStreamTerminalSummary> {
     if let Some(normalizer) = private_stream_normalizer {

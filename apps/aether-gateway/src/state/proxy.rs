@@ -33,7 +33,12 @@ impl AppState {
         }
         if node.tunnel_mode && node.tunnel_connected {
             let mut extra = Map::new();
-            if let Ok(Some(owner)) = self.lookup_tunnel_attachment_owner(node_id).await {
+            let owner = self
+                .lookup_tunnel_attachment_owner(node_id)
+                .await
+                .ok()
+                .flatten();
+            if let Some(owner) = owner {
                 extra.insert(
                     TUNNEL_BASE_URL_EXTRA_KEY.to_string(),
                     Value::String(owner.relay_base_url),
@@ -46,6 +51,8 @@ impl AppState {
                     TUNNEL_OWNER_OBSERVED_AT_EXTRA_KEY.to_string(),
                     json!(owner.observed_at_unix_secs),
                 );
+            } else if !self.tunnel.has_local_proxy(node_id) {
+                return None;
             }
             return Some(ProxySnapshot {
                 enabled: Some(true),
@@ -118,6 +125,13 @@ impl AppState {
         let node_id = json_string_field(object, "node_id");
         if let Some(snapshot) = self.resolve_proxy_node_snapshot(node_id.as_deref()).await {
             return Some(snapshot);
+        }
+        if let Some(node_id) = node_id.as_deref() {
+            if !proxy_object_has_inline_url(object)
+                && self.find_proxy_node(node_id).await.ok().flatten().is_some()
+            {
+                return None;
+            }
         }
 
         proxy_snapshot_from_object(object)
@@ -197,6 +211,10 @@ fn proxy_snapshot_from_object(object: &Map<String, Value>) -> Option<ProxySnapsh
     })
 }
 
+fn proxy_object_has_inline_url(object: &Map<String, Value>) -> bool {
+    json_string_field(object, "url").is_some() || json_string_field(object, "proxy_url").is_some()
+}
+
 fn json_string_field(object: &Map<String, Value>, key: &str) -> Option<String> {
     object
         .get(key)
@@ -241,7 +259,13 @@ fn proxy_url_with_node_auth(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use aether_data::repository::proxy_nodes::{InMemoryProxyNodeRepository, StoredProxyNode};
+    use serde_json::json;
+
     use super::proxy_url_with_node_auth;
+    use crate::{data::GatewayDataState, AppState};
 
     #[test]
     fn proxy_url_with_node_auth_omits_empty_password_separator() {
@@ -249,5 +273,126 @@ mod tests {
             proxy_url_with_node_auth("socks5://proxy.example:1080", Some("alice"), None).as_deref(),
             Some("socks5://alice@proxy.example:1080")
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_proxy_node_snapshot_rejects_unroutable_tunnel_node() {
+        let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![sample_tunnel_node(
+            "proxy-node-stale",
+        )]));
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(GatewayDataState::with_proxy_node_repository_for_tests(
+                repository,
+            ));
+
+        let snapshot = state
+            .resolve_proxy_node_snapshot(Some("proxy-node-stale"))
+            .await;
+
+        assert_eq!(snapshot, None);
+    }
+
+    #[tokio::test]
+    async fn resolve_proxy_node_snapshot_keeps_tunnel_node_with_owner_hint() {
+        let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![sample_tunnel_node(
+            "proxy-node-owned",
+        )]));
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_proxy_node_repository_for_tests(repository)
+                    .with_system_config_values_for_tests(vec![(
+                        "tunnel.attachments.proxy-node-owned".to_string(),
+                        json!({
+                            "gateway_instance_id": "gateway-owner",
+                            "relay_base_url": "http://gateway-owner.internal",
+                            "conn_count": 1,
+                            "observed_at_unix_secs": 4_102_444_800u64,
+                        }),
+                    )]),
+            );
+
+        let snapshot = state
+            .resolve_proxy_node_snapshot(Some("proxy-node-owned"))
+            .await
+            .expect("owned tunnel snapshot should resolve");
+
+        assert_eq!(snapshot.mode.as_deref(), Some("tunnel"));
+        assert_eq!(snapshot.node_id.as_deref(), Some("proxy-node-owned"));
+        assert_eq!(
+            snapshot
+                .extra
+                .as_ref()
+                .and_then(|extra| extra.get("tunnel_base_url"))
+                .and_then(serde_json::Value::as_str),
+            Some("http://gateway-owner.internal")
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_configured_proxy_snapshot_rejects_unroutable_stored_tunnel_reference() {
+        let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![sample_tunnel_node(
+            "proxy-node-stale",
+        )]));
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(GatewayDataState::with_proxy_node_repository_for_tests(
+                repository,
+            ));
+
+        let snapshot = state
+            .resolve_configured_proxy_snapshot_with_tunnel_affinity(Some(&json!({
+                "node_id": "proxy-node-stale",
+                "enabled": true,
+            })))
+            .await;
+
+        assert_eq!(snapshot, None);
+    }
+
+    #[tokio::test]
+    async fn resolve_configured_proxy_snapshot_keeps_inline_url_when_stored_node_is_unroutable() {
+        let repository = Arc::new(InMemoryProxyNodeRepository::seed(vec![sample_tunnel_node(
+            "proxy-node-stale",
+        )]));
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(GatewayDataState::with_proxy_node_repository_for_tests(
+                repository,
+            ));
+
+        let snapshot = state
+            .resolve_configured_proxy_snapshot_with_tunnel_affinity(Some(&json!({
+                "node_id": "proxy-node-stale",
+                "url": "http://proxy.example:8080",
+                "enabled": true,
+            })))
+            .await
+            .expect("inline proxy URL should still resolve");
+
+        assert_eq!(snapshot.node_id.as_deref(), Some("proxy-node-stale"));
+        assert_eq!(snapshot.url.as_deref(), Some("http://proxy.example:8080"));
+    }
+
+    fn sample_tunnel_node(id: &str) -> StoredProxyNode {
+        StoredProxyNode::new(
+            id.to_string(),
+            id.to_string(),
+            "127.0.0.1".to_string(),
+            0,
+            false,
+            "online".to_string(),
+            15,
+            1,
+            0,
+            0,
+            0,
+            0,
+            true,
+            true,
+            1,
+        )
+        .expect("sample tunnel node should build")
     }
 }

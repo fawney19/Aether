@@ -1,5 +1,6 @@
 use super::state::{
-    enrich_admin_provider_oauth_auth_config, json_non_empty_string, json_u64_value,
+    decode_jwt_claims, enrich_admin_provider_oauth_auth_config, json_non_empty_string,
+    json_u64_value,
 };
 use crate::handlers::admin::request::AdminAppState;
 use crate::provider_key_auth::provider_active_api_formats;
@@ -27,6 +28,32 @@ pub(crate) fn provider_oauth_active_api_formats(
     provider_active_api_formats(endpoints)
 }
 
+pub(crate) fn provider_oauth_token_payload_expires_at_unix_secs(
+    token_payload: &serde_json::Value,
+    now_unix_secs: u64,
+) -> Option<u64> {
+    json_u64_value(
+        token_payload
+            .get("expires_in")
+            .or_else(|| token_payload.get("expiresIn")),
+    )
+    .map(|expires_in| now_unix_secs.saturating_add(expires_in))
+    .or_else(|| {
+        json_u64_value(
+            token_payload
+                .get("expires_at")
+                .or_else(|| token_payload.get("expiresAt"))
+                .or_else(|| token_payload.get("expiry"))
+                .or_else(|| token_payload.get("exp")),
+        )
+    })
+    .or_else(|| {
+        let access_token = json_non_empty_string(token_payload.get("access_token"))?;
+        let claims = decode_jwt_claims(&access_token)?;
+        json_u64_value(claims.get("exp"))
+    })
+}
+
 pub(crate) fn build_provider_oauth_auth_config_from_token_payload(
     provider_type: &str,
     token_payload: &serde_json::Value,
@@ -43,8 +70,8 @@ pub(crate) fn build_provider_oauth_auth_config_from_token_payload(
         .ok()
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    let expires_at = json_u64_value(token_payload.get("expires_in"))
-        .map(|expires_in| now_unix_secs.saturating_add(expires_in));
+    let expires_at =
+        provider_oauth_token_payload_expires_at_unix_secs(token_payload, now_unix_secs);
 
     let mut auth_config = serde_json::Map::new();
     auth_config.insert("provider_type".to_string(), json!(provider_type));
@@ -123,7 +150,14 @@ pub(crate) async fn create_provider_oauth_catalog_key(
     record.circuit_breaker_by_format = Some(json!({}));
     record.created_at_unix_ms = Some(now_unix_secs);
     record.updated_at_unix_secs = Some(now_unix_secs);
-    state.create_provider_catalog_key(&record).await
+    let created = state.create_provider_catalog_key(&record).await?;
+    if let Some(key) = created.as_ref() {
+        let _ = state
+            .app()
+            .invalidate_local_oauth_refresh_entry(&key.id)
+            .await;
+    }
+    Ok(created)
 }
 
 pub(crate) async fn update_existing_provider_oauth_catalog_key(
@@ -152,7 +186,7 @@ pub(crate) async fn update_existing_provider_oauth_catalog_key(
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
     let mut updated = existing_key.clone();
-    updated.encrypted_api_key = encrypted_api_key;
+    updated.encrypted_api_key = Some(encrypted_api_key);
     updated.encrypted_auth_config = Some(encrypted_auth_config);
     updated.api_formats = provider_oauth_catalog_key_api_formats(provider_type, api_formats);
     updated.is_active = true;
@@ -166,7 +200,14 @@ pub(crate) async fn update_existing_provider_oauth_catalog_key(
         updated.proxy = Some(proxy);
     }
     updated.updated_at_unix_secs = Some(now_unix_secs);
-    state.update_provider_catalog_key(&updated).await
+    let persisted = state.update_provider_catalog_key(&updated).await?;
+    if let Some(key) = persisted.as_ref() {
+        let _ = state
+            .app()
+            .invalidate_local_oauth_refresh_entry(&key.id)
+            .await;
+    }
+    Ok(persisted)
 }
 
 fn provider_oauth_catalog_key_api_formats(
@@ -177,5 +218,59 @@ fn provider_oauth_catalog_key_api_formats(
         None
     } else {
         Some(json!(api_formats))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::provider_oauth_token_payload_expires_at_unix_secs;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use serde_json::json;
+
+    fn sample_unsigned_jwt(payload: serde_json::Value) -> String {
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(payload.to_string());
+        format!("{header}.{payload}.sig")
+    }
+
+    #[test]
+    fn token_payload_expiry_uses_relative_expires_in_aliases() {
+        let payload = json!({
+            "access_token": "opaque-token",
+            "expiresIn": 120,
+        });
+
+        assert_eq!(
+            provider_oauth_token_payload_expires_at_unix_secs(&payload, 1_000),
+            Some(1_120)
+        );
+    }
+
+    #[test]
+    fn token_payload_expiry_uses_absolute_expires_at_aliases() {
+        let payload = json!({
+            "access_token": "opaque-token",
+            "expiresAt": 4_102_444_800u64,
+        });
+
+        assert_eq!(
+            provider_oauth_token_payload_expires_at_unix_secs(&payload, 1_000),
+            Some(4_102_444_800)
+        );
+    }
+
+    #[test]
+    fn token_payload_expiry_falls_back_to_access_token_exp_claim() {
+        let access_token = sample_unsigned_jwt(json!({
+            "exp": 2_000_000_000u64,
+        }));
+        let payload = json!({
+            "access_token": access_token,
+        });
+
+        assert_eq!(
+            provider_oauth_token_payload_expires_at_unix_secs(&payload, 1_000),
+            Some(2_000_000_000)
+        );
     }
 }

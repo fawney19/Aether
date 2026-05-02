@@ -247,17 +247,15 @@ pub(crate) fn normalize_admin_user_api_formats(
     };
     let mut normalized = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    let pattern =
-        Regex::new(r"^[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+$").expect("api format regex should compile");
     for item in values {
         let item = item.trim();
         if item.is_empty() {
             return Err("allowed_api_formats 不能为空".to_string());
         }
-        if !pattern.is_match(item) {
+        let Some(normalized_item) = crate::api::ai::normalize_admin_endpoint_signature(item) else {
             return Err(format!("allowed_api_formats 格式无效: {item}"));
-        }
-        let normalized_item = item.to_ascii_lowercase();
+        };
+        let normalized_item = normalized_item.to_string();
         if seen.insert(normalized_item.clone()) {
             normalized.push(normalized_item);
         }
@@ -277,4 +275,43 @@ pub(super) fn format_optional_datetime_iso8601(
     value: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Option<String> {
     value.map(|value| value.to_rfc3339())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_admin_user_api_formats;
+
+    #[test]
+    fn admin_user_api_formats_accept_current_canonical_signatures() {
+        assert_eq!(
+            normalize_admin_user_api_formats(Some(vec![
+                " OPENAI:RESPONSES ".to_string(),
+                "claude:messages".to_string(),
+                "gemini:generate_content".to_string(),
+                "openai:responses".to_string(),
+            ]))
+            .expect("formats should normalize"),
+            Some(vec![
+                "openai:responses".to_string(),
+                "claude:messages".to_string(),
+                "gemini:generate_content".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn admin_user_api_formats_reject_unsupported_signatures() {
+        for unsupported in [
+            "claude",
+            "openai",
+            "unknown:chat",
+            "openai:unknown",
+            "gemini:generate",
+        ] {
+            assert!(
+                normalize_admin_user_api_formats(Some(vec![unsupported.to_string()])).is_err(),
+                "{unsupported} should be rejected"
+            );
+        }
+    }
 }

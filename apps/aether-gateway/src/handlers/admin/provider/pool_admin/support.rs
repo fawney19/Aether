@@ -15,6 +15,34 @@ pub(crate) const ADMIN_POOL_PROVIDER_CATALOG_WRITER_UNAVAILABLE_DETAIL: &str =
     "Admin pool cleanup requires provider catalog writer";
 pub(crate) const ADMIN_POOL_BANNED_KEY_CLEANUP_EMPTY_MESSAGE: &str = "未发现可清理的异常账号";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AdminPoolKeySortField {
+    Default,
+    ImportedAt,
+    LastUsedAt,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AdminPoolKeySortDirection {
+    Asc,
+    Desc,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AdminPoolKeySort {
+    pub field: AdminPoolKeySortField,
+    pub direction: AdminPoolKeySortDirection,
+}
+
+impl Default for AdminPoolKeySort {
+    fn default() -> Self {
+        Self {
+            field: AdminPoolKeySortField::Default,
+            direction: AdminPoolKeySortDirection::Desc,
+        }
+    }
+}
+
 pub(crate) fn build_admin_pool_error_response(
     status: http::StatusCode,
     detail: impl Into<String>,
@@ -81,6 +109,31 @@ pub(crate) fn parse_admin_pool_status_filter(query: Option<&str>) -> Result<Stri
         "all" | "active" | "inactive" | "cooldown" => Ok(value),
         _ => Err("status must be one of: all, active, cooldown, inactive".to_string()),
     }
+}
+
+pub(crate) fn parse_admin_pool_key_sort(query: Option<&str>) -> Result<AdminPoolKeySort, String> {
+    let field = match query_param_value(query, "sort_by")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .as_deref()
+    {
+        None | Some("default") | Some("name") => AdminPoolKeySortField::Default,
+        Some("imported_at") | Some("created_at") => AdminPoolKeySortField::ImportedAt,
+        Some("last_used_at") | Some("last_used") => AdminPoolKeySortField::LastUsedAt,
+        Some(_) => {
+            return Err("sort_by must be one of: name, imported_at, last_used_at".to_string());
+        }
+    };
+    let direction = match query_param_value(query, "sort_order")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .as_deref()
+    {
+        None | Some("desc") => AdminPoolKeySortDirection::Desc,
+        Some("asc") => AdminPoolKeySortDirection::Asc,
+        Some(_) => return Err("sort_order must be one of: asc, desc".to_string()),
+    };
+    Ok(AdminPoolKeySort { field, direction })
 }
 
 pub(crate) fn admin_pool_provider_id_from_path(request_path: &str) -> Option<String> {

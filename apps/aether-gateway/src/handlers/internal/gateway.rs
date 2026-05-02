@@ -8,7 +8,7 @@ use super::{
     maybe_build_internal_finalize_video_response, parse_internal_tunnel_heartbeat_request,
     parse_internal_tunnel_node_status_request,
 };
-use crate::ai_pipeline_api;
+use crate::ai_serving::api;
 use crate::constants::{
     CONTROL_EXECUTED_HEADER, EXECUTION_PATH_EXECUTION_RUNTIME_STREAM,
     EXECUTION_PATH_EXECUTION_RUNTIME_SYNC,
@@ -228,7 +228,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                         .into_response(),
                     ));
                 }
-                let Some(mut local_payload) = ai_pipeline_api::maybe_build_sync_decision_payload(
+                let Some(mut local_payload) = api::maybe_build_sync_decision_payload(
                     state,
                     &parts,
                     trace_id.as_str(),
@@ -330,7 +330,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                         .into_response(),
                     ));
                 }
-                let Some(mut local_payload) = ai_pipeline_api::maybe_build_stream_decision_payload(
+                let Some(mut local_payload) = api::maybe_build_stream_decision_payload(
                     state,
                     &parts,
                     trace_id.as_str(),
@@ -412,7 +412,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                     resolved.auth_context = Some(auth_context);
                     resolved.local_auth_rejection = None;
                 }
-                if let Some(mut planned) = ai_pipeline_api::maybe_build_sync_plan_payload(
+                if let Some(mut planned) = api::maybe_build_sync_plan_payload(
                     state,
                     &parts,
                     trace_id.as_str(),
@@ -479,7 +479,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                     resolved.auth_context = Some(auth_context);
                     resolved.local_auth_rejection = None;
                 }
-                if let Some(mut planned) = ai_pipeline_api::maybe_build_stream_plan_payload(
+                if let Some(mut planned) = api::maybe_build_stream_plan_payload(
                     state,
                     &parts,
                     trace_id.as_str(),
@@ -550,7 +550,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                     resolved.auth_context = Some(auth_context);
                     resolved.local_auth_rejection = None;
                 }
-                if let Some(plan_payload) = ai_pipeline_api::maybe_build_sync_plan_payload(
+                if let Some(plan_payload) = api::maybe_build_sync_plan_payload(
                     state,
                     &parts,
                     trace_id.as_str(),
@@ -634,7 +634,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                     resolved.auth_context = Some(auth_context);
                     resolved.local_auth_rejection = None;
                 }
-                if let Some(plan_payload) = ai_pipeline_api::maybe_build_stream_plan_payload(
+                if let Some(plan_payload) = api::maybe_build_stream_plan_payload(
                     state,
                     &parts,
                     trace_id.as_str(),
@@ -741,7 +741,7 @@ pub(crate) async fn maybe_build_local_internal_proxy_response_impl(
                     )));
                 };
                 let trace_id = payload.trace_id.clone();
-                if let Some(outcome) = ai_pipeline_api::maybe_build_sync_finalize_outcome(
+                if let Some(outcome) = api::maybe_build_sync_finalize_outcome(
                     trace_id.as_str(),
                     &synthetic_decision,
                     &payload,

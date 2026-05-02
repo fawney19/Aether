@@ -50,6 +50,28 @@ async fn gateway_handles_internal_gateway_resolve_without_proxying_upstream() {
     assert_eq!(payload["route_kind"], "chat");
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
+    let response = reqwest::Client::new()
+        .post(format!("{gateway_url}/api/internal/gateway/resolve"))
+        .json(&json!({
+            "method": "POST",
+            "path": "/v1/messages",
+            "headers": {
+                "authorization": "Bearer local-token",
+            },
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    assert_eq!(payload["route_class"], "ai_public");
+    assert_eq!(payload["route_family"], "claude");
+    assert_eq!(payload["route_kind"], "messages");
+    assert_eq!(payload["request_auth_channel"], "bearer_like");
+    assert_eq!(payload["auth_endpoint_signature"], "claude:messages");
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
+
     gateway_handle.abort();
     upstream_handle.abort();
 }

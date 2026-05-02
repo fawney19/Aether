@@ -3,6 +3,7 @@ export interface ProviderKeyAuthCarrier {
   credential_kind?: string | null
   runtime_auth_kind?: string | null
   oauth_managed?: boolean | null
+  oauth_temporary?: boolean | null
   can_refresh_oauth?: boolean | null
   can_export_oauth?: boolean | null
   can_edit_oauth?: boolean | null
@@ -38,12 +39,13 @@ export function getProviderCredentialKind(
 
 export function getProviderRuntimeAuthKind(
   input: ProviderKeyAuthCarrier,
-): 'api_key' | 'bearer' | 'service_account' | 'unknown' {
+): 'api_key' | 'bearer' | 'service_account' | 'mixed' | 'unknown' {
   const runtimeAuthKind = normalizeText(input.runtime_auth_kind)
   if (
     runtimeAuthKind === 'api_key'
     || runtimeAuthKind === 'bearer'
     || runtimeAuthKind === 'service_account'
+    || runtimeAuthKind === 'mixed'
   ) {
     return runtimeAuthKind
   }
@@ -67,9 +69,16 @@ export function isServiceAccountCredential(input: ProviderKeyAuthCarrier): boole
 }
 
 export function canRefreshOAuthCredential(input: ProviderKeyAuthCarrier): boolean {
+  if (input.oauth_temporary === true) {
+    return false
+  }
   if (typeof input.can_refresh_oauth === 'boolean') {
     return input.can_refresh_oauth
   }
+  return isOAuthManagedCredential(input)
+}
+
+export function shouldShowOAuthRefreshControl(input: ProviderKeyAuthCarrier): boolean {
   return isOAuthManagedCredential(input)
 }
 
@@ -90,11 +99,13 @@ export function canEditOAuthCredential(input: ProviderKeyAuthCarrier): boolean {
 export function getProviderAuthLabel(input: ProviderKeyAuthCarrier): string {
   if (isOAuthManagedCredential(input)) return 'OAuth'
   if (isServiceAccountCredential(input)) return '服务账号'
+  if (getProviderRuntimeAuthKind(input) === 'mixed') return '混合'
   return getProviderRuntimeAuthKind(input) === 'bearer' ? 'Bearer' : 'API Key'
 }
 
 export function getProviderMaskedSecretLabel(input: ProviderKeyAuthCarrier): string {
   if (isOAuthManagedCredential(input)) return '[OAuth Token]'
   if (isServiceAccountCredential(input)) return '[Service Account]'
+  if (getProviderRuntimeAuthKind(input) === 'mixed') return '[Key]'
   return getProviderRuntimeAuthKind(input) === 'bearer' ? '[Bearer Token]' : '[Key]'
 }

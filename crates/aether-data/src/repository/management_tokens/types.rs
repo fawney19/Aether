@@ -132,7 +132,7 @@ impl StoredManagementToken {
         self.token_prefix
             .as_deref()
             .map(|prefix| format!("{prefix}...****"))
-            .unwrap_or_else(|| "ae_****".to_string())
+            .unwrap_or_else(|| "ae-****".to_string())
     }
 }
 

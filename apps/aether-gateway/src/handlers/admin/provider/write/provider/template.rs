@@ -350,7 +350,7 @@ fn endpoint_matches_fixed_provider_template(
 }
 
 fn normalize_api_format_alias(value: &str) -> String {
-    crate::ai_pipeline::normalize_legacy_openai_format_alias(value)
+    crate::ai_serving::normalize_api_format_alias(value)
 }
 
 fn api_format_matches(left: &str, right: &str) -> bool {

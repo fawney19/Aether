@@ -348,7 +348,7 @@
                               <Copy class="w-2.5 h-2.5" />
                             </Button>
                             <!-- OAuth 状态（失效/过期/倒计时）和刷新按钮 -->
-                            <template v-if="getKeyOAuthExpires(key)">
+                            <template v-if="shouldShowOAuthRefreshControl(key)">
                               <!-- 账号级别异常：醒目提示 + 清除按钮 -->
                               <template v-if="isAccountLevelBlock(key)">
                                 <Badge
@@ -386,11 +386,19 @@
                                 >
                                   {{ getKeyOAuthExpires(key)?.text }}
                                 </span>
+                                <Badge
+                                  v-if="key.oauth_temporary"
+                                  variant="outline"
+                                  class="text-[10px] px-1.5 py-0 shrink-0"
+                                  title="仅通过 Access Token 导入，无法自动刷新，到期后需要重新导入"
+                                >
+                                  临时
+                                </Badge>
                                 <Button
                                   variant="ghost"
                                   size="icon"
                                   class="h-4 w-4 shrink-0"
-                                  :disabled="refreshingOAuthKeyId === key.id"
+                                  :disabled="refreshingOAuthKeyId === key.id || !canRefreshOAuthCredential(key)"
                                   :title="getOAuthRefreshButtonTitle(key)"
                                   @click.stop="handleRefreshOAuth(key)"
                                 >
@@ -1172,14 +1180,17 @@ import { getOAuthRefreshFeedback } from '@/utils/oauthRefreshFeedback'
 import {
   canEditOAuthCredential,
   canExportOAuthCredential,
+  canRefreshOAuthCredential,
   isOAuthManagedCredential,
   isServiceAccountCredential,
+  shouldShowOAuthRefreshControl,
 } from '@/utils/providerKeyAuth'
 import {
   getAccountStatusDisplay,
   getAccountStatusTitle,
   getOAuthRefreshButtonTitle as resolveOAuthRefreshButtonTitle,
   getOAuthStatusDisplay,
+  getOAuthStatusDisplayWithFallback,
   getOAuthStatusTitle as resolveOAuthStatusTitle,
 } from '@/utils/providerKeyStatus'
 
@@ -3104,7 +3115,7 @@ function getOAuthPlanTypeClass(planType: string): string {
 
 // OAuth 状态信息（包括失效和过期）
 function getKeyOAuthExpires(key: EndpointAPIKey) {
-  return getOAuthStatusDisplay(key, countdownTick.value)
+  return getOAuthStatusDisplayWithFallback(key, countdownTick.value)
 }
 
 function getOAuthRefreshButtonTitle(key: EndpointAPIKey): string {

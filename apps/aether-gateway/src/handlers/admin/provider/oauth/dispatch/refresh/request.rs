@@ -87,7 +87,7 @@ pub(super) async fn parse_admin_provider_oauth_refresh_request(
         )));
     };
     let Some(transport) = state
-        .read_provider_transport_snapshot(&provider_id, &endpoint.id, &key_id)
+        .read_provider_transport_snapshot_uncached(&provider_id, &endpoint.id, &key_id)
         .await?
     else {
         return Ok(RefreshDispatch::Respond(response::control_error_response(
@@ -101,6 +101,7 @@ pub(super) async fn parse_admin_provider_oauth_refresh_request(
         key,
         provider,
         provider_type,
+        trace_id: request_context.trace_id().to_string(),
         transport,
     }))
 }

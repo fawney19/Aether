@@ -12,8 +12,9 @@ pub use affinity::{
     matches_affinity_target, SchedulerAffinityTarget,
 };
 pub use auth::{
-    auth_constraints_allow_api_format, auth_constraints_allow_model,
-    auth_constraints_allow_provider, provider_matches_allowed_value, SchedulerAuthConstraints,
+    api_format_matches_allowed_value, auth_constraints_allow_api_format,
+    auth_constraints_allow_model, auth_constraints_allow_provider, provider_matches_allowed_value,
+    SchedulerAuthConstraints,
 };
 pub use candidate::{
     auth_api_key_concurrency_limit_reached, candidate_is_selectable_with_runtime_state,

@@ -103,16 +103,16 @@ pub fn infer_internal_finalize_signature(payload: &GatewaySyncReportRequest) -> 
         return Some("openai:video".to_string());
     }
     if report_kind.starts_with("claude_chat_") {
-        return Some("claude:chat".to_string());
+        return Some("claude:messages".to_string());
     }
     if report_kind.starts_with("claude_cli_") {
-        return Some("claude:cli".to_string());
+        return Some("claude:messages".to_string());
     }
     if report_kind.starts_with("gemini_chat_") {
-        return Some("gemini:chat".to_string());
+        return Some("gemini:generate_content".to_string());
     }
     if report_kind.starts_with("gemini_cli_") {
-        return Some("gemini:cli".to_string());
+        return Some("gemini:generate_content".to_string());
     }
     if report_kind.starts_with("gemini_video_") {
         return Some("gemini:video".to_string());
@@ -121,7 +121,7 @@ pub fn infer_internal_finalize_signature(payload: &GatewaySyncReportRequest) -> 
 }
 
 pub fn resolve_internal_finalize_route(signature: &str) -> Option<InternalFinalizeRoute> {
-    match aether_ai_formats::normalize_legacy_openai_format_alias(signature).as_str() {
+    match aether_ai_formats::normalize_api_format_alias(signature).as_str() {
         "openai:chat" => Some(InternalFinalizeRoute {
             public_path: "/v1/chat/completions",
             route_family: "openai",
@@ -147,25 +147,15 @@ pub fn resolve_internal_finalize_route(signature: &str) -> Option<InternalFinali
             route_family: "openai",
             route_kind: "video",
         }),
-        "claude:chat" => Some(InternalFinalizeRoute {
+        "claude:messages" => Some(InternalFinalizeRoute {
             public_path: "/v1/messages",
             route_family: "claude",
-            route_kind: "chat",
+            route_kind: "messages",
         }),
-        "claude:cli" => Some(InternalFinalizeRoute {
-            public_path: "/v1/messages",
-            route_family: "claude",
-            route_kind: "cli",
-        }),
-        "gemini:chat" => Some(InternalFinalizeRoute {
+        "gemini:generate_content" => Some(InternalFinalizeRoute {
             public_path: "/v1beta/models",
             route_family: "gemini",
-            route_kind: "chat",
-        }),
-        "gemini:cli" => Some(InternalFinalizeRoute {
-            public_path: "/v1beta/models",
-            route_family: "gemini",
-            route_kind: "cli",
+            route_kind: "generate_content",
         }),
         "gemini:video" => Some(InternalFinalizeRoute {
             public_path: "/v1beta/models",
@@ -525,10 +515,7 @@ mod tests {
                 route_kind: "responses:compact",
             })
         );
-        assert_eq!(
-            resolve_internal_finalize_route("openai:compact"),
-            resolve_internal_finalize_route("openai:responses:compact")
-        );
+        assert_eq!(resolve_internal_finalize_route("openai:compact"), None);
         assert_eq!(
             resolve_internal_finalize_route("gemini:video"),
             Some(InternalFinalizeRoute {

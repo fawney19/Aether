@@ -121,7 +121,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
             true,
             false,
             Some(serde_json::json!(["claude", "kiro"])),
-            Some(serde_json::json!(["claude:cli"])),
+            Some(serde_json::json!(["claude:messages"])),
             Some(serde_json::json!(["claude-sonnet-4"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -132,7 +132,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
             Some(5),
             Some(4_102_444_800),
             Some(serde_json::json!(["claude", "kiro"])),
-            Some(serde_json::json!(["claude:cli"])),
+            Some(serde_json::json!(["claude:messages"])),
             Some(serde_json::json!(["claude-sonnet-4"])),
         )
         .expect("auth snapshot should build")
@@ -146,7 +146,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-kiro-cli-local-sync-1".to_string(),
-            endpoint_api_format: "claude:cli".to_string(),
+            endpoint_api_format: "claude:messages".to_string(),
             endpoint_api_family: Some("claude".to_string()),
             endpoint_kind: Some("cli".to_string()),
             endpoint_is_active: true,
@@ -154,11 +154,11 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
             key_name: "prod".to_string(),
             key_auth_type: "bearer".to_string(),
             key_is_active: true,
-            key_api_formats: Some(vec!["claude:cli".to_string()]),
+            key_api_formats: Some(vec!["claude:messages".to_string()]),
             key_allowed_models: None,
             key_capabilities: None,
             key_internal_priority: 5,
-            key_global_priority_by_format: Some(serde_json::json!({"claude:cli": 1})),
+            key_global_priority_by_format: Some(serde_json::json!({"claude:messages": 1})),
             model_id: "model-kiro-cli-local-sync-1".to_string(),
             global_model_id: "global-model-kiro-cli-local-sync-1".to_string(),
             global_model_name: "claude-sonnet-4".to_string(),
@@ -168,7 +168,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
                 name: "claude-sonnet-4-upstream".to_string(),
                 priority: 1,
-                api_formats: Some(vec!["claude:cli".to_string()]),
+                api_formats: Some(vec!["claude:messages".to_string()]),
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -201,7 +201,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
         StoredProviderCatalogEndpoint::new(
             "endpoint-kiro-cli-local-sync-1".to_string(),
             "provider-kiro-cli-local-sync-1".to_string(),
-            "claude:cli".to_string(),
+            "claude:messages".to_string(),
             Some("claude".to_string()),
             Some("cli".to_string()),
             true,
@@ -249,7 +249,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["claude:cli"])),
+            Some(serde_json::json!(["claude:messages"])),
             encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "__placeholder__")
                 .expect("api key should encrypt"),
             Some(
@@ -260,7 +260,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
                 .expect("auth config should encrypt"),
             ),
             None,
-            Some(serde_json::json!({"claude:cli": 1})),
+            Some(serde_json::json!({"claude:messages": 1})),
             None,
             None,
             Some(serde_json::json!({"enabled": true, "node_id":"proxy-node-kiro-cli-local-sync"})),
@@ -288,8 +288,9 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
                     "action": "proxy_public",
                     "route_class": "ai_public",
                     "route_family": "claude",
-                    "route_kind": "cli",
-                    "auth_endpoint_signature": "claude:cli",
+                    "route_kind": "messages",
+                    "request_auth_channel": "bearer_like",
+                    "auth_endpoint_signature": "claude:messages",
                     "execution_runtime_candidate": true,
                     "auth_context": {
                         "user_id": "user-kiro-cli-local-sync-123",
@@ -683,7 +684,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
             true,
             false,
             Some(serde_json::json!(["claude", "kiro"])),
-            Some(serde_json::json!(["claude:cli"])),
+            Some(serde_json::json!(["claude:messages"])),
             Some(serde_json::json!(["claude-sonnet-4"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -694,7 +695,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
             Some(5),
             Some(4_102_444_800),
             Some(serde_json::json!(["claude", "kiro"])),
-            Some(serde_json::json!(["claude:cli"])),
+            Some(serde_json::json!(["claude:messages"])),
             Some(serde_json::json!(["claude-sonnet-4"])),
         )
         .expect("auth snapshot should build")
@@ -708,7 +709,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-kiro-cli-local-refresh-1".to_string(),
-            endpoint_api_format: "claude:cli".to_string(),
+            endpoint_api_format: "claude:messages".to_string(),
             endpoint_api_family: Some("claude".to_string()),
             endpoint_kind: Some("cli".to_string()),
             endpoint_is_active: true,
@@ -716,11 +717,11 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
             key_name: "prod".to_string(),
             key_auth_type: "bearer".to_string(),
             key_is_active: true,
-            key_api_formats: Some(vec!["claude:cli".to_string()]),
+            key_api_formats: Some(vec!["claude:messages".to_string()]),
             key_allowed_models: None,
             key_capabilities: None,
             key_internal_priority: 5,
-            key_global_priority_by_format: Some(serde_json::json!({"claude:cli": 1})),
+            key_global_priority_by_format: Some(serde_json::json!({"claude:messages": 1})),
             model_id: "model-kiro-cli-local-refresh-1".to_string(),
             global_model_id: "global-model-kiro-cli-local-refresh-1".to_string(),
             global_model_name: "claude-sonnet-4".to_string(),
@@ -730,7 +731,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
                 name: "claude-sonnet-4-upstream".to_string(),
                 priority: 1,
-                api_formats: Some(vec!["claude:cli".to_string()]),
+                api_formats: Some(vec!["claude:messages".to_string()]),
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -763,7 +764,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
         StoredProviderCatalogEndpoint::new(
             "endpoint-kiro-cli-local-refresh-1".to_string(),
             "provider-kiro-cli-local-refresh-1".to_string(),
-            "claude:cli".to_string(),
+            "claude:messages".to_string(),
             Some("claude".to_string()),
             Some("cli".to_string()),
             true,
@@ -810,7 +811,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["claude:cli"])),
+            Some(serde_json::json!(["claude:messages"])),
             encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "__placeholder__")
                 .expect("api key should encrypt"),
             Some(
@@ -821,7 +822,7 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
                 .expect("auth config should encrypt"),
             ),
             None,
-            Some(serde_json::json!({"claude:cli": 1})),
+            Some(serde_json::json!({"claude:messages": 1})),
             None,
             None,
             None,
@@ -872,8 +873,9 @@ async fn gateway_executes_kiro_claude_cli_sync_via_local_provider_catalog_candid
                     "action": "proxy_public",
                     "route_class": "ai_public",
                     "route_family": "claude",
-                    "route_kind": "cli",
-                    "auth_endpoint_signature": "claude:cli",
+                    "route_kind": "messages",
+                    "request_auth_channel": "bearer_like",
+                    "auth_endpoint_signature": "claude:messages",
                     "execution_runtime_candidate": true,
                     "auth_context": {
                         "user_id": "user-kiro-cli-local-refresh-123",

@@ -119,11 +119,15 @@ fn extract_codex_auth_fields_from_object(source: &Map<String, Value>) -> Map<Str
     let auth = source
         .get("https://api.openai.com/auth")
         .and_then(Value::as_object);
+    let profile = source
+        .get("https://api.openai.com/profile")
+        .and_then(Value::as_object);
     let mut result = Map::new();
 
     if let Some(email) = first_json_non_empty_string([
         source.get("email").cloned(),
         auth.and_then(|value| value.get("email")).cloned(),
+        profile.and_then(|value| value.get("email")).cloned(),
     ]) {
         result.insert("email".to_string(), json!(email));
     }

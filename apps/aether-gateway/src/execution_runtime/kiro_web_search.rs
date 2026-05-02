@@ -713,13 +713,17 @@ fn detect_kiro_web_search_request(
     {
         return None;
     }
-    if !plan.stream || !plan.provider_api_format.eq_ignore_ascii_case("claude:cli") {
+    if !plan.stream
+        || !plan
+            .provider_api_format
+            .eq_ignore_ascii_case("claude:messages")
+    {
         return None;
     }
     if report_context
         .and_then(|context| context.get("client_api_format"))
         .and_then(Value::as_str)
-        .is_some_and(|value| !value.eq_ignore_ascii_case("claude:cli"))
+        .is_some_and(|value| !value.eq_ignore_ascii_case("claude:messages"))
     {
         return None;
     }
@@ -933,7 +937,7 @@ fn build_web_search_sse_body(
     input_tokens: u64,
 ) -> Result<Vec<u8>, serde_json::Error> {
     let events = build_web_search_events(model, query, tool_use_id, search_results, input_tokens);
-    crate::ai_pipeline_api::encode_kiro_sse_events(events)
+    crate::ai_serving::api::encode_kiro_sse_events(events)
 }
 
 fn build_web_search_events(
@@ -1200,8 +1204,8 @@ mod tests {
             content_encoding: None,
             body: RequestBody::from_json(body),
             stream: true,
-            client_api_format: "claude:cli".to_string(),
-            provider_api_format: "claude:cli".to_string(),
+            client_api_format: "claude:messages".to_string(),
+            provider_api_format: "claude:messages".to_string(),
             model_name: Some("claude-sonnet-4.6".to_string()),
             proxy: None,
             tls_profile: None,
@@ -1227,7 +1231,7 @@ mod tests {
         let plan = sample_plan(json!({"conversationState": {}}));
         let report_context = json!({
             "envelope_name": "kiro:generateAssistantResponse",
-            "client_api_format": "claude:cli",
+            "client_api_format": "claude:messages",
             "original_request_body": {
                 "model": "claude-haiku-4-5-20251001",
                 "messages": [{
@@ -1274,7 +1278,7 @@ mod tests {
         }));
         let report_context = json!({
             "envelope_name": "kiro:generateAssistantResponse",
-            "client_api_format": "claude:cli"
+            "client_api_format": "claude:messages"
         });
 
         let detected = detect_kiro_web_search_request(&plan, Some(&report_context))

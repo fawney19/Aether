@@ -25,6 +25,30 @@ use aether_data_contracts::repository::provider_catalog::{
 };
 use sha2::{Digest, Sha256};
 
+const KIRO_CLAUDE_CLI_FINALIZE_TEST_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+fn run_kiro_claude_cli_finalize_test<F, Fut>(test_name: &'static str, make_future: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(KIRO_CLAUDE_CLI_FINALIZE_TEST_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            runtime.block_on(make_future());
+        })
+        .expect("kiro claude cli finalize test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 #[tokio::test]
 async fn gateway_executes_openai_responses_sync_upstream_stream_via_local_finalize_response() {
     use base64::Engine as _;
@@ -474,8 +498,15 @@ async fn gateway_executes_openai_responses_sync_upstream_stream_via_local_finali
     upstream_handle.abort();
 }
 
-#[tokio::test]
-async fn gateway_executes_kiro_claude_cli_sync_upstream_stream_via_local_finalize_response() {
+#[test]
+fn gateway_executes_kiro_claude_cli_sync_upstream_stream_via_local_finalize_response() {
+    run_kiro_claude_cli_finalize_test(
+        "gateway_executes_kiro_claude_cli_sync_upstream_stream_via_local_finalize_response",
+        gateway_executes_kiro_claude_cli_sync_upstream_stream_via_local_finalize_response_impl,
+    );
+}
+
+async fn gateway_executes_kiro_claude_cli_sync_upstream_stream_via_local_finalize_response_impl() {
     use base64::Engine as _;
 
     fn crc32(data: &[u8]) -> u32 {
@@ -556,7 +587,7 @@ async fn gateway_executes_kiro_claude_cli_sync_upstream_stream_via_local_finaliz
             true,
             false,
             Some(serde_json::json!(["claude", "kiro"])),
-            Some(serde_json::json!(["claude:cli"])),
+            Some(serde_json::json!(["claude:messages"])),
             Some(serde_json::json!(["claude-sonnet-4"])),
             api_key_id.to_string(),
             Some("default".to_string()),
@@ -567,7 +598,7 @@ async fn gateway_executes_kiro_claude_cli_sync_upstream_stream_via_local_finaliz
             Some(5),
             Some(4_102_444_800),
             Some(serde_json::json!(["claude", "kiro"])),
-            Some(serde_json::json!(["claude:cli"])),
+            Some(serde_json::json!(["claude:messages"])),
             Some(serde_json::json!(["claude-sonnet-4"])),
         )
         .expect("auth snapshot should build")
@@ -581,7 +612,7 @@ async fn gateway_executes_kiro_claude_cli_sync_upstream_stream_via_local_finaliz
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-kiro-cli-finalize-local-1".to_string(),
-            endpoint_api_format: "claude:cli".to_string(),
+            endpoint_api_format: "claude:messages".to_string(),
             endpoint_api_family: Some("claude".to_string()),
             endpoint_kind: Some("cli".to_string()),
             endpoint_is_active: true,
@@ -589,11 +620,11 @@ async fn gateway_executes_kiro_claude_cli_sync_upstream_stream_via_local_finaliz
             key_name: "prod".to_string(),
             key_auth_type: "bearer".to_string(),
             key_is_active: true,
-            key_api_formats: Some(vec!["claude:cli".to_string()]),
+            key_api_formats: Some(vec!["claude:messages".to_string()]),
             key_allowed_models: None,
             key_capabilities: None,
             key_internal_priority: 5,
-            key_global_priority_by_format: Some(serde_json::json!({"claude:cli": 1})),
+            key_global_priority_by_format: Some(serde_json::json!({"claude:messages": 1})),
             model_id: "model-kiro-cli-finalize-local-1".to_string(),
             global_model_id: "global-model-kiro-cli-finalize-local-1".to_string(),
             global_model_name: "claude-sonnet-4".to_string(),
@@ -603,7 +634,7 @@ async fn gateway_executes_kiro_claude_cli_sync_upstream_stream_via_local_finaliz
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
                 name: "claude-sonnet-4-upstream".to_string(),
                 priority: 1,
-                api_formats: Some(vec!["claude:cli".to_string()]),
+                api_formats: Some(vec!["claude:messages".to_string()]),
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -636,7 +667,7 @@ async fn gateway_executes_kiro_claude_cli_sync_upstream_stream_via_local_finaliz
         StoredProviderCatalogEndpoint::new(
             "endpoint-kiro-cli-finalize-local-1".to_string(),
             "provider-kiro-cli-finalize-local-1".to_string(),
-            "claude:cli".to_string(),
+            "claude:messages".to_string(),
             Some("claude".to_string()),
             Some("cli".to_string()),
             true,
@@ -684,7 +715,7 @@ async fn gateway_executes_kiro_claude_cli_sync_upstream_stream_via_local_finaliz
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["claude:cli"])),
+            Some(serde_json::json!(["claude:messages"])),
             encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "__placeholder__")
                 .expect("api key should encrypt"),
             Some(
@@ -695,7 +726,7 @@ async fn gateway_executes_kiro_claude_cli_sync_upstream_stream_via_local_finaliz
                 .expect("auth config should encrypt"),
             ),
             None,
-            Some(serde_json::json!({"claude:cli": 1})),
+            Some(serde_json::json!({"claude:messages": 1})),
             None,
             None,
             Some(serde_json::json!({"enabled": true, "node_id":"proxy-node-kiro-cli-finalize-local"})),

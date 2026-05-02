@@ -3,10 +3,14 @@ use std::sync::{Arc, Mutex};
 use aether_data::repository::auth::{
     InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeySnapshot,
 };
+use aether_data::repository::candidates::InMemoryRequestCandidateRepository;
 use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
 use aether_data::repository::usage::InMemoryUsageReadRepository;
 use aether_data::repository::users::{
     InMemoryUserReadRepository, StoredUserAuthRecord, StoredUserSummary,
+};
+use aether_data_contracts::repository::candidates::{
+    RequestCandidateStatus, StoredRequestCandidate,
 };
 use aether_data_contracts::repository::usage::StoredRequestUsageAudit;
 use axum::body::{Body, Bytes};
@@ -199,6 +203,43 @@ fn sample_usage_row(
     usage.cache_creation_ephemeral_5m_input_tokens = 6;
     usage.cache_creation_ephemeral_1h_input_tokens = 9;
     usage
+}
+
+fn sample_request_candidate(
+    id: &str,
+    request_id: &str,
+    candidate_index: i32,
+    retry_index: i32,
+    status: RequestCandidateStatus,
+) -> StoredRequestCandidate {
+    let attempted = status.is_attempted(None);
+    StoredRequestCandidate::new(
+        id.to_string(),
+        request_id.to_string(),
+        Some("user-1".to_string()),
+        Some("key-1".to_string()),
+        Some("alice".to_string()),
+        Some("primary".to_string()),
+        candidate_index,
+        retry_index,
+        Some("provider-1".to_string()),
+        Some(format!("endpoint-{candidate_index}")),
+        Some(format!("provider-key-{candidate_index}")),
+        status,
+        None,
+        false,
+        matches!(status, RequestCandidateStatus::Failed).then_some(503),
+        None,
+        matches!(status, RequestCandidateStatus::Failed).then(|| "upstream failed".to_string()),
+        attempted.then_some(50),
+        None,
+        None,
+        None,
+        1_711_000_000_000 + i64::from(candidate_index) * 10 + i64::from(retry_index),
+        attempted.then_some(1_711_000_000_000 + i64::from(candidate_index) * 10),
+        attempted.then_some(1_711_000_000_005 + i64::from(candidate_index) * 10),
+    )
+    .expect("request candidate should build")
 }
 
 fn sample_user_summary(id: &str, username: &str) -> StoredUserSummary {
@@ -482,9 +523,9 @@ async fn gateway_handles_admin_usage_aggregation_stats_locally_with_trusted_admi
     );
     usage_3.provider_id = Some("provider-anthropic".to_string());
     usage_3.total_tokens = usage_3.input_tokens;
-    usage_3.api_format = Some("claude:cli".to_string());
+    usage_3.api_format = Some("claude:messages".to_string());
     usage_3.api_family = Some("claude".to_string());
-    usage_3.endpoint_api_format = Some("claude:cli".to_string());
+    usage_3.endpoint_api_format = Some("claude:messages".to_string());
     usage_3.provider_api_family = Some("claude".to_string());
 
     let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
@@ -558,7 +599,7 @@ async fn gateway_handles_admin_usage_aggregation_stats_locally_with_trusted_admi
     assert_eq!(api_format_items.len(), 2);
     assert_eq!(api_format_items[0]["api_format"], "openai:chat");
     assert_eq!(api_format_items[0]["output_tokens"], 40);
-    assert_eq!(api_format_items[1]["api_format"], "claude:cli");
+    assert_eq!(api_format_items[1]["api_format"], "claude:messages");
     assert_eq!(api_format_items[1]["output_tokens"], 20);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
@@ -1199,6 +1240,190 @@ async fn gateway_filters_admin_usage_records_by_has_fallback_status() {
     assert_eq!(payload["records"][0]["has_fallback"], true);
     assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
 
+    gateway_handle.abort();
+    upstream_handle.abort();
+}
+
+#[tokio::test]
+async fn gateway_usage_record_attempt_flags_follow_request_candidate_timeline() {
+    let (_upstream_url, upstream_hits, upstream_handle) =
+        start_usage_upstream("/api/admin/usage/records").await;
+
+    let mut non_fallback_usage = sample_usage_row(
+        "usage-non-fallback-secondary",
+        "req-non-fallback-secondary",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-5",
+        "completed",
+        12,
+        8,
+        0.02,
+        0.02,
+        DAY_1_UNIX_SECS + 3,
+    );
+    non_fallback_usage.candidate_id = Some("cand-non-fallback-success".to_string());
+    non_fallback_usage.candidate_index = Some(1);
+
+    let mut fallback_usage = sample_usage_row(
+        "usage-real-fallback",
+        "req-real-fallback",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-5",
+        "completed",
+        12,
+        8,
+        0.02,
+        0.02,
+        DAY_1_UNIX_SECS + 2,
+    );
+    fallback_usage.candidate_id = Some("cand-fallback-success".to_string());
+    fallback_usage.candidate_index = Some(1);
+
+    let mut retry_usage = sample_usage_row(
+        "usage-real-retry",
+        "req-real-retry",
+        Some("user-1"),
+        Some("key-1"),
+        Some("primary"),
+        "OpenAI",
+        "gpt-5",
+        "completed",
+        12,
+        8,
+        0.02,
+        0.02,
+        DAY_1_UNIX_SECS + 1,
+    );
+    retry_usage.candidate_id = Some("cand-retry-success".to_string());
+    retry_usage.candidate_index = Some(0);
+
+    let usage_repository = Arc::new(InMemoryUsageReadRepository::seed(vec![
+        non_fallback_usage,
+        fallback_usage,
+        retry_usage,
+    ]));
+    let request_candidate_repository = Arc::new(InMemoryRequestCandidateRepository::seed(vec![
+        sample_request_candidate(
+            "cand-non-fallback-success",
+            "req-non-fallback-secondary",
+            1,
+            0,
+            RequestCandidateStatus::Success,
+        ),
+        sample_request_candidate(
+            "cand-non-fallback-unused",
+            "req-non-fallback-secondary",
+            2,
+            0,
+            RequestCandidateStatus::Unused,
+        ),
+        sample_request_candidate(
+            "cand-fallback-failed",
+            "req-real-fallback",
+            0,
+            0,
+            RequestCandidateStatus::Failed,
+        ),
+        sample_request_candidate(
+            "cand-fallback-success",
+            "req-real-fallback",
+            1,
+            0,
+            RequestCandidateStatus::Success,
+        ),
+        sample_request_candidate(
+            "cand-retry-failed",
+            "req-real-retry",
+            0,
+            0,
+            RequestCandidateStatus::Failed,
+        ),
+        sample_request_candidate(
+            "cand-retry-success",
+            "req-real-retry",
+            0,
+            1,
+            RequestCandidateStatus::Success,
+        ),
+    ]));
+    let gateway = build_router_with_state(
+        AppState::new()
+            .expect("gateway should build")
+            .with_data_state_for_tests(
+                GatewayDataState::with_request_candidate_and_usage_repository_for_tests(
+                    request_candidate_repository,
+                    usage_repository,
+                ),
+            ),
+    );
+    let (gateway_url, gateway_handle) = start_server(gateway).await;
+
+    let response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/usage/records?start_date=2024-03-21&end_date=2024-03-22&tz_offset_minutes=0&limit=10&offset=0"
+    )))
+    .send()
+    .await
+    .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: serde_json::Value = response.json().await.expect("json body should parse");
+    let records = payload["records"]
+        .as_array()
+        .expect("records should be array");
+    let record_by_id = |id: &str| {
+        records
+            .iter()
+            .find(|record| record["id"].as_str() == Some(id))
+            .expect("record should exist")
+    };
+    assert_eq!(
+        record_by_id("usage-non-fallback-secondary")["has_fallback"],
+        false
+    );
+    assert_eq!(
+        record_by_id("usage-non-fallback-secondary")["has_retry"],
+        false
+    );
+    assert_eq!(record_by_id("usage-real-fallback")["has_fallback"], true);
+    assert_eq!(record_by_id("usage-real-fallback")["has_retry"], false);
+    assert_eq!(record_by_id("usage-real-retry")["has_fallback"], false);
+    assert_eq!(record_by_id("usage-real-retry")["has_retry"], true);
+
+    let fallback_response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/usage/records?start_date=2024-03-21&end_date=2024-03-22&tz_offset_minutes=0&status=has_fallback&limit=10&offset=0"
+    )))
+    .send()
+    .await
+    .expect("fallback request should succeed");
+    assert_eq!(fallback_response.status(), StatusCode::OK);
+    let fallback_payload: serde_json::Value = fallback_response
+        .json()
+        .await
+        .expect("fallback json body should parse");
+    assert_eq!(fallback_payload["total"], 1);
+    assert_eq!(fallback_payload["records"][0]["id"], "usage-real-fallback");
+
+    let retry_response = admin_request(reqwest::Client::new().get(format!(
+        "{gateway_url}/api/admin/usage/records?start_date=2024-03-21&end_date=2024-03-22&tz_offset_minutes=0&status=has_retry&limit=10&offset=0"
+    )))
+    .send()
+    .await
+    .expect("retry request should succeed");
+    assert_eq!(retry_response.status(), StatusCode::OK);
+    let retry_payload: serde_json::Value = retry_response
+        .json()
+        .await
+        .expect("retry json body should parse");
+    assert_eq!(retry_payload["total"], 1);
+    assert_eq!(retry_payload["records"][0]["id"], "usage-real-retry");
+
+    assert_eq!(*upstream_hits.lock().expect("mutex should lock"), 0);
     gateway_handle.abort();
     upstream_handle.abort();
 }

@@ -465,7 +465,7 @@ CREATE TABLE IF NOT EXISTS public.payment_orders (
 
 CREATE TABLE IF NOT EXISTS public.provider_api_keys (
     id character varying(36) NOT NULL,
-    api_key text NOT NULL,
+    api_key text,
     name character varying(100) NOT NULL,
     note character varying(500),
     internal_priority integer DEFAULT 50,
@@ -497,6 +497,8 @@ CREATE TABLE IF NOT EXISTS public.provider_api_keys (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     provider_id character varying(36) NOT NULL,
     api_formats json,
+    auth_type_by_format json,
+    allow_auth_channel_mismatch_formats json,
     rate_multipliers json,
     health_by_format jsonb,
     circuit_breaker_by_format jsonb,
@@ -1994,21 +1996,6 @@ END $mig$;
 
 
 --
--- Name: provider_endpoints uq_provider_api_format; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-DO $mig$ BEGIN
-  ALTER TABLE ONLY public.provider_endpoints
-    ADD CONSTRAINT uq_provider_api_format UNIQUE (provider_id, api_format);
-EXCEPTION
-  WHEN duplicate_object THEN NULL;
-  WHEN duplicate_table THEN NULL;
-  WHEN invalid_table_definition THEN NULL;
-END $mig$;
-
-
-
---
 -- Name: models uq_provider_model; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2501,6 +2488,14 @@ CREATE INDEX IF NOT EXISTS idx_apikey_provider_enabled ON public.api_key_provide
 --
 
 CREATE INDEX IF NOT EXISTS idx_endpoint_format_active ON public.provider_endpoints USING btree (api_format, is_active);
+
+
+
+--
+-- Name: idx_provider_endpoints_provider_api_format; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX IF NOT EXISTS idx_provider_endpoints_provider_api_format ON public.provider_endpoints USING btree (provider_id, api_format);
 
 
 

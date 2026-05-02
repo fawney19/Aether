@@ -8,21 +8,19 @@ use axum::body::Bytes;
 use crate::control::GatewayControlDecision;
 use crate::headers::header_value_str;
 use crate::provider_transport::provider_types::is_codex_cli_backend_url;
-use crate::{AppState, GatewayControlSyncDecisionResponse};
+use crate::{AiExecutionDecision, AppState};
 
 pub(crate) const DIRECT_PLAN_BYPASS_TTL: Duration = Duration::from_secs(30);
 pub(crate) const DIRECT_PLAN_BYPASS_MAX_ENTRIES: usize = 512;
 
-pub(crate) fn should_bypass_execution_runtime_decision(
-    payload: &GatewayControlSyncDecisionResponse,
-) -> bool {
+pub(crate) fn should_bypass_execution_runtime_decision(payload: &AiExecutionDecision) -> bool {
     let provider_api_format = payload
         .provider_api_format
         .as_deref()
         .map(str::trim)
         .unwrap_or_default()
         .to_string();
-    if !crate::ai_pipeline::is_openai_responses_family_format(&provider_api_format) {
+    if !crate::ai_serving::is_openai_responses_family_format(&provider_api_format) {
         return false;
     }
 
@@ -36,7 +34,7 @@ pub(crate) fn should_bypass_execution_runtime_decision(
 }
 
 pub(crate) fn should_bypass_execution_runtime_plan(plan: &ExecutionPlan) -> bool {
-    if !crate::ai_pipeline::is_openai_responses_family_format(&plan.provider_api_format) {
+    if !crate::ai_serving::is_openai_responses_family_format(&plan.provider_api_format) {
         return false;
     }
 

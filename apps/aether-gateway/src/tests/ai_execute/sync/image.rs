@@ -2,7 +2,7 @@ use super::{
     any, build_router_with_state, build_state_with_execution_runtime_override, json, start_server,
     to_bytes, Arc, Body, Json, Mutex, Request, Router, StatusCode, TRACE_ID_HEADER,
 };
-use crate::ai_pipeline::CODEX_OPENAI_IMAGE_INTERNAL_MODEL;
+use crate::ai_serving::CODEX_OPENAI_IMAGE_INTERNAL_MODEL;
 use aether_crypto::{encrypt_python_fernet_plaintext, DEVELOPMENT_ENCRYPTION_KEY};
 use aether_data::repository::auth::{
     InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeySnapshot,

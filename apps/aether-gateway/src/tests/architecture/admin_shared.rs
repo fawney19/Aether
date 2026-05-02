@@ -580,12 +580,10 @@ fn admin_handlers_expose_real_subdomains_without_facade() {
 }
 
 #[test]
-fn ai_pipeline_external_consumers_use_single_api_facade() {
-    let ai_pipeline_mod = read_workspace_file("apps/aether-gateway/src/ai_pipeline/mod.rs");
+fn ai_serving_external_consumers_use_single_api_facade() {
+    let ai_serving_mod = read_workspace_file("apps/aether-gateway/src/ai_serving/mod.rs");
     for pattern in [
         "mod adaptation;",
-        "mod contracts;",
-        "mod conversion;",
         "mod finalize;",
         "mod planner;",
         "pub(crate) mod transport;",
@@ -596,8 +594,8 @@ fn ai_pipeline_external_consumers_use_single_api_facade() {
         "pub(crate) fn maybe_build_local_sync_finalize_response(",
     ] {
         assert!(
-            ai_pipeline_mod.contains(pattern),
-            "ai_pipeline/mod.rs should expose only the crate-facing ai_pipeline seam for {pattern}"
+            ai_serving_mod.contains(pattern),
+            "ai_serving/mod.rs should expose only the crate-facing ai_serving seam for {pattern}"
         );
     }
 
@@ -607,14 +605,16 @@ fn ai_pipeline_external_consumers_use_single_api_facade() {
         "pub(super) mod planner;",
         "pub(crate) mod adaptation;",
         "pub(crate) mod contracts;",
+        "mod contracts;",
         "pub(crate) mod conversion;",
+        "mod conversion;",
         "pub(crate) mod finalize;",
         "pub(crate) mod planner;",
         "pub(super) mod api;",
     ] {
         assert!(
-            !ai_pipeline_mod.contains(forbidden),
-            "ai_pipeline/mod.rs should not expose internal module {forbidden}"
+            !ai_serving_mod.contains(forbidden),
+            "ai_serving/mod.rs should not expose internal module {forbidden}"
         );
     }
 
@@ -628,41 +628,37 @@ fn ai_pipeline_external_consumers_use_single_api_facade() {
     ] {
         let contents = read_workspace_file(path);
         assert!(
-            contents.contains("ai_pipeline_api"),
-            "{path} should use the ai_pipeline_api facade"
+            contents.contains("ai_serving::api"),
+            "{path} should use the ai_serving::api facade"
         );
         for forbidden in [
-            "crate::ai_pipeline::planner::",
-            "crate::ai_pipeline::contracts::",
-            "crate::ai_pipeline::adaptation::private_envelope",
-            "crate::ai_pipeline::conversion::",
+            "crate::ai_serving::planner::",
+            "crate::ai_serving::contracts::",
+            "crate::ai_serving::adaptation::private_envelope",
+            "crate::ai_serving::conversion::",
         ] {
             assert!(
                 !contents.contains(forbidden),
-                "{path} should not bypass ai_pipeline_api through {forbidden}"
+                "{path} should not bypass ai_serving::api through {forbidden}"
             );
         }
     }
 }
 
 #[test]
-fn crate_root_exposes_real_admin_and_ai_pipeline_facades() {
+fn crate_root_exposes_real_admin_and_ai_serving_facades() {
     let lib_rs = read_workspace_file("apps/aether-gateway/src/lib.rs");
-    for pattern in ["mod admin_api;", "mod ai_pipeline_api;"] {
+    for pattern in ["mod admin_api;", "mod ai_serving;"] {
         assert!(
             lib_rs.contains(pattern),
             "lib.rs should register crate root facade module {pattern}"
         );
     }
-    for forbidden in [
-        "pub(crate) use self::handlers::admin_api;",
-        "pub(crate) use self::ai_pipeline::api as ai_pipeline_api;",
-    ] {
-        assert!(
-            !lib_rs.contains(forbidden),
-            "lib.rs should not keep alias-only facade wiring {forbidden}"
-        );
-    }
+    let forbidden = "pub(crate) use self::handlers::admin_api;";
+    assert!(
+        !lib_rs.contains(forbidden),
+        "lib.rs should not keep alias-only facade wiring {forbidden}"
+    );
 
     let admin_api = read_workspace_file("apps/aether-gateway/src/admin_api.rs");
     assert!(
@@ -684,31 +680,38 @@ fn crate_root_exposes_real_admin_and_ai_pipeline_facades() {
         "handlers/mod.rs should not keep alias-only admin_api wiring after crate root facade extraction"
     );
 
-    let ai_pipeline_api = read_workspace_file("apps/aether-gateway/src/ai_pipeline_api.rs");
+    let ai_serving_api_mod = read_workspace_file("apps/aether-gateway/src/ai_serving/api.rs");
     assert!(
-        ai_pipeline_api.contains("use crate::ai_pipeline::{is_json_request, GatewayControlDecision};"),
-        "ai_pipeline_api.rs should depend on the crate-facing ai_pipeline seam instead of deep internal modules"
+        ai_serving_api_mod.contains("use crate::ai_serving::{is_json_request, GatewayControlDecision};"),
+        "ai_serving/api.rs should depend on the crate-facing ai_serving seam instead of deep internal modules"
     );
 }
 
 #[test]
-fn gateway_ai_pipeline_api_facade_delegates_pure_ownership_to_pipeline_crate() {
-    let gateway_api = read_workspace_file("apps/aether-gateway/src/ai_pipeline_api.rs");
+fn gateway_ai_serving_api_module_delegates_pure_ownership_to_format_crate() {
+    let gateway_api = read_workspace_file("apps/aether-gateway/src/ai_serving/api.rs");
     assert!(
-        gateway_api.contains("pub(crate) use aether_ai_pipeline::api::{"),
-        "crate root ai_pipeline_api.rs should re-export pure ownership through aether_ai_pipeline::api"
+        gateway_api.contains("pub(crate) use aether_ai_formats::api::{"),
+        "ai_serving/api.rs should re-export pure ownership through aether_ai_formats::api"
     );
 
-    let pipeline_crate_api = read_workspace_file("crates/aether-ai-pipeline/src/api.rs");
+    let format_crate_api = read_workspace_file("crates/aether-ai-formats/src/api.rs");
     for pattern in [
         "pub use crate::contracts::{",
-        "pub use crate::conversion::{",
-        "pub use crate::planner::common::{",
-        "pub use crate::planner::route::{",
+        "pub use crate::provider_compat::kiro_stream::{",
+        "pub use crate::provider_compat::private_envelope::{",
+        "pub use crate::provider_compat::surfaces::{",
+        "pub use crate::request::common::{",
+        "pub use crate::request::route::{",
+        "pub use crate::response::common::{",
+        "pub use crate::response::error_body::{",
+        "pub use aether_ai_formats::{",
+        "pub use aether_ai_formats::protocol::conversion::request::{",
+        "pub use aether_ai_formats::protocol::conversion::response::{",
     ] {
         assert!(
-            pipeline_crate_api.contains(pattern),
-            "aether-ai-pipeline/src/api.rs should expose crate facade seam {pattern}"
+            format_crate_api.contains(pattern),
+            "aether-ai-formats/src/api.rs should expose crate facade seam {pattern}"
         );
     }
 }

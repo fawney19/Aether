@@ -219,7 +219,14 @@ VALUES (
   $19,
   $20,
   $21,
-  TO_TIMESTAMP(COALESCE($22, 0) / 1000.0),
+  COALESCE(
+    CASE
+      WHEN $22 IS NOT NULL AND $22 > 1000.0 THEN TO_TIMESTAMP($22 / 1000.0)
+    END,
+    TO_TIMESTAMP($23 / 1000.0),
+    TO_TIMESTAMP($24 / 1000.0),
+    NOW()
+  ),
   TO_TIMESTAMP($23 / 1000.0),
   TO_TIMESTAMP($24 / 1000.0)
 )
@@ -249,6 +256,11 @@ DO UPDATE SET
     ELSE EXCLUDED.extra_data
   END,
   required_capabilities = COALESCE(EXCLUDED.required_capabilities, request_candidates.required_capabilities),
+  created_at = CASE
+    WHEN request_candidates.created_at <= TO_TIMESTAMP(1)
+      THEN EXCLUDED.created_at
+    ELSE request_candidates.created_at
+  END,
   started_at = COALESCE(EXCLUDED.started_at, request_candidates.started_at),
   finished_at = COALESCE(EXCLUDED.finished_at, request_candidates.finished_at)
 RETURNING
@@ -740,8 +752,20 @@ fn to_i32_u64(value: u64) -> Result<i32, DataLayerError> {
 
 #[cfg(test)]
 mod tests {
-    use super::SqlxRequestCandidateReadRepository;
+    use super::{SqlxRequestCandidateReadRepository, UPSERT_SQL};
     use crate::postgres::{PostgresPoolConfig, PostgresPoolFactory};
+
+    #[test]
+    fn upsert_sql_does_not_default_missing_or_epoch_created_at_to_epoch() {
+        assert!(!UPSERT_SQL.contains("COALESCE($22, 0)"));
+        assert!(UPSERT_SQL.contains("WHEN $22 IS NOT NULL AND $22 > 1000.0"));
+        assert!(UPSERT_SQL.contains("TO_TIMESTAMP($22 / 1000.0)"));
+        assert!(UPSERT_SQL.contains("TO_TIMESTAMP($23 / 1000.0)"));
+        assert!(UPSERT_SQL.contains("TO_TIMESTAMP($24 / 1000.0)"));
+        assert!(UPSERT_SQL.contains("NOW()"));
+        assert!(UPSERT_SQL.contains("request_candidates.created_at <= TO_TIMESTAMP(1)"));
+        assert!(UPSERT_SQL.contains("THEN EXCLUDED.created_at"));
+    }
 
     #[tokio::test]
     async fn repository_constructs_from_lazy_pool() {

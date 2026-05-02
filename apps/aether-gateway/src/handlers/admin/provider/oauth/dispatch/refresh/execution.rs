@@ -21,12 +21,20 @@ pub(super) async fn execute_admin_provider_oauth_refresh(
         key,
         provider,
         provider_type,
+        trace_id,
         transport,
     } = request;
 
     let refreshed_entry = match state.force_local_oauth_refresh_entry(&transport).await {
         Ok(Some(entry)) => Some(entry),
         Ok(None) => {
+            tracing::warn!(
+                trace_id = %trace_id,
+                key_id = %key_id,
+                provider_id = %provider.id,
+                provider_type = %provider_type,
+                "gateway manual provider oauth refresh did not run"
+            );
             return Ok(RefreshDispatch::Respond(response::control_error_response(
                 http::StatusCode::BAD_REQUEST,
                 "Token 刷新未执行，请检查授权配置",
@@ -40,6 +48,15 @@ pub(super) async fn execute_admin_provider_oauth_refresh(
             let error_reason = normalize_provider_oauth_refresh_error_message(
                 Some(status_code),
                 Some(body_excerpt.as_str()),
+            );
+            tracing::warn!(
+                trace_id = %trace_id,
+                key_id = %key_id,
+                provider_id = %provider.id,
+                provider_type = %provider_type,
+                status_code,
+                reason = %error_reason,
+                "gateway manual provider oauth refresh failed"
             );
             if matches!(status_code, 400 | 401 | 403) {
                 let failure_reason = format!(
@@ -66,11 +83,40 @@ pub(super) async fn execute_admin_provider_oauth_refresh(
             ));
         }
         Err(AdminLocalOAuthRefreshError::Transport { source, .. }) => {
+            tracing::warn!(
+                trace_id = %trace_id,
+                key_id = %key_id,
+                provider_id = %provider.id,
+                provider_type = %provider_type,
+                error = %source,
+                "gateway manual provider oauth refresh transport failed"
+            );
             return Ok(RefreshDispatch::Respond(
                 response::oauth_refresh_failed_service_unavailable_response(source.to_string()),
             ));
         }
+        Err(AdminLocalOAuthRefreshError::TransportMessage { message, .. }) => {
+            tracing::warn!(
+                trace_id = %trace_id,
+                key_id = %key_id,
+                provider_id = %provider.id,
+                provider_type = %provider_type,
+                error = %message,
+                "gateway manual provider oauth refresh transport failed"
+            );
+            return Ok(RefreshDispatch::Respond(
+                response::oauth_refresh_failed_service_unavailable_response(message),
+            ));
+        }
         Err(AdminLocalOAuthRefreshError::InvalidResponse { message, .. }) => {
+            tracing::warn!(
+                trace_id = %trace_id,
+                key_id = %key_id,
+                provider_id = %provider.id,
+                provider_type = %provider_type,
+                reason = %message,
+                "gateway manual provider oauth refresh returned invalid response"
+            );
             return Ok(RefreshDispatch::Respond(
                 response::oauth_refresh_failed_bad_request_response(&message),
             ));

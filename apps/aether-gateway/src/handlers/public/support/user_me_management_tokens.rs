@@ -19,11 +19,12 @@ use super::{
     query_param_value, resolve_authenticated_local_user, AppState, AuthenticatedLocalUserContext,
     GatewayPublicRequestContext,
 };
+use crate::handlers::shared::generate_gateway_secret_plaintext;
 use crate::LocalMutationOutcome;
 
-const USERS_ME_MANAGEMENT_TOKEN_PREFIX: &str = "ae_";
-const USERS_ME_MANAGEMENT_TOKEN_RANDOM_LENGTH: usize = 40;
-const USERS_ME_MANAGEMENT_TOKEN_DISPLAY_PREFIX_LEN: usize = 7;
+const USERS_ME_MANAGEMENT_TOKEN_PREFIX: &str = "ae";
+const USERS_ME_MANAGEMENT_TOKEN_SEPARATOR: &str = "-";
+const USERS_ME_MANAGEMENT_TOKEN_DISPLAY_PREFIX_LEN: usize = 10;
 const USERS_ME_MANAGEMENT_TOKEN_FETCH_LIMIT: usize = 10_000;
 const USERS_ME_MANAGEMENT_TOKEN_DEFAULT_MAX_PER_USER: usize = 20;
 const USERS_ME_MANAGEMENT_TOKEN_MAX_PER_USER_ENV: &str = "MANAGEMENT_TOKEN_MAX_PER_USER";
@@ -122,13 +123,10 @@ fn users_me_management_token_max_per_user() -> usize {
 }
 
 fn generate_users_me_management_token_plaintext() -> String {
-    let first = Uuid::new_v4().simple().to_string();
-    let second = Uuid::new_v4().simple().to_string();
-    let mut random_part = String::with_capacity(USERS_ME_MANAGEMENT_TOKEN_RANDOM_LENGTH);
-    random_part.push_str(&first);
-    random_part.push_str(&second);
-    random_part.truncate(USERS_ME_MANAGEMENT_TOKEN_RANDOM_LENGTH);
-    format!("{USERS_ME_MANAGEMENT_TOKEN_PREFIX}{random_part}")
+    generate_gateway_secret_plaintext(
+        USERS_ME_MANAGEMENT_TOKEN_PREFIX,
+        USERS_ME_MANAGEMENT_TOKEN_SEPARATOR,
+    )
 }
 
 fn hash_users_me_management_token(value: &str) -> String {

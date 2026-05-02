@@ -171,7 +171,7 @@ mod admin_provider;
 mod admin_shared;
 mod admin_system;
 mod admin_users;
-mod ai_pipeline;
+mod ai_serving;
 mod runtime_and_security;
 mod sql_and_data;
 mod usage;

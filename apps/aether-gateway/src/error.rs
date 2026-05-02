@@ -5,7 +5,7 @@ use axum::Json;
 use serde_json::json;
 use tracing::warn;
 
-use crate::ai_pipeline::PipelineFinalizeError;
+use crate::ai_serving::AiSurfaceFinalizeError;
 use crate::constants::*;
 use crate::insert_header_if_missing;
 
@@ -68,8 +68,8 @@ impl IntoResponse for GatewayError {
     }
 }
 
-impl From<PipelineFinalizeError> for GatewayError {
-    fn from(error: PipelineFinalizeError) -> Self {
+impl From<AiSurfaceFinalizeError> for GatewayError {
+    fn from(error: AiSurfaceFinalizeError) -> Self {
         GatewayError::Internal(error.0)
     }
 }

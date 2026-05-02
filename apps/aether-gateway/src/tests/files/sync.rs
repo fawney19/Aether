@@ -44,7 +44,7 @@ async fn gateway_executes_gemini_files_upload_via_local_decision_gate_with_local
                     "route_class": "ai_public",
                     "route_family": "gemini",
                     "route_kind": "files",
-                    "auth_endpoint_signature": "gemini:chat",
+                    "auth_endpoint_signature": "gemini:generate_content",
                     "execution_runtime_candidate": true,
                     "auth_context": {
                         "user_id": "user-files-upload-local-123",
@@ -325,7 +325,7 @@ async fn gateway_executes_gemini_files_list_via_local_decision_gate_with_local_p
                     "route_class": "ai_public",
                     "route_family": "gemini",
                     "route_kind": "files",
-                    "auth_endpoint_signature": "gemini:chat",
+                    "auth_endpoint_signature": "gemini:generate_content",
                     "execution_runtime_candidate": true,
                     "auth_context": {
                         "user_id": "user-files-list-local-123",
@@ -533,7 +533,7 @@ async fn gateway_executes_gemini_files_delete_via_local_decision_gate_with_local
                     "route_class": "ai_public",
                     "route_family": "gemini",
                     "route_kind": "files",
-                    "auth_endpoint_signature": "gemini:chat",
+                    "auth_endpoint_signature": "gemini:generate_content",
                     "execution_runtime_candidate": true,
                     "auth_context": {
                         "user_id": "user-files-delete-local-123",

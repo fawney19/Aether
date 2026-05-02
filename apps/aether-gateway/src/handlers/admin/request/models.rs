@@ -12,8 +12,40 @@ use aether_data_contracts::repository::global_models::{
     AdminProviderModelListQuery, StoredAdminProviderModel, UpsertAdminProviderModelRecord,
 };
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
+
+fn normalize_provider_model_mappings_api_formats(
+    value: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let Some(mut value) = value else {
+        return None;
+    };
+    let Some(items) = value.as_array_mut() else {
+        return Some(value);
+    };
+    for item in items {
+        let Some(object) = item.as_object_mut() else {
+            continue;
+        };
+        let Some(api_formats) = object.get_mut("api_formats") else {
+            continue;
+        };
+        let Some(array) = api_formats.as_array() else {
+            continue;
+        };
+        let mut seen = BTreeSet::new();
+        let normalized = array
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(crate::ai_serving::normalize_api_format_alias)
+            .filter(|format| seen.insert(format.clone()))
+            .map(serde_json::Value::String)
+            .collect::<Vec<_>>();
+        *api_formats = serde_json::Value::Array(normalized);
+    }
+    Some(value)
+}
 
 impl<'a> AdminAppState<'a> {
     pub(crate) async fn admin_provider_model_name_exists(
@@ -105,8 +137,9 @@ impl<'a> AdminAppState<'a> {
             "price_per_request",
         )?;
         let tiered_pricing = normalize_json_object(payload.tiered_pricing, "tiered_pricing")?;
-        let provider_model_mappings =
-            normalize_json_array(payload.provider_model_mappings, "provider_model_mappings")?;
+        let provider_model_mappings = normalize_provider_model_mappings_api_formats(
+            normalize_json_array(payload.provider_model_mappings, "provider_model_mappings")?,
+        );
         let config = normalize_json_object(payload.config, "config")?;
         admin_provider_models_write_pure::build_admin_provider_model_create_record(
             Uuid::new_v4().to_string(),
@@ -190,7 +223,10 @@ impl<'a> AdminAppState<'a> {
             existing.tiered_pricing.clone()
         };
         let provider_model_mappings = if fields.contains("provider_model_mappings") {
-            normalize_json_array(payload.provider_model_mappings, "provider_model_mappings")?
+            normalize_provider_model_mappings_api_formats(normalize_json_array(
+                payload.provider_model_mappings,
+                "provider_model_mappings",
+            )?)
         } else {
             existing.provider_model_mappings.clone()
         };

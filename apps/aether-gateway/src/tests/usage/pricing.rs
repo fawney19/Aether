@@ -21,6 +21,27 @@ const OUTPUT_PRICE_PER_1M: f64 = 15.0;
 const CACHE_CREATION_PRICE_PER_1M: f64 = 3.75;
 const CACHE_READ_PRICE_PER_1M: f64 = 0.30;
 
+fn run_async_test_on_large_stack<F>(name: &'static str, future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime should build")
+                .block_on(future);
+        })
+        .expect("large-stack usage pricing test thread should spawn");
+
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ProviderSpec {
     provider_id: &'static str,
@@ -53,7 +74,7 @@ const OPENAI_SPEC: ProviderSpec = ProviderSpec {
 const CLAUDE_SPEC: ProviderSpec = ProviderSpec {
     provider_id: "provider-claude-usage-pricing-1",
     provider_name: "claude",
-    api_format: "claude:chat",
+    api_format: "claude:messages",
     endpoint_id: "endpoint-claude-usage-pricing-1",
     key_id: "key-claude-usage-pricing-1",
     model_id: "model-claude-usage-pricing-1",
@@ -67,7 +88,7 @@ const CLAUDE_SPEC: ProviderSpec = ProviderSpec {
 const GEMINI_SPEC: ProviderSpec = ProviderSpec {
     provider_id: "provider-gemini-usage-pricing-1",
     provider_name: "gemini",
-    api_format: "gemini:chat",
+    api_format: "gemini:generate_content",
     endpoint_id: "endpoint-gemini-usage-pricing-1",
     key_id: "key-gemini-usage-pricing-1",
     model_id: "model-gemini-usage-pricing-1",
@@ -752,8 +773,15 @@ async fn assert_candidate_success(
     assert_eq!(stored_candidates[0].status, RequestCandidateStatus::Success);
 }
 
-#[tokio::test]
-async fn gateway_records_openai_sync_usage_and_pricing_with_cache_tokens() {
+#[test]
+fn gateway_records_openai_sync_usage_and_pricing_with_cache_tokens() {
+    run_async_test_on_large_stack(
+        "gateway_records_openai_sync_usage_and_pricing_with_cache_tokens",
+        gateway_records_openai_sync_usage_and_pricing_with_cache_tokens_impl(),
+    );
+}
+
+async fn gateway_records_openai_sync_usage_and_pricing_with_cache_tokens_impl() {
     let expected = ExpectedUsagePricing {
         input_tokens: 120,
         billed_input_tokens: 100,
@@ -839,8 +867,15 @@ async fn gateway_records_openai_sync_usage_and_pricing_with_cache_tokens() {
     gateway.shutdown();
 }
 
-#[tokio::test]
-async fn gateway_records_openai_stream_usage_and_pricing_with_cache_tokens() {
+#[test]
+fn gateway_records_openai_stream_usage_and_pricing_with_cache_tokens() {
+    run_async_test_on_large_stack(
+        "gateway_records_openai_stream_usage_and_pricing_with_cache_tokens",
+        gateway_records_openai_stream_usage_and_pricing_with_cache_tokens_impl(),
+    );
+}
+
+async fn gateway_records_openai_stream_usage_and_pricing_with_cache_tokens_impl() {
     let expected = ExpectedUsagePricing {
         input_tokens: 240,
         billed_input_tokens: 200,
@@ -924,8 +959,15 @@ async fn gateway_records_openai_stream_usage_and_pricing_with_cache_tokens() {
     gateway.shutdown();
 }
 
-#[tokio::test]
-async fn gateway_records_claude_sync_usage_and_pricing_with_cache_breakdown() {
+#[test]
+fn gateway_records_claude_sync_usage_and_pricing_with_cache_breakdown() {
+    run_async_test_on_large_stack(
+        "gateway_records_claude_sync_usage_and_pricing_with_cache_breakdown",
+        gateway_records_claude_sync_usage_and_pricing_with_cache_breakdown_impl(),
+    );
+}
+
+async fn gateway_records_claude_sync_usage_and_pricing_with_cache_breakdown_impl() {
     let expected = ExpectedUsagePricing {
         input_tokens: 50,
         billed_input_tokens: 50,
@@ -1016,8 +1058,15 @@ async fn gateway_records_claude_sync_usage_and_pricing_with_cache_breakdown() {
     gateway.shutdown();
 }
 
-#[tokio::test]
-async fn gateway_records_claude_stream_usage_and_pricing_with_cache_breakdown() {
+#[test]
+fn gateway_records_claude_stream_usage_and_pricing_with_cache_breakdown() {
+    run_async_test_on_large_stack(
+        "gateway_records_claude_stream_usage_and_pricing_with_cache_breakdown",
+        gateway_records_claude_stream_usage_and_pricing_with_cache_breakdown_impl(),
+    );
+}
+
+async fn gateway_records_claude_stream_usage_and_pricing_with_cache_breakdown_impl() {
     let expected = ExpectedUsagePricing {
         input_tokens: 90,
         billed_input_tokens: 90,
@@ -1103,8 +1152,15 @@ async fn gateway_records_claude_stream_usage_and_pricing_with_cache_breakdown() 
     gateway.shutdown();
 }
 
-#[tokio::test]
-async fn gateway_records_gemini_sync_usage_and_pricing_with_cache_read_tokens() {
+#[test]
+fn gateway_records_gemini_sync_usage_and_pricing_with_cache_read_tokens() {
+    run_async_test_on_large_stack(
+        "gateway_records_gemini_sync_usage_and_pricing_with_cache_read_tokens",
+        gateway_records_gemini_sync_usage_and_pricing_with_cache_read_tokens_impl(),
+    );
+}
+
+async fn gateway_records_gemini_sync_usage_and_pricing_with_cache_read_tokens_impl() {
     let expected = ExpectedUsagePricing {
         input_tokens: 70,
         billed_input_tokens: 60,
@@ -1186,8 +1242,15 @@ async fn gateway_records_gemini_sync_usage_and_pricing_with_cache_read_tokens() 
     gateway.shutdown();
 }
 
-#[tokio::test]
-async fn gateway_records_gemini_stream_usage_and_pricing_with_cache_read_tokens() {
+#[test]
+fn gateway_records_gemini_stream_usage_and_pricing_with_cache_read_tokens() {
+    run_async_test_on_large_stack(
+        "gateway_records_gemini_stream_usage_and_pricing_with_cache_read_tokens",
+        gateway_records_gemini_stream_usage_and_pricing_with_cache_read_tokens_impl(),
+    );
+}
+
+async fn gateway_records_gemini_stream_usage_and_pricing_with_cache_read_tokens_impl() {
     let expected = ExpectedUsagePricing {
         input_tokens: 110,
         billed_input_tokens: 80,

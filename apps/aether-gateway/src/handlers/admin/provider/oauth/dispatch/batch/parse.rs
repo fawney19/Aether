@@ -1,5 +1,6 @@
+use super::super::token_import::{import_tokens_from_raw_token, normalize_single_import_tokens};
 use crate::handlers::admin::provider::oauth::errors::build_internal_control_error_response;
-use crate::handlers::admin::provider::oauth::state::current_unix_secs;
+use crate::handlers::admin::provider::oauth::state::{current_unix_secs, json_u64_value};
 use axum::{
     body::{to_bytes, Body, Bytes},
     http,
@@ -18,7 +19,9 @@ pub(super) struct AdminProviderOAuthBatchImportRequest {
 
 #[derive(Debug, Clone)]
 pub(super) struct AdminProviderOAuthBatchImportEntry {
-    pub refresh_token: String,
+    pub refresh_token: Option<String>,
+    pub access_token: Option<String>,
+    pub expires_at: Option<u64>,
     pub account_id: Option<String>,
     pub account_user_id: Option<String>,
     pub plan_type: Option<String>,
@@ -73,8 +76,11 @@ fn extract_admin_provider_oauth_batch_import_entry(
             if refresh_token.is_empty() {
                 None
             } else {
+                let (refresh_token, access_token) = import_tokens_from_raw_token(refresh_token);
                 Some(AdminProviderOAuthBatchImportEntry {
-                    refresh_token: refresh_token.to_string(),
+                    refresh_token,
+                    access_token,
+                    expires_at: None,
                     account_id: None,
                     account_user_id: None,
                     plan_type: None,
@@ -88,7 +94,19 @@ fn extract_admin_provider_oauth_batch_import_entry(
                 object
                     .get("refresh_token")
                     .or_else(|| object.get("refreshToken")),
-            )?;
+            );
+            let access_token = coerce_admin_provider_oauth_import_str(
+                object
+                    .get("access_token")
+                    .or_else(|| object.get("accessToken")),
+            );
+            let (refresh_token, access_token) =
+                normalize_single_import_tokens(refresh_token.as_deref(), access_token.as_deref());
+            if refresh_token.is_none() && access_token.is_none() {
+                return None;
+            }
+            let expires_at =
+                json_u64_value(object.get("expires_at").or_else(|| object.get("expiresAt")));
             let account_id = coerce_admin_provider_oauth_import_str(
                 object
                     .get("account_id")
@@ -121,6 +139,8 @@ fn extract_admin_provider_oauth_batch_import_entry(
             let email = coerce_admin_provider_oauth_import_str(object.get("email"));
             Some(AdminProviderOAuthBatchImportEntry {
                 refresh_token,
+                access_token,
+                expires_at,
                 account_id,
                 account_user_id,
                 plan_type,
@@ -163,13 +183,18 @@ pub(super) fn parse_admin_provider_oauth_batch_import_entries(
     raw.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|refresh_token| AdminProviderOAuthBatchImportEntry {
-            refresh_token: refresh_token.to_string(),
-            account_id: None,
-            account_user_id: None,
-            plan_type: None,
-            user_id: None,
-            email: None,
+        .map(|token| {
+            let (refresh_token, access_token) = import_tokens_from_raw_token(token);
+            AdminProviderOAuthBatchImportEntry {
+                refresh_token,
+                access_token,
+                expires_at: None,
+                account_id: None,
+                account_user_id: None,
+                plan_type: None,
+                user_id: None,
+                email: None,
+            }
         })
         .collect()
 }
@@ -290,4 +315,48 @@ pub(super) fn build_admin_provider_oauth_batch_task_state(
         "finished_at": finished_at,
         "updated_at": updated_at,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_admin_provider_oauth_batch_import_entries;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use serde_json::json;
+
+    fn unsigned_jwt(payload: serde_json::Value) -> String {
+        let header = json!({"alg": "none", "typ": "JWT"});
+        let encode = |value: serde_json::Value| {
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&value).expect("jwt json should serialize"))
+        };
+        format!("{}.{}.signature", encode(header), encode(payload))
+    }
+
+    #[test]
+    fn parses_access_token_only_entry() {
+        let entries = parse_admin_provider_oauth_batch_import_entries(
+            r#"[{"accessToken":"at_1","expiresAt":2100000000,"accountId":"acc-1","email":"u@example.com"}]"#,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].refresh_token, None);
+        assert_eq!(entries[0].access_token.as_deref(), Some("at_1"));
+        assert_eq!(entries[0].expires_at, Some(2_100_000_000));
+        assert_eq!(entries[0].account_id.as_deref(), Some("acc-1"));
+        assert_eq!(entries[0].email.as_deref(), Some("u@example.com"));
+    }
+
+    #[test]
+    fn parses_plain_jwt_line_as_access_token() {
+        let token = unsigned_jwt(json!({
+            "iss": "https://auth.openai.com",
+            "aud": ["https://api.openai.com/v1"],
+            "exp": 2_000_000_000u64,
+        }));
+
+        let entries = parse_admin_provider_oauth_batch_import_entries(&token);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].refresh_token, None);
+        assert_eq!(entries[0].access_token.as_deref(), Some(token.as_str()));
+    }
 }

@@ -1,6 +1,6 @@
 #[cfg(test)]
-use crate::ai_pipeline_api::core_success_background_report_kind;
-use crate::ai_pipeline_api::{
+use crate::ai_serving::api::core_success_background_report_kind;
+use crate::ai_serving::api::{
     build_core_error_body_for_client_format, core_error_background_report_kind,
     core_error_default_client_api_format, is_core_error_finalize_kind,
     maybe_compile_sync_finalize_response,
@@ -483,7 +483,7 @@ pub(crate) fn has_nested_error(value: &serde_json::Value) -> bool {
         return false;
     };
 
-    if object.contains_key("error") {
+    if object.get("error").is_some_and(|error| !error.is_null()) {
         return true;
     }
     if object
@@ -500,7 +500,9 @@ pub(crate) fn has_nested_error(value: &serde_json::Value) -> bool {
         .is_some_and(|chunks| {
             chunks.iter().any(|chunk| {
                 chunk.as_object().is_some_and(|chunk_object| {
-                    chunk_object.contains_key("error")
+                    chunk_object
+                        .get("error")
+                        .is_some_and(|error| !error.is_null())
                         || chunk_object
                             .get("type")
                             .and_then(|value| value.as_str())
@@ -607,7 +609,7 @@ mod tests {
         let payload = core_finalize_payload(
             "openai_chat_sync_finalize",
             "openai:chat",
-            "claude:chat",
+            "claude:messages",
             200,
             json!({
                 "type": "error",
@@ -647,8 +649,8 @@ mod tests {
     async fn maybe_build_local_core_error_response_infers_status_from_gemini_status_text() {
         let payload = core_finalize_payload(
             "gemini_chat_sync_finalize",
-            "gemini:chat",
-            "gemini:chat",
+            "gemini:generate_content",
+            "gemini:generate_content",
             200,
             json!({
                 "error": {

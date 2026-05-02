@@ -146,6 +146,13 @@ function normalizeKnownApiErrorMessage(message: string): string {
   }
 
   if (
+    lowered.includes('refresh_token_expired')
+    || lowered.includes('could not validate your refresh token')
+  ) {
+    return 'Token 刷新失败：refresh_token 无效、已过期或已撤销，请重新登录授权'
+  }
+
+  if (
     lowered.includes('token refresh 失败:')
     || lowered.includes('token refresh failed:')
   ) {

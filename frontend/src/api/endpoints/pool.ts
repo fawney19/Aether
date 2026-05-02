@@ -104,8 +104,10 @@ export interface PoolKeyDetail {
   key_name: string
   is_active: boolean
   auth_type: string
+  auth_type_by_format?: Record<string, 'api_key' | 'bearer'> | null
+  allow_auth_channel_mismatch_formats?: string[] | null
   credential_kind?: 'raw_secret' | 'oauth_session' | 'service_account' | string | null
-  runtime_auth_kind?: 'api_key' | 'bearer' | 'service_account' | 'unknown' | string | null
+  runtime_auth_kind?: 'api_key' | 'bearer' | 'service_account' | 'mixed' | 'unknown' | string | null
   oauth_managed?: boolean
   can_refresh_oauth?: boolean
   can_export_oauth?: boolean
@@ -118,6 +120,7 @@ export interface PoolKeyDetail {
   oauth_account_user_id?: string | null
   oauth_account_name?: string | null
   oauth_organizations?: OAuthOrganizationInfo[] | null
+  oauth_temporary?: boolean | null
   account_status_code?: string | null  // 兼容字段；优先使用 status_snapshot.account
   account_status_label?: string | null  // 兼容字段；优先使用 status_snapshot.account
   account_status_reason?: string | null  // 兼容字段；优先使用 status_snapshot.account
@@ -154,6 +157,7 @@ export interface PoolKeyDetail {
   sticky_sessions: number
   lru_score: number | null
   created_at: string | null
+  imported_at?: string | null
   last_used_at: string | null
   scheduling_status?: 'available' | 'degraded' | 'blocked'
   scheduling_reason?:
@@ -195,6 +199,8 @@ export interface PoolKeysQuery {
   status?: 'all' | 'active' | 'cooldown' | 'inactive'
   quick_selectors?: string[]
   search_scope?: 'name' | 'full'
+  sort_by?: 'imported_at' | 'last_used_at'
+  sort_order?: 'asc' | 'desc'
 }
 
 export interface PoolKeySelectionRequest {
@@ -206,8 +212,10 @@ export interface PoolKeySelectionItem {
   key_id: string
   key_name: string
   auth_type: string
+  auth_type_by_format?: Record<string, 'api_key' | 'bearer'> | null
+  allow_auth_channel_mismatch_formats?: string[] | null
   credential_kind?: 'raw_secret' | 'oauth_session' | 'service_account' | string | null
-  runtime_auth_kind?: 'api_key' | 'bearer' | 'service_account' | 'unknown' | string | null
+  runtime_auth_kind?: 'api_key' | 'bearer' | 'service_account' | 'mixed' | 'unknown' | string | null
   oauth_managed?: boolean
   can_refresh_oauth?: boolean
   can_export_oauth?: boolean

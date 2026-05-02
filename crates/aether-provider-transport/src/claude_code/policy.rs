@@ -99,7 +99,7 @@ mod tests {
             endpoint: GatewayProviderTransportEndpoint {
                 id: "endpoint-1".to_string(),
                 provider_id: "provider-1".to_string(),
-                api_format: "claude:cli".to_string(),
+                api_format: "claude:messages".to_string(),
                 api_family: Some("claude".to_string()),
                 endpoint_kind: Some("cli".to_string()),
                 is_active: true,
@@ -118,7 +118,10 @@ mod tests {
                 name: "key".to_string(),
                 auth_type: "bearer".to_string(),
                 is_active: true,
-                api_formats: Some(vec!["claude:cli".to_string()]),
+                api_formats: Some(vec!["claude:messages".to_string()]),
+                auth_type_by_format: None,
+                allow_auth_channel_mismatch_formats: None,
+
                 allowed_models: None,
                 capabilities: None,
                 rate_multipliers: None,
@@ -136,7 +139,7 @@ mod tests {
     fn supports_claude_code_transport_when_auth_and_tls_are_valid() {
         assert!(supports_local_claude_code_transport_with_network(
             &sample_transport(),
-            "claude:cli"
+            "claude:messages"
         ));
     }
 
@@ -147,7 +150,10 @@ mod tests {
         transport.key.decrypted_api_key = "__placeholder__".to_string();
 
         assert_eq!(
-            local_claude_code_transport_unsupported_reason_with_network(&transport, "claude:cli"),
+            local_claude_code_transport_unsupported_reason_with_network(
+                &transport,
+                "claude:messages"
+            ),
             Some("transport_auth_unavailable")
         );
     }

@@ -980,7 +980,7 @@ async fn gateway_handles_admin_provider_query_test_model_for_kiro_locally() {
             assert_eq!(plan.provider_id, "provider-kiro");
             assert_eq!(plan.endpoint_id, "endpoint-kiro-cli");
             assert_eq!(plan.key_id, "key-kiro-primary");
-            assert_eq!(plan.provider_api_format, "claude:cli");
+            assert_eq!(plan.provider_api_format, "claude:messages");
             assert_eq!(plan.model_name.as_deref(), Some("claude-sonnet-4-upstream"));
             Json(json!({
                 "request_id": plan.request_id,
@@ -1011,7 +1011,7 @@ async fn gateway_handles_admin_provider_query_test_model_for_kiro_locally() {
     let mut key = sample_key(
         "key-kiro-primary",
         "provider-kiro",
-        "claude:cli",
+        "claude:messages",
         "__placeholder__",
     );
     key.auth_type = "oauth".to_string();
@@ -1038,9 +1038,9 @@ async fn gateway_handles_admin_provider_query_test_model_for_kiro_locally() {
         vec![StoredProviderCatalogEndpoint::new(
             "endpoint-kiro-cli".to_string(),
             "provider-kiro".to_string(),
-            "claude:cli".to_string(),
+            "claude:messages".to_string(),
             Some("claude".to_string()),
-            Some("cli".to_string()),
+            Some("messages".to_string()),
             true,
         )
         .expect("endpoint should build")
@@ -1076,7 +1076,7 @@ async fn gateway_handles_admin_provider_query_test_model_for_kiro_locally() {
         .json(&json!({
             "provider_id": "provider-kiro",
             "model_name": "claude-sonnet-4-upstream",
-            "api_format": "claude:cli"
+            "api_format": "claude:messages"
         }))
         .send()
         .await
@@ -1148,7 +1148,7 @@ async fn gateway_handles_admin_provider_query_test_model_failover_for_kiro_local
     let mut provider = sample_provider("provider-kiro", "Kiro", 10);
     provider.provider_type = "kiro".to_string();
     let build_key = |id: &str| {
-        let mut key = sample_key(id, "provider-kiro", "claude:cli", "__placeholder__");
+        let mut key = sample_key(id, "provider-kiro", "claude:messages", "__placeholder__");
         key.auth_type = "oauth".to_string();
         key.encrypted_auth_config = Some(
             aether_crypto::encrypt_python_fernet_plaintext(
@@ -1175,9 +1175,9 @@ async fn gateway_handles_admin_provider_query_test_model_failover_for_kiro_local
         vec![StoredProviderCatalogEndpoint::new(
             "endpoint-kiro-cli".to_string(),
             "provider-kiro".to_string(),
-            "claude:cli".to_string(),
+            "claude:messages".to_string(),
             Some("claude".to_string()),
-            Some("cli".to_string()),
+            Some("messages".to_string()),
             true,
         )
         .expect("endpoint should build")
@@ -1217,7 +1217,7 @@ async fn gateway_handles_admin_provider_query_test_model_failover_for_kiro_local
             "mode": "direct",
             "model_name": "claude-sonnet-4-upstream",
             "failover_models": ["claude-sonnet-4-upstream"],
-            "api_format": "claude:cli",
+            "api_format": "claude:messages",
             "request_id": "provider-test-kiro"
         }))
         .send()
@@ -1295,7 +1295,7 @@ async fn gateway_retries_kiro_failover_after_http_error_without_message() {
     let mut provider = sample_provider("provider-kiro", "Kiro", 10);
     provider.provider_type = "kiro".to_string();
     let build_key = |id: &str| {
-        let mut key = sample_key(id, "provider-kiro", "claude:cli", "__placeholder__");
+        let mut key = sample_key(id, "provider-kiro", "claude:messages", "__placeholder__");
         key.auth_type = "oauth".to_string();
         key.encrypted_auth_config = Some(
             aether_crypto::encrypt_python_fernet_plaintext(
@@ -1322,9 +1322,9 @@ async fn gateway_retries_kiro_failover_after_http_error_without_message() {
         vec![StoredProviderCatalogEndpoint::new(
             "endpoint-kiro-cli".to_string(),
             "provider-kiro".to_string(),
-            "claude:cli".to_string(),
+            "claude:messages".to_string(),
             Some("claude".to_string()),
-            Some("cli".to_string()),
+            Some("messages".to_string()),
             true,
         )
         .expect("endpoint should build")
@@ -1364,7 +1364,7 @@ async fn gateway_retries_kiro_failover_after_http_error_without_message() {
             "mode": "direct",
             "model_name": "claude-sonnet-4-upstream",
             "failover_models": ["claude-sonnet-4-upstream"],
-            "api_format": "claude:cli",
+            "api_format": "claude:messages",
             "request_id": "provider-test-kiro-empty-error"
         }))
         .send()
@@ -1677,13 +1677,13 @@ async fn gateway_returns_stub_for_transport_unsupported_non_kiro_provider() {
         vec![sample_endpoint(
             "endpoint-antigravity-gemini",
             "provider-antigravity",
-            "gemini:chat",
+            "gemini:generate_content",
             "https://cloudcode-pa.googleapis.com",
         )],
         vec![sample_key(
             "key-antigravity-gemini",
             "provider-antigravity",
-            "gemini:chat",
+            "gemini:generate_content",
             "sk-test-antigravity",
         )],
     ));
@@ -1707,7 +1707,7 @@ async fn gateway_returns_stub_for_transport_unsupported_non_kiro_provider() {
         .json(&json!({
             "provider_id": "provider-antigravity",
             "model": "gemini-2.5-pro",
-            "api_format": "gemini:chat"
+            "api_format": "gemini:generate_content"
         }))
         .send()
         .await
@@ -1969,7 +1969,7 @@ async fn gateway_prefers_supported_non_kiro_endpoint_with_compatible_key_when_ap
             sample_endpoint(
                 "endpoint-gemini-chat",
                 "provider-openai",
-                "gemini:chat",
+                "gemini:generate_content",
                 "https://api.gemini.example",
             ),
             sample_endpoint(
@@ -2315,7 +2315,7 @@ async fn gateway_handles_claude_cli_test_model_locally() {
             assert_eq!(plan.provider_id, "provider-claude");
             assert_eq!(plan.endpoint_id, "endpoint-claude-cli");
             assert_eq!(plan.key_id, "key-claude-cli");
-            assert_eq!(plan.provider_api_format, "claude:cli");
+            assert_eq!(plan.provider_api_format, "claude:messages");
             assert_eq!(plan.url, "https://api.anthropic.example/v1/messages");
             assert_eq!(plan.model_name.as_deref(), Some("claude-sonnet-4-5"));
             Json(json!({
@@ -2351,13 +2351,13 @@ async fn gateway_handles_claude_cli_test_model_locally() {
         vec![sample_endpoint(
             "endpoint-claude-cli",
             "provider-claude",
-            "claude:cli",
+            "claude:messages",
             "https://api.anthropic.example",
         )],
         vec![sample_key(
             "key-claude-cli",
             "provider-claude",
-            "claude:cli",
+            "claude:messages",
             "sk-test-claude-cli",
         )],
     ));
@@ -2380,7 +2380,7 @@ async fn gateway_handles_claude_cli_test_model_locally() {
         .json(&json!({
             "provider_id": "provider-claude",
             "model": "claude-sonnet-4-5",
-            "api_format": "claude:cli"
+            "api_format": "claude:messages"
         }))
         .send()
         .await
@@ -2404,7 +2404,7 @@ async fn gateway_uses_compatible_claude_cli_endpoint_when_api_format_is_omitted(
         "/v1/execute/sync",
         any(move |Json(plan): Json<ExecutionPlan>| async move {
             assert_eq!(plan.endpoint_id, "endpoint-claude-cli");
-            assert_eq!(plan.provider_api_format, "claude:cli");
+            assert_eq!(plan.provider_api_format, "claude:messages");
             assert_eq!(plan.key_id, "key-claude-cli");
             Json(json!({
                 "request_id": plan.request_id,
@@ -2439,13 +2439,13 @@ async fn gateway_uses_compatible_claude_cli_endpoint_when_api_format_is_omitted(
         vec![sample_endpoint(
             "endpoint-claude-cli",
             "provider-claude",
-            "claude:cli",
+            "claude:messages",
             "https://api.anthropic.example",
         )],
         vec![sample_key(
             "key-claude-cli",
             "provider-claude",
-            "claude:cli",
+            "claude:messages",
             "sk-test-claude-cli",
         )],
     ));
@@ -2493,7 +2493,7 @@ async fn gateway_handles_claude_cli_test_model_failover_locally() {
             assert_eq!(plan.provider_id, "provider-claude");
             assert_eq!(plan.endpoint_id, "endpoint-claude-cli");
             assert_eq!(plan.key_id, "key-claude-cli");
-            assert_eq!(plan.provider_api_format, "claude:cli");
+            assert_eq!(plan.provider_api_format, "claude:messages");
             assert_eq!(plan.model_name.as_deref(), Some("claude-sonnet-4-5"));
             Json(json!({
                 "request_id": plan.request_id,
@@ -2528,13 +2528,13 @@ async fn gateway_handles_claude_cli_test_model_failover_locally() {
         vec![sample_endpoint(
             "endpoint-claude-cli",
             "provider-claude",
-            "claude:cli",
+            "claude:messages",
             "https://api.anthropic.example",
         )],
         vec![sample_key(
             "key-claude-cli",
             "provider-claude",
-            "claude:cli",
+            "claude:messages",
             "sk-test-claude-cli",
         )],
     ));
@@ -2559,7 +2559,7 @@ async fn gateway_handles_claude_cli_test_model_failover_locally() {
         .json(&json!({
             "provider_id": "provider-claude",
             "failover_models": ["claude-sonnet-4-5"],
-            "api_format": "claude:cli"
+            "api_format": "claude:messages"
         }))
         .send()
         .await
@@ -2586,7 +2586,7 @@ async fn gateway_handles_gemini_cli_test_model_locally() {
             assert_eq!(plan.provider_id, "provider-gemini");
             assert_eq!(plan.endpoint_id, "endpoint-gemini-cli");
             assert_eq!(plan.key_id, "key-gemini-cli");
-            assert_eq!(plan.provider_api_format, "gemini:cli");
+            assert_eq!(plan.provider_api_format, "gemini:generate_content");
             assert_eq!(
                 plan.url,
                 "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
@@ -2625,13 +2625,13 @@ async fn gateway_handles_gemini_cli_test_model_locally() {
         vec![sample_endpoint(
             "endpoint-gemini-cli",
             "provider-gemini",
-            "gemini:cli",
+            "gemini:generate_content",
             "https://generativelanguage.googleapis.com",
         )],
         vec![sample_key(
             "key-gemini-cli",
             "provider-gemini",
-            "gemini:cli",
+            "gemini:generate_content",
             "sk-test-gemini-cli",
         )],
     ));
@@ -2654,7 +2654,7 @@ async fn gateway_handles_gemini_cli_test_model_locally() {
         .json(&json!({
             "provider_id": "provider-gemini",
             "model": "gemini-2.5-pro",
-            "api_format": "gemini:cli"
+            "api_format": "gemini:generate_content"
         }))
         .send()
         .await
@@ -2680,7 +2680,7 @@ async fn gateway_handles_gemini_cli_test_model_with_oauth_header_fallback() {
             assert_eq!(plan.provider_id, "provider-gemini");
             assert_eq!(plan.endpoint_id, "endpoint-gemini-cli");
             assert_eq!(plan.key_id, "key-gemini-cli");
-            assert_eq!(plan.provider_api_format, "gemini:cli");
+            assert_eq!(plan.provider_api_format, "gemini:generate_content");
             assert_eq!(
                 plan.url,
                 "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
@@ -2721,7 +2721,7 @@ async fn gateway_handles_gemini_cli_test_model_with_oauth_header_fallback() {
     let mut key = sample_key(
         "key-gemini-cli",
         "provider-gemini",
-        "gemini:cli",
+        "gemini:generate_content",
         "cached-gemini-cli-token",
     );
     key.auth_type = "oauth".to_string();
@@ -2737,7 +2737,7 @@ async fn gateway_handles_gemini_cli_test_model_with_oauth_header_fallback() {
         vec![sample_endpoint(
             "endpoint-gemini-cli",
             "provider-gemini",
-            "gemini:cli",
+            "gemini:generate_content",
             "https://generativelanguage.googleapis.com",
         )],
         vec![key],
@@ -2761,7 +2761,7 @@ async fn gateway_handles_gemini_cli_test_model_with_oauth_header_fallback() {
         .json(&json!({
             "provider_id": "provider-gemini",
             "model": "gemini-2.5-pro",
-            "api_format": "gemini:cli"
+            "api_format": "gemini:generate_content"
         }))
         .send()
         .await
@@ -2785,7 +2785,7 @@ async fn gateway_uses_compatible_gemini_cli_endpoint_when_api_format_is_omitted(
         "/v1/execute/sync",
         any(move |Json(plan): Json<ExecutionPlan>| async move {
             assert_eq!(plan.endpoint_id, "endpoint-gemini-cli");
-            assert_eq!(plan.provider_api_format, "gemini:cli");
+            assert_eq!(plan.provider_api_format, "gemini:generate_content");
             assert_eq!(plan.key_id, "key-gemini-cli");
             Json(json!({
                 "request_id": plan.request_id,
@@ -2820,13 +2820,13 @@ async fn gateway_uses_compatible_gemini_cli_endpoint_when_api_format_is_omitted(
         vec![sample_endpoint(
             "endpoint-gemini-cli",
             "provider-gemini",
-            "gemini:cli",
+            "gemini:generate_content",
             "https://generativelanguage.googleapis.com",
         )],
         vec![sample_key(
             "key-gemini-cli",
             "provider-gemini",
-            "gemini:cli",
+            "gemini:generate_content",
             "sk-test-gemini-cli",
         )],
     ));
@@ -2874,7 +2874,7 @@ async fn gateway_handles_gemini_cli_test_model_failover_locally() {
             assert_eq!(plan.provider_id, "provider-gemini");
             assert_eq!(plan.endpoint_id, "endpoint-gemini-cli");
             assert_eq!(plan.key_id, "key-gemini-cli");
-            assert_eq!(plan.provider_api_format, "gemini:cli");
+            assert_eq!(plan.provider_api_format, "gemini:generate_content");
             assert_eq!(plan.model_name.as_deref(), Some("gemini-2.5-pro"));
             Json(json!({
                 "request_id": plan.request_id,
@@ -2909,13 +2909,13 @@ async fn gateway_handles_gemini_cli_test_model_failover_locally() {
         vec![sample_endpoint(
             "endpoint-gemini-cli",
             "provider-gemini",
-            "gemini:cli",
+            "gemini:generate_content",
             "https://generativelanguage.googleapis.com",
         )],
         vec![sample_key(
             "key-gemini-cli",
             "provider-gemini",
-            "gemini:cli",
+            "gemini:generate_content",
             "sk-test-gemini-cli",
         )],
     ));
@@ -2940,7 +2940,7 @@ async fn gateway_handles_gemini_cli_test_model_failover_locally() {
         .json(&json!({
             "provider_id": "provider-gemini",
             "failover_models": ["gemini-2.5-pro"],
-            "api_format": "gemini:cli"
+            "api_format": "gemini:generate_content"
         }))
         .send()
         .await

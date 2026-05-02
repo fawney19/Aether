@@ -154,6 +154,7 @@ vi.mock('lucide-vue-next', async () => {
   })
 
   return {
+    CircleHelp: Icon,
     Key: Icon,
     SquarePen: Icon,
   }

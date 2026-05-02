@@ -1,9 +1,10 @@
 use super::super::super::errors::build_internal_control_error_response;
+use super::super::super::provisioning::provider_oauth_token_payload_expires_at_unix_secs;
 use super::super::super::quota::codex::refresh_codex_provider_quota_locally;
 use super::super::super::runtime::provider_oauth_runtime_endpoint_for_provider;
 use super::super::super::state::{
     admin_provider_oauth_template, enrich_admin_provider_oauth_auth_config,
-    is_fixed_provider_type_for_provider_oauth, json_non_empty_string, json_u64_value,
+    is_fixed_provider_type_for_provider_oauth, json_non_empty_string,
 };
 use super::shared::{
     parse_admin_provider_oauth_complete_callback, parse_admin_provider_oauth_complete_request_body,
@@ -168,8 +169,8 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
         .ok()
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    let expires_at = json_u64_value(token_payload.get("expires_in"))
-        .map(|expires_in| now_unix_secs.saturating_add(expires_in));
+    let expires_at =
+        provider_oauth_token_payload_expires_at_unix_secs(&token_payload, now_unix_secs);
 
     let mut auth_config = serde_json::Map::new();
     auth_config.insert("provider_type".to_string(), json!(provider_type.clone()));
@@ -227,7 +228,7 @@ pub(super) async fn handle_admin_provider_oauth_complete_key(
             .await?;
         if let Some(endpoint) = endpoints.into_iter().find(|endpoint| {
             endpoint.is_active
-                && crate::ai_pipeline::is_openai_responses_format(&endpoint.api_format)
+                && crate::ai_serving::is_openai_responses_format(&endpoint.api_format)
         }) {
             let refreshed_key = state
                 .read_provider_catalog_keys_by_ids(std::slice::from_ref(&key_id))

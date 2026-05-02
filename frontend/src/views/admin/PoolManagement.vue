@@ -210,25 +210,6 @@
                 class="w-40 pl-8 pr-2 h-8 text-xs bg-background/50 border-border/60"
               />
             </div>
-            <Select v-model="statusFilter">
-              <SelectTrigger class="w-28 h-8 text-xs border-border/60">
-                <SelectValue placeholder="全部状态" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">
-                  全部状态
-                </SelectItem>
-                <SelectItem value="active">
-                  可调度
-                </SelectItem>
-                <SelectItem value="cooldown">
-                  冷却中
-                </SelectItem>
-                <SelectItem value="inactive">
-                  禁用
-                </SelectItem>
-              </SelectContent>
-            </Select>
             <div
               v-if="selectedProviderId"
               class="h-4 w-px bg-border"
@@ -356,7 +337,7 @@
       <template v-else>
         <!-- Desktop table -->
         <div
-          v-if="keyPage.keys.length > 0"
+          v-if="keyPage.keys.length > 0 || hasPoolKeyFilters"
           class="hidden xl:block overflow-x-auto"
         >
           <Table class="w-full table-fixed">
@@ -381,18 +362,51 @@
                 >
                   统计
                 </TableHead>
-                <TableHead
+                <SortableTableHead
                   class="font-semibold text-center whitespace-nowrap"
+                  column-key="imported_at"
+                  :active-key="sortBy"
+                  :direction="sortOrder"
+                  default-direction="desc"
+                  align="center"
+                  :style="{ width: desktopColumnWidths.imported }"
+                  title="按导入时间排序"
+                  @sort="handleTableSort"
+                >
+                  导入时间
+                </SortableTableHead>
+                <SortableTableHead
+                  class="font-semibold text-center whitespace-nowrap"
+                  column-key="last_used_at"
+                  :active-key="sortBy"
+                  :direction="sortOrder"
+                  default-direction="desc"
+                  align="center"
                   :style="{ width: desktopColumnWidths.lastUsed }"
+                  title="按最后使用时间排序"
+                  @sort="handleTableSort"
                 >
                   最后使用
-                </TableHead>
-                <TableHead
+                </SortableTableHead>
+                <SortableTableHead
                   class="font-semibold text-center whitespace-nowrap"
+                  column-key="status"
+                  :sortable="false"
+                  align="center"
+                  :filter-active="statusFilter !== 'all'"
+                  filter-title="筛选状态"
+                  filter-content-class="w-44 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
                   :style="{ width: desktopColumnWidths.status }"
                 >
                   状态
-                </TableHead>
+                  <template #filter="{ close }">
+                    <TableFilterMenu
+                      v-model="statusFilter"
+                      :options="poolKeyStatusFilterOptions"
+                      @select="close"
+                    />
+                  </template>
+                </SortableTableHead>
                 <TableHead
                   class="px-2 font-semibold text-center whitespace-nowrap"
                   :style="{ width: desktopColumnWidths.actions }"
@@ -463,12 +477,12 @@
                       <span class="font-mono">
                         {{ getProviderMaskedSecretLabel(key) }}
                       </span>
-                      <template v-if="canRefreshOAuthCredential(key)">
+                      <template v-if="keyUiStateMap[key.key_id]?.showOAuthRefreshControl">
                         <Button
                           variant="ghost"
                           size="icon"
                           class="h-4 w-4 shrink-0"
-                          :disabled="refreshingOAuthKeyId === key.key_id"
+                          :disabled="refreshingOAuthKeyId === key.key_id || !keyUiStateMap[key.key_id]?.canRefreshToken"
                           :title="keyUiStateMap[key.key_id]?.oauthRefreshButtonTitle || ''"
                           @click.stop="handleRefreshOAuth(key)"
                         >
@@ -577,6 +591,11 @@
                       </span>
                     </div>
                   </div>
+                </TableCell>
+                <TableCell class="py-3 text-center">
+                  <span class="text-[10px] text-muted-foreground whitespace-nowrap">
+                    {{ keyUiStateMap[key.key_id]?.importedAtRelative || '-' }}
+                  </span>
                 </TableCell>
                 <TableCell class="py-3 text-center">
                   <span class="text-[10px] text-muted-foreground whitespace-nowrap">
@@ -775,6 +794,8 @@
                   <span class="mx-1.5 text-muted-foreground/40">|</span>
                   <span class="font-medium text-foreground/90">费用:{{ formatStatUsd(key.total_cost_usd) }}</span>
                   <span class="mx-1.5 text-muted-foreground/40">|</span>
+                  <span class="font-medium text-foreground/90">导入:{{ keyUiStateMap[key.key_id]?.importedAtRelative || '-' }}</span>
+                  <span class="mx-1.5 text-muted-foreground/40">|</span>
                   <span class="font-medium text-foreground/90">最后使用:{{ keyUiStateMap[key.key_id]?.lastUsedRelative || '-' }}</span>
                 </div>
               </div>
@@ -863,7 +884,7 @@
                     variant="ghost"
                     size="icon"
                     class="h-7 w-7 shrink-0"
-                    :disabled="refreshingOAuthKeyId === key.key_id"
+                    :disabled="refreshingOAuthKeyId === key.key_id || !keyUiStateMap[key.key_id]?.canRefreshToken"
                     :title="keyUiStateMap[key.key_id]?.oauthRefreshButtonTitle || ''"
                     @click.stop="handleRefreshOAuth(key)"
                   >
@@ -980,16 +1001,26 @@
 
         <!-- Empty keys -->
         <div
-          v-if="keyPage.keys.length === 0 && !keysLoading"
+          v-if="keyPage.keys.length === 0 && !keysLoading && keysLoadedOnce"
           class="flex flex-col items-center justify-center py-16 text-center"
         >
           <div class="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-muted">
             <KeyRound class="h-8 w-8 text-muted-foreground" />
           </div>
           <p class="text-sm text-muted-foreground mt-4">
-            暂无账号
+            {{ hasPoolKeyFilters ? '未找到匹配账号' : '暂无账号' }}
           </p>
           <Button
+            v-if="hasPoolKeyFilters"
+            variant="outline"
+            size="sm"
+            class="mt-3"
+            @click="clearPoolKeyFilters"
+          >
+            清除筛选
+          </Button>
+          <Button
+            v-else
             variant="outline"
             size="sm"
             class="mt-3"
@@ -1112,6 +1143,8 @@ import {
   TableBody,
   TableRow,
   TableHead,
+  SortableTableHead,
+  TableFilterMenu,
   TableCell,
   Pagination,
   Popover,
@@ -1174,6 +1207,8 @@ import {
   buildPoolManagementQueryPatch,
   readPoolManagementViewState,
   resolvePoolManagementPageAfterLoad,
+  type PoolManagementSortBy,
+  type PoolManagementSortOrder,
   type PoolManagementViewState,
   writePoolManagementViewState,
 } from '@/features/pool/utils/poolManagementState'
@@ -1187,12 +1222,13 @@ import {
   getProviderMaskedSecretLabel,
   isOAuthManagedCredential,
   isServiceAccountCredential,
+  shouldShowOAuthRefreshControl,
 } from '@/utils/providerKeyAuth'
 import {
   getAccountStatusDisplay,
   getAccountStatusTitle,
   getOAuthRefreshButtonTitle as resolveOAuthRefreshButtonTitle,
-  getOAuthStatusDisplay,
+  getOAuthStatusDisplayWithFallback,
   getOAuthStatusTitle as resolveOAuthStatusTitle,
 } from '@/utils/providerKeyStatus'
 import {
@@ -1215,6 +1251,8 @@ const restoredViewState = readPoolManagementViewState(
     status: getQueryValue('status'),
     page: getQueryValue('page'),
     pageSize: getQueryValue('pageSize'),
+    sortBy: getQueryValue('sortBy'),
+    sortOrder: getQueryValue('sortOrder'),
   },
   poolManagementViewStorage,
 )
@@ -1232,6 +1270,12 @@ let hasHydratedInitialProviderSelection = false
 const POOL_OVERVIEW_CACHE_TTL_MS = 10 * 1000
 const POOL_KEYS_CACHE_TTL_MS = 10 * 1000
 const POOL_SCHEDULING_PRESETS_CACHE_TTL_MS = 5 * 60 * 1000
+const poolKeyStatusFilterOptions: Array<{ value: PoolManagementViewState['status'], label: string }> = [
+  { value: 'all', label: '全部状态' },
+  { value: 'active', label: '可调度' },
+  { value: 'cooldown', label: '冷却中' },
+  { value: 'inactive', label: '禁用' },
+]
 
 async function loadOverview(options: { cacheTtlMs?: number } = {}) {
   const requestId = ++overviewRequestId
@@ -1243,8 +1287,17 @@ async function loadOverview(options: { cacheTtlMs?: number } = {}) {
     const enabledProviders = allProviders.filter(item => item.pool_enabled)
     poolProviders.value = enabledProviders
 
-    // Keep selected provider aligned with dropdown options.
-    const selectedId = selectedProviderId.value
+    const queryProviderId = getQueryValue('providerId')
+    const queryProviderExists = Boolean(
+      queryProviderId && enabledProviders.some(item => item.provider_id === queryProviderId),
+    )
+    const currentSelectedId = selectedProviderId.value
+    const currentSelectedExists = Boolean(
+      currentSelectedId && enabledProviders.some(item => item.provider_id === currentSelectedId),
+    )
+    const selectedId = currentSelectedExists
+      ? currentSelectedId
+      : (queryProviderExists ? queryProviderId : currentSelectedId)
     const selectedStillExists = Boolean(
       selectedId && enabledProviders.some(item => item.provider_id === selectedId),
     )
@@ -1252,8 +1305,8 @@ async function loadOverview(options: { cacheTtlMs?: number } = {}) {
     if (selectedStillExists && selectedId) {
       // 页面刷新时可能先恢复了选中的 Provider，但列表请求尚未触发；
       // overview 回来后补一次初始化拉取，确保空态不会卡住。
-      if (!hasHydratedInitialProviderSelection) {
-        void selectProvider(selectedId, {
+      if (!hasHydratedInitialProviderSelection || selectedId !== selectedProviderId.value) {
+        await selectProvider(selectedId, {
           preserveSearch: true,
           preserveStatus: true,
           preservePagination: true,
@@ -1264,10 +1317,9 @@ async function loadOverview(options: { cacheTtlMs?: number } = {}) {
     }
 
     if (enabledProviders.length > 0) {
-      // Do not block overview loading on key list fetch; keys area has its own loader.
       const fallbackProviderId = enabledProviders[0].provider_id
       const shouldPreserveViewState = Boolean(selectedId)
-      void selectProvider(fallbackProviderId, {
+      await selectProvider(fallbackProviderId, {
         preserveSearch: shouldPreserveViewState,
         preserveStatus: shouldPreserveViewState,
         preservePagination: shouldPreserveViewState,
@@ -1276,6 +1328,7 @@ async function loadOverview(options: { cacheTtlMs?: number } = {}) {
     } else {
       selectedProviderId.value = null
       selectedProviderData.value = null
+      keysLoadedOnce.value = false
       showAccountBatchDialog.value = false
       closeProviderProxyPopovers()
       resetKeyPage()
@@ -1450,21 +1503,23 @@ const showAccountQuotaColumn = computed(() => {
 const desktopColumnWidths = computed(() => {
   if (showAccountQuotaColumn.value) {
     return {
-      name: '28%',
-      quota: '23%',
-      stats: '15%',
-      lastUsed: '10%',
-      status: '8%',
+      name: '24%',
+      quota: '21%',
+      stats: '13%',
+      imported: '10%',
+      lastUsed: '9%',
+      status: '7%',
       actions: '16%',
     }
   }
   return {
-    name: '40%',
+    name: '34%',
     quota: '0%',
-    stats: '18%',
+    stats: '16%',
+    imported: '12%',
     lastUsed: '12%',
-    status: '10%',
-    actions: '20%',
+    status: '9%',
+    actions: '17%',
   }
 })
 
@@ -1504,6 +1559,7 @@ async function selectProvider(
     clearTimeout(keysSearchDebounceTimer)
     keysSearchDebounceTimer = null
   }
+  keysLoadedOnce.value = false
   resetKeyPage(currentPage.value, pageSize.value)
   const keysTask = loadKeys({ cacheTtlMs: options.cacheTtlMs ?? 0 })
   // Provider summary is non-blocking for key list rendering.
@@ -1535,11 +1591,15 @@ function createEmptyKeyPage(page = 1, pageSizeValue = 50): PoolKeysPageResponse 
 
 const keyPage = ref<PoolKeysPageResponse>(createEmptyKeyPage())
 const keysLoading = ref(false)
+const keysLoadedOnce = ref(false)
 const refreshingCurrentPageQuota = ref(false)
 const searchQuery = ref(restoredViewState.search)
 const statusFilter = ref(restoredViewState.status)
 const currentPage = ref(restoredViewState.page)
 const pageSize = ref(restoredViewState.pageSize)
+const sortBy = ref<PoolManagementSortBy | null>(restoredViewState.sortBy)
+const sortOrder = ref<PoolManagementSortOrder>(restoredViewState.sortOrder)
+const hasPoolKeyFilters = computed(() => searchQuery.value.trim().length > 0 || statusFilter.value !== 'all')
 const MANUAL_QUOTA_REFRESH_COOLDOWN_SECONDS = 5 * 60
 const refreshingOAuthKeyId = ref<string | null>(null)
 const savingProxyKeyId = ref<string | null>(null)
@@ -1555,6 +1615,19 @@ const keyPermissionsDialogOpen = ref(false)
 const keyFormDialogOpen = ref(false)
 const oauthKeyEditDialogOpen = ref(false)
 const editingKeyDetail = ref<PoolKeyDetail | null>(null)
+
+function clearPoolKeyFilters() {
+  if (!hasPoolKeyFilters.value) return
+  suppressFiltersWatch = true
+  searchQuery.value = ''
+  statusFilter.value = 'all'
+  suppressFiltersWatch = false
+  if (currentPage.value !== 1) {
+    currentPage.value = 1
+    return
+  }
+  void loadKeys({ cacheTtlMs: POOL_KEYS_CACHE_TTL_MS })
+}
 
 watch(
   () => getQueryValue('search') ?? '',
@@ -1595,9 +1668,24 @@ watch(
 )
 
 watch(
+  () => readPoolManagementViewState({
+    sortBy: getQueryValue('sortBy'),
+    sortOrder: getQueryValue('sortOrder'),
+  }),
+  (value) => {
+    if (sortBy.value === value.sortBy && sortOrder.value === value.sortOrder) return
+    sortBy.value = value.sortBy
+    sortOrder.value = value.sortOrder
+  },
+  { immediate: true },
+)
+
+watch(
   () => getQueryValue('providerId'),
   (value) => {
+    if (overviewLoading.value) return
     if (!value || value === selectedProviderId.value) return
+    if (!poolProviders.value.some(item => item.provider_id === value)) return
     void selectProvider(value, {
       preserveSearch: true,
       preserveStatus: true,
@@ -1605,18 +1693,19 @@ watch(
       cacheTtlMs: POOL_KEYS_CACHE_TTL_MS,
     })
   },
-  { immediate: true },
 )
 
 watch(
-  [selectedProviderId, searchQuery, statusFilter, currentPage, pageSize],
-  ([providerId, search, status, page, pageSizeValue]) => {
+  [selectedProviderId, searchQuery, statusFilter, currentPage, pageSize, sortBy, sortOrder],
+  ([providerId, search, status, page, pageSizeValue, sortByValue, sortOrderValue]) => {
     const nextState: PoolManagementViewState = {
       providerId,
       search,
       status: status as PoolManagementViewState['status'],
       page,
       pageSize: pageSizeValue,
+      sortBy: sortByValue,
+      sortOrder: sortOrderValue,
     }
     patchQuery(buildPoolManagementQueryPatch(nextState))
     writePoolManagementViewState(nextState, poolManagementViewStorage)
@@ -1638,13 +1727,16 @@ type PoolKeyUiState = {
   schedulingBadgeVariant: PoolStatusVariant
   schedulingTitle: string
   oauthOrgBadge: ReturnType<typeof getOAuthOrgBadge>
-  visibleOAuthState: ReturnType<typeof getOAuthStatusDisplay>
+  visibleOAuthState: ReturnType<typeof getOAuthStatusDisplayWithFallback>
   oauthStatusTitle: string
   oauthRefreshButtonTitle: string
+  showOAuthRefreshControl: boolean
+  canRefreshToken: boolean
   planLabel: string
   planClass: string
   quotaFallbackText: string | null
   quotaTextClass: string
+  importedAtRelative: string
   lastUsedRelative: string
   mobileTagItems: PoolMobileTagItem[]
   mobileActionIds: PoolMobileActionId[]
@@ -1666,6 +1758,7 @@ const keyUiStateMap = computed<Record<string, PoolKeyUiState>>(() => {
     const oauthOrgBadge = getOAuthOrgBadge(key)
     const quotaFallbackText = getQuotaFallbackText(key)
     const canRefreshToken = canRefreshOAuthCredential(key)
+    const showOAuthRefreshControl = shouldShowOAuthRefreshControl(key)
 
     map[key.key_id] = {
       rowClass: getRowClass(key),
@@ -1675,16 +1768,19 @@ const keyUiStateMap = computed<Record<string, PoolKeyUiState>>(() => {
       oauthOrgBadge,
       visibleOAuthState,
       oauthStatusTitle: visibleOAuthState ? getOAuthStatusTitle(key) : '',
-      oauthRefreshButtonTitle: canRefreshToken ? getOAuthRefreshButtonTitle(key) : '',
+      oauthRefreshButtonTitle: showOAuthRefreshControl ? getOAuthRefreshButtonTitle(key) : '',
+      showOAuthRefreshControl,
+      canRefreshToken,
       planLabel: key.oauth_plan_type ? formatOAuthPlanType(key.oauth_plan_type) : '',
       planClass: key.oauth_plan_type ? getOAuthPlanTypeClass(key.oauth_plan_type) : '',
       quotaFallbackText,
       quotaTextClass: quotaFallbackText ? getQuotaTextClass(quotaFallbackText) : '',
+      importedAtRelative: formatPoolKeyImportedAt(key),
       lastUsedRelative: key.last_used_at ? formatRelativeTime(key.last_used_at) : '-',
       mobileTagItems: getMobileTagItems(key),
       mobileActionIds: splitPoolMobileActions({
         canDownloadOrCopy: true,
-        canRefreshToken,
+        showRefreshToken: showOAuthRefreshControl,
         canClearCooldown: Boolean(key.cooldown_reason),
         hasProxy: true,
       }).primary,
@@ -1835,6 +1931,7 @@ async function loadKeys(options: { cacheTtlMs?: number } = {}) {
   const pageSizeValue = pageSize.value
   const search = searchQuery.value || undefined
   const status = statusFilter.value as 'all' | 'active' | 'cooldown' | 'inactive'
+  const sortByValue = sortBy.value || undefined
   keysLoading.value = true
   try {
     const nextPage = await listPoolKeys(providerId, {
@@ -1842,6 +1939,8 @@ async function loadKeys(options: { cacheTtlMs?: number } = {}) {
       page_size: pageSizeValue,
       search,
       status,
+      sort_by: sortByValue || undefined,
+      sort_order: sortByValue ? sortOrder.value : undefined,
     }, {
       cacheTtlMs: options.cacheTtlMs ?? 0,
     })
@@ -1856,9 +1955,11 @@ async function loadKeys(options: { cacheTtlMs?: number } = {}) {
       return
     }
     keyPage.value = nextPage
+    keysLoadedOnce.value = true
   } catch (err) {
     if (requestId !== keysRequestId || selectedProviderId.value !== providerId) return
     resetKeyPage(page, pageSizeValue)
+    keysLoadedOnce.value = true
     showError(parseApiError(err))
   } finally {
     if (requestId === keysRequestId) {
@@ -1877,6 +1978,14 @@ watch(statusFilter, () => {
   void loadKeys({ cacheTtlMs: POOL_KEYS_CACHE_TTL_MS })
 })
 
+watch([sortBy, sortOrder], () => {
+  if (currentPage.value !== 1) {
+    currentPage.value = 1
+    return
+  }
+  void loadKeys({ cacheTtlMs: POOL_KEYS_CACHE_TTL_MS })
+})
+
 watch(searchQuery, () => {
   if (suppressFiltersWatch) return
   currentPage.value = 1
@@ -1892,6 +2001,7 @@ watch(searchQuery, () => {
 function normalizeAuthTypeForEdit(key: PoolKeyDetail): EndpointAPIKey['auth_type'] {
   if (isOAuthManagedCredential(key)) return 'oauth'
   if (isServiceAccountCredential(key)) return 'service_account'
+  if ((key.auth_type || '').trim().toLowerCase() === 'bearer') return 'bearer'
   return 'api_key'
 }
 
@@ -1903,6 +2013,7 @@ function toEndpointApiKey(key: PoolKeyDetail): EndpointAPIKey {
     api_formats: key.api_formats || [],
     api_key_masked: getProviderMaskedSecretLabel(key),
     auth_type: normalizeAuthTypeForEdit(key),
+    auth_type_by_format: key.auth_type_by_format ?? null,
     credential_kind: key.credential_kind ?? null,
     runtime_auth_kind: key.runtime_auth_kind ?? null,
     oauth_managed: key.oauth_managed ?? undefined,
@@ -1941,6 +2052,7 @@ function toEndpointApiKey(key: PoolKeyDetail): EndpointAPIKey {
     oauth_account_user_id: key.oauth_account_user_id ?? null,
     oauth_account_name: key.oauth_account_name ?? null,
     oauth_organizations: key.oauth_organizations ?? [],
+    oauth_temporary: key.oauth_temporary ?? false,
     oauth_invalid_at: key.oauth_invalid_at ?? null,
     oauth_invalid_reason: key.oauth_invalid_reason ?? null,
     status_snapshot: key.status_snapshot ?? null,
@@ -1960,6 +2072,12 @@ function sortCurrentPageKeysByPriority() {
     if (pa !== pb) return pa - pb
     return (a.created_at || '').localeCompare(b.created_at || '')
   })
+}
+
+function handleTableSort(payload: { key: string, direction: PoolManagementSortOrder }) {
+  if (payload.key !== 'imported_at' && payload.key !== 'last_used_at') return
+  sortBy.value = payload.key
+  sortOrder.value = payload.direction
 }
 
 function startEditInternalPriority(key: PoolKeyDetail) {
@@ -2624,7 +2742,7 @@ function getOAuthPlanTypeClass(planType: string): string {
 }
 
 function getVisibleOAuthState(key: PoolKeyDetail) {
-  return getOAuthStatusDisplay(key, countdownTick.value)
+  return getOAuthStatusDisplayWithFallback(key, countdownTick.value)
 }
 
 function getOAuthRefreshButtonTitle(key: PoolKeyDetail): string {
@@ -3098,6 +3216,11 @@ function formatRelativeTime(isoStr: string): string {
   const h = pad(date.getHours())
   const m = pad(date.getMinutes())
   return `${M}-${D} ${h}:${m}`
+}
+
+function formatPoolKeyImportedAt(key: PoolKeyDetail): string {
+  const value = key.imported_at || key.created_at
+  return value ? formatRelativeTime(value) : '-'
 }
 
 // --- Init ---

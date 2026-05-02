@@ -53,6 +53,7 @@ export interface QuotaStatusSnapshot {
   exhausted: boolean
   usage_ratio?: number | null
   updated_at?: number | null
+  reset_at?: number | null
   reset_seconds?: number | null
   plan_type?: string | null
   credits?: QuotaCreditsSnapshot | null

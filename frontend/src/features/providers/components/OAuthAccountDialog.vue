@@ -410,8 +410,8 @@
             :reset-key="importInputResetKey"
             drop-title="拖入授权文件或点击选择"
             drop-hint="支持 .json / .txt，可多选"
-            manual-placeholder="粘贴 Refresh Token 或 JSON 内容"
-            paste-toggle-text="或手动粘贴 Refresh Token"
+            manual-placeholder="粘贴 Refresh Token / Access Token 或 JSON 内容"
+            paste-toggle-text="或手动粘贴 Token"
             file-toggle-text="或选择 JSON 文件导入"
             textarea-class="min-h-[200px] text-xs font-mono break-all !rounded-xl"
             @error="handleImportInputError"
@@ -949,7 +949,7 @@ function isBatchImport(text: string): boolean {
   return lines.length > 1
 }
 
-function parseImportText(text: string): { refresh_token: string; name?: string } | null {
+function parseImportText(text: string): { refresh_token?: string; access_token?: string; name?: string } | null {
   const trimmed = text.trim()
   if (!trimmed) return null
 
@@ -963,9 +963,19 @@ function parseImportText(text: string): { refresh_token: string; name?: string }
     if (typeof parsed === 'object' && parsed !== null) {
       const obj = parsed as Record<string, unknown>
       const refreshToken = obj.refresh_token
-      if (typeof refreshToken === 'string' && refreshToken.trim()) {
+      const refreshTokenCamel = obj.refreshToken
+      const accessToken = obj.access_token
+      const accessTokenCamel = obj.accessToken
+      const normalizedRefreshToken = typeof refreshToken === 'string' && refreshToken.trim()
+        ? refreshToken.trim()
+        : (typeof refreshTokenCamel === 'string' && refreshTokenCamel.trim() ? refreshTokenCamel.trim() : undefined)
+      const normalizedAccessToken = typeof accessToken === 'string' && accessToken.trim()
+        ? accessToken.trim()
+        : (typeof accessTokenCamel === 'string' && accessTokenCamel.trim() ? accessTokenCamel.trim() : undefined)
+      if (normalizedRefreshToken || normalizedAccessToken) {
         return {
-          refresh_token: refreshToken.trim(),
+          refresh_token: normalizedRefreshToken,
+          access_token: normalizedAccessToken,
           name: (typeof obj.name === 'string' ? obj.name : undefined) || (typeof obj.oauth_email === 'string' ? obj.oauth_email : undefined),
         }
       }
@@ -975,7 +985,32 @@ function parseImportText(text: string): { refresh_token: string; name?: string }
     // Not JSON: treat as raw token.
   }
 
+  if (isLikelyJwtToken(trimmed)) {
+    return { access_token: trimmed }
+  }
+
   return { refresh_token: trimmed }
+}
+
+function isLikelyJwtToken(token: string): boolean {
+  const parts = token.trim().split('.')
+  if (parts.length !== 3 || parts.some(part => !part)) return false
+
+  try {
+    const header = JSON.parse(decodeBase64Url(parts[0])) as Record<string, unknown>
+    const payload = JSON.parse(decodeBase64Url(parts[1])) as Record<string, unknown>
+    const tokenType = typeof header.typ === 'string' ? header.typ.toLowerCase() : ''
+    if (tokenType && tokenType !== 'jwt' && tokenType !== 'at+jwt') return false
+    return ['exp', 'aud', 'iss', 'scope', 'scp'].some(key => key in payload)
+  } catch {
+    return false
+  }
+}
+
+function decodeBase64Url(value: string): string {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/')
+  const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), '=')
+  return atob(padded)
 }
 
 function handleImportInputError(payload: { message: string; title?: string }) {

@@ -6,7 +6,7 @@
       <SelectTrigger class="h-8 w-32 text-xs border-border/60">
         <SelectValue placeholder="选择时间段" />
       </SelectTrigger>
-      <SelectContent>
+      <SelectContent :searchable="false">
         <SelectItem value="today">
           今天
         </SelectItem>

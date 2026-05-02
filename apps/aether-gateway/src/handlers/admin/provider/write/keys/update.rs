@@ -1,6 +1,8 @@
 use crate::handlers::admin::provider::shared::payloads::AdminProviderKeyUpdatePatch;
 use crate::handlers::admin::provider::write::normalize::{
-    normalize_auth_type, validate_vertex_api_formats,
+    normalize_allow_auth_channel_mismatch_formats, normalize_api_format_json_object_keys,
+    normalize_api_format_list, normalize_auth_type, normalize_auth_type_by_format,
+    validate_vertex_api_formats,
 };
 use crate::handlers::admin::request::AdminAppState;
 use crate::handlers::admin::shared::{
@@ -48,10 +50,6 @@ pub(crate) async fn build_admin_update_provider_key_record(
         .as_deref()
         .map(str::trim)
         .map(ToOwned::to_owned);
-    if api_key_present && api_key_value.as_deref() == Some("") {
-        return Err("api_key 不能为空".to_string());
-    }
-
     let auth_config_present = fields.contains("auth_config");
     let auth_config = normalize_json_object(payload.auth_config, "auth_config")?;
     let auth_config_object = auth_config
@@ -65,31 +63,26 @@ pub(crate) async fn build_admin_update_provider_key_record(
         .map_err(|err| format!("{err:?}"))?;
 
     match target_auth_type.as_str() {
-        "api_key" => {
-            if auth_type_switch
-                && matches!(
-                    api_key_value.as_deref(),
-                    None | Some("") | Some("__placeholder__")
-                )
+        "api_key" | "bearer" => {
+            if let Some(api_key) = api_key_value
+                .as_deref()
+                .filter(|value| !value.is_empty() && *value != "__placeholder__")
             {
-                return Err("切换到 API Key 认证模式时，必须提供新的 API Key".to_string());
-            }
-            if api_key_present
-                && matches!(
-                    api_key_value.as_deref(),
-                    None | Some("") | Some("__placeholder__")
-                )
-            {
-                return Err("API Key 认证模式下 api_key 不能为空".to_string());
-            }
-            if let Some(api_key) = api_key_value.as_deref() {
-                for existing_key in existing_keys.iter().filter(|key| {
-                    key.id != existing.id && key.auth_type.trim().eq_ignore_ascii_case("api_key")
-                }) {
-                    let Some(decrypted) = decrypt_catalog_secret_with_fallbacks(
-                        state.encryption_key(),
-                        &existing_key.encrypted_api_key,
-                    ) else {
+                for existing_key in existing_keys
+                    .iter()
+                    .filter(|key| key.id != existing.id && raw_secret_auth_type(&key.auth_type))
+                {
+                    let Some(decrypted) =
+                        existing_key
+                            .encrypted_api_key
+                            .as_deref()
+                            .and_then(|ciphertext| {
+                                decrypt_catalog_secret_with_fallbacks(
+                                    state.encryption_key(),
+                                    ciphertext,
+                                )
+                            })
+                    else {
                         continue;
                     };
                     if decrypted != "__placeholder__" && decrypted == api_key {
@@ -99,9 +92,12 @@ pub(crate) async fn build_admin_update_provider_key_record(
                         ));
                     }
                 }
-                updated.encrypted_api_key =
+                updated.encrypted_api_key = Some(
                     encrypt_catalog_secret_with_fallbacks(state, api_key)
-                        .ok_or_else(|| "gateway 未配置 provider key 加密密钥".to_string())?;
+                        .ok_or_else(|| "gateway 未配置 provider key 加密密钥".to_string())?,
+                );
+            } else if api_key_present {
+                updated.encrypted_api_key = None;
             }
             updated.encrypted_auth_config = None;
         }
@@ -120,9 +116,7 @@ pub(crate) async fn build_admin_update_provider_key_record(
                 return Err("Service Account 认证模式下不允许直接填写 api_key".to_string());
             }
             if auth_type_switch || api_key_present {
-                updated.encrypted_api_key =
-                    encrypt_catalog_secret_with_fallbacks(state, "__placeholder__")
-                        .ok_or_else(|| "gateway 未配置 provider key 加密密钥".to_string())?;
+                updated.encrypted_api_key = None;
             }
             if let Some(client_email) = auth_config_object
                 .as_ref()
@@ -181,9 +175,7 @@ pub(crate) async fn build_admin_update_provider_key_record(
                 return Err("OAuth 认证模式下不允许直接填写 api_key".to_string());
             }
             if auth_type_switch {
-                updated.encrypted_api_key =
-                    encrypt_catalog_secret_with_fallbacks(state, "__placeholder__")
-                        .ok_or_else(|| "gateway 未配置 provider key 加密密钥".to_string())?;
+                updated.encrypted_api_key = None;
                 updated.encrypted_auth_config = None;
             }
         }
@@ -191,10 +183,13 @@ pub(crate) async fn build_admin_update_provider_key_record(
     }
 
     if fields.contains("api_formats") {
-        let api_formats = normalize_string_list(payload.api_formats)
-            .ok_or_else(|| "api_formats 为必填字段".to_string())?;
+        let api_formats = normalize_api_format_list(
+            normalize_string_list(payload.api_formats)
+                .ok_or_else(|| "api_formats 为必填字段".to_string())?,
+        );
         if managed_fixed_oauth_key {
             updated.api_formats = None;
+            updated.auth_type_by_format = None;
         } else {
             validate_vertex_api_formats(&provider.provider_type, &target_auth_type, &api_formats)?;
             updated.api_formats = Some(json!(api_formats));
@@ -203,9 +198,56 @@ pub(crate) async fn build_admin_update_provider_key_record(
         if managed_fixed_oauth_key {
             updated.api_formats = None;
         } else {
-            let api_formats = json_string_list(existing.api_formats.as_ref());
+            let api_formats =
+                normalize_api_format_list(json_string_list(existing.api_formats.as_ref()));
             validate_vertex_api_formats(&provider.provider_type, &target_auth_type, &api_formats)?;
         }
+    }
+
+    let effective_api_formats =
+        normalize_api_format_list(json_string_list(updated.api_formats.as_ref()));
+    if matches!(target_auth_type.as_str(), "api_key" | "bearer") {
+        if fields.contains("auth_type_by_format") {
+            updated.auth_type_by_format = normalize_auth_type_by_format(
+                payload.auth_type_by_format,
+                "auth_type_by_format",
+                &effective_api_formats,
+            )?;
+        } else if fields.contains("api_formats") {
+            updated.auth_type_by_format = normalize_auth_type_by_format(
+                updated.auth_type_by_format.clone(),
+                "auth_type_by_format",
+                &effective_api_formats,
+            )?;
+        }
+    } else {
+        updated.auth_type_by_format = None;
+    }
+    if fields.contains("allow_auth_channel_mismatch_formats") {
+        updated.allow_auth_channel_mismatch_formats =
+            normalize_allow_auth_channel_mismatch_formats(
+                payload.allow_auth_channel_mismatch_formats,
+                "allow_auth_channel_mismatch_formats",
+                &effective_api_formats,
+            )?;
+    } else if fields.contains("api_formats") {
+        let existing = updated
+            .allow_auth_channel_mismatch_formats
+            .as_ref()
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            });
+        updated.allow_auth_channel_mismatch_formats =
+            normalize_allow_auth_channel_mismatch_formats(
+                existing,
+                "allow_auth_channel_mismatch_formats",
+                &effective_api_formats,
+            )?;
     }
 
     updated.auth_type = target_auth_type;
@@ -219,13 +261,13 @@ pub(crate) async fn build_admin_update_provider_key_record(
     }
     if fields.contains("rate_multipliers") {
         updated.rate_multipliers =
-            normalize_json_object(payload.rate_multipliers, "rate_multipliers")?;
+            normalize_api_format_json_object_keys(payload.rate_multipliers, "rate_multipliers")?;
     }
     if let Some(internal_priority) = payload.internal_priority {
         updated.internal_priority = internal_priority;
     }
     if fields.contains("global_priority_by_format") {
-        updated.global_priority_by_format = normalize_json_object(
+        updated.global_priority_by_format = normalize_api_format_json_object_keys(
             payload.global_priority_by_format,
             "global_priority_by_format",
         )?;
@@ -286,7 +328,7 @@ pub(crate) async fn build_admin_update_provider_key_record(
     if fields.contains("fingerprint") {
         updated.fingerprint = normalize_json_object(payload.fingerprint, "fingerprint")?;
     }
-    if auth_config_present && !auth_type_switch && updated.auth_type != "api_key" {
+    if auth_config_present && !auth_type_switch && !raw_secret_auth_type(&updated.auth_type) {
         updated.encrypted_auth_config = auth_config
             .as_ref()
             .map(serde_json::to_string)
@@ -304,4 +346,11 @@ pub(crate) async fn build_admin_update_provider_key_record(
         .ok()
         .map(|duration| duration.as_secs());
     Ok(updated)
+}
+
+fn raw_secret_auth_type(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "api_key" | "bearer"
+    )
 }

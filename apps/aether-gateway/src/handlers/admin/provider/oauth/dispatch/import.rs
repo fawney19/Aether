@@ -2,7 +2,8 @@ use super::super::duplicates::find_duplicate_provider_oauth_key;
 use super::super::errors::build_internal_control_error_response;
 use super::super::provisioning::{
     build_provider_oauth_auth_config_from_token_payload, create_provider_oauth_catalog_key,
-    provider_oauth_active_api_formats, update_existing_provider_oauth_catalog_key,
+    provider_oauth_active_api_formats, provider_oauth_key_proxy_value,
+    update_existing_provider_oauth_catalog_key,
 };
 use super::super::runtime::{
     provider_oauth_runtime_endpoint_for_provider,
@@ -11,10 +12,17 @@ use super::super::runtime::{
 use super::super::state::{
     admin_provider_oauth_template, build_admin_provider_oauth_backend_unavailable_response,
     exchange_admin_provider_oauth_refresh_token, is_fixed_provider_type_for_provider_oauth,
+    json_u64_value,
+};
+use super::token_import::{
+    build_codex_access_token_import_auth_config, normalize_single_import_tokens,
 };
 use crate::handlers::admin::provider::shared::paths::admin_provider_oauth_import_provider_id;
-use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
+use crate::handlers::admin::request::{
+    AdminAppState, AdminProviderOAuthTemplate, AdminRequestContext,
+};
 use crate::GatewayError;
+use aether_contracts::ProxySnapshot;
 use axum::{
     body::Body,
     http,
@@ -23,6 +31,125 @@ use axum::{
 };
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+struct AdminProviderOAuthSingleImportTokens {
+    access_token: String,
+    auth_config: serde_json::Map<String, serde_json::Value>,
+    expires_at: Option<u64>,
+}
+
+fn import_payload_string(
+    payload: &serde_json::Map<String, serde_json::Value>,
+    snake_case: &str,
+    camel_case: &str,
+) -> Option<String> {
+    payload
+        .get(snake_case)
+        .or_else(|| payload.get(camel_case))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn import_payload_u64(
+    payload: &serde_json::Map<String, serde_json::Value>,
+    snake_case: &str,
+    camel_case: &str,
+) -> Option<u64> {
+    json_u64_value(payload.get(snake_case).or_else(|| payload.get(camel_case)))
+}
+
+async fn resolve_admin_provider_oauth_single_import_tokens(
+    state: &AdminAppState<'_>,
+    template: AdminProviderOAuthTemplate,
+    provider_type: &str,
+    refresh_token: Option<&str>,
+    access_token: Option<&str>,
+    imported_expires_at: Option<u64>,
+    request_proxy: Option<ProxySnapshot>,
+) -> Result<AdminProviderOAuthSingleImportTokens, Response<Body>> {
+    if let Some(refresh_token) = refresh_token
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let token_payload = match state
+            .exchange_admin_provider_oauth_refresh_token(
+                template,
+                refresh_token,
+                request_proxy.clone(),
+            )
+            .await
+        {
+            Ok(payload) => payload,
+            Err(response) => {
+                if provider_type.eq_ignore_ascii_case("codex") {
+                    if let Some(access_token) = access_token
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        let (auth_config, expires_at) = build_codex_access_token_import_auth_config(
+                            access_token,
+                            Some(refresh_token),
+                            imported_expires_at,
+                            Some("Refresh Token 验证失败，已回退为 Access Token 导入"),
+                        );
+                        return Ok(AdminProviderOAuthSingleImportTokens {
+                            access_token: access_token.to_string(),
+                            auth_config,
+                            expires_at,
+                        });
+                    }
+                }
+                return Err(response);
+            }
+        };
+
+        let (mut auth_config, access_token, returned_refresh_token, expires_at) =
+            build_provider_oauth_auth_config_from_token_payload(provider_type, &token_payload);
+        let Some(access_token) = access_token else {
+            return Err(build_internal_control_error_response(
+                http::StatusCode::BAD_REQUEST,
+                "token refresh 返回缺少 access_token",
+            ));
+        };
+        let refresh_token = returned_refresh_token
+            .or_else(|| Some(refresh_token.to_string()))
+            .filter(|value| !value.trim().is_empty());
+        if let Some(refresh_token) = refresh_token.as_ref() {
+            auth_config.insert("refresh_token".to_string(), json!(refresh_token));
+        }
+        return Ok(AdminProviderOAuthSingleImportTokens {
+            access_token,
+            auth_config,
+            expires_at,
+        });
+    }
+
+    let Some(access_token) = access_token
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(build_internal_control_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "Refresh Token 或 Access Token 不能为空",
+        ));
+    };
+    if !provider_type.eq_ignore_ascii_case("codex") {
+        return Err(build_internal_control_error_response(
+            http::StatusCode::BAD_REQUEST,
+            "Access Token 导入仅支持 Codex Provider",
+        ));
+    }
+
+    let (auth_config, expires_at) =
+        build_codex_access_token_import_auth_config(access_token, None, imported_expires_at, None);
+    Ok(AdminProviderOAuthSingleImportTokens {
+        access_token: access_token.to_string(),
+        auth_config,
+        expires_at,
+    })
+}
 
 pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
     state: &AdminAppState<'_>,
@@ -53,17 +180,19 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
             ));
         }
     };
-    let Some(refresh_token_input) = raw_payload
-        .get("refresh_token")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    let refresh_token_input = import_payload_string(&raw_payload, "refresh_token", "refreshToken");
+    let access_token_input = import_payload_string(&raw_payload, "access_token", "accessToken");
+    let imported_expires_at = import_payload_u64(&raw_payload, "expires_at", "expiresAt");
+    let (refresh_token_input, access_token_input) = normalize_single_import_tokens(
+        refresh_token_input.as_deref(),
+        access_token_input.as_deref(),
+    );
+    if refresh_token_input.is_none() && access_token_input.is_none() {
         return Ok(build_internal_control_error_response(
             http::StatusCode::BAD_REQUEST,
-            "Refresh Token 不能为空",
+            "Refresh Token 或 Access Token 不能为空",
         ));
-    };
+    }
     let name = raw_payload
         .get("name")
         .and_then(serde_json::Value::as_str)
@@ -119,33 +248,32 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
             ],
         )
         .await;
+    let key_proxy = provider_oauth_key_proxy_value(proxy_node_id.as_deref());
 
-    let token_payload = match state
-        .exchange_admin_provider_oauth_refresh_token(
-            template,
-            refresh_token_input,
-            request_proxy.clone(),
-        )
-        .await
+    let resolved_import = match resolve_admin_provider_oauth_single_import_tokens(
+        state,
+        template,
+        &provider_type,
+        refresh_token_input.as_deref(),
+        access_token_input.as_deref(),
+        imported_expires_at,
+        request_proxy.clone(),
+    )
+    .await
     {
-        Ok(payload) => payload,
+        Ok(value) => value,
         Err(response) => return Ok(response),
     };
-
-    let (mut auth_config, access_token, returned_refresh_token, expires_at) =
-        build_provider_oauth_auth_config_from_token_payload(&provider_type, &token_payload);
-    let Some(access_token) = access_token else {
-        return Ok(build_internal_control_error_response(
-            http::StatusCode::BAD_REQUEST,
-            "token refresh 返回缺少 access_token",
-        ));
-    };
-    let refresh_token = returned_refresh_token
-        .or_else(|| Some(refresh_token_input.to_string()))
-        .filter(|value| !value.trim().is_empty());
-    if let Some(refresh_token) = refresh_token.as_ref() {
-        auth_config.insert("refresh_token".to_string(), json!(refresh_token));
-    }
+    let AdminProviderOAuthSingleImportTokens {
+        access_token,
+        auth_config,
+        expires_at,
+    } = resolved_import;
+    let has_refresh_token = auth_config
+        .get("refresh_token")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
 
     let api_formats = provider_oauth_active_api_formats(&endpoints);
     let duplicate = match state
@@ -170,7 +298,7 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
                 &access_token,
                 &auth_config,
                 &api_formats,
-                None,
+                key_proxy.clone(),
                 expires_at,
             )
             .await?
@@ -211,7 +339,7 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
                 &access_token,
                 &auth_config,
                 &api_formats,
-                None,
+                key_proxy.clone(),
                 expires_at,
             )
             .await?
@@ -237,7 +365,11 @@ pub(super) async fn handle_admin_provider_oauth_import_refresh_token(
         "key_id": persisted_key.id,
         "provider_type": provider_type,
         "expires_at": expires_at,
-        "has_refresh_token": refresh_token.is_some(),
+        "has_refresh_token": has_refresh_token,
+        "temporary": auth_config
+            .get("access_token_import_temporary")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
         "email": auth_config.get("email").cloned().unwrap_or(serde_json::Value::Null),
         "replaced": replaced,
     }))

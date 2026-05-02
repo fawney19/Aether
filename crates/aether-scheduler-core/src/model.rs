@@ -114,7 +114,7 @@ pub fn resolve_provider_model_name(
     for &allowed_model in &sorted_allowed_models {
         if row_has_candidate_model_name(row, api_format, allowed_model) {
             let allowed_model = allowed_model.to_owned();
-            return Some((allowed_model.clone(), Some(allowed_model)));
+            return Some((selected_provider_model_name.clone(), Some(allowed_model)));
         }
     }
 
@@ -279,7 +279,7 @@ pub fn extract_global_priority_for_format(
 }
 
 pub fn normalize_api_format(value: &str) -> String {
-    aether_ai_formats::normalize_legacy_openai_format_alias(value)
+    aether_ai_formats::normalize_api_format_alias(value)
 }
 
 fn row_has_candidate_model_name(

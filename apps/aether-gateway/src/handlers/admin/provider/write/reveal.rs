@@ -2,6 +2,7 @@ fn normalize_reveal_auth_type(value: &str) -> &str {
     match value.trim().to_ascii_lowercase().as_str() {
         "service_account" | "vertex_ai" => "service_account",
         "oauth" => "oauth",
+        "bearer" => "bearer",
         _ => "api_key",
     }
 }
@@ -44,8 +45,10 @@ pub(crate) fn build_admin_reveal_key_payload(
                 "auth_config": auth_config,
             }));
         }
-        let decrypted = state
-            .decrypt_catalog_secret_with_fallbacks(&key.encrypted_api_key)
+        let decrypted = key
+            .encrypted_api_key
+            .as_deref()
+            .and_then(|ciphertext| state.decrypt_catalog_secret_with_fallbacks(ciphertext))
             .ok_or_else(|| {
                 "无法解密认证配置，可能是加密密钥已更改。请重新添加该密钥。".to_string()
             })?;
@@ -58,9 +61,14 @@ pub(crate) fn build_admin_reveal_key_payload(
         }));
     }
 
-    let decrypted = state
-        .decrypt_catalog_secret_with_fallbacks(&key.encrypted_api_key)
-        .ok_or_else(|| "无法解密 API Key，可能是加密密钥已更改。请重新添加该密钥。".to_string())?;
+    let decrypted = match key.encrypted_api_key.as_deref().map(str::trim) {
+        Some(ciphertext) if !ciphertext.is_empty() => state
+            .decrypt_catalog_secret_with_fallbacks(ciphertext)
+            .ok_or_else(|| {
+                "无法解密 API Key，可能是加密密钥已更改。请重新添加该密钥。".to_string()
+            })?,
+        _ => String::new(),
+    };
     Ok(json!({
         "auth_type": auth_type,
         "api_key": decrypted,
@@ -71,27 +79,27 @@ fn provider_oauth_export_payload(
     provider_type: &str,
     auth_config: &serde_json::Map<String, serde_json::Value>,
     upstream_metadata: Option<&serde_json::Value>,
+    fallback_access_token: Option<&str>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let normalized_provider_type = provider_type.trim().to_ascii_lowercase();
-    let skip_keys: &[&str] = match normalized_provider_type.as_str() {
-        "kiro" => &["access_token", "expires_at", "updated_at"],
-        _ => &[
-            "access_token",
-            "expires_at",
-            "updated_at",
-            "token_type",
-            "scope",
-        ],
-    };
+    let skip_keys = ["updated_at", "updatedAt"];
     let mut payload = serde_json::Map::new();
     for (key, value) in auth_config {
         if skip_keys.contains(&key.as_str()) {
             continue;
         }
-        if value.is_null() || value.as_str().is_some_and(str::is_empty) {
+        if value.is_null() || value.as_str().is_some_and(|inner| inner.trim().is_empty()) {
             continue;
         }
         payload.insert(key.clone(), value.clone());
+    }
+    if !json_map_has_non_empty_string(&payload, &["access_token", "accessToken"]) {
+        if let Some(access_token) = fallback_access_token
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "__placeholder__")
+        {
+            payload.insert("access_token".to_string(), json!(access_token));
+        }
     }
     if normalized_provider_type == "kiro" && !payload.contains_key("email") {
         if let Some(email) = upstream_metadata
@@ -106,6 +114,17 @@ fn provider_oauth_export_payload(
         }
     }
     payload
+}
+
+fn json_map_has_non_empty_string(
+    map: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> bool {
+    keys.iter().any(|key| {
+        map.get(*key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    })
 }
 
 pub(crate) async fn build_admin_export_key_payload(
@@ -125,13 +144,6 @@ pub(crate) async fn build_admin_export_key_payload(
         .ok()
         .and_then(|value| value.as_object().cloned())
         .ok_or_else(|| "无法解密认证配置".to_string())?;
-    if !auth_config
-        .get("refresh_token")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
-    {
-        return Err("缺少 refresh_token，无法导出".to_string());
-    }
 
     let provider_type_from_config = auth_config
         .get("provider_type")
@@ -155,8 +167,18 @@ pub(crate) async fn build_admin_export_key_payload(
         return Err("仅 OAuth 管理账号支持导出".to_string());
     }
 
-    let mut payload =
-        provider_oauth_export_payload(&provider_type, &auth_config, key.upstream_metadata.as_ref());
+    let fallback_access_token = key
+        .encrypted_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|ciphertext| state.decrypt_catalog_secret_with_fallbacks(ciphertext));
+    let mut payload = provider_oauth_export_payload(
+        &provider_type,
+        &auth_config,
+        key.upstream_metadata.as_ref(),
+        fallback_access_token.as_deref(),
+    );
     payload.insert("name".to_string(), json!(key.name));
     payload.insert(
         "exported_at".to_string(),

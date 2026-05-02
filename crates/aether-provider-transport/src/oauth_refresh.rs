@@ -3,6 +3,11 @@ use std::fmt;
 use std::sync::Arc;
 
 use aether_data::redis::{RedisLockKey, RedisLockRunner};
+use aether_oauth::core::OAuthError;
+use aether_oauth::network::{
+    OAuthHttpExecutor, OAuthHttpRequest, OAuthHttpResponse, OAuthNetworkContext,
+};
+use aether_oauth::provider::ProviderOAuthTransportContext;
 use async_trait::async_trait;
 use serde_json::Value;
 use thiserror::Error;
@@ -71,6 +76,11 @@ pub enum LocalOAuthRefreshError {
         provider_type: &'static str,
         status_code: u16,
         body_excerpt: String,
+    },
+    #[error("{provider_type} oauth refresh transport failed: {message}")]
+    TransportMessage {
+        provider_type: &'static str,
+        message: String,
     },
     #[error("{provider_type} oauth refresh returned invalid response: {message}")]
     InvalidResponse {
@@ -141,6 +151,127 @@ impl LocalOAuthHttpExecutor for ReqwestLocalOAuthHttpExecutor {
             status_code,
             body_text,
         })
+    }
+}
+
+pub(crate) struct ProviderOAuthLocalHttpExecutor<'a> {
+    provider_type: &'static str,
+    transport: &'a GatewayProviderTransportSnapshot,
+    inner: &'a dyn LocalOAuthHttpExecutor,
+}
+
+impl<'a> ProviderOAuthLocalHttpExecutor<'a> {
+    pub(crate) fn new(
+        provider_type: &'static str,
+        transport: &'a GatewayProviderTransportSnapshot,
+        inner: &'a dyn LocalOAuthHttpExecutor,
+    ) -> Self {
+        Self {
+            provider_type,
+            transport,
+            inner,
+        }
+    }
+}
+
+#[async_trait]
+impl OAuthHttpExecutor for ProviderOAuthLocalHttpExecutor<'_> {
+    async fn execute(&self, request: OAuthHttpRequest) -> Result<OAuthHttpResponse, OAuthError> {
+        let response = self
+            .inner
+            .execute(
+                self.provider_type,
+                self.transport,
+                &LocalOAuthHttpRequest {
+                    request_id: "provider-oauth:local-refresh-token",
+                    method: request.method,
+                    url: request.url,
+                    headers: request.headers,
+                    json_body: request.json_body,
+                    body_bytes: request.body_bytes,
+                },
+            )
+            .await
+            .map_err(local_refresh_error_to_oauth_error)?;
+        let json_body = serde_json::from_str::<Value>(&response.body_text).ok();
+        Ok(OAuthHttpResponse {
+            status_code: response.status_code,
+            body_text: response.body_text,
+            json_body,
+        })
+    }
+}
+
+pub(crate) fn provider_oauth_transport_context_from_snapshot(
+    transport: &GatewayProviderTransportSnapshot,
+) -> ProviderOAuthTransportContext {
+    ProviderOAuthTransportContext {
+        provider_id: transport.provider.id.clone(),
+        provider_type: transport.provider.provider_type.clone(),
+        endpoint_id: Some(transport.endpoint.id.clone()),
+        key_id: Some(transport.key.id.clone()),
+        auth_type: Some(transport.key.auth_type.clone()),
+        decrypted_api_key: Some(transport.key.decrypted_api_key.clone()),
+        decrypted_auth_config: transport.key.decrypted_auth_config.clone(),
+        provider_config: transport.provider.config.clone(),
+        endpoint_config: transport.endpoint.config.clone(),
+        key_config: None,
+        network: OAuthNetworkContext::provider_operation(None),
+    }
+}
+
+pub(crate) fn oauth_error_to_local_refresh_error(
+    provider_type: &'static str,
+    error: OAuthError,
+) -> LocalOAuthRefreshError {
+    match error {
+        OAuthError::HttpStatus {
+            status_code,
+            body_excerpt,
+        } => LocalOAuthRefreshError::HttpStatus {
+            provider_type,
+            status_code,
+            body_excerpt,
+        },
+        OAuthError::Transport(message) => LocalOAuthRefreshError::TransportMessage {
+            provider_type,
+            message,
+        },
+        OAuthError::InvalidRequest(message)
+        | OAuthError::InvalidResponse(message)
+        | OAuthError::Storage(message)
+        | OAuthError::UnsupportedProvider(message) => LocalOAuthRefreshError::InvalidResponse {
+            provider_type,
+            message,
+        },
+        OAuthError::InvalidState => LocalOAuthRefreshError::InvalidResponse {
+            provider_type,
+            message: "oauth state is invalid or expired".to_string(),
+        },
+        OAuthError::EncryptionUnavailable => LocalOAuthRefreshError::InvalidResponse {
+            provider_type,
+            message: "oauth encryption unavailable".to_string(),
+        },
+    }
+}
+
+fn local_refresh_error_to_oauth_error(error: LocalOAuthRefreshError) -> OAuthError {
+    match error {
+        LocalOAuthRefreshError::Transport { source, .. } => {
+            OAuthError::Transport(source.to_string())
+        }
+        LocalOAuthRefreshError::TransportMessage { message, .. } => OAuthError::Transport(message),
+        LocalOAuthRefreshError::HttpStatus {
+            status_code,
+            body_excerpt,
+            ..
+        } => OAuthError::HttpStatus {
+            status_code,
+            body_excerpt,
+        },
+        LocalOAuthRefreshError::InvalidResponse { message, .. } => {
+            OAuthError::InvalidResponse(message)
+        }
     }
 }
 
@@ -229,6 +360,10 @@ impl LocalOAuthRefreshCoordinator {
 
     async fn insert_cached_entry(&self, key_id: &str, entry: CachedOAuthEntry) {
         self.cache.lock().await.insert(key_id.to_string(), entry);
+    }
+
+    pub async fn store_cached_entry(&self, key_id: &str, entry: CachedOAuthEntry) {
+        self.insert_cached_entry(key_id, entry).await;
     }
 
     pub async fn invalidate_cached_entry(&self, key_id: &str) -> bool {
@@ -355,9 +490,12 @@ impl LocalOAuthRefreshCoordinator {
             _ => None,
         };
 
-        let refresh_result = adapter
-            .refresh(executor, transport, cached_entry.as_ref())
-            .await;
+        // Forced refresh still needs the latest rotated refresh_token as input.
+        // Otherwise a second overlapping refresh can acquire the lock after the
+        // first one completes, then immediately retry with the stale token that
+        // came from the original transport snapshot.
+        let refresh_entry = cached_entry.as_ref();
+        let refresh_result = adapter.refresh(executor, transport, refresh_entry).await;
         if let (Some(lock), Some(lease)) = (distributed_lock, distributed_lease.as_ref()) {
             if let Err(err) = lock.release(lease).await {
                 tracing::warn!(
@@ -371,8 +509,6 @@ impl LocalOAuthRefreshCoordinator {
         let Some(refreshed_entry) = refresh_result? else {
             return Ok(None);
         };
-        self.insert_cached_entry(key_id, refreshed_entry.clone())
-            .await;
         Ok(adapter
             .resolve_cached(transport, &refreshed_entry)
             .map(|auth| LocalOAuthResolution::resolved(auth, Some(refreshed_entry))))
@@ -434,6 +570,7 @@ mod tests {
     #[derive(Debug)]
     struct TestAdapter {
         refresh_hits: Arc<AtomicUsize>,
+        refresh_with_entry_hits: Arc<AtomicUsize>,
     }
 
     #[async_trait]
@@ -478,9 +615,12 @@ mod tests {
             &self,
             _executor: &dyn LocalOAuthHttpExecutor,
             _transport: &GatewayProviderTransportSnapshot,
-            _entry: Option<&CachedOAuthEntry>,
+            entry: Option<&CachedOAuthEntry>,
         ) -> Result<Option<CachedOAuthEntry>, LocalOAuthRefreshError> {
             self.refresh_hits.fetch_add(1, Ordering::SeqCst);
+            if entry.is_some() {
+                self.refresh_with_entry_hits.fetch_add(1, Ordering::SeqCst);
+            }
             Ok(Some(CachedOAuthEntry {
                 provider_type: "test-oauth".to_string(),
                 auth_header_name: "authorization".to_string(),
@@ -511,7 +651,7 @@ mod tests {
             endpoint: GatewayProviderTransportEndpoint {
                 id: "endpoint-1".to_string(),
                 provider_id: "provider-1".to_string(),
-                api_format: "claude:cli".to_string(),
+                api_format: "claude:messages".to_string(),
                 api_family: Some("claude".to_string()),
                 endpoint_kind: Some("cli".to_string()),
                 is_active: true,
@@ -531,6 +671,9 @@ mod tests {
                 auth_type: "bearer".to_string(),
                 is_active: true,
                 api_formats: None,
+                auth_type_by_format: None,
+                allow_auth_channel_mismatch_formats: None,
+
                 allowed_models: None,
                 capabilities: None,
                 rate_multipliers: None,
@@ -547,9 +690,11 @@ mod tests {
     #[tokio::test]
     async fn coordinator_reuses_runtime_cached_refresh_result() {
         let refresh_hits = Arc::new(AtomicUsize::new(0));
+        let refresh_with_entry_hits = Arc::new(AtomicUsize::new(0));
         let coordinator =
             LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![Arc::new(TestAdapter {
                 refresh_hits: Arc::clone(&refresh_hits),
+                refresh_with_entry_hits: Arc::clone(&refresh_with_entry_hits),
             })]);
         let transport = sample_transport();
         let executor = ReqwestLocalOAuthHttpExecutor::new(reqwest::Client::new());
@@ -558,6 +703,15 @@ mod tests {
             .resolve_with_result(&executor, &transport, None, None)
             .await
             .expect("first resolve should succeed");
+        coordinator
+            .insert_cached_entry(
+                transport.key.id.as_str(),
+                first
+                    .as_ref()
+                    .and_then(|result| result.refreshed_entry.clone())
+                    .expect("first resolve should provide cached entry"),
+            )
+            .await;
         let second = coordinator
             .resolve_with_result(&executor, &transport, None, None)
             .await
@@ -597,9 +751,11 @@ mod tests {
     #[tokio::test]
     async fn coordinator_force_refresh_bypasses_runtime_cache() {
         let refresh_hits = Arc::new(AtomicUsize::new(0));
+        let refresh_with_entry_hits = Arc::new(AtomicUsize::new(0));
         let coordinator =
             LocalOAuthRefreshCoordinator::with_adapters_for_tests(vec![Arc::new(TestAdapter {
                 refresh_hits: Arc::clone(&refresh_hits),
+                refresh_with_entry_hits: Arc::clone(&refresh_with_entry_hits),
             })]);
         let transport = sample_transport();
         let executor = ReqwestLocalOAuthHttpExecutor::new(reqwest::Client::new());
@@ -608,6 +764,15 @@ mod tests {
             .resolve_with_result(&executor, &transport, None, None)
             .await
             .expect("initial resolve should succeed");
+        coordinator
+            .insert_cached_entry(
+                transport.key.id.as_str(),
+                first
+                    .as_ref()
+                    .and_then(|result| result.refreshed_entry.clone())
+                    .expect("first resolve should provide cached entry"),
+            )
+            .await;
         let forced = coordinator
             .force_refresh_with_result(&executor, &transport, None, None)
             .await
@@ -616,5 +781,6 @@ mod tests {
         assert!(first.and_then(|result| result.refreshed_entry).is_some());
         assert!(forced.and_then(|result| result.refreshed_entry).is_some());
         assert_eq!(refresh_hits.load(Ordering::SeqCst), 2);
+        assert_eq!(refresh_with_entry_hits.load(Ordering::SeqCst), 1);
     }
 }

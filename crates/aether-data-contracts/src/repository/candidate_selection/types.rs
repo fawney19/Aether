@@ -57,12 +57,8 @@ impl StoredMinimalCandidateSelectionRow {
     }
 }
 
-fn normalize_api_format(value: &str) -> String {
-    aether_ai_formats::normalize_legacy_openai_format_alias(value)
-}
-
 fn api_format_matches(left: &str, right: &str) -> bool {
-    normalize_api_format(left) == normalize_api_format(right)
+    aether_ai_formats::api_format_alias_matches(left, right)
 }
 
 #[async_trait]

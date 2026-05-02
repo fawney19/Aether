@@ -4,15 +4,14 @@ import type { EndpointHealthDetail } from '@/api/endpoints'
 export type EndpointStatus = 'disabled' | 'no_keys' | 'keys_disabled' | 'available'
 
 const ENDPOINT_SORT_ORDER = [
-  'claude:chat',
-  'claude:cli',
+  'claude:messages',
   'openai:chat',
   'openai:responses',
   'openai:responses:compact',
-  'gemini:chat',
-  'gemini:cli',
+  'gemini:generate_content',
   'openai:video',
   'gemini:video',
+  'gemini:files',
 ]
 
 /**

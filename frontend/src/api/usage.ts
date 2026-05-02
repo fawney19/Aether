@@ -267,7 +267,7 @@ export const usageApi = {
     username?: string
     model?: string
     provider?: string
-    api_format?: string  // API 格式筛选（如 openai:chat, claude:chat）
+    api_format?: string  // API 格式筛选（如 openai:chat, claude:messages）
     status?: string // 'stream' | 'standard' | 'error'
     limit?: number
     offset?: number

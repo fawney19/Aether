@@ -130,17 +130,17 @@ async fn admin_gemini_files_upload_single_key(
                 && endpoint
                     .api_format
                     .trim()
-                    .eq_ignore_ascii_case("gemini:chat")
+                    .eq_ignore_ascii_case("gemini:generate_content")
         })
     }) else {
-        return Err("找不到有效的 gemini:chat 端点".to_string());
+        return Err("找不到有效的 gemini:generate_content 端点".to_string());
     };
     let transport = state
         .read_provider_transport_snapshot(&key.provider_id, &endpoint.id, &key.id)
         .await
         .map_err(|err| format!("{err:?}"))?
         .ok_or_else(|| "无法读取 Key 传输配置".to_string())?;
-    if !state.supports_local_gemini_transport_with_network(&transport, "gemini:chat") {
+    if !state.supports_local_gemini_transport_with_network(&transport, "gemini:generate_content") {
         return Err("Key 传输配置不支持 Gemini Files 上传".to_string());
     }
     if transport.endpoint.body_rules.is_some() {

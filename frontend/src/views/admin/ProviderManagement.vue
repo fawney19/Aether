@@ -138,15 +138,59 @@
               <TableHead class="w-[20%] min-w-[180px]">
                 余额监控
               </TableHead>
-              <TableHead class="w-[12%] min-w-[100px] text-center">
+              <SortableTableHead
+                class="w-[12%] min-w-[100px] text-center"
+                column-key="model"
+                :sortable="false"
+                align="center"
+                :filter-active="filterModel !== 'all'"
+                filter-title="筛选模型"
+                filter-content-class="w-64 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
+              >
                 资源统计
-              </TableHead>
-              <TableHead class="w-[24%] min-w-[260px]">
+                <template #filter="{ close }">
+                  <TableFilterMenu
+                    v-model="filterModel"
+                    :options="modelFilters"
+                    @select="close"
+                  />
+                </template>
+              </SortableTableHead>
+              <SortableTableHead
+                class="w-[24%] min-w-[260px]"
+                column-key="api_format"
+                :sortable="false"
+                :filter-active="filterApiFormat !== 'all'"
+                filter-title="筛选 API 格式"
+                filter-content-class="w-72 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
+              >
                 端点健康
-              </TableHead>
-              <TableHead class="w-[8%] min-w-[60px] text-center">
+                <template #filter="{ close }">
+                  <TableFilterMenu
+                    v-model="filterApiFormat"
+                    :options="apiFormatFilters"
+                    @select="close"
+                  />
+                </template>
+              </SortableTableHead>
+              <SortableTableHead
+                class="w-[8%] min-w-[60px] text-center"
+                column-key="status"
+                :sortable="false"
+                align="center"
+                :filter-active="filterStatus !== 'all'"
+                filter-title="筛选状态"
+                filter-content-class="w-40 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
+              >
                 状态
-              </TableHead>
+                <template #filter="{ close }">
+                  <TableFilterMenu
+                    v-model="filterStatus"
+                    :options="statusFilters"
+                    @select="close"
+                  />
+                </template>
+              </SortableTableHead>
               <TableHead class="w-[18%] min-w-[120px] text-center">
                 操作
               </TableHead>
@@ -265,6 +309,8 @@ import TableHeader from '@/components/ui/table-header.vue'
 import TableBody from '@/components/ui/table-body.vue'
 import TableRow from '@/components/ui/table-row.vue'
 import TableHead from '@/components/ui/table-head.vue'
+import SortableTableHead from '@/components/ui/sortable-table-head.vue'
+import TableFilterMenu from '@/components/ui/table-filter-menu.vue'
 import Pagination from '@/components/ui/pagination.vue'
 import { ProviderFormDialog, PriorityManagementDialog, ProviderAuthDialog } from '@/features/providers/components'
 import ProviderDetailDrawer from '@/features/providers/components/ProviderDetailDrawer.vue'

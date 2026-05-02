@@ -1,14 +1,16 @@
 use super::{
     admin_pool_provider_id_from_path, admin_provider_pool_config, build_admin_pool_error_response,
-    parse_admin_pool_page, parse_admin_pool_page_size, parse_admin_pool_quick_selectors,
-    parse_admin_pool_search, parse_admin_pool_status_filter, pool_payloads, pool_selection,
-    read_admin_provider_pool_cooldown_key_ids, read_admin_provider_pool_runtime_state,
-    AdminProviderPoolRuntimeState, ProviderCatalogKeyListOrder, ProviderCatalogKeyListQuery,
-    ADMIN_POOL_PROVIDER_CATALOG_READER_UNAVAILABLE_DETAIL,
+    parse_admin_pool_key_sort, parse_admin_pool_page, parse_admin_pool_page_size,
+    parse_admin_pool_quick_selectors, parse_admin_pool_search, parse_admin_pool_status_filter,
+    pool_payloads, pool_selection, read_admin_provider_pool_cooldown_key_ids,
+    read_admin_provider_pool_runtime_state, AdminPoolKeySort, AdminPoolKeySortDirection,
+    AdminPoolKeySortField, AdminProviderPoolRuntimeState, ProviderCatalogKeyListOrder,
+    ProviderCatalogKeyListQuery, ADMIN_POOL_PROVIDER_CATALOG_READER_UNAVAILABLE_DETAIL,
 };
 use crate::handlers::admin::request::{AdminAppState, AdminRequestContext};
 use crate::GatewayError;
 use aether_admin::provider::pool as admin_provider_pool_pure;
+use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey;
 use axum::{
     body::Body,
     http,
@@ -16,6 +18,51 @@ use axum::{
     Json,
 };
 use serde_json::json;
+use std::cmp::Ordering;
+
+fn admin_pool_compare_optional_unix_secs(
+    left: Option<u64>,
+    right: Option<u64>,
+    direction: AdminPoolKeySortDirection,
+) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => match direction {
+            AdminPoolKeySortDirection::Asc => left.cmp(&right),
+            AdminPoolKeySortDirection::Desc => right.cmp(&left),
+        },
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn admin_pool_sort_keys_for_request(keys: &mut [StoredProviderCatalogKey], sort: AdminPoolKeySort) {
+    match sort.field {
+        AdminPoolKeySortField::Default => pool_selection::admin_pool_sort_keys(keys),
+        AdminPoolKeySortField::ImportedAt => {
+            keys.sort_by(|left, right| {
+                admin_pool_compare_optional_unix_secs(
+                    left.created_at_unix_ms,
+                    right.created_at_unix_ms,
+                    sort.direction,
+                )
+                .then(left.name.cmp(&right.name))
+                .then(left.id.cmp(&right.id))
+            });
+        }
+        AdminPoolKeySortField::LastUsedAt => {
+            keys.sort_by(|left, right| {
+                admin_pool_compare_optional_unix_secs(
+                    left.last_used_at_unix_secs,
+                    right.last_used_at_unix_secs,
+                    sort.direction,
+                )
+                .then(left.name.cmp(&right.name))
+                .then(left.id.cmp(&right.id))
+            });
+        }
+    }
+}
 
 pub(super) async fn build_admin_pool_list_keys_response(
     state: &AdminAppState<'_>,
@@ -58,6 +105,15 @@ pub(super) async fn build_admin_pool_list_keys_response(
         parse_admin_pool_quick_selectors(query),
     );
     let status = match parse_admin_pool_status_filter(query) {
+        Ok(value) => value,
+        Err(detail) => {
+            return Ok(build_admin_pool_error_response(
+                http::StatusCode::BAD_REQUEST,
+                detail,
+            ));
+        }
+    };
+    let sort = match parse_admin_pool_key_sort(query) {
         Ok(value) => value,
         Err(detail) => {
             return Ok(build_admin_pool_error_response(
@@ -117,7 +173,7 @@ pub(super) async fn build_admin_pool_list_keys_response(
                 })
             });
         }
-        pool_selection::admin_pool_sort_keys(&mut keys);
+        admin_pool_sort_keys_for_request(&mut keys, sort);
         let total = keys.len();
         let keys = keys
             .into_iter()
@@ -125,7 +181,7 @@ pub(super) async fn build_admin_pool_list_keys_response(
             .take(page_size)
             .collect::<Vec<_>>();
         (keys, total)
-    } else if !quick_selectors.is_empty() {
+    } else if !quick_selectors.is_empty() || sort.field != AdminPoolKeySortField::Default {
         let mut keys = state
             .list_provider_catalog_keys_by_provider_ids(std::slice::from_ref(&provider.id))
             .await?
@@ -154,7 +210,7 @@ pub(super) async fn build_admin_pool_list_keys_response(
                 })
             })
             .collect::<Vec<_>>();
-        pool_selection::admin_pool_sort_keys(&mut keys);
+        admin_pool_sort_keys_for_request(&mut keys, sort);
         let total = keys.len();
         let keys = keys
             .into_iter()

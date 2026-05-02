@@ -25,12 +25,10 @@ pub fn local_kiro_request_transport_unsupported_reason_with_network(
     {
         return Some("transport_provider_type_unsupported");
     }
-    if !transport
-        .endpoint
-        .api_format
-        .trim()
-        .eq_ignore_ascii_case("claude:cli")
-    {
+    if !aether_ai_formats::api_format_alias_matches(
+        &transport.endpoint.api_format,
+        "claude:messages",
+    ) {
         return Some("transport_api_format_mismatch");
     }
     if !header_rules_are_locally_supported(transport.endpoint.header_rules.as_ref()) {
@@ -69,12 +67,10 @@ pub fn supports_local_kiro_request_transport(transport: &GatewayProviderTranspor
     {
         return false;
     }
-    if !transport
-        .endpoint
-        .api_format
-        .trim()
-        .eq_ignore_ascii_case("claude:cli")
-    {
+    if !aether_ai_formats::api_format_alias_matches(
+        &transport.endpoint.api_format,
+        "claude:messages",
+    ) {
         return false;
     }
     supports_local_kiro_request_shape(
@@ -120,9 +116,9 @@ mod tests {
             endpoint: GatewayProviderTransportEndpoint {
                 id: "endpoint-1".to_string(),
                 provider_id: "provider-1".to_string(),
-                api_format: "claude:cli".to_string(),
+                api_format: "claude:messages".to_string(),
                 api_family: Some("claude".to_string()),
-                endpoint_kind: Some("cli".to_string()),
+                endpoint_kind: Some("messages".to_string()),
                 is_active: true,
                 base_url: "https://kiro.example".to_string(),
                 header_rules: None,
@@ -139,7 +135,10 @@ mod tests {
                 name: "key".to_string(),
                 auth_type: "bearer".to_string(),
                 is_active: true,
-                api_formats: Some(vec!["claude:cli".to_string()]),
+                api_formats: Some(vec!["claude:messages".to_string()]),
+                auth_type_by_format: None,
+                allow_auth_channel_mismatch_formats: None,
+
                 allowed_models: None,
                 capabilities: None,
                 rate_multipliers: None,

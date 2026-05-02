@@ -183,33 +183,34 @@ impl ResolvedAuthApiKeySnapshot {
 
     pub fn effective_allowed_providers(&self) -> Option<&[String]> {
         if self.api_key_is_standalone {
-            return self.api_key_allowed_providers.as_deref();
+            return non_empty_allowed_list(self.api_key_allowed_providers.as_deref());
         }
 
-        self.api_key_allowed_providers
-            .as_deref()
-            .or(self.user_allowed_providers.as_deref())
+        non_empty_allowed_list(self.api_key_allowed_providers.as_deref())
+            .or_else(|| non_empty_allowed_list(self.user_allowed_providers.as_deref()))
     }
 
     pub fn effective_allowed_api_formats(&self) -> Option<&[String]> {
         if self.api_key_is_standalone {
-            return self.api_key_allowed_api_formats.as_deref();
+            return non_empty_allowed_list(self.api_key_allowed_api_formats.as_deref());
         }
 
-        self.api_key_allowed_api_formats
-            .as_deref()
-            .or(self.user_allowed_api_formats.as_deref())
+        non_empty_allowed_list(self.api_key_allowed_api_formats.as_deref())
+            .or_else(|| non_empty_allowed_list(self.user_allowed_api_formats.as_deref()))
     }
 
     pub fn effective_allowed_models(&self) -> Option<&[String]> {
         if self.api_key_is_standalone {
-            return self.api_key_allowed_models.as_deref();
+            return non_empty_allowed_list(self.api_key_allowed_models.as_deref());
         }
 
-        self.api_key_allowed_models
-            .as_deref()
-            .or(self.user_allowed_models.as_deref())
+        non_empty_allowed_list(self.api_key_allowed_models.as_deref())
+            .or_else(|| non_empty_allowed_list(self.user_allowed_models.as_deref()))
     }
+}
+
+fn non_empty_allowed_list(values: Option<&[String]>) -> Option<&[String]> {
+    values.filter(|items| !items.is_empty())
 }
 
 #[async_trait]
@@ -913,7 +914,7 @@ mod tests {
             None,
             None,
             Some(serde_json::json!(["anthropic"])),
-            Some(serde_json::json!(["claude:chat"])),
+            Some(serde_json::json!(["claude:messages"])),
             Some(serde_json::json!(["claude-sonnet-4-5"])),
         )
         .expect("snapshot should build");
@@ -926,7 +927,7 @@ mod tests {
         );
         assert_eq!(
             resolved.effective_allowed_api_formats(),
-            Some(&["claude:chat".to_string()][..])
+            Some(&["claude:messages".to_string()][..])
         );
         assert_eq!(
             resolved.effective_allowed_models(),
@@ -979,7 +980,7 @@ mod tests {
     }
 
     #[test]
-    fn standalone_snapshot_keeps_empty_key_allowed_lists_as_deny_all() {
+    fn standalone_snapshot_treats_empty_key_allowed_lists_as_unrestricted() {
         let snapshot = StoredAuthApiKeySnapshot::new(
             "admin-user".to_string(),
             "admin".to_string(),
@@ -1007,9 +1008,9 @@ mod tests {
 
         let resolved = ResolvedAuthApiKeySnapshot::from_stored(snapshot, 150);
 
-        assert_eq!(resolved.effective_allowed_providers(), Some(&[][..]));
-        assert_eq!(resolved.effective_allowed_api_formats(), Some(&[][..]));
-        assert_eq!(resolved.effective_allowed_models(), Some(&[][..]));
+        assert_eq!(resolved.effective_allowed_providers(), None);
+        assert_eq!(resolved.effective_allowed_api_formats(), None);
+        assert_eq!(resolved.effective_allowed_models(), None);
     }
 
     #[test]

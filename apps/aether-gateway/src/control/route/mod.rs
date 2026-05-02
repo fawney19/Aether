@@ -19,6 +19,7 @@ pub(crate) struct GatewayControlDecision {
     pub(crate) route_class: Option<String>,
     pub(crate) route_family: Option<String>,
     pub(crate) route_kind: Option<String>,
+    pub(crate) request_auth_channel: Option<String>,
     pub(crate) auth_endpoint_signature: Option<String>,
     pub(crate) execution_runtime_candidate: bool,
     pub(crate) auth_context: Option<GatewayControlAuthContext>,
@@ -40,6 +41,7 @@ impl GatewayControlDecision {
             route_class,
             route_family,
             route_kind,
+            request_auth_channel: None,
             auth_endpoint_signature,
             execution_runtime_candidate: false,
             auth_context: None,
@@ -75,6 +77,7 @@ pub(super) struct ClassifiedRoute {
     route_class: &'static str,
     route_family: &'static str,
     route_kind: &'static str,
+    request_auth_channel: Option<&'static str>,
     auth_endpoint_signature: String,
     execution_runtime_candidate: bool,
 }
@@ -90,6 +93,25 @@ pub(super) fn classified(
         route_class,
         route_family,
         route_kind,
+        request_auth_channel: None,
+        auth_endpoint_signature: auth_endpoint_signature.into(),
+        execution_runtime_candidate,
+    }
+}
+
+pub(super) fn classified_with_request_auth_channel(
+    route_class: &'static str,
+    route_family: &'static str,
+    route_kind: &'static str,
+    request_auth_channel: &'static str,
+    auth_endpoint_signature: impl Into<String>,
+    execution_runtime_candidate: bool,
+) -> ClassifiedRoute {
+    ClassifiedRoute {
+        route_class,
+        route_family,
+        route_kind,
+        request_auth_channel: Some(request_auth_channel),
         auth_endpoint_signature: auth_endpoint_signature.into(),
         execution_runtime_candidate,
     }
@@ -103,6 +125,7 @@ impl ClassifiedRoute {
             route_class: Some(self.route_class.to_string()),
             route_family: Some(self.route_family.to_string()),
             route_kind: Some(self.route_kind.to_string()),
+            request_auth_channel: self.request_auth_channel.map(str::to_string),
             auth_endpoint_signature: Some(self.auth_endpoint_signature),
             execution_runtime_candidate: self.execution_runtime_candidate,
             auth_context: None,
@@ -162,7 +185,7 @@ pub(super) fn detect_public_models_auth_signature(uri: &Uri, headers: &http::Hea
         .is_some();
     let has_anthropic_version = header_value_str(headers, "anthropic-version").is_some();
     if has_claude_key && has_anthropic_version {
-        return "claude:chat".to_string();
+        return "claude:messages".to_string();
     }
 
     let has_gemini_key = header_value_str(headers, "x-goog-api-key").is_some()
@@ -171,11 +194,11 @@ pub(super) fn detect_public_models_auth_signature(uri: &Uri, headers: &http::Hea
                 .any(|(key, value)| key == "key" && !value.trim().is_empty())
         });
     if has_gemini_key {
-        return "gemini:chat".to_string();
+        return "gemini:generate_content".to_string();
     }
 
     if uri.path().starts_with("/v1beta/models") {
-        return "gemini:chat".to_string();
+        return "gemini:generate_content".to_string();
     }
 
     "openai:chat".to_string()

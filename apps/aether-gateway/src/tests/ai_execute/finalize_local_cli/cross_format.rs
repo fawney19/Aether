@@ -82,7 +82,7 @@ async fn gateway_executes_openai_responses_cross_format_upstream_stream_via_loca
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-openai-cli-gemini-finalize-local-1".to_string(),
-            endpoint_api_format: "gemini:cli".to_string(),
+            endpoint_api_format: "gemini:generate_content".to_string(),
             endpoint_api_family: Some("gemini".to_string()),
             endpoint_kind: Some("cli".to_string()),
             endpoint_is_active: true,
@@ -90,11 +90,11 @@ async fn gateway_executes_openai_responses_cross_format_upstream_stream_via_loca
             key_name: "prod".to_string(),
             key_auth_type: "bearer".to_string(),
             key_is_active: true,
-            key_api_formats: Some(vec!["gemini:cli".to_string()]),
+            key_api_formats: Some(vec!["gemini:generate_content".to_string()]),
             key_allowed_models: None,
             key_capabilities: None,
             key_internal_priority: 5,
-            key_global_priority_by_format: Some(serde_json::json!({"gemini:cli": 1})),
+            key_global_priority_by_format: Some(serde_json::json!({"gemini:generate_content": 1})),
             model_id: "model-openai-cli-gemini-finalize-local-1".to_string(),
             global_model_id: "global-model-openai-cli-gemini-finalize-local-1".to_string(),
             global_model_name: "gpt-5".to_string(),
@@ -104,7 +104,7 @@ async fn gateway_executes_openai_responses_cross_format_upstream_stream_via_loca
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
                 name: "gemini-2.5-pro-upstream".to_string(),
                 priority: 1,
-                api_formats: Some(vec!["gemini:cli".to_string()]),
+                api_formats: Some(vec!["gemini:generate_content".to_string()]),
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -137,7 +137,7 @@ async fn gateway_executes_openai_responses_cross_format_upstream_stream_via_loca
         StoredProviderCatalogEndpoint::new(
             "endpoint-openai-cli-gemini-finalize-local-1".to_string(),
             "provider-openai-cli-gemini-finalize-local-1".to_string(),
-            "gemini:cli".to_string(),
+            "gemini:generate_content".to_string(),
             Some("gemini".to_string()),
             Some("cli".to_string()),
             true,
@@ -169,7 +169,7 @@ async fn gateway_executes_openai_responses_cross_format_upstream_stream_via_loca
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["gemini:cli"])),
+            Some(serde_json::json!(["gemini:generate_content"])),
             encrypt_python_fernet_plaintext(
                 DEVELOPMENT_ENCRYPTION_KEY,
                 "sk-upstream-openai-cli-gemini-finalize",
@@ -177,7 +177,7 @@ async fn gateway_executes_openai_responses_cross_format_upstream_stream_via_loca
             .expect("api key should encrypt"),
             None,
             None,
-            Some(serde_json::json!({"gemini:cli": 1})),
+            Some(serde_json::json!({"gemini:generate_content": 1})),
             None,
             None,
             None,
@@ -540,7 +540,7 @@ async fn gateway_executes_openai_responses_cross_format_function_call_upstream_s
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-openai-cli-gemini-tool-finalize-local-1".to_string(),
-            endpoint_api_format: "gemini:cli".to_string(),
+            endpoint_api_format: "gemini:generate_content".to_string(),
             endpoint_api_family: Some("gemini".to_string()),
             endpoint_kind: Some("cli".to_string()),
             endpoint_is_active: true,
@@ -548,11 +548,11 @@ async fn gateway_executes_openai_responses_cross_format_function_call_upstream_s
             key_name: "prod".to_string(),
             key_auth_type: "bearer".to_string(),
             key_is_active: true,
-            key_api_formats: Some(vec!["gemini:cli".to_string()]),
+            key_api_formats: Some(vec!["gemini:generate_content".to_string()]),
             key_allowed_models: None,
             key_capabilities: None,
             key_internal_priority: 5,
-            key_global_priority_by_format: Some(serde_json::json!({"gemini:cli": 1})),
+            key_global_priority_by_format: Some(serde_json::json!({"gemini:generate_content": 1})),
             model_id: "model-openai-cli-gemini-tool-finalize-local-1".to_string(),
             global_model_id: "global-model-openai-cli-gemini-tool-finalize-local-1".to_string(),
             global_model_name: "gpt-5".to_string(),
@@ -562,7 +562,7 @@ async fn gateway_executes_openai_responses_cross_format_function_call_upstream_s
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
                 name: "gemini-2.5-pro-upstream".to_string(),
                 priority: 1,
-                api_formats: Some(vec!["gemini:cli".to_string()]),
+                api_formats: Some(vec!["gemini:generate_content".to_string()]),
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -595,7 +595,7 @@ async fn gateway_executes_openai_responses_cross_format_function_call_upstream_s
         StoredProviderCatalogEndpoint::new(
             "endpoint-openai-cli-gemini-tool-finalize-local-1".to_string(),
             "provider-openai-cli-gemini-tool-finalize-local-1".to_string(),
-            "gemini:cli".to_string(),
+            "gemini:generate_content".to_string(),
             Some("gemini".to_string()),
             Some("cli".to_string()),
             true,
@@ -627,7 +627,7 @@ async fn gateway_executes_openai_responses_cross_format_function_call_upstream_s
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["gemini:cli"])),
+            Some(serde_json::json!(["gemini:generate_content"])),
             encrypt_python_fernet_plaintext(
                 DEVELOPMENT_ENCRYPTION_KEY,
                 "sk-upstream-openai-cli-gemini-tool-finalize",
@@ -635,7 +635,7 @@ async fn gateway_executes_openai_responses_cross_format_function_call_upstream_s
             .expect("api key should encrypt"),
             None,
             None,
-            Some(serde_json::json!({"gemini:cli": 1})),
+            Some(serde_json::json!({"gemini:generate_content": 1})),
             None,
             None,
             None,
@@ -1010,7 +1010,7 @@ async fn gateway_executes_openai_responses_antigravity_cross_format_upstream_str
             provider_priority: 10,
             provider_is_active: true,
             endpoint_id: "endpoint-openai-cli-antigravity-finalize-local-1".to_string(),
-            endpoint_api_format: "gemini:cli".to_string(),
+            endpoint_api_format: "gemini:generate_content".to_string(),
             endpoint_api_family: Some("gemini".to_string()),
             endpoint_kind: Some("cli".to_string()),
             endpoint_is_active: true,
@@ -1018,11 +1018,11 @@ async fn gateway_executes_openai_responses_antigravity_cross_format_upstream_str
             key_name: "oauth".to_string(),
             key_auth_type: "oauth".to_string(),
             key_is_active: true,
-            key_api_formats: Some(vec!["gemini:cli".to_string()]),
+            key_api_formats: Some(vec!["gemini:generate_content".to_string()]),
             key_allowed_models: None,
             key_capabilities: None,
             key_internal_priority: 5,
-            key_global_priority_by_format: Some(serde_json::json!({"gemini:cli": 1})),
+            key_global_priority_by_format: Some(serde_json::json!({"gemini:generate_content": 1})),
             model_id: "model-openai-cli-antigravity-finalize-local-1".to_string(),
             global_model_id: "global-model-openai-cli-antigravity-finalize-local-1".to_string(),
             global_model_name: "gpt-5".to_string(),
@@ -1032,7 +1032,7 @@ async fn gateway_executes_openai_responses_antigravity_cross_format_upstream_str
             model_provider_model_mappings: Some(vec![StoredProviderModelMapping {
                 name: "claude-sonnet-4-5".to_string(),
                 priority: 1,
-                api_formats: Some(vec!["gemini:cli".to_string()]),
+                api_formats: Some(vec!["gemini:generate_content".to_string()]),
             }]),
             model_supports_streaming: Some(true),
             model_is_active: true,
@@ -1065,7 +1065,7 @@ async fn gateway_executes_openai_responses_antigravity_cross_format_upstream_str
         StoredProviderCatalogEndpoint::new(
             "endpoint-openai-cli-antigravity-finalize-local-1".to_string(),
             "provider-openai-cli-antigravity-finalize-local-1".to_string(),
-            "gemini:cli".to_string(),
+            "gemini:generate_content".to_string(),
             Some("gemini".to_string()),
             Some("cli".to_string()),
             true,
@@ -1100,12 +1100,12 @@ async fn gateway_executes_openai_responses_antigravity_cross_format_upstream_str
         )
         .expect("key should build")
         .with_transport_fields(
-            Some(serde_json::json!(["gemini:cli"])),
+            Some(serde_json::json!(["gemini:generate_content"])),
             encrypt_python_fernet_plaintext(DEVELOPMENT_ENCRYPTION_KEY, "__placeholder__")
                 .expect("placeholder api key should encrypt"),
             Some(encrypted_auth_config),
             None,
-            Some(serde_json::json!({"gemini:cli": 1})),
+            Some(serde_json::json!({"gemini:generate_content": 1})),
             None,
             None,
             None,

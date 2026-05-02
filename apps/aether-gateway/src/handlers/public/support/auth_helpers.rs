@@ -236,7 +236,7 @@ pub(super) fn extract_cookie_value(headers: &http::HeaderMap, cookie_name: &str)
     None
 }
 
-pub(super) fn extract_client_device_id(
+pub(crate) fn extract_client_device_id(
     request_context: &GatewayPublicRequestContext,
     headers: &http::HeaderMap,
 ) -> Result<String, Response<Body>> {

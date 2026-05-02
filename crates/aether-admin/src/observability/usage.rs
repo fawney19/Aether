@@ -428,6 +428,11 @@ fn admin_usage_local_execution_client_error_message(message: &str) -> String {
         .map(|(prefix, _)| prefix)
         .unwrap_or(message);
     let mut simplified = without_reason.trim().to_string();
+    if let Some(unavailable_message) =
+        admin_usage_simplify_all_candidates_skipped_client_error_message(simplified.as_str())
+    {
+        return unavailable_message;
+    }
     for marker in ["。请检查", "。请确认", ". 请检查", ". 请确认"] {
         if let Some(index) = simplified.find(marker) {
             simplified.truncate(index);
@@ -438,6 +443,37 @@ fn admin_usage_local_execution_client_error_message(message: &str) -> String {
         .trim()
         .trim_end_matches(['。', '.', '！', '!', '？', '?'])
         .to_string()
+}
+
+fn admin_usage_simplify_all_candidates_skipped_client_error_message(
+    message: &str,
+) -> Option<String> {
+    if !message.contains("候选提供商")
+        || !(message.contains("全部不可用") || message.contains("都不满足本次"))
+    {
+        return None;
+    }
+
+    let request_mode = admin_usage_extract_local_execution_request_mode(message)?;
+    if let Some(model) = admin_usage_extract_candidate_supported_model(message) {
+        return Some(format!(
+            "没有可用提供商支持模型 {model} 的{request_mode}请求"
+        ));
+    }
+
+    Some(format!("没有可用提供商支持本次{request_mode}请求"))
+}
+
+fn admin_usage_extract_local_execution_request_mode(message: &str) -> Option<&str> {
+    let rest = message.get(message.find("本次")? + "本次".len()..)?;
+    let mode = rest.get(..rest.find("请求")?)?.trim();
+    (!mode.is_empty()).then_some(mode)
+}
+
+fn admin_usage_extract_candidate_supported_model(message: &str) -> Option<&str> {
+    let rest = message.get(message.find("支持模型 ")? + "支持模型 ".len()..)?;
+    let model = rest.get(..rest.find(" 的")?)?.trim();
+    (!model.is_empty()).then_some(model)
 }
 
 fn admin_usage_client_error_fallback_message(item: &StoredRequestUsageAudit) -> Option<String> {
@@ -839,13 +875,12 @@ fn admin_usage_api_format_defaults_to_non_stream(item: &StoredRequestUsageAudit)
         return false;
     };
     matches!(
-        aether_ai_formats::normalize_legacy_openai_format_alias(value).as_str(),
+        aether_ai_formats::normalize_api_format_alias(value).as_str(),
         "openai:chat"
             | "openai:responses"
             | "openai:responses:compact"
             | "openai:image"
-            | "claude:chat"
-            | "claude:cli"
+            | "claude:messages"
     )
 }
 
@@ -2771,6 +2806,44 @@ mod tests {
         let item = StoredRequestUsageAudit {
             execution_path: Some("local_execution_runtime_miss".to_string()),
             local_execution_runtime_miss_reason: Some("candidate_list_empty".to_string()),
+            error_category: Some("http_error".to_string()),
+            client_response_headers: Some(json!({"content-type": "application/json"})),
+            client_response_body: None,
+            client_response_body_ref: Some(
+                "usage://request/req-1/client_response_body".to_string(),
+            ),
+            response_body: None,
+            ..sample_usage("failed", Some(503), Some(message))
+        };
+
+        let payload = build_admin_usage_detail_payload(
+            &item,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+            false,
+            None,
+            false,
+            Some(json!({"model": "gpt-5.4", "stream": true})),
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(
+            payload["client_error"]["message"],
+            "没有可用提供商支持模型 gpt-5.4 的流式请求"
+        );
+        assert_eq!(
+            payload["failure_summary"]["message"],
+            "没有可用提供商支持模型 gpt-5.4 的流式请求"
+        );
+    }
+
+    #[test]
+    fn detail_payload_simplifies_all_candidates_skipped_when_client_body_is_unloaded() {
+        let message = "找到 1 个支持模型 gpt-5.4 的候选提供商，但本次流式请求全部不可用：provider_quota_blocked 2 次（原因代码: all_candidates_skipped）";
+        let item = StoredRequestUsageAudit {
+            execution_path: Some("local_execution_runtime_miss".to_string()),
+            local_execution_runtime_miss_reason: Some("all_candidates_skipped".to_string()),
             error_category: Some("http_error".to_string()),
             client_response_headers: Some(json!({"content-type": "application/json"})),
             client_response_body: None,

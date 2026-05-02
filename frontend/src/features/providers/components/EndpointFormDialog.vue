@@ -51,6 +51,53 @@
                     <Shuffle class="w-3.5 h-3.5" />
                   </Button>
                 </span>
+                <!-- 端点代理 -->
+                <Popover
+                  :open="endpointProxyPopoverOpen[endpoint.id] || false"
+                  @update:open="(open: boolean) => handleEndpointProxyPopoverToggle(endpoint.id, open)"
+                >
+                  <PopoverTrigger as-child>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      class="h-7 w-7"
+                      :class="endpointProxyNodeId(endpoint) ? 'text-blue-500' : ''"
+                      :disabled="savingEndpointId === endpoint.id"
+                      :title="getEndpointProxyTitle(endpoint)"
+                    >
+                      <Globe class="w-3.5 h-3.5" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent
+                    class="w-72 p-3 !z-[90]"
+                    side="bottom"
+                    align="end"
+                  >
+                    <div class="space-y-2">
+                      <div class="flex items-center justify-between">
+                        <span class="text-xs font-medium">端点代理节点</span>
+                        <Button
+                          v-if="endpointProxyNodeId(endpoint)"
+                          variant="ghost"
+                          size="sm"
+                          class="h-6 px-2 text-[10px] text-muted-foreground"
+                          :disabled="savingEndpointId === endpoint.id"
+                          @click="clearEndpointProxy(endpoint)"
+                        >
+                          清除
+                        </Button>
+                      </div>
+                      <ProxyNodeSelect
+                        :model-value="endpointProxyNodeId(endpoint)"
+                        trigger-class="h-8"
+                        @update:model-value="setEndpointProxy(endpoint, $event)"
+                      />
+                      <p class="text-[10px] text-muted-foreground">
+                        {{ endpointProxyNodeId(endpoint) ? '当前使用端点级代理' : '未设置时按提供商代理、系统代理继续兜底' }}
+                      </p>
+                    </div>
+                  </PopoverContent>
+                </Popover>
                 <!-- 上游流式三态按钮 -->
                 <Button
                   variant="ghost"
@@ -823,12 +870,14 @@ import {
   PopoverTrigger,
   PopoverContent,
 } from '@/components/ui'
-import { Settings, Trash2, Check, X, Power, ChevronRight, Plus, Shuffle, RotateCcw, Radio, CheckCircle, Save, Filter, HelpCircle, GripVertical } from 'lucide-vue-next'
+import { Settings, Trash2, Check, X, Power, ChevronRight, Plus, Shuffle, RotateCcw, Radio, CheckCircle, Save, Filter, HelpCircle, GripVertical, Globe } from 'lucide-vue-next'
 import { useToast } from '@/composables/useToast'
 import { parseApiError } from '@/utils/errorParser'
 import { log } from '@/utils/logger'
 import AlertDialog from '@/components/common/AlertDialog.vue'
 import EndpointConditionEditor from './EndpointConditionEditor.vue'
+import ProxyNodeSelect from './ProxyNodeSelect.vue'
+import { useProxyNodesStore } from '@/stores/proxy-nodes'
 import {
   createEndpoint,
   getDefaultBodyRules,
@@ -921,6 +970,7 @@ const formatConversionDisabledTooltip = computed(() => {
 })
 
 const { success, error: showError } = useToast()
+const proxyNodesStore = useProxyNodesStore()
 
 // 规则 Select 的展开状态（与 Collapsible 分开管理）
 const ruleSelectOpen = ref<Record<string, boolean>>({})
@@ -1098,6 +1148,7 @@ const deletingEndpointId = ref<string | null>(null)
 const togglingEndpointId = ref<string | null>(null)
 const togglingFormatEndpointId = ref<string | null>(null)
 const formatSelectOpen = ref(false)
+const endpointProxyPopoverOpen = ref<Record<string, boolean>>({})
 
 // 删除确认弹窗状态
 const deleteConfirmOpen = ref(false)
@@ -1287,10 +1338,6 @@ function hasDefaultBodyRules(apiFormat: string): boolean {
 
 function normalizeLegacyOpenAIFormatAlias(apiFormat: string): string {
   switch (apiFormat.trim().toLowerCase()) {
-    case 'openai:cli':
-      return 'openai:responses'
-    case 'openai:compact':
-      return 'openai:responses:compact'
     default:
       return apiFormat.trim().toLowerCase()
   }
@@ -1334,10 +1381,10 @@ function getDefaultPath(apiFormat: string, baseUrl?: string): string {
   const providerType = (props.provider?.provider_type || '').toLowerCase()
   const normalizedApiFormat = normalizeLegacyOpenAIFormatAlias(apiFormat)
   if (providerType === 'vertex_ai') {
-    if (normalizedApiFormat === 'gemini:chat') {
+    if (normalizedApiFormat === 'gemini:generate_content') {
       return '/v1/publishers/google/models/{model}:{action}'
     }
-    if (normalizedApiFormat === 'claude:chat') {
+    if (normalizedApiFormat === 'claude:messages') {
       return '/v1/projects/{project_id}/locations/{region}/publishers/anthropic/models/{model}:{action}'
     }
   }
@@ -1378,6 +1425,71 @@ function getEndpointUpstreamStreamPolicy(endpoint: ProviderEndpoint): string {
   if (s === 'force_stream' || s === 'stream' || s === 'sse' || s === 'true' || s === '1') return 'force_stream'
   if (s === 'force_non_stream' || s === 'force_sync' || s === 'non_stream' || s === 'sync' || s === 'false' || s === '0') return 'force_non_stream'
   return 'auto'
+}
+
+function endpointProxyNodeId(endpoint: ProviderEndpoint): string {
+  if (endpoint.proxy?.enabled === false) return ''
+  return endpoint.proxy?.node_id?.trim() || ''
+}
+
+function getEndpointProxyNodeName(endpoint: ProviderEndpoint): string {
+  const nodeId = endpointProxyNodeId(endpoint)
+  if (!nodeId) return '未知节点'
+  const node = proxyNodesStore.nodes.find(n => n.id === nodeId)
+  return node ? node.name : `${nodeId.slice(0, 8)}...`
+}
+
+function getEndpointProxyTitle(endpoint: ProviderEndpoint): string {
+  const nodeId = endpointProxyNodeId(endpoint)
+  return nodeId ? `端点代理: ${getEndpointProxyNodeName(endpoint)}` : '设置端点代理节点'
+}
+
+function handleEndpointProxyPopoverToggle(endpointId: string, open: boolean) {
+  endpointProxyPopoverOpen.value[endpointId] = open
+  if (open) {
+    proxyNodesStore.ensureLoaded()
+  }
+}
+
+function replaceLocalEndpoint(updated: ProviderEndpoint) {
+  localEndpoints.value = localEndpoints.value.map(endpoint =>
+    endpoint.id === updated.id ? updated : endpoint,
+  )
+}
+
+async function setEndpointProxy(endpoint: ProviderEndpoint, nodeId: string) {
+  const normalizedNodeId = nodeId.trim()
+  if (!normalizedNodeId) return
+
+  savingEndpointId.value = endpoint.id
+  try {
+    const updated = await updateEndpoint(endpoint.id, {
+      proxy: { node_id: normalizedNodeId, enabled: true },
+    })
+    replaceLocalEndpoint(updated)
+    endpointProxyPopoverOpen.value[endpoint.id] = false
+    success('端点代理已更新')
+    emit('endpointUpdated')
+  } catch (error: unknown) {
+    showError(parseApiError(error, '更新代理失败'), '错误')
+  } finally {
+    savingEndpointId.value = null
+  }
+}
+
+async function clearEndpointProxy(endpoint: ProviderEndpoint) {
+  savingEndpointId.value = endpoint.id
+  try {
+    const updated = await updateEndpoint(endpoint.id, { proxy: null })
+    replaceLocalEndpoint(updated)
+    endpointProxyPopoverOpen.value[endpoint.id] = false
+    success('端点代理已清除')
+    emit('endpointUpdated')
+  } catch (error: unknown) {
+    showError(parseApiError(error, '清除代理失败'), '错误')
+  } finally {
+    savingEndpointId.value = null
+  }
 }
 
 function emptyHeaderRule(): EditableRule {

@@ -1,18 +1,21 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::BTreeMap;
 
+use aether_oauth::provider::providers::KiroProviderOAuthAdapter as CoreKiroProviderOAuthAdapter;
+use aether_oauth::provider::{ProviderOAuthAccount, ProviderOAuthAdapter};
 use async_trait::async_trait;
-use serde_json::{json, Value};
 
 use super::super::oauth_refresh::{
-    CachedOAuthEntry, LocalOAuthHttpExecutor, LocalOAuthHttpRequest, LocalOAuthRefreshAdapter,
-    LocalOAuthRefreshError, LocalResolvedOAuthRequestAuth,
+    oauth_error_to_local_refresh_error, provider_oauth_transport_context_from_snapshot,
+    CachedOAuthEntry, LocalOAuthHttpExecutor, LocalOAuthRefreshAdapter, LocalOAuthRefreshError,
+    LocalResolvedOAuthRequestAuth, ProviderOAuthLocalHttpExecutor,
 };
 use super::super::snapshot::GatewayProviderTransportSnapshot;
 use super::auth::{
     build_kiro_request_auth_from_config, resolve_local_kiro_request_auth, PROVIDER_TYPE,
 };
-use super::credentials::{generate_machine_id, KiroAuthConfig};
+use super::credentials::KiroAuthConfig;
 
+#[cfg(test)]
 const IDC_AMZ_USER_AGENT: &str = "aws-sdk-js/3.738.0 ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#3.738.0 m/E KiroIDE";
 
 #[derive(Debug, Clone, Default)]
@@ -38,39 +41,33 @@ impl KiroOAuthRefreshAdapter {
         transport: &GatewayProviderTransportSnapshot,
         auth_config: &KiroAuthConfig,
     ) -> Result<KiroAuthConfig, LocalOAuthRefreshError> {
-        if auth_config.is_idc_auth() {
-            self.refresh_idc_token(executor, transport, auth_config)
-                .await
-        } else {
-            self.refresh_social_token(executor, transport, auth_config)
-                .await
-        }
-    }
-
-    fn social_refresh_url(&self, auth_config: &KiroAuthConfig) -> String {
-        if let Some(base_url) = self
-            .social_refresh_base_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return format!("{}/refreshToken", base_url.trim_end_matches('/'));
-        }
-        let region = auth_config.effective_auth_region();
-        format!("https://prod.{region}.auth.desktop.kiro.dev/refreshToken")
-    }
-
-    fn idc_refresh_url(&self, auth_config: &KiroAuthConfig) -> String {
-        if let Some(base_url) = self
-            .idc_refresh_base_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return format!("{}/token", base_url.trim_end_matches('/'));
-        }
-        let region = auth_config.effective_auth_region();
-        format!("https://oidc.{region}.amazonaws.com/token")
+        let adapter = CoreKiroProviderOAuthAdapter::default().with_refresh_base_urls(
+            self.social_refresh_base_url.clone(),
+            self.idc_refresh_base_url.clone(),
+        );
+        let oauth_executor =
+            ProviderOAuthLocalHttpExecutor::new(PROVIDER_TYPE, transport, executor);
+        let ctx = provider_oauth_transport_context_from_snapshot(transport);
+        let account = ProviderOAuthAccount {
+            provider_type: PROVIDER_TYPE.to_string(),
+            access_token: auth_config
+                .cached_access_token()
+                .map(ToOwned::to_owned)
+                .unwrap_or_default(),
+            auth_config: auth_config.to_json_value(),
+            expires_at_unix_secs: auth_config.expires_at,
+            identity: BTreeMap::new(),
+        };
+        let refreshed = adapter
+            .refresh(&oauth_executor, &ctx, &account)
+            .await
+            .map_err(|error| oauth_error_to_local_refresh_error(PROVIDER_TYPE, error))?;
+        KiroAuthConfig::from_json_value(&refreshed.auth_config).ok_or_else(|| {
+            LocalOAuthRefreshError::InvalidResponse {
+                provider_type: PROVIDER_TYPE,
+                message: "kiro refresh returned invalid auth_config".to_string(),
+            }
+        })
     }
 
     fn auth_config_from_entry(entry: &CachedOAuthEntry) -> Option<KiroAuthConfig> {
@@ -100,222 +97,6 @@ impl KiroOAuthRefreshAdapter {
             expires_at_unix_secs: auth_config.expires_at,
             metadata: Some(auth_config.to_json_value()),
         })
-    }
-
-    async fn refresh_social_token(
-        &self,
-        executor: &dyn LocalOAuthHttpExecutor,
-        transport: &GatewayProviderTransportSnapshot,
-        auth_config: &KiroAuthConfig,
-    ) -> Result<KiroAuthConfig, LocalOAuthRefreshError> {
-        let url = self.social_refresh_url(auth_config);
-        let host = reqwest::Url::parse(&url)
-            .ok()
-            .and_then(|value| value.host_str().map(ToOwned::to_owned))
-            .unwrap_or_else(|| {
-                format!(
-                    "prod.{}.auth.desktop.kiro.dev",
-                    auth_config.effective_auth_region()
-                )
-            });
-        let machine_id = generate_machine_id(auth_config, None).ok_or_else(|| {
-            LocalOAuthRefreshError::InvalidResponse {
-                provider_type: PROVIDER_TYPE,
-                message: "missing machine_id seed for social refresh".to_string(),
-            }
-        })?;
-        let kiro_version = auth_config.effective_kiro_version();
-        let user_agent = build_kiro_ide_tag(kiro_version, &machine_id);
-        let response = executor
-            .execute(
-                PROVIDER_TYPE,
-                transport,
-                &LocalOAuthHttpRequest {
-                    request_id: "provider-oauth:kiro-social-refresh",
-                    method: reqwest::Method::POST,
-                    url,
-                    headers: std::collections::BTreeMap::from([
-                        ("user-agent".to_string(), user_agent),
-                        ("host".to_string(), host),
-                        (
-                            "accept".to_string(),
-                            "application/json, text/plain, */*".to_string(),
-                        ),
-                        ("content-type".to_string(), "application/json".to_string()),
-                        ("connection".to_string(), "close".to_string()),
-                        (
-                            "accept-encoding".to_string(),
-                            "gzip, compress, deflate, br".to_string(),
-                        ),
-                    ]),
-                    json_body: Some(json!({
-                        "refreshToken": auth_config
-                            .refresh_token
-                            .as_deref()
-                            .map(str::trim)
-                            .unwrap_or_default()
-                    })),
-                    body_bytes: None,
-                },
-            )
-            .await?;
-
-        let status = reqwest::StatusCode::from_u16(response.status_code).unwrap_or_default();
-        let body = response.body_text;
-        if !status.is_success() {
-            return Err(LocalOAuthRefreshError::HttpStatus {
-                provider_type: PROVIDER_TYPE,
-                status_code: status.as_u16(),
-                body_excerpt: truncate_body(&body),
-            });
-        }
-
-        let payload: Value =
-            serde_json::from_str(&body).map_err(|_| LocalOAuthRefreshError::InvalidResponse {
-                provider_type: PROVIDER_TYPE,
-                message: "social refresh returned non-json body".to_string(),
-            })?;
-        let access_token = payload
-            .get("accessToken")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| LocalOAuthRefreshError::InvalidResponse {
-                provider_type: PROVIDER_TYPE,
-                message: "social refresh returned empty accessToken".to_string(),
-            })?;
-
-        let mut refreshed = auth_config.clone();
-        refreshed.access_token = Some(access_token.to_string());
-        refreshed.expires_at = Some(resolve_expires_at(&payload));
-        if refreshed
-            .machine_id
-            .as_deref()
-            .map(str::trim)
-            .is_none_or(|value| value.is_empty())
-        {
-            refreshed.machine_id = Some(machine_id);
-        }
-        if let Some(refresh_token) = payload
-            .get("refreshToken")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            refreshed.refresh_token = Some(refresh_token.to_string());
-        }
-        if let Some(profile_arn) = payload
-            .get("profileArn")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            refreshed.profile_arn = Some(profile_arn.to_string());
-        }
-
-        Ok(refreshed)
-    }
-
-    async fn refresh_idc_token(
-        &self,
-        executor: &dyn LocalOAuthHttpExecutor,
-        transport: &GatewayProviderTransportSnapshot,
-        auth_config: &KiroAuthConfig,
-    ) -> Result<KiroAuthConfig, LocalOAuthRefreshError> {
-        let url = self.idc_refresh_url(auth_config);
-        let host = reqwest::Url::parse(&url)
-            .ok()
-            .and_then(|value| value.host_str().map(ToOwned::to_owned))
-            .unwrap_or_else(|| {
-                format!("oidc.{}.amazonaws.com", auth_config.effective_auth_region())
-            });
-        let response = executor
-            .execute(
-                PROVIDER_TYPE,
-                transport,
-                &LocalOAuthHttpRequest {
-                    request_id: "provider-oauth:kiro-idc-refresh",
-                    method: reqwest::Method::POST,
-                    url,
-                    headers: std::collections::BTreeMap::from([
-                        ("content-type".to_string(), "application/json".to_string()),
-                        ("host".to_string(), host),
-                        (
-                            "x-amz-user-agent".to_string(),
-                            IDC_AMZ_USER_AGENT.to_string(),
-                        ),
-                        ("user-agent".to_string(), "node".to_string()),
-                        ("accept".to_string(), "*/*".to_string()),
-                    ]),
-                    json_body: Some(json!({
-                        "clientId": auth_config
-                            .client_id
-                            .as_deref()
-                            .map(str::trim)
-                            .unwrap_or_default(),
-                        "clientSecret": auth_config
-                            .client_secret
-                            .as_deref()
-                            .map(str::trim)
-                            .unwrap_or_default(),
-                        "refreshToken": auth_config
-                            .refresh_token
-                            .as_deref()
-                            .map(str::trim)
-                            .unwrap_or_default(),
-                        "grantType": "refresh_token"
-                    })),
-                    body_bytes: None,
-                },
-            )
-            .await?;
-
-        let status = reqwest::StatusCode::from_u16(response.status_code).unwrap_or_default();
-        let body = response.body_text;
-        if !status.is_success() {
-            return Err(LocalOAuthRefreshError::HttpStatus {
-                provider_type: PROVIDER_TYPE,
-                status_code: status.as_u16(),
-                body_excerpt: truncate_body(&body),
-            });
-        }
-
-        let payload: Value =
-            serde_json::from_str(&body).map_err(|_| LocalOAuthRefreshError::InvalidResponse {
-                provider_type: PROVIDER_TYPE,
-                message: "idc refresh returned non-json body".to_string(),
-            })?;
-        let access_token = payload
-            .get("accessToken")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| LocalOAuthRefreshError::InvalidResponse {
-                provider_type: PROVIDER_TYPE,
-                message: "idc refresh returned empty accessToken".to_string(),
-            })?;
-
-        let mut refreshed = auth_config.clone();
-        refreshed.access_token = Some(access_token.to_string());
-        refreshed.expires_at = Some(resolve_expires_at(&payload));
-        if refreshed
-            .machine_id
-            .as_deref()
-            .map(str::trim)
-            .is_none_or(|value| value.is_empty())
-        {
-            refreshed.machine_id = generate_machine_id(auth_config, None);
-        }
-        if let Some(refresh_token) = payload
-            .get("refreshToken")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            refreshed.refresh_token = Some(refresh_token.to_string());
-        }
-
-        Ok(refreshed)
     }
 
     fn refreshable_auth_config(
@@ -374,51 +155,11 @@ impl LocalOAuthRefreshAdapter for KiroOAuthRefreshAdapter {
         let Some(auth_config) = self.refreshable_auth_config(transport, entry) else {
             return Ok(None);
         };
-        let refreshed = if auth_config.is_idc_auth() {
-            self.refresh_idc_token(executor, transport, &auth_config)
-                .await?
-        } else {
-            self.refresh_social_token(executor, transport, &auth_config)
-                .await?
-        };
+        let refreshed = self
+            .refresh_auth_config(executor, transport, &auth_config)
+            .await?;
         Ok(Self::build_cached_entry(&refreshed))
     }
-}
-
-fn build_kiro_ide_tag(kiro_version: &str, machine_id: &str) -> String {
-    if machine_id.trim().is_empty() {
-        format!("KiroIDE-{kiro_version}")
-    } else {
-        format!("KiroIDE-{kiro_version}-{machine_id}")
-    }
-}
-
-fn resolve_expires_at(payload: &Value) -> u64 {
-    let expires_in = payload
-        .get("expiresIn")
-        .and_then(|value| {
-            value
-                .as_u64()
-                .or_else(|| value.as_str()?.parse::<u64>().ok())
-        })
-        .unwrap_or(3600);
-    current_unix_secs().saturating_add(expires_in)
-}
-
-fn current_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|value| value.as_secs())
-        .unwrap_or_default()
-}
-
-fn truncate_body(body: &str) -> String {
-    let body = body.trim();
-    if body.is_empty() {
-        return String::from("-");
-    }
-    body.chars().take(500).collect()
 }
 
 #[cfg(test)]
@@ -471,7 +212,7 @@ mod tests {
             endpoint: GatewayProviderTransportEndpoint {
                 id: "endpoint-1".to_string(),
                 provider_id: "provider-1".to_string(),
-                api_format: "claude:cli".to_string(),
+                api_format: "claude:messages".to_string(),
                 api_family: Some("claude".to_string()),
                 endpoint_kind: Some("cli".to_string()),
                 is_active: true,
@@ -490,7 +231,10 @@ mod tests {
                 name: "key".to_string(),
                 auth_type: "bearer".to_string(),
                 is_active: true,
-                api_formats: Some(vec!["claude:cli".to_string()]),
+                api_formats: Some(vec!["claude:messages".to_string()]),
+                auth_type_by_format: None,
+                allow_auth_channel_mismatch_formats: None,
+
                 allowed_models: None,
                 capabilities: None,
                 rate_multipliers: None,

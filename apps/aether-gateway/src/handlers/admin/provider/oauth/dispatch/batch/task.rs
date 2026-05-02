@@ -5,6 +5,9 @@ use super::execution::{
 use super::parse::{
     build_admin_provider_oauth_batch_task_state, parse_admin_provider_oauth_batch_import_request,
 };
+use super::progress::{
+    AdminProviderOAuthBatchImportProgress, AdminProviderOAuthBatchProgressReporter,
+};
 use crate::handlers::admin::provider::oauth::errors::build_internal_control_error_response;
 use crate::handlers::admin::provider::oauth::state::{
     admin_provider_oauth_template, build_admin_provider_oauth_backend_unavailable_response,
@@ -25,6 +28,55 @@ use tokio::task;
 use uuid::Uuid;
 
 const PROVIDER_OAUTH_BATCH_TASK_MAX_ERROR_SAMPLES: usize = 20;
+
+struct BatchTaskProgressReporter {
+    app: crate::AppState,
+    task_id: String,
+    provider_id: String,
+    provider_type: String,
+    created_at: u64,
+    started_at: u64,
+    error_samples: Vec<serde_json::Value>,
+}
+
+#[async_trait::async_trait]
+impl AdminProviderOAuthBatchProgressReporter for BatchTaskProgressReporter {
+    async fn report(&mut self, progress: AdminProviderOAuthBatchImportProgress) {
+        if let Some(latest_result) = progress.latest_result.as_ref() {
+            if latest_result
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                == Some("error")
+                && self.error_samples.len() < PROVIDER_OAUTH_BATCH_TASK_MAX_ERROR_SAMPLES
+            {
+                self.error_samples.push(latest_result.clone());
+            }
+        }
+
+        let message = format!("处理中 {}/{}", progress.processed, progress.total);
+        let progress_state = build_admin_provider_oauth_batch_task_state(
+            &self.task_id,
+            &self.provider_id,
+            &self.provider_type,
+            "processing",
+            progress.total,
+            progress.processed,
+            progress.success,
+            progress.failed,
+            progress.created_count,
+            progress.replaced_count,
+            Some(message.as_str()),
+            None,
+            self.error_samples.clone(),
+            self.created_at,
+            Some(self.started_at),
+            None,
+        );
+        let _ = AdminAppState::new(&self.app)
+            .save_provider_oauth_batch_task_payload(&self.task_id, &progress_state)
+            .await;
+    }
+}
 
 pub(in super::super) async fn handle_admin_provider_oauth_start_batch_import_task(
     state: &AdminAppState<'_>,
@@ -149,12 +201,22 @@ pub(in super::super) async fn handle_admin_provider_oauth_start_batch_import_tas
             .save_provider_oauth_batch_task_payload(&task_id_for_worker, &processing_state)
             .await;
 
+        let mut progress_reporter = BatchTaskProgressReporter {
+            app: task_state.clone(),
+            task_id: task_id_for_worker.clone(),
+            provider_id: provider_id_for_worker.clone(),
+            provider_type: provider_type_for_worker.clone(),
+            created_at,
+            started_at,
+            error_samples: Vec::new(),
+        };
         match execute_admin_provider_oauth_batch_import_for_provider_type(
             &AdminAppState::new(&task_state),
             &provider_id_for_worker,
             &provider_type_for_worker,
             raw_credentials.as_str(),
             proxy_node_id.as_deref(),
+            Some(&mut progress_reporter),
         )
         .await
         {

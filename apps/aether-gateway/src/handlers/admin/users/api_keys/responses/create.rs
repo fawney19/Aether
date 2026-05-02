@@ -171,7 +171,8 @@ pub(crate) async fn build_admin_create_user_api_key_response(
             "rate_limit": created.rate_limit,
             "concurrent_limit": created.concurrent_limit,
             "expires_at": format_optional_unix_secs_iso8601(created.expires_at_unix_secs),
-            "created_at": chrono::Utc::now().to_rfc3339(),
+            "last_used_at": format_optional_unix_secs_iso8601(created.last_used_at_unix_secs),
+            "created_at": format_optional_unix_secs_iso8601(created.created_at_unix_secs),
             "message": "API Key创建成功，请妥善保存完整密钥",
         }))
         .into_response(),

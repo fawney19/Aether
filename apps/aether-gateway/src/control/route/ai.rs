@@ -1,6 +1,6 @@
 use super::{
-    classified, is_claude_cli_request, is_gemini_cli_request, is_gemini_models_route,
-    is_gemini_operation_route, ClassifiedRoute,
+    classified, classified_with_request_auth_channel, is_claude_cli_request, is_gemini_cli_request,
+    is_gemini_models_route, is_gemini_operation_route, ClassifiedRoute,
 };
 
 pub(super) fn classify_ai_public_route(
@@ -54,21 +54,23 @@ pub(super) fn classify_ai_public_route(
             "ai_public",
             "claude",
             "count_tokens",
-            "claude:chat",
+            "claude:messages",
             false,
         ))
     } else if method == http::Method::POST && normalized_path == "/v1/messages" {
-        if is_claude_cli_request(headers) {
-            Some(classified("ai_public", "claude", "cli", "claude:cli", true))
+        let request_auth_channel = if is_claude_cli_request(headers) {
+            "bearer_like"
         } else {
-            Some(classified(
-                "ai_public",
-                "claude",
-                "chat",
-                "claude:chat",
-                true,
-            ))
-        }
+            "api_key"
+        };
+        Some(classified_with_request_auth_channel(
+            "ai_public",
+            "claude",
+            "messages",
+            request_auth_channel,
+            "claude:messages",
+            true,
+        ))
     } else if normalized_path.starts_with("/v1/videos") {
         Some(classified(
             "ai_public",
@@ -87,13 +89,21 @@ pub(super) fn classify_ai_public_route(
                 true,
             ))
         } else if is_gemini_cli_request(headers) {
-            Some(classified("ai_public", "gemini", "cli", "gemini:cli", true))
-        } else {
-            Some(classified(
+            Some(classified_with_request_auth_channel(
                 "ai_public",
                 "gemini",
-                "chat",
-                "gemini:chat",
+                "generate_content",
+                "bearer_like",
+                "gemini:generate_content",
+                true,
+            ))
+        } else {
+            Some(classified_with_request_auth_channel(
+                "ai_public",
+                "gemini",
+                "generate_content",
+                "api_key",
+                "gemini:generate_content",
                 true,
             ))
         }
@@ -112,7 +122,7 @@ pub(super) fn classify_ai_public_route(
             "ai_public",
             "gemini",
             "files",
-            "gemini:chat",
+            "gemini:files",
             true,
         ))
     } else {

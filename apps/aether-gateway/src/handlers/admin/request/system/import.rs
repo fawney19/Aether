@@ -250,20 +250,18 @@ fn apply_imported_oauth_key_credentials(
     record: &mut aether_data_contracts::repository::provider_catalog::StoredProviderCatalogKey,
 ) -> Result<(), String> {
     if let Some(api_key_value) = raw_key.get("api_key") {
-        let plaintext = match api_key_value {
-            Value::String(raw) => {
-                let trimmed = raw.trim();
-                if trimmed.is_empty() {
-                    "__placeholder__"
-                } else {
-                    trimmed
-                }
-            }
-            _ => "__placeholder__",
+        let plaintext = api_key_value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        record.encrypted_api_key = match plaintext {
+            Some(plaintext) => Some(
+                state
+                    .encrypt_catalog_secret_with_fallbacks(plaintext)
+                    .ok_or_else(|| "gateway 未配置 provider key 加密密钥".to_string())?,
+            ),
+            None => None,
         };
-        record.encrypted_api_key = state
-            .encrypt_catalog_secret_with_fallbacks(plaintext)
-            .ok_or_else(|| "gateway 未配置 provider key 加密密钥".to_string())?;
     }
 
     if raw_key.contains_key("auth_config") {
@@ -1118,14 +1116,15 @@ impl<'a> AdminAppState<'a> {
                         .filter(|value| !value.is_empty())
                         .map(ToOwned::to_owned);
                     existing_keys.iter().position(|existing_key| {
+                        let decrypted_existing = existing_key
+                            .encrypted_api_key
+                            .as_deref()
+                            .and_then(|ciphertext| {
+                                self.decrypt_catalog_secret_with_fallbacks(ciphertext)
+                            });
                         target_key
                             .as_deref()
-                            .zip(
-                                self.decrypt_catalog_secret_with_fallbacks(
-                                    &existing_key.encrypted_api_key,
-                                )
-                                .as_deref(),
-                            )
+                            .zip(decrypted_existing.as_deref())
                             .is_some_and(|(target, decrypted)| decrypted == target)
                     })
                 } else if matches!(auth_type.as_str(), "service_account" | "vertex_ai") {

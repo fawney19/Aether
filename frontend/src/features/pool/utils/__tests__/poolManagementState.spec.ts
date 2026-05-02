@@ -37,6 +37,8 @@ describe('poolManagementState', () => {
         status: 'cooldown',
         page: 5,
         pageSize: 20,
+        sortBy: 'last_used_at',
+        sortOrder: 'asc',
       },
       storage,
     )
@@ -48,6 +50,8 @@ describe('poolManagementState', () => {
         status: 'inactive',
         page: '3',
         pageSize: '100',
+        sortBy: 'imported_at',
+        sortOrder: 'desc',
       },
       storage,
     )
@@ -58,6 +62,8 @@ describe('poolManagementState', () => {
       status: 'inactive',
       page: 3,
       pageSize: 100,
+      sortBy: 'imported_at',
+      sortOrder: 'desc',
     })
   })
 
@@ -69,6 +75,8 @@ describe('poolManagementState', () => {
         status: 'active',
         page: 2,
         pageSize: 50,
+        sortBy: 'last_used_at',
+        sortOrder: 'asc',
       },
       storage,
     )
@@ -81,6 +89,8 @@ describe('poolManagementState', () => {
       status: 'active',
       page: 2,
       pageSize: 50,
+      sortBy: 'last_used_at',
+      sortOrder: 'asc',
     })
   })
 
@@ -92,6 +102,8 @@ describe('poolManagementState', () => {
         status: 'all',
         page: 1,
         pageSize: 50,
+        sortBy: null,
+        sortOrder: 'desc',
       }),
     ).toEqual({
       providerId: 'provider-d',
@@ -99,6 +111,25 @@ describe('poolManagementState', () => {
       status: undefined,
       page: undefined,
       pageSize: undefined,
+      sortBy: undefined,
+      sortOrder: undefined,
+    })
+  })
+
+  it('keeps sortable column state in query patch', () => {
+    expect(
+      buildPoolManagementQueryPatch({
+        providerId: 'provider-e',
+        search: '',
+        status: 'all',
+        page: 1,
+        pageSize: 50,
+        sortBy: 'last_used_at',
+        sortOrder: 'asc',
+      }),
+    ).toMatchObject({
+      sortBy: 'last_used_at',
+      sortOrder: 'asc',
     })
   })
 

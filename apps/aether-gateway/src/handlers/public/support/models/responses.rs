@@ -9,7 +9,7 @@ use serde_json::json;
 
 pub(crate) fn build_models_auth_error_response(api_format: &str) -> Response<Body> {
     match api_format {
-        "claude:chat" => (
+        "claude:messages" => (
             http::StatusCode::UNAUTHORIZED,
             Json(json!({
                 "type": "error",
@@ -20,7 +20,7 @@ pub(crate) fn build_models_auth_error_response(api_format: &str) -> Response<Bod
             })),
         )
             .into_response(),
-        "gemini:chat" => (
+        "gemini:generate_content" => (
             http::StatusCode::UNAUTHORIZED,
             Json(json!({
                 "error": {
@@ -48,7 +48,7 @@ pub(crate) fn build_models_auth_error_response(api_format: &str) -> Response<Bod
 
 pub(super) fn build_models_not_found_response(model_id: &str, api_format: &str) -> Response<Body> {
     match api_format {
-        "claude:chat" => (
+        "claude:messages" => (
             http::StatusCode::NOT_FOUND,
             Json(json!({
                 "type": "error",
@@ -59,7 +59,7 @@ pub(super) fn build_models_not_found_response(model_id: &str, api_format: &str) 
             })),
         )
             .into_response(),
-        "gemini:chat" => (
+        "gemini:generate_content" => (
             http::StatusCode::NOT_FOUND,
             Json(json!({
                 "error": {
@@ -87,14 +87,14 @@ pub(super) fn build_models_not_found_response(model_id: &str, api_format: &str) 
 
 pub(super) fn build_empty_models_list_response(api_format: &str) -> Response<Body> {
     match api_format {
-        "claude:chat" => Json(json!({
+        "claude:messages" => Json(json!({
             "data": [],
             "has_more": false,
             "first_id": serde_json::Value::Null,
             "last_id": serde_json::Value::Null,
         }))
         .into_response(),
-        "gemini:chat" => Json(json!({ "models": [] })).into_response(),
+        "gemini:generate_content" => Json(json!({ "models": [] })).into_response(),
         _ => Json(json!({ "object": "list", "data": [] })).into_response(),
     }
 }

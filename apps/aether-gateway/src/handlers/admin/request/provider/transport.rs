@@ -4,6 +4,17 @@ use serde_json::{Map, Value};
 use url::Url;
 
 impl<'a> AdminAppState<'a> {
+    pub(crate) async fn read_provider_transport_snapshot_uncached(
+        &self,
+        provider_id: &str,
+        endpoint_id: &str,
+        key_id: &str,
+    ) -> Result<Option<AdminGatewayProviderTransportSnapshot>, GatewayError> {
+        self.app
+            .read_provider_transport_snapshot_uncached(provider_id, endpoint_id, key_id)
+            .await
+    }
+
     pub(crate) async fn read_provider_transport_snapshot(
         &self,
         provider_id: &str,

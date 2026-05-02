@@ -1075,7 +1075,8 @@ fn admin_provider_write_uses_specific_local_owners() {
     for pattern in [
         "pub(crate) async fn build_admin_create_provider_key_record(",
         "crate::handlers::admin::provider::write::normalize::{",
-        "normalize_auth_type, validate_vertex_api_formats,",
+        "normalize_auth_type,",
+        "validate_vertex_api_formats,",
         "normalize_json_object, normalize_string_list,",
     ] {
         assert!(
@@ -1102,7 +1103,8 @@ fn admin_provider_write_uses_specific_local_owners() {
     for pattern in [
         "pub(crate) async fn build_admin_update_provider_key_record(",
         "crate::handlers::admin::provider::write::normalize::{",
-        "normalize_auth_type, validate_vertex_api_formats,",
+        "normalize_auth_type,",
+        "validate_vertex_api_formats,",
         "encrypt_catalog_secret_with_fallbacks, json_string_list,",
         "normalize_json_object, normalize_string_list,",
     ] {

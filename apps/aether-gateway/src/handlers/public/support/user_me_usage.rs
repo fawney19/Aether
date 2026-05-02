@@ -213,13 +213,12 @@ fn users_me_usage_api_format_defaults_to_non_stream(item: &StoredRequestUsageAud
         return false;
     };
     matches!(
-        crate::ai_pipeline::normalize_legacy_openai_format_alias(value).as_str(),
+        crate::ai_serving::normalize_api_format_alias(value).as_str(),
         "openai:chat"
             | "openai:responses"
             | "openai:responses:compact"
             | "openai:image"
-            | "claude:chat"
-            | "claude:cli"
+            | "claude:messages"
     )
 }
 
@@ -1347,9 +1346,9 @@ mod tests {
         let item = StoredRequestUsageAudit {
             provider_name: "Claude".to_string(),
             model: "claude-sonnet-4-5".to_string(),
-            api_format: Some("claude:chat".to_string()),
+            api_format: Some("claude:messages".to_string()),
             api_family: Some("claude".to_string()),
-            endpoint_api_format: Some("claude:chat".to_string()),
+            endpoint_api_format: Some("claude:messages".to_string()),
             provider_api_family: Some("claude".to_string()),
             input_tokens: 4941,
             output_tokens: 973,

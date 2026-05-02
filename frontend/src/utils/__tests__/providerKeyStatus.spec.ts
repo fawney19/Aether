@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 
 import {
   getAccountStatusDisplay,
+  getOAuthRefreshButtonTitle,
   getOAuthStatusDisplay,
+  getOAuthStatusDisplayWithFallback,
   getOAuthStatusTitle,
 } from '@/utils/providerKeyStatus'
 
@@ -154,5 +156,51 @@ describe('providerKeyStatus', () => {
       oauth_managed: true,
       oauth_expires_at: future,
     }, 0)).toContain('Token 剩余有效期:')
+  })
+
+  it('shows missing refresh token state for access-token-only oauth credentials', () => {
+    const input = {
+      auth_type: 'oauth',
+      oauth_managed: true,
+      oauth_temporary: true,
+    }
+
+    expect(getOAuthStatusDisplay(input, 0)).toBeNull()
+    expect(getOAuthStatusDisplayWithFallback(input, 0)).toEqual({
+      text: '未添加',
+      isExpired: false,
+      isExpiringSoon: false,
+      isInvalid: false,
+    })
+    expect(getOAuthStatusTitle(input, 0)).toBe('Refresh Token 未添加，无法自动刷新')
+    expect(getOAuthRefreshButtonTitle(input, 0)).toBe('仅 Access Token 导入，无法自动刷新，到期后需要重新导入')
+  })
+
+  it('does not show invalid oauth state when refresh token is missing', () => {
+    const input = {
+      auth_type: 'oauth',
+      oauth_managed: true,
+      oauth_temporary: true,
+      status_snapshot: {
+        oauth: {
+          code: 'invalid',
+          reason: 'missing_refresh_token',
+          requires_reauth: true,
+        },
+        account: {
+          code: 'ok',
+          blocked: false,
+        },
+        quota: { code: 'ok', exhausted: false },
+      },
+    }
+
+    expect(getOAuthStatusDisplayWithFallback(input, 0)).toEqual({
+      text: '未添加',
+      isExpired: false,
+      isExpiringSoon: false,
+      isInvalid: false,
+    })
+    expect(getOAuthStatusTitle(input, 0)).toBe('Refresh Token 未添加，无法自动刷新')
   })
 })

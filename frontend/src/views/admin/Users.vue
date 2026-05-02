@@ -106,44 +106,48 @@
             <div class="h-4 w-px bg-border" />
 
             <!-- 角色筛选 -->
-            <Select
-              v-model="filterRole"
-            >
-              <SelectTrigger class="w-32 h-8 text-xs border-border/60">
-                <SelectValue placeholder="全部角色" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">
-                  全部角色
-                </SelectItem>
-                <SelectItem value="admin">
-                  管理员
-                </SelectItem>
-                <SelectItem value="user">
-                  普通用户
-                </SelectItem>
-              </SelectContent>
-            </Select>
+            <div class="xl:hidden">
+              <Select
+                v-model="filterRole"
+              >
+                <SelectTrigger class="w-32 h-8 text-xs border-border/60">
+                  <SelectValue placeholder="全部角色" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">
+                    全部角色
+                  </SelectItem>
+                  <SelectItem value="admin">
+                    管理员
+                  </SelectItem>
+                  <SelectItem value="user">
+                    普通用户
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
 
             <!-- 状态筛选 -->
-            <Select
-              v-model="filterStatus"
-            >
-              <SelectTrigger class="w-28 h-8 text-xs border-border/60">
-                <SelectValue placeholder="全部状态" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">
-                  全部状态
-                </SelectItem>
-                <SelectItem value="active">
-                  活跃
-                </SelectItem>
-                <SelectItem value="inactive">
-                  禁用
-                </SelectItem>
-              </SelectContent>
-            </Select>
+            <div class="xl:hidden">
+              <Select
+                v-model="filterStatus"
+              >
+                <SelectTrigger class="w-28 h-8 text-xs border-border/60">
+                  <SelectValue placeholder="全部状态" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">
+                    全部状态
+                  </SelectItem>
+                  <SelectItem value="active">
+                    活跃
+                  </SelectItem>
+                  <SelectItem value="inactive">
+                    禁用
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
 
             <!-- 分隔线 -->
             <div class="h-4 w-px bg-border" />
@@ -173,9 +177,23 @@
         <Table>
           <TableHeader>
             <TableRow class="border-b border-border/60 hover:bg-transparent">
-              <TableHead class="w-[260px] h-12 font-semibold">
+              <SortableTableHead
+                class="w-[260px] h-12 font-semibold"
+                column-key="role"
+                :sortable="false"
+                :filter-active="filterRole !== 'all'"
+                filter-title="筛选角色"
+                filter-content-class="w-40 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
+              >
                 用户信息
-              </TableHead>
+                <template #filter="{ close }">
+                  <TableFilterMenu
+                    v-model="filterRole"
+                    :options="userRoleFilterOptions"
+                    @select="close"
+                  />
+                </template>
+              </SortableTableHead>
               <TableHead class="w-[240px] h-12 font-semibold">
                 钱包
               </TableHead>
@@ -185,9 +203,23 @@
               <TableHead class="w-[110px] h-12 font-semibold">
                 创建时间
               </TableHead>
-              <TableHead class="w-[180px] h-12 font-semibold">
+              <SortableTableHead
+                class="w-[180px] h-12 font-semibold"
+                column-key="status"
+                :sortable="false"
+                :filter-active="filterStatus !== 'all'"
+                filter-title="筛选状态"
+                filter-content-class="w-40 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
+              >
                 状态
-              </TableHead>
+                <template #filter="{ close }">
+                  <TableFilterMenu
+                    v-model="filterStatus"
+                    :options="userStatusFilterOptions"
+                    @select="close"
+                  />
+                </template>
+              </SortableTableHead>
               <TableHead class="w-[220px] h-12 font-semibold text-center">
                 操作
               </TableHead>
@@ -1055,6 +1087,8 @@ import {
   TableBody,
   TableRow,
   TableHead,
+  SortableTableHead,
+  TableFilterMenu,
   TableCell,
   Avatar,
   AvatarFallback,
@@ -1125,6 +1159,16 @@ const walletActionTarget = ref<{ user: User; wallet: AdminWallet } | null>(null)
 const searchQuery = ref('')
 const filterRole = ref('all')
 const filterStatus = ref('all')
+const userRoleFilterOptions = [
+  { value: 'all', label: '全部角色' },
+  { value: 'admin', label: '管理员' },
+  { value: 'user', label: '普通用户' },
+]
+const userStatusFilterOptions = [
+  { value: 'all', label: '全部状态' },
+  { value: 'active', label: '活跃' },
+  { value: 'inactive', label: '禁用' },
+]
 
 const currentPage = ref(1)
 const pageSize = ref(20)

@@ -57,14 +57,8 @@ const fn decision_from_classification(
     match classification {
         LocalFailoverClassification::UseDefault => LocalFailoverDecision::UseDefault,
         LocalFailoverClassification::StopStatusCode
-        | LocalFailoverClassification::StopErrorPattern
-        | LocalFailoverClassification::StopSemanticClientError => {
-            LocalFailoverDecision::StopLocalFailover
-        }
+        | LocalFailoverClassification::StopErrorPattern => LocalFailoverDecision::StopLocalFailover,
         LocalFailoverClassification::RetrySuccessPattern
-        | LocalFailoverClassification::RetrySemanticCompatibilityError
-        | LocalFailoverClassification::RetrySemanticRateLimit
-        | LocalFailoverClassification::RetrySemanticThinkingError
         | LocalFailoverClassification::RetryStatusCode
         | LocalFailoverClassification::RetryUpstreamFailure => {
             LocalFailoverDecision::RetryNextCandidate
@@ -104,7 +98,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_maps_semantic_client_error_to_stop_failover() {
+    fn recovery_retries_default_client_error_without_custom_rule() {
         assert_eq!(
             recover_local_failover_decision(
                 &LocalFailoverPolicy::default(),
@@ -113,12 +107,12 @@ mod tests {
                     Some("{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long\"}}")
                 )
             ),
-            LocalFailoverDecision::StopLocalFailover
+            LocalFailoverDecision::RetryNextCandidate
         );
     }
 
     #[test]
-    fn recovery_maps_semantic_thinking_error_to_retry_next_candidate() {
+    fn recovery_retries_any_error_status_without_custom_rule() {
         assert_eq!(
             recover_local_failover_decision(
                 &LocalFailoverPolicy::default(),
@@ -144,7 +138,7 @@ mod tests {
         assert_eq!(analysis.decision, LocalFailoverDecision::RetryNextCandidate);
         assert_eq!(
             analysis.classification,
-            LocalFailoverClassification::RetrySemanticCompatibilityError
+            LocalFailoverClassification::RetryUpstreamFailure
         );
     }
 }

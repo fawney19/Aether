@@ -90,17 +90,17 @@ pub(super) async fn maybe_build_local_test_connection_route_response(
     } else {
         let endpoint = active_endpoints.into_iter().next()?;
         let format_value = if endpoint.api_format.trim().is_empty() {
-            "claude:chat".to_string()
+            "claude:messages".to_string()
         } else {
-            endpoint.api_format.clone()
+            crate::ai_serving::normalize_api_format_alias(&endpoint.api_format)
         };
         (endpoint, format_value)
     };
 
-    let format_value = format_value.trim().to_string();
+    let format_value = crate::ai_serving::normalize_api_format_alias(&format_value);
     if !matches!(
         format_value.as_str(),
-        "openai:chat" | "claude:chat" | "gemini:chat"
+        "openai:chat" | "claude:messages" | "gemini:generate_content"
     ) {
         return None;
     }
@@ -169,12 +169,12 @@ pub(super) async fn maybe_build_local_test_connection_route_response(
     }
 
     let mut provider_request_body = match format_value.as_str() {
-        "openai:chat" | "claude:chat" => json!({
+        "openai:chat" | "claude:messages" => json!({
             "model": model,
             "messages": [{"role": "user", "content": "Health check"}],
             "max_tokens": 5,
         }),
-        "gemini:chat" => json!({
+        "gemini:generate_content" => json!({
             "contents": [{
                 "role": "user",
                 "parts": [{"text": "Health check"}],
@@ -194,7 +194,7 @@ pub(super) async fn maybe_build_local_test_connection_route_response(
     }
 
     let oauth_auth = match format_value.as_str() {
-        "openai:chat" | "claude:chat" => {
+        "openai:chat" | "claude:messages" => {
             match state.resolve_local_oauth_request_auth(&transport).await {
                 Ok(Some(crate::provider_transport::LocalResolvedOAuthRequestAuth::Header {
                     name,
@@ -211,9 +211,13 @@ pub(super) async fn maybe_build_local_test_connection_route_response(
             crate::provider_transport::auth::resolve_local_openai_bearer_auth(&transport)
                 .or(oauth_auth.clone())
         }
-        "claude:chat" => crate::provider_transport::auth::resolve_local_standard_auth(&transport)
-            .or(oauth_auth.clone()),
-        "gemini:chat" => crate::provider_transport::auth::resolve_local_gemini_auth(&transport),
+        "claude:messages" => {
+            crate::provider_transport::auth::resolve_local_standard_auth(&transport)
+                .or(oauth_auth.clone())
+        }
+        "gemini:generate_content" => {
+            crate::provider_transport::auth::resolve_local_gemini_auth(&transport)
+        }
         _ => None,
     };
     let Some((auth_header, auth_value)) = auth else {
@@ -238,22 +242,23 @@ pub(super) async fn maybe_build_local_test_connection_route_response(
         return None;
     };
 
-    let mut provider_request_headers = BTreeMap::from([
-        ("content-type".to_string(), "application/json".to_string()),
-        (auth_header.clone(), auth_value.clone()),
-    ]);
+    let mut provider_request_headers =
+        BTreeMap::from([("content-type".to_string(), "application/json".to_string())]);
+    if !auth_header.trim().is_empty() && !auth_value.trim().is_empty() {
+        provider_request_headers.insert(auth_header.clone(), auth_value.clone());
+    }
     if uses_vertex_query_auth {
         provider_request_headers.remove("x-goog-api-key");
     }
-    let protected_headers = if uses_vertex_query_auth {
-        &["content-type"][..]
+    let protected_headers = if uses_vertex_query_auth || auth_value.trim().is_empty() {
+        vec!["content-type"]
     } else {
-        &[auth_header.as_str(), "content-type"][..]
+        vec![auth_header.as_str(), "content-type"]
     };
     if !crate::provider_transport::apply_local_header_rules(
         &mut provider_request_headers,
         transport.endpoint.header_rules.as_ref(),
-        protected_headers,
+        &protected_headers,
         &provider_request_body,
         None,
     ) {

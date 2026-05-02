@@ -39,7 +39,7 @@ use self::execution_failures::{
     build_stream_failure_from_execution_error, build_stream_failure_report,
     handle_prefetch_stream_failure, submit_midstream_stream_failure, StreamFailureReport,
 };
-use crate::ai_pipeline_api::{
+use crate::ai_serving::api::{
     maybe_bridge_standard_sync_json_to_stream, maybe_build_provider_private_stream_normalizer,
     maybe_build_stream_response_rewriter, normalize_provider_private_report_context,
     StreamingStandardTerminalObserver,
@@ -2354,8 +2354,8 @@ mod tests {
         assert!(should_skip_direct_finalize_prefetch(
             Some("claude_cli_sync_finalize"),
             Some("text/event-stream"),
-            "claude:cli",
-            "claude:cli",
+            "claude:messages",
+            "claude:messages",
             false,
             false,
         ));
@@ -2366,8 +2366,8 @@ mod tests {
         assert!(should_skip_direct_finalize_prefetch(
             Some("claude_cli_sync_finalize"),
             None,
-            "claude:cli",
-            "claude:cli",
+            "claude:messages",
+            "claude:messages",
             false,
             false,
         ));
@@ -2378,8 +2378,8 @@ mod tests {
         assert!(!should_skip_direct_finalize_prefetch(
             Some("claude_cli_sync_finalize"),
             Some("application/json"),
-            "claude:cli",
-            "claude:cli",
+            "claude:messages",
+            "claude:messages",
             false,
             false,
         ));
@@ -2391,7 +2391,7 @@ mod tests {
             Some("claude_cli_sync_finalize"),
             Some("text/event-stream"),
             "openai:chat",
-            "claude:cli",
+            "claude:messages",
             false,
             true,
         ));

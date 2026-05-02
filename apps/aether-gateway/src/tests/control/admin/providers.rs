@@ -585,7 +585,7 @@ async fn gateway_handles_admin_providers_summary_list_locally_with_trusted_admin
             sample_endpoint(
                 "endpoint-anthropic-chat",
                 "provider-anthropic",
-                "claude:chat",
+                "claude:messages",
                 "https://api.anthropic.example",
             ),
         ],

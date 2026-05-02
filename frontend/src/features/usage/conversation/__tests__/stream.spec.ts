@@ -51,7 +51,7 @@ describe('Conversation stream compatibility', () => {
       '',
     ].join('\n')
 
-    const rendered = renderResponse(rawSse, requestBody, 'openai:cli')
+    const rendered = renderResponse(rawSse, requestBody, 'openai:responses')
     expect(rendered.error).toBeUndefined()
     expect(rendered.isStream).toBe(true)
     expect(rendered.blocks).toHaveLength(1)
@@ -91,7 +91,7 @@ describe('Conversation stream compatibility', () => {
       '',
     ].join('\n')
 
-    const rendered = renderResponse(rawSse, requestBody, 'openai:cli')
+    const rendered = renderResponse(rawSse, requestBody, 'openai:responses')
     expect(rendered.error).toBeUndefined()
     expect(rendered.isStream).toBe(true)
     expect(rendered.blocks[0]).toMatchObject({

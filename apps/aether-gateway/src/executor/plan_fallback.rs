@@ -1,12 +1,11 @@
-use crate::ai_pipeline_api::{
-    maybe_build_stream_plan_payload, maybe_build_sync_plan_payload, LocalStreamPlanAndReport,
-    LocalSyncPlanAndReport,
+use crate::ai_serving::api::{
+    maybe_build_stream_plan_payload, maybe_build_sync_plan_payload, AiStreamAttempt, AiSyncAttempt,
 };
 use crate::control::GatewayControlDecision;
 use crate::executor::{
     execute_stream_plan_and_reports, execute_sync_plan_and_reports, LocalExecutionRequestOutcome,
 };
-use crate::{AppState, GatewayControlPlanResponse, GatewayError, GatewayFallbackReason};
+use crate::{AiExecutionPlanPayload, AppState, GatewayError, GatewayFallbackReason};
 
 pub(crate) async fn maybe_execute_sync_via_plan_fallback(
     state: &AppState,
@@ -35,7 +34,7 @@ pub(crate) async fn maybe_execute_sync_via_plan_fallback(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    let GatewayControlPlanResponse {
+    let AiExecutionPlanPayload {
         action: _,
         plan_kind,
         plan,
@@ -54,7 +53,7 @@ pub(crate) async fn maybe_execute_sync_via_plan_fallback(
         trace_id,
         decision,
         plan_kind.as_str(),
-        vec![LocalSyncPlanAndReport {
+        vec![AiSyncAttempt {
             plan,
             report_kind,
             report_context,
@@ -87,7 +86,7 @@ pub(crate) async fn maybe_execute_stream_via_plan_fallback(
         return Ok(LocalExecutionRequestOutcome::NoPath);
     };
 
-    let GatewayControlPlanResponse {
+    let AiExecutionPlanPayload {
         action: _,
         plan_kind,
         plan,
@@ -105,7 +104,7 @@ pub(crate) async fn maybe_execute_stream_via_plan_fallback(
         trace_id,
         decision,
         plan_kind.as_str(),
-        vec![LocalStreamPlanAndReport {
+        vec![AiStreamAttempt {
             plan,
             report_kind,
             report_context,

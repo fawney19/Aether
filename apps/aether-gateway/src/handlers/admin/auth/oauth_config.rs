@@ -34,14 +34,24 @@ pub(crate) struct AdminOAuthProviderUpsertRequest {
 }
 
 pub(super) fn build_admin_oauth_supported_types_payload() -> Vec<serde_json::Value> {
-    vec![json!({
-        "provider_type": "linuxdo",
-        "display_name": "Linux Do",
-        "default_authorization_url": "https://connect.linux.do/oauth2/authorize",
-        "default_token_url": "https://connect.linux.do/oauth2/token",
-        "default_userinfo_url": "https://connect.linux.do/api/user",
-        "default_scopes": [],
-    })]
+    vec![
+        json!({
+            "provider_type": "linuxdo",
+            "display_name": "Linux Do",
+            "default_authorization_url": "https://connect.linux.do/oauth2/authorize",
+            "default_token_url": "https://connect.linux.do/oauth2/token",
+            "default_userinfo_url": "https://connect.linux.do/api/user",
+            "default_scopes": [],
+        }),
+        json!({
+            "provider_type": "custom_oidc",
+            "display_name": "Custom OIDC",
+            "default_authorization_url": "",
+            "default_token_url": "",
+            "default_userinfo_url": "",
+            "default_scopes": ["openid", "profile", "email"],
+        }),
+    ]
 }
 
 pub(super) fn build_admin_oauth_provider_payload(
@@ -78,15 +88,39 @@ pub(crate) fn admin_oauth_test_provider_type_from_path(request_path: &str) -> Op
 }
 
 fn admin_oauth_is_supported_provider(provider_type: &str) -> bool {
-    provider_type.eq_ignore_ascii_case("linuxdo")
+    matches!(
+        provider_type.to_ascii_lowercase().as_str(),
+        "linuxdo" | "custom_oidc"
+    )
 }
 
-fn admin_oauth_allowed_domains(provider_type: &str) -> Option<&'static [&'static str]> {
+fn admin_oauth_builtin_allowed_domains(provider_type: &str) -> Option<&'static [&'static str]> {
     if provider_type.eq_ignore_ascii_case("linuxdo") {
         Some(&["linux.do", "connect.linux.do", "connect.linuxdo.org"])
     } else {
         None
     }
+}
+
+fn admin_oauth_custom_allowed_domains(extra_config: Option<&serde_json::Value>) -> Vec<String> {
+    extra_config
+        .and_then(serde_json::Value::as_object)
+        .and_then(|object| {
+            object
+                .get("allowed_domains")
+                .or_else(|| object.get("oauth_allowed_domains"))
+        })
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.trim_end_matches('.').to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 fn validate_admin_oauth_frontend_callback_url(url: &str) -> Result<(), String> {
@@ -134,6 +168,17 @@ fn validate_admin_oauth_url_override(url: &str, allowed_domains: &[&str]) -> Res
     Ok(())
 }
 
+fn validate_admin_oauth_url_override_for_domains(
+    url: &str,
+    allowed_domains: &[String],
+) -> Result<(), String> {
+    let allowed = allowed_domains
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    validate_admin_oauth_url_override(url, &allowed)
+}
+
 pub(super) fn build_admin_oauth_upsert_record(
     state: &AdminAppState<'_>,
     provider_type: &str,
@@ -163,21 +208,64 @@ pub(super) fn build_admin_oauth_upsert_record(
     validate_admin_oauth_frontend_callback_url(frontend_callback_url)?;
     validate_admin_oauth_redirect_uri(redirect_uri)?;
 
-    let allowed_domains = admin_oauth_allowed_domains(provider_type)
-        .ok_or_else(|| "不支持的 provider_type".to_string())?;
+    let is_custom_oidc = provider_type.eq_ignore_ascii_case("custom_oidc");
+    let custom_allowed_domains = if is_custom_oidc {
+        let domains = admin_oauth_custom_allowed_domains(payload.extra_config.as_ref());
+        if domains.is_empty() {
+            return Err(
+                "custom_oidc 必须在 extra_config.allowed_domains 配置域名白名单".to_string(),
+            );
+        }
+        domains
+    } else {
+        Vec::new()
+    };
+    let builtin_allowed_domains = admin_oauth_builtin_allowed_domains(provider_type);
+
+    if is_custom_oidc {
+        for (field_name, value) in [
+            (
+                "authorization_url_override",
+                payload.authorization_url_override.as_deref(),
+            ),
+            ("token_url_override", payload.token_url_override.as_deref()),
+            (
+                "userinfo_url_override",
+                payload.userinfo_url_override.as_deref(),
+            ),
+        ] {
+            let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+                return Err(format!("custom_oidc 必须配置 {field_name}"));
+            };
+            validate_admin_oauth_url_override_for_domains(value, &custom_allowed_domains)?;
+        }
+    }
+
     if let Some(value) = payload.authorization_url_override.as_deref().map(str::trim) {
         if !value.is_empty() {
-            validate_admin_oauth_url_override(value, allowed_domains)?;
+            if let Some(allowed_domains) = builtin_allowed_domains {
+                validate_admin_oauth_url_override(value, allowed_domains)?;
+            } else {
+                validate_admin_oauth_url_override_for_domains(value, &custom_allowed_domains)?;
+            }
         }
     }
     if let Some(value) = payload.token_url_override.as_deref().map(str::trim) {
         if !value.is_empty() {
-            validate_admin_oauth_url_override(value, allowed_domains)?;
+            if let Some(allowed_domains) = builtin_allowed_domains {
+                validate_admin_oauth_url_override(value, allowed_domains)?;
+            } else {
+                validate_admin_oauth_url_override_for_domains(value, &custom_allowed_domains)?;
+            }
         }
     }
     if let Some(value) = payload.userinfo_url_override.as_deref().map(str::trim) {
         if !value.is_empty() {
-            validate_admin_oauth_url_override(value, allowed_domains)?;
+            if let Some(allowed_domains) = builtin_allowed_domains {
+                validate_admin_oauth_url_override(value, allowed_domains)?;
+            } else {
+                validate_admin_oauth_url_override_for_domains(value, &custom_allowed_domains)?;
+            }
         }
     }
 

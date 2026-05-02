@@ -12,8 +12,8 @@ const MODEL_FETCH_FORMAT_PRIORITY: &[&[&str]] = &[
         "openai:responses",
         "openai:responses:compact",
     ],
-    &["claude:chat", "claude:cli"],
-    &["gemini:chat", "gemini:cli"],
+    &["claude:messages"],
+    &["gemini:generate_content"],
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,10 +221,8 @@ pub fn endpoint_supports_rust_models_fetch(api_format: &str) -> bool {
         "openai:chat"
             | "openai:responses"
             | "openai:responses:compact"
-            | "claude:chat"
-            | "claude:cli"
-            | "gemini:chat"
-            | "gemini:cli"
+            | "claude:messages"
+            | "gemini:generate_content"
     )
 }
 
@@ -239,25 +237,25 @@ pub fn provider_type_uses_preset_models(provider_type: &str) -> bool {
 pub fn preset_models_for_provider(provider_type: &str) -> Option<Vec<Value>> {
     let models = match provider_type.trim().to_ascii_lowercase().as_str() {
         "gemini_cli" => vec![
-            preset_model("gemini-2.5-pro", "google", "Gemini 2.5 Pro", "gemini:cli"),
-            preset_model("gemini-2.5-flash", "google", "Gemini 2.5 Flash", "gemini:cli"),
-            preset_model("gemini-3-pro-preview", "google", "Gemini 3 Pro Preview", "gemini:cli"),
-            preset_model("gemini-3-flash-preview", "google", "Gemini 3 Flash Preview", "gemini:cli"),
-            preset_model("gemini-3.1-pro-preview", "google", "Gemini 3.1 Pro Preview", "gemini:cli"),
+            preset_model("gemini-2.5-pro", "google", "Gemini 2.5 Pro", "gemini:generate_content"),
+            preset_model("gemini-2.5-flash", "google", "Gemini 2.5 Flash", "gemini:generate_content"),
+            preset_model("gemini-3-pro-preview", "google", "Gemini 3 Pro Preview", "gemini:generate_content"),
+            preset_model("gemini-3-flash-preview", "google", "Gemini 3 Flash Preview", "gemini:generate_content"),
+            preset_model("gemini-3.1-pro-preview", "google", "Gemini 3.1 Pro Preview", "gemini:generate_content"),
         ],
         "kiro" => vec![
-            preset_model("claude-sonnet-4.5", "anthropic", "Claude Sonnet 4.5", "claude:cli"),
-            preset_model("claude-sonnet-4.6", "anthropic", "Claude Sonnet 4.6", "claude:cli"),
-            preset_model("claude-opus-4.5", "anthropic", "Claude Opus 4.5", "claude:cli"),
-            preset_model("claude-opus-4.6", "anthropic", "Claude Opus 4.6", "claude:cli"),
-            preset_model("claude-haiku-4.5", "anthropic", "Claude Haiku 4.5", "claude:cli"),
+            preset_model("claude-sonnet-4.5", "anthropic", "Claude Sonnet 4.5", "claude:messages"),
+            preset_model("claude-sonnet-4.6", "anthropic", "Claude Sonnet 4.6", "claude:messages"),
+            preset_model("claude-opus-4.5", "anthropic", "Claude Opus 4.5", "claude:messages"),
+            preset_model("claude-opus-4.6", "anthropic", "Claude Opus 4.6", "claude:messages"),
+            preset_model("claude-haiku-4.5", "anthropic", "Claude Haiku 4.5", "claude:messages"),
         ],
         "claude_code" => vec![
-            preset_model("claude-opus-4-5-20251101", "anthropic", "Claude Opus 4.5", "claude:cli"),
-            preset_model("claude-opus-4-6", "anthropic", "Claude Opus 4.6", "claude:cli"),
-            preset_model("claude-sonnet-4-6", "anthropic", "Claude Sonnet 4.6", "claude:cli"),
-            preset_model("claude-sonnet-4-5-20250929", "anthropic", "Claude Sonnet 4.5", "claude:cli"),
-            preset_model("claude-haiku-4-5-20251001", "anthropic", "Claude Haiku 4.5", "claude:cli"),
+            preset_model("claude-opus-4-5-20251101", "anthropic", "Claude Opus 4.5", "claude:messages"),
+            preset_model("claude-opus-4-6", "anthropic", "Claude Opus 4.6", "claude:messages"),
+            preset_model("claude-sonnet-4-6", "anthropic", "Claude Sonnet 4.6", "claude:messages"),
+            preset_model("claude-sonnet-4-5-20250929", "anthropic", "Claude Sonnet 4.5", "claude:messages"),
+            preset_model("claude-haiku-4-5-20251001", "anthropic", "Claude Haiku 4.5", "claude:messages"),
         ],
         "codex" => vec![
             preset_model("gpt-5", "openai", "GPT-5", "openai:responses"),
@@ -570,7 +568,7 @@ fn wildcard_matches(pattern: &str, model_id: &str) -> bool {
 }
 
 fn normalize_api_format(value: &str) -> String {
-    aether_ai_formats::normalize_legacy_openai_format_alias(value)
+    aether_ai_formats::normalize_api_format_alias(value)
 }
 
 #[cfg(test)]
@@ -726,7 +724,7 @@ mod tests {
     #[test]
     fn parse_models_response_page_reads_claude_pagination_state() {
         let parsed = parse_models_response_page(
-            "claude:chat",
+            "claude:messages",
             &json!({
                 "data": [{"id": "claude-sonnet-4"}],
                 "has_more": true,
@@ -750,8 +748,8 @@ mod tests {
             ),
             sample_endpoint(
                 "provider-1",
-                "endpoint-cli",
-                "openai:cli",
+                "endpoint-compact",
+                "openai:responses:compact",
                 "https://example.com",
             ),
             sample_endpoint(
@@ -769,8 +767,8 @@ mod tests {
         let endpoints = vec![
             sample_endpoint(
                 "provider-1",
-                "endpoint-cli",
-                "openai:cli",
+                "endpoint-compact",
+                "openai:responses:compact",
                 "https://example.com",
             ),
             sample_endpoint(

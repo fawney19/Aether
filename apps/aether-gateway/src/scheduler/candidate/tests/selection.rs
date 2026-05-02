@@ -199,7 +199,7 @@ fn provider_key_concurrency_state(
 }
 
 #[test]
-fn skips_inactive_or_exhausted_monthly_quota_provider() {
+fn skips_only_exhausted_monthly_quota_provider() {
     let inactive = StoredProviderQuotaSnapshot::new(
         "provider-1".to_string(),
         "monthly_quota".to_string(),
@@ -211,7 +211,20 @@ fn skips_inactive_or_exhausted_monthly_quota_provider() {
         false,
     )
     .expect("quota should build");
-    assert!(should_skip_provider_quota(&inactive, 2_000));
+    assert!(!should_skip_provider_quota(&inactive, 2_000));
+
+    let expired = StoredProviderQuotaSnapshot::new(
+        "provider-1".to_string(),
+        "monthly_quota".to_string(),
+        Some(10.0),
+        1.0,
+        Some(30),
+        Some(1_000),
+        Some(1_500),
+        true,
+    )
+    .expect("quota should build");
+    assert!(!should_skip_provider_quota(&expired, 2_000));
 
     let exhausted = StoredProviderQuotaSnapshot::new(
         "provider-1".to_string(),
@@ -1629,7 +1642,7 @@ async fn skips_codex_candidate_when_account_quota_is_exhausted_and_pool_flag_ena
 }
 
 #[tokio::test]
-async fn skips_oauth_invalid_candidate_before_local_auth_resolution() {
+async fn keeps_refresh_failed_oauth_candidate_selectable_before_local_auth_resolution() {
     let mut first = sample_row();
     first.provider_id = "provider-codex".to_string();
     first.provider_name = "codex".to_string();
@@ -1699,11 +1712,10 @@ async fn skips_oauth_invalid_candidate_before_local_auth_resolution() {
     .await
     .expect("selection should succeed");
 
-    assert_eq!(selected.len(), 1);
-    assert_eq!(selected[0].provider_id, "provider-openai");
-    assert_eq!(skipped.len(), 1);
-    assert_eq!(skipped[0].candidate.provider_id, "provider-codex");
-    assert_eq!(skipped[0].skip_reason, "oauth_invalid");
+    assert_eq!(selected.len(), 2);
+    assert_eq!(selected[0].provider_id, "provider-codex");
+    assert_eq!(selected[1].provider_id, "provider-openai");
+    assert!(skipped.is_empty());
 }
 
 #[tokio::test]
@@ -1766,15 +1778,76 @@ async fn keeps_request_failed_oauth_candidate_selectable() {
 }
 
 #[tokio::test]
+async fn keeps_codex_candidate_selectable_when_oauth_token_is_expired() {
+    let mut row = sample_row();
+    row.provider_id = "provider-codex".to_string();
+    row.provider_name = "codex".to_string();
+    row.provider_type = "codex".to_string();
+    row.endpoint_id = "endpoint-codex".to_string();
+    row.endpoint_api_format = "openai:responses".to_string();
+    row.key_id = "key-codex".to_string();
+    row.key_name = "codex-token-expired".to_string();
+    row.key_auth_type = "oauth".to_string();
+    row.key_api_formats = Some(vec!["openai:responses".to_string()]);
+
+    let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
+        row,
+    ]));
+    let mut provider = sample_provider("provider-codex", None);
+    provider.provider_type = "codex".to_string();
+    let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+        vec![provider],
+        Vec::new(),
+        vec![{
+            let mut key = sample_key("key-codex", "provider-codex", Some(10));
+            key.auth_type = "oauth".to_string();
+            key.oauth_invalid_at_unix_secs = Some(1_710_000_000);
+            key.oauth_invalid_reason = Some("Codex Token 无效或已过期".to_string());
+            key
+        }],
+    ));
+    let quotas = Arc::new(InMemoryProviderQuotaRepository::seed(vec![]));
+    let request_candidates = Arc::new(InMemoryRequestCandidateRepository::seed(vec![]));
+    let state = AppState::new()
+        .expect("state should build")
+        .with_data_state_for_tests(
+            GatewayDataState::with_candidate_selection_provider_catalog_quota_and_request_candidates_for_tests(
+                candidates,
+                provider_catalog,
+                quotas,
+                request_candidates,
+            ),
+        );
+
+    let (selected, skipped) = collect_selectable_candidates_with_skip_reasons(
+        state.data.as_ref(),
+        &state,
+        "openai:responses",
+        "gpt-4.1",
+        false,
+        None,
+        1_710_000_100,
+    )
+    .await
+    .expect("selection should succeed");
+
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].provider_id, "provider-codex");
+    assert!(skipped.is_empty());
+}
+
+#[tokio::test]
 async fn keeps_refreshable_kiro_candidate_selectable_with_runtime_oauth_invalid_marker() {
     let mut row = sample_row();
     row.provider_id = "provider-kiro".to_string();
     row.provider_name = "kiro".to_string();
     row.provider_type = "kiro".to_string();
     row.endpoint_id = "endpoint-kiro".to_string();
+    row.endpoint_api_format = "claude:messages".to_string();
     row.key_id = "key-kiro".to_string();
     row.key_name = "kiro-refreshable".to_string();
     row.key_auth_type = "oauth".to_string();
+    row.key_api_formats = Some(vec!["claude:messages".to_string()]);
 
     let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
         row,
@@ -1809,7 +1882,7 @@ async fn keeps_refreshable_kiro_candidate_selectable_with_runtime_oauth_invalid_
     let (selected, skipped) = collect_selectable_candidates_with_skip_reasons(
         state.data.as_ref(),
         &state,
-        "openai:chat",
+        "claude:messages",
         "gpt-4.1",
         false,
         None,
@@ -1830,9 +1903,11 @@ async fn keeps_refreshable_kiro_candidate_selectable_when_oauth_token_expired() 
     row.provider_name = "kiro".to_string();
     row.provider_type = "kiro".to_string();
     row.endpoint_id = "endpoint-kiro".to_string();
+    row.endpoint_api_format = "claude:messages".to_string();
     row.key_id = "key-kiro".to_string();
     row.key_name = "kiro-expired-refreshable".to_string();
     row.key_auth_type = "oauth".to_string();
+    row.key_api_formats = Some(vec!["claude:messages".to_string()]);
 
     let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
         row,
@@ -1866,7 +1941,7 @@ async fn keeps_refreshable_kiro_candidate_selectable_when_oauth_token_expired() 
     let (selected, skipped) = collect_selectable_candidates_with_skip_reasons(
         state.data.as_ref(),
         &state,
-        "openai:chat",
+        "claude:messages",
         "gpt-4.1",
         false,
         None,
@@ -1881,15 +1956,17 @@ async fn keeps_refreshable_kiro_candidate_selectable_when_oauth_token_expired() 
 }
 
 #[tokio::test]
-async fn skips_kiro_candidate_after_refresh_failure_requires_reauth() {
+async fn keeps_kiro_candidate_selectable_after_refresh_failure() {
     let mut row = sample_row();
     row.provider_id = "provider-kiro".to_string();
     row.provider_name = "kiro".to_string();
     row.provider_type = "kiro".to_string();
     row.endpoint_id = "endpoint-kiro".to_string();
+    row.endpoint_api_format = "claude:messages".to_string();
     row.key_id = "key-kiro".to_string();
     row.key_name = "kiro-refresh-failed".to_string();
     row.key_auth_type = "oauth".to_string();
+    row.key_api_formats = Some(vec!["claude:messages".to_string()]);
 
     let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
         row,
@@ -1927,7 +2004,7 @@ async fn skips_kiro_candidate_after_refresh_failure_requires_reauth() {
     let (selected, skipped) = collect_selectable_candidates_with_skip_reasons(
         state.data.as_ref(),
         &state,
-        "openai:chat",
+        "claude:messages",
         "gpt-4.1",
         false,
         None,
@@ -1936,10 +2013,9 @@ async fn skips_kiro_candidate_after_refresh_failure_requires_reauth() {
     .await
     .expect("selection should succeed");
 
-    assert!(selected.is_empty());
-    assert_eq!(skipped.len(), 1);
-    assert_eq!(skipped[0].candidate.provider_id, "provider-kiro");
-    assert_eq!(skipped[0].skip_reason, "oauth_invalid");
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].provider_id, "provider-kiro");
+    assert!(skipped.is_empty());
 }
 
 #[tokio::test]
@@ -1949,9 +2025,11 @@ async fn skips_refreshable_kiro_candidate_when_oauth_marker_is_account_block() {
     row.provider_name = "kiro".to_string();
     row.provider_type = "kiro".to_string();
     row.endpoint_id = "endpoint-kiro".to_string();
+    row.endpoint_api_format = "claude:messages".to_string();
     row.key_id = "key-kiro".to_string();
     row.key_name = "kiro-account-blocked".to_string();
     row.key_auth_type = "oauth".to_string();
+    row.key_api_formats = Some(vec!["claude:messages".to_string()]);
 
     let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
         row,
@@ -1986,7 +2064,7 @@ async fn skips_refreshable_kiro_candidate_when_oauth_marker_is_account_block() {
     let (selected, skipped) = collect_selectable_candidates_with_skip_reasons(
         state.data.as_ref(),
         &state,
-        "openai:chat",
+        "claude:messages",
         "gpt-4.1",
         false,
         None,
@@ -2089,22 +2167,22 @@ async fn skips_kiro_candidate_when_account_quota_is_exhausted_and_pool_flag_enab
     first.provider_name = "kiro".to_string();
     first.provider_type = "kiro".to_string();
     first.endpoint_id = "endpoint-kiro".to_string();
-    first.endpoint_api_format = "claude:cli".to_string();
+    first.endpoint_api_format = "claude:messages".to_string();
     first.key_id = "key-kiro".to_string();
     first.key_name = "kiro-exhausted".to_string();
     first.key_auth_type = "oauth".to_string();
-    first.key_api_formats = Some(vec!["claude:cli".to_string()]);
-    first.key_global_priority_by_format = Some(serde_json::json!({"claude:cli": 1}));
+    first.key_api_formats = Some(vec!["claude:messages".to_string()]);
+    first.key_global_priority_by_format = Some(serde_json::json!({"claude:messages": 1}));
 
     let mut second = sample_row();
     second.provider_id = "provider-openai".to_string();
     second.provider_name = "openai".to_string();
     second.endpoint_id = "endpoint-openai".to_string();
-    second.endpoint_api_format = "claude:cli".to_string();
+    second.endpoint_api_format = "claude:messages".to_string();
     second.key_id = "key-openai".to_string();
     second.key_name = "fallback".to_string();
-    second.key_api_formats = Some(vec!["claude:cli".to_string()]);
-    second.key_global_priority_by_format = Some(serde_json::json!({"claude:cli": 2}));
+    second.key_api_formats = Some(vec!["claude:messages".to_string()]);
+    second.key_global_priority_by_format = Some(serde_json::json!({"claude:messages": 2}));
 
     let candidates = Arc::new(InMemoryMinimalCandidateSelectionReadRepository::seed(vec![
         first, second,
@@ -2149,7 +2227,7 @@ async fn skips_kiro_candidate_when_account_quota_is_exhausted_and_pool_flag_enab
     let (selected, skipped) = collect_selectable_candidates_with_skip_reasons(
         state.data.as_ref(),
         &state,
-        "claude:cli",
+        "claude:messages",
         "gpt-4.1",
         false,
         None,
@@ -2265,14 +2343,14 @@ async fn same_priority_candidates_use_aggregate_health_score_when_api_format_spe
             sample_key("key-a", "provider-a", Some(10)).with_health_fields(
                 Some(serde_json::json!({
                     "openai:responses": {"health_score": 0.40},
-                    "claude:chat": {"health_score": 0.55}
+                    "claude:messages": {"health_score": 0.55}
                 })),
                 None,
             ),
             sample_key("key-b", "provider-b", Some(10)).with_health_fields(
                 Some(serde_json::json!({
                     "openai:responses": {"health_score": 0.90},
-                    "claude:chat": {"health_score": 0.92}
+                    "claude:messages": {"health_score": 0.92}
                 })),
                 None,
             ),

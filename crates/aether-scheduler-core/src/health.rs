@@ -1308,14 +1308,14 @@ mod tests {
             Some(serde_json::json!({
                 "openai:chat": {"health_score": 0.85},
                 "openai:responses": {"health_score": 0.45},
-                "claude:chat": {"health_score": 0.70}
+                "claude:messages": {"health_score": 0.70}
             })),
             None,
         );
 
         assert_eq!(aggregate_provider_key_health_score(&key), Some(0.45));
         assert_eq!(
-            effective_provider_key_health_score(&key, "gemini:chat"),
+            effective_provider_key_health_score(&key, "gemini:generate_content"),
             Some(0.45)
         );
     }

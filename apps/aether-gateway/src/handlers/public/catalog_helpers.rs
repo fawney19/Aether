@@ -594,10 +594,14 @@ pub(crate) fn api_format_display_name(api_format: &str) -> String {
     };
     let kind_label = match kind {
         "chat" => "Chat",
-        "cli" => "CLI",
+        "messages" => "Messages",
+        "generate_content" => "Generate Content",
+        "responses" => "Responses",
+        "responses:compact" => "Responses Compact",
         "compact" => "Compact",
         "video" => "Video",
         "image" => "Image",
+        "files" => "Files",
         other => other,
     };
     format!("{family_label} {kind_label}")

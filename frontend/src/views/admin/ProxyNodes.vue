@@ -82,22 +82,24 @@
               />
             </div>
             <div class="h-4 w-px bg-border" />
-            <Select v-model="filterStatus">
-              <SelectTrigger class="w-28 h-8 text-xs border-border/60">
-                <SelectValue placeholder="全部状态" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">
-                  全部状态
-                </SelectItem>
-                <SelectItem value="online">
-                  在线
-                </SelectItem>
-                <SelectItem value="offline">
-                  离线
-                </SelectItem>
-              </SelectContent>
-            </Select>
+            <div class="xl:hidden">
+              <Select v-model="filterStatus">
+                <SelectTrigger class="w-28 h-8 text-xs border-border/60">
+                  <SelectValue placeholder="全部状态" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">
+                    全部状态
+                  </SelectItem>
+                  <SelectItem value="online">
+                    在线
+                  </SelectItem>
+                  <SelectItem value="offline">
+                    离线
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
             <div class="h-4 w-px bg-border" />
             <Button
               variant="outline"
@@ -138,9 +140,24 @@
               <TableHead class="w-[100px] h-12 font-semibold">
                 区域
               </TableHead>
-              <TableHead class="w-[90px] h-12 font-semibold text-center">
+              <SortableTableHead
+                class="w-[90px] h-12 font-semibold text-center"
+                column-key="status"
+                :sortable="false"
+                align="center"
+                :filter-active="filterStatus !== 'all'"
+                filter-title="筛选状态"
+                filter-content-class="w-36 p-1 rounded-2xl border-border bg-card text-foreground shadow-2xl backdrop-blur-xl"
+              >
                 状态
-              </TableHead>
+                <template #filter="{ close }">
+                  <TableFilterMenu
+                    v-model="filterStatus"
+                    :options="proxyNodeStatusFilterOptions"
+                    @select="close"
+                  />
+                </template>
+              </SortableTableHead>
               <TableHead class="w-[100px] h-12 font-semibold text-center">
                 总请求
               </TableHead>
@@ -783,6 +800,8 @@ import {
   TableBody,
   TableRow,
   TableHead,
+  SortableTableHead,
+  TableFilterMenu,
   TableCell,
   Pagination,
   RefreshButton,
@@ -800,6 +819,11 @@ const store = useProxyNodesStore()
 
 const searchQuery = ref('')
 const filterStatus = ref('all')
+const proxyNodeStatusFilterOptions = [
+  { value: 'all', label: '全部状态' },
+  { value: 'online', label: '在线' },
+  { value: 'offline', label: '离线' },
+]
 const currentPage = ref(1)
 const pageSize = ref(20)
 

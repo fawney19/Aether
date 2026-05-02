@@ -62,8 +62,8 @@ const CLAUDE_CODE_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProvider
     version: 1,
     base_url: "https://api.anthropic.com",
     endpoints: &[FixedProviderEndpointTemplate {
-        item_key: "claude:cli",
-        api_format: "claude:cli",
+        item_key: "claude:messages",
+        api_format: "claude:messages",
         custom_path: None,
         config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
     }],
@@ -100,8 +100,8 @@ const KIRO_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTemplat
     version: 1,
     base_url: "https://q.{region}.amazonaws.com",
     endpoints: &[FixedProviderEndpointTemplate {
-        item_key: "claude:cli",
-        api_format: "claude:cli",
+        item_key: "claude:messages",
+        api_format: "claude:messages",
         custom_path: None,
         config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
     }],
@@ -112,8 +112,8 @@ const GEMINI_CLI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderT
     version: 1,
     base_url: "https://cloudcode-pa.googleapis.com",
     endpoints: &[FixedProviderEndpointTemplate {
-        item_key: "gemini:cli",
-        api_format: "gemini:cli",
+        item_key: "gemini:generate_content",
+        api_format: "gemini:generate_content",
         custom_path: None,
         config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
     }],
@@ -125,14 +125,14 @@ const VERTEX_AI_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProviderTe
     base_url: "https://aiplatform.googleapis.com",
     endpoints: &[
         FixedProviderEndpointTemplate {
-            item_key: "gemini:chat",
-            api_format: "gemini:chat",
+            item_key: "gemini:generate_content",
+            api_format: "gemini:generate_content",
             custom_path: None,
             config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
         },
         FixedProviderEndpointTemplate {
-            item_key: "claude:chat",
-            api_format: "claude:chat",
+            item_key: "claude:messages",
+            api_format: "claude:messages",
             custom_path: None,
             config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
         },
@@ -144,8 +144,8 @@ const ANTIGRAVITY_FIXED_PROVIDER_TEMPLATE: FixedProviderTemplate = FixedProvider
     version: 1,
     base_url: "https://cloudcode-pa.googleapis.com",
     endpoints: &[FixedProviderEndpointTemplate {
-        item_key: "gemini:chat",
-        api_format: "gemini:chat",
+        item_key: "gemini:generate_content",
+        api_format: "gemini:generate_content",
         custom_path: None,
         config_defaults: EMPTY_ENDPOINT_CONFIG_DEFAULTS,
     }],
@@ -156,6 +156,22 @@ pub fn provider_type_is_fixed(provider_type: &str) -> bool {
         provider_type.trim().to_ascii_lowercase().as_str(),
         "claude_code" | "kiro" | "codex" | "gemini_cli" | "antigravity" | "vertex_ai"
     )
+}
+
+pub fn fixed_provider_key_inherits_api_formats(
+    provider_type: &str,
+    auth_type: &str,
+    decrypted_auth_config: Option<&str>,
+) -> bool {
+    let provider_type = provider_type.trim().to_ascii_lowercase();
+    let auth_type = auth_type.trim().to_ascii_lowercase();
+    provider_type_is_fixed(&provider_type)
+        && (auth_type == "oauth"
+            || provider_type == "kiro"
+                && auth_type == "bearer"
+                && decrypted_auth_config
+                    .map(str::trim)
+                    .is_some_and(|value| !value.is_empty()))
 }
 
 pub fn provider_type_enables_format_conversion_by_default(provider_type: &str) -> bool {
@@ -181,7 +197,7 @@ pub fn fixed_provider_endpoint_template_by_api_format(
     provider_type: &str,
     api_format: &str,
 ) -> Option<&'static FixedProviderEndpointTemplate> {
-    let normalized = aether_ai_formats::normalize_legacy_openai_format_alias(api_format);
+    let normalized = aether_ai_formats::normalize_api_format_alias(api_format);
     fixed_provider_template(provider_type)?
         .endpoints
         .iter()
@@ -284,8 +300,8 @@ pub const ADMIN_PROVIDER_OAUTH_TEMPLATE_TYPES: &[&str] =
 #[cfg(test)]
 mod tests {
     use super::{
-        fixed_provider_endpoint_template_by_api_format, fixed_provider_template,
-        FixedProviderEndpointConfigValue,
+        fixed_provider_endpoint_template_by_api_format, fixed_provider_key_inherits_api_formats,
+        fixed_provider_template, FixedProviderEndpointConfigValue,
     };
 
     #[test]
@@ -320,5 +336,23 @@ mod tests {
                 FixedProviderEndpointConfigValue::String("force_stream")
             )]
         );
+    }
+
+    #[test]
+    fn fixed_provider_key_inheritance_keeps_oauth_and_kiro_configured_bearer_keys_open() {
+        assert!(fixed_provider_key_inherits_api_formats(
+            "codex", "oauth", None
+        ));
+        assert!(fixed_provider_key_inherits_api_formats(
+            "kiro",
+            "bearer",
+            Some("{}")
+        ));
+        assert!(!fixed_provider_key_inherits_api_formats(
+            "kiro", "bearer", None
+        ));
+        assert!(!fixed_provider_key_inherits_api_formats(
+            "custom", "oauth", None
+        ));
     }
 }

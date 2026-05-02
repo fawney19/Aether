@@ -26,16 +26,8 @@ pub fn local_vertex_api_key_gemini_transport_unsupported_reason_with_network(
             Some("key_inactive")
         };
     }
-    if !transport
-        .endpoint
-        .api_format
-        .trim()
-        .eq_ignore_ascii_case("gemini:chat")
-        && !transport
-            .endpoint
-            .api_format
-            .trim()
-            .eq_ignore_ascii_case("gemini:cli")
+    if aether_ai_formats::normalize_api_format_alias(&transport.endpoint.api_format)
+        != "gemini:generate_content"
     {
         return Some("transport_api_format_mismatch");
     }
@@ -66,7 +58,7 @@ pub fn supports_local_vertex_api_key_gemini_transport(
 ) -> bool {
     supports_local_vertex_api_key_same_format_transport(
         transport,
-        &["gemini:chat", "gemini:cli"],
+        &["gemini:generate_content"],
         false,
     )
 }
@@ -80,13 +72,21 @@ pub fn supports_local_vertex_api_key_gemini_transport_with_network(
 pub fn supports_local_vertex_api_key_imagen_transport(
     transport: &GatewayProviderTransportSnapshot,
 ) -> bool {
-    supports_local_vertex_api_key_same_format_transport(transport, &["gemini:chat"], false)
+    supports_local_vertex_api_key_same_format_transport(
+        transport,
+        &["gemini:generate_content"],
+        false,
+    )
 }
 
 pub fn supports_local_vertex_api_key_imagen_transport_with_network(
     transport: &GatewayProviderTransportSnapshot,
 ) -> bool {
-    supports_local_vertex_api_key_same_format_transport(transport, &["gemini:chat"], true)
+    supports_local_vertex_api_key_same_format_transport(
+        transport,
+        &["gemini:generate_content"],
+        true,
+    )
 }
 
 fn supports_local_vertex_api_key_same_format_transport(
@@ -97,18 +97,11 @@ fn supports_local_vertex_api_key_same_format_transport(
     if !transport.provider.is_active || !transport.endpoint.is_active || !transport.key.is_active {
         return false;
     }
-    if !transport
-        .endpoint
-        .api_format
-        .trim()
-        .eq_ignore_ascii_case(api_formats[0])
-        && !api_formats.iter().any(|api_format| {
-            transport
-                .endpoint
-                .api_format
-                .trim()
-                .eq_ignore_ascii_case(api_format)
-        })
+    let endpoint_api_format =
+        aether_ai_formats::normalize_api_format_alias(&transport.endpoint.api_format);
+    if !api_formats
+        .iter()
+        .any(|api_format| endpoint_api_format.eq_ignore_ascii_case(api_format))
     {
         return false;
     }
@@ -190,9 +183,9 @@ mod tests {
             endpoint: GatewayProviderTransportEndpoint {
                 id: "endpoint-1".to_string(),
                 provider_id: "provider-1".to_string(),
-                api_format: "gemini:chat".to_string(),
+                api_format: "gemini:generate_content".to_string(),
                 api_family: Some("gemini".to_string()),
-                endpoint_kind: Some("chat".to_string()),
+                endpoint_kind: Some("generate_content".to_string()),
                 is_active: true,
                 base_url: "https://aiplatform.googleapis.com".to_string(),
                 header_rules: None,
@@ -209,7 +202,10 @@ mod tests {
                 name: "key".to_string(),
                 auth_type: "api_key".to_string(),
                 is_active: true,
-                api_formats: Some(vec!["gemini:chat".to_string()]),
+                api_formats: Some(vec!["gemini:generate_content".to_string()]),
+                auth_type_by_format: None,
+                allow_auth_channel_mismatch_formats: None,
+
                 allowed_models: None,
                 capabilities: None,
                 rate_multipliers: None,
@@ -231,17 +227,17 @@ mod tests {
     }
 
     #[test]
-    fn supports_vertex_api_key_gemini_cli_subset() {
+    fn supports_vertex_api_key_gemini_generate_content_subset() {
         let mut transport = sample_transport();
-        transport.endpoint.api_format = "gemini:cli".to_string();
+        transport.endpoint.api_format = "gemini:generate_content".to_string();
         assert!(supports_local_vertex_api_key_gemini_transport(&transport));
     }
 
     #[test]
-    fn supports_custom_aiplatform_gemini_cli_subset() {
+    fn supports_custom_aiplatform_gemini_generate_content_subset() {
         let mut transport = sample_transport();
         transport.provider.provider_type = "custom".to_string();
-        transport.endpoint.api_format = "gemini:cli".to_string();
+        transport.endpoint.api_format = "gemini:generate_content".to_string();
         assert!(supports_local_vertex_api_key_gemini_transport(&transport));
     }
 

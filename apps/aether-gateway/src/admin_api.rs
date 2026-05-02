@@ -1,10 +1,14 @@
 pub(crate) use crate::handlers::admin::{
     admin_provider_ops_local_action_response, admin_provider_pool_config,
-    build_internal_control_error_response, maybe_build_local_admin_pool_response,
+    build_internal_control_error_response, create_provider_oauth_catalog_key,
+    find_duplicate_provider_oauth_key, maybe_build_local_admin_pool_response,
     maybe_build_local_admin_response, provider_oauth_runtime_endpoint_for_provider,
     refresh_antigravity_provider_quota_locally, refresh_codex_provider_quota_locally,
-    refresh_kiro_provider_quota_locally, AdminAppState, AdminRequestContext, AdminRouteRequest,
-    AdminRouteResponse, AdminRouteResult, AdminStatsTimeRange, AdminStatsUsageFilter,
+    refresh_kiro_provider_quota_locally, refresh_provider_oauth_account_state_after_update,
+    update_existing_provider_oauth_catalog_key, AdminAppState,
+    AdminGatewayProviderTransportSnapshot, AdminLocalOAuthRefreshError, AdminRequestContext,
+    AdminRouteRequest, AdminRouteResponse, AdminRouteResult, AdminStatsTimeRange,
+    AdminStatsUsageFilter,
 };
 
 use crate::handlers::admin::{

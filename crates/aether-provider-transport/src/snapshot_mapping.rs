@@ -54,12 +54,21 @@ pub(super) fn map_key(
     encryption_key: &str,
     fallback_encryption_keys: &[String],
 ) -> Result<GatewayProviderTransportKey, DataLayerError> {
-    let decrypted_api_key = decrypt_secret(
-        encryption_key,
-        fallback_encryption_keys,
-        &key.encrypted_api_key,
-        "provider_api_keys.api_key",
-    )?;
+    let decrypted_api_key = key
+        .encrypted_api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|ciphertext| {
+            decrypt_secret(
+                encryption_key,
+                fallback_encryption_keys,
+                ciphertext,
+                "provider_api_keys.api_key",
+            )
+        })
+        .transpose()?
+        .unwrap_or_default();
     let decrypted_auth_config = key
         .encrypted_auth_config
         .as_deref()
@@ -85,6 +94,10 @@ pub(super) fn map_key(
             normalize_optional_json(key.api_formats),
             "provider_api_keys.api_formats",
         )?,
+        auth_type_by_format: normalize_optional_json(key.auth_type_by_format),
+        allow_auth_channel_mismatch_formats: normalize_optional_json(
+            key.allow_auth_channel_mismatch_formats,
+        ),
         allowed_models: normalize_string_list(
             normalize_optional_json(key.allowed_models),
             "provider_api_keys.allowed_models",

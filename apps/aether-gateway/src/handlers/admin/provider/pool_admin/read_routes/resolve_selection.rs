@@ -98,6 +98,7 @@ pub(super) async fn build_admin_pool_resolve_selection_response(
                 "key_id": key.id,
                 "key_name": key.name,
                 "auth_type": key.auth_type,
+                "auth_type_by_format": key.auth_type_by_format,
                 "credential_kind": auth_semantics.credential_kind().as_str(),
                 "runtime_auth_kind": auth_semantics.runtime_auth_kind().as_str(),
                 "oauth_managed": auth_semantics.oauth_managed(),

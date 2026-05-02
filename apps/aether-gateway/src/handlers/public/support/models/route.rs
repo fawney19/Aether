@@ -115,7 +115,7 @@ pub(super) async fn maybe_build_local_models_route_response(
                 return Some(build_empty_models_list_response(api_format));
             }
             let response = match api_format {
-                "claude:chat" => {
+                "claude:messages" => {
                     let before_id = query_param_value(
                         request_context.request_query_string.as_deref(),
                         "before_id",
@@ -136,7 +136,7 @@ pub(super) async fn maybe_build_local_models_route_response(
                         limit,
                     )
                 }
-                "gemini:chat" => {
+                "gemini:generate_content" => {
                     let page_size = query_param_value(
                         request_context.request_query_string.as_deref(),
                         "pageSize",
@@ -167,8 +167,8 @@ pub(super) async fn maybe_build_local_models_route_response(
                 return Some(build_models_not_found_response(&model_id, api_format));
             };
             let response = match api_format {
-                "claude:chat" => build_claude_model_detail_response(row),
-                "gemini:chat" => build_gemini_model_detail_response(row),
+                "claude:messages" => build_claude_model_detail_response(row),
+                "gemini:generate_content" => build_gemini_model_detail_response(row),
                 _ => build_openai_model_detail_response(row),
             };
             Some(response)

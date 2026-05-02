@@ -1,5 +1,8 @@
 use std::time::Duration;
 
+use aether_data_contracts::repository::provider_catalog::{
+    StoredProviderCatalogEndpoint, StoredProviderCatalogProvider,
+};
 use axum::http::Uri;
 use base64::Engine as _;
 use hmac::Mac;
@@ -611,7 +614,7 @@ async fn build_data_backed_auth_context(
         .unwrap_or(auth_endpoint_signature)
         .trim();
     let requested_provider_allowed =
-        auth_snapshot_allows_requested_provider(state, &snapshot, requested_provider).await;
+        auth_snapshot_allows_requested_provider(state, &snapshot, auth_endpoint_signature).await;
     let local_rejection = if invalid_api_key {
         Some(GatewayLocalAuthRejection::InvalidApiKey)
     } else if locked_api_key {
@@ -660,22 +663,27 @@ fn contains_api_format_or_alias(items: &[String], target: &str) -> bool {
 }
 
 fn normalize_api_format_alias(value: &str) -> String {
-    crate::ai_pipeline::normalize_legacy_openai_format_alias(value)
+    crate::ai_serving::normalize_api_format_alias(value)
 }
 
 fn api_format_matches(left: &str, right: &str) -> bool {
-    normalize_api_format_alias(left) == normalize_api_format_alias(right)
+    aether_scheduler_core::api_format_matches_allowed_value(left, right)
 }
 
 async fn auth_snapshot_allows_requested_provider(
     state: &AppState,
     snapshot: &crate::data::auth::GatewayAuthApiKeySnapshot,
-    requested_provider: &str,
+    auth_endpoint_signature: &str,
 ) -> bool {
     let Some(allowed_providers) = snapshot.effective_allowed_providers() else {
         return true;
     };
-    let requested_provider = requested_provider.trim();
+    let requested_api_format = normalize_api_format_alias(auth_endpoint_signature);
+    let requested_provider = requested_api_format
+        .split_once(':')
+        .map(|(provider, _)| provider)
+        .unwrap_or(requested_api_format.as_str())
+        .trim();
     if requested_provider.is_empty() {
         return true;
     }
@@ -684,7 +692,7 @@ async fn auth_snapshot_allows_requested_provider(
     }
     if allowed_providers
         .iter()
-        .any(|value| value.trim().eq_ignore_ascii_case(requested_provider))
+        .any(|value| allowed_provider_value_matches_requested_provider(value, requested_provider))
     {
         return true;
     }
@@ -704,12 +712,10 @@ async fn auth_snapshot_allows_requested_provider(
         }
     };
 
-    providers.into_iter().any(|provider| {
-        provider
-            .provider_type
-            .trim()
-            .eq_ignore_ascii_case(requested_provider)
-            && allowed_providers.iter().any(|value| {
+    let allowed_catalog_providers = providers
+        .into_iter()
+        .filter(|provider| {
+            allowed_providers.iter().any(|value| {
                 aether_scheduler_core::provider_matches_allowed_value(
                     value,
                     &provider.id,
@@ -717,7 +723,93 @@ async fn auth_snapshot_allows_requested_provider(
                     &provider.provider_type,
                 )
             })
+        })
+        .collect::<Vec<_>>();
+    if allowed_catalog_providers
+        .iter()
+        .any(|provider| provider_matches_requested_provider(provider, requested_provider))
+    {
+        return true;
+    }
+
+    let allowed_provider_ids = allowed_catalog_providers
+        .iter()
+        .map(|provider| provider.id.clone())
+        .collect::<Vec<_>>();
+    if allowed_provider_ids.is_empty() {
+        return false;
+    }
+
+    let endpoints = match state
+        .list_provider_catalog_endpoints_by_provider_ids(&allowed_provider_ids)
+        .await
+    {
+        Ok(value) => value,
+        Err(err) => {
+            debug!(
+                "skip local provider auth gate for requested provider {}: provider endpoint lookup failed: {:?}",
+                requested_provider, err
+            );
+            return true;
+        }
+    };
+
+    endpoints.iter().any(|endpoint| {
+        endpoint_matches_requested_provider(endpoint, &requested_api_format, requested_provider)
     })
+}
+
+fn allowed_provider_value_matches_requested_provider(
+    allowed_value: &str,
+    requested_provider: &str,
+) -> bool {
+    aether_scheduler_core::provider_matches_allowed_value(
+        allowed_value,
+        requested_provider,
+        requested_provider,
+        requested_provider,
+    )
+}
+
+fn provider_matches_requested_provider(
+    provider: &StoredProviderCatalogProvider,
+    requested_provider: &str,
+) -> bool {
+    aether_scheduler_core::provider_matches_allowed_value(
+        requested_provider,
+        &provider.id,
+        &provider.name,
+        &provider.provider_type,
+    )
+}
+
+fn endpoint_matches_requested_provider(
+    endpoint: &StoredProviderCatalogEndpoint,
+    requested_api_format: &str,
+    requested_provider: &str,
+) -> bool {
+    if !endpoint.is_active {
+        return false;
+    }
+    if api_format_matches(&endpoint.api_format, requested_api_format) {
+        return true;
+    }
+    let endpoint_api_format = normalize_api_format_alias(&endpoint.api_format);
+    if crate::ai_serving::request_conversion_kind(requested_api_format, &endpoint_api_format)
+        .is_some()
+    {
+        return true;
+    }
+    if endpoint.api_family.as_deref().is_some_and(|family| {
+        allowed_provider_value_matches_requested_provider(family, requested_provider)
+    }) {
+        return true;
+    }
+    let endpoint_provider = endpoint_api_format
+        .split_once(':')
+        .map(|(provider, _)| provider)
+        .unwrap_or(endpoint_api_format.as_str());
+    allowed_provider_value_matches_requested_provider(endpoint_provider, requested_provider)
 }
 
 fn get_cached_auth_context(state: &AppState, cache_key: &str) -> Option<GatewayControlAuthContext> {
@@ -734,7 +826,9 @@ mod tests {
         InMemoryAuthApiKeySnapshotRepository, StoredAuthApiKeySnapshot,
     };
     use aether_data::repository::provider_catalog::InMemoryProviderCatalogReadRepository;
-    use aether_data_contracts::repository::provider_catalog::StoredProviderCatalogProvider;
+    use aether_data_contracts::repository::provider_catalog::{
+        StoredProviderCatalogEndpoint, StoredProviderCatalogProvider,
+    };
     use axum::http::{HeaderMap, Uri};
 
     use super::{resolve_data_backed_auth_context, GatewayLocalAuthRejection};
@@ -781,6 +875,22 @@ mod tests {
             provider_type.to_string(),
         )
         .expect("provider should build")
+    }
+
+    fn sample_endpoint(
+        id: &str,
+        provider_id: &str,
+        api_format: &str,
+    ) -> StoredProviderCatalogEndpoint {
+        StoredProviderCatalogEndpoint::new(
+            id.to_string(),
+            provider_id.to_string(),
+            api_format.to_string(),
+            None,
+            None,
+            true,
+        )
+        .expect("endpoint should build")
     }
 
     #[tokio::test]
@@ -860,6 +970,191 @@ mod tests {
             &headers,
             &uri("/v1/chat/completions"),
             Some("openai:chat"),
+        )
+        .await
+        .expect("resolution should succeed")
+        .expect("auth context should exist");
+
+        assert_eq!(auth_context.local_rejection, None);
+    }
+
+    #[tokio::test]
+    async fn data_backed_auth_context_allows_provider_id_for_matching_endpoint_format() {
+        let api_key = "sk-test-provider-endpoint";
+        let mut snapshot = sample_snapshot("key-4", "user-4");
+        snapshot.user_allowed_providers = Some(vec!["provider-custom-claude".to_string()]);
+        snapshot.api_key_allowed_providers = Some(vec!["provider-custom-claude".to_string()]);
+        snapshot.user_allowed_api_formats = None;
+        snapshot.api_key_allowed_api_formats = None;
+        let repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some(hash_api_key(api_key)),
+            snapshot,
+        )]));
+        let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider(
+                "provider-custom-claude",
+                "Custom Claude Gateway",
+                "custom",
+            )],
+            vec![sample_endpoint(
+                "endpoint-custom-claude",
+                "provider-custom-claude",
+                "claude:messages",
+            )],
+            Vec::new(),
+        ));
+        let data = GatewayDataState::with_auth_api_key_reader_for_tests(repository)
+            .with_provider_catalog_reader(provider_catalog);
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", api_key.parse().unwrap());
+
+        let auth_context = resolve_data_backed_auth_context(
+            &state,
+            &headers,
+            &uri("/v1/messages"),
+            Some("claude:messages"),
+        )
+        .await
+        .expect("resolution should succeed")
+        .expect("auth context should exist");
+
+        assert_eq!(auth_context.local_rejection, None);
+    }
+
+    #[tokio::test]
+    async fn data_backed_auth_context_allows_provider_id_for_convertible_endpoint_format() {
+        let api_key = "sk-test-provider-convertible-endpoint";
+        let mut snapshot = sample_snapshot("key-9", "user-9");
+        snapshot.api_key_is_standalone = true;
+        snapshot.user_allowed_providers = None;
+        snapshot.api_key_allowed_providers = Some(vec!["provider-custom-openai".to_string()]);
+        snapshot.user_allowed_api_formats = None;
+        snapshot.api_key_allowed_api_formats = None;
+        let repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some(hash_api_key(api_key)),
+            snapshot,
+        )]));
+        let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider(
+                "provider-custom-openai",
+                "Custom OpenAI Responses Gateway",
+                "custom",
+            )],
+            vec![sample_endpoint(
+                "endpoint-custom-openai-responses",
+                "provider-custom-openai",
+                "openai:responses",
+            )],
+            Vec::new(),
+        ));
+        let data = GatewayDataState::with_auth_api_key_reader_for_tests(repository)
+            .with_provider_catalog_reader(provider_catalog);
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", api_key.parse().unwrap());
+
+        let auth_context = resolve_data_backed_auth_context(
+            &state,
+            &headers,
+            &uri("/v1/messages?beta=true"),
+            Some("claude:messages"),
+        )
+        .await
+        .expect("resolution should succeed")
+        .expect("auth context should exist");
+
+        assert_eq!(auth_context.local_rejection, None);
+    }
+
+    #[tokio::test]
+    async fn data_backed_auth_context_denies_retired_anthropic_provider_alias_for_claude_route() {
+        let api_key = "sk-test-provider-retired-anthropic-alias";
+        let mut snapshot = sample_snapshot("key-5", "user-5");
+        snapshot.user_allowed_providers = Some(vec!["anthropic".to_string()]);
+        snapshot.api_key_allowed_providers = Some(vec!["anthropic".to_string()]);
+        snapshot.user_allowed_api_formats = None;
+        snapshot.api_key_allowed_api_formats = None;
+        let repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some(hash_api_key(api_key)),
+            snapshot,
+        )]));
+        let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider("provider-claude", "Claude", "custom")],
+            Vec::new(),
+            Vec::new(),
+        ));
+        let data = GatewayDataState::with_auth_api_key_reader_for_tests(repository)
+            .with_provider_catalog_reader(provider_catalog);
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", api_key.parse().unwrap());
+
+        let auth_context = resolve_data_backed_auth_context(
+            &state,
+            &headers,
+            &uri("/v1/messages"),
+            Some("claude:messages"),
+        )
+        .await
+        .expect("resolution should succeed")
+        .expect("auth context should exist");
+
+        assert_eq!(
+            auth_context.local_rejection,
+            Some(GatewayLocalAuthRejection::ProviderNotAllowed {
+                provider: "claude".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn data_backed_auth_context_treats_empty_allowed_lists_as_unrestricted() {
+        let api_key = "sk-test-empty-restrictions";
+        let mut snapshot = sample_snapshot("key-6", "user-6");
+        snapshot.api_key_is_standalone = true;
+        snapshot.user_allowed_providers = Some(vec!["openai".to_string()]);
+        snapshot.user_allowed_api_formats = Some(vec!["openai:chat".to_string()]);
+        snapshot.user_allowed_models = Some(vec!["gpt-4.1".to_string()]);
+        snapshot.api_key_allowed_providers = Some(Vec::new());
+        snapshot.api_key_allowed_api_formats = Some(Vec::new());
+        snapshot.api_key_allowed_models = Some(Vec::new());
+        let repository = Arc::new(InMemoryAuthApiKeySnapshotRepository::seed(vec![(
+            Some(hash_api_key(api_key)),
+            snapshot,
+        )]));
+        let provider_catalog = Arc::new(InMemoryProviderCatalogReadRepository::seed(
+            vec![sample_provider("provider-claude", "Claude", "custom")],
+            vec![sample_endpoint(
+                "endpoint-claude",
+                "provider-claude",
+                "claude:messages",
+            )],
+            Vec::new(),
+        ));
+        let data = GatewayDataState::with_auth_api_key_reader_for_tests(repository)
+            .with_provider_catalog_reader(provider_catalog);
+        let state = AppState::new()
+            .expect("state should build")
+            .with_data_state_for_tests(data);
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", api_key.parse().unwrap());
+
+        let auth_context = resolve_data_backed_auth_context(
+            &state,
+            &headers,
+            &uri("/v1/messages"),
+            Some("claude:messages"),
         )
         .await
         .expect("resolution should succeed")

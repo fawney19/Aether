@@ -56,6 +56,26 @@
 
       <div class="max-h-48 overflow-y-auto">
         <div
+          v-if="hasOptions"
+          class="sticky top-0 z-10 flex cursor-pointer items-center gap-2 border-b bg-popover/95 px-3 py-2 backdrop-blur hover:bg-muted/50 supports-[backdrop-filter]:bg-popover/85"
+          @click="toggleAll"
+        >
+          <input
+            type="checkbox"
+            :checked="isAllSelected"
+            :indeterminate="isPartiallySelected"
+            aria-label="全选"
+            class="h-4 w-4 shrink-0 cursor-pointer rounded border-gray-300"
+            @click.stop
+            @change="toggleAll"
+          >
+          <span class="min-w-0 truncate text-sm">全选</span>
+          <span class="ml-auto shrink-0 text-xs text-muted-foreground">
+            {{ selectedOptionCount }}/{{ options.length }}
+          </span>
+        </div>
+
+        <div
           v-for="item in filteredInvalidItems"
           :key="'invalid-' + item"
           class="flex cursor-pointer items-center gap-2 bg-destructive/5 px-3 py-2 hover:bg-muted/50"
@@ -152,6 +172,20 @@ const invalidItems = computed(() =>
 
 const totalCount = computed(() => props.options.length + invalidItems.value.length)
 
+const hasOptions = computed(() => props.options.length > 0)
+
+const selectedOptionCount = computed(
+  () => new Set(props.modelValue.filter(v => validValues.value.has(v))).size,
+)
+
+const isAllSelected = computed(
+  () => hasOptions.value && selectedOptionCount.value === props.options.length,
+)
+
+const isPartiallySelected = computed(
+  () => selectedOptionCount.value > 0 && !isAllSelected.value,
+)
+
 const showSearch = computed(
   () => props.searchable && totalCount.value >= props.searchThreshold,
 )
@@ -204,5 +238,19 @@ function toggle(value: string) {
 
 function remove(value: string) {
   emit('update:modelValue', props.modelValue.filter(v => v !== value))
+}
+
+function toggleAll() {
+  const invalidValues = props.modelValue.filter(v => !validValues.value.has(v))
+
+  if (isAllSelected.value) {
+    emit('update:modelValue', invalidValues)
+    return
+  }
+
+  emit('update:modelValue', [
+    ...invalidValues,
+    ...props.options.map(option => option.value),
+  ])
 }
 </script>

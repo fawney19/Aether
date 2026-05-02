@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::future::Future;
 use std::io;
 use std::net::IpAddr;
@@ -9,7 +10,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::Stream;
 use http_body_util::combinators::UnsyncBoxBody;
-use http_body_util::{BodyExt, StreamBody};
+use http_body_util::{BodyExt, Full, StreamBody};
 use hyper::body::Frame;
 use hyper::rt;
 use hyper::Response;
@@ -41,6 +42,12 @@ where
     S: Stream<Item = Result<Frame<Bytes>, io::Error>> + Send + 'static,
 {
     StreamBody::new(stream).boxed_unsync()
+}
+
+pub fn full_request_body(body: Bytes) -> UpstreamRequestBody {
+    Full::new(body)
+        .map_err(|err: Infallible| match err {})
+        .boxed_unsync()
 }
 
 #[derive(Clone, Copy, Debug, Default)]

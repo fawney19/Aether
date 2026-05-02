@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::RwLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 
@@ -11,6 +12,13 @@ use super::types::{
 };
 use crate::repository::usage::{ApiKeyUsageContribution, ApiKeyUsageDelta};
 use crate::DataLayerError;
+
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
 
 #[derive(Debug, Default)]
 struct MemoryAuthApiKeyIndex {
@@ -528,6 +536,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             )?
         };
 
+        let now_unix_secs = current_unix_secs() as i64;
         let export = StoredAuthApiKeyExportRecord::new(
             record.user_id.clone(),
             record.api_key_id.clone(),
@@ -556,7 +565,8 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             record.total_tokens as i64,
             record.total_cost_usd,
             false,
-        )?;
+        )?
+        .with_activity_timestamps(None, Some(now_unix_secs), Some(now_unix_secs))?;
 
         index
             .by_key_hash
@@ -649,6 +659,7 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             )?
         };
 
+        let now_unix_secs = current_unix_secs() as i64;
         let export = StoredAuthApiKeyExportRecord::new(
             record.user_id.clone(),
             record.api_key_id.clone(),
@@ -677,7 +688,8 @@ impl AuthApiKeyWriteRepository for InMemoryAuthApiKeySnapshotRepository {
             record.total_tokens as i64,
             record.total_cost_usd,
             true,
-        )?;
+        )?
+        .with_activity_timestamps(None, Some(now_unix_secs), Some(now_unix_secs))?;
 
         index
             .by_key_hash

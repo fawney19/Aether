@@ -168,7 +168,7 @@ pub(crate) fn mapping_preview_masked_catalog_api_key(
     state: &AdminAppState<'_>,
     key: &StoredProviderCatalogKey,
 ) -> String {
-    let ciphertext = key.encrypted_api_key.trim();
+    let ciphertext = key.encrypted_api_key.as_deref().unwrap_or("").trim();
     if ciphertext.is_empty() {
         return "***".to_string();
     }

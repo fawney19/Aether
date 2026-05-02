@@ -3,7 +3,7 @@ members = [
     "apps/aether-proxy",
     "crates/aether-ai-formats",
     "crates/aether-admin",
-    "crates/aether-ai-pipeline",
+    "crates/aether-ai-serving",
     "crates/aether-data-contracts",
     "crates/aether-cache",
     "crates/aether-billing",
@@ -12,6 +12,7 @@ members = [
     "crates/aether-contracts",
     "crates/aether-data",
     "crates/aether-model-fetch",
+    "crates/aether-oauth",
     "crates/aether-provider-transport",
     "crates/aether-scheduler-core",
     "crates/aether-usage-runtime",
@@ -31,7 +32,7 @@ repository = "https://github.com/fawney19/Aether.git"
 [workspace.dependencies]
 aether-admin = { path = "crates/aether-admin" }
 aether-ai-formats = { path = "crates/aether-ai-formats" }
-aether-ai-pipeline = { path = "crates/aether-ai-pipeline" }
+aether-ai-serving = { path = "crates/aether-ai-serving" }
 aether-data-contracts = { path = "crates/aether-data-contracts" }
 aether-cache = { path = "crates/aether-cache" }
 aether-billing = { path = "crates/aether-billing" }
@@ -40,6 +41,7 @@ aether-crypto = { path = "crates/aether-crypto" }
 aether-contracts = { path = "crates/aether-contracts" }
 aether-data = { path = "crates/aether-data" }
 aether-model-fetch = { path = "crates/aether-model-fetch" }
+aether-oauth = { path = "crates/aether-oauth" }
 aether-provider-transport = { path = "crates/aether-provider-transport" }
 aether-scheduler-core = { path = "crates/aether-scheduler-core" }
 aether-usage-runtime = { path = "crates/aether-usage-runtime" }

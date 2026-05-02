@@ -524,7 +524,7 @@ async fn gateway_handles_admin_api_keys_update_locally_with_trusted_admin_princi
         "rate_limit": null,
         "concurrent_limit": 12,
         "allowed_providers": ["gemini"],
-        "allowed_api_formats": ["gemini:chat"],
+        "allowed_api_formats": ["gemini:generate_content"],
         "allowed_models": ["gemini-2.5-pro"],
         "expires_at": "2030-03-04",
         "auto_delete_on_expiry": true,
@@ -541,7 +541,10 @@ async fn gateway_handles_admin_api_keys_update_locally_with_trusted_admin_princi
     assert_eq!(payload["rate_limit"], serde_json::Value::Null);
     assert_eq!(payload["concurrent_limit"], json!(12));
     assert_eq!(payload["allowed_providers"], json!(["gemini"]));
-    assert_eq!(payload["allowed_api_formats"], json!(["gemini:chat"]));
+    assert_eq!(
+        payload["allowed_api_formats"],
+        json!(["gemini:generate_content"])
+    );
     assert_eq!(payload["allowed_models"], json!(["gemini-2.5-pro"]));
     assert_eq!(payload["auto_delete_on_expiry"], json!(true));
     assert_eq!(payload["wallet"]["limit_mode"], json!("unlimited"));

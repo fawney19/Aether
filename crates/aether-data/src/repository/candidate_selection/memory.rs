@@ -41,6 +41,7 @@ impl MinimalCandidateSelectionReadRepository for InMemoryMinimalCandidateSelecti
                     && row.model_is_available
                     && api_format_matches(&row.endpoint_api_format, api_format)
                     && row.key_supports_api_format(api_format)
+                    && key_auth_channel_matches(row, api_format)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -70,11 +71,42 @@ impl MinimalCandidateSelectionReadRepository for InMemoryMinimalCandidateSelecti
 }
 
 fn normalize_api_format(value: &str) -> String {
-    aether_ai_formats::normalize_legacy_openai_format_alias(value)
+    aether_ai_formats::normalize_api_format_alias(value)
 }
 
 fn api_format_matches(left: &str, right: &str) -> bool {
-    normalize_api_format(left) == normalize_api_format(right)
+    aether_ai_formats::api_format_alias_matches(left, right)
+}
+
+fn key_auth_channel_matches(row: &StoredMinimalCandidateSelectionRow, api_format: &str) -> bool {
+    let provider_type = row.provider_type.trim().to_ascii_lowercase();
+    let auth_type = row.key_auth_type.trim().to_ascii_lowercase();
+    let api_format = normalize_api_format(api_format);
+    match provider_type.as_str() {
+        "codex" => {
+            auth_type == "oauth"
+                && matches!(
+                    api_format.as_str(),
+                    "openai:responses" | "openai:responses:compact" | "openai:image"
+                )
+        }
+        "claude_code" => auth_type == "oauth" && api_format == "claude:messages",
+        "kiro" => {
+            matches!(auth_type.as_str(), "oauth" | "bearer") && api_format == "claude:messages"
+        }
+        "gemini_cli" | "antigravity" => {
+            auth_type == "oauth" && api_format == "gemini:generate_content"
+        }
+        "vertex_ai" => {
+            (auth_type == "api_key" && api_format == "gemini:generate_content")
+                || (matches!(auth_type.as_str(), "service_account" | "vertex_ai")
+                    && matches!(
+                        api_format.as_str(),
+                        "claude:messages" | "gemini:generate_content"
+                    ))
+        }
+        _ => auth_type != "oauth",
+    }
 }
 
 #[cfg(test)]
