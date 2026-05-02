@@ -98,6 +98,7 @@ class CliSyncMixin:
         mapped_model_result = None  # 映射后的目标模型名（用于 Usage 记录）
         response_metadata_result: dict[str, Any] = {}  # Provider 响应元数据
         needs_conversion = False  # 是否需要格式转换（由 candidate 决定）
+        response_is_client_format = False  # 已在请求函数内转换为客户端格式
         sync_proxy_info: dict[str, Any] | None = None  # 代理信息
 
         request_state = MutableRequestBodyState(original_request_body)
@@ -108,9 +109,10 @@ class CliSyncMixin:
             key: "ProviderAPIKey",
             candidate: ProviderCandidate,
         ) -> dict[str, Any]:
-            nonlocal provider_name, response_json, status_code, response_headers, provider_api_format, provider_request_headers, provider_request_body, mapped_model_result, response_metadata_result, needs_conversion, sync_proxy_info
+            nonlocal provider_name, response_json, status_code, response_headers, provider_api_format, provider_request_headers, provider_request_body, mapped_model_result, response_metadata_result, needs_conversion, response_is_client_format, sync_proxy_info
             provider_name = str(provider.name)
             provider_api_format = str(endpoint.api_format) if endpoint.api_format else ""
+            response_is_client_format = False
 
             # 获取模型映射（优先使用映射匹配到的模型，其次是 Provider 级别的映射）
             mapped_model = candidate.mapping_matched_model if candidate else None
@@ -285,6 +287,7 @@ class CliSyncMixin:
                             requested_model=model,
                         )
                         response_json = response_json if isinstance(response_json, dict) else {}
+                        response_is_client_format = True
 
                 except (httpx.ConnectError, httpx.ConnectTimeout, httpx.TimeoutException) as e:
                     if envelope:
@@ -418,6 +421,7 @@ class CliSyncMixin:
                 needs_conversion
                 and provider_api_format
                 and api_format
+                and not response_is_client_format
                 and isinstance(response_json, dict)
             ):
                 try:
