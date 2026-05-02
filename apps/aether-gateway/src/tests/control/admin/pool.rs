@@ -1779,7 +1779,7 @@ async fn gateway_prefers_status_snapshot_codex_quota_over_stale_metadata() {
 }
 
 #[tokio::test]
-async fn gateway_shows_codex_quota_reset_for_exhausted_zero_usage_snapshot() {
+async fn gateway_treats_stale_codex_exhausted_snapshot_as_available_when_windows_have_capacity() {
     let mut provider = sample_provider("provider-codex", "codex", 10).with_transport_fields(
         true,
         false,
@@ -1881,11 +1881,8 @@ async fn gateway_shows_codex_quota_reset_for_exhausted_zero_usage_snapshot() {
     .expect("json body should parse");
     let keys = payload["keys"].as_array().expect("keys should be array");
 
-    assert_eq!(keys[0]["scheduling_status"], json!("blocked"));
-    assert_eq!(
-        keys[0]["scheduling_reason"],
-        json!("account_quota_exhausted")
-    );
+    assert_eq!(keys[0]["scheduling_status"], json!("available"));
+    assert_eq!(keys[0]["scheduling_reason"], json!("available"));
     assert_eq!(
         keys[0]["account_quota"],
         json!("周剩余 100.0% (7天0小时后重置) | 5H剩余 100.0% (5小时0分钟后重置)")

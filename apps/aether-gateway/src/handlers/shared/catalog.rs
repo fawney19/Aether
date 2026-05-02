@@ -626,9 +626,8 @@ fn build_codex_quota_status_snapshot(
         .filter_map(admin_provider_quota_pure::coerce_json_u64)
         .min();
     let reset_at = quota_windows_min_reset_at(&windows);
-    let exhausted_by_credits = windows.is_empty()
-        && credits_unlimited != Some(true)
-        && credits_has_credits == Some(false);
+    let exhausted_by_credits =
+        windows.is_empty() && credits_unlimited != Some(true) && credits_has_credits == Some(false);
     let exhausted_by_window = usage_ratio.is_some_and(|value| value >= 1.0 - 1e-6);
     let exhausted = exhausted_by_credits || exhausted_by_window;
 
@@ -1649,6 +1648,45 @@ mod tests {
                 .and_then(Value::as_object)
                 .and_then(|credits| credits.get("balance")),
             Some(&json!(42.0))
+        );
+        assert_eq!(
+            quota.get("windows").and_then(Value::as_array).map(Vec::len),
+            Some(2usize)
+        );
+    }
+
+    #[test]
+    fn provider_key_status_snapshot_payload_keeps_codex_free_window_quota_available() {
+        let mut key = sample_catalog_key();
+        key.upstream_metadata = Some(json!({
+            "codex": {
+                "updated_at": 1_775_553_285u64,
+                "plan_type": "free",
+                "primary_used_percent": 64.0,
+                "primary_reset_at": 1_900_000_000u64,
+                "secondary_used_percent": 3.0,
+                "secondary_reset_at": 1_900_500_000u64,
+                "has_credits": false,
+                "credits_balance": 0.0,
+                "credits_unlimited": false
+            }
+        }));
+
+        let payload = provider_key_status_snapshot_payload(&key, "codex");
+        let quota = payload
+            .get("quota")
+            .and_then(Value::as_object)
+            .expect("quota snapshot should be object");
+
+        assert_eq!(quota.get("code"), Some(&json!("ok")));
+        assert_eq!(quota.get("exhausted"), Some(&json!(false)));
+        assert_eq!(quota.get("usage_ratio"), Some(&json!(0.64)));
+        assert_eq!(
+            quota
+                .get("credits")
+                .and_then(Value::as_object)
+                .and_then(|credits| credits.get("has_credits")),
+            Some(&json!(false))
         );
         assert_eq!(
             quota.get("windows").and_then(Value::as_array).map(Vec::len),
