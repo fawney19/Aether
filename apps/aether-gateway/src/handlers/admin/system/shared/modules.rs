@@ -56,6 +56,18 @@ pub(crate) const ADMIN_MODULE_DEFINITIONS: &[AdminModuleDefinition] = &[
         admin_menu_order: 0,
     },
     AdminModuleDefinition {
+        name: "chat_pii_redaction",
+        display_name: "敏感信息替换保护",
+        description: "发送给供应商前将聊天消息中的敏感信息替换为占位符，返回客户端前自动还原。",
+        category: "security",
+        env_key: "CHAT_PII_REDACTION_AVAILABLE",
+        default_available: true,
+        admin_route: Some("/admin/modules/chat-pii-redaction"),
+        admin_menu_icon: Some("ShieldCheck"),
+        admin_menu_group: Some("system"),
+        admin_menu_order: 59,
+    },
+    AdminModuleDefinition {
         name: "notification_email",
         display_name: "异常通知",
         description: "为 5xx 异常发送邮件通知，可在模块管理中启用或禁用",

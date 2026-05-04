@@ -2,6 +2,7 @@ use crate::handlers::admin::provider::shared::payloads::AdminProviderCreateReque
 use crate::handlers::admin::provider::shared::support::{
     normalize_provider_billing_type, parse_optional_rfc3339_unix_secs,
 };
+use crate::handlers::admin::provider::write::normalize::normalize_chat_pii_redaction_config;
 use crate::handlers::admin::provider::write::normalize::normalize_pool_advanced_config;
 use crate::handlers::admin::provider::write::normalize::normalize_provider_type_input;
 use crate::handlers::admin::request::AdminAppState;
@@ -133,6 +134,12 @@ pub(crate) async fn build_admin_create_provider_record(
             return Err("claude_code_advanced 仅适用于 provider_type=claude_code".to_string());
         }
         config_map.insert("claude_code_advanced".to_string(), value);
+    }
+    if config_map.contains_key("chat_pii_redaction") {
+        let value = normalize_chat_pii_redaction_config(config_map.remove("chat_pii_redaction"))?;
+        if let Some(value) = value {
+            config_map.insert("chat_pii_redaction".to_string(), value);
+        }
     }
     let config = (!config_map.is_empty()).then_some(serde_json::Value::Object(config_map));
 

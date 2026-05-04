@@ -160,6 +160,7 @@ fn gateway_error_to_oauth_error(error: GatewayError) -> OAuthError {
     match error {
         GatewayError::UpstreamUnavailable { message, .. }
         | GatewayError::ControlUnavailable { message, .. }
+        | GatewayError::Client { message, .. }
         | GatewayError::Internal(message) => OAuthError::Transport(message),
     }
 }
